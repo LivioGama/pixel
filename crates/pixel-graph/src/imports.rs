@@ -1,0 +1,239 @@
+//! Import-spec → file resolution. Best-effort per language family;
+//! `None` is an acceptable answer (the import simply stays unresolved).
+
+use crate::extract::lang_of;
+
+/// Resolve `spec` (as written in `importer_rel`) to a repo-relative file
+/// path from `all_files`, or `None` when no confident match exists.
+pub fn resolve_import(spec: &str, importer_rel: &str, all_files: &[String]) -> Option<String> {
+    match lang_of(importer_rel)? {
+        "ts" | "tsx" | "js" => resolve_js(spec, importer_rel, all_files),
+        "rust" => resolve_rust(spec, importer_rel, all_files),
+        "python" => resolve_python(spec, importer_rel, all_files),
+        "go" => resolve_go(spec, all_files),
+        "java" => resolve_java(spec, all_files),
+        _ => None,
+    }
+}
+
+fn dir_of(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(i) => &path[..i],
+        None => "",
+    }
+}
+
+/// Join + normalize `.`/`..` segments into a clean repo-relative path.
+fn normalize(base_dir: &str, rel: &str) -> String {
+    let mut parts: Vec<&str> = if base_dir.is_empty() {
+        Vec::new()
+    } else {
+        base_dir.split('/').collect()
+    };
+    for seg in rel.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
+fn contains(all_files: &[String], candidate: &str) -> bool {
+    all_files.iter().any(|f| f == candidate)
+}
+
+fn first_suffix_match(all_files: &[String], suffix: &str) -> Option<String> {
+    all_files
+        .iter()
+        .find(|f| f.as_str() == suffix || f.ends_with(&format!("/{suffix}")))
+        .cloned()
+}
+
+// --- TS / JS --------------------------------------------------------------
+
+const JS_EXTS: [&str; 6] = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+
+fn resolve_js(spec: &str, importer_rel: &str, all_files: &[String]) -> Option<String> {
+    if !spec.starts_with('.') {
+        return None; // bare specifier: package import, out of scope
+    }
+    let base = normalize(dir_of(importer_rel), spec);
+    if lang_of(&base).is_some() && contains(all_files, &base) {
+        return Some(base);
+    }
+    for ext in JS_EXTS {
+        let cand = format!("{base}{ext}");
+        if contains(all_files, &cand) {
+            return Some(cand);
+        }
+    }
+    for ext in JS_EXTS {
+        let cand = format!("{base}/index{ext}");
+        if contains(all_files, &cand) {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+// --- Rust -----------------------------------------------------------------
+
+fn resolve_rust(spec: &str, importer_rel: &str, all_files: &[String]) -> Option<String> {
+    // Strip alias / braces: `crate::a::b as c`, `crate::a::{b, c}`.
+    let spec = spec.split(" as ").next().unwrap_or(spec);
+    let spec = spec
+        .split('{')
+        .next()
+        .unwrap_or(spec)
+        .trim_end_matches("::")
+        .trim();
+    let segs: Vec<&str> = spec
+        .split("::")
+        .filter(|s| !s.is_empty() && *s != "*")
+        .collect();
+    if segs.is_empty() {
+        return None;
+    }
+    let importer_dir = dir_of(importer_rel);
+    let (roots, segs): (Vec<String>, &[&str]) = match segs[0] {
+        "crate" => (vec!["src".to_string(), String::new()], &segs[1..]),
+        "self" => (vec![importer_dir.to_string()], &segs[1..]),
+        "super" => {
+            let mut dir = importer_dir.to_string();
+            let mut rest = &segs[1..];
+            loop {
+                dir = dir_of(&dir).to_string();
+                if rest.first() == Some(&"super") {
+                    rest = &rest[1..];
+                } else {
+                    break;
+                }
+            }
+            (vec![dir], rest)
+        }
+        "std" | "core" | "alloc" => return None,
+        _ => (
+            vec!["src".to_string(), String::new(), importer_dir.to_string()],
+            &segs[..],
+        ),
+    };
+    if segs.is_empty() {
+        return None;
+    }
+    // Try longest module path first, dropping trailing item segments.
+    for k in (1..=segs.len()).rev() {
+        let modpath = segs[..k].join("/");
+        for root in &roots {
+            let base = if root.is_empty() {
+                modpath.clone()
+            } else {
+                format!("{root}/{modpath}")
+            };
+            for cand in [format!("{base}.rs"), format!("{base}/mod.rs")] {
+                if contains(all_files, &cand) {
+                    return Some(cand);
+                }
+            }
+        }
+        // Fall back to a unique suffix match anywhere in the tree.
+        if let Some(hit) = first_suffix_match(all_files, &format!("{modpath}.rs")) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+// --- Python ---------------------------------------------------------------
+
+fn resolve_python(spec: &str, importer_rel: &str, all_files: &[String]) -> Option<String> {
+    let dots = spec.chars().take_while(|&c| c == '.').count();
+    let rest = &spec[dots..];
+    let segs: Vec<&str> = rest.split('.').filter(|s| !s.is_empty()).collect();
+    if dots > 0 {
+        // Relative import: one dot = importer's package, each extra dot = up one.
+        let mut dir = dir_of(importer_rel).to_string();
+        for _ in 1..dots {
+            dir = dir_of(&dir).to_string();
+        }
+        let base = if segs.is_empty() {
+            dir.clone()
+        } else if dir.is_empty() {
+            segs.join("/")
+        } else {
+            format!("{}/{}", dir, segs.join("/"))
+        };
+        for cand in [format!("{base}.py"), format!("{base}/__init__.py")] {
+            if contains(all_files, &cand) {
+                return Some(cand);
+            }
+        }
+        return None;
+    }
+    if segs.is_empty() {
+        return None;
+    }
+    for k in (1..=segs.len()).rev() {
+        let modpath = segs[..k].join("/");
+        for cand in [format!("{modpath}.py"), format!("{modpath}/__init__.py")] {
+            if contains(all_files, &cand) {
+                return Some(cand);
+            }
+            if let Some(hit) = first_suffix_match(all_files, &cand) {
+                return Some(hit);
+            }
+        }
+    }
+    None
+}
+
+// --- Go -------------------------------------------------------------------
+
+fn resolve_go(spec: &str, all_files: &[String]) -> Option<String> {
+    // Match a directory whose path suffix equals the import path (or its
+    // trailing segments); return the first .go file in that directory.
+    let segs: Vec<&str> = spec.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.is_empty() {
+        return None;
+    }
+    for take in (1..=segs.len()).rev() {
+        let suffix = segs[segs.len() - take..].join("/");
+        let hit = all_files.iter().find(|f| {
+            if !f.ends_with(".go") {
+                return false;
+            }
+            let dir = dir_of(f);
+            dir == suffix || dir.ends_with(&format!("/{suffix}"))
+        });
+        if let Some(f) = hit {
+            return Some(f.clone());
+        }
+    }
+    None
+}
+
+// --- Java -----------------------------------------------------------------
+
+fn resolve_java(spec: &str, all_files: &[String]) -> Option<String> {
+    if let Some(pkg) = spec.strip_suffix(".*") {
+        let dir_suffix = pkg.replace('.', "/");
+        return all_files
+            .iter()
+            .find(|f| {
+                f.ends_with(".java") && {
+                    let dir = dir_of(f);
+                    dir == dir_suffix || dir.ends_with(&format!("/{dir_suffix}"))
+                }
+            })
+            .cloned();
+    }
+    let path = format!("{}.java", spec.replace('.', "/"));
+    first_suffix_match(all_files, &path).or_else(|| {
+        // Fall back: match on the class file name alone.
+        let class_file = format!("{}.java", spec.rsplit('.').next()?);
+        first_suffix_match(all_files, &class_file)
+    })
+}

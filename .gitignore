@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+.DS_Store
+.pixel/
+scripts/experiments/sniper/artifacts/
+scripts/experiments/sniper/shim/

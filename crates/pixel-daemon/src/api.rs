@@ -1,0 +1,1733 @@
+//! Transport-agnostic service: one `Request` in, one `Response` out.
+//!
+//! All cross-crate contract calls (graph analyses, context rendering) are
+//! centralized in the `bridge` module at the bottom so integration drift is
+//! a one-line fix per call site.
+
+use std::collections::BTreeMap;
+use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use pixel_index::TrigramExtractor;
+use pixel_index::index::{MAX_FILE_BYTES, open_regular_bounded};
+use pixel_index::indexset::{IndexSet, IndexSetError};
+use pixel_graph::{EdgeKind, EdgeRow, GraphStore, SymbolKind, SymbolRow};
+
+pub const GRAPH_DB_FILE: &str = "graph.db";
+/// Increment whenever the daemon request/response contract changes in a way
+/// that an older process cannot safely serve to a newer CLI.
+pub const PROTOCOL_VERSION: u64 = 6;
+
+// ---------------------------------------------------------------------------
+// errors
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub enum ServeError {
+    Index(IndexSetError),
+    Io(std::io::Error),
+    Msg(String),
+}
+
+impl std::fmt::Display for ServeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServeError::Index(e) => write!(f, "{e}"),
+            ServeError::Io(e) => write!(f, "io error: {e}"),
+            ServeError::Msg(m) => write!(f, "{m}"),
+        }
+    }
+}
+impl std::error::Error for ServeError {}
+
+impl From<IndexSetError> for ServeError {
+    fn from(e: IndexSetError) -> Self {
+        ServeError::Index(e)
+    }
+}
+impl From<std::io::Error> for ServeError {
+    fn from(e: std::io::Error) -> Self {
+        ServeError::Io(e)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// wire types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum Request {
+    Ping,
+    /// Transcript-corpus operation, served only by a recall daemon (a repo
+    /// daemon answers it with an "unsupported" error). `action` selects the
+    /// recall op ("search" | "ask"); `params` is its argument object.
+    Recall {
+        action: String,
+        #[serde(default)]
+        params: Value,
+    },
+    Search {
+        pattern: String,
+        #[serde(default)]
+        json: bool,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        offset: Option<usize>,
+        /// Repo-relative path prefixes to restrict the search to (rg-style
+        /// multi-path invocations). None/empty = whole repo.
+        #[serde(default)]
+        paths: Option<Vec<String>>,
+    },
+    /// Sniper target list: task description in, closed prioritized file
+    /// list (P0/P1/P2) out.
+    Targets {
+        task: String,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    Symbol {
+        name: String,
+    },
+    Context {
+        uid: String,
+        #[serde(default)]
+        budget_tokens: Option<usize>,
+    },
+    Impact {
+        uid_or_name: String,
+        direction: String,
+        #[serde(default)]
+        depth: Option<u32>,
+    },
+    Uses {
+        uid_or_name: String,
+        /// "callers" | "callees"
+        role: String,
+        #[serde(default)]
+        offset: Option<usize>,
+    },
+    Trace {
+        from: String,
+        to: String,
+    },
+    Processes {
+        #[serde(default)]
+        offset: Option<usize>,
+    },
+    Clusters {
+        #[serde(default)]
+        offset: Option<usize>,
+    },
+    Changes {
+        #[serde(default)]
+        base: Option<String>,
+        #[serde(default)]
+        offset: Option<usize>,
+    },
+    Graph {},
+    Status {},
+    Shutdown,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Response {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub data: Value,
+}
+
+impl Response {
+    pub fn ok(data: Value) -> Self {
+        Response {
+            ok: true,
+            error: None,
+            data,
+        }
+    }
+    pub fn err(msg: impl Into<String>) -> Self {
+        Response {
+            ok: false,
+            error: Some(msg.into()),
+            data: Value::Null,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// service
+// ---------------------------------------------------------------------------
+
+pub struct Service {
+    root: PathBuf,
+    index: IndexSet,
+    graph: Option<GraphStore>,
+}
+
+impl Service {
+    /// Open (building layers if needed) the text index; graph db is lazy.
+    pub fn open(root: &Path) -> Result<Self, ServeError> {
+        let root = root
+            .canonicalize()
+            .map_err(|e| ServeError::Msg(format!("bad root {}: {e}", root.display())))?;
+        let index = IndexSet::open_or_build(&root, Box::new(TrigramExtractor))?;
+        Ok(Service {
+            root,
+            index,
+            graph: None,
+        })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn graph_db_path(&self) -> PathBuf {
+        self.root
+            .join(pixel_index::index::SHARD_DIR)
+            .join(GRAPH_DB_FILE)
+    }
+
+    /// Watcher hook: refresh one file in index + graph (best effort).
+    pub fn refresh_file(&mut self, rel: &str) {
+        self.index.refresh_file(rel);
+        let db = self.graph_db_path();
+        if db.exists() {
+            bridge::update_file(&self.root, &db, rel);
+            // Drop the cached handle so the next read sees the update.
+            self.graph = None;
+        }
+    }
+
+    /// Watcher hook: file deleted.
+    pub fn remove_file(&mut self, rel: &str) {
+        self.index.remove_file(rel);
+        let db = self.graph_db_path();
+        if db.exists() {
+            if let Ok(mut store) = GraphStore::open(&db) {
+                let _ = store.remove_file(rel);
+            }
+            self.graph = None;
+        }
+    }
+
+    /// Make sure `self.graph` is populated; builds graph.db on first use and
+    /// rebuilds it when the working tree has drifted from the indexed state
+    /// (detected via the build-time freshness signature). Returns build info
+    /// (stats + timing) when a build/rebuild happened.
+    fn ensure_graph(&mut self) -> Result<Option<Value>, String> {
+        if self.graph.is_some() {
+            return Ok(None);
+        }
+        let db = self.graph_db_path();
+        // An existing db is only reused if its freshness signature matches the
+        // current working tree; otherwise it is stale (files added/removed/
+        // edited since it was built) and is rebuilt from scratch.
+        let stale = db.exists() && !bridge::is_fresh(&self.root, &db);
+        let built = if !db.exists() || stale {
+            let (stats, build_ms) = self.rebuild_graph()?;
+            Some(json!({
+                "graph_built": true,
+                "build_ms": build_ms,
+                "stats": stats,
+            }))
+        } else {
+            None
+        };
+        if self.graph.is_none() {
+            self.graph = Some(GraphStore::open(&db).map_err(|e| e.to_string())?);
+        }
+        Ok(built)
+    }
+
+    fn rebuild_graph(&mut self) -> Result<(Value, u64), String> {
+        let db = self.graph_db_path();
+        let tmp = db.with_file_name(format!(".graph-rebuild-{}.db", std::process::id()));
+        self.graph.take();
+        remove_sqlite_files(&tmp)?;
+        let started = Instant::now();
+        let stats = bridge::build_graph(&self.root, &tmp)?;
+        {
+            let checkpoint = GraphStore::open(&tmp).map_err(|error| error.to_string())?;
+            checkpoint
+                .conn()
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .map_err(|error| error.to_string())?;
+        }
+        remove_sqlite_sidecars(&db)?;
+        std::fs::rename(&tmp, &db).map_err(|error| {
+            format!(
+                "publish graph {} -> {}: {error}",
+                tmp.display(),
+                db.display()
+            )
+        })?;
+        remove_sqlite_sidecars(&tmp)?;
+        self.graph = Some(GraphStore::open(&db).map_err(|error| error.to_string())?);
+        Ok((stats, started.elapsed().as_millis() as u64))
+    }
+
+    pub fn handle(&mut self, req: Request) -> Response {
+        match self.dispatch(req) {
+            Ok(v) => Response::ok(v),
+            Err(e) => Response::err(e),
+        }
+    }
+
+    fn dispatch(&mut self, req: Request) -> Result<Value, String> {
+        match req {
+            Request::Ping => Ok(json!({
+                "pong": true,
+                "root": self.root.display().to_string(),
+                "protocol_version": PROTOCOL_VERSION,
+            })),
+            Request::Shutdown => Ok(json!({"shutting_down": true})),
+            Request::Recall { .. } => Err(
+                "recall ops are served by the recall daemon (`gitpixel recall daemon start`), not a repository daemon"
+                    .to_string(),
+            ),
+            Request::Search {
+                pattern,
+                json: _,
+                limit,
+                offset,
+                paths,
+            } => self.op_search(&pattern, limit, offset, paths.as_deref()),
+            Request::Targets { task, limit } => self.op_targets(&task, limit),
+            Request::Symbol { name } => self.op_symbol(&name),
+            Request::Context { uid, budget_tokens } => self.op_context(&uid, budget_tokens),
+            Request::Impact {
+                uid_or_name,
+                direction,
+                depth,
+            } => self.op_impact(&uid_or_name, &direction, depth),
+            Request::Uses {
+                uid_or_name,
+                role,
+                offset,
+            } => self.op_uses(&uid_or_name, &role, offset),
+            Request::Trace { from, to } => self.op_trace(&from, &to),
+            Request::Processes { offset } => self.op_processes(offset),
+            Request::Clusters { offset } => self.op_clusters(offset),
+            Request::Changes { base, offset } => self.op_changes(base.as_deref(), offset),
+            Request::Graph {} => self.op_graph(),
+            Request::Status {} => self.op_status(),
+        }
+    }
+
+    // -- ops ---------------------------------------------------------------
+
+    fn op_search(
+        &self,
+        pattern: &str,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        paths: Option<&[String]>,
+    ) -> Result<Value, String> {
+        // Default row limit and byte cap protect against broad patterns
+        // (`.*`, short literals that hit every file) returning unbounded
+        // output. A caller-provided limit overrides the row cap; the byte cap
+        // always applies as a safety valve.
+        const DEFAULT_LIMIT: usize = 100;
+        const MAX_LIMIT: usize = 10_000;
+        const BYTE_CAP: usize = 64 * 1024;
+        /// Per-match text cap: a single match line is truncated to this many
+        /// bytes so one oversized line cannot bypass the byte cap.
+        const PER_MATCH_TEXT_CAP: usize = 4096;
+        let row_limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+        let offset = offset.unwrap_or(0);
+
+        let (matches, stats) = self
+            .index
+            .search_page_in(pattern, offset, Some(row_limit), paths)
+            .map_err(|e| e.to_string())?;
+
+        // Render matches until either the row limit or the byte cap is hit.
+        let mut arr: Vec<Value> = Vec::with_capacity(matches.len().min(row_limit));
+        let mut bytes = 0usize;
+        let mut byte_capped = false;
+        for m in &matches {
+            // Cap per-match text so a single oversized line cannot dominate.
+            let text = if m.line.len() > PER_MATCH_TEXT_CAP {
+                let mut end = PER_MATCH_TEXT_CAP;
+                while !m.line.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}…[truncated]", &m.line[..end])
+            } else {
+                m.line.clone()
+            };
+            let entry = json!({"path": m.path, "line": m.line_number, "text": text});
+            let entry_bytes = serde_json::to_vec(&entry)
+                .map_err(|error| error.to_string())?
+                .len();
+            if bytes.saturating_add(entry_bytes) > BYTE_CAP {
+                byte_capped = true;
+                break;
+            }
+            bytes += entry_bytes;
+            arr.push(entry);
+            if arr.len() >= row_limit {
+                break;
+            }
+        }
+        // `truncated` is authoritative from the index layer (which knows if
+        // more candidates exist) OR from the byte cap. Do NOT use
+        // `arr.len() < matches.len()` alone — it can be true when exactly
+        // `limit` matches were found but the byte cap reduced the output.
+        let truncated = stats.truncated || byte_capped;
+        let next_offset = truncated.then_some(offset.saturating_add(arr.len()));
+        Ok(json!({
+            "matches": arr,
+            "truncated": truncated,
+            "offset": offset,
+            "next_offset": next_offset,
+            "limit": row_limit,
+            "byte_cap": BYTE_CAP,
+            "match_count": arr.len(),
+            "stats": {
+                "candidates": stats.candidates,
+                "scanned_all": stats.scanned_all,
+                "matches": stats.matches,
+                "elapsed_us": stats.elapsed_us as u64,
+                "truncated": stats.truncated,
+            }
+        }))
+    }
+
+    /// Sniper target list: tokenize the task, gather lexical + graph signals,
+    /// fuse, tier. Graph failure degrades to lexical-only (envelope says so)
+    /// instead of erroring — a scoping request must never die on a broken
+    /// graph build.
+    fn op_targets(&mut self, task: &str, limit: Option<usize>) -> Result<Value, String> {
+        use crate::targets as engine;
+        use pixel_graph::targets as graph_targets;
+
+        let started = Instant::now();
+        let query = engine::tokenize_task(task)?;
+
+        let ensured = self.ensure_graph();
+        let graph_available = ensured.is_ok();
+        let build_info = ensured.ok().flatten();
+
+        let all_paths = self.index.paths();
+
+        // S3: per-keyword content match counts (capped probes keep this ms-scale).
+        const CONTENT_PROBE_LIMIT: usize = 500;
+        let mut content_hits: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
+        for kw in &query.keywords {
+            // Keywords are [a-z0-9_]+ by construction — safe inside a regex.
+            let pattern = format!("(?i){kw}");
+            if let Ok((matches, _)) =
+                self.index
+                    .search_page_in(&pattern, 0, Some(CONTENT_PROBE_LIMIT), None)
+            {
+                let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+                for m in matches {
+                    *counts.entry(m.path).or_default() += 1;
+                }
+                if !counts.is_empty() {
+                    content_hits.insert(kw.clone(), counts.into_iter().collect());
+                }
+            }
+        }
+
+        let mut symbol_hits = Vec::new();
+        let mut graph_neighbors: Vec<(String, String)> = Vec::new();
+        let mut cluster_neighbors: Vec<(String, String)> = Vec::new();
+        let mut envelope = None;
+        if graph_available {
+            let store = self.graph.as_ref().unwrap();
+            symbol_hits = graph_targets::symbol_hits(store, &query.keywords, &query.exact_tokens)
+                .map_err(|e| e.to_string())?;
+
+            // Graph expansion is seeded from the lexical pre-fuse so every
+            // P1/P2 neighbor traces back to a lexical anchor.
+            const MAX_SEED_FILES: usize = 8;
+            const MAX_SEED_SYMBOLS: usize = 24;
+            let seed_paths: Vec<String> =
+                engine::lexical_rank(&all_paths, &query.keywords, &symbol_hits, &content_hits)
+                    .into_iter()
+                    .take(MAX_SEED_FILES)
+                    .collect();
+            let seed_set: HashSet<&str> = seed_paths.iter().map(String::as_str).collect();
+            let mut seed_symbol_ids: Vec<i64> = Vec::new();
+            for hit in &symbol_hits {
+                if seed_set.contains(hit.path.as_str()) {
+                    for (sym, _) in &hit.symbols {
+                        if seed_symbol_ids.len() < MAX_SEED_SYMBOLS {
+                            seed_symbol_ids.push(sym.id);
+                        }
+                    }
+                }
+            }
+
+            let mut seen: HashSet<String> = HashSet::new();
+            for (path, reason) in graph_targets::neighbor_files(store, &seed_symbol_ids)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .chain(
+                    graph_targets::import_adjacent_files(store, &seed_paths)
+                        .map_err(|e| e.to_string())?,
+                )
+            {
+                if seen.insert(path.clone()) {
+                    graph_neighbors.push((path, reason));
+                }
+            }
+            cluster_neighbors =
+                graph_targets::cluster_co_files(store, &seed_symbol_ids, &query.keywords)
+                    .map_err(|e| e.to_string())?;
+
+            let mut names: Vec<&str> = query.exact_tokens.iter().map(String::as_str).collect();
+            for hit in &symbol_hits {
+                for (sym, _) in &hit.symbols {
+                    names.push(sym.name.as_str());
+                }
+            }
+            envelope =
+                Some(graph_targets::envelope_for_names(store, &names).map_err(|e| e.to_string())?);
+        }
+
+        let opts = engine::TargetsOptions {
+            limit: limit.unwrap_or(engine::DEFAULT_LIMIT),
+        };
+        let report = engine::compute_targets(
+            task,
+            &query,
+            engine::SignalInputs {
+                all_paths,
+                content_hits,
+                symbol_hits,
+                graph_neighbors,
+                cluster_neighbors,
+                graph_available,
+                envelope,
+            },
+            &opts,
+        );
+        let mut out = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+        if let Some(stats) = out.get_mut("stats") {
+            stats["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
+            stats["commit_oid"] = json!(self.index.status().commit_oid);
+        }
+        merge_build_info(&mut out, build_info);
+        Ok(out)
+    }
+
+    fn op_symbol(&mut self, name: &str) -> Result<Value, String> {
+        let built = self.ensure_graph()?;
+        let store = self.graph.as_ref().unwrap();
+        let files = file_map(store)?;
+        let syms = store.symbols_by_name(name, 50).map_err(|e| e.to_string())?;
+        let envelope = store.envelope_for_name(name).map_err(|e| e.to_string())?;
+        let mut out = json!({
+            "symbols": syms.iter().map(|s| symbol_json(s, &files)).collect::<Vec<_>>(),
+            "envelope": envelope,
+        });
+        merge_build_info(&mut out, built);
+        Ok(out)
+    }
+
+    fn op_context(&mut self, uid: &str, budget_tokens: Option<usize>) -> Result<Value, String> {
+        let built = self.ensure_graph()?;
+        let store = self.graph.as_ref().unwrap();
+        let files = file_map(store)?;
+        let sym = store
+            .symbol_by_uid(uid)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no symbol with uid {uid:?}"))?;
+        let envelope = store
+            .envelope_for_name(&sym.name)
+            .map_err(|e| e.to_string())?;
+        let sym_json = symbol_json(&sym, &files);
+        use pixel_context::estimate_tokens;
+
+        let budget = budget_tokens.unwrap_or(2000);
+        let value_tokens =
+            |value: &Value| estimate_tokens(&serde_json::to_string(value).unwrap_or_default());
+        let minimum_response = json!({
+            "budget_tokens": budget,
+            "rendered_tokens": 0,
+            "budgeted": true,
+            "truncated": false,
+            "text": "",
+        });
+        let minimum = value_tokens(&minimum_response);
+        if budget < minimum {
+            return Err(format!(
+                "context budget {budget} is below the minimum response size of {minimum} tokens"
+            ));
+        }
+
+        let mut incoming = store.edges_to(sym.id, None).map_err(|e| e.to_string())?;
+        let mut outgoing = store.edges_from(sym.id, None).map_err(|e| e.to_string())?;
+        let edge_order = |a: &EdgeRow, b: &EdgeRow| {
+            a.kind
+                .as_str()
+                .cmp(b.kind.as_str())
+                .then(a.tier.as_str().cmp(b.tier.as_str()))
+                .then(a.site_line.cmp(&b.site_line))
+                .then(a.src_id.cmp(&b.src_id))
+                .then(a.dst_id.cmp(&b.dst_id))
+        };
+        incoming.sort_by(edge_order);
+        outgoing.sort_by(edge_order);
+        incoming.dedup_by(|a, b| {
+            a.src_id == b.src_id
+                && a.dst_id == b.dst_id
+                && a.kind == b.kind
+                && a.tier == b.tier
+                && a.site_line == b.site_line
+        });
+        outgoing.dedup_by(|a, b| {
+            a.src_id == b.src_id
+                && a.dst_id == b.dst_id
+                && a.kind == b.kind
+                && a.tier == b.tier
+                && a.site_line == b.site_line
+        });
+
+        const EDGE_LIMIT: usize = 20;
+        const MAX_CONTEXT_ITEMS: usize = 41;
+        const MAX_CONTEXT_SOURCE_BYTES: usize = 256 * 1024;
+        const MAX_TARGET_SNIPPET_BYTES: usize = 32 * 1024;
+        const MAX_NEIGHBOR_SNIPPET_BYTES: usize = 4 * 1024;
+
+        // Bound source retained before rendering. The target gets priority;
+        // neighbors share only the remaining aggregate allowance.
+        let mut source_remaining = budget.saturating_mul(4).min(MAX_CONTEXT_SOURCE_BYTES);
+        let mut items = Vec::new();
+        let target_cap = source_remaining.min(MAX_TARGET_SNIPPET_BYTES);
+        let target = context_item(&self.root, &sym, &files, target_cap);
+        source_remaining = source_remaining.saturating_sub(target.snippet.len());
+        items.push(target);
+        let mut seen_context = std::collections::HashSet::from([sym.id]);
+        let neighbors = incoming
+            .iter()
+            .map(|edge| edge.src_id)
+            .chain(outgoing.iter().map(|edge| edge.dst_id));
+        let mut source_elided_items = 0usize;
+        for symbol_id in neighbors {
+            if !seen_context.insert(symbol_id) {
+                continue;
+            }
+            if items.len() >= MAX_CONTEXT_ITEMS || source_remaining == 0 {
+                source_elided_items += 1;
+                continue;
+            }
+            if let Some(other) = symbol_by_id(store, symbol_id) {
+                let cap = source_remaining.min(MAX_NEIGHBOR_SNIPPET_BYTES);
+                let item = context_item(&self.root, &other, &files, cap);
+                source_remaining = source_remaining.saturating_sub(item.snippet.len());
+                items.push(item);
+            }
+        }
+
+        let incoming_total = incoming.len();
+        let outgoing_total = outgoing.len();
+        let incoming_compact = compact_edges(store, &incoming, &files, false, EDGE_LIMIT)?;
+        let outgoing_compact = compact_edges(store, &outgoing, &files, true, EDGE_LIMIT)?;
+        let mut response = minimum_response;
+        response["truncated"] = json!(
+            incoming_total > EDGE_LIMIT || outgoing_total > EDGE_LIMIT || source_elided_items > 0
+        );
+        for (key, value) in [
+            ("symbol", sym_json),
+            (
+                "envelope",
+                serde_json::to_value(envelope).unwrap_or(Value::Null),
+            ),
+            ("incoming", incoming_compact),
+            ("outgoing", outgoing_compact),
+            ("incoming_total", json!(incoming_total)),
+            ("outgoing_total", json!(outgoing_total)),
+            ("context_items_total", json!(seen_context.len())),
+            ("context_items_loaded", json!(items.len())),
+        ] {
+            let mut candidate = response.clone();
+            candidate[key] = value;
+            if value_tokens(&candidate) <= budget {
+                response = candidate;
+            } else {
+                response["truncated"] = json!(true);
+            }
+        }
+        if let Some(build_info) = built {
+            let mut candidate = response.clone();
+            candidate["graph_build"] = build_info;
+            if value_tokens(&candidate) <= budget {
+                response = candidate;
+            } else {
+                response["truncated"] = json!(true);
+            }
+        }
+
+        let overhead = value_tokens(&response);
+        let (mut text, layer, fit_elided_items) =
+            bridge::render_context(&items, budget.saturating_sub(overhead));
+        for (key, value) in [
+            ("context_layer", json!(layer)),
+            (
+                "elided_items",
+                json!(source_elided_items.saturating_add(fit_elided_items)),
+            ),
+        ] {
+            let mut candidate = response.clone();
+            candidate[key] = value;
+            if value_tokens(&candidate) <= budget {
+                response = candidate;
+            } else {
+                response["truncated"] = json!(true);
+            }
+        }
+        if layer != "L2" || fit_elided_items > 0 {
+            response["truncated"] = json!(true);
+        }
+        loop {
+            response["text"] = json!(text);
+            response["rendered_tokens"] = json!(estimate_tokens(
+                response["text"].as_str().unwrap_or_default()
+            ));
+            if value_tokens(&response) <= budget {
+                break;
+            }
+            let chars = response["text"]
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .count();
+            if chars == 0 {
+                break;
+            }
+            response["truncated"] = json!(true);
+            text = text.chars().take(chars.saturating_sub(1)).collect();
+        }
+        Ok(response)
+    }
+
+    fn op_impact(
+        &mut self,
+        uid_or_name: &str,
+        direction: &str,
+        depth: Option<u32>,
+    ) -> Result<Value, String> {
+        let built = self.ensure_graph()?;
+        let store = self.graph.as_ref().unwrap();
+        let sym = match resolve_symbol(store, uid_or_name)? {
+            Resolved::One(s) => s,
+            Resolved::Many(v) => return candidates_value(store, &v),
+        };
+        let mut out = bridge::impact(store, &sym.uid, direction, depth.unwrap_or(3))?;
+        merge_build_info(&mut out, built);
+        Ok(out)
+    }
+
+    fn op_uses(
+        &mut self,
+        uid_or_name: &str,
+        role: &str,
+        offset: Option<usize>,
+    ) -> Result<Value, String> {
+        let built = self.ensure_graph()?;
+        let store = self.graph.as_ref().unwrap();
+        let sym = match resolve_symbol(store, uid_or_name)? {
+            Resolved::One(s) => s,
+            Resolved::Many(v) => return candidates_value(store, &v),
+        };
+        let files = file_map(store)?;
+        let (edges, other_is_src) = match role {
+            "callees" => (store.edges_from(sym.id, Some(EdgeKind::Calls)), false),
+            _ => (store.edges_to(sym.id, Some(EdgeKind::Calls)), true),
+        };
+        const EDGE_LIMIT: usize = 20;
+        let mut edges = edges.map_err(|e| e.to_string())?;
+        edges.sort_by(|a, b| {
+            a.site_line
+                .cmp(&b.site_line)
+                .then(a.src_id.cmp(&b.src_id))
+                .then(a.dst_id.cmp(&b.dst_id))
+                .then(a.tier.as_str().cmp(b.tier.as_str()))
+        });
+        let total_edges = edges.len();
+        let offset = offset.unwrap_or(0).min(total_edges);
+        let mut arr = Vec::with_capacity(total_edges.min(EDGE_LIMIT));
+        for e in edges.iter().skip(offset).take(EDGE_LIMIT) {
+            let other_id = if other_is_src { e.src_id } else { e.dst_id };
+            let other = symbol_by_id(store, other_id);
+            arr.push(json!({
+                "symbol": other.as_ref().map(|s| symbol_json(s, &files)),
+                "tier": e.tier.as_str(),
+                "site_line": e.site_line,
+            }));
+        }
+        let envelope = store
+            .envelope_for_name(&sym.name)
+            .map_err(|e| e.to_string())?;
+        let returned_edges = arr.len();
+        let has_more = offset.saturating_add(returned_edges) < total_edges;
+        let mut out = json!({
+            "symbol": symbol_json(&sym, &files),
+            "role": if role == "callees" { "callees" } else { "callers" },
+            "edges": arr,
+            "total_edges": total_edges,
+            "returned_edges": returned_edges,
+            "edge_limit": EDGE_LIMIT,
+            "offset": offset,
+            "next_offset": has_more.then_some(offset.saturating_add(returned_edges)),
+            "truncated": has_more,
+            "envelope": envelope,
+        });
+        merge_build_info(&mut out, built);
+        Ok(out)
+    }
+
+    fn op_trace(&mut self, from: &str, to: &str) -> Result<Value, String> {
+        let built = self.ensure_graph()?;
+        let store = self.graph.as_ref().unwrap();
+        let from_sym = match resolve_symbol(store, from)? {
+            Resolved::One(s) => s,
+            Resolved::Many(v) => return candidates_value(store, &v),
+        };
+        let to_sym = match resolve_symbol(store, to)? {
+            Resolved::One(s) => s,
+            Resolved::Many(v) => return candidates_value(store, &v),
+        };
+        let mut out = bridge::trace(store, &from_sym.uid, &to_sym.uid)?;
+        merge_build_info(&mut out, built);
+        Ok(out)
+    }
+
+    fn op_processes(&mut self, offset: Option<usize>) -> Result<Value, String> {
+        let built = self.ensure_graph()?;
+        let store = self.graph.as_mut().unwrap();
+        let mut out = bridge::processes(store, offset.unwrap_or(0))?;
+        merge_build_info(&mut out, built);
+        Ok(out)
+    }
+
+    fn op_graph(&mut self) -> Result<Value, String> {
+        let (stats, build_ms) = self.rebuild_graph()?;
+        Ok(json!({
+            "files": stats.get("files").cloned().unwrap_or(Value::Null),
+            "symbols": stats.get("symbols").cloned().unwrap_or(Value::Null),
+            "edges": stats.get("edges").cloned().unwrap_or(Value::Null),
+            "unresolved": stats.get("unresolved").cloned().unwrap_or(Value::Null),
+            "elapsed_ms": build_ms,
+        }))
+    }
+
+    fn op_clusters(&mut self, offset: Option<usize>) -> Result<Value, String> {
+        let built = self.ensure_graph()?;
+        let store = self.graph.as_mut().unwrap();
+        let mut out = bridge::clusters(store, offset.unwrap_or(0))?;
+        merge_build_info(&mut out, built);
+        Ok(out)
+    }
+
+    fn op_changes(&mut self, base: Option<&str>, offset: Option<usize>) -> Result<Value, String> {
+        const SYMBOL_LIMIT: usize = 20;
+        const PROCESS_LIMIT: usize = 20;
+        const PROCESSES_PER_SYMBOL_LIMIT: usize = 10;
+        let offset = offset.unwrap_or(0);
+        let built = self.ensure_graph()?;
+        let root = self.root.clone();
+        let store = self.graph.as_ref().unwrap();
+        let mut out = bridge::changes(store, &root, base)?;
+        let mut nested_processes_truncated = false;
+        let symbols_total = out["symbols"].as_array().map_or(0, Vec::len);
+        if let Some(symbols) = out["symbols"].as_array_mut() {
+            symbols.sort_by(|a, b| {
+                a["path"]
+                    .as_str()
+                    .cmp(&b["path"].as_str())
+                    .then(a["uid"].as_str().cmp(&b["uid"].as_str()))
+            });
+            let start = offset.min(symbols.len());
+            let end = start.saturating_add(SYMBOL_LIMIT).min(symbols.len());
+            *symbols = symbols.drain(start..end).collect();
+            for symbol in symbols {
+                let process_total = symbol["processes"].as_array().map_or(0, Vec::len);
+                if let Some(processes) = symbol["processes"].as_array_mut() {
+                    processes.truncate(PROCESSES_PER_SYMBOL_LIMIT);
+                }
+                if let Some(object) = symbol.as_object_mut() {
+                    object.insert("processes_total".into(), json!(process_total));
+                    object.insert(
+                        "processes_truncated".into(),
+                        json!(process_total > PROCESSES_PER_SYMBOL_LIMIT),
+                    );
+                }
+                nested_processes_truncated |= process_total > PROCESSES_PER_SYMBOL_LIMIT;
+            }
+        }
+        let affected_processes_total = out["affected_processes"].as_array().map_or(0, Vec::len);
+        if let Some(processes) = out["affected_processes"].as_array_mut() {
+            let start = offset.min(processes.len());
+            let end = start.saturating_add(PROCESS_LIMIT).min(processes.len());
+            *processes = processes.drain(start..end).collect();
+        }
+        let returned_symbols = out["symbols"].as_array().map_or(0, Vec::len);
+        let returned_processes = out["affected_processes"].as_array().map_or(0, Vec::len);
+        let has_more = offset.saturating_add(returned_symbols) < symbols_total
+            || offset.saturating_add(returned_processes) < affected_processes_total;
+        if let Some(object) = out.as_object_mut() {
+            object.insert("symbols_total".into(), json!(symbols_total));
+            object.insert("returned_symbols".into(), json!(returned_symbols));
+            object.insert("symbol_limit".into(), json!(SYMBOL_LIMIT));
+            object.insert("offset".into(), json!(offset));
+            object.insert(
+                "next_offset".into(),
+                json!(
+                    has_more
+                        .then_some(offset.saturating_add(returned_symbols.max(returned_processes)))
+                ),
+            );
+            object.insert(
+                "affected_processes_total".into(),
+                json!(affected_processes_total),
+            );
+            object.insert("process_limit".into(), json!(PROCESS_LIMIT));
+            object.insert(
+                "returned_affected_processes".into(),
+                json!(returned_processes),
+            );
+            object.insert(
+                "truncated".into(),
+                json!(has_more || nested_processes_truncated),
+            );
+        }
+        merge_build_info(&mut out, built);
+        Ok(out)
+    }
+
+    fn op_status(&mut self) -> Result<Value, String> {
+        let s = self.index.status();
+        let db = self.graph_db_path();
+        let graph = if db.exists() {
+            match GraphStore::open(&db) {
+                Ok(store) => {
+                    let (files, symbols, edges, unresolved) =
+                        store.counts().map_err(|e| e.to_string())?;
+                    json!({
+                        "present": true,
+                        "files": files,
+                        "symbols": symbols,
+                        "edges": edges,
+                        "unresolved_calls": unresolved,
+                    })
+                }
+                Err(e) => json!({"present": true, "error": e.to_string()}),
+            }
+        } else {
+            json!({"present": false})
+        };
+        Ok(json!({
+            "root": self.root.display().to_string(),
+            "index": {
+                "commit_oid": s.commit_oid,
+                "base_files": s.base_files,
+                "delta_files": s.delta_files,
+                "overlay_files": s.overlay_files,
+                "tombstones": s.tombstones,
+            },
+            "graph": graph,
+        }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+enum Resolved {
+    One(SymbolRow),
+    Many(Vec<SymbolRow>),
+}
+
+/// `uid_or_name` protocol: '#' means uid; otherwise a name, with the
+/// disambiguation protocol (`{candidates: [...], hint}`) on ambiguity.
+fn resolve_symbol(store: &GraphStore, uid_or_name: &str) -> Result<Resolved, String> {
+    if uid_or_name.contains('#') {
+        return store
+            .symbol_by_uid(uid_or_name)
+            .map_err(|e| e.to_string())?
+            .map(Resolved::One)
+            .ok_or_else(|| format!("no symbol with uid {uid_or_name:?}"));
+    }
+    let syms = store
+        .symbols_by_name(uid_or_name, 50)
+        .map_err(|e| e.to_string())?;
+    match syms.len() {
+        0 => Err(format!("no symbol named {uid_or_name:?}")),
+        1 => Ok(Resolved::One(syms.into_iter().next().unwrap())),
+        _ => Ok(Resolved::Many(syms)),
+    }
+}
+
+fn candidates_value(store: &GraphStore, syms: &[SymbolRow]) -> Result<Value, String> {
+    let files = file_map(store)?;
+    Ok(json!({
+        "candidates": syms.iter().map(|s| symbol_json(s, &files)).collect::<Vec<_>>(),
+        "hint": "ambiguous name; re-call with uid",
+    }))
+}
+
+fn file_map(store: &GraphStore) -> Result<HashMap<i64, String>, String> {
+    Ok(store
+        .files()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|f| (f.id, f.path))
+        .collect())
+}
+
+fn symbol_json(s: &SymbolRow, files: &HashMap<i64, String>) -> Value {
+    json!({
+        "uid": s.uid,
+        "name": s.name,
+        "qualified": s.qualified,
+        "kind": s.kind.as_str(),
+        "path": files.get(&s.file_id).cloned().unwrap_or_default(),
+        "start_line": s.start_line,
+        "end_line": s.end_line,
+        "sig": s.sig,
+    })
+}
+
+/// Public-API `GraphStore` has uid/name lookups only; edge rows carry raw
+/// ids, so resolve them through the sanctioned `conn()` escape hatch.
+fn symbol_by_id(store: &GraphStore, id: i64) -> Option<SymbolRow> {
+    store
+        .conn()
+        .query_row(
+            "SELECT id, uid, file_id, name, qualified, kind, start_line, end_line, sig
+             FROM symbols WHERE id = ?1",
+            rusqlite::params![id],
+            |r| {
+                Ok(SymbolRow {
+                    id: r.get(0)?,
+                    uid: r.get(1)?,
+                    file_id: r.get(2)?,
+                    name: r.get(3)?,
+                    qualified: r.get(4)?,
+                    kind: SymbolKind::parse(&r.get::<_, String>(5)?),
+                    start_line: r.get(6)?,
+                    end_line: r.get(7)?,
+                    sig: r.get(8)?,
+                })
+            },
+        )
+        .ok()
+}
+
+#[expect(
+    dead_code,
+    reason = "retained for the full-detail graph response shape while context uses compact edges"
+)]
+fn edges_by_kind(
+    store: &GraphStore,
+    edges: &[EdgeRow],
+    files: &HashMap<i64, String>,
+    other_is_dst: bool,
+) -> Result<Value, String> {
+    let mut grouped: BTreeMap<&'static str, Vec<Value>> = BTreeMap::new();
+    for e in edges {
+        let other_id = if other_is_dst { e.dst_id } else { e.src_id };
+        let other = symbol_by_id(store, other_id);
+        grouped.entry(e.kind.as_str()).or_default().push(json!({
+            "symbol": other.as_ref().map(|s| symbol_json(s, files)),
+            "tier": e.tier.as_str(),
+            "site_line": e.site_line,
+        }));
+    }
+    Ok(serde_json::to_value(grouped).unwrap_or(Value::Null))
+}
+
+/// Compact edge representation for budgeted responses: just name, path, and
+/// tier per edge, grouped by kind. Preserves relationship metadata without
+/// the full symbol JSON (no sig, no uid, no line range).
+fn compact_edges(
+    store: &GraphStore,
+    edges: &[EdgeRow],
+    files: &HashMap<i64, String>,
+    other_is_dst: bool,
+    limit: usize,
+) -> Result<Value, String> {
+    let mut grouped: BTreeMap<&'static str, Vec<Value>> = BTreeMap::new();
+    let mut seen = HashSet::new();
+    for e in edges {
+        if seen.len() >= limit {
+            break;
+        }
+        let other_id = if other_is_dst { e.dst_id } else { e.src_id };
+        let other = symbol_by_id(store, other_id);
+        let entry = if let Some(s) = &other {
+            let path = files.get(&s.file_id).cloned().unwrap_or_default();
+            if !seen.insert((
+                e.kind.as_str(),
+                s.name.clone(),
+                path.clone(),
+                e.tier.as_str(),
+            )) {
+                continue;
+            }
+            json!({
+                "name": s.name,
+                "path": path,
+                "tier": e.tier.as_str(),
+            })
+        } else {
+            if !seen.insert((
+                e.kind.as_str(),
+                String::new(),
+                String::new(),
+                e.tier.as_str(),
+            )) {
+                continue;
+            }
+            json!({ "tier": e.tier.as_str() })
+        };
+        grouped.entry(e.kind.as_str()).or_default().push(entry);
+    }
+    Ok(serde_json::to_value(grouped).unwrap_or(Value::Null))
+}
+
+fn context_item(
+    root: &Path,
+    s: &SymbolRow,
+    files: &HashMap<i64, String>,
+    max_snippet_bytes: usize,
+) -> bridge::Item {
+    let path = files.get(&s.file_id).cloned().unwrap_or_default();
+    let snippet = read_snippet(
+        &root.join(&path),
+        s.start_line,
+        s.end_line,
+        60,
+        max_snippet_bytes,
+    );
+    bridge::Item {
+        name: s.name.clone(),
+        kind: s.kind.as_str().to_string(),
+        path,
+        start_line: s.start_line,
+        end_line: s.end_line,
+        sig: s.sig.clone(),
+        snippet,
+    }
+}
+
+fn read_snippet(
+    abs: &Path,
+    start_line: u32,
+    end_line: u32,
+    max_lines: usize,
+    max_bytes: usize,
+) -> String {
+    if max_bytes == 0 {
+        return String::new();
+    }
+    let Ok(file) = open_regular_bounded(abs, MAX_FILE_BYTES) else {
+        return String::new();
+    };
+    let start = start_line.saturating_sub(1) as usize;
+    let mut snippet = String::new();
+    for line in BufReader::new(file.take(MAX_FILE_BYTES.saturating_add(1)))
+        .lines()
+        .skip(start)
+        .take(
+            ((end_line as usize).saturating_sub(start))
+                .min(max_lines)
+                .max(1),
+        )
+        .filter_map(Result::ok)
+    {
+        let separator = usize::from(!snippet.is_empty());
+        let remaining = max_bytes.saturating_sub(snippet.len() + separator);
+        if remaining == 0 {
+            break;
+        }
+        if separator == 1 {
+            snippet.push('\n');
+        }
+        if line.len() <= remaining {
+            snippet.push_str(&line);
+            continue;
+        }
+        let mut end = remaining;
+        while end > 0 && !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        snippet.push_str(&line[..end]);
+        break;
+    }
+    snippet
+}
+
+fn merge_build_info(out: &mut Value, built: Option<Value>) {
+    if let (Some(info), Some(obj)) = (built, out.as_object_mut()) {
+        obj.insert("graph_build".into(), info);
+    }
+}
+
+fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn remove_sqlite_sidecars(path: &Path) -> Result<(), String> {
+    for sidecar in [sqlite_sidecar(path, "-wal"), sqlite_sidecar(path, "-shm")] {
+        match std::fs::remove_file(&sidecar) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("remove {}: {error}", sidecar.display())),
+        }
+    }
+    Ok(())
+}
+
+fn remove_sqlite_files(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("remove {}: {error}", path.display())),
+    }
+    remove_sqlite_sidecars(path)
+}
+
+// ---------------------------------------------------------------------------
+// bridge — the ONLY place that calls concurrently-developed crate APIs.
+// Each fn is one call deep so contract drift is a one-line fix.
+// ---------------------------------------------------------------------------
+
+mod bridge {
+    use super::{Value, es, to_val};
+    use pixel_graph::GraphStore;
+    use std::path::Path;
+
+    /// Neutral mirror of `pixel_context::ContextItem`.
+    pub struct Item {
+        pub name: String,
+        pub kind: String,
+        pub path: String,
+        pub start_line: u32,
+        pub end_line: u32,
+        pub sig: String,
+        pub snippet: String,
+    }
+
+    pub fn build_graph(root: &Path, db: &Path) -> Result<Value, String> {
+        let s = pixel_graph::build::build_graph(root, db).map_err(es)?;
+        Ok(serde_json::json!({
+            "files": s.files,
+            "symbols": s.symbols,
+            "edges": s.edges,
+            "unresolved": s.unresolved,
+            "elapsed_ms": s.elapsed_ms as u64,
+        }))
+    }
+
+    /// True iff the on-disk graph is fresh relative to `root`'s working tree.
+    pub fn is_fresh(root: &Path, db: &Path) -> bool {
+        pixel_graph::build::is_fresh(root, db)
+    }
+
+    pub fn update_file(root: &Path, db: &Path, rel: &str) {
+        let _ = pixel_graph::build::update_file(root, db, rel);
+    }
+
+    pub fn impact(
+        store: &GraphStore,
+        uid: &str,
+        direction: &str,
+        depth: u32,
+    ) -> Result<Value, String> {
+        use pixel_graph::impact::{Direction, impact};
+        let dir = if direction == "downstream" {
+            Direction::Downstream
+        } else {
+            Direction::Upstream
+        };
+        impact(store, uid, dir, depth, 50).map(to_val).map_err(es)
+    }
+
+    pub fn trace(store: &GraphStore, from_uid: &str, to_uid: &str) -> Result<Value, String> {
+        pixel_graph::trace::trace(store, from_uid, to_uid, 8)
+            .map(to_val)
+            .map_err(es)
+    }
+
+    pub fn processes(store: &mut GraphStore, offset: usize) -> Result<Value, String> {
+        use pixel_graph::process;
+        const PROCESS_LIMIT: usize = 5;
+        const STEP_LIMIT: usize = 10;
+        let (listed, persisted_total) =
+            process::list(store, PROCESS_LIMIT, STEP_LIMIT, offset).map_err(es)?;
+        let (mut v, total_processes) = if persisted_total == 0 {
+            const DISCOVERY_LIMIT: usize = 100;
+            let discovered = process::discover(store, 6, 3, 3, DISCOVERY_LIMIT).map_err(es)?;
+            let total = discovered.len();
+            (
+                discovered
+                    .into_iter()
+                    .skip(offset)
+                    .take(PROCESS_LIMIT)
+                    .collect(),
+                total,
+            )
+        } else {
+            (listed, persisted_total)
+        };
+        v.truncate(PROCESS_LIMIT);
+        let mut steps_truncated = v
+            .iter()
+            .any(|summary| summary.step_count as usize > STEP_LIMIT);
+        for summary in &mut v {
+            if summary.steps.len() > STEP_LIMIT {
+                summary.steps.truncate(STEP_LIMIT);
+                steps_truncated = true;
+            }
+        }
+        let returned_processes = v.len();
+        let has_more = offset.saturating_add(returned_processes) < total_processes;
+        Ok(serde_json::json!({
+            "processes": to_val(v),
+            "total_processes": total_processes,
+            "returned_processes": returned_processes,
+            "process_limit": PROCESS_LIMIT,
+            "step_limit": STEP_LIMIT,
+            "offset": offset,
+            "next_offset": has_more.then_some(offset.saturating_add(returned_processes)),
+            "truncated": has_more || steps_truncated,
+        }))
+    }
+
+    pub fn clusters(store: &mut GraphStore, offset: usize) -> Result<Value, String> {
+        use pixel_graph::cluster;
+        const CLUSTER_LIMIT: usize = 50;
+        let (listed, persisted_total) = cluster::list(store, CLUSTER_LIMIT, offset).map_err(es)?;
+        let (mut v, total_clusters) = if persisted_total == 0 {
+            let computed = cluster::compute(store).map_err(es)?;
+            let total = computed.len();
+            (
+                computed
+                    .into_iter()
+                    .skip(offset)
+                    .take(CLUSTER_LIMIT)
+                    .collect(),
+                total,
+            )
+        } else {
+            (listed, persisted_total)
+        };
+        v.truncate(CLUSTER_LIMIT);
+        let returned_clusters = v.len();
+        let has_more = offset.saturating_add(returned_clusters) < total_clusters;
+        Ok(serde_json::json!({
+            "clusters": to_val(v),
+            "total_clusters": total_clusters,
+            "returned_clusters": returned_clusters,
+            "cluster_limit": CLUSTER_LIMIT,
+            "offset": offset,
+            "next_offset": has_more.then_some(offset.saturating_add(returned_clusters)),
+            "truncated": has_more,
+        }))
+    }
+
+    pub fn changes(store: &GraphStore, root: &Path, base: Option<&str>) -> Result<Value, String> {
+        pixel_graph::changes::detect(store, root, base)
+            .map(to_val)
+            .map_err(es)
+    }
+
+    /// Budget-fitted text rendering via pixel-context; empty on any miss.
+    pub fn render_context(items: &[Item], budget_tokens: usize) -> (String, &'static str, usize) {
+        use pixel_context::{ContextItem, Layer, fit_to_budget_detailed, render};
+        let mapped: Vec<ContextItem> = items
+            .iter()
+            .map(|i| ContextItem {
+                name: i.name.clone(),
+                kind: i.kind.clone(),
+                path: i.path.clone(),
+                start_line: i.start_line,
+                end_line: i.end_line,
+                sig: i.sig.clone(),
+                snippet: i.snippet.clone(),
+            })
+            .collect();
+        if let Some((target, neighbors)) = mapped.split_first() {
+            let target_text = render(std::slice::from_ref(target), Layer::L2);
+            let target_tokens = pixel_context::estimate_tokens(&target_text);
+            if target_tokens <= budget_tokens {
+                let neighbors_fit =
+                    fit_to_budget_detailed(neighbors, budget_tokens - target_tokens, Layer::L1);
+                let layer = if neighbors_fit.text.is_empty() {
+                    "L2"
+                } else if neighbors_fit.layer == Layer::L1 {
+                    "L2+L1"
+                } else {
+                    "L2+L0"
+                };
+                return (
+                    format!("{target_text}{}", neighbors_fit.text),
+                    layer,
+                    neighbors_fit.elided_items,
+                );
+            }
+        }
+        let fitted = fit_to_budget_detailed(&mapped, budget_tokens, Layer::L2);
+        (fitted.text, fitted.layer.as_str(), fitted.elided_items)
+    }
+}
+
+fn to_val<T: Serialize>(t: T) -> Value {
+    serde_json::to_value(t).unwrap_or(Value::Null)
+}
+
+fn es<E: std::fmt::Display>(e: E) -> String {
+    e.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "pixel-daemon-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                % 1_000_000
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {:?}", out);
+    }
+
+    #[test]
+    fn ping_reports_daemon_protocol_version() {
+        let root = tmpdir("protocol-version");
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(Request::Ping);
+        assert!(resp.ok);
+        assert_eq!(
+            resp.data.get("protocol_version").and_then(Value::as_u64),
+            Some(super::PROTOCOL_VERSION)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn uses_pages_cover_all_edges_without_overlap() {
+        let root = tmpdir("uses-pages");
+        let mut source = String::from("export function target(): number { return 1 }\n");
+        for index in 0..25 {
+            source.push_str(&format!(
+                "export function caller{index:02}(): number {{ return target() }}\n"
+            ));
+        }
+        std::fs::write(root.join("calls.ts"), source).unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "calls"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let first = svc.handle(Request::Uses {
+            uid_or_name: "target".into(),
+            role: "callers".into(),
+            offset: Some(0),
+        });
+        let second = svc.handle(Request::Uses {
+            uid_or_name: "target".into(),
+            role: "callers".into(),
+            offset: Some(20),
+        });
+        assert!(first.ok && second.ok);
+        let edge_uids = |response: &Response| {
+            response.data["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|edge| edge["symbol"]["uid"].as_str().map(str::to_string))
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let first_uids = edge_uids(&first);
+        let second_uids = edge_uids(&second);
+        assert_eq!(first_uids.len(), 20);
+        assert_eq!(second_uids.len(), 5);
+        assert!(first_uids.is_disjoint(&second_uids));
+        assert_eq!(first.data["next_offset"].as_u64(), Some(20));
+        assert!(second.data["next_offset"].is_null());
+        assert_eq!(second.data["total_edges"].as_u64(), Some(25));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn changes_pages_cover_all_symbols_without_overlap() {
+        let root = tmpdir("changes-pages");
+        let make_source = |increment: usize| {
+            (0..25)
+                .map(|index| {
+                    format!(
+                        "export function changed{index:02}(x: number): number {{ return x + {increment} }}\n"
+                    )
+                })
+                .collect::<String>()
+        };
+        std::fs::write(root.join("changed.ts"), make_source(1)).unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "baseline"]);
+        std::fs::write(root.join("changed.ts"), make_source(2)).unwrap();
+
+        let mut svc = Service::open(&root).unwrap();
+        let first = svc.handle(Request::Changes {
+            base: None,
+            offset: Some(0),
+        });
+        let second = svc.handle(Request::Changes {
+            base: None,
+            offset: Some(20),
+        });
+        assert!(first.ok && second.ok, "first={first:?} second={second:?}");
+        let symbol_uids = |response: &Response| {
+            response.data["symbols"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|symbol| symbol["uid"].as_str().map(str::to_string))
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let first_uids = symbol_uids(&first);
+        let second_uids = symbol_uids(&second);
+        assert_eq!(first_uids.len(), 20);
+        assert_eq!(second_uids.len(), 5);
+        assert!(first_uids.is_disjoint(&second_uids));
+        assert_eq!(first.data["next_offset"].as_u64(), Some(20));
+        assert!(second.data["next_offset"].is_null());
+        assert_eq!(second.data["symbols_total"].as_u64(), Some(25));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Regression: a `Context` request with a small token budget must produce
+    /// a response whose total serialized size is bounded by the budget (in
+    /// tokens), not just the inner `text` field. Previously `--budget 50`
+    /// could emit thousands of bytes because the structured incoming/outgoing
+    /// sections were not counted.
+    #[test]
+    fn context_budget_covers_whole_response() {
+        let root = tmpdir("ctx-budget");
+        std::fs::write(
+            root.join("a.ts"),
+            "export function alpha(x: number): number { return x + 1 }\n\
+             export function beta(x: number): number { return alpha(x) }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        // Find the uid for `alpha`.
+        let sym = svc.handle(Request::Symbol {
+            name: "alpha".into(),
+        });
+        assert!(sym.ok, "symbol lookup: {:?}", sym);
+        let uid = sym
+            .data
+            .get("symbols")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(|v| v.get("uid"))
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("no uid in {sym:?}"))
+            .to_string();
+
+        // Request a tiny budget. The whole response must be bounded.
+        let resp = svc.handle(Request::Context {
+            uid: uid.clone(),
+            budget_tokens: Some(50),
+        });
+        assert!(resp.ok, "context: {:?}", resp);
+        let serialized = serde_json::to_string(&resp.data).unwrap();
+        let tokens = pixel_context::estimate_tokens(&serialized);
+        assert!(
+            tokens <= 50,
+            "whole-response budget exceeded: {tokens} tokens for budget 50 ({} bytes)",
+            serialized.len()
+        );
+        // Text must be empty or very small when budget < overhead.
+        let text = resp.data.get("text").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            text.is_empty() || pixel_context::estimate_tokens(text) <= 50,
+            "text should be empty or tiny when budget is 50, got {} tokens",
+            pixel_context::estimate_tokens(text)
+        );
+        // budgeted flag must be set so callers know the cap applied.
+        assert_eq!(
+            resp.data.get("budgeted").and_then(Value::as_bool),
+            Some(true),
+            "budgeted flag must be true when a budget is set"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Regression: a `Context` request with a moderate budget must produce a
+    /// response whose total serialized size (including metadata + text) does
+    /// not exceed the budget by more than a small rounding factor.
+    #[test]
+    fn context_moderate_budget_covers_whole_response() {
+        let root = tmpdir("ctx-budget-moderate");
+        std::fs::write(
+            root.join("a.ts"),
+            "export function alpha(x: number): number { return x + 1 }\n\
+             export function beta(x: number): number { return alpha(x) }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let sym = svc.handle(Request::Symbol {
+            name: "alpha".into(),
+        });
+        let uid = sym
+            .data
+            .get("symbols")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(|v| v.get("uid"))
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+
+        // Budget 500: metadata and text together must fit the hard limit.
+        let resp = svc.handle(Request::Context {
+            uid: uid.clone(),
+            budget_tokens: Some(500),
+        });
+        assert!(resp.ok, "context: {:?}", resp);
+        let serialized = serde_json::to_string(&resp.data).unwrap();
+        let tokens = pixel_context::estimate_tokens(&serialized);
+        assert!(
+            tokens <= 500,
+            "whole-response budget exceeded: {tokens} tokens for budget 500 ({} bytes)",
+            serialized.len()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Regression: a broad search (`.*` or a short literal hitting every file)
+    /// must be bounded by a default row limit and a byte cap, not return
+    /// unbounded output.
+    #[test]
+    fn search_broad_pattern_is_bounded() {
+        let root = tmpdir("search-bound");
+        git(&root, &["init", "-q"]);
+        // 120 files, each with a common needle, so the default 100-row page
+        // is exercised rather than merely reported.
+        for i in 0..120 {
+            std::fs::write(
+                root.join(format!("f{i:03}.rs")),
+                format!("fn commonBroadNeedle{i:03}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "many"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        // Broad pattern with no explicit limit: default limit applies.
+        let resp = svc.handle(Request::Search {
+            paths: None,
+            pattern: "commonBroadNeedle".into(),
+            json: true,
+            limit: None,
+            offset: None,
+        });
+        assert!(resp.ok, "search: {:?}", resp);
+        let matches = resp.data.get("matches").and_then(Value::as_array).unwrap();
+        // Default limit is 100; 120 matching files must return one full page
+        // with an exact continuation offset.
+        assert_eq!(
+            resp.data.get("limit").and_then(Value::as_u64),
+            Some(100),
+            "default limit must be reported"
+        );
+        assert_eq!(matches.len(), 100, "default limit must cap matches");
+        assert_eq!(
+            resp.data.get("next_offset").and_then(Value::as_u64),
+            Some(100)
+        );
+        // Now request a tiny limit: must truncate.
+        let resp = svc.handle(Request::Search {
+            paths: None,
+            pattern: "commonBroadNeedle".into(),
+            json: true,
+            limit: Some(5),
+            offset: None,
+        });
+        assert!(resp.ok);
+        let matches = resp.data.get("matches").and_then(Value::as_array).unwrap();
+        let truncated = resp
+            .data
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        assert!(matches.len() <= 5, "explicit limit must cap matches");
+        assert!(truncated, "truncated must be true when more matches exist");
+        let first_page = matches.clone();
+
+        let resp = svc.handle(Request::Search {
+            paths: None,
+            pattern: "commonBroadNeedle".into(),
+            json: true,
+            limit: Some(5),
+            offset: Some(5),
+        });
+        assert!(resp.ok);
+        let second_page = resp.data.get("matches").and_then(Value::as_array).unwrap();
+        assert_eq!(second_page.len(), 5);
+        assert!(
+            first_page.iter().all(|item| !second_page.contains(item)),
+            "offset page must not repeat prior matches"
+        );
+        assert_eq!(resp.data.get("offset").and_then(Value::as_u64), Some(5));
+        assert_eq!(
+            resp.data.get("next_offset").and_then(Value::as_u64),
+            Some(10)
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
