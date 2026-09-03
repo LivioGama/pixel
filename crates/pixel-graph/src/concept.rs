@@ -172,6 +172,7 @@ pub fn concept_lang_of(path: &str) -> Option<&'static str> {
         "go" => Some("go"),
         "java" => Some("java"),
         "py" => Some("python"),
+        "rb" | "rake" | "gemspec" | "ru" => Some("ruby"),
         "svelte" => Some("svelte"),
         "vue" => Some("vue"),
         "html" => Some("html"),
@@ -201,7 +202,7 @@ pub fn extract_concepts(path_rel: &str, content: &[u8]) -> Vec<RawConcept> {
         "yaml" => extract_yaml_config(content),
         "css" => extract_css(content),
         "rust" => extract_rust(path_rel, content),
-        // go/java/python have no concept sources defined in PLAN.md Engine 1.
+        // go/java/python/ruby have no concept sources defined in PLAN.md Engine 1.
         _ => Vec::new(),
     };
     out.extend(path_routes(path_rel, content));

@@ -60,6 +60,7 @@ pub fn lang_of(path: &str) -> Option<&'static str> {
         "java" => Some("java"),
         "py" => Some("python"),
         "cs" => Some("csharp"),
+        "rb" | "rake" | "gemspec" | "ru" => Some("ruby"),
         _ => None,
     }
 }
@@ -83,6 +84,7 @@ fn language_for(lang: &str) -> Option<Language> {
         "java" => tree_sitter_java::LANGUAGE.into(),
         "python" => tree_sitter_python::LANGUAGE.into(),
         "csharp" => tree_sitter_c_sharp::LANGUAGE.into(),
+        "ruby" => tree_sitter_ruby::LANGUAGE.into(),
         _ => return None,
     })
 }
@@ -107,6 +109,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         "java" => walk_java(&mut w, root, 0),
         "python" => walk_python(&mut w, root, 0),
         "csharp" => walk_csharp(&mut w, root, 0),
+        "ruby" => walk_ruby(&mut w, root, 0),
         _ => return None,
     }
     let mut fx = FileExtraction {
@@ -861,9 +864,110 @@ fn walk_csharp(w: &mut Walker, node: Node, depth: usize) {
     }
 }
 
+// --- Ruby -----------------------------------------------------------------
+
+/// `call` methods that load another file rather than invoke behaviour. Their
+/// first string argument becomes an import spec instead of a call edge.
+const RUBY_REQUIRE_METHODS: &[&str] =
+    &["require", "require_relative", "require_dependency", "load"];
+
+fn walk_ruby(w: &mut Walker, node: Node, depth: usize) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let mut pushed = false;
+    match node.kind() {
+        "module" => {
+            if let Some(name) = field_text(w, node, "name") {
+                let q = w.qualify(&name, "::");
+                w.push_symbol(name.clone(), q, SymbolKind::Module, node);
+                w.stack.push(name);
+                pushed = true;
+            }
+        }
+        "class" => {
+            // `name` may be a `scope_resolution` (`Admin::User`); keep the
+            // full text so reopened namespaced classes qualify consistently.
+            if let Some(name) = field_text(w, node, "name") {
+                let q = w.qualify(&name, "::");
+                w.push_symbol(name.clone(), q, SymbolKind::Class, node);
+                w.stack.push(name);
+                pushed = true;
+            }
+        }
+        "method" => {
+            if let Some(name) = field_text(w, node, "name") {
+                let (kind, q) = if w.stack.is_empty() {
+                    (SymbolKind::Function, name.clone())
+                } else {
+                    // Ruby convention: `Klass#instance_method`.
+                    (
+                        SymbolKind::Method,
+                        format!("{}#{}", w.stack.join("::"), name),
+                    )
+                };
+                w.push_symbol(name, q, kind, node);
+            }
+        }
+        "singleton_method" => {
+            // `def self.foo` — Ruby convention: `Klass.class_method`. The
+            // `object` is not pushed on the stack; the enclosing type is.
+            if let Some(name) = field_text(w, node, "name") {
+                let q = if w.stack.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}.{}", w.stack.join("::"), name)
+                };
+                w.push_symbol(name, q, SymbolKind::Method, node);
+            }
+        }
+        "call" => {
+            if let Some(name) = field_text(w, node, "method") {
+                let recv = field_text(w, node, "receiver");
+                if recv.is_none() && RUBY_REQUIRE_METHODS.contains(&name.as_str()) {
+                    if let Some(spec) = ruby_first_string_argument(w, node) {
+                        w.push_import(spec, Vec::new());
+                    }
+                } else {
+                    // Covers paren-less Rails DSL (`has_many :spots`,
+                    // `before_action :auth`) and receiver calls (`user.save`).
+                    w.push_call(name, recv, node);
+                }
+            }
+        }
+        _ => {}
+    }
+    for child in each_child(node) {
+        walk_ruby(w, child, depth + 1);
+    }
+    if pushed {
+        w.stack.pop();
+    }
+}
+
+/// Literal text of the first `string` argument of a Ruby `call`, or `None`
+/// when the first argument is missing, non-literal, or interpolated.
+fn ruby_first_string_argument(w: &Walker, call: Node) -> Option<String> {
+    let args = call.child_by_field_name("arguments")?;
+    let first = each_child(args).into_iter().find(|c| c.is_named())?;
+    if first.kind() != "string" {
+        return None;
+    }
+    let mut spec = String::new();
+    for part in each_child(first) {
+        match part.kind() {
+            "string_content" => spec.push_str(&w.text(part)),
+            "interpolation" => return None,
+            _ => {}
+        }
+    }
+    if spec.is_empty() { None } else { Some(spec) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::extract_file;
+    use crate::store::SymbolKind;
 
     #[test]
     fn rust_test_containers_do_not_enter_runtime_graph() {
@@ -978,5 +1082,102 @@ namespace MyApp.Services {
             .find(|s| s.qualified == "MyApp.Services.IGreeter.Greet")
             .expect("interface method Greet should exist with full qualification");
         assert_eq!(greet_in_interface.name, "Greet");
+    }
+
+    #[test]
+    fn ruby_extracts_rails_symbols_calls_and_imports() {
+        let source = br#"
+require "json"
+require_relative "../lib/pricing"
+
+module Admin
+  class UsersController < ApplicationController
+    before_action :authenticate!
+
+    def index
+      @users = User.where(active: true)
+      render json: @users
+    end
+
+    def self.permitted_params
+    end
+
+    private
+
+    def authenticate!
+    end
+  end
+end
+
+def helper
+end
+"#;
+        let extraction = extract_file("app/controllers/admin/users_controller.rb", source).unwrap();
+        assert_eq!(extraction.lang, "ruby");
+
+        // `require` loads files: they must land in imports, in source order,
+        // so import-tier resolution can link the spec to a repo file.
+        let specs: Vec<_> = extraction.imports.iter().map(|i| i.spec.as_str()).collect();
+        assert_eq!(
+            specs,
+            vec!["json", "../lib/pricing"],
+            "require strings become import specs in order"
+        );
+        assert!(
+            !extraction
+                .calls
+                .iter()
+                .any(|c| c.callee_name == "require" || c.callee_name == "require_relative"),
+            "require must not double as a call edge — it would resolve to nothing and pollute impact: {:?}",
+            extraction.calls
+        );
+
+        let find = |q: &str| extraction.symbols.iter().find(|s| s.qualified == q);
+        let module =
+            find("Admin").expect("module Admin is a symbol so namespaced targets qualify under it");
+        assert_eq!(module.kind, SymbolKind::Module);
+        let class =
+            find("Admin::UsersController").expect("class qualifies under its module with `::`");
+        assert_eq!(class.kind, SymbolKind::Class);
+        assert_eq!(class.name, "UsersController");
+        // `#` vs `.` distinguishes instance from class methods so impact
+        // lookups never merge `User#save` with `User.save`.
+        let index =
+            find("Admin::UsersController#index").expect("instance method qualifies with `#`");
+        assert_eq!(index.kind, SymbolKind::Method);
+        let params = find("Admin::UsersController.permitted_params")
+            .expect("`def self.` qualifies with `.`");
+        assert_eq!(params.kind, SymbolKind::Method);
+        assert!(
+            find("Admin::UsersController#authenticate!").is_some(),
+            "bang methods keep their `!` — it is part of the Ruby name: {:?}",
+            extraction
+                .symbols
+                .iter()
+                .map(|s| &s.qualified)
+                .collect::<Vec<_>>()
+        );
+        let helper =
+            find("helper").expect("top-level def is a bare Function, not a method of anything");
+        assert_eq!(helper.kind, SymbolKind::Function);
+
+        let call = |name: &str| extraction.calls.iter().find(|c| c.callee_name == name);
+        let before = call("before_action")
+            .expect("paren-less Rails DSL is a call — hooks are how Rails wires behaviour");
+        assert_eq!(before.receiver, None);
+        let wher = call("where").expect("receiver call `User.where` is a call");
+        assert_eq!(
+            wher.receiver.as_deref(),
+            Some("User"),
+            "receiver is kept so class-method calls can resolve to `User.where`"
+        );
+        let render = call("render").expect("keyword-arg call without parens is still a call");
+        assert_eq!(render.receiver, None);
+        assert_eq!(
+            wher.enclosing_index
+                .map(|i| extraction.symbols[i].qualified.as_str()),
+            Some("Admin::UsersController#index"),
+            "call sites attach to the smallest enclosing method so impact walks method-to-method"
+        );
     }
 }
