@@ -160,6 +160,7 @@ const SEMANTIC_RELATIONS: &[(&str, &[&str])] = &[
         &["language", "extract", "grammar", "c_sharp", "cs"],
     ),
     ("python", &["language", "extract", "grammar", "py"]),
+    ("ruby", &["language", "extract", "grammar", "rb", "rails"]),
     ("rust", &["language", "extract", "grammar", "rs"]),
     ("javascript", &["language", "extract", "grammar", "js"]),
     ("typescript", &["language", "extract", "grammar", "ts"]),
@@ -184,6 +185,7 @@ pub fn normalize_task_compounds(task: &str) -> String {
         ("c#", "csharp"),
         ("c-sharp", "csharp"),
         ("c_sharp", "csharp"),
+        ("ruby on rails", "ruby"),
         ("c++", "cpp"),
         ("f#", "fsharp"),
         (".net", "dotnet"),
@@ -1072,6 +1074,9 @@ mod tests {
 
         let q_dotnet = tokenize_task("support for .NET and Node.js").unwrap();
         assert_eq!(q_dotnet.keywords, vec!["dotnet", "nodejs"]);
+
+        let q_ruby = tokenize_task("add ruby on rails support").unwrap();
+        assert_eq!(q_ruby.keywords, vec!["ruby"]);
 
         let expanded = expand_keywords(&q_csharp.keywords);
         assert!(expanded.contains(&"language".to_string()));
