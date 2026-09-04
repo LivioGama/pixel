@@ -48,13 +48,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cargo-zigbuild
-        run: cargo install cargo-zigbuild
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools perl make
 
-      - name: Install zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.13.0
+      - name: Install cross
+        run: cargo install cross
 
-      - name: Cross-build
-        run: cargo zigbuild --release --no-default-features --target ${{ matrix.target }} -p pixel-cli
+      - name: Cross-build (no fastembed — ort-sys has no musl prebuilts)
+        run: cross build --release --no-default-features --target ${{ matrix.target }} -p pixel-cli

@@ -36,21 +36,15 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y perl make
+          sudo apt-get install -y musl-tools perl make
 
-      - name: Install cargo-zigbuild (Linux musl)
+      - name: Install cross (Linux musl)
         if: runner.os == 'Linux'
-        run: cargo install cargo-zigbuild
+        run: cargo install cross
 
-      - name: Install zig (Linux musl)
+      - name: Build (Linux musl via cross, no fastembed)
         if: runner.os == 'Linux'
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.13.0
-
-      - name: Build (Linux musl via zigbuild, no fastembed)
-        if: runner.os == 'Linux'
-        run: cargo zigbuild --release --no-default-features --target ${{ matrix.target }} -p pixel-cli
+        run: cross build --release --no-default-features --target ${{ matrix.target }} -p pixel-cli
 
       - name: Build (macOS native)
         if: runner.os == 'macOS'
