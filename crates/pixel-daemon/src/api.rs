@@ -451,6 +451,22 @@ impl Service {
     }
 
     pub fn handle(&mut self, req: Request) -> Response {
+        let resp = self.handle_inner(req);
+        // Envelope choke point: every response leaves through here, so a
+        // structurally broken envelope (success without result, failure
+        // without error, wrong protocol) cannot reach the wire unnoticed in
+        // debug builds. Release builds skip the check; the contract tests
+        // cover them.
+        debug_assert!(
+            resp.validate().is_ok(),
+            "invalid envelope for op {}: {}",
+            resp.op,
+            resp.validate().unwrap_err()
+        );
+        resp
+    }
+
+    fn handle_inner(&mut self, req: Request) -> Response {
         let op_name = req.op_name();
         // Ops that return repo state attach a `snapshot` envelope field so
         // callers can correlate the answer with the exact working-tree state
@@ -2821,6 +2837,75 @@ mod tests {
             .output()
             .unwrap();
         assert!(out.status.success(), "git {args:?}: {:?}", out);
+    }
+
+    /// Every envelope the daemon emits must satisfy `Envelope::validate`,
+    /// for success and failure alike, across the whole read-only op
+    /// surface. Without this, an op can return `ok: true` with a null
+    /// result (the CLI would print `null` as an answer) or `ok: false`
+    /// with no message (the agent would retry blind).
+    #[test]
+    fn every_read_op_emits_a_valid_envelope() {
+        let root = tmpdir("envelope-contract");
+        std::fs::write(
+            root.join("login.rs"),
+            "pub fn login(user: &str) -> bool { !user.is_empty() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("caller.rs"),
+            "use crate::login::login;\npub fn go() { login(\"a\"); }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let reqs: Vec<Request> = vec![
+            Request::Ping,
+            Request::Status {},
+            Request::Graph {},
+            serde_json::from_value(json!({"op":"search","pattern":"login"})).unwrap(),
+            serde_json::from_value(json!({"op":"search","pattern":"("})).unwrap(),
+            serde_json::from_value(json!({"op":"symbol","name":"login"})).unwrap(),
+            serde_json::from_value(json!({"op":"symbol","name":"does_not_exist"})).unwrap(),
+            serde_json::from_value(
+                json!({"op":"impact","uid_or_name":"login","direction":"upstream"}),
+            )
+            .unwrap(),
+            serde_json::from_value(json!({"op":"context","uid":"nope"})).unwrap(),
+            serde_json::from_value(json!({"op":"targets","task":"fix login"})).unwrap(),
+            serde_json::from_value(json!({"op":"processes"})).unwrap(),
+            serde_json::from_value(json!({"op":"clusters"})).unwrap(),
+            serde_json::from_value(json!({"op":"inspect"})).unwrap(),
+            serde_json::from_value(json!({"op":"recall","action":"search"})).unwrap(),
+        ];
+        let mut saw_failure = false;
+        for req in reqs {
+            let op = req.op_name();
+            let resp = svc.handle(req);
+            assert_eq!(resp.op, op, "envelope op must echo the request op");
+            assert_eq!(resp.validate(), Ok(()), "op {op}: {resp:?}");
+            saw_failure |= !resp.ok;
+            // Round trip through the NDJSON wire: one line, parses back to
+            // a still-valid envelope with the same verdict. (Payloads are
+            // not compared: f32 scores widen to f64 on the way through
+            // `Value`, which is a float detail, not a contract break.)
+            let line = serde_json::to_string(&resp).unwrap();
+            assert!(
+                !line.contains('\n'),
+                "op {op}: wire line must be single-line"
+            );
+            let back: Response = serde_json::from_str(&line).unwrap();
+            assert_eq!(back.validate(), Ok(()), "op {op}: wire line re-validates");
+            assert_eq!(
+                (back.ok, back.op, back.error),
+                (resp.ok, resp.op, resp.error)
+            );
+        }
+        assert!(saw_failure, "battery must include at least one failing op");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
