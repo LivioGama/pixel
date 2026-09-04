@@ -8,14 +8,14 @@ license.workspace = true
 rusqlite = { version = "0.32", features = ["bundled"] }
 pixel-git = { path = "../pixel-git" }
 pixel-index = { path = "../pixel-index" }
-tree-sitter = "0.25"
+tree-sitter = "0.26"
 tree-sitter-typescript = "0.23"
 tree-sitter-javascript = "0.23"
-tree-sitter-rust = "0.23"
+tree-sitter-rust = "0.24"
 tree-sitter-c-sharp = "0.23"
-tree-sitter-go = "0.23"
+tree-sitter-go = "0.25"
 tree-sitter-java = "0.23"
-tree-sitter-python = "0.23"
+tree-sitter-python = "0.25"
 rayon = "1"
 xxhash-rust = { workspace = true }
 serde = { version = "1", features = ["derive"] }
