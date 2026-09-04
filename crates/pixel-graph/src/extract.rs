@@ -59,6 +59,7 @@ pub fn lang_of(path: &str) -> Option<&'static str> {
         "go" => Some("go"),
         "java" => Some("java"),
         "py" => Some("python"),
+        "cs" => Some("csharp"),
         _ => None,
     }
 }
@@ -81,6 +82,7 @@ fn language_for(lang: &str) -> Option<Language> {
         "go" => tree_sitter_go::LANGUAGE.into(),
         "java" => tree_sitter_java::LANGUAGE.into(),
         "python" => tree_sitter_python::LANGUAGE.into(),
+        "csharp" => tree_sitter_c_sharp::LANGUAGE.into(),
         _ => return None,
     })
 }
@@ -104,6 +106,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         "go" => walk_go(&mut w, root, 0),
         "java" => walk_java(&mut w, root, 0),
         "python" => walk_python(&mut w, root, 0),
+        "csharp" => walk_csharp(&mut w, root, 0),
         _ => return None,
     }
     let mut fx = FileExtraction {
@@ -748,6 +751,116 @@ fn walk_python(w: &mut Walker, node: Node, depth: usize) {
     }
 }
 
+// --- C# -------------------------------------------------------------------
+
+fn walk_csharp(w: &mut Walker, node: Node, depth: usize) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let mut pushed = false;
+    match node.kind() {
+        "namespace_declaration" => {
+            if let Some(name) = field_text(w, node, "name") {
+                let q = w.qualify(&name, ".");
+                w.push_symbol(name.clone(), q, SymbolKind::Module, node);
+                w.stack.push(name);
+                pushed = true;
+            }
+        }
+        "class_declaration" | "record_declaration" | "struct_declaration" => {
+            if let Some(name) = field_text(w, node, "name") {
+                let q = w.qualify(&name, ".");
+                w.push_symbol(name.clone(), q, SymbolKind::Class, node);
+                w.stack.push(name);
+                pushed = true;
+            }
+        }
+        "interface_declaration" => {
+            if let Some(name) = field_text(w, node, "name") {
+                let q = w.qualify(&name, ".");
+                w.push_symbol(name.clone(), q, SymbolKind::Interface, node);
+                w.stack.push(name);
+                pushed = true;
+            }
+        }
+        "enum_declaration" => {
+            if let Some(name) = field_text(w, node, "name") {
+                let q = w.qualify(&name, ".");
+                w.push_symbol(name, q, SymbolKind::Enum, node);
+            }
+        }
+        "delegate_declaration" => {
+            if let Some(name) = field_text(w, node, "name") {
+                let q = w.qualify(&name, ".");
+                w.push_symbol(name, q, SymbolKind::Method, node);
+            }
+        }
+        "method_declaration" | "constructor_declaration" | "local_function_statement" => {
+            if let Some(name) = field_text(w, node, "name") {
+                let q = w.qualify(&name, ".");
+                w.push_symbol(name, q, SymbolKind::Method, node);
+            }
+        }
+        "property_declaration" => {
+            if let Some(name) = field_text(w, node, "name") {
+                let q = w.qualify(&name, ".");
+                w.push_symbol(name, q, SymbolKind::Method, node);
+            }
+        }
+        "invocation_expression" => {
+            if let Some(f) = node.child_by_field_name("function") {
+                match f.kind() {
+                    "identifier" => {
+                        let name = w.text(f);
+                        w.push_call(name, None, node);
+                    }
+                    "member_access_expression" => {
+                        if let Some(name) = field_text(w, f, "name") {
+                            let recv = field_text(w, f, "expression");
+                            w.push_call(name, recv, node);
+                        }
+                    }
+                    "generic_name" => {
+                        if let Some(inner) = f.child_by_field_name("name") {
+                            let name = w.text(inner);
+                            w.push_call(name, None, node);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        "object_creation_expression" => {
+            if let Some(ty) = field_text(w, node, "type") {
+                let base = ty.split('<').next().unwrap_or(&ty);
+                let name = base.rsplit('.').next().unwrap_or(base).trim().to_string();
+                w.push_call(name, None, node);
+            }
+        }
+        "using_directive" => {
+            // `name` field only exists for alias usings (`using Foo = X;`)
+            // and holds the alias — not the imported namespace. The qualified
+            // namespace is a plain child (`qualified_name` / `identifier`).
+            for child in each_child(node) {
+                match child.kind() {
+                    "qualified_name" | "identifier" => {
+                        let spec = w.text(child);
+                        w.push_import(spec, Vec::new());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    for child in each_child(node) {
+        walk_csharp(w, child, depth + 1);
+    }
+    if pushed {
+        w.stack.pop();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::extract_file;
@@ -778,5 +891,87 @@ mod tests {
         assert!(!names.contains(&"top_level_test"));
         assert!(!names.contains(&"nested_test"));
         assert!(!names.contains(&"tests"));
+    }
+
+    #[test]
+    fn csharp_extracts_symbols_calls_and_imports() {
+        let source = br#"
+using System.Collections.Generic;
+
+namespace MyApp.Services {
+    interface IGreeter {
+        string Greet(string who);
+    }
+
+    enum Status { Open, Closed }
+
+    public struct Point { public int X; }
+
+    public class Greeter : IGreeter {
+        public Greeter() { }
+
+        public string Greet(string who) {
+            var list = new List<string>();
+            list.Add(who);
+            return $"Hello {who}";
+        }
+
+        public int Add(int a, int b) => a + b;
+    }
+
+    public delegate bool Predicate(int x);
+}
+"#;
+        let extraction = extract_file("Greeter.cs", source).unwrap();
+        assert_eq!(extraction.lang, "csharp");
+        assert_eq!(extraction.imports.len(), 1);
+        assert_eq!(extraction.imports[0].spec, "System.Collections.Generic");
+
+        let names: Vec<_> = extraction.symbols.iter().map(|s| s.name.as_str()).collect();
+        for expected in [
+            "MyApp.Services",
+            "IGreeter",
+            "Status",
+            "Point",
+            "Greeter",
+            "Greet",
+            "Add",
+            "Predicate",
+        ] {
+            assert!(names.contains(&expected), "missing symbol {expected}: {names:?}");
+        }
+
+        // Call into List<string>.Add via member access: receiver `list`.
+        let member_calls: Vec<_> = extraction
+            .calls
+            .iter()
+            .filter(|c| c.receiver.is_some())
+            .collect();
+        assert!(
+            member_calls.iter().any(|c| c.callee_name == "Add" && c.receiver.as_deref() == Some("list")),
+            "expected member call Add() on receiver `list`: {:?}",
+            extraction.calls
+        );
+        // Constructor invocation of List.
+        assert!(
+            extraction.calls.iter().any(|c| c.callee_name == "List"),
+            "expected object creation of List: {:?}",
+            extraction.calls
+        );
+
+        // Symbols inside the class carry qualified names (both the
+        // interface method and the class method have the same simple name).
+        let greet_in_greeter = extraction
+            .symbols
+            .iter()
+            .find(|s| s.qualified == "MyApp.Services.Greeter.Greet")
+            .expect("class method Greet should exist with full qualification");
+        assert_eq!(greet_in_greeter.name, "Greet");
+        let greet_in_interface = extraction
+            .symbols
+            .iter()
+            .find(|s| s.qualified == "MyApp.Services.IGreeter.Greet")
+            .expect("interface method Greet should exist with full qualification");
+        assert_eq!(greet_in_interface.name, "Greet");
     }
 }

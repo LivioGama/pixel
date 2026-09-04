@@ -18,6 +18,7 @@ use rayon::prelude::*;
 use crate::delta::{DeltaState, delta_shard_path};
 use crate::gram::GramExtractor;
 use crate::index::{MAX_FILE_BYTES, SHARD_DIR, SHARD_FILE, SearchStats, read_regular_bounded};
+use crate::lock::BuildLock;
 use crate::overlay::Overlay;
 use crate::plan::plan_pattern;
 use crate::posting::{GramQuery, resolve_query};
@@ -102,9 +103,10 @@ fn plain_sig_path(gpx_dir: &Path) -> PathBuf {
 /// that can actually appear in search results.
 fn plain_signature(root: &Path) -> String {
     use std::hash::Hasher;
-    let mut entries: Vec<(String, u64)> = ignore::WalkBuilder::new(root)
-        .hidden(true)
-        .build()
+    // Must mirror `index::build`'s walk policy exactly — both go through
+    // `policy_walk` — or freshness would disagree with what the shard
+    // actually contains.
+    let mut entries: Vec<(String, u64)> = crate::index::policy_walk(root)
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let path = entry.path();
@@ -192,9 +194,19 @@ fn build_shard_from(
     commit_oid: &str,
     dest: &Path,
 ) -> Result<Shard, IndexSetError> {
+    let prune_default = !matches!(
+        std::env::var("PIXEL_INDEX_NO_DEFAULT_IGNORES").as_deref(),
+        Ok("1") | Ok("true")
+    );
     let mut extracted: Vec<(String, Vec<u64>)> = rel_paths
         .par_iter()
         .filter(|rel| !is_internal(rel))
+        .filter(|rel| {
+            if !prune_default {
+                return true;
+            }
+            !rel.split('/').any(crate::index::is_ignored_dir_name)
+        })
         .filter_map(|rel| extract_blob(root, commit_oid, rel, extractor))
         .collect();
     extracted.sort_by(|a, b| a.0.cmp(&b.0));
@@ -209,6 +221,9 @@ fn build_shard_from(
 
 impl IndexSet {
     /// Open the index at `root/.pixel`, (re)building layers as needed.
+    /// Concurrent callers building the same root are serialized via an
+    /// exclusive `flock` on `.pixel/build.lock` — the first process builds,
+    /// others wait and then load the already-built shard.
     pub fn open_or_build(
         root: &Path,
         extractor: Box<dyn GramExtractor>,
@@ -217,7 +232,7 @@ impl IndexSet {
         let base_path = gpx_dir.join(SHARD_FILE);
         let head = gitsync::rev_parse_head(root);
 
-        // --- base layer ---
+        // --- base layer (fast path: no lock if shard is valid) ---
         let mut base = match Shard::open(&base_path) {
             Ok(s) if s.extractor_id() == extractor.id() => Some(s),
             _ => None,
@@ -236,9 +251,32 @@ impl IndexSet {
         {
             base = None;
         }
+
         let base = match base {
             Some(s) => s,
             None => {
+                // Build needed — acquire exclusive lock so concurrent
+                // callers don't duplicate the work. After acquiring, re-check
+                // whether the shard is now valid (another process may have
+                // built it while we waited).
+                let _lock = BuildLock::acquire(root)?;
+
+                // Re-check after acquiring the lock.
+                if let Ok(s) = Shard::open(&base_path) {
+                    if s.extractor_id() == extractor.id() {
+                        let valid = if head.is_some() {
+                            s.commit_oid().is_some()
+                        } else {
+                            s.commit_oid().is_none()
+                                && load_plain_sig(&gpx_dir).as_deref()
+                                    == Some(&plain_signature(root))
+                        };
+                        if valid {
+                            return Self::finish_open(root, s, extractor, head, &gpx_dir);
+                        }
+                    }
+                }
+
                 // Invalidate stale delta state alongside a base rebuild.
                 std::fs::remove_file(delta_shard_path(&gpx_dir)).ok();
                 std::fs::remove_file(crate::delta::state_path(&gpx_dir)).ok();
@@ -264,6 +302,19 @@ impl IndexSet {
                 }
             }
         };
+
+        Self::finish_open(root, base, extractor, head, &gpx_dir)
+    }
+
+    /// Complete the open after the base shard is resolved — build delta +
+    /// overlay for git repos, assemble the `IndexSet`.
+    fn finish_open(
+        root: &Path,
+        base: Shard,
+        extractor: Box<dyn GramExtractor>,
+        head: Option<String>,
+        gpx_dir: &Path,
+    ) -> Result<Self, IndexSetError> {
 
         let mut set = Self {
             root: root.to_path_buf(),
@@ -664,6 +715,85 @@ mod tests {
         let (m, _) = set.search("plainWalkNeedle", None).unwrap();
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].path, "solo.txt");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Phase 3 item 4: hidden files (dotfiles, `.github/`, `.claude/`) are
+    /// real project content and must be indexed — while `.git/` and our own
+    /// `.pixel/` sidecar must never be, even with the hidden filter off.
+    #[test]
+    fn hidden_files_are_indexed_but_git_dir_is_not() {
+        let dir = std::env::temp_dir().join(format!(
+            "gpx-indexset-hidden-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                % 1_000_000
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+
+        // --- non-Git directory: the plain-walk build path ---
+        std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
+        std::fs::write(
+            dir.join(".github/workflows/x.yml"),
+            "jobs:\n  build:\n    run: hiddenWorkflowNeedle\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join(".dotfileNeedle.cfg"), "dotfileContentNeedle=1\n").unwrap();
+        // A fake .git dir (not a valid repo, so the plain-walk path is used)
+        // whose content must NEVER be indexed.
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git/config"), "gitInternalNeedle = true\n").unwrap();
+        std::fs::write(dir.join("visible.txt"), "plainVisibleNeedle\n").unwrap();
+
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        let (m, _) = set.search("hiddenWorkflowNeedle", None).unwrap();
+        assert_eq!(m.len(), 1, "hidden .github workflow content must be searchable");
+        assert_eq!(m[0].path, ".github/workflows/x.yml");
+        let (m, _) = set.search("dotfileContentNeedle", None).unwrap();
+        assert_eq!(m.len(), 1, "dotfile content must be searchable");
+        let (m, _) = set.search("gitInternalNeedle", None).unwrap();
+        assert!(m.is_empty(), ".git/ content must never be indexed: {m:?}");
+        assert!(
+            set.paths().iter().all(|p| !p.starts_with(".git/") && !p.starts_with(".pixel/")),
+            "no .git/ or .pixel/ path may appear in the file universe: {:?}",
+            set.paths()
+        );
+
+        // Freshness must react to hidden-file edits too (plain signature
+        // walks the same policy).
+        std::fs::write(
+            dir.join(".github/workflows/x.yml"),
+            "jobs:\n  build:\n    run: editedHiddenNeedle\n",
+        )
+        .unwrap();
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        let (m, _) = set.search("editedHiddenNeedle", None).unwrap();
+        assert_eq!(m.len(), 1, "hidden-file edits must invalidate the plain signature");
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        // --- git repo: tracked hidden files come through the git-anchored
+        // base, and .git/ still never appears in the universe ---
+        std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
+        git(&dir, &["init", "-q"]);
+        std::fs::write(
+            dir.join(".github/workflows/x.yml"),
+            "jobs:\n  test:\n    run: trackedHiddenNeedle\n",
+        )
+        .unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "hidden"]);
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        let (m, _) = set.search("trackedHiddenNeedle", None).unwrap();
+        assert_eq!(m.len(), 1, "tracked hidden files must be searchable in a git repo");
+        assert!(
+            set.paths().iter().all(|p| !p.starts_with(".git/")),
+            "git repo universe must not contain .git/ paths"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

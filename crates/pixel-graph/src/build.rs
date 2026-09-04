@@ -10,7 +10,6 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::Instant;
 
-use ignore::WalkBuilder;
 use rayon::prelude::*;
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -20,6 +19,39 @@ use crate::resolve::{
     FileCalls, PendingCall, reconsider_resolved_calls, resolve_all, resolve_calls,
 };
 use crate::store::{EdgeKind, GraphStore};
+
+/// Extract concepts for a file and insert them, linking each to the smallest
+/// enclosing symbol (by line range) when one exists. `symbol_ids` are the ids
+/// of the file's symbols in `start_line` order.
+fn insert_concepts(
+    store: &GraphStore,
+    file_id: i64,
+    rel: &str,
+    content: &[u8],
+    symbol_ids: &[i64],
+    symbol_lines: &[(u32, u32)],
+) -> Result<(), BoxErr> {
+    let concepts = crate::concept::extract_concepts(rel, content);
+    for mut c in concepts {
+        c.owner_symbol_id = symbol_lines
+            .iter()
+            .enumerate()
+            .filter(|(_, (s, e))| *s <= c.start_line && c.end_line <= *e)
+            .min_by_key(|(_, (s, e))| e - s)
+            .map(|(i, _)| symbol_ids[i]);
+        store.insert_concept(
+            file_id,
+            c.kind,
+            &c.raw,
+            &c.norm,
+            &c.detail,
+            c.start_line,
+            c.end_line,
+            c.owner_symbol_id,
+        )?;
+    }
+    Ok(())
+}
 
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
@@ -71,15 +103,47 @@ fn rel_path(root: &Path, path: &Path) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-/// Walk `root` collecting supported source files (skips .pixel, hidden
-/// files, gitignored paths, binaries, oversized files).
+/// Maximum number of source files to collect in a single walk when there is
+/// no git anchor. With a git repo, `git ls-files` bounds the file set to
+/// tracked files only; without git, the walk could traverse an entire home
+/// directory or a vendored monorepo. This cap prevents pathological cases
+/// from hanging the daemon. Override with `PIXEL_GRAPH_MAX_FILES=0` (disables)
+/// or a positive integer. Default 50000 — generous for any real project,
+/// but stops a runaway walk on a mis-rooted or huge directory.
+const DEFAULT_GRAPH_MAX_FILES: usize = 50_000;
+
+fn graph_max_files() -> Option<usize> {
+    match std::env::var("PIXEL_GRAPH_MAX_FILES") {
+        Ok(v) => v
+            .parse::<usize>()
+            .ok()
+            .filter(|&n| n > 0)
+            .or(Some(usize::MAX)),
+        Err(_) => Some(DEFAULT_GRAPH_MAX_FILES),
+    }
+}
+
+/// Walk `root` collecting supported source files (skips .git, .pixel,
+/// default-ignored dirs, gitignored paths, binaries, oversized files). Hidden
+/// files (dotfiles, `.github/`, `.claude/`, …) ARE collected — they are real
+/// project content. The walk itself is the shared
+/// `pixel_index::index::policy_walk`, so default-ignored-dir pruning and
+/// gitless-tree gitignore handling stay in lockstep with the lexical index.
+///
+/// When `max_files` is `Some(n)`, the walk stops after collecting `n` source
+/// files — a safety cap for non-git directories where there is no
+/// `git ls-files` to bound the file set. `None` means no cap (git-anchored
+/// builds where `git ls-files` already bounds the set).
 fn collect_files(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let max_files = graph_max_files();
     let mut out = Vec::new();
-    let walker = WalkBuilder::new(root)
-        .hidden(true)
-        .filter_entry(|e| e.file_name().to_string_lossy() != ".pixel")
-        .build();
+    let walker = pixel_index::index::policy_walk(root);
     for entry in walker.flatten() {
+        if let Some(cap) = max_files {
+            if out.len() >= cap {
+                break;
+            }
+        }
         let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
         if !is_file {
             continue;
@@ -104,6 +168,7 @@ fn collect_files(root: &Path) -> Vec<(String, Vec<u8>)> {
 struct Extracted {
     rel: String,
     blob_oid: String,
+    content: Vec<u8>,
     fx: FileExtraction,
 }
 
@@ -128,13 +193,15 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
 
     let inputs = collect_files(root);
     let snapshot_signature = input_signature(&inputs);
-    let extracted: Vec<Extracted> = inputs
-        .par_iter()
+    let mut extracted: Vec<Extracted> = inputs
+        .into_par_iter()
         .filter_map(|(rel, content)| {
-            let fx = extract_file(rel, content)?;
+            let fx = extract_file(&rel, &content)?;
+            let blob_oid = format!("{:016x}", xxh3_64(&content));
             Some(Extracted {
-                rel: rel.clone(),
-                blob_oid: format!("{:016x}", xxh3_64(content)),
+                rel,
+                blob_oid,
+                content,
                 fx,
             })
         })
@@ -159,10 +226,11 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
     // Pass 1: files + symbols (need every file id before import resolution).
     let mut path_to_id: HashMap<String, i64> = HashMap::new();
     let mut sym_ids: Vec<Vec<i64>> = Vec::with_capacity(extracted.len());
-    for e in &extracted {
+    for (i, e) in extracted.iter_mut().enumerate() {
         let file_id = store.replace_file(&e.rel, &e.blob_oid, e.fx.lang)?;
         path_to_id.insert(e.rel.clone(), file_id);
         let mut ids = Vec::with_capacity(e.fx.symbols.len());
+        let mut lines = Vec::with_capacity(e.fx.symbols.len());
         for s in &e.fx.symbols {
             let uid = format!("{}#{}#{}", e.rel, s.qualified, s.kind.as_str());
             let id = store.insert_symbol(
@@ -176,8 +244,13 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
                 &s.sig,
             )?;
             ids.push(id);
+            lines.push((s.start_line, s.end_line));
         }
         sym_ids.push(ids);
+        // Engine 1: concept pass alongside symbol extraction with O(1) content access.
+        insert_concepts(&store, file_id, &e.rel, &e.content, &sym_ids[i], &lines)?;
+        e.content.clear();
+        e.content.shrink_to_fit();
     }
 
     // Pass 2: imports (resolved against the full file list) + pending calls.
@@ -236,10 +309,10 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
 /// excluded (their target's content would be unstable and they are never
 /// indexed).
 pub fn freshness_signature(root: &Path) -> String {
-    let walker = WalkBuilder::new(root)
-        .hidden(true)
-        .filter_entry(|e| e.file_name().to_string_lossy() != ".pixel")
-        .build();
+    // Must mirror `collect_files`'s walk policy exactly — both go through
+    // `pixel_index::index::policy_walk` — or the freshness signature would
+    // disagree with the set of files the graph was actually built from.
+    let walker = pixel_index::index::policy_walk(root);
     let mut entries: Vec<(String, u64)> = walker
         .flatten()
         .filter_map(|entry| {
@@ -280,126 +353,169 @@ pub fn is_fresh(root: &Path, db_path: &Path) -> bool {
     stored == freshness_signature(root)
 }
 
-/// Incrementally re-index one file: preserve incoming call knowledge as
-/// unresolved rows, replace the file, re-extract, re-resolve its own calls,
-/// then retry every unresolved call repo-wide.
-pub fn update_file(root: &Path, db_path: &Path, rel: &str) -> Result<(), BoxErr> {
+/// Incrementally re-index a batch of files: preserve incoming call knowledge,
+/// replace files, re-extract symbols and concepts, and resolve all calls once.
+pub fn update_files(root: &Path, db_path: &Path, files: &[(&str, bool)]) -> Result<(), BoxErr> {
+    if files.is_empty() {
+        return Ok(());
+    }
     let mut store = GraphStore::open(db_path)?;
-    let abs = root.join(rel);
-
-    // Demote incoming call edges (from OTHER files) into unresolved rows so
-    // they can re-link after the rebuild instead of being silently dropped.
-    // The receiver is preserved so receiver calls are never falsely promoted
-    // from Probable to Exact during re-resolution.
-    if let Some(old) = store.file_by_path(rel)? {
-        let old_syms = store.symbols_in_file(old.id)?;
-        let mut demoted: Vec<(i64, String, i64, u32, Option<String>)> = Vec::new();
-        for sym in &old_syms {
-            for edge in store.edges_to(sym.id, Some(EdgeKind::Calls))? {
-                let src_file: Option<i64> = store
-                    .conn()
-                    .query_row(
-                        "SELECT file_id FROM symbols WHERE id = ?1",
-                        rusqlite::params![edge.src_id],
-                        |r| r.get(0),
-                    )
-                    .ok();
-                if let Some(src_file) = src_file
-                    && src_file != old.id
-                {
-                    demoted.push((
-                        src_file,
-                        sym.name.clone(),
-                        edge.src_id,
-                        edge.site_line,
-                        edge.receiver.clone(),
-                    ));
-                }
-            }
-        }
-        for (src_file, name, src_id, site_line, receiver) in demoted {
-            store.insert_unresolved_call(
-                src_file,
-                &name,
-                Some(src_id),
-                site_line,
-                receiver.as_deref(),
-            )?;
-        }
-    }
-
-    let Some(content) = read_source_file(&abs) else {
-        // File deleted: drop it, then let survivors re-resolve.
-        store.remove_file(rel)?;
-        resolve_all(&mut store)?;
-        store.meta_set(FRESHNESS_KEY, &freshness_signature(root))?;
-        return Ok(());
-    };
-
-    let Some(fx) = extract_file(rel, &content) else {
-        store.remove_file(rel)?;
-        resolve_all(&mut store)?;
-        store.meta_set(FRESHNESS_KEY, &freshness_signature(root))?;
-        return Ok(());
-    };
-    let changed_names: HashSet<String> = fx
-        .symbols
-        .iter()
-        .map(|symbol| symbol.name.clone())
-        .collect();
-
-    let blob_oid = format!("{:016x}", xxh3_64(&content));
-    let file_id = store.replace_file(rel, &blob_oid, fx.lang)?;
-
-    let mut ids = Vec::with_capacity(fx.symbols.len());
-    for s in &fx.symbols {
-        let uid = format!("{rel}#{}#{}", s.qualified, s.kind.as_str());
-        let id = store.insert_symbol(
-            file_id,
-            &uid,
-            &s.name,
-            &s.qualified,
-            s.kind,
-            s.start_line,
-            s.end_line,
-            &s.sig,
-        )?;
-        ids.push(id);
-    }
+    let mut all_changed_names: HashSet<String> = HashSet::new();
+    let mut pending_calls: Vec<FileCalls> = Vec::new();
 
     let all_paths: Vec<String> = store.files()?.into_iter().map(|f| f.path).collect();
-    let path_to_id: HashMap<String, i64> = {
+    let mut path_to_id: HashMap<String, i64> = {
         let mut m = HashMap::new();
         for f in store.files()? {
             m.insert(f.path, f.id);
         }
         m
     };
-    for imp in &fx.imports {
-        let resolved =
-            resolve_import(&imp.spec, rel, &all_paths).and_then(|p| path_to_id.get(&p).copied());
-        store.insert_import(file_id, &imp.spec, resolved, &imp.bindings)?;
+
+    for &(rel, removed) in files {
+        let abs = root.join(rel);
+
+        // Demote incoming call edges (from OTHER files) into unresolved rows so
+        // they can re-link after the rebuild instead of being silently dropped.
+        // The receiver is preserved so receiver calls are never falsely promoted
+        // from Probable to Exact during re-resolution.
+        if let Some(old) = store.file_by_path(rel)? {
+            let old_syms = store.symbols_in_file(old.id)?;
+            let mut demoted: Vec<(i64, String, i64, u32, Option<String>)> = Vec::new();
+            for sym in &old_syms {
+                for edge in store.edges_to(sym.id, Some(EdgeKind::Calls))? {
+                    let src_file: Option<i64> = store
+                        .conn()
+                        .query_row(
+                            "SELECT file_id FROM symbols WHERE id = ?1",
+                            rusqlite::params![edge.src_id],
+                            |r| r.get(0),
+                        )
+                        .ok();
+                    if let Some(src_file) = src_file
+                        && src_file != old.id
+                    {
+                        demoted.push((
+                            src_file,
+                            sym.name.clone(),
+                            edge.src_id,
+                            edge.site_line,
+                            edge.receiver.clone(),
+                        ));
+                    }
+                }
+            }
+            for (src_file, name, src_id, site_line, receiver) in demoted {
+                store.insert_unresolved_call(
+                    src_file,
+                    &name,
+                    Some(src_id),
+                    site_line,
+                    receiver.as_deref(),
+                )?;
+            }
+        }
+
+        if removed {
+            store.remove_file(rel)?;
+            path_to_id.remove(rel);
+            continue;
+        }
+
+        let Some(content) = read_source_file(&abs) else {
+            store.remove_file(rel)?;
+            path_to_id.remove(rel);
+            continue;
+        };
+
+        let Some(fx) = extract_file(rel, &content) else {
+            store.remove_file(rel)?;
+            path_to_id.remove(rel);
+            continue;
+        };
+
+        for s in &fx.symbols {
+            all_changed_names.insert(s.name.clone());
+        }
+
+        let blob_oid = format!("{:016x}", xxh3_64(&content));
+        let file_id = store.replace_file(rel, &blob_oid, fx.lang)?;
+        path_to_id.insert(rel.to_string(), file_id);
+
+        let mut ids = Vec::with_capacity(fx.symbols.len());
+        let mut lines = Vec::with_capacity(fx.symbols.len());
+        for s in &fx.symbols {
+            let uid = format!("{rel}#{}#{}", s.qualified, s.kind.as_str());
+            let id = store.insert_symbol(
+                file_id,
+                &uid,
+                &s.name,
+                &s.qualified,
+                s.kind,
+                s.start_line,
+                s.end_line,
+                &s.sig,
+            )?;
+            ids.push(id);
+            lines.push((s.start_line, s.end_line));
+        }
+        insert_concepts(&store, file_id, rel, &content, &ids, &lines)?;
+
+        for imp in &fx.imports {
+            let resolved =
+                resolve_import(&imp.spec, rel, &all_paths).and_then(|p| path_to_id.get(&p).copied());
+            store.insert_import(file_id, &imp.spec, resolved, &imp.bindings)?;
+        }
+
+        let calls = fx
+            .calls
+            .iter()
+            .map(|c| PendingCall {
+                callee_name: c.callee_name.clone(),
+                enclosing_symbol_id: c.enclosing_index.map(|ix| ids[ix]),
+                site_line: c.site_line,
+                receiver: c.receiver.clone(),
+            })
+            .collect();
+        pending_calls.push(FileCalls { file_id, calls });
     }
 
-    let calls = fx
-        .calls
-        .iter()
-        .map(|c| PendingCall {
-            callee_name: c.callee_name.clone(),
-            enclosing_symbol_id: c.enclosing_index.map(|ix| ids[ix]),
-            site_line: c.site_line,
-            receiver: c.receiver.clone(),
-        })
-        .collect();
-    resolve_calls(&store, &[FileCalls { file_id, calls }])?;
+    if !pending_calls.is_empty() {
+        resolve_calls(&store, &pending_calls)?;
+    }
 
     // Any changed definition can invalidate a previously unique target.
-    reconsider_resolved_calls(&mut store, &changed_names)?;
+    reconsider_resolved_calls(&mut store, &all_changed_names)?;
     // Retry everything unresolved against the complete new candidate set.
     resolve_all(&mut store)?;
     // Keep the freshness signature in sync so a later cold open does not
     // needlessly rebuild after this incremental update.
     store.meta_set(FRESHNESS_KEY, &freshness_signature(root))?;
+    Ok(())
+}
+
+/// Incrementally re-index one file.
+pub fn update_file(root: &Path, db_path: &Path, rel: &str) -> Result<(), BoxErr> {
+    update_files(root, db_path, &[(rel, false)])
+}
+
+/// Concepts-only refresh for a file that is NOT a graph language (e.g. a
+/// `.svelte`/`.vue`/`.html`/`.json`/`.yaml`/`.css` file the symbol graph
+/// ignores). Ensures the file row exists, then replaces its concepts in one
+/// transaction. No-op for files outside the concept gate.
+pub fn update_concepts(root: &Path, db_path: &Path, rel: &str) -> Result<(), BoxErr> {
+    if crate::concept::concept_lang_of(rel).is_none() {
+        return Ok(());
+    }
+    let mut store = GraphStore::open(db_path)?;
+    let abs = root.join(rel);
+    let Some(content) = read_source_file(&abs) else {
+        store.remove_file(rel)?;
+        return Ok(());
+    };
+    let concepts = crate::concept::extract_concepts(rel, &content);
+    let file_id = store.replace_file(rel, &format!("{:016x}", xxh3_64(&content)), "concept")?;
+    store.replace_concepts(file_id, &concepts)?;
     Ok(())
 }
 

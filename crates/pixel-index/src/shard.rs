@@ -33,6 +33,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
+use rayon::prelude::*;
 
 pub const MAGIC: &[u8; 8] = b"GPXSHARD";
 pub const VERSION: u32 = 1;
@@ -143,7 +144,7 @@ impl ShardBuilder {
     }
 
     /// Write the shard to `dest` atomically (tmp + fsync + rename).
-    pub fn write(self, dest: &Path) -> Result<(), ShardError> {
+    pub fn write(mut self, dest: &Path) -> Result<(), ShardError> {
         let tmp: PathBuf = dest.with_extension("tmp");
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
@@ -168,20 +169,34 @@ impl ShardBuilder {
                 files_buf.extend_from_slice(path.as_bytes());
             }
 
-            let mut hashes: Vec<&u64> = self.postings.keys().collect();
+            let mut hashes: Vec<u64> = self.postings.keys().copied().collect();
             hashes.sort_unstable();
 
-            let mut lookup_buf: Vec<u8> = Vec::with_capacity(hashes.len() * LOOKUP_RECORD);
-            let mut postings_buf: Vec<u8> = Vec::new();
-            for h in &hashes {
-                let ids = &self.postings[h];
+            // Parallel delta-varint encoding: each gram's posting list is
+            // independent. Encode in parallel, then assemble sequentially.
+            let postings = std::mem::take(&mut self.postings);
+            let encoded: Vec<(u64, Vec<u8>)> = hashes
+                .par_iter()
+                .map(|&h| {
+                    let ids = &postings[&h];
+                    let mut buf = Vec::with_capacity(ids.len() * 2);
+                    let mut prev = 0u32;
+                    for (i, &id) in ids.iter().enumerate() {
+                        let delta = if i == 0 { id } else { id - prev };
+                        write_varint(&mut buf, delta);
+                        prev = id;
+                    }
+                    (h, buf)
+                })
+                .collect();
+            drop(postings);
+
+            let mut lookup_buf: Vec<u8> = Vec::with_capacity(encoded.len() * LOOKUP_RECORD);
+            let total_postings_est: usize = encoded.iter().map(|(_, b)| b.len()).sum();
+            let mut postings_buf: Vec<u8> = Vec::with_capacity(total_postings_est);
+            for (h, buf) in encoded {
                 let start = postings_buf.len() as u64;
-                let mut prev = 0u32;
-                for (i, &id) in ids.iter().enumerate() {
-                    let delta = if i == 0 { id } else { id - prev };
-                    write_varint(&mut postings_buf, delta);
-                    prev = id;
-                }
+                postings_buf.extend_from_slice(&buf);
                 let len = postings_buf.len() as u64 - start;
                 lookup_buf.extend_from_slice(&h.to_le_bytes());
                 lookup_buf.extend_from_slice(&start.to_le_bytes());

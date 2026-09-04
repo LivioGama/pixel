@@ -12,6 +12,9 @@ use crate::gram::GramExtractor;
 use crate::index::{MAX_FILE_BYTES, read_regular_bounded};
 use crate::posting::GramQuery;
 
+pub const MAX_OVERLAY_FILES: usize = 1000;
+pub const MAX_TOMBSTONES: usize = 5000;
+
 #[derive(Default)]
 pub struct Overlay {
     /// rel path -> deduped gram hash set (from the working-tree content).
@@ -29,6 +32,9 @@ impl Overlay {
     /// tombstoned without an overlay gram set (they can never match). Symlinks
     /// are rejected so a tracked symlink can never expose out-of-repo content.
     pub fn refresh_file(&mut self, root: &Path, rel_path: &str, extractor: &dyn GramExtractor) {
+        if self.tombstones.len() >= MAX_TOMBSTONES {
+            self.tombstones.clear();
+        }
         self.tombstones.insert(rel_path.to_string());
         let abs = root.join(rel_path);
         let Ok(content) = read_regular_bounded(&abs, MAX_FILE_BYTES) else {
@@ -43,6 +49,11 @@ impl Overlay {
         let mut hits = Vec::new();
         extractor.grams(&content, &mut hits);
         let hashes: HashSet<u64> = hits.iter().map(|h| h.hash).collect();
+        if self.files.len() >= MAX_OVERLAY_FILES && !self.files.contains_key(rel_path) {
+            if let Some(old_key) = self.files.keys().next().cloned() {
+                self.files.remove(&old_key);
+            }
+        }
         self.files.insert(rel_path.to_string(), hashes);
     }
 
