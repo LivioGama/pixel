@@ -80,6 +80,41 @@ impl<T> Envelope<T> {
         }
     }
 
+    /// Check the structural invariants every envelope on the wire must
+    /// satisfy, independent of the op:
+    ///
+    /// - `protocol` equals this crate's `ENVELOPE_PROTOCOL_VERSION`;
+    /// - `op` is non-empty;
+    /// - `ok: true` carries a `result` and no `error`;
+    /// - `ok: false` carries an `error` and no `result`;
+    /// - every `error.message` is non-empty.
+    ///
+    /// The daemon asserts this on every response it builds (debug builds)
+    /// and the CLI contract tests assert it on real output, so an op cannot
+    /// ship an envelope that claims success without a payload or failure
+    /// without a reason.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.protocol != ENVELOPE_PROTOCOL_VERSION {
+            return Err(format!(
+                "protocol {} != {ENVELOPE_PROTOCOL_VERSION}",
+                self.protocol
+            ));
+        }
+        if self.op.is_empty() {
+            return Err("op is empty".into());
+        }
+        match (self.ok, self.result.is_some(), &self.error) {
+            (true, false, _) => Err("ok envelope has no result".into()),
+            (true, true, Some(_)) => Err("ok envelope also carries an error".into()),
+            (false, _, None) => Err("failure envelope has no error".into()),
+            (false, true, Some(_)) => Err("failure envelope also carries a result".into()),
+            (false, false, Some(e)) if e.message.trim().is_empty() => {
+                Err("failure envelope has an empty error message".into())
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request_id = Some(request_id.into());
         self
@@ -357,5 +392,71 @@ mod tests {
         assert!(envelope.snapshot.is_none());
         assert!(envelope.epistemics.is_none());
         assert!(envelope.budget.is_none());
+    }
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+    use crate::error::{ErrorCode, PixelError};
+    use serde_json::json;
+
+    fn err(msg: &str) -> PixelError {
+        PixelError::new(ErrorCode::InvalidInput, msg)
+    }
+
+    #[test]
+    fn constructors_produce_valid_envelopes() {
+        let ok: Envelope<serde_json::Value> = Envelope::success("search", json!({}));
+        assert_eq!(ok.validate(), Ok(()));
+        let failed: Envelope<serde_json::Value> = Envelope::failure("search", err("bad regex"));
+        assert_eq!(failed.validate(), Ok(()));
+    }
+
+    /// A success without a payload would make a caller read `null` as an
+    /// answer. A failure without an error would make it retry blind. Both
+    /// shapes are unrepresentable through the constructors, but a
+    /// hand-built or deserialized envelope can carry them — validate must
+    /// catch each one by name.
+    #[test]
+    fn mixed_ok_and_error_states_are_rejected() {
+        let mut e: Envelope<serde_json::Value> = Envelope::success("op", json!(1));
+        e.error = Some(err("x"));
+        assert!(e.validate().unwrap_err().contains("also carries an error"));
+
+        let mut e: Envelope<serde_json::Value> = Envelope::success("op", json!(1));
+        e.result = None;
+        assert!(e.validate().unwrap_err().contains("no result"));
+
+        let mut e: Envelope<serde_json::Value> = Envelope::failure("op", err("x"));
+        e.error = None;
+        assert!(e.validate().unwrap_err().contains("no error"));
+
+        let mut e: Envelope<serde_json::Value> = Envelope::failure("op", err("x"));
+        e.result = Some(json!(1));
+        assert!(e.validate().unwrap_err().contains("also carries a result"));
+
+        let e: Envelope<serde_json::Value> = Envelope::failure("op", err("  "));
+        assert!(e.validate().unwrap_err().contains("empty error message"));
+    }
+
+    #[test]
+    fn protocol_and_op_are_checked() {
+        let mut e: Envelope<serde_json::Value> = Envelope::success("op", json!(1));
+        e.protocol = ENVELOPE_PROTOCOL_VERSION + 1;
+        assert!(e.validate().unwrap_err().starts_with("protocol"));
+
+        let e: Envelope<serde_json::Value> = Envelope::success("", json!(1));
+        assert_eq!(e.validate(), Err("op is empty".to_string()));
+    }
+
+    /// A wire line from an older or foreign producer goes through serde,
+    /// not the constructors, so the deserialized path must be validated
+    /// the same way.
+    #[test]
+    fn deserialized_wire_line_is_validated() {
+        let line = r#"{"ok":true,"op":"ping","protocol":1,"result":null,"error":null}"#;
+        let e: Envelope<serde_json::Value> = serde_json::from_str(line).unwrap();
+        assert!(e.validate().unwrap_err().contains("no result"));
     }
 }
