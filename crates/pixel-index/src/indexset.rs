@@ -269,8 +269,7 @@ impl IndexSet {
                         s.commit_oid().is_some()
                     } else {
                         s.commit_oid().is_none()
-                            && load_plain_sig(&gpx_dir).as_deref()
-                                == Some(&plain_signature(root))
+                            && load_plain_sig(&gpx_dir).as_deref() == Some(&plain_signature(root))
                     };
                     if valid {
                         return Self::finish_open(root, s, extractor, head, &gpx_dir);

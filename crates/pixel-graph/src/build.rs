@@ -140,9 +140,10 @@ fn collect_files(root: &Path) -> Vec<(String, Vec<u8>)> {
     let walker = pixel_index::index::policy_walk(root);
     for entry in walker.flatten() {
         if let Some(cap) = max_files
-            && out.len() >= cap {
-                break;
-            }
+            && out.len() >= cap
+        {
+            break;
+        }
         let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
         if !is_file {
             continue;

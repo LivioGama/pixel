@@ -57,9 +57,10 @@ pub fn run() -> ! {
 
     // Allow opt-out via env var.
     if let Ok(kill) = std::env::var("PIXEL_TASK_BOUNDARY")
-        && matches!(kill.as_str(), "0" | "false" | "off") {
-            std::process::exit(0);
-        }
+        && matches!(kill.as_str(), "0" | "false" | "off")
+    {
+        std::process::exit(0);
+    }
 
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
@@ -141,7 +142,9 @@ fn detect_boundary(prompt: &str, cwd: &Path) -> Result<Option<BoundaryEvent>, St
     // 5. Decision logic.
     let is_boundary = if similarity < SIMILARITY_THRESHOLD && completion {
         true
-    } else { similarity < WEAK_THRESHOLD };
+    } else {
+        similarity < WEAK_THRESHOLD
+    };
 
     if !is_boundary {
         return Ok(None);
@@ -225,9 +228,10 @@ fn recent_completion_signal(cwd: &Path) -> bool {
 
     for path in log_paths {
         if let Ok(file) = std::fs::File::open(&path)
-            && check_action_log_file(file, cwd, cutoff) {
-                return true;
-            }
+            && check_action_log_file(file, cwd, cutoff)
+        {
+            return true;
+        }
     }
     false
 }

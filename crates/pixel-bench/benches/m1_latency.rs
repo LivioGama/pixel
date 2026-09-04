@@ -54,7 +54,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use pixel_daemon::api::{Request, Response, Service};
+use pixel_daemon::api::{Response, Service};
 use pixel_proto::Op;
 use tempfile::tempdir;
 
@@ -162,15 +162,13 @@ fn assert_service_time_budget(
 fn bench_search_service_time(c: &mut Criterion) {
     let (_root, mut svc) = fixture_with_needle(50, "uniqueNeedle123");
 
-    let make_req = || {
-        Request::from(Op::Search {
-            pattern: "uniqueNeedle123".into(),
-            json: false,
-            limit: Some(10),
-            offset: None,
-            paths: None,
-            scope: None,
-        })
+    let make_req = || Op::Search {
+        pattern: "uniqueNeedle123".into(),
+        json: false,
+        limit: Some(10),
+        offset: None,
+        paths: None,
+        scope: None,
     };
 
     // Warm up the index (first search builds it).
@@ -191,13 +189,11 @@ fn bench_search_service_time(c: &mut Criterion) {
 fn bench_targets_service_time(c: &mut Criterion) {
     let (_root, mut svc) = fixture_with_needle(50, "uniqueNeedle123");
 
-    let make_req = || {
-        Request::from(Op::Targets {
-            task: "fix uniqueNeedle123".into(),
-            limit: Some(20),
-            max_tier: None,
-            precision: false,
-        })
+    let make_req = || Op::Targets {
+        task: "fix uniqueNeedle123".into(),
+        limit: Some(20),
+        max_tier: None,
+        precision: false,
     };
 
     // Warm up the graph (first targets builds it).
@@ -223,15 +219,13 @@ fn bench_targets_service_time(c: &mut Criterion) {
 fn bench_ranked_search_service_time(c: &mut Criterion) {
     let (_root, mut svc) = fixture_with_needle(50, "uniqueNeedle123");
 
-    let make_req = || {
-        Request::from(Op::Search {
-            pattern: "uniqueNeedle123".into(),
-            json: false,
-            limit: Some(10),
-            offset: None,
-            paths: None,
-            scope: Some("code".into()),
-        })
+    let make_req = || Op::Search {
+        pattern: "uniqueNeedle123".into(),
+        json: false,
+        limit: Some(10),
+        offset: None,
+        paths: None,
+        scope: Some("code".into()),
     };
 
     // Warm up.
@@ -259,12 +253,10 @@ fn bench_ping_service_time(c: &mut Criterion) {
         "ping_service_time",
         SERVICE_TIME_BUDGET,
         FAST_GATE_ITERS,
-        || svc.handle(Request::from(Op::Ping)),
+        || svc.handle(Op::Ping),
     );
 
-    c.bench_function("ping_service_time", |b| {
-        b.iter(|| svc.handle(Request::from(Op::Ping)))
-    });
+    c.bench_function("ping_service_time", |b| b.iter(|| svc.handle(Op::Ping)));
 }
 
 criterion_group! {

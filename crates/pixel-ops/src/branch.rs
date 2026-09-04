@@ -66,10 +66,11 @@ pub fn branch(root: &Path, opts: &BranchOptions) -> Result<Value, String> {
         &format!("refs/heads/{}", opts.name),
     ]);
     if let Some(out) = existing
-        && !out.is_empty() {
-            lock.release();
-            return Err(format!("REF_EXISTS: branch '{}' already exists", opts.name));
-        }
+        && !out.is_empty()
+    {
+        lock.release();
+        return Err(format!("REF_EXISTS: branch '{}' already exists", opts.name));
+    }
 
     // Create branch.
     let from = opts.from.as_deref().unwrap_or("HEAD");

@@ -160,9 +160,10 @@ fn command_text(v: &Value) -> String {
                 && let Some(pos) = parts
                     .iter()
                     .position(|t| t.starts_with('-') && t.contains('c'))
-                    && let Some(script) = parts.get(pos + 1) {
-                        return unwrap_shell_c(script);
-                    }
+                && let Some(script) = parts.get(pos + 1)
+            {
+                return unwrap_shell_c(script);
+            }
             unwrap_shell_c(&parts.join(" "))
         }
         _ => String::new(),
@@ -242,9 +243,10 @@ struct Manifest {
 /// failure path is a deliberate exit 0 (allow, optionally with advice).
 pub fn run() -> ! {
     if let Ok(kill) = std::env::var("PIXEL_TARGETS_GUARD")
-        && matches!(kill.as_str(), "0" | "false" | "off") {
-            std::process::exit(0);
-        }
+        && matches!(kill.as_str(), "0" | "false" | "off")
+    {
+        std::process::exit(0);
+    }
 
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
@@ -340,12 +342,13 @@ pub fn run() -> ! {
         // the rewrite. By checking rewrite first, we ensure the rewrite takes
         // priority over the advisory — the rewrite IS the resolution.
         if idx_root.is_some()
-            && let Some(rewritten) = try_rewrite_bash(cmd, &cwd) {
-                // Read-only search rewrites are semantically equivalent, so
-                // transparently replace the input and let the normal tool
-                // permission flow continue.
-                allow_rewrite(&rewritten);
-            }
+            && let Some(rewritten) = try_rewrite_bash(cmd, &cwd)
+        {
+            // Read-only search rewrites are semantically equivalent, so
+            // transparently replace the input and let the normal tool
+            // permission flow continue.
+            allow_rewrite(&rewritten);
+        }
 
         // ADVISORY TIER (only if no rewrite applied): scoping advisory
         check_bash_advisories(cmd, &cwd, idx_root.as_deref(), manifest.as_ref());
@@ -930,14 +933,16 @@ fn check_bash_advisories(
     }
     // Bypass-pattern advisories for indexed repos
     if let Some(root) = idx_root
-        && let Some(lines) = bypass_advisory_lines(effective_cmd, &effective_cwd, root) {
-            advise(&non_blocking_advisory_lines(&lines));
-        }
+        && let Some(lines) = bypass_advisory_lines(effective_cmd, &effective_cwd, root)
+    {
+        advise(&non_blocking_advisory_lines(&lines));
+    }
     if let Some(m) = manifest
         && let Some(first_file) = single_reader_target(effective_cmd, &effective_cwd)
-            && !allowed(&first_file, m) {
-                scoping_advisory(&first_file, m);
-            }
+        && !allowed(&first_file, m)
+    {
+        scoping_advisory(&first_file, m);
+    }
 }
 
 /// Advisory messages for common grep/search bypass patterns that should use pixel
@@ -1372,9 +1377,11 @@ fn git_mutation_substitute_lines(
                 let alt_root =
                     extract_cd_target(cmd, cwd).or_else(|| extract_git_c_path(&args, cwd));
                 if let Some(alt) = alt_root
-                    && alt != root && reconcile_conflict_pending(&alt) {
-                        return None;
-                    }
+                    && alt != root
+                    && reconcile_conflict_pending(&alt)
+                {
+                    return None;
+                }
             }
             return Some(lines);
         }
@@ -1388,9 +1395,7 @@ fn extract_cd_target(cmd: &str, cwd: &Path) -> Option<PathBuf> {
     // Match `cd <path>` possibly followed by `&&` or `;`
     let cd_idx = cmd.find("cd ")?;
     let rest = &cmd[cd_idx + 3..];
-    let end = rest
-        .find(['&', ';'])
-        .unwrap_or(rest.len());
+    let end = rest.find(['&', ';']).unwrap_or(rest.len());
     let path = rest[..end]
         .trim()
         .trim_matches(|c: char| c == '"' || c == '\'');
@@ -1597,21 +1602,21 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                 // turn guessing what to stage. Falls back to the generic message
                 // on any failure.
                 if let Some(files) = git_status_porcelain_files(root)
-                    && !files.is_empty() {
-                        let files_str = files
-                            .iter()
-                            .map(|f| format!("--files {}", shell_quote(f)))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        lines.push(format!(
-                            "  pixel publish {files_str} --message \"<msg>\" --request-id <id> {root_q}"
-                        ));
-                        lines.push(
-                            "(Auto-populated from git status --porcelain -- adjust if needed.)"
-                                .into(),
-                        );
-                        return Some(lines);
-                    }
+                    && !files.is_empty()
+                {
+                    let files_str = files
+                        .iter()
+                        .map(|f| format!("--files {}", shell_quote(f)))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    lines.push(format!(
+                        "  pixel publish {files_str} --message \"<msg>\" --request-id <id> {root_q}"
+                    ));
+                    lines.push(
+                        "(Auto-populated from git status --porcelain -- adjust if needed.)".into(),
+                    );
+                    return Some(lines);
+                }
                 lines.push(format!(
                     "  pixel publish --files <file> [--files <file2> …] --message \"<msg>\" --request-id <id> {root_q}"
                 ));

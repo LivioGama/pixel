@@ -28,6 +28,7 @@
 //!     number measures keyword retrieval quality, not open-ended NL.
 //!   - Ground truth is 1 (relevant) / 0 (irrelevant); no graded relevance.
 //!   - Pool is capped but on this crate it is complete for these patterns.
+//!
 //! This is a self-benchmark; it must NOT be reported as comparable to
 //! semble's cross-repo number, only as pixel's own measured quality and as a
 //! regression gate for the ranking layer and the `ask` semantic channel.
@@ -36,7 +37,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use pixel_daemon::api::{Request, Response, Service};
+use pixel_daemon::api::{Response, Service};
 use pixel_proto::Op;
 
 /// Ground truth: query -> files in `crates/pixel-graph/src/` that genuinely
@@ -97,10 +98,10 @@ fn file_order_from_response(resp: &Response) -> Vec<String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut order: Vec<String> = Vec::new();
     for m in matches {
-        if let Some(p) = m.get("path").and_then(|x| x.as_str()) {
-            if seen.insert(p.to_string()) {
-                order.push(p.to_string());
-            }
+        if let Some(p) = m.get("path").and_then(|x| x.as_str())
+            && seen.insert(p.to_string())
+        {
+            order.push(p.to_string());
         }
     }
     order
@@ -140,14 +141,14 @@ fn run_ndcg(
         } else {
             words.join("|")
         };
-        let resp = svc.handle(Request::from(Op::Search {
+        let resp = svc.handle(Op::Search {
             pattern,
             json: true,
             limit: Some(50),
             offset: None,
             paths: Some(vec!["crates/pixel-graph/src".to_string()]),
             scope: scope.map(str::to_string),
-        }));
+        });
         if resp.ok {
             let order = file_order_from_response(&resp);
             sum += ndcg_at_k(&order, &rel_set, k);
@@ -201,14 +202,14 @@ fn bench(c: &mut Criterion) {
     let (root, mut svc) = graph_fixture();
     let suite = qrels(&root);
     // Warm up index + graph.
-    let _ = svc.handle(Request::from(Op::Search {
+    let _ = svc.handle(Op::Search {
         pattern: "concept resolve".into(),
         json: true,
         limit: Some(10),
         offset: None,
         paths: Some(vec!["crates/pixel-graph/src".to_string()]),
         scope: Some("code".to_string()),
-    }));
+    });
 
     let ranked = run_ndcg(&mut svc, &suite, Some("code"), 10);
     let unranked = run_ndcg(&mut svc, &suite, None, 10);

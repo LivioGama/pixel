@@ -77,8 +77,7 @@ impl SnapshotStore {
         ensure_dir(&dir)?;
         let token = record.token();
         let path = dir.join(format!("{token}.json"));
-        let json = serde_json::to_vec_pretty(record)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_vec_pretty(record).map_err(std::io::Error::other)?;
         write_durably(&path, &json)?;
         self.prune(&record.root)?;
         Ok(token)

@@ -39,9 +39,10 @@ struct PostCompactionPayload {
 pub fn run() -> ! {
     // Allow opt-out via env var.
     if let Ok(kill) = std::env::var("PIXEL_POST_COMPACTION")
-        && matches!(kill.as_str(), "0" | "false" | "off") {
-            std::process::exit(0);
-        }
+        && matches!(kill.as_str(), "0" | "false" | "off")
+    {
+        std::process::exit(0);
+    }
 
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {

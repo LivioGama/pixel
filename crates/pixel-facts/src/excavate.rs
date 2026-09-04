@@ -384,7 +384,7 @@ impl FactsStore {
             // case excavate exists to serve). `file_changes` is UNIQUE on
             // (commit_id, path), so this join is exact, not a guess.
             #[allow(clippy::type_complexity)]
-        let row: Option<(
+            let row: Option<(
                 String,
                 String,
                 String,
@@ -430,9 +430,10 @@ impl FactsStore {
                     }
                 }
                 if let Some(p) = path
-                    && hpath != p {
-                        continue;
-                    }
+                    && hpath != p
+                {
+                    continue;
+                }
                 let text = format!("{added}\n{removed}");
                 let rel = crate::search::relevance_of(&text, &units);
                 if rel == 0 {
@@ -549,9 +550,10 @@ impl FactsStore {
         for row in rows {
             let (oid, at, message, status, p, seq) = row?;
             if let Some(rf) = range
-                && !rf.allows(&oid) {
-                    continue;
-                }
+                && !rf.allows(&oid)
+            {
+                continue;
+            }
             out.push(ExcavateCandidate {
                 oid: short_oid(&oid),
                 path: p,
@@ -601,9 +603,10 @@ impl FactsStore {
         for row in rows {
             let (oid, at, message, status, p, seq) = row?;
             if let Some(rf) = range
-                && !rf.allows(&oid) {
-                    continue;
-                }
+                && !rf.allows(&oid)
+            {
+                continue;
+            }
             out.push(ExcavateCandidate {
                 oid: short_oid(&oid),
                 path: p.clone(),

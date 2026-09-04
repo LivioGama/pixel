@@ -153,27 +153,28 @@ pub fn execute(flow: &Flow, vars: &HashMap<String, String>) -> ExecResult {
 
     // MFA detection.
     if !flow.mfa_keywords.is_empty()
-        && let Ok(snapshot) = run_agent_browser(&["snapshot", "-i"]) {
-            for kw in &flow.mfa_keywords {
-                if snapshot.contains(kw) {
-                    log.push_str(&format!(
-                        "# MFA DETECTED: keyword '{}' found in snapshot.\n",
+        && let Ok(snapshot) = run_agent_browser(&["snapshot", "-i"])
+    {
+        for kw in &flow.mfa_keywords {
+            if snapshot.contains(kw) {
+                log.push_str(&format!(
+                    "# MFA DETECTED: keyword '{}' found in snapshot.\n",
+                    kw
+                ));
+                log.push_str("# → Hand off to user — MFA cannot be automated.\n");
+                return ExecResult {
+                    steps_executed,
+                    steps_skipped,
+                    log,
+                    success: false,
+                    error: Some(format!(
+                        "MFA gate detected (keyword: '{}') — user intervention required",
                         kw
-                    ));
-                    log.push_str("# → Hand off to user — MFA cannot be automated.\n");
-                    return ExecResult {
-                        steps_executed,
-                        steps_skipped,
-                        log,
-                        success: false,
-                        error: Some(format!(
-                            "MFA gate detected (keyword: '{}') — user intervention required",
-                            kw
-                        )),
-                    };
-                }
+                    )),
+                };
             }
         }
+    }
 
     log.push_str(&format!(
         "\n# Flow complete: {} steps executed, {} skipped\n",
@@ -219,12 +220,14 @@ fn exec_step(
 
     // Per-step tab switching.
     let effective_tab = step.tab.as_deref().or(flow_tab);
-    if step.action != "switch_tab" && step.tab.is_some()
-        && let Some(tab) = effective_tab {
-            let tab = substitute(tab, vars);
-            log.push_str(&format!("{}# Switching to tab: {}\n", indent, tab));
-            switch_to_tab(&tab, log)?;
-        }
+    if step.action != "switch_tab"
+        && step.tab.is_some()
+        && let Some(tab) = effective_tab
+    {
+        let tab = substitute(tab, vars);
+        log.push_str(&format!("{}# Switching to tab: {}\n", indent, tab));
+        switch_to_tab(&tab, log)?;
+    }
 
     match step.action.as_str() {
         "open" => {
@@ -549,9 +552,10 @@ fn extract_char_number(hint: &str) -> Option<usize> {
     let parts: Vec<&str> = hint.split_whitespace().collect();
     for i in 0..parts.len().saturating_sub(1) {
         if parts[i] == "character"
-            && let Ok(n) = parts[i + 1].parse::<usize>() {
-                return Some(n);
-            }
+            && let Ok(n) = parts[i + 1].parse::<usize>()
+        {
+            return Some(n);
+        }
     }
     None
 }
@@ -671,14 +675,15 @@ fn close_stale_tabs(pattern: &str, log: &mut String) -> Result<(), String> {
     let pat_lower = pattern.to_lowercase();
     for line in output.lines() {
         if line.to_lowercase().contains(&pat_lower)
-            && let Some(t_start) = line.find("t") {
-                let after = &line[t_start..];
-                if let Some(end) = after.find(|c: char| !c.is_ascii_digit() && c != 't') {
-                    let tab_id = &after[..end];
-                    log.push_str(&format!("#   closing tab {}\n", tab_id));
-                    let _ = run_agent_browser(&["tab", "close", tab_id]);
-                }
+            && let Some(t_start) = line.find("t")
+        {
+            let after = &line[t_start..];
+            if let Some(end) = after.find(|c: char| !c.is_ascii_digit() && c != 't') {
+                let tab_id = &after[..end];
+                log.push_str(&format!("#   closing tab {}\n", tab_id));
+                let _ = run_agent_browser(&["tab", "close", tab_id]);
             }
+        }
     }
     Ok(())
 }
