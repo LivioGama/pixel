@@ -1,0 +1,225 @@
+{
+  "name": "claude-code-auth-flow",
+  "title": "Claude Code authentication",
+  "description": "Authenticate Claude Code CLI via OAuth with Google sign-in",
+  "tags": [
+    "auth",
+    "oauth",
+    "google",
+    "template"
+  ],
+  "tab": "claude.ai",
+  "success_url_contains": [
+    "claude.ai/new",
+    "claude.ai/chat",
+    "claude.ai/settings",
+    "platform.claude.com/oauth/code/callback"
+  ],
+  "success_url_excludes": [
+    "/login"
+  ],
+  "mfa_keywords": [
+    "passkey",
+    "two-factor",
+    "2fa",
+    "security key",
+    "verify it's you"
+  ],
+  "stale_tab_cleanup": [
+    "claude.ai/login",
+    "accounts.google.com",
+    "platform.claude.com/oauth"
+  ],
+  "preconditions": [
+    "Verify comet-cdp is up (port 9222) \u2014 run: comet-cdp status",
+    "Verify the CLI tool is installed and available in PATH",
+    "Run: <cli> auth login \u2014 it prints an OAuth URL"
+  ],
+  "vars": [
+    {
+      "name": "auth_url",
+      "description": "The OAuth URL printed by the CLI",
+      "required": true
+    },
+    {
+      "name": "google_account",
+      "description": "Google account to select. Pass full email.",
+      "required": false,
+      "default": null
+    }
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "rationale": "Open the OAuth authorization URL from the CLI",
+      "url": "{{auth_url}}",
+      "on_failure": "If redirected to /login, the session has expired \u2014 sign in manually first, then retry",
+      "max_retries": 2
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Check if already authenticated (redirects to consent) or shows login page",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Session is logged out \u2014 need to sign in via Google",
+      "condition": "URL contains '/login' or page shows 'Log in' heading",
+      "then": [
+        {
+          "action": "snapshot",
+          "rationale": "Find the 'Continue with Google' button",
+          "max_retries": 1
+        },
+        {
+          "action": "click",
+          "rationale": "Initiate Google OAuth \u2014 opens a new tab for the Google account picker",
+          "ref_hint": "button containing 'Continue with Google'",
+          "max_retries": 1
+        },
+        {
+          "action": "switch_tab",
+          "rationale": "Switch to the Google account picker tab",
+          "tab": "accounts.google.com",
+          "max_retries": 1
+        },
+        {
+          "action": "snapshot",
+          "rationale": "See the list of Google accounts",
+          "max_retries": 1
+        },
+        {
+          "action": "conditional",
+          "rationale": "Account is in the picker \u2014 click it directly",
+          "condition": "the desired account {{google_account}} is visible in the list",
+          "then": [
+            {
+              "action": "click",
+              "rationale": "Select the correct Google account",
+              "ref_hint": "link containing '{{google_account}}'",
+              "max_retries": 1
+            }
+          ],
+          "max_retries": 1
+        },
+        {
+          "action": "snapshot",
+          "rationale": "Check for Google consent screen",
+          "max_retries": 1
+        },
+        {
+          "action": "conditional",
+          "rationale": "Google asks for consent to share account info",
+          "condition": "page shows 'Continue' button or 'signing back in' text",
+          "then": [
+            {
+              "action": "click",
+              "rationale": "Approve Google consent \u2014 the Google tab closes and redirects back",
+              "ref_hint": "button containing 'Continue'",
+              "max_retries": 1
+            }
+          ],
+          "max_retries": 1
+        },
+        {
+          "action": "switch_tab",
+          "rationale": "Switch back to the app tab \u2014 Google auth completed",
+          "tab": "app.example.com",
+          "max_retries": 1
+        },
+        {
+          "action": "snapshot",
+          "rationale": "Check if captcha or consent screen appeared",
+          "max_retries": 1
+        },
+        {
+          "action": "conditional",
+          "rationale": "hCaptcha blocks automated flows \u2014 reload to clear it",
+          "condition": "page contains 'hCaptcha' or 'captcha' iframe",
+          "then": [
+            {
+              "action": "eval",
+              "rationale": "Reload the page to clear the captcha",
+              "value": "location.reload()",
+              "max_retries": 1
+            },
+            {
+              "action": "wait",
+              "rationale": "Wait for page to reload",
+              "wait": "3s",
+              "max_retries": 1
+            },
+            {
+              "action": "snapshot",
+              "rationale": "Re-check after reload \u2014 captcha should be gone",
+              "max_retries": 1
+            }
+          ],
+          "max_retries": 1
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Check for the OAuth consent/authorize screen",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "OAuth may show a consent screen granting the CLI tool access",
+      "condition": "page shows 'Authorize' or 'Allow' or 'Continue' button for CLI access",
+      "then": [
+        {
+          "action": "eval",
+          "rationale": "Scroll down to enable the Authorize button (disabled until scrolled into view)",
+          "value": "window.scrollBy(0, 500)",
+          "max_retries": 1
+        },
+        {
+          "action": "wait",
+          "rationale": "Brief wait for button state to update",
+          "wait": "1s",
+          "max_retries": 1
+        },
+        {
+          "action": "snapshot",
+          "rationale": "Re-snapshot after scroll \u2014 button should be enabled",
+          "max_retries": 1
+        },
+        {
+          "action": "click",
+          "rationale": "Approve the OAuth request for the CLI",
+          "ref_hint": "button containing 'Authorize'",
+          "on_failure": "If click doesn't navigate, reload the page and retry \u2014 captcha may have blocked the click",
+          "max_retries": 2
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Verify the callback \u2014 URL should contain the auth code parameter",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "The callback has the auth code \u2014 the CLI should pick it up",
+      "condition": "URL contains 'code=' parameter",
+      "then": [
+        {
+          "action": "wait",
+          "rationale": "Wait for the CLI to exchange the code and confirm authentication",
+          "wait": "10s",
+          "max_retries": 1
+        }
+      ],
+      "max_retries": 1
+    }
+  ],
+  "success_signal": "CLI prints 'Successfully authenticated' or callback URL contains code parameter",
+  "created_unix": 0,
+  "revised_unix": 0,
+  "revision": 1,
+  "proven": false
+}
