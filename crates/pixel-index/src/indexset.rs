@@ -262,18 +262,18 @@ impl IndexSet {
                 let _lock = BuildLock::acquire(root)?;
 
                 // Re-check after acquiring the lock.
-                if let Ok(s) = Shard::open(&base_path) {
-                    if s.extractor_id() == extractor.id() {
-                        let valid = if head.is_some() {
-                            s.commit_oid().is_some()
-                        } else {
-                            s.commit_oid().is_none()
-                                && load_plain_sig(&gpx_dir).as_deref()
-                                    == Some(&plain_signature(root))
-                        };
-                        if valid {
-                            return Self::finish_open(root, s, extractor, head, &gpx_dir);
-                        }
+                if let Ok(s) = Shard::open(&base_path)
+                    && s.extractor_id() == extractor.id()
+                {
+                    let valid = if head.is_some() {
+                        s.commit_oid().is_some()
+                    } else {
+                        s.commit_oid().is_none()
+                            && load_plain_sig(&gpx_dir).as_deref()
+                                == Some(&plain_signature(root))
+                    };
+                    if valid {
+                        return Self::finish_open(root, s, extractor, head, &gpx_dir);
                     }
                 }
 
@@ -332,7 +332,7 @@ impl IndexSet {
                 .expect("git-anchored base has an oid")
                 .to_string();
             if head_oid != base_oid {
-                set.reconcile_delta(&gpx_dir, &base_oid, &head_oid)?;
+                set.reconcile_delta(gpx_dir, &base_oid, &head_oid)?;
             }
             // Dirty working tree -> overlay.
             for (xy, path) in gitsync::status_porcelain(root) {

@@ -309,8 +309,6 @@ pub fn build_with_budget(
         let total_bytes = &total_bytes;
         let budget_exceeded = &budget_exceeded;
         let max_total_bytes = &max_total_bytes;
-        let extractor = extractor;
-
         // Collect all paths from the channel first (walker is concurrent),
         // then parallel-extract. This is a middle ground: the walk runs on
         // its own thread while we drain the channel, then we rayon-extract.
@@ -383,15 +381,15 @@ pub fn build_with_budget(
     }
 
     let bytes_seen = total_bytes.load(Ordering::Relaxed);
-    if let Some(cap) = max_total_bytes {
-        if bytes_seen > cap {
-            return Err(budget_bytes_error(paths_count, bytes_seen, cap));
-        }
+    if let Some(cap) = max_total_bytes
+        && bytes_seen > cap
+    {
+        return Err(budget_bytes_error(paths_count, bytes_seen, cap));
     }
-    if let Some(d) = budget {
-        if started.elapsed() > d {
-            return Err(budget_time_error(started.elapsed(), d, paths_count));
-        }
+    if let Some(d) = budget
+        && started.elapsed() > d
+    {
+        return Err(budget_time_error(started.elapsed(), d, paths_count));
     }
 
     let mut builder = ShardBuilder::new(&extractor_id);
