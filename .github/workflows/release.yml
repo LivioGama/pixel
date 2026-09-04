@@ -45,6 +45,8 @@ jobs:
       - name: Install zig (Linux musl)
         if: runner.os == 'Linux'
         uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
 
       - name: Build (Linux musl via zigbuild)
         if: runner.os == 'Linux'
