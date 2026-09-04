@@ -9,7 +9,7 @@ publish = false
 pixel-git = { path = "../pixel-git" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
 rusqlite = { workspace = true }
