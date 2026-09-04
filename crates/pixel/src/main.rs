@@ -1155,31 +1155,110 @@ fn write_stdout(text: &str) -> Result<(), String> {
 const STDOUT_BYTE_CAP: usize = 256 * 1024;
 
 fn print_data(data: &Value, raw_json: bool) -> Result<(), String> {
+    write_stdout(&render_data(data, raw_json, STDOUT_BYTE_CAP))
+}
+
+/// Serialize `data` for stdout under a byte cap.
+///
+/// Human mode (`raw_json == false`) pretty-prints and, when over the cap,
+/// cuts the text on a char boundary and appends a visible truncation note.
+///
+/// JSON mode (`raw_json == true`) must never emit anything that is not one
+/// JSON document: a caller doing `serde_json::from_slice(stdout)` cannot
+/// recover from a cut-off object followed by prose. When the compact
+/// serialization exceeds the cap, the output becomes a small wrapper
+/// object `{truncated: true, cap_bytes, note, partial}` where `partial` is
+/// the leading bytes of the original serialization as a string. The wrapper
+/// itself can exceed the cap by the size of the note and JSON escaping;
+/// that is bounded and preferable to invalid output.
+fn render_data(data: &Value, raw_json: bool, cap: usize) -> String {
     let mut output = if raw_json {
         serde_json::to_string(data).unwrap_or_default()
     } else {
         serde_json::to_string_pretty(data).unwrap_or_default()
     };
-    // Global byte cap: truncate to STDOUT_BYTE_CAP on a char boundary.
-    // Commands with their own smaller caps will never hit this; it catches
-    // the uncapped paths (inspect, history-search, impact) before they
-    // reach the agent's context window.
-    if output.len() > STDOUT_BYTE_CAP {
-        let mut end = STDOUT_BYTE_CAP;
+    if output.len() > cap {
+        let mut end = cap;
         while end > 0 && !output.is_char_boundary(end) {
             end -= 1;
         }
-        let truncation_note = format!(
-            "\n\n⚠ OUTPUT TRUNCATED AT {STDOUT_BYTE_CAP} BYTES (global safety cap). \
-             The full response was larger than 256KB — re-run with a narrower \
-             scope, --limit, or --offset to page through results. \
-             Remove .pixel/calls.json if the circuit breaker fires."
+        let note = format!(
+            "OUTPUT TRUNCATED AT {cap} BYTES (global safety cap). The full \
+             response was larger — re-run with a narrower scope, --limit, or \
+             --offset to page through results. Remove .pixel/calls.json if \
+             the circuit breaker fires."
         );
         output.truncate(end);
-        output.push_str(&truncation_note);
+        if raw_json {
+            output = serde_json::to_string(&json!({
+                "truncated": true,
+                "cap_bytes": cap,
+                "note": note,
+                "partial": output,
+            }))
+            .unwrap_or_default();
+        } else {
+            output.push_str("\n\n⚠ ");
+            output.push_str(&note);
+        }
     }
     output.push('\n');
-    write_stdout(&output)
+    output
+}
+
+#[cfg(test)]
+mod render_data_tests {
+    use super::*;
+
+    fn big() -> Value {
+        json!({"matches": (0..200).map(|i| json!({"path": format!("src/file_{i}.rs"), "line": i, "text": "é".repeat(20)})).collect::<Vec<_>>()})
+    }
+
+    #[test]
+    fn under_cap_is_untouched() {
+        let d = json!({"a": 1});
+        assert_eq!(render_data(&d, true, 1024), "{\"a\":1}\n");
+        assert_eq!(
+            serde_json::from_str::<Value>(&render_data(&d, false, 1024)).unwrap(),
+            d
+        );
+    }
+
+    /// The reason this matters: agents call `pixel … --json` and parse
+    /// stdout. A truncated document with prose appended is a parse error
+    /// they cannot tell apart from a crash. The JSON path must stay one
+    /// valid document and say it was cut.
+    #[test]
+    fn json_mode_truncation_stays_valid_json_and_flags_it() {
+        let out = render_data(&big(), true, 500);
+        let v: Value = serde_json::from_str(&out).expect("stdout must remain one JSON document");
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["cap_bytes"], 500);
+        let partial = v["partial"].as_str().unwrap();
+        assert!(partial.len() <= 500);
+        assert!(partial.starts_with("{\"matches\":["));
+        assert!(v["note"].as_str().unwrap().contains("TRUNCATED"));
+        assert_eq!(out.matches('\n').count(), 1, "single NDJSON-safe line");
+    }
+
+    #[test]
+    fn human_mode_truncation_keeps_visible_note() {
+        let out = render_data(&big(), false, 500);
+        assert!(out.contains("⚠ OUTPUT TRUNCATED AT 500 BYTES"));
+        assert!(serde_json::from_str::<Value>(&out).is_err());
+    }
+
+    /// Multi-byte text near the cap: the cut must land on a char boundary
+    /// so the partial string is valid UTF-8 and serializable.
+    #[test]
+    fn truncation_respects_char_boundaries() {
+        let d = json!({"t": "é".repeat(1000)});
+        for cap in 100..140 {
+            let out = render_data(&d, true, cap);
+            let v: Value = serde_json::from_str(&out).unwrap();
+            assert!(v["partial"].as_str().unwrap().len() <= cap);
+        }
+    }
 }
 
 /// Shared graph-command epilogue: candidates protocol + build announcement.
