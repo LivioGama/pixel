@@ -57,4 +57,4 @@ jobs:
           version: 0.13.0
 
       - name: Cross-build
-        run: cargo zigbuild --release --target ${{ matrix.target }} -p pixel-cli
+        run: cargo zigbuild --release --no-default-features --target ${{ matrix.target }} -p pixel-cli

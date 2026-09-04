@@ -48,9 +48,9 @@ jobs:
         with:
           version: 0.13.0
 
-      - name: Build (Linux musl via zigbuild)
+      - name: Build (Linux musl via zigbuild, no fastembed)
         if: runner.os == 'Linux'
-        run: cargo zigbuild --release --target ${{ matrix.target }} -p pixel-cli
+        run: cargo zigbuild --release --no-default-features --target ${{ matrix.target }} -p pixel-cli
 
       - name: Build (macOS native)
         if: runner.os == 'macOS'

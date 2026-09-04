@@ -288,6 +288,11 @@ fn install_removes_deprecated_mcp_servers() {
 fn install_leaves_settings_json_valid_after_install() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
+    // Pre-create .claude/settings.json so installed_agents detects Claude
+    // even when the `claude` binary is not on PATH (e.g. Linux CI).
+    let claude_dir = home.join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    fs::write(claude_dir.join("settings.json"), "{}").unwrap();
 
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
@@ -575,6 +580,11 @@ fn install_scrubs_deprecated_mcp_servers_from_global_claude_json() {
 fn dry_run_leaves_pre_existing_files_byte_identical() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
+    // Pre-create .claude/settings.json so installed_agents detects Claude
+    // even when the `claude` binary is not on PATH (e.g. Linux CI).
+    let claude_dir = home.join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    fs::write(claude_dir.join("settings.json"), "{}").unwrap();
 
     // Pre-create real state as if a previous non-dry-run install ran.
     let real_options = InstallOptions {
@@ -1364,6 +1374,11 @@ fn uninstall_removes_managed_block_and_preserves_user_content() {
 fn uninstall_removes_claude_hooks_and_scripts() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
+    // Pre-create .claude/settings.json so installed_agents detects Claude
+    // even when the `claude` binary is not on PATH (e.g. Linux CI).
+    let claude_dir = home.join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    fs::write(claude_dir.join("settings.json"), "{}").unwrap();
 
     // Install
     let install_opts = InstallOptions {
