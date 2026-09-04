@@ -241,7 +241,7 @@ impl RecallService {
         }
         // Drain the embed backlog only when it is small: the daemon loop is
         // single-threaded, and a bulk backfill here would block the socket
-        // for minutes (that is `gitpixel recall embed`'s job).
+        // for minutes (that is `pixel recall embed`'s job).
         const MAX_INLINE_BACKLOG: i64 = 5_000;
         match self.store.embed_backlog() {
             Ok(backlog) if backlog > 0 && backlog <= MAX_INLINE_BACKLOG => {
@@ -261,7 +261,7 @@ impl RecallService {
             }
             Ok(backlog) if backlog > MAX_INLINE_BACKLOG => {
                 eprintln!(
-                    "recall daemon: embed backlog {backlog} exceeds inline cap — run `gitpixel recall embed`"
+                    "recall daemon: embed backlog {backlog} exceeds inline cap — run `pixel recall embed`"
                 );
             }
             _ => {}

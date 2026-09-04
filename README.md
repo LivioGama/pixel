@@ -1,6 +1,6 @@
 # 🟩 Pixel
 
-> **A local control layer that stops coding agents wasting minutes on simple repository work.**
+> **A local control layer that helps coding agents spend less time on simple repository work.**
 
 [![agent-config managed](https://img.shields.io/badge/agent--config-managed-blue)](https://github.com/LivioGama/pixel-rules)
 
@@ -186,7 +186,16 @@ Run `pixel --help` or `pixel <command> --help` for the complete command and opti
 
 ## 🌍 Platform
 
-Pixel is written in Rust and is designed for local macOS and Linux development environments. It uses a per-repository Unix-socket daemon where available and falls back to running in-process.
+Pixel is written in Rust (requires Rust ≥ 1.85, edition 2024) and is designed for local macOS and Linux development environments. It uses a per-repository Unix-socket daemon where available and falls back to running in-process.
+
+### Network access
+
+Pixel is local-first, but two features require network access on first use:
+
+- **Semantic search** (`pixel ask`, `pixel recall`): the `fastembed` feature (enabled by default) downloads embedding models from Hugging Face on first use via `pixel recall setup`. After download, all inference is local (CPU). Disable with `--no-default-features` at build time if offline-only operation is required.
+- **Git remote operations** (`pixel publish`, `pixel push`, `pixel ship`): these intentionally talk to your configured Git remote.
+
+All other operations — indexing, search, graph analysis, flow replay, history excavation — run entirely locally after any required model download.
 
 ## 📝 License
 

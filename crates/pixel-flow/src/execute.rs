@@ -448,7 +448,7 @@ fn run_agent_browser(args: &[&str]) -> Result<String, String> {
 ///
 /// The `ref_hint` is a natural language description like:
 ///   "button containing 'Continue with Google'"
-///   "account matching alice@example.com"
+///   "account matching user@example.com"
 ///   "input[type=email] or textbox matching 'Email'"
 fn find_ref_in_snapshot(snapshot: &str, ref_hint: &str) -> Option<String> {
     // Extract quoted strings from the ref_hint — these are the search terms.
@@ -571,7 +571,7 @@ fn extract_quoted_strings(s: &str) -> Vec<&str> {
 /// Conditions look like:
 ///   "page shows 'Continue with Google' or 'Continue with Google'"
 ///   "page shows 'Welcome back' heading with account buttons"
-///   "the desired account alice@example.com is visible"
+///   "the desired account user@example.com is visible"
 ///   "page contains 'hCaptcha' or 'Drag'"
 ///   "page shows password input field"
 ///   "URL contains 'code=' parameter"
@@ -793,7 +793,7 @@ mod tests {
 
     #[test]
     fn condition_account_absent_from_chooser() {
-        // Only livio's account is shown — user2 is NOT listed.
+        // Only alice's account is shown — bob is NOT listed.
         let snapshot = "- heading \"Welcome back\" [level=1, ref=e1]\n\
             - button \"Select account Alice alice@example.com\" [ref=e7]";
         let cond = "the desired account 'bob@example.com' is visible as a 'Select account' button";

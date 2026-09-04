@@ -22,9 +22,10 @@ pub mod vector;
 
 use std::path::PathBuf;
 
-/// Corpus root: `$PIXEL_RECALL_DIR`, else `~/.local/share/gitpixel/recall`.
-/// Created on demand with owner-only permissions — this directory
-/// concentrates every transcript on the machine.
+/// Corpus root: `$PIXEL_RECALL_DIR`, else `~/.local/share/pixel/recall`.
+/// Falls back to the legacy `~/.local/share/gitpixel/recall` path if it
+/// already exists (migration compat). Created on demand with owner-only
+/// permissions — this directory concentrates every transcript on the machine.
 pub fn recall_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("PIXEL_RECALL_DIR")
         && !dir.is_empty()
@@ -32,7 +33,15 @@ pub fn recall_dir() -> PathBuf {
         return PathBuf::from(dir);
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".local/share/gitpixel/recall")
+    let new_path = PathBuf::from(&home).join(".local/share/pixel/recall");
+    // Migration: if the new path doesn't exist but the legacy gitpixel path
+    // does, keep using the legacy path so existing users don't lose their
+    // corpus. New users get the new path.
+    let legacy_path = PathBuf::from(&home).join(".local/share/gitpixel/recall");
+    if !new_path.exists() && legacy_path.exists() {
+        return legacy_path;
+    }
+    new_path
 }
 
 /// Ensure the corpus root exists with mode 0700.
@@ -62,5 +71,11 @@ pub fn vectors_dir() -> PathBuf {
 /// Embedding model cache — shared across rebuilds, never inside a repo.
 pub fn models_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".local/share/gitpixel/models")
+    let new_path = PathBuf::from(&home).join(".local/share/pixel/models");
+    // Migration: use legacy path if it exists and the new one doesn't.
+    let legacy_path = PathBuf::from(&home).join(".local/share/gitpixel/models");
+    if !new_path.exists() && legacy_path.exists() {
+        return legacy_path;
+    }
+    new_path
 }

@@ -72,7 +72,7 @@ impl VectorStore {
         }
         if self.meta.model_id != model_id || self.meta.dim != dim {
             return Err(format!(
-                "vector store was built with model '{}' ({}d) but the active model is '{}' ({}d) — run `gitpixel recall embed --rebuild`",
+                "vector store was built with model '{}' ({}d) but the active model is '{}' ({}d) — run `pixel recall embed --rebuild`",
                 self.meta.model_id, self.meta.dim, model_id, dim
             ));
         }

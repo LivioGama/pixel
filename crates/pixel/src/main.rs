@@ -1,4 +1,4 @@
-//! gitpixel CLI — index/search plus the graph command surface, speaking to a
+//! pixel CLI — index/search plus the graph command surface, speaking to a
 //! per-root daemon over its Unix socket when one is up, else in-process.
 
 use std::collections::HashMap;
@@ -899,7 +899,7 @@ enum FlowCmd {
         vars: Vec<String>,
         /// Shortcut for `--var google_account=<value>` (or `openai_account`
         /// depending on the flow). Picks which account to use.
-        /// Accepts a full email or a short alias: user1, user2, user3.
+        /// Accepts a full email address (e.g. user@example.com).
         #[arg(long)]
         account: Option<String>,
         /// Actually execute the flow by running agent-browser commands.
@@ -1564,19 +1564,6 @@ fn envelope_note(data: &Value) {
 /// capability block must reach the agent even when the probe cannot
 /// complete, so the probe is bounded rather than trusted.
 const SESSION_STATUS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// Resolve a short account alias to a full email address for the
-/// `--account` flag on `pixel flow replay`. Accepts full emails as-is.
-fn resolve_account_alias(input: &str) -> String {
-    let lower = input.to_lowercase();
-    match lower.as_str() {
-        "user1" | "user1" => "alice@example.com".to_string(),
-        "user2" | "user2" | "user2b" => "bob@example.com".to_string(),
-        "user3" | "user3" | "user3" => "alice@example.com".to_string(),
-        // Pass through if it already looks like an email or is unknown.
-        _ => input.to_string(),
-    }
-}
 
 pub(crate) fn discover_root(path: &Path) -> Result<PathBuf, String> {
     let abs = path
@@ -3421,7 +3408,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     // inject into the flow's account var. Try openai_account
                     // first (Codex), then google_account (Claude/others).
                     if let Some(acct) = account {
-                        let resolved = resolve_account_alias(&acct);
+                        let resolved = acct.clone();
                         // Check which var the flow expects by loading it.
                         let var_name = pixel_flow::load(&name)
                             .ok()

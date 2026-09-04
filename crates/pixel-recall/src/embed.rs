@@ -245,11 +245,11 @@ pub mod potion {
             let marker = cache_dir.join("potion.ok");
             if !download && !marker.exists() {
                 return Err(
-                    "embedding model not present — run `gitpixel recall setup` first".to_string(),
+                    "embedding model not present — run `pixel recall setup` first".to_string(),
                 );
             }
             let _ = std::fs::create_dir_all(cache_dir);
-            // Route the HF hub cache under gitpixel's model dir. set_var is
+            // Route the HF hub cache under pixel's model dir. set_var is
             // process-global; both CLI and daemon call this before any
             // threads that read the environment.
             unsafe {
@@ -308,7 +308,7 @@ pub mod fast {
         pub fn open(cache_dir: &std::path::Path, download: bool) -> Result<Self, String> {
             if !download && !cache_dir.exists() {
                 return Err(
-                    "embedding model not present — run `gitpixel recall setup` first".to_string(),
+                    "embedding model not present — run `pixel recall setup` first".to_string(),
                 );
             }
             let options = fastembed::InitOptions::new(fastembed::EmbeddingModel::MultilingualE5Small)

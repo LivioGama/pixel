@@ -13,21 +13,17 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            archive: tar.gz
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-            archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
-            archive: tar.gz
           - target: x86_64-apple-darwin
             os: macos-13
-            archive: tar.gz
     steps:
       - uses: actions/checkout@v4
 
@@ -46,7 +42,6 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p pixel-cli
 
       - name: Package
-        id: package
         run: |
           VERSION="${GITHUB_REF#refs/tags/}"
           TARGET="${{ matrix.target }}"
@@ -58,12 +53,83 @@ jobs:
           cp LICENSE "$STAGING/" 2>/dev/null || true
           tar czf "$ARCHIVE" "$STAGING"
           shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
-          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
-          echo "sha256=$(cat "$ARCHIVE.sha256" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixel-${{ matrix.target }}
+          path: |
+            pixel-*.tar.gz
+            pixel-*.tar.gz.sha256
+
+  release:
+    name: Publish release + formula
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate Homebrew formula with real hashes
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          # Extract SHA256 for each target from the downloaded .sha256 files.
+          ARM_MAC=$(awk '{print $1}' "artifacts/pixel-${VERSION}-aarch64-apple-darwin.tar.gz.sha256")
+          INTEL_MAC=$(awk '{print $1}' "artifacts/pixel-${VERSION}-x86_64-apple-darwin.tar.gz.sha256")
+          ARM_LINUX=$(awk '{print $1}' "artifacts/pixel-${VERSION}-aarch64-unknown-linux-musl.tar.gz.sha256")
+          INTEL_LINUX=$(awk '{print $1}' "artifacts/pixel-${VERSION}-x86_64-unknown-linux-musl.tar.gz.sha256")
+
+          # Strip leading 'v' for formula version (Homebrew convention).
+          FORMULA_VERSION="${VERSION#v}"
+
+          cat > pixel.rb <<EOF
+          class Pixel < Formula
+            desc "Local control layer for coding agents — deterministic retrieval + git engine"
+            homepage "https://github.com/LivioGama/pixel"
+            version "${FORMULA_VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/LivioGama/pixel/releases/download/${VERSION}/pixel-${VERSION}-aarch64-apple-darwin.tar.gz"
+                sha256 "${ARM_MAC}"
+              end
+              on_intel do
+                url "https://github.com/LivioGama/pixel/releases/download/${VERSION}/pixel-${VERSION}-x86_64-apple-darwin.tar.gz"
+                sha256 "${INTEL_MAC}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/LivioGama/pixel/releases/download/${VERSION}/pixel-${VERSION}-aarch64-unknown-linux-musl.tar.gz"
+                sha256 "${ARM_LINUX}"
+              end
+              on_intel do
+                url "https://github.com/LivioGama/pixel/releases/download/${VERSION}/pixel-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+                sha256 "${INTEL_LINUX}"
+              end
+            end
+
+            def install
+              bin.install "bin/pixel"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/pixel --version")
+            end
+          end
+          EOF
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            pixel-*.tar.gz
-            pixel-*.tar.gz.sha256
+            artifacts/pixel-*.tar.gz
+            artifacts/pixel-*.tar.gz.sha256
+            pixel.rb

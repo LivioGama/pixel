@@ -160,6 +160,12 @@ impl ActionLog {
         if fs::create_dir_all(dir).is_err() {
             return ActionLog::noop();
         }
+        // Ensure the .pixel directory is owner-only (0700).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        }
         Self::spawn_at(path)
     }
 
@@ -220,7 +226,7 @@ impl Drop for ActionLog {
 }
 
 fn writer_loop(path: PathBuf, rx: mpsc::Receiver<ActionEvent>, done_tx: Sender<()>) {
-    let mut file = OpenOptions::new().create(true).append(true).open(&path).ok();
+    let mut file = open_log_file(&path);
     let mut since_rotate_check: u32 = 0;
     while let Ok(event) = rx.recv() {
         if let Some(f) = file.as_mut()
@@ -233,10 +239,23 @@ fn writer_loop(path: PathBuf, rx: mpsc::Receiver<ActionEvent>, done_tx: Sender<(
         if since_rotate_check >= ROTATE_CHECK_EVERY {
             since_rotate_check = 0;
             let _ = rotate_if_needed(&path);
-            file = OpenOptions::new().create(true).append(true).open(&path).ok();
+            file = open_log_file(&path);
         }
     }
     let _ = done_tx.send(());
+}
+
+/// Open the log file for appending, creating it with 0600 permissions if
+/// it doesn't exist yet. The action log may contain fill values (passwords,
+/// OTPs) from flow replay, so it must not be world-readable.
+fn open_log_file(path: &Path) -> Option<File> {
+    let file = OpenOptions::new().create(true).append(true).open(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    Some(file)
 }
 
 /// If the log has grown past `MAX_LOG_BYTES`, rewrite it keeping only the
@@ -268,6 +287,11 @@ fn rotate_if_needed(path: &Path) -> std::io::Result<()> {
             writeln!(out, "{line}")?;
         }
         out.flush()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
     }
     fs::rename(&tmp, path)?;
     Ok(())

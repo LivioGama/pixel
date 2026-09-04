@@ -231,7 +231,7 @@ pub fn ask(
         Some(embedder) => {
             if vectors.meta.segments.is_empty() {
                 notice = Some(
-                    "semantic channel empty (run `gitpixel recall embed`) — lexical-only answer"
+                    "semantic channel empty (run `pixel recall embed`) — lexical-only answer"
                         .to_string(),
                 );
             } else {

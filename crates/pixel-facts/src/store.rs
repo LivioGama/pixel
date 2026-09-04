@@ -129,6 +129,14 @@ impl FactsStore {
         let root = root.to_path_buf();
         let pixel_dir = root.join(".pixel");
         std::fs::create_dir_all(&pixel_dir)?;
+        // Ensure the .pixel directory is owner-only (0700) — it contains
+        // history.db, index shards, and actions.jsonl, some of which may
+        // carry fill values (passwords, OTPs) from flow replay.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&pixel_dir, std::fs::Permissions::from_mode(0o700));
+        }
         let path = pixel_dir.join(HISTORY_DB_FILE);
         // Cross-process guard: without this, two concurrent pixel processes
         // (e.g. two agent sessions both running `pixel index --history`
@@ -190,6 +198,30 @@ impl FactsStore {
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        // Security: verify the _pixel_marker table exists and has the correct
+        // value. A db planted by a hostile repo (git add -f .pixel/history.db)
+        // will not have this marker and is wiped before any of its data is
+        // trusted or parsed.
+        let has_marker: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='_pixel_marker'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if has_marker == 0 {
+            return Ok(true); // No marker → foreign db → rebuild (wipe).
+        }
+        let marker_val: String = conn
+            .query_row(
+                "SELECT val FROM _pixel_marker WHERE key='created_by'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        if marker_val != "pixel-facts" {
+            return Ok(true); // Wrong marker → foreign db → rebuild (wipe).
+        }
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap_or(0);
@@ -499,6 +531,15 @@ CREATE TABLE IF NOT EXISTS path_grams (
 );
 CREATE INDEX IF NOT EXISTS path_grams_hash ON path_grams (hash);
 CREATE INDEX IF NOT EXISTS path_grams_change ON path_grams (change_id);
+
+-- Marker table: proves this db was created by pixel, not planted by a
+-- hostile repo. Checked in needs_rebuild; a db missing this marker is
+-- treated as foreign and wiped.
+CREATE TABLE IF NOT EXISTS _pixel_marker (
+  key TEXT PRIMARY KEY,
+  val TEXT NOT NULL
+);
+INSERT OR IGNORE INTO _pixel_marker (key, val) VALUES ('created_by', 'pixel-facts');
 "#;
 
 /// Shorten an oid to the conventional 12-char display form.

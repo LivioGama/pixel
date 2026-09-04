@@ -55,6 +55,11 @@ impl DeltaState {
 
     pub fn save(&self, gitpixel_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(gitpixel_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(gitpixel_dir, std::fs::Permissions::from_mode(0o700));
+        }
         let tmp = state_path(gitpixel_dir).with_extension("json.tmp");
         match std::fs::remove_file(&tmp) {
             Ok(()) => {}

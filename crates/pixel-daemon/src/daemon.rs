@@ -63,6 +63,13 @@ const MAX_REQUESTS_PER_CONN: u32 = 64;
 
 /// $TMPDIR/pixel-<xxh3-of-canonical-root>.sock
 ///
+/// On Linux, `TMPDIR` defaults to world-writable `/tmp`, which allows any
+/// local user to predict the socket path and squat on it before the daemon
+/// binds. We prefer `XDG_RUNTIME_DIR` (per-user, 0700, tmpfs) when available,
+/// falling back to `TMPDIR` only on macOS (where `TMPDIR` is already per-user
+/// 0700). On Linux without `XDG_RUNTIME_DIR`, we use `~/.cache/pixel/sockets/`
+/// created with 0700 permissions.
+///
 /// Deliberately distinct from the legacy gitpixel tool's `gitpixel-*.sock`
 /// prefix: the two daemons speak incompatible response envelopes (gitpixel's
 /// `{ok,error,data}` vs pixel's `{op,protocol,...}`), so an old gitpixel
@@ -71,7 +78,37 @@ const MAX_REQUESTS_PER_CONN: u32 = 64;
 pub fn socket_path(root: &Path) -> PathBuf {
     let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let h = xxhash_rust::xxh3::xxh3_64(canon.to_string_lossy().as_bytes());
-    std::env::temp_dir().join(format!("pixel-{h:016x}.sock"))
+    let sock_name = format!("pixel-{h:016x}.sock");
+    runtime_dir().join(sock_name)
+}
+
+/// Return a per-user directory for socket files. On macOS, `TMPDIR` is
+/// already per-user with 0700 permissions. On Linux, prefer
+/// `XDG_RUNTIME_DIR`; if unset, create `~/.cache/pixel/sockets/` with 0700.
+fn runtime_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        return std::env::temp_dir();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR")
+            && !dir.is_empty()
+            && std::path::Path::new(&dir).exists()
+        {
+            return PathBuf::from(dir);
+        }
+        // Fallback: ~/.cache/pixel/sockets/ with 0700 perms.
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let dir = PathBuf::from(home).join(".cache/pixel/sockets");
+        let _ = std::fs::create_dir_all(&dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+        dir
+    }
 }
 
 pub fn pid_path(root: &Path) -> PathBuf {

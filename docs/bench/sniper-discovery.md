@@ -228,7 +228,7 @@ up calling the same Gemini model through different wrappers.
 ### Path resolution issue (arm B)
 
 In some arm B runs, `gitpixel targets` wrote its manifest to the working
-repo (`~/gitpixel` → `/Users/livio/Documents/gitpixel`) instead of the test
+repo (`~/pixel` → the working repo) instead of the test
 repo (`~/gitpixel-under-test`). Agents then followed absolute paths from
 the targets output to the working repo (at HEAD) rather than the test repo
 (at the historical checkout). This means arm B agents may have read

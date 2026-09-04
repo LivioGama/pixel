@@ -23,6 +23,11 @@ pub fn flow_dir() -> PathBuf {
 pub fn ensure_flow_dir() -> Result<PathBuf, String> {
     let dir = flow_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create flow dir {}: {e}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+    }
     Ok(dir)
 }
 
@@ -136,7 +141,10 @@ pub fn list() -> Result<Value, String> {
     Ok(Value::Array(entries))
 }
 
-/// Atomic write: temp file in same dir, then rename.
+/// Atomic write: temp file in same dir, then rename. Sets owner-only
+/// permissions (0600) on the final file — flow files may contain fill
+/// values (passwords, OTPs) in FlowStep.value, so they must not be
+/// world-readable.
 fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(
@@ -144,6 +152,13 @@ fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
         path.file_name().and_then(|f| f.to_str()).unwrap_or("flow")
     ));
     fs::write(&tmp, data)?;
+    // Set 0600 before rename so the final file is never world-readable,
+    // even briefly.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
     fs::rename(&tmp, path)?;
     Ok(())
 }

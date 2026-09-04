@@ -26,9 +26,11 @@ TARGET="${ARCH_TARGET}-${OS_TARGET}"
 
 # Fetch latest release tag
 echo "Fetching latest release..."
-LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | head -1 | sed -E 's/.*"v?([^"]+)".*/\1/')
+LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | head -1 | sed -E 's/.*"v?([^"]+)".*/\1/')
 if [ -z "$LATEST" ]; then
-    echo "Could not determine latest version." >&2
+    echo "No prebuilt release found for ${REPO}." >&2
+    echo "Install from source instead:" >&2
+    echo "  cargo install --git https://github.com/${REPO} --force" >&2
     exit 1
 fi
 VERSION="v${LATEST}"
@@ -60,15 +62,20 @@ echo "Checksum OK."
 # Extract
 tar xzf "${TMPDIR}/${ARCHIVE}" -C "$TMPDIR"
 
-# Install
+# Install — atomic rename to avoid corrupting a running binary's code
+# signature on macOS (in-place cp overwrites a mapped Mach-O, invalidating
+# the ad-hoc signature and causing SIGKILL on next invocation).
 mkdir -p "$INSTALL_DIR"
 BINARY="${TMPDIR}/pixel-${VERSION}-${TARGET}/bin/pixel"
 if [ ! -f "$BINARY" ]; then
     # Fallback: some archives may not have the version-prefixed dir
     BINARY="${TMPDIR}/bin/pixel"
 fi
-cp "$BINARY" "${INSTALL_DIR}/pixel"
-chmod +x "${INSTALL_DIR}/pixel"
+DEST="${INSTALL_DIR}/pixel"
+TMP_DEST="${INSTALL_DIR}/.pixel.tmp.$$"
+cp "$BINARY" "$TMP_DEST"
+chmod +x "$TMP_DEST"
+mv -f "$TMP_DEST" "$DEST"
 
 echo "Installed pixel to ${INSTALL_DIR}/pixel"
 echo "Add ${INSTALL_DIR} to your PATH if it's not already there."

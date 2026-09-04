@@ -14,3 +14,30 @@ crates/pixel-index/src/gram.rs is an independent Rust implementation of
 the algorithm described publicly by ClickHouse (src/Functions/sparseGramsImpl.h,
 Apache-2.0) and by Cursor ("Fast regex search: indexing text for agent tools").
 No ClickHouse source code was copied.
+
+## Bundled / transitive dependencies
+
+This project bundles or depends on the following notable components:
+
+- **SQLite** (Public Domain) — bundled via the `rusqlite` crate's
+  `bundled` feature. Source: https://www.sqlite.org/
+- **OpenSSL** (Apache-2.0) — vendored via the `openssl` crate's `vendored`
+  feature, compiled from source at build time. Required transitively by
+  `fastembed` → `hf-hub` → `native-tls`. Source: https://www.openssl.org/
+- **ONNX Runtime** (MIT) — downloaded as prebuilt binaries by the
+  `fastembed` crate for neural embedding inference. The runtime is loaded
+  at build/run time, not compiled into the binary. Source:
+  https://github.com/microsoft/onnxruntime
+- **option-ext** (MPL-2.0) — used for `Option::unwrap_or` extensions.
+  Source: https://github.com/servo/rust-option-ext
+- **Tree-sitter grammars** (MIT, all 8) — used for code graph parsing:
+  tree-sitter, tree-sitter-typescript, tree-sitter-javascript,
+  tree-sitter-rust, tree-sitter-go, tree-sitter-java, tree-sitter-python,
+  tree-sitter-c. Source: https://github.com/tree-sitter/
+- **Embedding models** — downloaded from Hugging Face Hub on first use
+  via `pixel recall setup`:
+  - Multilingual E5 Small (fastembed default)
+  - potion-base-2M (model2vec)
+  These models have their own licenses; see the Hugging Face model pages.
+
+No GPL or AGPL licensed components are used anywhere in this project.

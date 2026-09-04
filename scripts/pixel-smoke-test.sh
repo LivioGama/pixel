@@ -2,7 +2,7 @@
 # pixel smoke test — exercises guard hook with both Claude + Devin tool names,
 # core CLI commands, and the four mandatory workflows.
 PIXEL=~/.local/bin/pixel
-REPO=/Users/livio/Documents/pixel
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PASS=0; FAIL=0
 ok() { echo "PASS: $1"; PASS=$((PASS+1)); }
 no() { echo "FAIL: $1 — $2"; FAIL=$((FAIL+1)); }

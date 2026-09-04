@@ -148,6 +148,12 @@ impl ShardBuilder {
         let tmp: PathBuf = dest.with_extension("tmp");
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
+            // Ensure the .pixel directory is owner-only (0700).
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+            }
         }
         match fs::remove_file(&tmp) {
             Ok(()) => {}

@@ -1,4 +1,4 @@
-//! pixel-index — sparse n-gram text index for the gitpixel sidecar.
+//! pixel-index — sparse n-gram text index for the pixel sidecar.
 //!
 //! Phase 0 surface: gram extraction (`gram`), window weighting (`weights`),
 //! and posting-list algebra (`posting`). Shards, git anchoring, overlay,

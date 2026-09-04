@@ -520,7 +520,7 @@ impl Service {
             })),
             Request::Shutdown => Ok(json!({"shutting_down": true})),
             Request::Recall { .. } => Err(
-                "recall ops are served by the recall daemon (`gitpixel recall daemon start`), not a repository daemon"
+                "recall ops are served by the recall daemon (`pixel recall daemon start`), not a repository daemon"
                     .to_string(),
             ),
             Request::Search {
