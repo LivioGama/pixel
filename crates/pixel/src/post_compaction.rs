@@ -122,16 +122,64 @@ fn manifest_context(m: &Value, root: &Path, head: &str, now: u64) -> Option<Stri
         Some(1) | None => vec![m],
         _ => return None,
     };
-    tasks.retain(|task| {
-        task.get("head_oid").and_then(Value::as_str) == Some(head)
-            && task
-                .get("created_unix")
-                .and_then(Value::as_u64)
-                .is_some_and(|created| created <= now && now - created <= MANIFEST_MAX_AGE_SECS)
-    });
-    tasks.sort_by_key(|task| std::cmp::Reverse(task["created_unix"].as_u64()));
-    let mut text = String::from(
-        "[PIXEL:POST_COMPACTION] Saved task hints from this HEAD, not proof of working-tree freshness or current task relevance. Refresh targets if the task or files changed.\n",
+
+    let data =
+        std::fs::read_to_string(&manifest_path).map_err(|e| format!("read manifest: {e}"))?;
+
+    let m: Value = serde_json::from_str(&data).map_err(|e| format!("parse manifest: {e}"))?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Collect (task, [(path, tier)]) pairs from the manifest, filtering expired.
+    let mut all_tasks: Vec<(String, Vec<(String, String)>)> = Vec::new();
+
+    if m.get("version").and_then(Value::as_u64) == Some(2) {
+        // v2 multi-task format.
+        if let Some(tasks) = m.get("tasks").and_then(Value::as_array) {
+            for t in tasks {
+                let created = t.get("created_unix").and_then(Value::as_u64).unwrap_or(0);
+                if now.saturating_sub(created) > MANIFEST_MAX_AGE_SECS {
+                    continue; // expired
+                }
+                let task = t
+                    .get("task")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string();
+                let files = parse_targets(t.get("targets").and_then(Value::as_array));
+                if !files.is_empty() {
+                    all_tasks.push((task, files));
+                }
+            }
+        }
+    } else {
+        // legacy v1 format.
+        let created = m.get("created_unix").and_then(Value::as_u64).unwrap_or(0);
+        if now.saturating_sub(created) <= MANIFEST_MAX_AGE_SECS {
+            let task = m
+                .get("task")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string();
+            let files = parse_targets(m.get("files").and_then(Value::as_array));
+            if !files.is_empty() {
+                all_tasks.push((task, files));
+            }
+        }
+    }
+
+    if all_tasks.is_empty() {
+        return Ok(None);
+    }
+
+    // Build a compact manifest summary for re-injection.
+    let mut lines = Vec::new();
+    lines.push(
+        "[PIXEL:POST_COMPACTION] Context was compacted. Your active `pixel targets` manifest is re-injected below; it is the scoped file list for the current task, so work from it and treat files outside it as out of scope unless the task requires them. Re-run `pixel targets` if the task has changed.\n"
+            .to_string(),
     );
     let mut emitted = false;
     for task in tasks {
