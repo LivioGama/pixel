@@ -9,10 +9,10 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+pub mod config;
 pub mod doctor;
 pub mod install;
 pub mod uninstall;
-pub mod config;
 
 /// Shared error type for the install/doctor/migrate surface.
 #[derive(Debug, Error)]

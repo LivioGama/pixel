@@ -30,7 +30,8 @@ pub fn validate_ref(r: &str) -> Result<(), GitError> {
     let ok = !r.is_empty()
         && !r.starts_with('-')
         && r.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '.' | '~' | '^' | '-' | '@' | '{' | '}')
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '/' | '.' | '~' | '^' | '-' | '@' | '{' | '}')
         });
     if ok {
         Ok(())

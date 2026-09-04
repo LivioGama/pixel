@@ -87,7 +87,14 @@ fn plan_suspect_is_diff_content_based_and_beats_subject_keywords() {
     let (dir, _a, b, c) = disagreement_fixture("plan-disagree");
     let out = gitpixel(
         &dir,
-        &["rescue", "discount broken", ".", "--file", "src/calc.rs", "--json"],
+        &[
+            "rescue",
+            "discount broken",
+            ".",
+            "--file",
+            "src/calc.rs",
+            "--json",
+        ],
     );
     assert!(out.status.success(), "rescue plan failed: {out:?}");
     let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -176,11 +183,16 @@ fn plan_reports_depth_cap_honestly_when_no_suspect_found() {
         note.contains("NOT examined"),
         "hitting the depth cap without a suspect must be said out loud, got {note:?}"
     );
-    assert!(note.contains("--depth"), "note should point at the --depth remedy: {note:?}");
+    assert!(
+        note.contains("--depth"),
+        "note should point at the --depth remedy: {note:?}"
+    );
     // The note also rides in the decision caveats for JSON consumers.
     let caveats = plan["decision"]["caveats"].as_array().unwrap();
     assert!(
-        caveats.iter().any(|c| c.as_str().unwrap_or("").contains("NOT examined")),
+        caveats
+            .iter()
+            .any(|c| c.as_str().unwrap_or("").contains("NOT examined")),
         "caveats must carry the bounded-answer note: {caveats:?}"
     );
 

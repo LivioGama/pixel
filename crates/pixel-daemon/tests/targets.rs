@@ -129,10 +129,14 @@ fn targets_rejects_empty_task() {
         precision: false,
     });
     assert!(!resp.ok);
-    assert!(resp.error.unwrap().message.contains("no searchable keywords"));
+    assert!(
+        resp.error
+            .unwrap()
+            .message
+            .contains("no searchable keywords")
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
-
 
 /// A bare directory (NO `.git`) now builds a graph from the filesystem walk
 /// (capped by PIXEL_GRAPH_MAX_FILES, default 50000) instead of refusing.
@@ -169,7 +173,11 @@ fn targets_no_git_builds_graphless() {
         max_tier: None,
         precision: false,
     });
-    assert!(resp.ok, "targets op failed on a no-git dir: {:?}", resp.error);
+    assert!(
+        resp.ok,
+        "targets op failed on a no-git dir: {:?}",
+        resp.error
+    );
     let data = resp.into_data();
 
     // The graph IS built (gitless mode) — the file-count cap keeps it safe.

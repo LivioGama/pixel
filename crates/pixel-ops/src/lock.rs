@@ -51,12 +51,20 @@ impl RepositoryLock {
         let token = uuid::Uuid::new_v4().to_string();
 
         match Self::try_acquire(&lock_dir, &token, common_directory) {
-            Ok(()) => Ok(Self { lock_dir, token, acquired: true }),
+            Ok(()) => Ok(Self {
+                lock_dir,
+                token,
+                acquired: true,
+            }),
             Err(_) => {
                 // Maybe stale — try recovery.
                 if Self::try_recover_stale(&lock_dir) {
                     match Self::try_acquire(&lock_dir, &token, common_directory) {
-                        Ok(()) => Ok(Self { lock_dir, token, acquired: true }),
+                        Ok(()) => Ok(Self {
+                            lock_dir,
+                            token,
+                            acquired: true,
+                        }),
                         Err(_) => Err(RepositoryBusyError),
                     }
                 } else {
@@ -180,7 +188,10 @@ mod tests {
     fn stale_lock_recovered() {
         let dir = tempdir().unwrap();
         let common = "/test/repo3/.git";
-        let lock_dir = dir.path().join("locks").join(format!("{}.lock", sha256_hex(common)));
+        let lock_dir = dir
+            .path()
+            .join("locks")
+            .join(format!("{}.lock", sha256_hex(common)));
         ensure_dir(&dir.path().join("locks")).unwrap();
 
         // Simulate a stale lock with a dead PID.

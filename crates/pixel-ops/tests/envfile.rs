@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::Path;
 
-use pixel_ops::envfile::{envfile, EnvAction};
+use pixel_ops::envfile::{EnvAction, envfile};
 
 const SENTINEL: &str = "SENTINEL_SECRET_VALUE_hunter2_XYZ";
 
@@ -135,7 +135,13 @@ fn snapshot_restore_round_trip() {
     .unwrap();
     assert_eq!(read(root, ".env"), "A=1\nB=changed\n");
 
-    let snaps = envfile(root, &EnvAction::Snapshots { file: ".env".into() }).unwrap();
+    let snaps = envfile(
+        root,
+        &EnvAction::Snapshots {
+            file: ".env".into(),
+        },
+    )
+    .unwrap();
     assert_eq!(snaps["snapshot_count"], 1);
     let snap = &snaps["snapshots"][0];
     assert_eq!(snap["keys"], 2);
@@ -205,7 +211,13 @@ fn restore_of_restore_returns_to_pre_restore_state() {
     assert!(second["restored_from"].as_str().is_some());
 
     // Named restore also works: pick the OLDEST snapshot explicitly (v1).
-    let snaps = envfile(root, &EnvAction::Snapshots { file: ".env".into() }).unwrap();
+    let snaps = envfile(
+        root,
+        &EnvAction::Snapshots {
+            file: ".env".into(),
+        },
+    )
+    .unwrap();
     let oldest = snaps["snapshots"][0]["id"].as_str().unwrap().to_string();
     envfile(
         root,
@@ -239,7 +251,11 @@ fn restore_missing_snapshot_errors() {
 fn check_reports_missing_keys() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    write(root, ".env", "PRESENT_ONE=x\n# MISSING_COMMENTED=y\nPRESENT_TWO=z\n");
+    write(
+        root,
+        ".env",
+        "PRESENT_ONE=x\n# MISSING_COMMENTED=y\nPRESENT_TWO=z\n",
+    );
 
     let result = envfile(
         root,
@@ -343,7 +359,9 @@ fn no_output_or_journal_ever_contains_a_value() {
             value: format!("{SENTINEL}-appended"),
             create_file: false,
         },
-        EnvAction::Snapshots { file: ".env".into() },
+        EnvAction::Snapshots {
+            file: ".env".into(),
+        },
         EnvAction::Restore {
             file: ".env".into(),
             snapshot: None,
@@ -386,7 +404,10 @@ fn no_output_or_journal_ever_contains_a_value() {
         "journal leaked a secret value: {journal}"
     );
     let lines: Vec<&str> = journal.lines().collect();
-    assert!(lines.len() >= 3, "expected journal records for set/set/restore");
+    assert!(
+        lines.len() >= 3,
+        "expected journal records for set/set/restore"
+    );
     for line in &lines {
         let record: serde_json::Value = serde_json::from_str(line).unwrap();
         assert!(record["ts"].is_string());

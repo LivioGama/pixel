@@ -121,9 +121,7 @@ const COMMENT_LINE_PREFIXES: &[&str] = &["///", "//!", "//", "#"];
 fn phrase_outside_comment(text: &str, phrase: &str) -> bool {
     text.lines().any(|line| {
         let trimmed = line.trim_start();
-        let is_comment = COMMENT_LINE_PREFIXES
-            .iter()
-            .any(|p| trimmed.starts_with(p));
+        let is_comment = COMMENT_LINE_PREFIXES.iter().any(|p| trimmed.starts_with(p));
         !is_comment && line.contains(phrase)
     })
 }
@@ -281,22 +279,23 @@ impl FactsStore {
     /// Bounds are INCLUSIVE on both ends: `from` = older bound, `to` = newer
     /// bound, either may be absent. A ref that does not resolve to a commit
     /// is a structured `FactsError::Msg` — never silence.
-    fn resolve_range(
-        &self,
-        from: Option<&str>,
-        to: Option<&str>,
-    ) -> Result<Option<RangeFilter>> {
+    fn resolve_range(&self, from: Option<&str>, to: Option<&str>) -> Result<Option<RangeFilter>> {
         if from.is_none() && to.is_none() {
             return Ok(None);
         }
         let runner = GitRunner::new(self.root());
         let resolve = |label: &str, r: &str| -> Result<String> {
-            pixel_git::validate_ref(r).map_err(|e| {
-                FactsError::Msg(format!("invalid --{label} ref {r:?}: {e}"))
-            })?;
+            pixel_git::validate_ref(r)
+                .map_err(|e| FactsError::Msg(format!("invalid --{label} ref {r:?}: {e}")))?;
             let spec = format!("{r}^{{commit}}");
             let out = runner
-                .run(&["rev-parse", "--verify", "--quiet", "--end-of-options", &spec])
+                .run(&[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "--end-of-options",
+                    &spec,
+                ])
                 .map_err(|_| {
                     FactsError::Msg(format!(
                         "--{label} ref {r:?} does not resolve to a commit in this repository"
@@ -384,32 +383,43 @@ impl FactsStore {
             // `last_good` candidate at all (the exact dropped-file restore
             // case excavate exists to serve). `file_changes` is UNIQUE on
             // (commit_id, path), so this join is exact, not a guess.
-            let row: Option<(String, String, String, String, String, String, String, String, i64)> =
-                self.conn
-                    .query_row(
-                        "SELECT c.oid, c.committed_at, c.author, c.message,
+            let row: Option<(
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                i64,
+            )> = self
+                .conn
+                .query_row(
+                    "SELECT c.oid, c.committed_at, c.author, c.message,
                                 h.path, h.added, h.removed, fc.status, c.id
                          FROM hunks h
                          JOIN commits c ON c.id = h.commit_id
                          LEFT JOIN file_changes fc
                                 ON fc.commit_id = h.commit_id AND fc.path = h.path
                          WHERE h.id = ?1",
-                        [id],
-                        |r| {
-                            Ok((
-                                r.get(0)?,
-                                r.get(1)?,
-                                r.get(2)?,
-                                r.get(3)?,
-                                r.get(4)?,
-                                r.get(5)?,
-                                r.get(6)?,
-                                r.get::<_, Option<String>>(7)?.unwrap_or_else(|| "M".to_string()),
-                                r.get(8)?,
-                            ))
-                        },
-                    )
-                    .ok();
+                    [id],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                            r.get::<_, Option<String>>(7)?
+                                .unwrap_or_else(|| "M".to_string()),
+                            r.get(8)?,
+                        ))
+                    },
+                )
+                .ok();
             if let Some((oid, at, _author, message, hpath, added, removed, status, seq)) = row {
                 if let Some(rf) = range {
                     // `commits.oid` is the full oid — filter BEFORE the
@@ -495,8 +505,12 @@ impl FactsStore {
         // Recency remains the final tiebreaker within each (suspect,
         // is_definition) group.
         out.sort_by(|a, b| {
-            (b.suspect, b.is_definition, &b.at, b.seq)
-                .cmp(&(a.suspect, a.is_definition, &a.at, a.seq))
+            (b.suspect, b.is_definition, &b.at, b.seq).cmp(&(
+                a.suspect,
+                a.is_definition,
+                &a.at,
+                a.seq,
+            ))
         });
         out.truncate(limit);
         Ok(out)

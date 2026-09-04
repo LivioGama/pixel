@@ -47,29 +47,60 @@ pub fn compile_query(intent: &str, explicit: QueryKind) -> QueryResult {
         QueryKind::Auto if normalized.starts_with("where is `") && normalized.ends_with('`') => {
             Some(QueryKind::Locate)
         }
-        QueryKind::Auto if normalized.starts_with("what files implement ") => Some(QueryKind::Scope),
+        QueryKind::Auto if normalized.starts_with("what files implement ") => {
+            Some(QueryKind::Scope)
+        }
         QueryKind::Auto if normalized.starts_with("show impact of ") => Some(QueryKind::Impact),
-        QueryKind::Auto if normalized.starts_with("restore ") || normalized.contains("working before") => {
+        QueryKind::Auto
+            if normalized.starts_with("restore ") || normalized.contains("working before") =>
+        {
             Some(QueryKind::HistoryRecovery)
         }
-        QueryKind::Auto if normalized == "status" || normalized == "what changed" => Some(QueryKind::Status),
+        QueryKind::Auto if normalized == "status" || normalized == "what changed" => {
+            Some(QueryKind::Status)
+        }
         QueryKind::Auto => None,
         kind => Some(kind),
     };
     let plan = match inferred {
-        Some(QueryKind::Locate) => vec![QueryPlan { recipe: "locate.v1".into(), operations: vec!["resolve".into(), "search_on_unresolved".into()] }],
-        Some(QueryKind::Scope) => vec![QueryPlan { recipe: "scope.v1".into(), operations: vec!["targets".into()] }],
-        Some(QueryKind::Impact) => vec![QueryPlan { recipe: "impact.v1".into(), operations: vec!["impact".into()] }],
-        Some(QueryKind::HistoryRecovery) => vec![QueryPlan { recipe: "history_recovery.v1".into(), operations: vec!["excavate".into()] }],
-        Some(QueryKind::Status) => vec![QueryPlan { recipe: "status.v1".into(), operations: vec!["inspect".into(), "review".into(), "changes".into()] }],
+        Some(QueryKind::Locate) => vec![QueryPlan {
+            recipe: "locate.v1".into(),
+            operations: vec!["resolve".into(), "search_on_unresolved".into()],
+        }],
+        Some(QueryKind::Scope) => vec![QueryPlan {
+            recipe: "scope.v1".into(),
+            operations: vec!["targets".into()],
+        }],
+        Some(QueryKind::Impact) => vec![QueryPlan {
+            recipe: "impact.v1".into(),
+            operations: vec!["impact".into()],
+        }],
+        Some(QueryKind::HistoryRecovery) => vec![QueryPlan {
+            recipe: "history_recovery.v1".into(),
+            operations: vec!["excavate".into()],
+        }],
+        Some(QueryKind::Status) => vec![QueryPlan {
+            recipe: "status.v1".into(),
+            operations: vec!["inspect".into(), "review".into(), "changes".into()],
+        }],
         Some(QueryKind::Auto) | None => vec![
-            QueryPlan { recipe: "locate.v1".into(), operations: vec!["resolve".into()] },
-            QueryPlan { recipe: "scope.v1".into(), operations: vec!["targets".into()] },
+            QueryPlan {
+                recipe: "locate.v1".into(),
+                operations: vec!["resolve".into()],
+            },
+            QueryPlan {
+                recipe: "scope.v1".into(),
+                operations: vec!["targets".into()],
+            },
         ],
     };
     QueryResult {
         intent: normalized.into(),
-        status: if inferred.is_some() { QueryStatus::Resolved } else { QueryStatus::Ranked },
+        status: if inferred.is_some() {
+            QueryStatus::Resolved
+        } else {
+            QueryStatus::Ranked
+        },
         plan,
         evidence: vec![],
         bundle: None,

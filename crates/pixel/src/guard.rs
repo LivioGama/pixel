@@ -98,8 +98,7 @@ const SHELL_WRAPPERS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
 fn strip_outer_quotes(s: &str) -> &str {
     let b = s.as_bytes();
     if b.len() >= 2
-        && ((b[0] == b'"' && b[b.len() - 1] == b'"')
-            || (b[0] == b'\'' && b[b.len() - 1] == b'\''))
+        && ((b[0] == b'"' && b[b.len() - 1] == b'"') || (b[0] == b'\'' && b[b.len() - 1] == b'\''))
     {
         return &s[1..s.len() - 1];
     }
@@ -210,14 +209,12 @@ const ARCHAEOLOGY_TOOLS: &[&str] = &["sqlite3", "python3", "python ", "node ", "
 /// reading it, or `None` when the command doesn't match — the common
 /// case, checked first for speed.
 fn transcript_store_hit(cmd: &str) -> Option<&'static str> {
-    let store = TRANSCRIPT_STORE_MARKERS.iter().find(|m| cmd.contains(**m))?;
+    let store = TRANSCRIPT_STORE_MARKERS
+        .iter()
+        .find(|m| cmd.contains(**m))?;
     let digs_in = ARCHAEOLOGY_TOOLS.iter().any(|t| cmd.contains(t))
         || READERS.iter().any(|r| cmd.contains(r));
-    if digs_in {
-        Some(store)
-    } else {
-        None
-    }
+    if digs_in { Some(store) } else { None }
 }
 
 /// Advisory (non-blocking) lines for a transcript-store poke.
@@ -272,7 +269,10 @@ pub fn run() -> ! {
         std::process::exit(0);
     }
 
-    let tool = payload.get("tool_name").and_then(Value::as_str).unwrap_or("");
+    let tool = payload
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let cwd = payload
         .get("cwd")
         .and_then(Value::as_str)
@@ -488,7 +488,11 @@ fn resolve(raw: &str, base: &Path) -> Option<PathBuf> {
         return None;
     }
     let p = Path::new(raw);
-    let joined = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base.join(p)
+    };
     Some(std::fs::canonicalize(&joined).unwrap_or(joined))
 }
 
@@ -554,7 +558,11 @@ fn load_manifest_state(root: &Path) -> ManifestState {
             })
             .filter_map(|t| {
                 Some(TaskEntry {
-                    task: t.get("task").and_then(Value::as_str).unwrap_or("?").to_string(),
+                    task: t
+                        .get("task")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
+                        .to_string(),
                     files: parse_manifest_files(t.get("targets")?.as_array()?),
                 })
             })
@@ -568,7 +576,11 @@ fn load_manifest_state(root: &Path) -> ManifestState {
             return ManifestState::Absent;
         };
         vec![TaskEntry {
-            task: m.get("task").and_then(Value::as_str).unwrap_or("?").to_string(),
+            task: m
+                .get("task")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string(),
             files: parse_manifest_files(files),
         }]
     };
@@ -579,7 +591,10 @@ fn load_manifest_state(root: &Path) -> ManifestState {
             ManifestState::Absent
         };
     }
-    ManifestState::Active(Manifest { root: root.to_path_buf(), tasks })
+    ManifestState::Active(Manifest {
+        root: root.to_path_buf(),
+        tasks,
+    })
 }
 
 /// Compatibility shim over `load_manifest_state` for tests that only care
@@ -596,7 +611,11 @@ fn parse_manifest_files(raw: &[Value]) -> Vec<(String, String)> {
     raw.iter()
         .filter_map(|f| {
             let path = f.get("path")?.as_str()?.to_string();
-            let tier = f.get("tier").and_then(Value::as_str).unwrap_or("").to_string();
+            let tier = f
+                .get("tier")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             Some((path, tier))
         })
         .collect()
@@ -711,12 +730,9 @@ fn scoping_advisory_lines(abs: &Path, m: &Manifest) -> Vec<String> {
             .iter()
             .map(|t| format!("  - '{}'", short_task(&t.task, 70))),
     );
-    lines.push(
-        "Proceeding. If scope has drifted, re-run `pixel targets \"<refined task>\"`".into(),
-    );
-    lines.push(
-        "to refresh your task's list, or `pixel targets --clear` to end scoping.".into(),
-    );
+    lines
+        .push("Proceeding. If scope has drifted, re-run `pixel targets \"<refined task>\"`".into());
+    lines.push("to refresh your task's list, or `pixel targets --clear` to end scoping.".into());
     lines
 }
 
@@ -761,8 +777,7 @@ fn is_retrieval_tool(tool: &str) -> bool {
 fn is_read_tool(tool: &str) -> bool {
     matches!(
         tool,
-        "Read" | "read" | "read_file" | "notebook_read"
-        | "view_file"  // Antigravity
+        "Read" | "read" | "read_file" | "notebook_read" | "view_file" // Antigravity
     )
 }
 
@@ -773,10 +788,41 @@ fn is_source_file(p: &Path) -> bool {
     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
     matches!(
         ext,
-        "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "java" | "c" | "cpp"
-        | "h" | "hpp" | "cs" | "rb" | "swift" | "kt" | "scala" | "clj" | "ex"
-        | "exs" | "erl" | "hs" | "ml" | "fs" | "nim" | "zig" | "v" | "lua"
-        | "php" | "pl" | "r" | "dart" | "elm" | "julia" | "lisp" | "sch"
+        "rs" | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "py"
+            | "go"
+            | "java"
+            | "c"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "cs"
+            | "rb"
+            | "swift"
+            | "kt"
+            | "scala"
+            | "clj"
+            | "ex"
+            | "exs"
+            | "erl"
+            | "hs"
+            | "ml"
+            | "fs"
+            | "nim"
+            | "zig"
+            | "v"
+            | "lua"
+            | "php"
+            | "pl"
+            | "r"
+            | "dart"
+            | "elm"
+            | "julia"
+            | "lisp"
+            | "sch"
     )
 }
 
@@ -813,10 +859,12 @@ fn retrieval_guard_advisory(_cwd: &Path, idx_root: &Path) -> ! {
     let root = idx_root.display().to_string();
     advise(&[
         "pixel-guard advisory: code search happened before retrieval scoping.".into(),
-        "In an indexed directory, consider running `pixel targets` before searching the codebase.".into(),
+        "In an indexed directory, consider running `pixel targets` before searching the codebase."
+            .into(),
         format!("  pixel targets \"<one-line task description>\" {root}"),
         "That returns the P0/P1/P2 file list in <50ms. Work P0 first, then P1.".into(),
-        "After scoping, use `pixel search` / `pixel resolve` for code search — not grep/glob.".into(),
+        "After scoping, use `pixel search` / `pixel resolve` for code search — not grep/glob."
+            .into(),
         "Proceeding with the original retrieval call.".into(),
     ]);
 }
@@ -858,7 +906,10 @@ fn expired_manifest_advisory(idx_root: &Path) -> ! {
 fn suggest_index_advisory(dir: &Path, is_git: bool) -> ! {
     let repo_phrase = if is_git { "git repo" } else { "directory" };
     advise(&[
-        format!("pixel-targets-guard advisory: this {} has not been indexed by pixel yet.", repo_phrase),
+        format!(
+            "pixel-targets-guard advisory: this {} has not been indexed by pixel yet.",
+            repo_phrase
+        ),
         "Proceeding. To enable pixel's scoped retrieval (one-time, takes seconds):".into(),
         format!("  pixel index {}", dir.display()),
         "Then scope tasks with: pixel targets \"<one-line task description>\" .".into(),
@@ -873,7 +924,12 @@ fn suggest_index_advisory(dir: &Path, is_git: bool) -> ! {
 /// in run() so that rewrites take priority over advisories. This contains
 /// the scoping advisory plus advisories for common grep/search bypass patterns
 /// (sed, awk, perl, python, find, ls, cat).
-fn check_bash_advisories(cmd: &str, cwd: &Path, idx_root: Option<&Path>, manifest: Option<&Manifest>) {
+fn check_bash_advisories(
+    cmd: &str,
+    cwd: &Path,
+    idx_root: Option<&Path>,
+    manifest: Option<&Manifest>,
+) {
     // Strip leading `cd X &&` before pattern matching — the same stripping
     // that try_rewrite_bash does. strip_cd_prefix returns (effective_cwd, effective_cmd).
     let (effective_cwd, effective_cmd) = strip_cd_prefix(cmd, cwd);
@@ -908,7 +964,10 @@ fn bypass_advisory_lines(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<Strin
     // and `rtk grep` are properly intercepted. This closes the wrapper-prefix
     // evasion where an agent invokes `command grep` to bypass a guard that
     // only checks for bare `grep`.
-    while matches!(tokens.first().map(String::as_str), Some("rtk") | Some("command") | Some("builtin")) {
+    while matches!(
+        tokens.first().map(String::as_str),
+        Some("rtk") | Some("command") | Some("builtin")
+    ) {
         tokens.remove(0);
         if tokens.is_empty() {
             return None;
@@ -1148,12 +1207,18 @@ fn is_branch_like(ref_str: &str) -> bool {
         return false;
     }
     // Relative refs — HEAD, HEAD~N, HEAD^, HEAD@{N}
-    if ref_str == "HEAD" || ref_str.starts_with("HEAD~") || ref_str.starts_with("HEAD^") || ref_str.starts_with("HEAD@") {
+    if ref_str == "HEAD"
+        || ref_str.starts_with("HEAD~")
+        || ref_str.starts_with("HEAD^")
+        || ref_str.starts_with("HEAD@")
+    {
         return false;
     }
     // Raw OID — 40 (SHA-1) or 64 (SHA-256) hex chars
     let trimmed = ref_str.trim();
-    if (trimmed.len() == 40 || trimmed.len() == 64) && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+    if (trimmed.len() == 40 || trimmed.len() == 64)
+        && trimmed.chars().all(|c| c.is_ascii_hexdigit())
+    {
         return false;
     }
     // Short OID — 7+ hex chars (git accepts abbreviated SHAs)
@@ -1279,9 +1344,11 @@ fn destructive_git_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<S
 
 fn raw_restore_deny() -> Vec<String> {
     vec![
-        "BLOCKED by pixel-targets-guard: raw historical file restore can clobber in-progress work.".into(),
+        "BLOCKED by pixel-targets-guard: raw historical file restore can clobber in-progress work."
+            .into(),
         "Use the surgical planner instead:".into(),
-        "  pixel rescue \"<what broke>\" .            # plan: versions + recommended last-good".into(),
+        "  pixel rescue \"<what broke>\" .            # plan: versions + recommended last-good"
+            .into(),
         "  pixel rescue --apply <oid> --file <path> [--merge|--stash-first]".into(),
     ]
 }
@@ -1296,7 +1363,11 @@ fn raw_restore_deny() -> Vec<String> {
 
 /// Substitute recommendation for a full Bash command. Only fires in indexed
 /// repos, mirroring `bash_deny_lines`.
-fn git_mutation_substitute_lines(cmd: &str, idx_root: Option<&Path>, cwd: &Path) -> Option<Vec<String>> {
+fn git_mutation_substitute_lines(
+    cmd: &str,
+    idx_root: Option<&Path>,
+    cwd: &Path,
+) -> Option<Vec<String>> {
     // The idx_root is found from the hook payload's cwd, but the actual
     // command may cd to a different directory first (e.g. `cd /repo && git
     // rebase`). Try the idx_root first, then extract a cd/-C target from the
@@ -1310,7 +1381,8 @@ fn git_mutation_substitute_lines(cmd: &str, idx_root: Option<&Path>, cwd: &Path)
             // Check if a cd target or git -C path has a reconcile conflict
             // state file — if so, allow the rebase as an escape hatch.
             if sub == "rebase" {
-                let alt_root = extract_cd_target(cmd, cwd).or_else(|| extract_git_c_path(&args, cwd));
+                let alt_root =
+                    extract_cd_target(cmd, cwd).or_else(|| extract_git_c_path(&args, cwd));
                 if let Some(alt) = alt_root {
                     if alt != root && reconcile_conflict_pending(&alt) {
                         return None;
@@ -1329,13 +1401,21 @@ fn extract_cd_target(cmd: &str, cwd: &Path) -> Option<PathBuf> {
     // Match `cd <path>` possibly followed by `&&` or `;`
     let cd_idx = cmd.find("cd ")?;
     let rest = &cmd[cd_idx + 3..];
-    let end = rest.find(|c: char| c == '&' || c == ';').unwrap_or(rest.len());
-    let path = rest[..end].trim().trim_matches(|c: char| c == '"' || c == '\'');
+    let end = rest
+        .find(|c: char| c == '&' || c == ';')
+        .unwrap_or(rest.len());
+    let path = rest[..end]
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'');
     if path.is_empty() {
         return None;
     }
     let p = Path::new(path);
-    let resolved = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+    let resolved = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    };
     resolved.canonicalize().ok().filter(|p| p.is_dir())
 }
 
@@ -1344,7 +1424,11 @@ fn extract_git_c_path(args: &[String], cwd: &Path) -> Option<PathBuf> {
     let c_idx = args.iter().position(|a| a == "-C")?;
     let path = args.get(c_idx + 1)?;
     let p = Path::new(path);
-    let resolved = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+    let resolved = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    };
     resolved.canonicalize().ok().filter(|p| p.is_dir())
 }
 
@@ -1392,7 +1476,11 @@ fn sequencer_in_progress(root: &Path) -> bool {
         // A relative `gitdir:` pointer is relative to the directory holding
         // the `.git` file — resolving it against the process cwd instead
         // would silently return false (fail-closed into a wrong deny).
-        if pointed.is_absolute() { pointed } else { root.join(pointed) }
+        if pointed.is_absolute() {
+            pointed
+        } else {
+            root.join(pointed)
+        }
     } else {
         return false; // no .git — not a repo root we can reason about
     };
@@ -1411,7 +1499,9 @@ fn sequencer_in_progress(root: &Path) -> bool {
 /// `pixel reconcile` itself reported "manual resolution required", so the
 /// deterministic path is exhausted and raw git is the only way forward.
 fn reconcile_conflict_pending(root: &Path) -> bool {
-    root.join(".pixel").join("reconcile-conflict.json").is_file()
+    root.join(".pixel")
+        .join("reconcile-conflict.json")
+        .is_file()
 }
 
 /// Run `git status --porcelain` in `root` and return the list of modified
@@ -1466,9 +1556,10 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
     match sub {
         "add" => {
             // Interactive hunk staging — no pixel equivalent, pass through.
-            if args.iter().any(|a| {
-                a == "-p" || a == "--patch" || a == "-i" || a == "--interactive"
-            }) {
+            if args
+                .iter()
+                .any(|a| a == "-p" || a == "--patch" || a == "-i" || a == "--interactive")
+            {
                 return None;
             }
             // Conflict-resolution staging during an active sequencer
@@ -1486,9 +1577,9 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
             // too) don't take a following pathspec, but we don't model every
             // value-consuming flag — the common shapes (`git add <files>`,
             // `git add .`, `git add -A`) are covered.
-            let all_variant = args.iter().any(|a| {
-                a == "." || a == "-A" || a == "--all" || a == "-u" || a == "--update"
-            });
+            let all_variant = args
+                .iter()
+                .any(|a| a == "." || a == "-A" || a == "--all" || a == "-u" || a == "--update");
             let pathspecs: Vec<&String> = args
                 .iter()
                 .filter(|a| !a.starts_with('-') && a.as_str() != ".")
@@ -1529,7 +1620,8 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                             "  pixel publish {files_str} --message \"<msg>\" --request-id <id> {root_q}"
                         ));
                         lines.push(
-                            "(Auto-populated from git status --porcelain -- adjust if needed.)".into(),
+                            "(Auto-populated from git status --porcelain -- adjust if needed.)"
+                                .into(),
                         );
                         return Some(lines);
                     }
@@ -1575,13 +1667,18 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                 "`git commit`"
             };
             let mut lines = vec![
-                format!("BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw {what} bypasses pixel's snapshot-gated, journaled mutation surface."),
+                format!(
+                    "BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw {what} bypasses pixel's snapshot-gated, journaled mutation surface."
+                ),
                 "Run the exact equivalent instead (--files repeated once per file):".into(),
-                format!("  pixel publish {amend}{files} --message {msg} --request-id <id> {root_q}"),
+                format!(
+                    "  pixel publish {amend}{files} --message {msg} --request-id <id> {root_q}"
+                ),
             ];
             if c.all {
                 lines.push(
-                    "(-a detected: list each modified tracked file as its own --files flag.)".into(),
+                    "(-a detected: list each modified tracked file as its own --files flag.)"
+                        .into(),
                 );
             }
             Some(lines)
@@ -1592,7 +1689,13 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
         // here (destructive tier runs first).
         "push" => {
             const PUSH_PASS: &[&str] = &[
-                "--tags", "--delete", "-d", "--mirror", "--all", "--prune", "--branches",
+                "--tags",
+                "--delete",
+                "-d",
+                "--mirror",
+                "--all",
+                "--prune",
+                "--branches",
             ];
             if args.iter().any(|a| {
                 PUSH_PASS.contains(&a.as_str())
@@ -1635,8 +1738,18 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
         }
         "rebase" => {
             const REBASE_PASS: &[&str] = &[
-                "-i", "--interactive", "--continue", "--abort", "--skip", "--quit",
-                "--edit-todo", "--onto", "--exec", "-x", "--autosquash", "--root",
+                "-i",
+                "--interactive",
+                "--continue",
+                "--abort",
+                "--skip",
+                "--quit",
+                "--edit-todo",
+                "--onto",
+                "--exec",
+                "-x",
+                "--autosquash",
+                "--root",
             ];
             if args.iter().any(|a| REBASE_PASS.contains(&a.as_str())) {
                 return None; // pass-through: interactive / state exit / not reconcile-expressible
@@ -1664,7 +1777,9 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
 
 fn branch_substitute_lines(what: &str, name_q: &str, root_q: &str) -> Vec<String> {
     vec![
-        format!("BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw {what} bypasses pixel's journaled branch op."),
+        format!(
+            "BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw {what} bypasses pixel's journaled branch op."
+        ),
         "Run the exact equivalent instead (creates AND checks out the branch):".into(),
         format!("  pixel branch {name_q} --request-id <id> {root_q}"),
     ]
@@ -1684,8 +1799,19 @@ struct CommitArgs {
 /// Commit flags that consume a following value token (so the value must
 /// not be mistaken for a pathspec).
 const COMMIT_VALUE_FLAGS: &[&str] = &[
-    "-m", "--message", "-C", "-c", "--fixup", "--squash", "-F", "--file",
-    "--author", "--date", "-t", "--template", "--trailer",
+    "-m",
+    "--message",
+    "-C",
+    "-c",
+    "--fixup",
+    "--squash",
+    "-F",
+    "--file",
+    "--author",
+    "--date",
+    "-t",
+    "--template",
+    "--trailer",
 ];
 
 fn parse_commit_args(args: &[String]) -> CommitArgs {
@@ -1697,8 +1823,12 @@ fn parse_commit_args(args: &[String]) -> CommitArgs {
             out.amend = true;
         } else if t == "-a" || t == "--all" {
             out.all = true;
-        } else if t == "--interactive" || t == "--patch" || t == "--fixup" || t == "--squash"
-            || t.starts_with("--fixup=") || t.starts_with("--squash=")
+        } else if t == "--interactive"
+            || t == "--patch"
+            || t == "--fixup"
+            || t == "--squash"
+            || t.starts_with("--fixup=")
+            || t.starts_with("--squash=")
         {
             // --fixup/--squash target an interactive-rebase workflow.
             out.interactive = true;
@@ -1755,15 +1885,13 @@ fn single_reader_target(cmd: &str, cwd: &Path) -> Option<PathBuf> {
     if cmd.contains("$(") || cmd.contains('`') || cmd.contains("<<") {
         return None;
     }
-    if ["xargs", "for ", "while "].iter().any(|kw| cmd.contains(kw)) {
+    if ["xargs", "for ", "while "]
+        .iter()
+        .any(|kw| cmd.contains(kw))
+    {
         return None;
     }
-    let first_segment = cmd
-        .split([';', '|'])
-        .next()?
-        .split("&&")
-        .next()?
-        .trim();
+    let first_segment = cmd.split([';', '|']).next()?.split("&&").next()?.trim();
     let tokens = simple_tokenize(first_segment);
     let (mut tokens, eff_cwd) = if tokens.first().map(String::as_str) == Some("cd") {
         let rest_after_cd = cmd.splitn(2, "&&").nth(1)?.trim();
@@ -1901,12 +2029,13 @@ fn is_grep_tool(tool: &str, input: &serde_json::Map<String, Value>) -> bool {
     // Claude Code's Grep tool has "pattern"; Devin's grep has "pattern";
     // some agents use "query". Read/Glob don't have pattern fields.
     // Antigravity's grep_search uses "Query"; file_search uses "Query".
-    if !matches!(tool, "Grep" | "grep" | "search" | "grep_search" | "file_search") {
+    if !matches!(
+        tool,
+        "Grep" | "grep" | "search" | "grep_search" | "file_search"
+    ) {
         return false;
     }
-    input.get("pattern").is_some()
-        || input.get("query").is_some()
-        || input.get("Query").is_some()
+    input.get("pattern").is_some() || input.get("query").is_some() || input.get("Query").is_some()
 }
 
 /// Build an advisory for a Grep tool call redirecting to `pixel search` —
@@ -1928,7 +2057,8 @@ fn grep_redirect_advisory_lines(
             flags.push(f.to_string());
         }
     }
-    if input.contains_key("glob") || input.contains_key("type") || input.contains_key("output_mode") {
+    if input.contains_key("glob") || input.contains_key("type") || input.contains_key("output_mode")
+    {
         return vec![
             "pixel-guard advisory: this Grep call includes filters that Pixel search cannot preserve exactly.".into(),
             "Proceeding with the original Grep call; use Pixel search when those filters are not needed.".into(),
@@ -1939,7 +2069,8 @@ fn grep_redirect_advisory_lines(
         .unwrap_or_else(|| ".".to_string());
     let Some(cmd) = search_can_replace(pattern, &flags, &root) else {
         return vec![
-            "pixel-guard advisory: this Grep query cannot be represented exactly by Pixel search.".into(),
+            "pixel-guard advisory: this Grep query cannot be represented exactly by Pixel search."
+                .into(),
             "Proceeding with the original Grep call.".into(),
         ];
     };
@@ -1956,10 +2087,7 @@ fn try_rewrite_bash(cmd: &str, cwd: &Path) -> Option<String> {
     let trimmed = cmd.trim();
 
     // Skip complex commands -- heredocs, command substitution are left alone.
-    if trimmed.contains("<<")
-        || trimmed.contains("$(")
-        || trimmed.contains('`')
-    {
+    if trimmed.contains("<<") || trimmed.contains("$(") || trimmed.contains('`') {
         return None;
     }
 
@@ -2185,9 +2313,7 @@ fn strip_cd_prefix<'a>(cmd: &'a str, cwd: &Path) -> (PathBuf, &'a str) {
     };
     let dir_str = rest_after_cd[..amp_idx].trim();
     // Strip quotes from the directory.
-    let dir_str = dir_str
-        .trim_matches(|c| c == '\'' || c == '"')
-        .trim();
+    let dir_str = dir_str.trim_matches(|c| c == '\'' || c == '"').trim();
     let new_cwd = if dir_str.starts_with('/') {
         PathBuf::from(dir_str)
     } else {
@@ -2225,8 +2351,19 @@ fn find_unquoted_double_amp(s: &str) -> Option<usize> {
 /// Flags that consume a following value (or an attached `=value`), so they
 /// must be skipped when locating the search pattern.
 const VALUE_FLAGS: &[&str] = &[
-    "-A", "-B", "-C", "-m", "-g", "-t", "-f", "--include", "--exclude",
-    "--glob", "--type", "-d", "--max-depth",
+    "-A",
+    "-B",
+    "-C",
+    "-m",
+    "-g",
+    "-t",
+    "-f",
+    "--include",
+    "--exclude",
+    "--glob",
+    "--type",
+    "-d",
+    "--max-depth",
 ];
 
 /// Value-consuming flags that also change the match count in ways `pixel
@@ -2234,9 +2371,7 @@ const VALUE_FLAGS: &[&str] = &[
 /// so the command falls through to the original. File-filter flags
 /// (`--include`/`--exclude`/`--glob`/`--type`) are NOT here — we drop them
 /// and search a superset (see `search_can_replace`).
-const SCOPE_FLAGS: &[&str] = &[
-    "-m",
-];
+const SCOPE_FLAGS: &[&str] = &["-m"];
 
 /// Check for unquoted control operators EXCEPT pipe (`|`) and redirects
 /// (`>`, `<`). Pipes are handled separately by [`first_unquoted_pipe`].
@@ -2328,7 +2463,10 @@ fn parse_grep(cmd: &str) -> Option<(String, Vec<String>, Vec<String>)> {
     }
     // Strip shell wrapper prefixes (rtk, command, builtin) so `command grep`
     // and `builtin grep` are properly intercepted, matching bypass_advisory_lines.
-    while matches!(tokens.first().map(String::as_str), Some("rtk") | Some("command") | Some("builtin")) {
+    while matches!(
+        tokens.first().map(String::as_str),
+        Some("rtk") | Some("command") | Some("builtin")
+    ) {
         tokens.remove(0);
         if tokens.is_empty() {
             return None;
@@ -2361,8 +2499,14 @@ fn parse_grep(cmd: &str) -> Option<(String, Vec<String>, Vec<String>)> {
     tokens = expanded;
 
     let unsupported_flags = [
-        "-l", "--files-with-matches", "-c", "--count", "-v", "--invert",
-        "-o", "--only-matching",
+        "-l",
+        "--files-with-matches",
+        "-c",
+        "--count",
+        "-v",
+        "--invert",
+        "-o",
+        "--only-matching",
     ];
     let mut unsupported: Vec<String> = tokens[1..]
         .iter()
@@ -2475,11 +2619,21 @@ fn search_can_replace(pattern: &str, flags: &[String], root: &str) -> Option<Str
     // File-filter flags (--include/--exclude/--glob/--type) are NOT here —
     // we drop them and search a superset.
     let unsupported_flags = [
-        "-l", "--files-with-matches", "-c", "--count", "-v", "--invert",
-        "-o", "--only-matching",
-        "-m", "--max-count",
+        "-l",
+        "--files-with-matches",
+        "-c",
+        "--count",
+        "-v",
+        "--invert",
+        "-o",
+        "--only-matching",
+        "-m",
+        "--max-count",
     ];
-    if flags.iter().any(|f| unsupported_flags.contains(&f.as_str())) {
+    if flags
+        .iter()
+        .any(|f| unsupported_flags.contains(&f.as_str()))
+    {
         return None;
     }
     let escaped = pattern.replace('\'', "'\\''");
@@ -2548,16 +2702,17 @@ fn strip_redirects(cmd: &str) -> (String, String) {
         i -= 1;
         let t = &tokens[i];
         // `2>/dev/null` or `>file` or `&>file` — single token with redirect+target
-        if t.starts_with("2>") || t.starts_with("1>") || t.starts_with("&>")
-            || t.starts_with('>') || t.starts_with('<')
+        if t.starts_with("2>")
+            || t.starts_with("1>")
+            || t.starts_with("&>")
+            || t.starts_with('>')
+            || t.starts_with('<')
         {
             redirect_start = i;
             continue;
         }
         // `2>` or `>` or `<` as a separate token — consumes the next token as filename
-        if (t == "2>" || t == "1>" || t == "&>" || t == ">" || t == "<")
-            && i + 1 < tokens.len()
-        {
+        if (t == "2>" || t == "1>" || t == "&>" || t == ">" || t == "<") && i + 1 < tokens.len() {
             redirect_start = i;
             continue;
         }
@@ -2583,7 +2738,10 @@ fn strip_redirects(cmd: &str) -> (String, String) {
 fn try_rewrite_git_archaeology(cmd: &str, root: &str) -> Option<String> {
     let mut tokens = simple_tokenize(cmd);
     // Strip shell wrapper prefixes (rtk, command, builtin) — same as parse_grep.
-    while matches!(tokens.first().map(String::as_str), Some("rtk") | Some("command") | Some("builtin")) {
+    while matches!(
+        tokens.first().map(String::as_str),
+        Some("rtk") | Some("command") | Some("builtin")
+    ) {
         tokens.remove(0);
     }
     if tokens.len() < 3 || tokens[0] != "git" || tokens[1] != "log" {
@@ -2637,7 +2795,11 @@ fn try_rewrite_git_archaeology(cmd: &str, root: &str) -> Option<String> {
         return None;
     }
     let escaped = phrase.replace('\'', "'\\''");
-    let mut out = format!("pixel excavate --phrase '{}' {}", escaped, shell_quote(root));
+    let mut out = format!(
+        "pixel excavate --phrase '{}' {}",
+        escaped,
+        shell_quote(root)
+    );
     if let Some(p) = pathspecs.first() {
         out.push_str(&format!(" --file {}", shell_quote(p)));
     }
@@ -2653,7 +2815,8 @@ mod tests {
     /// canonicalized root so `starts_with` comparisons are stable on
     /// platforms where the temp dir is a symlink (macOS).
     fn scratch_repo(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("pixel-guard-{}-{}", name, std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("pixel-guard-{}-{}", name, std::process::id()));
         std::fs::create_dir_all(root.join("src")).unwrap();
         canonical(&root)
     }
@@ -2796,9 +2959,15 @@ mod tests {
         let m = load_manifest(&repo).unwrap();
         assert!(!allowed(&c, &m), "c.rs is outside the manifest");
         let msg = scoping_advisory_lines(&c, &m).join("\n");
-        assert!(msg.contains("advisory"), "must be phrased as advisory: {msg}");
+        assert!(
+            msg.contains("advisory"),
+            "must be phrased as advisory: {msg}"
+        );
         assert!(msg.contains("src/c.rs"), "must name the file: {msg}");
-        assert!(msg.contains("pixel targets"), "must suggest re-scoping: {msg}");
+        assert!(
+            msg.contains("pixel targets"),
+            "must suggest re-scoping: {msg}"
+        );
         assert!(!msg.contains("BLOCKED"), "must not read as a deny: {msg}");
         assert!(!msg.contains("PIXEL_TARGETS_GUARD"), "no bypass ad: {msg}");
     }
@@ -2809,7 +2978,10 @@ mod tests {
         let f = repo.join("src").join("a.rs");
         std::fs::write(&f, "x").unwrap();
         let msg = mandate_advisory_lines(&f, &repo).join("\n");
-        assert!(msg.contains("advisory") && !msg.contains("BLOCKED"), "{msg}");
+        assert!(
+            msg.contains("advisory") && !msg.contains("BLOCKED"),
+            "{msg}"
+        );
         assert!(msg.contains("pixel targets"), "{msg}");
         let msg = expired_manifest_advisory_lines(&repo).join("\n");
         assert!(msg.contains("expired") && !msg.contains("BLOCKED"), "{msg}");
@@ -2832,7 +3004,10 @@ mod tests {
         );
         assert!(matches!(load_manifest_state(&repo), ManifestState::Expired));
         let missing = scratch_repo("expired-state-missing");
-        assert!(matches!(load_manifest_state(&missing), ManifestState::Absent));
+        assert!(matches!(
+            load_manifest_state(&missing),
+            ManifestState::Absent
+        ));
     }
 
     #[test]
@@ -2951,8 +3126,14 @@ mod tests {
         let lines = bash_deny_lines("git reset --hard history-rewrite", Some(&repo))
             .expect("branch-targeted reset --hard must still be denied");
         let msg = lines.join("\n");
-        assert!(msg.contains("git checkout -B"), "should suggest checkout -B: {msg}");
-        assert!(!msg.contains("pixel rescue"), "should NOT suggest rescue for branch repoint: {msg}");
+        assert!(
+            msg.contains("git checkout -B"),
+            "should suggest checkout -B: {msg}"
+        );
+        assert!(
+            !msg.contains("pixel rescue"),
+            "should NOT suggest rescue for branch repoint: {msg}"
+        );
     }
 
     #[test]
@@ -2962,8 +3143,14 @@ mod tests {
         let lines = bash_deny_lines("git reset --hard HEAD~3", Some(repo))
             .expect("HEAD~N reset must be denied");
         let msg = lines.join("\n");
-        assert!(msg.contains("pixel rescue"), "should suggest rescue for HEAD~N: {msg}");
-        assert!(!msg.contains("git checkout -B"), "should NOT suggest checkout -B for HEAD~N: {msg}");
+        assert!(
+            msg.contains("pixel rescue"),
+            "should suggest rescue for HEAD~N: {msg}"
+        );
+        assert!(
+            !msg.contains("git checkout -B"),
+            "should NOT suggest checkout -B for HEAD~N: {msg}"
+        );
     }
 
     #[test]
@@ -2973,7 +3160,10 @@ mod tests {
         let lines = bash_deny_lines("git reset --hard abc123def456789", Some(repo))
             .expect("raw OID reset must be denied");
         let msg = lines.join("\n");
-        assert!(msg.contains("pixel rescue"), "should suggest rescue for raw OID: {msg}");
+        assert!(
+            msg.contains("pixel rescue"),
+            "should suggest rescue for raw OID: {msg}"
+        );
     }
 
     #[test]
@@ -2983,7 +3173,10 @@ mod tests {
         let lines = bash_deny_lines("git reset --hard HEAD", Some(repo))
             .expect("bare HEAD reset must be denied");
         let msg = lines.join("\n");
-        assert!(msg.contains("pixel rescue"), "should suggest rescue for bare HEAD: {msg}");
+        assert!(
+            msg.contains("pixel rescue"),
+            "should suggest rescue for bare HEAD: {msg}"
+        );
     }
 
     #[test]
@@ -3000,7 +3193,9 @@ mod tests {
         assert!(!is_branch_like("HEAD^"));
         assert!(!is_branch_like("HEAD@{1}"));
         // Raw OIDs — NOT branch-like
-        assert!(!is_branch_like("abc123def4567890123456789012345678901234567")); // 40 hex
+        assert!(!is_branch_like(
+            "abc123def4567890123456789012345678901234567"
+        )); // 40 hex
         assert!(!is_branch_like("abc1234")); // 7 hex (short OID)
         assert!(!is_branch_like(""));
     }
@@ -3020,7 +3215,11 @@ mod tests {
             bash_deny_lines("git commit -m 'step 1; git reset --hard later'", Some(repo)).is_none()
         );
         assert!(
-            bash_deny_lines("pixel publish --message \"cleanup | git clean -fd equivalent\" .", Some(repo)).is_none()
+            bash_deny_lines(
+                "pixel publish --message \"cleanup | git clean -fd equivalent\" .",
+                Some(repo)
+            )
+            .is_none()
         );
         assert!(
             git_mutation_substitute_lines(
@@ -3032,9 +3231,7 @@ mod tests {
             "a multi-line --message mentioning `git add` must not deny pixel's own substitute"
         );
         // …but a genuinely unquoted chained invocation is still caught.
-        assert!(
-            bash_deny_lines("pixel search 'x' . && git reset --hard", Some(repo)).is_some()
-        );
+        assert!(bash_deny_lines("pixel search 'x' . && git reset --hard", Some(repo)).is_some());
     }
 
     #[test]
@@ -3051,13 +3248,17 @@ mod tests {
             "git push --force",
             "git stash drop",
         ] {
-            let msg = non_blocking_advisory_lines(&bash_deny_lines(cmd, Some(repo)).unwrap()).join("\n");
+            let msg =
+                non_blocking_advisory_lines(&bash_deny_lines(cmd, Some(repo)).unwrap()).join("\n");
             assert!(
                 !msg.contains("PIXEL_TARGETS_GUARD"),
                 "advisory for `{cmd}` must not advertise the kill switch: {msg}"
             );
             assert!(!msg.contains("BLOCKED"), "must be non-blocking: {msg}");
-            assert!(msg.contains("Proceeding"), "must allow the original command: {msg}");
+            assert!(
+                msg.contains("Proceeding"),
+                "must allow the original command: {msg}"
+            );
         }
         let mut input = serde_json::Map::new();
         input.insert("pattern".to_string(), Value::String("foo".to_string()));
@@ -3086,17 +3287,26 @@ mod tests {
         // the rest of the pipe is preserved. This is the common agent pattern:
         // `grep -rln "pattern" ... | grep -v node_modules | sort | wc -l`
         let rewritten = try_rewrite_bash("rg foo | head -5", Path::new("/tmp"));
-        assert!(rewritten.is_some(), "first grep segment in a pipeline should be rewritten");
+        assert!(
+            rewritten.is_some(),
+            "first grep segment in a pipeline should be rewritten"
+        );
         let cmd = rewritten.unwrap();
         assert!(cmd.starts_with("pixel search 'foo'"), "cmd was: {cmd}");
-        assert!(cmd.contains("| head -5"), "rest of pipe must be preserved, cmd was: {cmd}");
+        assert!(
+            cmd.contains("| head -5"),
+            "rest of pipe must be preserved, cmd was: {cmd}"
+        );
     }
 
     #[test]
     fn pipeline_with_non_grep_first_segment_not_rewritten() {
         // If the first segment isn't grep/rg, don't touch the pipeline.
         let rewritten = try_rewrite_bash("cat foo.txt | grep bar", Path::new("/tmp"));
-        assert!(rewritten.is_none(), "non-grep first segment must not be rewritten");
+        assert!(
+            rewritten.is_none(),
+            "non-grep first segment must not be rewritten"
+        );
     }
 
     #[test]
@@ -3122,7 +3332,10 @@ mod tests {
         let idx = scratch_repo("compound-idx");
         std::fs::create_dir_all(idx.join(".pixel")).unwrap();
         let rewritten = try_rewrite_bash("rg foo && echo hi", &idx);
-        assert!(rewritten.is_some(), "compound command should rewrite grep segment");
+        assert!(
+            rewritten.is_some(),
+            "compound command should rewrite grep segment"
+        );
         let rw = rewritten.unwrap();
         assert!(rw.contains("pixel search"), "should contain pixel search");
         assert!(rw.contains("echo hi"), "should preserve the echo suffix");
@@ -3133,7 +3346,10 @@ mod tests {
         let idx = scratch_repo("compound-semi");
         std::fs::create_dir_all(idx.join(".pixel")).unwrap();
         let rewritten = try_rewrite_bash("rg foo; echo hi", &idx);
-        assert!(rewritten.is_some(), "compound command with ; should rewrite grep segment");
+        assert!(
+            rewritten.is_some(),
+            "compound command with ; should rewrite grep segment"
+        );
         let rw = rewritten.unwrap();
         assert!(rw.contains("pixel search"), "should contain pixel search");
         assert!(rw.contains("echo hi"), "should preserve the echo suffix");
@@ -3151,7 +3367,8 @@ mod tests {
 
     #[test]
     fn regexp_equals_pattern() {
-        let rewritten = try_rewrite_grep("grep --regexp=foo", Path::new("/repo"), Path::new("/repo"));
+        let rewritten =
+            try_rewrite_grep("grep --regexp=foo", Path::new("/repo"), Path::new("/repo"));
         assert_eq!(
             rewritten,
             Some("pixel search 'foo' /repo --context 5".to_string())
@@ -3233,20 +3450,35 @@ mod tests {
         // filters handle the rest. The pattern must be correctly identified.
         let repo = Path::new("/repo");
         let rewritten = try_rewrite_grep("grep --include=*.rs foo", repo, repo);
-        assert!(rewritten.is_some(), "--include should be rewritten as superset");
+        assert!(
+            rewritten.is_some(),
+            "--include should be rewritten as superset"
+        );
         assert!(rewritten.unwrap().contains("'foo'"), "pattern must be foo");
 
         let rewritten = try_rewrite_grep("grep --glob '*.rs' foo", repo, repo);
-        assert!(rewritten.is_some(), "--glob should be rewritten as superset");
+        assert!(
+            rewritten.is_some(),
+            "--glob should be rewritten as superset"
+        );
 
         // `rg --type rust foo` must not misparse "rust" as the pattern.
         let rewritten = try_rewrite_grep("rg --type rust foo", repo, repo);
-        assert!(rewritten.is_some(), "--type should be rewritten as superset");
-        assert!(rewritten.unwrap().contains("'foo'"), "pattern must be foo, not rust");
+        assert!(
+            rewritten.is_some(),
+            "--type should be rewritten as superset"
+        );
+        assert!(
+            rewritten.unwrap().contains("'foo'"),
+            "pattern must be foo, not rust"
+        );
 
         let rewritten = try_rewrite_grep("rg -t rust foo", repo, repo);
         assert!(rewritten.is_some(), "-t should be rewritten as superset");
-        assert!(rewritten.unwrap().contains("'foo'"), "pattern must be foo, not rust");
+        assert!(
+            rewritten.unwrap().contains("'foo'"),
+            "pattern must be foo, not rust"
+        );
     }
 
     #[test]
@@ -3346,7 +3578,10 @@ mod tests {
     }
 
     fn now_unix() -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
     }
 
     /// Write `text` as `<root>/.pixel/targets.json`.
@@ -3473,7 +3708,10 @@ mod tests {
         let msg = sub(cmd)
             .unwrap_or_else(|| panic!("`{cmd}` must be substitute-denied"))
             .join("\n");
-        assert!(msg.contains("BLOCKED [PIXEL_SUBSTITUTE]"), "reason code missing for `{cmd}`: {msg}");
+        assert!(
+            msg.contains("BLOCKED [PIXEL_SUBSTITUTE]"),
+            "reason code missing for `{cmd}`: {msg}"
+        );
         assert!(
             msg.contains(substitute_fragment),
             "substitute for `{cmd}` must contain `{substitute_fragment}`: {msg}"
@@ -3487,11 +3725,11 @@ mod tests {
 
     #[test]
     fn substitute_commit_with_message_parsed() {
-        let msg = assert_substitute_contract(
-            "git commit -m 'fix the parser'",
-            "pixel publish",
+        let msg = assert_substitute_contract("git commit -m 'fix the parser'", "pixel publish");
+        assert!(
+            msg.contains("--message 'fix the parser'"),
+            "parsed -m must enrich the suggestion: {msg}"
         );
-        assert!(msg.contains("--message 'fix the parser'"), "parsed -m must enrich the suggestion: {msg}");
         assert!(msg.contains("--request-id <id>"), "{msg}");
         // --message form and -am cluster parse too.
         let msg = assert_substitute_contract("git commit --message 'x y'", "pixel publish");
@@ -3499,22 +3737,29 @@ mod tests {
         // A single safe word stays bare through shell_quote.
         let msg = assert_substitute_contract("git commit -am 'both words here'", "pixel publish");
         assert!(msg.contains("--message 'both words here'"), "{msg}");
-        assert!(msg.contains("-a detected"), "-a must enrich the suggestion: {msg}");
+        assert!(
+            msg.contains("-a detected"),
+            "-a must enrich the suggestion: {msg}"
+        );
     }
 
     #[test]
     fn substitute_commit_without_message_uses_placeholder() {
         let msg = assert_substitute_contract("git commit", "pixel publish");
-        assert!(msg.contains("--message \"<msg>\""), "placeholder expected: {msg}");
-        assert!(msg.contains("--files <file>"), "files placeholder expected: {msg}");
+        assert!(
+            msg.contains("--message \"<msg>\""),
+            "placeholder expected: {msg}"
+        );
+        assert!(
+            msg.contains("--files <file>"),
+            "files placeholder expected: {msg}"
+        );
     }
 
     #[test]
     fn substitute_commit_pathspecs_become_files_flags() {
-        let msg = assert_substitute_contract(
-            "git commit -m fix src/a.rs src/b.rs",
-            "pixel publish",
-        );
+        let msg =
+            assert_substitute_contract("git commit -m fix src/a.rs src/b.rs", "pixel publish");
         assert!(
             msg.contains("--files src/a.rs --files src/b.rs"),
             "each pathspec must be its own --files: {msg}"
@@ -3523,17 +3768,27 @@ mod tests {
 
     #[test]
     fn substitute_commit_amend_suggests_publish_amend() {
-        let msg = assert_substitute_contract("git commit --amend -m better", "pixel publish --amend");
+        let msg =
+            assert_substitute_contract("git commit --amend -m better", "pixel publish --amend");
         assert!(msg.contains("--message better"), "{msg}");
     }
 
     #[test]
     fn substitute_push_plain_and_with_lease() {
-        let msg = assert_substitute_contract("git push origin main", "pixel push origin main --request-id <id>");
+        let msg = assert_substitute_contract(
+            "git push origin main",
+            "pixel push origin main --request-id <id>",
+        );
         assert!(msg.contains("/repo"), "{msg}");
         // --force-with-lease is allowed by the destructive tier but IS
         // substitute-denied — pixel push carries the same lease semantics.
-        assert!(bash_deny_lines("git push --force-with-lease origin main", Some(Path::new("/repo"))).is_none());
+        assert!(
+            bash_deny_lines(
+                "git push --force-with-lease origin main",
+                Some(Path::new("/repo"))
+            )
+            .is_none()
+        );
         assert_substitute_contract(
             "git push --force-with-lease origin main",
             "pixel push origin main --request-id <id>",
@@ -3545,9 +3800,18 @@ mod tests {
 
     #[test]
     fn substitute_branch_creation() {
-        assert_substitute_contract("git checkout -b feature/x", "pixel branch feature/x --request-id <id>");
-        assert_substitute_contract("git switch -c feature/y", "pixel branch feature/y --request-id <id>");
-        assert_substitute_contract("git switch --create feature/z", "pixel branch feature/z --request-id <id>");
+        assert_substitute_contract(
+            "git checkout -b feature/x",
+            "pixel branch feature/x --request-id <id>",
+        );
+        assert_substitute_contract(
+            "git switch -c feature/y",
+            "pixel branch feature/y --request-id <id>",
+        );
+        assert_substitute_contract(
+            "git switch --create feature/z",
+            "pixel branch feature/z --request-id <id>",
+        );
     }
 
     #[test]
@@ -3589,16 +3853,16 @@ mod tests {
             "git add -i",
             "git add --interactive",
         ] {
-            assert!(sub(cmd).is_none(), "`{cmd}` must pass through the substitute tier");
+            assert!(
+                sub(cmd).is_none(),
+                "`{cmd}` must pass through the substitute tier"
+            );
         }
     }
 
     #[test]
     fn substitute_add_with_pathspecs() {
-        let msg = assert_substitute_contract(
-            "git add src/a.rs src/b.rs",
-            "pixel publish",
-        );
+        let msg = assert_substitute_contract("git add src/a.rs src/b.rs", "pixel publish");
         assert!(
             msg.contains("--files src/a.rs --files src/b.rs"),
             "each pathspec must be its own --files: {msg}"
@@ -3616,7 +3880,12 @@ mod tests {
 
     #[test]
     fn substitute_add_all_variant() {
-        for cmd in ["git add -A", "git add --all", "git add -u", "git add --update"] {
+        for cmd in [
+            "git add -A",
+            "git add --all",
+            "git add -u",
+            "git add --update",
+        ] {
             let msg = assert_substitute_contract(cmd, "pixel publish");
             assert!(
                 msg.contains("List each modified tracked file"),
@@ -3627,17 +3896,28 @@ mod tests {
 
     #[test]
     fn substitute_only_in_indexed_repo() {
-        assert!(git_mutation_substitute_lines("git commit -m x", None, Path::new("/repo")).is_none());
+        assert!(
+            git_mutation_substitute_lines("git commit -m x", None, Path::new("/repo")).is_none()
+        );
     }
 
     #[test]
     fn substitute_advisory_keeps_suggestion_and_allows_original() {
         let lines = sub("git commit -m x").unwrap();
         let advisory = non_blocking_advisory_lines(&lines).join("\n");
-        assert!(!advisory.contains("BLOCKED"), "must not read as a deny: {advisory}");
+        assert!(
+            !advisory.contains("BLOCKED"),
+            "must not read as a deny: {advisory}"
+        );
         assert!(advisory.contains("pixel-guard advisory"), "{advisory}");
-        assert!(advisory.contains("pixel publish"), "suggestion must survive the downgrade: {advisory}");
-        assert!(advisory.contains("Proceeding"), "the original git command must remain available: {advisory}");
+        assert!(
+            advisory.contains("pixel publish"),
+            "suggestion must survive the downgrade: {advisory}"
+        );
+        assert!(
+            advisory.contains("Proceeding"),
+            "the original git command must remain available: {advisory}"
+        );
     }
 
     #[test]
@@ -3647,7 +3927,9 @@ mod tests {
         // first, and the substitute tier's push arm can't even see it
         // in practice — but assert the destructive verdict directly).
         let repo = Path::new("/repo");
-        let msg = bash_deny_lines("git push --force origin main", Some(repo)).unwrap().join("\n");
+        let msg = bash_deny_lines("git push --force origin main", Some(repo))
+            .unwrap()
+            .join("\n");
         assert!(msg.contains("destroy remote history"), "{msg}");
     }
 
@@ -3658,7 +3940,10 @@ mod tests {
         let store = transcript_store_hit("sqlite3 ~/.zcode/cli/db/db.sqlite 'select 1'");
         assert_eq!(store, Some(".zcode/cli/db"));
         let msg = transcript_archaeology_advisory_lines(store.unwrap()).join("\n");
-        assert!(msg.contains("Advisory") && !msg.contains("BLOCKED"), "{msg}");
+        assert!(
+            msg.contains("Advisory") && !msg.contains("BLOCKED"),
+            "{msg}"
+        );
         assert!(msg.contains("pixel recall"), "{msg}");
     }
 
@@ -3680,8 +3965,14 @@ mod tests {
             input.insert("pattern".to_string(), Value::String("foo".to_string()));
             input.insert(field.to_string(), Value::String("x".to_string()));
             let msg = grep_redirect_advisory_lines("foo", Path::new("/tmp"), &input).join("\n");
-            assert!(!msg.contains("BLOCKED"), "Grep with `{field}` must not be blocked: {msg}");
-            assert!(msg.contains("Proceeding"), "Grep with `{field}` must proceed: {msg}");
+            assert!(
+                !msg.contains("BLOCKED"),
+                "Grep with `{field}` must not be blocked: {msg}"
+            );
+            assert!(
+                msg.contains("Proceeding"),
+                "Grep with `{field}` must proceed: {msg}"
+            );
         }
     }
 
@@ -3692,36 +3983,60 @@ mod tests {
         let mut input = serde_json::Map::new();
         input.insert("pattern".to_string(), Value::String("foo".to_string()));
         let msg = grep_redirect_advisory_lines("foo", &repo, &input).join("\n");
-        assert!(!msg.contains("BLOCKED"), "equivalent Grep must not be blocked: {msg}");
-        assert!(msg.contains("pixel search"), "advisory should show the Pixel equivalent: {msg}");
-        assert!(msg.contains("Proceeding with the original Grep call"), "{msg}");
+        assert!(
+            !msg.contains("BLOCKED"),
+            "equivalent Grep must not be blocked: {msg}"
+        );
+        assert!(
+            msg.contains("pixel search"),
+            "advisory should show the Pixel equivalent: {msg}"
+        );
+        assert!(
+            msg.contains("Proceeding with the original Grep call"),
+            "{msg}"
+        );
     }
 
     // --- sequencer pass-through for `git add` ---------------------------
 
     /// Create a real git repo in a temp dir and return its root path.
     fn real_repo(name: &str) -> PathBuf {
-        let root = std::env::temp_dir()
-            .join(format!("pixel-guard-seq-{}-{}", name, std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("pixel-guard-seq-{}-{}", name, std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         std::process::Command::new("git")
-            .arg("init").arg("-q").arg("-b").arg("main").arg(&root)
-            .status().unwrap();
+            .arg("init")
+            .arg("-q")
+            .arg("-b")
+            .arg("main")
+            .arg(&root)
+            .status()
+            .unwrap();
         std::process::Command::new("git")
-            .arg("-C").arg(&root)
+            .arg("-C")
+            .arg(&root)
             .args(["config", "user.email", "t@t"])
-            .status().unwrap();
+            .status()
+            .unwrap();
         std::process::Command::new("git")
-            .arg("-C").arg(&root)
+            .arg("-C")
+            .arg(&root)
             .args(["config", "user.name", "t"])
-            .status().unwrap();
+            .status()
+            .unwrap();
         std::fs::write(root.join("a.txt"), b"a").unwrap();
         std::process::Command::new("git")
-            .arg("-C").arg(&root).args(["add", "."])
-            .status().unwrap();
+            .arg("-C")
+            .arg(&root)
+            .args(["add", "."])
+            .status()
+            .unwrap();
         std::process::Command::new("git")
-            .arg("-C").arg(&root).args(["commit", "-qm", "init"])
-            .status().unwrap();
+            .arg("-C")
+            .arg(&root)
+            .args(["commit", "-qm", "init"])
+            .status()
+            .unwrap();
         canonical(&root)
     }
 
@@ -3820,7 +4135,8 @@ mod tests {
         let root = real_repo("commit-merge");
         std::fs::write(root.join(".git").join("MERGE_HEAD"), b"def456\n").unwrap();
         assert!(
-            git_mutation_substitute_lines("git commit -m 'resolve merge'", Some(&root), &root).is_none(),
+            git_mutation_substitute_lines("git commit -m 'resolve merge'", Some(&root), &root)
+                .is_none(),
             "`git commit` during merge must pass through, not be substitute-denied"
         );
     }

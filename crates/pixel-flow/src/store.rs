@@ -22,7 +22,8 @@ pub fn flow_dir() -> PathBuf {
 /// Ensure the flow directory exists (mode 0700).
 pub fn ensure_flow_dir() -> Result<PathBuf, String> {
     let dir = flow_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("cannot create flow dir {}: {e}", dir.display()))?;
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("cannot create flow dir {}: {e}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -84,8 +85,8 @@ pub fn save(flow: &Flow) -> Result<PathBuf, String> {
     flow.validate()?;
     ensure_flow_dir()?;
     let path = flow_path(&flow.name);
-    let json = serde_json::to_string_pretty(flow)
-        .map_err(|e| format!("cannot serialize flow: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(flow).map_err(|e| format!("cannot serialize flow: {e}"))?;
     write_atomic(&path, json.as_bytes())
         .map_err(|e| format!("cannot write flow '{}': {e}", path.display()))?;
     Ok(path)
@@ -97,8 +98,7 @@ pub fn delete(name: &str) -> Result<bool, String> {
     if !path.exists() {
         return Ok(false);
     }
-    fs::remove_file(&path)
-        .map_err(|e| format!("cannot delete flow '{}': {e}", path.display()))?;
+    fs::remove_file(&path).map_err(|e| format!("cannot delete flow '{}': {e}", path.display()))?;
     Ok(true)
 }
 
@@ -109,8 +109,8 @@ pub fn list() -> Result<Value, String> {
         return Ok(Value::Array(vec![]));
     }
     let mut entries: Vec<Value> = Vec::new();
-    let read = fs::read_dir(&dir)
-        .map_err(|e| format!("cannot read flow dir {}: {e}", dir.display()))?;
+    let read =
+        fs::read_dir(&dir).map_err(|e| format!("cannot read flow dir {}: {e}", dir.display()))?;
     for entry in read {
         let entry = entry.map_err(|e| format!("dir entry error: {e}"))?;
         let path = entry.path();
@@ -218,21 +218,27 @@ mod tests {
     fn save_load_round_trip() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("PIXEL_FLOW_DIR", tmp.path()); }
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
+        }
         let flow = make_flow("round-trip-test");
         let saved = save(&flow).unwrap();
         assert!(saved.exists());
         let loaded = load("round-trip-test").unwrap();
         assert_eq!(loaded.name, "round-trip-test");
         assert_eq!(loaded.title, "Test");
-        unsafe { std::env::remove_var("PIXEL_FLOW_DIR"); }
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
     }
 
     #[test]
     fn list_returns_saved_flows() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("PIXEL_FLOW_DIR", tmp.path()); }
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
+        }
         save(&make_flow("alpha")).unwrap();
         save(&make_flow("beta")).unwrap();
         let list = list().unwrap();
@@ -240,28 +246,38 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["name"].as_str(), Some("alpha"));
         assert_eq!(arr[1]["name"].as_str(), Some("beta"));
-        unsafe { std::env::remove_var("PIXEL_FLOW_DIR"); }
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
     }
 
     #[test]
     fn delete_removes_flow() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("PIXEL_FLOW_DIR", tmp.path()); }
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
+        }
         save(&make_flow("to-delete")).unwrap();
         assert!(exists("to-delete"));
         assert!(delete("to-delete").unwrap());
         assert!(!exists("to-delete"));
         assert!(!delete("to-delete").unwrap()); // already gone
-        unsafe { std::env::remove_var("PIXEL_FLOW_DIR"); }
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
     }
 
     #[test]
     fn load_missing_errors() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("PIXEL_FLOW_DIR", tmp.path()); }
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
+        }
         assert!(load("nonexistent").is_err());
-        unsafe { std::env::remove_var("PIXEL_FLOW_DIR"); }
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
     }
 }

@@ -118,7 +118,10 @@ fn bash_grep_denies_rather_than_racing_rtk_with_a_rewrite() {
     for cmd in ["grep -rn GUARD_NEEDLE_XYZ .", "rg GUARD_NEEDLE_XYZ"] {
         let (code, stdout, stderr) = run_guard_env(&bash_payload(&repo, cmd), &[]);
         assert_eq!(code, 0, "`{cmd}` must remain available: {stderr}");
-        assert!(stdout.contains("updatedInput") && stdout.contains("pixel search"), "{stdout}");
+        assert!(
+            stdout.contains("updatedInput") && stdout.contains("pixel search"),
+            "{stdout}"
+        );
     }
 }
 
@@ -154,8 +157,14 @@ fn devin_config_dir_is_not_treated_as_a_transcript_store() {
 
     // Control: the real store path is still identified, but remains allowed.
     let (code, stdout, stderr) = run_guard_env(&bash_payload(&dir, TRANSCRIPT_POKE), &env);
-    assert_eq!(code, 0, "real transcript store must remain available: {stderr}");
-    assert!(stdout.contains("pixel recall"), "advisory should name the substitute: {stdout}");
+    assert_eq!(
+        code, 0,
+        "real transcript store must remain available: {stderr}"
+    );
+    assert!(
+        stdout.contains("pixel recall"),
+        "advisory should name the substitute: {stdout}"
+    );
 
     // Regression: the CONFIG dir must not be treated as a store.
     let cfg_poke = "sqlite3 ~/.config/devin/config.json .tables";
@@ -218,7 +227,10 @@ fn grep_tool_remains_available_with_search_advisory() {
         "tool_input": {"pattern": "GUARD_NEEDLE_XYZ"},
     });
     let (code, stdout, stderr) = run_guard_env(&payload, &[]);
-    assert_eq!(code, 0, "Grep in an indexed repo must remain available: {stderr}");
+    assert_eq!(
+        code, 0,
+        "Grep in an indexed repo must remain available: {stderr}"
+    );
     assert!(
         stdout.contains("pixel-guard advisory"),
         "advisory header missing: {stdout}"
@@ -325,8 +337,14 @@ fn bash_git_commit_gets_substitute_advisory() {
     let repo = indexed_repo("sub-commit");
     let payload = bash_payload(&repo, "git commit -m 'fix parser'");
     let (code, stdout, stderr) = run_guard_env(&payload, &[]);
-    assert_eq!(code, 0, "raw git commit must remain available: {stderr} {stdout}");
-    assert!(stdout.contains("pixel-guard advisory [PIXEL_SUBSTITUTE]"), "{stdout}");
+    assert_eq!(
+        code, 0,
+        "raw git commit must remain available: {stderr} {stdout}"
+    );
+    assert!(
+        stdout.contains("pixel-guard advisory [PIXEL_SUBSTITUTE]"),
+        "{stdout}"
+    );
     assert!(stdout.contains("pixel publish"), "{stdout}");
     assert!(
         stdout.contains("--message 'fix parser'"),
@@ -344,7 +362,10 @@ fn bash_git_add_gets_substitute_advisory() {
     let payload = bash_payload(&repo, "git add src/a.rs src/b.rs");
     let (code, stdout, stderr) = run_guard_env(&payload, &[]);
     assert_eq!(code, 0, "raw git add must remain available: {stderr}");
-    assert!(stdout.contains("pixel-guard advisory [PIXEL_SUBSTITUTE]"), "{stdout}");
+    assert!(
+        stdout.contains("pixel-guard advisory [PIXEL_SUBSTITUTE]"),
+        "{stdout}"
+    );
     assert!(stdout.contains("pixel publish"), "{stdout}");
     assert!(
         stdout.contains("--files src/a.rs --files src/b.rs"),
@@ -362,7 +383,10 @@ fn bash_git_add_dot_gets_substitute_advisory() {
     let payload = bash_payload(&repo, "git add .");
     let (code, stdout, stderr) = run_guard_env(&payload, &[]);
     assert_eq!(code, 0, "raw git add . must remain available: {stderr}");
-    assert!(stdout.contains("pixel-guard advisory [PIXEL_SUBSTITUTE]"), "{stdout}");
+    assert!(
+        stdout.contains("pixel-guard advisory [PIXEL_SUBSTITUTE]"),
+        "{stdout}"
+    );
     assert!(stdout.contains("pixel publish"), "{stdout}");
     assert!(
         stdout.contains("List each modified tracked file"),
@@ -373,7 +397,12 @@ fn bash_git_add_dot_gets_substitute_advisory() {
 #[test]
 fn bash_git_add_interactive_passes_through() {
     let repo = indexed_repo("sub-add-interactive");
-    for cmd in ["git add -p", "git add --patch", "git add -i", "git add --interactive"] {
+    for cmd in [
+        "git add -p",
+        "git add --patch",
+        "git add -i",
+        "git add --interactive",
+    ] {
         let payload = bash_payload(&repo, cmd);
         let (code, _stdout, stderr) = run_guard_env(&payload, &[]);
         assert_eq!(
@@ -404,8 +433,14 @@ fn bash_sequencer_state_passes_add_commit_and_side_selection() {
     ] {
         let payload = bash_payload(&repo, cmd);
         let (code, _stdout, stderr) = run_guard_env(&payload, &[]);
-        assert_eq!(code, 0, "`{cmd}` must pass during an active merge: {stderr}");
-        assert!(!stderr.contains("BLOCKED"), "`{cmd}` must not be denied: {stderr}");
+        assert_eq!(
+            code, 0,
+            "`{cmd}` must pass during an active merge: {stderr}"
+        );
+        assert!(
+            !stderr.contains("BLOCKED"),
+            "`{cmd}` must not be denied: {stderr}"
+        );
     }
 }
 
@@ -428,8 +463,7 @@ fn bash_publish_message_mentioning_git_add_not_denied() {
 fn escape_hatch_downgrades_commit_to_advisory() {
     let repo = indexed_repo("sub-escape");
     let payload = bash_payload(&repo, "git commit -m 'fix parser'");
-    let (code, stdout, stderr) =
-        run_guard_env(&payload, &[("PIXEL_GUARD_RAW_GIT", "1")]);
+    let (code, stdout, stderr) = run_guard_env(&payload, &[("PIXEL_GUARD_RAW_GIT", "1")]);
     assert_eq!(code, 0, "escape hatch must allow the command: {stderr}");
     assert!(
         stdout.contains("pixel publish"),
@@ -445,8 +479,7 @@ fn escape_hatch_downgrades_commit_to_advisory() {
 fn escape_hatch_does_not_touch_destructive_tier() {
     let repo = indexed_repo("sub-escape-destructive");
     let payload = bash_payload(&repo, "git reset --hard HEAD~1");
-    let (code, stdout, stderr) =
-        run_guard_env(&payload, &[("PIXEL_GUARD_RAW_GIT", "1")]);
+    let (code, stdout, stderr) = run_guard_env(&payload, &[("PIXEL_GUARD_RAW_GIT", "1")]);
     assert_eq!(code, 0, "destructive commands remain available: {stderr}");
     assert!(stdout.contains("pixel-guard advisory"), "{stdout}");
 }
@@ -467,7 +500,10 @@ fn transcript_poke_gets_advisory_when_recall_index_exists() {
         &payload,
         &[("PIXEL_RECALL_DIR", recall_dir.to_str().unwrap())],
     );
-    assert_eq!(code, 0, "poke must remain available when the index exists: {stderr}");
+    assert_eq!(
+        code, 0,
+        "poke must remain available when the index exists: {stderr}"
+    );
     assert!(stdout.contains("pixel recall sessions --agent"), "{stdout}");
     assert!(
         !stdout.contains("PIXEL_GUARD_RAW_TRANSCRIPTS=1"),
@@ -482,7 +518,10 @@ fn transcript_poke_gets_advisory_when_recall_index_exists() {
             ("PIXEL_GUARD_RAW_TRANSCRIPTS", "1"),
         ],
     );
-    assert_eq!(code, 0, "PIXEL_GUARD_RAW_TRANSCRIPTS=1 must downgrade: {stdout}");
+    assert_eq!(
+        code, 0,
+        "PIXEL_GUARD_RAW_TRANSCRIPTS=1 must downgrade: {stdout}"
+    );
     assert!(stdout.contains("Advisory"), "{stdout}");
 }
 
@@ -492,10 +531,8 @@ fn transcript_poke_advisory_when_no_recall_index() {
     let empty = dir.join("empty-recall");
     std::fs::create_dir_all(&empty).unwrap();
     let payload = bash_payload(&dir, TRANSCRIPT_POKE);
-    let (code, stdout, stderr) = run_guard_env(
-        &payload,
-        &[("PIXEL_RECALL_DIR", empty.to_str().unwrap())],
-    );
+    let (code, stdout, stderr) =
+        run_guard_env(&payload, &[("PIXEL_RECALL_DIR", empty.to_str().unwrap())]);
     assert_eq!(
         code, 0,
         "without a recall index there is no substitute — advisory only: {stderr}"
@@ -511,10 +548,8 @@ fn zcode_poke_flagged_via_marker() {
     let empty = dir.join("empty-recall");
     std::fs::create_dir_all(&empty).unwrap();
     let payload = bash_payload(&dir, "sqlite3 ~/.zcode/cli/db/db.sqlite '.tables'");
-    let (code, stdout, _stderr) = run_guard_env(
-        &payload,
-        &[("PIXEL_RECALL_DIR", empty.to_str().unwrap())],
-    );
+    let (code, stdout, _stderr) =
+        run_guard_env(&payload, &[("PIXEL_RECALL_DIR", empty.to_str().unwrap())]);
     assert_eq!(code, 0, "no index → advisory: {stdout}");
     assert!(
         stdout.contains(".zcode/cli/db") && stdout.contains("pixel recall"),

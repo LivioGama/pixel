@@ -171,13 +171,23 @@ impl RecallService {
                 } else {
                     self.embedder.as_deref_mut()
                 };
-                let result = ask(&self.store, &segments, &vectors, embedder, &query, &filters, k)?;
+                let result = ask(
+                    &self.store,
+                    &segments,
+                    &vectors,
+                    embedder,
+                    &query,
+                    &filters,
+                    k,
+                )?;
                 let mut text = String::new();
                 if let Some(n) = &result.notice {
                     text.push_str(&format!("note: {n}\n"));
                 }
                 if result.groups.is_empty() {
-                    text.push_str("no matching sessions — nothing in the corpus resembles that query\n");
+                    text.push_str(
+                        "no matching sessions — nothing in the corpus resembles that query\n",
+                    );
                 }
                 for g in &result.groups {
                     text.push_str(&format_group(g));
@@ -277,18 +287,22 @@ impl Corpus for RecallService {
     fn handle(&mut self, req: Request) -> Response {
         let op_name = req.op_name();
         match req {
-            Request::Ping => Envelope::success(op_name, json!({
-                "pong": true,
-                "root": self.root.display().to_string(),
-                "corpus": "recall",
-                "protocol_version": PROTOCOL_VERSION,
-            })),
+            Request::Ping => Envelope::success(
+                op_name,
+                json!({
+                    "pong": true,
+                    "root": self.root.display().to_string(),
+                    "corpus": "recall",
+                    "protocol_version": PROTOCOL_VERSION,
+                }),
+            ),
             Request::Shutdown => Envelope::success(op_name, json!({"shutting_down": true})),
             Request::Recall { action, params } => match self.op(&action, params) {
                 Ok(data) => Envelope::success(op_name, data),
                 Err(e) => failure_response(op_name, e),
             },
-            _ => failure_response(op_name,
+            _ => failure_response(
+                op_name,
                 "this daemon serves the transcript corpus; repository ops go to a repo daemon"
                     .to_string(),
             ),

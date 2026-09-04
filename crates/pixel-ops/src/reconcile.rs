@@ -21,13 +21,47 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use pixel_git::GitRunner;
 
 use crate::durable::{sha256_hex, state_root};
 use crate::journal::{BeginOutcome, JournalOperation, OperationJournal};
 use crate::lock::RepositoryLock;
+
+/// True if a rebase is currently in progress (`.git/rebase-merge/` or
+/// `.git/rebase-apply/` exists). Guards `rebase --abort` calls so they
+/// only fire when there is actually a rebase to abort — calling
+/// `--abort` without an active rebase is a git error that can mask the
+/// real failure in the surrounding error-handling path.
+fn rebase_in_progress(root: &Path) -> bool {
+    let git_dir = root.join(".git");
+    // Worktree support: `.git` may be a file pointing at the real git dir.
+    let git_dir = if git_dir.is_file() {
+        // `gitdir: <path>` — read the pointer.
+        std::fs::read_to_string(&git_dir)
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("gitdir:"))
+                    .map(|l| l.trim_start_matches("gitdir:").trim().to_string())
+            })
+            .map(std::path::PathBuf::from)
+            .unwrap_or(git_dir)
+    } else {
+        git_dir
+    };
+    git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir()
+}
+
+/// Abort the current rebase if one is in progress. No-op if the repo is
+/// not mid-rebase — avoids a spurious git error that would mask the real
+/// failure in the caller's error-handling path.
+fn safe_rebase_abort(runner: &GitRunner) {
+    if rebase_in_progress(runner.root()) {
+        let _ = runner.run_opt(&["rebase", "--abort"]);
+    }
+}
 
 /// True if `path` is inside a pixel sidecar directory — `.pixel/` (current)
 /// or `.gitpixel/` (legacy; `pixel migrate` is opt-in, so pre-migration
@@ -57,9 +91,9 @@ fn dirty_excluding_sidecar(
     runner: &GitRunner,
     refuse_msg: &str,
 ) -> Result<Vec<(String, String)>, String> {
-    let dirty = runner.status_porcelain_or_err().map_err(|e| {
-        format!("{refuse_msg}: {e}")
-    })?;
+    let dirty = runner
+        .status_porcelain_or_err()
+        .map_err(|e| format!("{refuse_msg}: {e}"))?;
     Ok(dirty
         .into_iter()
         .filter(|(xy, p)| !ignorable_sidecar_entry(xy, p))
@@ -82,8 +116,8 @@ const REPORT_MAX_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ReconcileOptions {
-    pub strategy: String,    // "report" | "rebase-if-clean"
-    pub push: String,        // "auto" | "none" ("never" accepted as an alias of "none")
+    pub strategy: String, // "report" | "rebase-if-clean"
+    pub push: String,     // "auto" | "none" ("never" accepted as an alias of "none")
     pub request_id: String,
     /// `--into <target>` integration mode. `None` (the default) preserves the
     /// existing behavior exactly. `Some(target)` means: fetch the remote
@@ -224,7 +258,11 @@ pub fn reconcile_with_hooks(
     let push_mode = validate_push_mode(&opts.push)?;
 
     let runner = GitRunner::new(root);
-    let repo_key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf()).display().to_string();
+    let repo_key = root
+        .canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .display()
+        .to_string();
     // `into_target` participates in the replay-identity hash: the same
     // request_id with a different integration target must never replay a
     // cached result computed for another target (or for plain sync mode).
@@ -254,7 +292,12 @@ pub fn reconcile_with_hooks(
         opts.request_id.clone()
     };
 
-    let outcome = journal.begin(&request_id, JournalOperation::Update, &repo_key, &input_hash)?;
+    let outcome = journal.begin(
+        &request_id,
+        JournalOperation::Update,
+        &repo_key,
+        &input_hash,
+    )?;
     if let BeginOutcome::Replay(result) = outcome {
         return Ok(result);
     }
@@ -262,11 +305,14 @@ pub fn reconcile_with_hooks(
     let mut lock = RepositoryLock::acquire_with_state_root(
         &root.join(".git").display().to_string(),
         &state_root,
-    ).map_err(|_| "repository is busy".to_string())?;
+    )
+    .map_err(|_| "repository is busy".to_string())?;
 
     // Snapshot current state.
     let head = runner.rev_parse_head().ok_or("no HEAD")?;
-    let branch = runner.current_branch().unwrap_or_else(|| "HEAD".to_string());
+    let branch = runner
+        .current_branch()
+        .unwrap_or_else(|| "HEAD".to_string());
 
     // `--into <target>` integration mode: an entirely separate flow that
     // rebases the CURRENT branch onto origin/<target> and fast-forwards the
@@ -287,10 +333,12 @@ pub fn reconcile_with_hooks(
     // `refs/remotes/origin/<branch>` because it matches the remote's default
     // fetch refspec, without the non-determinism of pulling in unrelated
     // branch/tag churn.
-    runner.run(&["fetch", "--end-of-options", "origin", &branch]).map_err(|e| {
-        let _ = lock.release();
-        format!("git fetch: {e}")
-    })?;
+    runner
+        .run(&["fetch", "--end-of-options", "origin", &branch])
+        .map_err(|e| {
+            let _ = lock.release();
+            format!("git fetch: {e}")
+        })?;
 
     // The OID this call's own fetch just observed for the remote branch.
     // This — NOT local HEAD — is what a `--force-with-lease` must assert the
@@ -315,7 +363,8 @@ pub fn reconcile_with_hooks(
     // Classify with rev-list --left-right --count.
     let (ahead, behind) = classify_counts(&runner, &upstream);
 
-    let merge_base = runner.run_opt(&["merge-base", "HEAD", &upstream])
+    let merge_base = runner
+        .run_opt(&["merge-base", "HEAD", &upstream])
         .map(|o| String::from_utf8_lossy(&o).trim().to_string())
         .unwrap_or_default();
 
@@ -345,34 +394,41 @@ pub fn reconcile_with_hooks(
             // entries can never block it — filtering would be redundant.
             let dirty = runner.status_porcelain_or_err().map_err(|e| {
                 let _ = lock.release();
-                format!(
-                    "could not determine working-tree status, refusing to fast-forward: {e}"
-                )
+                format!("could not determine working-tree status, refusing to fast-forward: {e}")
             })?;
             if !dirty.is_empty() {
-                let changes = runner.diff_name_status_or_err(&head, &upstream).map_err(|e| {
-                    let _ = lock.release();
-                    format!(
-                        "could not determine which paths the fast-forward would change, \
+                let changes = runner
+                    .diff_name_status_or_err(&head, &upstream)
+                    .map_err(|e| {
+                        let _ = lock.release();
+                        format!(
+                            "could not determine which paths the fast-forward would change, \
                          refusing to proceed while dirty files are present: {e}"
-                    )
-                })?;
-                let changed_paths: std::collections::HashSet<String> = changes.iter().map(|(_, p)| p.clone()).collect();
-                let dirty_intersect: Vec<String> = dirty.iter()
+                        )
+                    })?;
+                let changed_paths: std::collections::HashSet<String> =
+                    changes.iter().map(|(_, p)| p.clone()).collect();
+                let dirty_intersect: Vec<String> = dirty
+                    .iter()
                     .filter(|(_, p)| changed_paths.contains(p))
                     .map(|(_, p)| p.clone())
                     .collect();
                 if !dirty_intersect.is_empty() {
                     let _ = lock.release();
-                    return Err(format!("UNSUPPORTED_STATE: dirty files would be overwritten: {}", dirty_intersect.join(", ")));
+                    return Err(format!(
+                        "UNSUPPORTED_STATE: dirty files would be overwritten: {}",
+                        dirty_intersect.join(", ")
+                    ));
                 }
             }
             // Fast-forward. `--ff-only` guarantees this can never fabricate
             // a merge commit.
-            runner.run(&["merge", "--ff-only", &upstream]).map_err(|e| {
-                let _ = lock.release();
-                format!("git merge --ff-only: {e}")
-            })?;
+            runner
+                .run(&["merge", "--ff-only", &upstream])
+                .map_err(|e| {
+                    let _ = lock.release();
+                    format!("git merge --ff-only: {e}")
+                })?;
             json!({
                 "state": "fast_forwarded",
                 "from": head,
@@ -388,7 +444,11 @@ pub fn reconcile_with_hooks(
                         "head": head,
                         "branch": branch,
                     }),
-                    LeaseOutcome::Raced { error, ahead: a2, behind: b2 } => json!({
+                    LeaseOutcome::Raced {
+                        error,
+                        ahead: a2,
+                        behind: b2,
+                    } => json!({
                         "state": "push_raced",
                         "head": head,
                         "branch": branch,
@@ -436,22 +496,31 @@ pub fn reconcile_with_hooks(
                     // sidecar is excluded: it is never tracked, never touched
                     // by rebase, and regenerated by the daemon — without this
                     // exclusion the daemon's own writes would block every call.
-                    let dirty = dirty_excluding_sidecar(&runner, "could not determine working-tree status, refusing rebase-if-clean").map_err(|e| {
+                    let dirty = dirty_excluding_sidecar(
+                        &runner,
+                        "could not determine working-tree status, refusing rebase-if-clean",
+                    )
+                    .map_err(|e| {
                         let _ = lock.release();
                         e
                     })?;
                     if !dirty.is_empty() {
                         let _ = lock.release();
-                        return Err(format!("UNSUPPORTED_STATE: rebase-if-clean requires clean worktree, {} dirty files", dirty.len()));
+                        return Err(format!(
+                            "UNSUPPORTED_STATE: rebase-if-clean requires clean worktree, {} dirty files",
+                            dirty.len()
+                        ));
                     }
 
                     // Backup ref written FIRST, before any attempt to touch
                     // the worktree.
                     let backup_ref = format!("refs/pixel/reconcile-backup/{branch}");
-                    runner.run(&["update-ref", &backup_ref, &head]).map_err(|e| {
-                        let _ = lock.release();
-                        format!("git update-ref (backup): {e}")
-                    })?;
+                    runner
+                        .run(&["update-ref", &backup_ref, &head])
+                        .map_err(|e| {
+                            let _ = lock.release();
+                            format!("git update-ref (backup): {e}")
+                        })?;
 
                     if !probe.clean {
                         // merge-tree predicts conflicts. Attempt the rebase
@@ -467,7 +536,12 @@ pub fn reconcile_with_hooks(
                                 let new_head = runner.rev_parse_head().unwrap_or_default();
                                 clear_conflict_state(root);
                                 if push_mode == "auto" {
-                                    match attempt_lease_push_or_reclassify(&runner, &branch, &upstream_oid, &upstream) {
+                                    match attempt_lease_push_or_reclassify(
+                                        &runner,
+                                        &branch,
+                                        &upstream_oid,
+                                        &upstream,
+                                    ) {
                                         LeaseOutcome::Pushed => json!({
                                             "state": "rebased",
                                             "from": head,
@@ -476,7 +550,11 @@ pub fn reconcile_with_hooks(
                                             "backup_ref": backup_ref,
                                             "pushed": true,
                                         }),
-                                        LeaseOutcome::Raced { error, ahead: a2, behind: b2 } => json!({
+                                        LeaseOutcome::Raced {
+                                            error,
+                                            ahead: a2,
+                                            behind: b2,
+                                        } => json!({
                                             "state": "rebased",
                                             "from": head,
                                             "to": new_head,
@@ -506,8 +584,14 @@ pub fn reconcile_with_hooks(
                             Err(_) => {
                                 // Rebase conflicted. Auto-resolve the conflict
                                 // markers in the worktree, then continue.
-                                let unmerged = runner.run_opt(&["diff", "--name-only", "--diff-filter=U"])
-                                    .map(|b| String::from_utf8_lossy(&b).lines().map(String::from).collect::<Vec<_>>())
+                                let unmerged = runner
+                                    .run_opt(&["diff", "--name-only", "--diff-filter=U"])
+                                    .map(|b| {
+                                        String::from_utf8_lossy(&b)
+                                            .lines()
+                                            .map(String::from)
+                                            .collect::<Vec<_>>()
+                                    })
                                     .unwrap_or_default();
                                 let mut rebase_resolved = Vec::new();
                                 let mut rebase_unresolved = Vec::new();
@@ -525,8 +609,10 @@ pub fn reconcile_with_hooks(
                                     // Use GIT_EDITOR=true to avoid opening an
                                     // editor for the rebase commit message.
                                     let cont = std::process::Command::new("git")
-                                        .arg("-C").arg(root)
-                                        .arg("rebase").arg("--continue")
+                                        .arg("-C")
+                                        .arg(root)
+                                        .arg("rebase")
+                                        .arg("--continue")
                                         .env("GIT_EDITOR", "true")
                                         .output()
                                         .ok()
@@ -535,7 +621,12 @@ pub fn reconcile_with_hooks(
                                         let new_head = runner.rev_parse_head().unwrap_or_default();
                                         clear_conflict_state(root);
                                         if push_mode == "auto" {
-                                            match attempt_lease_push_or_reclassify(&runner, &branch, &upstream_oid, &upstream) {
+                                            match attempt_lease_push_or_reclassify(
+                                                &runner,
+                                                &branch,
+                                                &upstream_oid,
+                                                &upstream,
+                                            ) {
                                                 LeaseOutcome::Pushed => json!({
                                                     "state": "rebased",
                                                     "from": head,
@@ -545,7 +636,11 @@ pub fn reconcile_with_hooks(
                                                     "pushed": true,
                                                     "auto_resolved": rebase_resolved,
                                                 }),
-                                                LeaseOutcome::Raced { error, ahead: a2, behind: b2 } => json!({
+                                                LeaseOutcome::Raced {
+                                                    error,
+                                                    ahead: a2,
+                                                    behind: b2,
+                                                } => json!({
                                                     "state": "rebased",
                                                     "from": head,
                                                     "to": new_head,
@@ -575,9 +670,16 @@ pub fn reconcile_with_hooks(
                                         }
                                     } else {
                                         // --continue failed, abort and report.
-                                        let _ = runner.run_opt(&["rebase", "--abort"]);
-                                        let report = build_conflict_report(&runner, &merge_base, &head, &upstream, &probe);
-                                        let conflict_count = report["conflict_count"].as_u64().unwrap_or(0) as usize;
+                                        safe_rebase_abort(&runner);
+                                        let report = build_conflict_report(
+                                            &runner,
+                                            &merge_base,
+                                            &head,
+                                            &upstream,
+                                            &probe,
+                                        );
+                                        let conflict_count =
+                                            report["conflict_count"].as_u64().unwrap_or(0) as usize;
                                         write_conflict_state(root, conflict_count);
                                         json!({
                                             "state": "diverged",
@@ -596,9 +698,16 @@ pub fn reconcile_with_hooks(
                                     }
                                 } else {
                                     // Some rebase conflicts couldn't be auto-resolved.
-                                    let _ = runner.run_opt(&["rebase", "--abort"]);
-                                    let report = build_conflict_report(&runner, &merge_base, &head, &upstream, &probe);
-                                    let conflict_count = report["conflict_count"].as_u64().unwrap_or(0) as usize;
+                                    safe_rebase_abort(&runner);
+                                    let report = build_conflict_report(
+                                        &runner,
+                                        &merge_base,
+                                        &head,
+                                        &upstream,
+                                        &probe,
+                                    );
+                                    let conflict_count =
+                                        report["conflict_count"].as_u64().unwrap_or(0) as usize;
                                     write_conflict_state(root, conflict_count);
                                     json!({
                                         "state": "diverged",
@@ -629,7 +738,12 @@ pub fn reconcile_with_hooks(
                                     // `new_head`: the rebase only rewrote
                                     // local history, the remote is still at
                                     // the OID this call fetched earlier.
-                                    match attempt_lease_push_or_reclassify(&runner, &branch, &upstream_oid, &upstream) {
+                                    match attempt_lease_push_or_reclassify(
+                                        &runner,
+                                        &branch,
+                                        &upstream_oid,
+                                        &upstream,
+                                    ) {
                                         LeaseOutcome::Pushed => json!({
                                             "state": "rebased",
                                             "from": head,
@@ -638,7 +752,11 @@ pub fn reconcile_with_hooks(
                                             "backup_ref": backup_ref,
                                             "pushed": true,
                                         }),
-                                        LeaseOutcome::Raced { error, ahead: a2, behind: b2 } => json!({
+                                        LeaseOutcome::Raced {
+                                            error,
+                                            ahead: a2,
+                                            behind: b2,
+                                        } => json!({
                                             "state": "rebased",
                                             "from": head,
                                             "to": new_head,
@@ -679,7 +797,7 @@ pub fn reconcile_with_hooks(
                                     .map(|(_, p)| p)
                                     .collect();
                                 // Never leave the repo mid-rebase.
-                                let _ = runner.run(&["rebase", "--abort"]);
+                                safe_rebase_abort(&runner);
                                 json!({
                                     "state": "diverged",
                                     "merge_base": merge_base,
@@ -824,7 +942,12 @@ fn reconcile_into(
     // later target move is a pure fast-forward. A diverged local target must
     // be reconciled on its own first — never forced, never merged.
     let target_is_ancestor = runner
-        .run_opt(&["merge-base", "--is-ancestor", &target_old_oid, &remote_target_oid])
+        .run_opt(&[
+            "merge-base",
+            "--is-ancestor",
+            &target_old_oid,
+            &remote_target_oid,
+        ])
         .is_some();
     if !target_is_ancestor {
         let _ = lock.release();
@@ -838,7 +961,11 @@ fn reconcile_into(
     // Clean worktree required — identical rule to the rebase-if-clean path,
     // same fail-closed status source. Pixel's own `.pixel/` sidecar is
     // excluded (see `rebase-if-clean` comment for rationale).
-    let dirty = dirty_excluding_sidecar(&runner, "could not determine working-tree status, refusing --into integration").map_err(|e| {
+    let dirty = dirty_excluding_sidecar(
+        &runner,
+        "could not determine working-tree status, refusing --into integration",
+    )
+    .map_err(|e| {
         let _ = lock.release();
         e
     })?;
@@ -873,10 +1000,12 @@ fn reconcile_into(
 
     // Backup ref written FIRST, before any attempt to touch the worktree.
     let backup_ref = format!("refs/pixel/reconcile-backup/{branch}");
-    runner.run(&["update-ref", &backup_ref, head]).map_err(|e| {
-        let _ = lock.release();
-        format!("git update-ref (backup): {e}")
-    })?;
+    runner
+        .run(&["update-ref", &backup_ref, head])
+        .map_err(|e| {
+            let _ = lock.release();
+            format!("git update-ref (backup): {e}")
+        })?;
 
     let probe = probe_merge_tree(root, head, &remote_target);
     if !probe.clean {
@@ -896,8 +1025,14 @@ fn reconcile_into(
                 }));
             }
             Err(_) => {
-                let unmerged = runner.run_opt(&["diff", "--name-only", "--diff-filter=U"])
-                    .map(|b| String::from_utf8_lossy(&b).lines().map(String::from).collect::<Vec<_>>())
+                let unmerged = runner
+                    .run_opt(&["diff", "--name-only", "--diff-filter=U"])
+                    .map(|b| {
+                        String::from_utf8_lossy(&b)
+                            .lines()
+                            .map(String::from)
+                            .collect::<Vec<_>>()
+                    })
                     .unwrap_or_default();
                 let mut rebase_resolved = Vec::new();
                 let mut rebase_unresolved = Vec::new();
@@ -912,8 +1047,10 @@ fn reconcile_into(
 
                 if rebase_unresolved.is_empty() && !rebase_resolved.is_empty() {
                     let cont = std::process::Command::new("git")
-                        .arg("-C").arg(root)
-                        .arg("rebase").arg("--continue")
+                        .arg("-C")
+                        .arg(root)
+                        .arg("rebase")
+                        .arg("--continue")
                         .env("GIT_EDITOR", "true")
                         .output()
                         .ok()
@@ -932,8 +1069,9 @@ fn reconcile_into(
                     }
                 }
                 // Fall back to manual.
-                let _ = runner.run_opt(&["rebase", "--abort"]);
-                let report = build_conflict_report(runner, &merge_base, head, &remote_target, &probe);
+                safe_rebase_abort(runner);
+                let report =
+                    build_conflict_report(runner, &merge_base, head, &remote_target, &probe);
                 let conflict_count = report["conflict_count"].as_u64().unwrap_or(0) as usize;
                 write_conflict_state(root, conflict_count);
                 return Ok(json!({
@@ -966,7 +1104,7 @@ fn reconcile_into(
             .filter(|(xy, _)| xy.contains('U') || xy == "AA" || xy == "DD")
             .map(|(_, p)| p)
             .collect();
-        let _ = runner.run(&["rebase", "--abort"]);
+        safe_rebase_abort(runner);
         return Ok(json!({
             "state": "diverged",
             "into_target": target,
@@ -1067,7 +1205,11 @@ fn classify_state(ahead: u64, behind: u64) -> &'static str {
 
 enum LeaseOutcome {
     Pushed,
-    Raced { error: String, ahead: u64, behind: u64 },
+    Raced {
+        error: String,
+        ahead: u64,
+        behind: u64,
+    },
 }
 
 /// Leased push with `--force-with-lease=<branch>:<lease_oid>`, where
@@ -1092,7 +1234,11 @@ fn attempt_lease_push_or_reclassify(
         Err(e) => {
             let _ = runner.run(&["fetch", "--end-of-options", "origin", branch]);
             let (a2, b2) = classify_counts(runner, upstream);
-            LeaseOutcome::Raced { error: e.to_string(), ahead: a2, behind: b2 }
+            LeaseOutcome::Raced {
+                error: e.to_string(),
+                ahead: a2,
+                behind: b2,
+            }
         }
     }
 }
@@ -1113,10 +1259,17 @@ fn git_supports_merge_tree_write_tree(root: &Path) -> bool {
     }
     let s = String::from_utf8_lossy(&out.stdout);
     // "git version 2.55.0" (possibly with a vendor/build suffix).
-    let Some(ver_field) = s.split_whitespace().nth(2) else { return false };
+    let Some(ver_field) = s.split_whitespace().nth(2) else {
+        return false;
+    };
     let mut parts = ver_field.split('.');
-    let Some(major) = parts.next().and_then(|p| p.parse::<u32>().ok()) else { return false };
-    let minor = parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+    let Some(major) = parts.next().and_then(|p| p.parse::<u32>().ok()) else {
+        return false;
+    };
+    let minor = parts
+        .next()
+        .and_then(|p| p.parse::<u32>().ok())
+        .unwrap_or(0);
     (major, minor) >= (2, 38)
 }
 
@@ -1156,13 +1309,20 @@ fn probe_merge_tree(root: &Path, ours: &str, theirs: &str) -> MergeTreeProbe {
             .arg(theirs)
             .output();
         match out {
-            Ok(o) => (o.status.success(), String::from_utf8_lossy(&o.stdout).into_owned()),
+            Ok(o) => (
+                o.status.success(),
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+            ),
             Err(_) => (false, String::new()),
         }
     };
     let (clean, stage_lines) = run(&["--no-messages"]);
     let (_, messages) = run(&[]);
-    MergeTreeProbe { clean, stage_lines, messages }
+    MergeTreeProbe {
+        clean,
+        stage_lines,
+        messages,
+    }
 }
 
 /// Parses `merge-tree --write-tree --no-messages` stdout into
@@ -1183,8 +1343,12 @@ fn parse_stage_lines(text: &str) -> BTreeMap<String, BTreeMap<u8, String>> {
         let mut fields = meta.split_whitespace();
         let Some(_mode) = fields.next() else { continue };
         let Some(oid) = fields.next() else { continue };
-        let Some(stage) = fields.next().and_then(|s| s.parse::<u8>().ok()) else { continue };
-        map.entry(path.to_string()).or_default().insert(stage, oid.to_string());
+        let Some(stage) = fields.next().and_then(|s| s.parse::<u8>().ok()) else {
+            continue;
+        };
+        map.entry(path.to_string())
+            .or_default()
+            .insert(stage, oid.to_string());
     }
     map
 }
@@ -1220,13 +1384,27 @@ fn capped(mut s: String, cap: usize) -> (String, bool) {
 /// `git diff --unified=0 <merge_base> <side_ref> -- <path>`, capped at
 /// `HUNK_MAX_BYTES`. `None` when there is no merge base (unrelated
 /// histories) or the diff could not be produced.
-fn side_hunk(runner: &GitRunner, merge_base: &str, side_ref: &str, path: &str) -> (Option<String>, bool) {
+fn side_hunk(
+    runner: &GitRunner,
+    merge_base: &str,
+    side_ref: &str,
+    path: &str,
+) -> (Option<String>, bool) {
     if merge_base.is_empty() {
         return (None, false);
     }
-    match runner.run_opt(&["diff", "--no-color", "--unified=0", merge_base, side_ref, "--", path]) {
+    match runner.run_opt(&[
+        "diff",
+        "--no-color",
+        "--unified=0",
+        merge_base,
+        side_ref,
+        "--",
+        path,
+    ]) {
         Some(bytes) => {
-            let (text, truncated) = capped(String::from_utf8_lossy(&bytes).into_owned(), HUNK_MAX_BYTES);
+            let (text, truncated) =
+                capped(String::from_utf8_lossy(&bytes).into_owned(), HUNK_MAX_BYTES);
             (Some(text), truncated)
         }
         None => (None, false),
@@ -1334,8 +1512,10 @@ fn non_conflicting_paths(root: &Path, merge_base: &str, ours: &str, theirs: &str
     let ours_changes = runner.diff_name_status(merge_base, ours);
     let theirs_changes = runner.diff_name_status(merge_base, theirs);
 
-    let ours_paths: std::collections::HashSet<String> = ours_changes.iter().map(|(_, p)| p.clone()).collect();
-    let theirs_paths: std::collections::HashSet<String> = theirs_changes.iter().map(|(_, p)| p.clone()).collect();
+    let ours_paths: std::collections::HashSet<String> =
+        ours_changes.iter().map(|(_, p)| p.clone()).collect();
+    let theirs_paths: std::collections::HashSet<String> =
+        theirs_changes.iter().map(|(_, p)| p.clone()).collect();
 
     let ours_only: Vec<String> = ours_paths.difference(&theirs_paths).cloned().collect();
     let theirs_only: Vec<String> = theirs_paths.difference(&ours_paths).cloned().collect();
@@ -1352,21 +1532,69 @@ mod tests {
     use tempfile::tempdir;
 
     fn init_repo_with_remote(root: &Path, remote: &Path) {
-        std::process::Command::new("git").arg("init").arg("-q").arg("-b").arg("main").arg(root).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["config", "user.email", "t@t"]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["config", "user.name", "t"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg("-b")
+            .arg("main")
+            .arg(root)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["config", "user.email", "t@t"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["config", "user.name", "t"])
+            .status()
+            .unwrap();
         std::fs::write(root.join("a.txt"), b"a").unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["add", "."]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["commit", "-qm", "init"]).status().unwrap();
-        std::process::Command::new("git").arg("init").arg("--bare").arg("-q").arg(remote).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["commit", "-qm", "init"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg("-q")
+            .arg(remote)
+            .status()
+            .unwrap();
         // Point the bare remote's HEAD at main: without init.defaultBranch
         // configured on the machine, HEAD dangles at refs/heads/master, so
         // later clones check out nothing — their commits then land on a
         // fresh `master` and never reach `main`, silently turning every
         // "diverged" fixture into "ahead".
-        std::process::Command::new("git").arg("-C").arg(remote).args(["symbolic-ref", "HEAD", "refs/heads/main"]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["remote", "add", "origin", remote.to_str().unwrap()]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["push", "-u", "origin", "main"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(remote)
+            .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["remote", "add", "origin", remote.to_str().unwrap()])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["push", "-u", "origin", "main"])
+            .status()
+            .unwrap();
     }
 
     #[test]
@@ -1393,13 +1621,44 @@ mod tests {
 
         // Make a new commit on the remote.
         let clone_dir = tempdir().unwrap();
-        std::process::Command::new("git").arg("clone").arg("-q").arg(remote.path()).arg(clone_dir.path()).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["config", "user.email", "t@t"]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["config", "user.name", "t"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("clone")
+            .arg("-q")
+            .arg(remote.path())
+            .arg(clone_dir.path())
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["config", "user.email", "t@t"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["config", "user.name", "t"])
+            .status()
+            .unwrap();
         std::fs::write(clone_dir.path().join("b.txt"), b"b").unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["add", "."]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["commit", "-qm", "remote commit"]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["push"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["commit", "-qm", "remote commit"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["push"])
+            .status()
+            .unwrap();
 
         let opts = ReconcileOptions {
             strategy: "report".to_string(),
@@ -1419,18 +1678,59 @@ mod tests {
 
         // Diverge: local commit.
         std::fs::write(dir.path().join("local.txt"), b"local").unwrap();
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["add", "."]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["commit", "-qm", "local"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["commit", "-qm", "local"])
+            .status()
+            .unwrap();
 
         // Remote commit.
         let clone_dir = tempdir().unwrap();
-        std::process::Command::new("git").arg("clone").arg("-q").arg(remote.path()).arg(clone_dir.path()).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["config", "user.email", "t@t"]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["config", "user.name", "t"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("clone")
+            .arg("-q")
+            .arg(remote.path())
+            .arg(clone_dir.path())
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["config", "user.email", "t@t"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["config", "user.name", "t"])
+            .status()
+            .unwrap();
         std::fs::write(clone_dir.path().join("remote.txt"), b"remote").unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["add", "."]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["commit", "-qm", "remote"]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["push"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["commit", "-qm", "remote"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["push"])
+            .status()
+            .unwrap();
 
         let opts = ReconcileOptions {
             strategy: "report".to_string(),
@@ -1513,18 +1813,59 @@ mod tests {
 
         // Add a local commit so the branch is "ahead" (diverged path).
         std::fs::write(dir.path().join("local.txt"), b"local").unwrap();
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["add", "."]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["commit", "-qm", "local"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["commit", "-qm", "local"])
+            .status()
+            .unwrap();
 
         // Add a remote commit so the branch is "behind" (diverged).
         let clone_dir = tempdir().unwrap();
-        std::process::Command::new("git").arg("clone").arg("-q").arg(remote.path()).arg(clone_dir.path()).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["config", "user.email", "t@t"]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["config", "user.name", "t"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("clone")
+            .arg("-q")
+            .arg(remote.path())
+            .arg(clone_dir.path())
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["config", "user.email", "t@t"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["config", "user.name", "t"])
+            .status()
+            .unwrap();
         std::fs::write(clone_dir.path().join("remote.txt"), b"remote").unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["add", "."]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["commit", "-qm", "remote"]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["push"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["commit", "-qm", "remote"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["push"])
+            .status()
+            .unwrap();
 
         let opts = ReconcileOptions {
             strategy: "rebase-if-clean".to_string(),
@@ -1538,11 +1879,15 @@ mod tests {
         // rebase is clean, so state should be "diverged" with
         // clean_rebase_possible=true (or "up_to_date" after the rebase).
         assert_ne!(
-            result["state"], json!("error"),
+            result["state"],
+            json!("error"),
             "rebase-if-clean must not be blocked by .pixel/ sidecar: {result}"
         );
         assert!(
-            result.get("clean_rebase_possible").map(|v| v == true).unwrap_or(true),
+            result
+                .get("clean_rebase_possible")
+                .map(|v| v == true)
+                .unwrap_or(true),
             "sidecar dirtiness must not prevent clean rebase: {result}"
         );
     }
@@ -1560,19 +1905,60 @@ mod tests {
         // Commit a tracked sidecar file, then modify it without committing.
         std::fs::create_dir_all(dir.path().join(".pixel")).unwrap();
         std::fs::write(dir.path().join(".pixel/targets.json"), b"{\"v\":1}").unwrap();
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["add", ".pixel/targets.json"]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["commit", "-qm", "track sidecar file"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["add", ".pixel/targets.json"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["commit", "-qm", "track sidecar file"])
+            .status()
+            .unwrap();
         std::fs::write(dir.path().join(".pixel/targets.json"), b"{\"v\":2}").unwrap();
 
         // Diverge: remote gains a commit the local branch doesn't have.
         let clone_dir = tempdir().unwrap();
-        std::process::Command::new("git").arg("clone").arg("-q").arg(remote.path()).arg(clone_dir.path()).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["config", "user.email", "t@t"]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["config", "user.name", "t"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("clone")
+            .arg("-q")
+            .arg(remote.path())
+            .arg(clone_dir.path())
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["config", "user.email", "t@t"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["config", "user.name", "t"])
+            .status()
+            .unwrap();
         std::fs::write(clone_dir.path().join("remote.txt"), b"remote").unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["add", "."]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["commit", "-qm", "remote"]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(clone_dir.path()).args(["push"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["commit", "-qm", "remote"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["push"])
+            .status()
+            .unwrap();
 
         let opts = ReconcileOptions {
             strategy: "rebase-if-clean".to_string(),
@@ -1580,9 +1966,8 @@ mod tests {
             request_id: format!("rec-tracked-sidecar-{}", uuid::Uuid::new_v4()),
             into_target: None,
         };
-        let err = reconcile(dir.path(), &opts).expect_err(
-            "a modified TRACKED .pixel/ file must refuse rebase-if-clean",
-        );
+        let err = reconcile(dir.path(), &opts)
+            .expect_err("a modified TRACKED .pixel/ file must refuse rebase-if-clean");
         assert!(
             err.contains("dirty"),
             "refusal must cite dirty files, got: {err}"

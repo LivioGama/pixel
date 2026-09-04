@@ -49,9 +49,7 @@ where
         .map(|mut c| {
             let act = activity.get(&c.path).copied().unwrap_or(0.0);
             let ses = session.get(&c.path).copied().unwrap_or(0.0);
-            c.rrf_score = c.rrf_score
-                * (1.0 + 0.15 * act + 0.35 * ses)
-                * penalty(&c.path);
+            c.rrf_score = c.rrf_score * (1.0 + 0.15 * act + 0.35 * ses) * penalty(&c.path);
             c
         })
         .collect();

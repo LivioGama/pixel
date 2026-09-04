@@ -14,7 +14,7 @@ use std::process::Command;
 use serde_json::json;
 use tempfile::TempDir;
 
-use pixel_ops::rewrite::{rewrite_with_state, RewriteOptions};
+use pixel_ops::rewrite::{RewriteOptions, rewrite_with_state};
 
 // ---------------------------------------------------------------------------
 // git fixture helpers
@@ -64,7 +64,10 @@ fn fixture(push_feat: bool) -> Fixture {
     git(work.path(), &["config", "user.name", "t"]);
     commit_file(work.path(), "base.txt", "base", "base");
     git(remote.path(), &["init", "--bare", "-q", "."]);
-    git(work.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    git(
+        work.path(),
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
     git(work.path(), &["push", "-qu", "origin", "main"]);
     // Make the default branch detectable via origin/HEAD.
     git(work.path(), &["remote", "set-head", "origin", "main"]);
@@ -77,7 +80,11 @@ fn fixture(push_feat: bool) -> Fixture {
     commit_file(work.path(), "two.txt", "2", "wip two");
     commit_file(work.path(), "three.txt", "3", "wip three");
 
-    Fixture { work, remote, state }
+    Fixture {
+        work,
+        remote,
+        state,
+    }
 }
 
 fn opts(onto: Option<&str>, push: bool) -> RewriteOptions {
@@ -101,7 +108,8 @@ fn rewrite_squashes_three_commits_into_one() {
     let fx = fixture(true); // upstream = origin/feat at base
     let old_head = git(fx.work.path(), &["rev-parse", "HEAD"]);
 
-    let result = rewrite_with_state(fx.work.path(), &opts(None, false), None, fx.state.path()).unwrap();
+    let result =
+        rewrite_with_state(fx.work.path(), &opts(None, false), None, fx.state.path()).unwrap();
 
     assert_eq!(result["state"], json!("squashed"));
     assert_eq!(result["commits_squashed"], json!(3));
@@ -111,7 +119,10 @@ fn rewrite_squashes_three_commits_into_one() {
 
     // Exactly ONE commit on feat past the base now.
     let base = result["base_oid"].as_str().unwrap();
-    let count = git(fx.work.path(), &["rev-list", "--count", &format!("{base}..HEAD")]);
+    let count = git(
+        fx.work.path(),
+        &["rev-list", "--count", &format!("{base}..HEAD")],
+    );
     assert_eq!(count, "1");
 
     // Tree content of all three commits survives.
@@ -121,7 +132,10 @@ fn rewrite_squashes_three_commits_into_one() {
 
     // Auto-generated message lists the squashed subjects.
     let msg = git(fx.work.path(), &["log", "-1", "--format=%B"]);
-    assert!(msg.starts_with("squash: 3 commits"), "unexpected message: {msg}");
+    assert!(
+        msg.starts_with("squash: 3 commits"),
+        "unexpected message: {msg}"
+    );
     for s in ["wip one", "wip two", "wip three"] {
         assert!(msg.contains(s), "message missing subject {s:?}: {msg}");
     }
@@ -132,13 +146,21 @@ fn rewrite_explicit_onto_base_is_used() {
     let fx = fixture(false); // no upstream for feat
     let main_oid = git(fx.work.path(), &["rev-parse", "main"]);
 
-    let result =
-        rewrite_with_state(fx.work.path(), &opts(Some("main"), false), None, fx.state.path()).unwrap();
+    let result = rewrite_with_state(
+        fx.work.path(),
+        &opts(Some("main"), false),
+        None,
+        fx.state.path(),
+    )
+    .unwrap();
 
     assert_eq!(result["state"], json!("squashed"));
     assert_eq!(result["base_oid"], json!(main_oid));
     assert_eq!(result["commits_squashed"], json!(3));
-    let count = git(fx.work.path(), &["rev-list", "--count", &format!("{main_oid}..HEAD")]);
+    let count = git(
+        fx.work.path(),
+        &["rev-list", "--count", &format!("{main_oid}..HEAD")],
+    );
     assert_eq!(count, "1");
 }
 
@@ -161,11 +183,21 @@ fn rewrite_backup_ref_points_at_old_head() {
     let fx = fixture(true);
     let old_head = git(fx.work.path(), &["rev-parse", "HEAD"]);
 
-    let result = rewrite_with_state(fx.work.path(), &opts(None, false), None, fx.state.path()).unwrap();
+    let result =
+        rewrite_with_state(fx.work.path(), &opts(None, false), None, fx.state.path()).unwrap();
 
-    assert_eq!(result["backup_ref"], json!("refs/pixel/rewrite-backup/feat"));
-    let backup = git(fx.work.path(), &["rev-parse", "refs/pixel/rewrite-backup/feat"]);
-    assert_eq!(backup, old_head, "backup ref must point at the pre-rewrite head");
+    assert_eq!(
+        result["backup_ref"],
+        json!("refs/pixel/rewrite-backup/feat")
+    );
+    let backup = git(
+        fx.work.path(),
+        &["rev-parse", "refs/pixel/rewrite-backup/feat"],
+    );
+    assert_eq!(
+        backup, old_head,
+        "backup ref must point at the pre-rewrite head"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +213,10 @@ fn rewrite_refuses_default_branch_without_onto() {
     let err =
         rewrite_with_state(fx.work.path(), &opts(None, false), None, fx.state.path()).unwrap_err();
     assert!(err.contains("REFUSED"), "expected REFUSED, got: {err}");
-    assert!(err.contains("default branch"), "expected default-branch reason, got: {err}");
+    assert!(
+        err.contains("default branch"),
+        "expected default-branch reason, got: {err}"
+    );
 }
 
 #[test]
@@ -193,9 +228,17 @@ fn rewrite_refuses_when_base_not_ancestor() {
     let other_oid = git(fx.work.path(), &["rev-parse", "HEAD"]);
     git(fx.work.path(), &["checkout", "-q", "feat"]);
 
-    let err = rewrite_with_state(fx.work.path(), &opts(Some(&other_oid), false), None, fx.state.path())
-        .unwrap_err();
-    assert!(err.contains("not an ancestor"), "expected ancestor refusal, got: {err}");
+    let err = rewrite_with_state(
+        fx.work.path(),
+        &opts(Some(&other_oid), false),
+        None,
+        fx.state.path(),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("not an ancestor"),
+        "expected ancestor refusal, got: {err}"
+    );
 }
 
 #[test]
@@ -233,9 +276,11 @@ fn rewrite_allow_default_branch_overrides_default_branch_refusal() {
 
     let mut o = opts(None, false);
     o.allow_default_branch = true;
-    let res =
-        rewrite_with_state(fx.work.path(), &o, None, fx.state.path());
-    assert!(res.is_ok(), "allow_default_branch should override default-branch refusal, got: {res:?}");
+    let res = rewrite_with_state(fx.work.path(), &o, None, fx.state.path());
+    assert!(
+        res.is_ok(),
+        "allow_default_branch should override default-branch refusal, got: {res:?}"
+    );
 }
 
 #[test]
@@ -250,13 +295,11 @@ fn rewrite_allow_default_branch_overrides_published_mainline_refusal() {
 
     let mut o = opts(Some(&old_main), false);
     o.allow_default_branch = true;
-    let res = rewrite_with_state(
-        fx.work.path(),
-        &o,
-        None,
-        fx.state.path(),
+    let res = rewrite_with_state(fx.work.path(), &o, None, fx.state.path());
+    assert!(
+        res.is_ok(),
+        "allow_default_branch should override published-mainline refusal, got: {res:?}"
     );
-    assert!(res.is_ok(), "allow_default_branch should override published-mainline refusal, got: {res:?}");
 }
 
 #[test]
@@ -265,10 +308,17 @@ fn rewrite_refuses_detached_head() {
     let head = git(fx.work.path(), &["rev-parse", "HEAD"]);
     git(fx.work.path(), &["checkout", "-q", &head]);
 
-    let err =
-        rewrite_with_state(fx.work.path(), &opts(Some("main"), false), None, fx.state.path())
-            .unwrap_err();
-    assert!(err.contains("detached HEAD"), "expected detached-HEAD refusal, got: {err}");
+    let err = rewrite_with_state(
+        fx.work.path(),
+        &opts(Some("main"), false),
+        None,
+        fx.state.path(),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("detached HEAD"),
+        "expected detached-HEAD refusal, got: {err}"
+    );
 }
 
 #[test]
@@ -277,7 +327,10 @@ fn rewrite_refuses_stale_expected_head() {
     let mut o = opts(None, false);
     o.expected_head = Some("0".repeat(40));
     let err = rewrite_with_state(fx.work.path(), &o, None, fx.state.path()).unwrap_err();
-    assert!(err.contains("STALE_STATE"), "expected STALE_STATE, got: {err}");
+    assert!(
+        err.contains("STALE_STATE"),
+        "expected STALE_STATE, got: {err}"
+    );
 }
 
 #[test]
@@ -285,9 +338,17 @@ fn rewrite_errors_when_nothing_to_squash() {
     let fx = fixture(false);
     // Base == HEAD.
     let head = git(fx.work.path(), &["rev-parse", "HEAD"]);
-    let err = rewrite_with_state(fx.work.path(), &opts(Some(&head), false), None, fx.state.path())
-        .unwrap_err();
-    assert!(err.contains("NOTHING_TO_SQUASH"), "expected NOTHING_TO_SQUASH, got: {err}");
+    let err = rewrite_with_state(
+        fx.work.path(),
+        &opts(Some(&head), false),
+        None,
+        fx.state.path(),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("NOTHING_TO_SQUASH"),
+        "expected NOTHING_TO_SQUASH, got: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -299,22 +360,31 @@ fn rewrite_dirty_worktree_tolerated_with_warning() {
     let fx = fixture(true);
     std::fs::write(fx.work.path().join("uncommitted.txt"), "dirty").unwrap();
 
-    let result = rewrite_with_state(fx.work.path(), &opts(None, false), None, fx.state.path()).unwrap();
+    let result =
+        rewrite_with_state(fx.work.path(), &opts(None, false), None, fx.state.path()).unwrap();
     assert_eq!(result["state"], json!("squashed"));
     let warnings = result["warnings"].as_array().unwrap();
     assert!(
-        warnings.iter().any(|w| w.as_str().unwrap().contains("dirty")),
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("dirty")),
         "expected a dirty-worktree warning, got: {warnings:?}"
     );
     // The dirty file survives, untouched and uncommitted.
-    assert_eq!(std::fs::read_to_string(fx.work.path().join("uncommitted.txt")).unwrap(), "dirty");
+    assert_eq!(
+        std::fs::read_to_string(fx.work.path().join("uncommitted.txt")).unwrap(),
+        "dirty"
+    );
     let show = Command::new("git")
         .arg("-C")
         .arg(fx.work.path())
         .args(["cat-file", "-e", "HEAD:uncommitted.txt"])
         .output()
         .unwrap();
-    assert!(!show.status.success(), "uncommitted file must not be swept into the squash commit");
+    assert!(
+        !show.status.success(),
+        "uncommitted file must not be swept into the squash commit"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -327,17 +397,30 @@ fn rewrite_leased_push_succeeds_against_bare_remote() {
     // Push the messy state so the remote holds the pre-rewrite tip.
     git(fx.work.path(), &["push", "-q", "origin", "feat"]);
 
-    let result = rewrite_with_state(fx.work.path(), &opts(Some("main"), true), None, fx.state.path())
-        .unwrap();
+    let result = rewrite_with_state(
+        fx.work.path(),
+        &opts(Some("main"), true),
+        None,
+        fx.state.path(),
+    )
+    .unwrap();
 
     assert_eq!(result["state"], json!("squashed"));
-    assert_eq!(result["pushed"], json!(true), "push_error: {:?}", result["push_error"]);
+    assert_eq!(
+        result["pushed"],
+        json!(true),
+        "push_error: {:?}",
+        result["push_error"]
+    );
 
     // The bare remote's feat now IS the squash commit.
     let remote_feat = git(fx.remote.path(), &["rev-parse", "refs/heads/feat"]);
     assert_eq!(json!(remote_feat), result["new_head"]);
     let base = result["base_oid"].as_str().unwrap();
-    let count = git(fx.remote.path(), &["rev-list", "--count", &format!("{base}..refs/heads/feat")]);
+    let count = git(
+        fx.remote.path(),
+        &["rev-list", "--count", &format!("{base}..refs/heads/feat")],
+    );
     assert_eq!(count, "1");
 }
 
@@ -349,7 +432,10 @@ fn rewrite_leased_push_fails_when_remote_moved() {
     // A second clone advances feat on the remote AFTER our remote-tracking
     // ref was last updated — the classic lease-protection scenario.
     let intruder = TempDir::new().unwrap();
-    git(intruder.path(), &["clone", "-q", fx.remote.path().to_str().unwrap(), "."]);
+    git(
+        intruder.path(),
+        &["clone", "-q", fx.remote.path().to_str().unwrap(), "."],
+    );
     git(intruder.path(), &["config", "user.email", "i@i"]);
     git(intruder.path(), &["config", "user.name", "i"]);
     git(intruder.path(), &["checkout", "-q", "feat"]);
@@ -357,19 +443,30 @@ fn rewrite_leased_push_fails_when_remote_moved() {
     git(intruder.path(), &["push", "-q", "origin", "feat"]);
     let intruder_tip = git(intruder.path(), &["rev-parse", "HEAD"]);
 
-    let result = rewrite_with_state(fx.work.path(), &opts(Some("main"), true), None, fx.state.path())
-        .unwrap();
+    let result = rewrite_with_state(
+        fx.work.path(),
+        &opts(Some("main"), true),
+        None,
+        fx.state.path(),
+    )
+    .unwrap();
 
     // The local squash succeeded, but the leased push was refused and
     // classified — never retried with plain --force.
     assert_eq!(result["state"], json!("squashed"));
     assert_eq!(result["pushed"], json!(false));
     let push_error = result["push_error"].as_str().unwrap();
-    assert!(push_error.contains("STALE_REMOTE"), "expected STALE_REMOTE, got: {push_error}");
+    assert!(
+        push_error.contains("STALE_REMOTE"),
+        "expected STALE_REMOTE, got: {push_error}"
+    );
 
     // The intruder's commit is still the remote tip — nothing was clobbered.
     let remote_feat = git(fx.remote.path(), &["rev-parse", "refs/heads/feat"]);
-    assert_eq!(remote_feat, intruder_tip, "lease must have protected the remote");
+    assert_eq!(
+        remote_feat, intruder_tip,
+        "lease must have protected the remote"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -396,15 +493,30 @@ fn rewrite_crash_in_reset_commit_window_restores_from_backup() {
     // Resume with the SAME request_id → restoration from the journaled
     // backup metadata, structured GIT_FAILED.
     let err2 = rewrite_with_state(fx.work.path(), &o, None, fx.state.path()).unwrap_err();
-    assert!(err2.contains("GIT_FAILED"), "expected GIT_FAILED, got: {err2}");
-    assert!(err2.contains(&old_head), "restore message names the restored head: {err2}");
+    assert!(
+        err2.contains("GIT_FAILED"),
+        "expected GIT_FAILED, got: {err2}"
+    );
+    assert!(
+        err2.contains(&old_head),
+        "restore message names the restored head: {err2}"
+    );
 
     // The branch is back exactly where it started; backup ref intact.
     assert_eq!(git(fx.work.path(), &["rev-parse", "HEAD"]), old_head);
-    assert_eq!(git(fx.work.path(), &["rev-parse", "refs/pixel/rewrite-backup/feat"]), old_head);
+    assert_eq!(
+        git(
+            fx.work.path(),
+            &["rev-parse", "refs/pixel/rewrite-backup/feat"]
+        ),
+        old_head
+    );
     // Worktree content intact.
     for f in ["one.txt", "two.txt", "three.txt"] {
-        assert!(fx.work.path().join(f).exists(), "{f} lost across crash+restore");
+        assert!(
+            fx.work.path().join(f).exists(),
+            "{f} lost across crash+restore"
+        );
     }
     // Nothing left staged relative to the restored HEAD.
     let staged = git(fx.work.path(), &["diff", "--cached", "--name-only"]);
@@ -420,6 +532,9 @@ fn rewrite_replay_is_idempotent() {
     assert_eq!(r1["new_head"], r2["new_head"]);
     // No second squash happened.
     let base = r1["base_oid"].as_str().unwrap();
-    let count = git(fx.work.path(), &["rev-list", "--count", &format!("{base}..HEAD")]);
+    let count = git(
+        fx.work.path(),
+        &["rev-list", "--count", &format!("{base}..HEAD")],
+    );
     assert_eq!(count, "1");
 }

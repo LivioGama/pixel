@@ -435,10 +435,9 @@ impl Store {
                 "SELECT * FROM errors WHERE surface = ?1 ORDER BY id DESC LIMIT ?2",
                 params![surface.as_str(), n],
             ),
-            None => self.collect_errors(
-                "SELECT * FROM errors ORDER BY id DESC LIMIT ?1",
-                params![n],
-            ),
+            None => {
+                self.collect_errors("SELECT * FROM errors ORDER BY id DESC LIMIT ?1", params![n])
+            }
         }
     }
 
@@ -508,8 +507,7 @@ impl Store {
                 params![limit],
             );
         }
-        let placeholders: Vec<String> =
-            (1..=kinds.len()).map(|i| format!("?{i}")).collect();
+        let placeholders: Vec<String> = (1..=kinds.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "SELECT * FROM events WHERE kind IN ({}) ORDER BY id DESC LIMIT ?{}",
             placeholders.join(", "),
@@ -541,9 +539,9 @@ impl Store {
     }
 
     pub fn latest_runs(&self, n: i64) -> Result<Vec<RunRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT * FROM runs ORDER BY started_at DESC, run_id DESC LIMIT ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM runs ORDER BY started_at DESC, run_id DESC LIMIT ?1")?;
         let rows = stmt.query_map(params![n], row_to_run)?;
         let mut out = Vec::new();
         for row in rows {
@@ -589,11 +587,7 @@ impl Store {
 
     // -- row mapping ---------------------------------------------------------
 
-    fn collect_errors(
-        &self,
-        sql: &str,
-        params: impl rusqlite::Params,
-    ) -> Result<Vec<ErrorRecord>> {
+    fn collect_errors(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<ErrorRecord>> {
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(params, row_to_error)?;
         let mut out = Vec::new();
@@ -603,11 +597,7 @@ impl Store {
         Ok(out)
     }
 
-    fn collect_events(
-        &self,
-        sql: &str,
-        params: impl rusqlite::Params,
-    ) -> Result<Vec<EventRecord>> {
+    fn collect_events(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<EventRecord>> {
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(params, row_to_event)?;
         let mut out = Vec::new();

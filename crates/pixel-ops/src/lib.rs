@@ -10,28 +10,28 @@
 //! can resume from any crash point. The crash matrix tests verify
 //! zero-lost-work at every kill point.
 
+pub mod branch;
+pub mod branches;
+pub mod diff;
+pub mod durable;
+pub mod envfile;
+pub mod fingerprint;
+pub mod history;
+pub mod inspect;
 pub mod journal;
 pub mod lock;
-pub mod snapshot;
-pub mod durable;
-pub mod recovery;
-pub mod fingerprint;
-pub mod inspect;
-pub mod review;
-pub mod history;
-pub mod diff;
+pub mod provenance;
 pub mod publish;
 pub mod push;
-pub mod branch;
-pub mod update;
-pub mod sync;
-pub mod ship;
 pub mod reconcile;
+pub mod recovery;
+pub mod review;
 pub mod rewrite;
-pub mod provenance;
-pub mod branches;
-pub mod envfile;
+pub mod ship;
+pub mod snapshot;
+pub mod sync;
+pub mod update;
 
-pub use journal::{OperationJournal, JournalRecord, JournalPhase, JournalOperation, BeginOutcome};
-pub use lock::{RepositoryLock, RepositoryBusyError};
-pub use snapshot::{SnapshotStore, SnapshotRecord, snapshot_token};
+pub use journal::{BeginOutcome, JournalOperation, JournalPhase, JournalRecord, OperationJournal};
+pub use lock::{RepositoryBusyError, RepositoryLock};
+pub use snapshot::{SnapshotRecord, SnapshotStore, snapshot_token};

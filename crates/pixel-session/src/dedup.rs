@@ -183,7 +183,10 @@ mod tests {
 
     #[test]
     fn normalize_strips_big_numbers_keeps_small() {
-        assert_eq!(normalize_message("port 3000 pid 123456"), "port 3000 pid <num>");
+        assert_eq!(
+            normalize_message("port 3000 pid 123456"),
+            "port 3000 pid <num>"
+        );
     }
 
     #[test]
@@ -220,7 +223,11 @@ mod tests {
         ];
         assert_eq!(
             top_app_frames(Some(&frames)),
-            vec!["src/routes/chat.tsx:88", "src/lib/api.ts:12", "src/main.tsx:3"]
+            vec![
+                "src/routes/chat.tsx:88",
+                "src/lib/api.ts:12",
+                "src/main.tsx:3"
+            ]
         );
     }
 
@@ -257,8 +264,14 @@ mod tests {
     #[test]
     fn hash_differs_by_surface_kind_frames() {
         let base = dedup_hash(Surface::BrowserWindow, Some("TypeError"), "boom", None);
-        assert_ne!(base, dedup_hash(Surface::ServerConsole, Some("TypeError"), "boom", None));
-        assert_ne!(base, dedup_hash(Surface::BrowserWindow, Some("RangeError"), "boom", None));
+        assert_ne!(
+            base,
+            dedup_hash(Surface::ServerConsole, Some("TypeError"), "boom", None)
+        );
+        assert_ne!(
+            base,
+            dedup_hash(Surface::BrowserWindow, Some("RangeError"), "boom", None)
+        );
         let fa = [frame("src/a.ts", 1)];
         let fb = [frame("src/b.ts", 1)];
         assert_ne!(

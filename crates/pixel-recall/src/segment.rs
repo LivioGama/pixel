@@ -163,7 +163,11 @@ impl SegmentLock {
         let path = dir.join(".index.lock");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
         loop {
-            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
                 Ok(mut f) => {
                     use std::io::Write;
                     let _ = writeln!(f, "{}", std::process::id());

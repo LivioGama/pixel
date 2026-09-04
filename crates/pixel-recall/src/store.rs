@@ -139,11 +139,11 @@ impl RecallStore {
         state: &IngestState,
     ) -> Result<i64> {
         let tx = self.conn.transaction()?;
-        let session_id =
-            match existing_session_id(&tx, session.agent, &session.source_session_id)? {
-                Some(id) => id,
-                None => insert_session(&tx, session)?,
-            };
+        let session_id = match existing_session_id(&tx, session.agent, &session.source_session_id)?
+        {
+            Some(id) => id,
+            None => insert_session(&tx, session)?,
+        };
         let next_seq: i64 = tx.query_row(
             "SELECT COALESCE(MAX(seq) + 1, 0) FROM turns WHERE session_id = ?1",
             params![session_id],
@@ -315,9 +315,9 @@ impl RecallStore {
 
     /// Turns newer than `after_id`, oldest first, for segment building.
     pub fn turns_for_indexing(&self, after_id: i64, limit: usize) -> Result<Vec<(i64, String)>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, text FROM turns WHERE id > ?1 ORDER BY id LIMIT ?2",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id, text FROM turns WHERE id > ?1 ORDER BY id LIMIT ?2")?;
         let rows = stmt.query_map(params![after_id, limit as i64], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })?;
@@ -677,7 +677,10 @@ fn migrate(conn: &Connection) -> Result<()> {
         Ok(false)
     };
     if !has_column("vector_chunks", "chunk_start")? {
-        conn.execute("ALTER TABLE vector_chunks ADD COLUMN chunk_start INTEGER", [])?;
+        conn.execute(
+            "ALTER TABLE vector_chunks ADD COLUMN chunk_start INTEGER",
+            [],
+        )?;
     }
     // The pending-embed queue is drained in id order; an index keyed on id
     // (not on the constant `embedded` value) makes each batch O(batch).

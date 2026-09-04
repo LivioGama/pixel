@@ -135,7 +135,10 @@ mod tests {
         }
         std::fs::write(root.join(&dir).join("needle.txt"), b"needle content").unwrap();
         git(&root, &["add", "-A"]);
-        git(&root, &["commit", "-q", "-m", "big tracked tree with needle"]);
+        git(
+            &root,
+            &["commit", "-q", "-m", "big tracked tree with needle"],
+        );
 
         let tracked = ls_files(&root);
         assert_eq!(

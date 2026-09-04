@@ -110,7 +110,11 @@ fn build_max_bytes_from_env() -> Option<u64> {
     }
 }
 
-fn budget_time_error(elapsed: std::time::Duration, budget: std::time::Duration, files: usize) -> IndexError {
+fn budget_time_error(
+    elapsed: std::time::Duration,
+    budget: std::time::Duration,
+    files: usize,
+) -> IndexError {
     IndexError::Budget(format!(
         "index build exceeded its time budget: stopped after {:.1}s (budget {:.1}s), {} files walked, no shard written. \
          Scope pixel at a git repo (a `.git` bounds the file set), raise the budget with \
@@ -273,9 +277,7 @@ pub fn build_with_budget(
     let walker_handle = std::thread::spawn(move || {
         let tx = walker_tx.lock().unwrap().take().unwrap();
         for entry in policy_walk(&walker_root) {
-            if walker_budget.is_some()
-                && walker_started.elapsed() > walker_budget.unwrap()
-            {
+            if walker_budget.is_some() && walker_started.elapsed() > walker_budget.unwrap() {
                 walker_budget_exceeded.store(true, Ordering::Relaxed);
                 break;
             }
@@ -314,7 +316,11 @@ pub fn build_with_budget(
         // its own thread while we drain the channel, then we rayon-extract.
         let mut all_paths: Vec<PathBuf> = Vec::new();
         loop {
-            match rx.lock().unwrap().recv_timeout(std::time::Duration::from_millis(500)) {
+            match rx
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_millis(500))
+            {
                 Ok(p) => all_paths.push(p),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if walker_handle.is_finished() {
@@ -369,7 +375,11 @@ pub fn build_with_budget(
 
     let paths_count = file_count.load(Ordering::Relaxed);
     if budget_exceeded.load(Ordering::Relaxed) {
-        return Err(budget_time_error(started.elapsed(), budget.unwrap(), paths_count));
+        return Err(budget_time_error(
+            started.elapsed(),
+            budget.unwrap(),
+            paths_count,
+        ));
     }
 
     let bytes_seen = total_bytes.load(Ordering::Relaxed);
@@ -515,7 +525,11 @@ mod tests {
         );
 
         let shard = Shard::open(&shard_path(&dir)).unwrap();
-        for token in ["vendoredJsUniqueFn", "vendoredPodUniqueFn", "vendoredTargetUniqueFn"] {
+        for token in [
+            "vendoredJsUniqueFn",
+            "vendoredPodUniqueFn",
+            "vendoredTargetUniqueFn",
+        ] {
             let (matches, _) = search(&dir, &shard, &ex, token).unwrap();
             assert!(matches.is_empty(), "{token} must not be searchable");
         }
@@ -526,8 +540,7 @@ mod tests {
 
     #[test]
     fn build_honors_gitignore_in_gitless_tree() {
-        let dir =
-            std::env::temp_dir().join(format!("gpx-index-gitignore-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gpx-index-gitignore-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(".gitignore"), "secrets.txt\n").unwrap();
@@ -558,11 +571,10 @@ mod tests {
         std::fs::write(dir.join("a.rs"), "fn budgetTripFn() {}\n").unwrap();
 
         let ex = SparseGramExtractor::new(Crc32Weigher);
-        let err =
-            match build_with_budget(&dir, &ex, Some(std::time::Duration::ZERO)) {
-                Err(e) => e,
-                Ok(_) => panic!("zero budget must trip"),
-            };
+        let err = match build_with_budget(&dir, &ex, Some(std::time::Duration::ZERO)) {
+            Err(e) => e,
+            Ok(_) => panic!("zero budget must trip"),
+        };
         assert!(matches!(err, IndexError::Budget(_)), "{err}");
         let msg = err.to_string();
         assert!(msg.contains("time budget"), "cap must be named: {msg}");

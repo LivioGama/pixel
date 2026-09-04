@@ -315,7 +315,6 @@ impl IndexSet {
         head: Option<String>,
         gpx_dir: &Path,
     ) -> Result<Self, IndexSetError> {
-
         let mut set = Self {
             root: root.to_path_buf(),
             extractor,
@@ -750,14 +749,20 @@ mod tests {
 
         let set = IndexSet::open_or_build(&dir, ex()).unwrap();
         let (m, _) = set.search("hiddenWorkflowNeedle", None).unwrap();
-        assert_eq!(m.len(), 1, "hidden .github workflow content must be searchable");
+        assert_eq!(
+            m.len(),
+            1,
+            "hidden .github workflow content must be searchable"
+        );
         assert_eq!(m[0].path, ".github/workflows/x.yml");
         let (m, _) = set.search("dotfileContentNeedle", None).unwrap();
         assert_eq!(m.len(), 1, "dotfile content must be searchable");
         let (m, _) = set.search("gitInternalNeedle", None).unwrap();
         assert!(m.is_empty(), ".git/ content must never be indexed: {m:?}");
         assert!(
-            set.paths().iter().all(|p| !p.starts_with(".git/") && !p.starts_with(".pixel/")),
+            set.paths()
+                .iter()
+                .all(|p| !p.starts_with(".git/") && !p.starts_with(".pixel/")),
             "no .git/ or .pixel/ path may appear in the file universe: {:?}",
             set.paths()
         );
@@ -771,7 +776,11 @@ mod tests {
         .unwrap();
         let set = IndexSet::open_or_build(&dir, ex()).unwrap();
         let (m, _) = set.search("editedHiddenNeedle", None).unwrap();
-        assert_eq!(m.len(), 1, "hidden-file edits must invalidate the plain signature");
+        assert_eq!(
+            m.len(),
+            1,
+            "hidden-file edits must invalidate the plain signature"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
 
@@ -788,7 +797,11 @@ mod tests {
         git(&dir, &["commit", "-qm", "hidden"]);
         let set = IndexSet::open_or_build(&dir, ex()).unwrap();
         let (m, _) = set.search("trackedHiddenNeedle", None).unwrap();
-        assert_eq!(m.len(), 1, "tracked hidden files must be searchable in a git repo");
+        assert_eq!(
+            m.len(),
+            1,
+            "tracked hidden files must be searchable in a git repo"
+        );
         assert!(
             set.paths().iter().all(|p| !p.starts_with(".git/")),
             "git repo universe must not contain .git/ paths"

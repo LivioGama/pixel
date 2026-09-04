@@ -251,7 +251,16 @@ pub fn run_recall(cmd: RecallCmd) -> Result<(), String> {
             lexical_only,
             json,
         } => run_ask(
-            &query, agent, repo, since, until, role, human_only, k, lexical_only, json,
+            &query,
+            agent,
+            repo,
+            since,
+            until,
+            role,
+            human_only,
+            k,
+            lexical_only,
+            json,
         ),
         RecallCmd::Maxtest {
             keywords,
@@ -288,8 +297,7 @@ fn run_daemon_cmd(cmd: RecallDaemonCmd) -> Result<(), String> {
     match cmd {
         RecallDaemonCmd::Start { foreground } => {
             if foreground {
-                let service =
-                    pixel_daemon::RecallService::open().map_err(|e| e.to_string())?;
+                let service = pixel_daemon::RecallService::open().map_err(|e| e.to_string())?;
                 return pixel_daemon::daemon::run_corpus(service).map_err(|e| e.to_string());
             }
             if crate::daemon_ping(&root) {
@@ -340,14 +348,21 @@ fn try_recall_daemon(action: &str, params: serde_json::Value) -> Option<serde_js
         params,
     };
     let resp = crate::try_daemon(&root, &req)?;
-    if resp.ok { Some(resp.into_data()) } else { None }
+    if resp.ok {
+        Some(resp.into_data())
+    } else {
+        None
+    }
 }
 
 fn print_daemon_result(data: &serde_json::Value, json: bool) {
     if json {
         println!("{}", data.get("json").unwrap_or(&serde_json::Value::Null));
     } else {
-        print!("{}", data.get("text").and_then(|t| t.as_str()).unwrap_or(""));
+        print!(
+            "{}",
+            data.get("text").and_then(|t| t.as_str()).unwrap_or("")
+        );
     }
 }
 
@@ -542,9 +557,7 @@ fn run_ask(
     let embedder: Option<&mut (dyn pixel_recall::embed::Embedder + 'static)> =
         embedder_slot.as_deref_mut();
 
-    let result = pixel_recall::ask::ask(
-        &store, &segments, &vectors, embedder, query, &filters, k,
-    )?;
+    let result = pixel_recall::ask::ask(&store, &segments, &vectors, embedder, query, &filters, k)?;
     if json {
         let out = json!({
             "groups": result.groups.iter().map(|g| json!({
@@ -633,11 +646,7 @@ fn run_maxtest(
         if sessions.is_empty() {
             println!("  {term:24} 0 matches — term does not appear in the corpus");
         } else {
-            println!(
-                "  {term:24} {} sessions, {} turns",
-                sessions.len(),
-                turns
-            );
+            println!("  {term:24} {} sessions, {} turns", sessions.len(), turns);
         }
     }
     // The pin: intersect the two rarest non-empty terms (or take the single
@@ -650,7 +659,9 @@ fn run_maxtest(
         [first, second, ..] => first.2.intersection(&second.2).copied().collect(),
     };
     if pin.is_empty() {
-        println!("\nno session contains the rarest terms together — widen the window or try other keywords");
+        println!(
+            "\nno session contains the rarest terms together — widen the window or try other keywords"
+        );
         return Ok(());
     }
     println!("\npinned sessions ({}):", pin.len());
@@ -665,7 +676,10 @@ fn run_maxtest(
         println!("  {}", session_line(row));
     }
     if pin.len() > 10 {
-        println!("  … and {} more (narrow with --repo/--since)", pin.len() - 10);
+        println!(
+            "  … and {} more (narrow with --repo/--since)",
+            pin.len() - 10
+        );
     }
     Ok(())
 }
@@ -938,9 +952,7 @@ fn expand_repo(repo: &str) -> String {
 fn session_line(s: &SessionRow) -> String {
     let ts = s.ts_last.map(format_ms).unwrap_or_else(|| "?".to_string());
     let ts_note = match s.ts_source {
-        pixel_recall::model::TsSource::Iso | pixel_recall::model::TsSource::UnixMs => {
-            String::new()
-        }
+        pixel_recall::model::TsSource::Iso | pixel_recall::model::TsSource::UnixMs => String::new(),
         other => format!(" [ts:{}]", other.as_str()),
     };
     let cwd = s.cwd.as_deref().unwrap_or("-");
@@ -1110,7 +1122,9 @@ fn run_status(json: bool) -> Result<(), String> {
     let stats = store.stats().map_err(|e| e.to_string())?;
     let total_turns = store.total_turns().map_err(|e| e.to_string())?;
     let backlog = store.embed_backlog().map_err(|e| e.to_string())?;
-    let db_bytes = std::fs::metadata(store.path()).map(|m| m.len()).unwrap_or(0);
+    let db_bytes = std::fs::metadata(store.path())
+        .map(|m| m.len())
+        .unwrap_or(0);
     let segments = SegmentSet::open(&pixel_recall::segments_dir())?;
     let vectors = pixel_recall::vector::VectorStore::open(&pixel_recall::vectors_dir())?;
     let unsegmented: i64 = store

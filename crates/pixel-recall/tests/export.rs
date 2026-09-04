@@ -203,7 +203,13 @@ fn date_window_filters_and_reports_unresolvable_ts() {
 
     // Without a date filter the clock-less session exports normally.
     let out_all = tmp.path().join("export-all");
-    let summary = export(&store, &ExportFilters::default(), &out_all, ExportFormat::Md).unwrap();
+    let summary = export(
+        &store,
+        &ExportFilters::default(),
+        &out_all,
+        ExportFormat::Md,
+    )
+    .unwrap();
     assert_eq!(summary.sessions_exported, 3);
     assert!(summary.skipped_unresolvable_ts.is_empty());
 }
@@ -287,7 +293,11 @@ fn md_fences_grow_past_embedded_backticks_and_names_dedupe() {
     let summary = export(&store, &ExportFilters::default(), &out, ExportFormat::Md).unwrap();
     assert_eq!(summary.sessions_exported, 2);
     let files = dir_files(&out);
-    assert_eq!(files.len(), 2, "colliding names must not overwrite: {files:?}");
+    assert_eq!(
+        files.len(),
+        2,
+        "colliding names must not overwrite: {files:?}"
+    );
 
     let with_code = files
         .iter()

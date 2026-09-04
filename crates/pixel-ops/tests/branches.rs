@@ -8,7 +8,7 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-use pixel_ops::branches::{branches, BranchesOptions};
+use pixel_ops::branches::{BranchesOptions, branches};
 
 // ---------------------------------------------------------------------------
 // git fixture helpers
@@ -174,10 +174,7 @@ fn inventory_classifies_ahead_merged_no_upstream_and_stale() {
     assert_eq!(ahead["merged_into_default"], false);
     assert_eq!(ahead["last_commit"]["subject"], "ahead extra");
     assert_eq!(ahead["last_commit"]["author"], "t");
-    assert!(ahead["last_commit"]["date"]
-        .as_str()
-        .unwrap()
-        .contains('T'));
+    assert!(ahead["last_commit"]["date"].as_str().unwrap().contains('T'));
 
     let merged = find_branch(&result, "feature-merged");
     assert_eq!(merged["merged_into_default"], true);

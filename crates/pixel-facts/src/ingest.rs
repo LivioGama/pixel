@@ -20,8 +20,7 @@ use crate::poison::{
 };
 use crate::store::{
     DIFF_STATE_EVICTED, DIFF_STATE_INDEXED, DIFF_STATE_PENDING, DIFF_STATE_SKIPPED, FactsStore,
-    REACH_BRANCH, REACH_REFLOG_ONLY, REACH_REMOTE, REACH_STASH, REACH_TAG,
-    Result,
+    REACH_BRANCH, REACH_REFLOG_ONLY, REACH_REMOTE, REACH_STASH, REACH_TAG, Result,
 };
 
 /// Default wall-clock budget per tick (250ms per PLAN.md). Queries never wait
@@ -222,7 +221,12 @@ fn phase_a(store: &mut FactsStore, deadline: &Instant) -> Result<bool> {
         .collect();
     let dbg = std::env::var("PIXEL_FACTS_DEBUG_TICKS").is_ok();
     if dbg {
-        eprintln!("phase_a: oids={} known={} pending={}", oids.len(), known.len(), pending.len());
+        eprintln!(
+            "phase_a: oids={} known={} pending={}",
+            oids.len(),
+            known.len(),
+            pending.len()
+        );
     }
     store_phase_a_cursor(store, &pending)?;
     if pending.is_empty() {
@@ -244,7 +248,10 @@ fn phase_a(store: &mut FactsStore, deadline: &Instant) -> Result<bool> {
         let batch = &pending[idx..batch_end];
         let (commits, reach) = fetch_phase_a_batch(store, batch)?;
         if dbg {
-            eprintln!("phase_a: batch [{idx}..{batch_end}) fetched {} parsed commits", commits.len());
+            eprintln!(
+                "phase_a: batch [{idx}..{batch_end}) fetched {} parsed commits",
+                commits.len()
+            );
         }
         insert_phase_a_batch(store, &commits, &reach)?;
         idx = batch_end;
@@ -254,7 +261,10 @@ fn phase_a(store: &mut FactsStore, deadline: &Instant) -> Result<bool> {
     }
     let done = idx >= pending.len();
     if dbg {
-        eprintln!("phase_a: idx={idx} pending.len()={} done={done}", pending.len());
+        eprintln!(
+            "phase_a: idx={idx} pending.len()={} done={done}",
+            pending.len()
+        );
     }
     if done {
         complete_phase_a(store)?;
@@ -359,7 +369,11 @@ fn refresh_refs(store: &mut FactsStore) -> Result<()> {
         )?;
     }
     // refs/stash + stash reflog (first-class reach).
-    let stash = runner.run(&["for-each-ref", "--format=%(refname)%00%(objectname)", "refs/stash"]);
+    let stash = runner.run(&[
+        "for-each-ref",
+        "--format=%(refname)%00%(objectname)",
+        "refs/stash",
+    ]);
     if let Ok(out) = stash {
         for line in split_nul_lines(&out) {
             if line.is_empty() {
@@ -457,7 +471,10 @@ fn known_oids(store: &FactsStore) -> std::collections::HashSet<String> {
 
 /// Fetch one batch of phase-A commit metadata via `git log -z --no-walk`.
 /// Uses the NUL-separated format from usable-git's sound parser.
-fn fetch_phase_a_batch(store: &FactsStore, oids: &[String]) -> Result<(Vec<PhaseACommit>, Vec<String>)> {
+fn fetch_phase_a_batch(
+    store: &FactsStore,
+    oids: &[String],
+) -> Result<(Vec<PhaseACommit>, Vec<String>)> {
     // Higher cap than the default 1MiB: a 200-commit metadata batch with long
     // messages / many changed paths can exceed it. This is bounded by the
     // PHASE_A_BATCH commit count, not by diff text (phase A has no diff text).
@@ -565,26 +582,35 @@ fn insert_phase_a_batch(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
         let mut sel = tx.prepare("SELECT id FROM commits WHERE oid = ?1")?;
-        let mut ins_msg = tx.prepare("INSERT INTO messages_fts (rowid, message) VALUES (?1, ?2)")?;
+        let mut ins_msg =
+            tx.prepare("INSERT INTO messages_fts (rowid, message) VALUES (?1, ?2)")?;
         let mut ins_fc = tx.prepare(
             "INSERT OR IGNORE INTO file_changes (commit_id, path, status, old_path) VALUES (?1, ?2, ?3, ?4)",
         )?;
-        let mut sel_fc = tx.prepare("SELECT id FROM file_changes WHERE commit_id = ?1 AND path = ?2")?;
-        let mut ins_pgram = tx.prepare("INSERT INTO path_grams (hash, change_id) VALUES (?1, ?2)")?;
+        let mut sel_fc =
+            tx.prepare("SELECT id FROM file_changes WHERE commit_id = ?1 AND path = ?2")?;
+        let mut ins_pgram =
+            tx.prepare("INSERT INTO path_grams (hash, change_id) VALUES (?1, ?2)")?;
         for c in commits {
             let reach = c.reach;
             // Merge in any reach bits discovered during enumeration.
             let extra: Option<i64> = tx
-                .query_row(
-                    "SELECT bits FROM reach_map WHERE oid = ?1",
-                    [&c.oid],
-                    |r| r.get(0),
-                )
+                .query_row("SELECT bits FROM reach_map WHERE oid = ?1", [&c.oid], |r| {
+                    r.get(0)
+                })
                 .ok();
             let final_reach = reach | extra.unwrap_or(0);
             let is_merge = c.parents.len() > 1;
-            let diff_state = if is_merge { DIFF_STATE_SKIPPED } else { DIFF_STATE_PENDING };
-            let skip_note = if is_merge { Some("merge".to_string()) } else { None };
+            let diff_state = if is_merge {
+                DIFF_STATE_SKIPPED
+            } else {
+                DIFF_STATE_PENDING
+            };
+            let skip_note = if is_merge {
+                Some("merge".to_string())
+            } else {
+                None
+            };
             ins.execute(params![
                 c.oid,
                 c.parents.join(" "),
@@ -701,9 +727,10 @@ fn complete_phase_b(store: &mut FactsStore) -> Result<()> {
 /// Returns the number of newly-poisoned paths.
 fn measure_commit_blobs(store: &mut FactsStore, cid: i64) -> Result<u64> {
     let paths = changed_paths_for_commit(store, cid)?;
-    let oid: String = store
-        .conn()
-        .query_row("SELECT oid FROM commits WHERE id = ?1", [cid], |r| r.get(0))?;
+    let oid: String =
+        store
+            .conn()
+            .query_row("SELECT oid FROM commits WHERE id = ?1", [cid], |r| r.get(0))?;
     let mut poisoned = 0u64;
     let sizes = measure_blob_sizes(store, &oid, &paths)?;
     for (path, (size_add, size_rem)) in &sizes {
@@ -716,7 +743,9 @@ fn measure_commit_blobs(store: &mut FactsStore, cid: i64) -> Result<u64> {
 }
 
 fn changed_paths_for_commit(store: &FactsStore, cid: i64) -> Result<Vec<String>> {
-    let mut stmt = store.conn().prepare("SELECT path FROM file_changes WHERE commit_id = ?1")?;
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT path FROM file_changes WHERE commit_id = ?1")?;
     let rows = stmt.query_map([cid], |r| r.get::<_, String>(0))?;
     let mut v = Vec::new();
     for row in rows {
@@ -1080,9 +1109,11 @@ fn parse_phase_c(output: &[u8]) -> Vec<PhaseCCommit> {
 fn insert_phase_c_commit(store: &mut FactsStore, commit: &PhaseCCommit) -> Result<()> {
     let cid: Option<i64> = store
         .conn()
-        .query_row("SELECT id FROM commits WHERE oid = ?1", [&commit.oid], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT id FROM commits WHERE oid = ?1",
+            [&commit.oid],
+            |r| r.get(0),
+        )
         .ok();
     let cid = match cid {
         Some(id) => id,
@@ -1118,9 +1149,8 @@ fn insert_phase_c_commit(store: &mut FactsStore, commit: &PhaseCCommit) -> Resul
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
         let mut ins_gram = tx.prepare("INSERT INTO diff_grams (hash, hunk_id) VALUES (?1, ?2)")?;
-        let mut mark = tx.prepare(
-            "UPDATE commits SET diff_state = ?1 WHERE id = ?2 AND diff_state = ?3",
-        )?;
+        let mut mark =
+            tx.prepare("UPDATE commits SET diff_state = ?1 WHERE id = ?2 AND diff_state = ?3")?;
         let mut commit_bytes = 0usize;
         let mut over_cap = false;
         for (i, file) in commit.files.iter().enumerate() {
@@ -1144,13 +1174,15 @@ fn insert_phase_c_commit(store: &mut FactsStore, commit: &PhaseCCommit) -> Resul
             emit_grams(&mut ins_gram, &file.removed, id)?;
             commit_bytes += file.added.len() + file.removed.len();
         }
-        mark.execute(
-            params![
-                if over_cap { DIFF_STATE_SKIPPED } else { DIFF_STATE_INDEXED },
-                cid,
-                DIFF_STATE_PENDING
-            ],
-        )?;
+        mark.execute(params![
+            if over_cap {
+                DIFF_STATE_SKIPPED
+            } else {
+                DIFF_STATE_INDEXED
+            },
+            cid,
+            DIFF_STATE_PENDING
+        ])?;
         if over_cap {
             // record the over-cap note
             tx.execute(
@@ -1165,11 +1197,7 @@ fn insert_phase_c_commit(store: &mut FactsStore, commit: &PhaseCCommit) -> Resul
 
 /// Emit grams for `text` into the diff_grams posting table, tagged with the
 /// hunk rowid. Uses pixel-index's trigram extractor (xxh3-based).
-fn emit_grams(
-    ins: &mut rusqlite::Statement,
-    text: &str,
-    hunk_id: i64,
-) -> Result<()> {
+fn emit_grams(ins: &mut rusqlite::Statement, text: &str, hunk_id: i64) -> Result<()> {
     use pixel_index::{GramExtractor, TrigramExtractor};
     let extractor = TrigramExtractor;
     let mut hits = Vec::new();
@@ -1192,9 +1220,7 @@ fn now_iso() -> String {
 
 fn split_nul_lines(bytes: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(bytes);
-    text.split('\n')
-        .map(|s| s.to_string())
-        .collect()
+    text.split('\n').map(|s| s.to_string()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1248,7 +1274,9 @@ pub fn evict_to_budget(store: &mut FactsStore, budget_bytes: u64) -> Result<u64>
             "DELETE FROM path_grams WHERE change_id IN (SELECT id FROM file_changes WHERE commit_id = ?1)",
             [cid],
         )?;
-        store.conn().execute("DELETE FROM hunks WHERE commit_id = ?1", [cid])?;
+        store
+            .conn()
+            .execute("DELETE FROM hunks WHERE commit_id = ?1", [cid])?;
         store.conn().execute(
             "UPDATE commits SET diff_state = ?1 WHERE id = ?2",
             params![DIFF_STATE_EVICTED, cid],

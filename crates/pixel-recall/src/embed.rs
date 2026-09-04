@@ -54,9 +54,7 @@ pub fn chunk_offsets(text: &str) -> Vec<(usize, usize)> {
 /// The text actually embedded for a chunk: a tiny context header improves
 /// "which session did X" queries at negligible cost.
 pub fn embed_text(agent: &str, cwd: Option<&str>, role: &str, chunk: &str) -> String {
-    let repo = cwd
-        .and_then(|c| c.rsplit('/').next())
-        .unwrap_or("-");
+    let repo = cwd.and_then(|c| c.rsplit('/').next()).unwrap_or("-");
     format!("[{agent}] [{repo}] {role}: {chunk}")
 }
 
@@ -180,13 +178,27 @@ pub fn run_backfill(
         report.turns_embedded += batch.len();
 
         if pending_rows.len() >= FLUSH_CHUNKS {
-            flush(store, vectors, embedder, &mut pending_rows, &mut pending_turns, &mut report)?;
+            flush(
+                store,
+                vectors,
+                embedder,
+                &mut pending_rows,
+                &mut pending_turns,
+                &mut report,
+            )?;
             let backlog = store.embed_backlog().map_err(|e| e.to_string())?;
             progress(report.turns_embedded, backlog);
         }
     }
     if !pending_rows.is_empty() {
-        flush(store, vectors, embedder, &mut pending_rows, &mut pending_turns, &mut report)?;
+        flush(
+            store,
+            vectors,
+            embedder,
+            &mut pending_rows,
+            &mut pending_turns,
+            &mut report,
+        )?;
     }
     report.backlog_remaining = store.embed_backlog().map_err(|e| e.to_string())?;
     report.elapsed_ms = started.elapsed().as_millis();
@@ -311,9 +323,10 @@ pub mod fast {
                     "embedding model not present — run `pixel recall setup` first".to_string(),
                 );
             }
-            let options = fastembed::InitOptions::new(fastembed::EmbeddingModel::MultilingualE5Small)
-                .with_cache_dir(cache_dir.to_path_buf())
-                .with_show_download_progress(download);
+            let options =
+                fastembed::InitOptions::new(fastembed::EmbeddingModel::MultilingualE5Small)
+                    .with_cache_dir(cache_dir.to_path_buf())
+                    .with_show_download_progress(download);
             let model = fastembed::TextEmbedding::try_new(options)
                 .map_err(|e| format!("embedding model init: {e}"))?;
             Ok(Self {
@@ -424,7 +437,10 @@ mod tests {
             .connection()
             .query_row("SELECT COUNT(*) FROM vector_chunks", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(chunk_count, 300, "each short turn must yield exactly one chunk");
+        assert_eq!(
+            chunk_count, 300,
+            "each short turn must yield exactly one chunk"
+        );
         assert_eq!(store.embed_backlog().unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }

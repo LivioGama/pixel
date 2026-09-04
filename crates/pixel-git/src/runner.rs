@@ -172,7 +172,11 @@ fn read_capped<R: Read>(mut r: R, cap: Option<usize>) -> Result<Vec<u8>, ()> {
 /// directly against non-git commands in tests (see `mod tests` below) —
 /// proving the exact poll/kill logic `run()` uses, without depending on a
 /// git hook or a slow git operation to create a deterministic hang.
-fn execute(mut cmd: Command, args_for_err: Vec<String>, options: &GitOptions) -> Result<Vec<u8>, GitError> {
+fn execute(
+    mut cmd: Command,
+    args_for_err: Vec<String>,
+    options: &GitOptions,
+) -> Result<Vec<u8>, GitError> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
@@ -184,7 +188,8 @@ fn execute(mut cmd: Command, args_for_err: Vec<String>, options: &GitOptions) ->
     let max_out = options.max_output_bytes;
 
     let stdout_thread = std::thread::spawn(move || read_capped(stdout, max_out));
-    let stderr_thread = std::thread::spawn(move || read_capped(stderr, max_out).unwrap_or_default());
+    let stderr_thread =
+        std::thread::spawn(move || read_capped(stderr, max_out).unwrap_or_default());
 
     let start = Instant::now();
     let mut timed_out = false;
@@ -217,9 +222,7 @@ fn execute(mut cmd: Command, args_for_err: Vec<String>, options: &GitOptions) ->
         let _ = child.wait();
         let _ = stdout_thread.join();
         let _ = stderr_thread.join();
-        return Err(GitError::Timeout {
-            args: args_for_err,
-        });
+        return Err(GitError::Timeout { args: args_for_err });
     }
 
     let stdout_result = stdout_thread
@@ -334,7 +337,11 @@ mod tests {
                 &dir.join("other.txt"),
             )
             .expect("merge-file spawns");
-        assert_eq!(status.code(), Some(0), "expected a clean, conflict-free merge");
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "expected a clean, conflict-free merge"
+        );
         let merged = std::fs::read_to_string(dir.join("current.txt")).unwrap();
         assert!(merged.contains("line1-mine"));
         assert!(merged.contains("line3-theirs"));

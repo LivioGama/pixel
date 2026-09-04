@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use pixel_git::GitRunner;
 
@@ -48,9 +48,7 @@ pub fn history(
     args.push(ref_name.to_string());
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let output = runner
-        .run(&arg_refs)
-        .map_err(|e| format!("git log: {e}"))?;
+    let output = runner.run(&arg_refs).map_err(|e| format!("git log: {e}"))?;
     let log = String::from_utf8_lossy(&output);
 
     let mut commits: Vec<Value> = Vec::new();
@@ -81,9 +79,7 @@ pub fn history(
             continue;
         };
 
-        let entry_bytes = serde_json::to_vec(&entry)
-            .map_err(|e| e.to_string())?
-            .len();
+        let entry_bytes = serde_json::to_vec(&entry).map_err(|e| e.to_string())?.len();
         if bytes.saturating_add(entry_bytes) > cap {
             break;
         }

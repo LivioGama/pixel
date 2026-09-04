@@ -24,8 +24,9 @@ fn best_frame(record: &ErrorRecord) -> Option<&Frame> {
     frames
         .iter()
         .find(|f| {
-            f.best_location()
-                .is_some_and(|(file, _, _)| !file.contains("node_modules") && !file.starts_with("node:"))
+            f.best_location().is_some_and(|(file, _, _)| {
+                !file.contains("node_modules") && !file.starts_with("node:")
+            })
         })
         .or_else(|| frames.iter().find(|f| f.best_location().is_some()))
 }

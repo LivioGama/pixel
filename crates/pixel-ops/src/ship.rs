@@ -2,10 +2,10 @@
 
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::publish::{publish, PublishOptions};
-use crate::push::{push, PushOptions};
+use crate::publish::{PublishOptions, publish};
+use crate::push::{PushOptions, push};
 
 /// Ship = publish (commit) then push. Uses separate request IDs for
 /// each phase so they're independently recoverable.
@@ -67,14 +67,52 @@ mod tests {
     fn init_repo_with_remote(root: &Path, remote: &Path) {
         // `-b main`: never rely on the machine's init.defaultBranch — the
         // ship below pushes the literal refspec "main".
-        std::process::Command::new("git").arg("init").arg("-q").arg("-b").arg("main").arg(root).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["config", "user.email", "t@t"]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["config", "user.name", "t"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg("-b")
+            .arg("main")
+            .arg(root)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["config", "user.email", "t@t"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["config", "user.name", "t"])
+            .status()
+            .unwrap();
         std::fs::write(root.join("a.txt"), b"a").unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["add", "."]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["commit", "-qm", "init"]).status().unwrap();
-        std::process::Command::new("git").arg("init").arg("--bare").arg("-q").arg(remote).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["remote", "add", "origin", remote.to_str().unwrap()]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["commit", "-qm", "init"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg("-q")
+            .arg(remote)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["remote", "add", "origin", remote.to_str().unwrap()])
+            .status()
+            .unwrap();
     }
 
     #[test]

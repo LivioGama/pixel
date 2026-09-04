@@ -12,14 +12,14 @@ pub mod replay;
 pub mod store;
 pub mod types;
 
-pub use execute::{execute, ExecResult};
+pub use execute::{ExecResult, execute};
 pub use store::{delete, ensure_flow_dir, exists, flow_dir, list, load, save, slugify};
 pub use types::{Flow, FlowStep, FlowVar};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Subactions of the `pixel flow` command group.
 #[derive(Debug, Clone)]
@@ -208,8 +208,7 @@ fn save_flow(
 
 fn get_flow(name: &str) -> Result<Value, String> {
     let flow = load(name)?;
-    Ok(serde_json::to_value(&flow)
-        .map_err(|e| format!("cannot serialize flow: {e}"))?)
+    Ok(serde_json::to_value(&flow).map_err(|e| format!("cannot serialize flow: {e}"))?)
 }
 
 fn list_flows(tag: &Option<String>) -> Result<Value, String> {
@@ -306,11 +305,7 @@ fn revise_flow(
     }))
 }
 
-fn replay_flow(
-    name: &str,
-    vars: &HashMap<String, String>,
-    dry_run: bool,
-) -> Result<Value, String> {
+fn replay_flow(name: &str, vars: &HashMap<String, String>, dry_run: bool) -> Result<Value, String> {
     let flow = load(name)?;
     let output = replay::replay(&flow, vars)?;
     Ok(json!({
@@ -320,10 +315,7 @@ fn replay_flow(
     }))
 }
 
-fn execute_flow(
-    name: &str,
-    vars: &HashMap<String, String>,
-) -> Result<Value, String> {
+fn execute_flow(name: &str, vars: &HashMap<String, String>) -> Result<Value, String> {
     let flow = load(name)?;
     let result = execute::execute(&flow, vars);
     Ok(json!({
@@ -346,8 +338,8 @@ fn delete_flow(name: &str) -> Result<Value, String> {
 
 fn show_flow(name: &str) -> Result<Value, String> {
     let flow = load(name)?;
-    let pretty = serde_json::to_string_pretty(&flow)
-        .map_err(|e| format!("cannot serialize flow: {e}"))?;
+    let pretty =
+        serde_json::to_string_pretty(&flow).map_err(|e| format!("cannot serialize flow: {e}"))?;
     Ok(json!({
         "name": flow.name,
         "output": pretty,

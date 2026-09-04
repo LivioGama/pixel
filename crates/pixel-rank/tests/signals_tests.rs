@@ -8,12 +8,12 @@ use std::collections::HashMap;
 use std::process::Command;
 
 use pixel_git::GitRunner;
-use pixel_rank::rerank::{rerank, rerank_targets, RankedCandidate};
-use pixel_rank::signals::{
-    activity_from_git_log, inputs_digest, score_signals, test_penalty_for, SessionEvent,
-    SessionEventKind, SignalOptions,
-};
 use pixel_rank::TargetFile;
+use pixel_rank::rerank::{RankedCandidate, rerank, rerank_targets};
+use pixel_rank::signals::{
+    SessionEvent, SessionEventKind, SignalOptions, activity_from_git_log, inputs_digest,
+    score_signals, test_penalty_for,
+};
 use pixel_session::types::{ErrorRecord, Surface};
 
 // ---------------------------------------------------------------------------
@@ -156,7 +156,10 @@ fn activity_from_git_log_scores_recent_files_higher_than_stale_ones() {
         (cold - 0.00219).abs() < 0.0005,
         "cold.txt (85d old) should score ~0.00219, got {cold}"
     );
-    assert!(hot > warm && warm > cold, "recency ordering must hold: hot={hot} warm={warm} cold={cold}");
+    assert!(
+        hot > warm && warm > cold,
+        "recency ordering must hold: hot={hot} warm={warm} cold={cold}"
+    );
 
     // ancient.txt is outside `--since=90.days` entirely: must not appear at
     // all (not merely "low score" — genuinely absent from the git log
@@ -173,7 +176,10 @@ fn activity_from_git_log_degrades_gracefully_outside_a_repo() {
     let dir = tempfile::tempdir().unwrap();
     let runner = GitRunner::new(dir.path());
     let activity = activity_from_git_log(&runner, now_ms(), 14.0);
-    assert!(activity.is_empty(), "non-repo dir must yield empty activity map, got {activity:?}");
+    assert!(
+        activity.is_empty(),
+        "non-repo dir must yield empty activity map, got {activity:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -208,8 +214,14 @@ fn session_score_weights_edits_2x_reads_at_equal_recency() {
     // be the max (1.0), read_only.rs exactly half of it.
     let edited = *bundle.session.get("src/edited.rs").unwrap();
     let read = *bundle.session.get("src/read_only.rs").unwrap();
-    assert!((edited - 1.0).abs() < 1e-9, "edited.rs should normalize to 1.0, got {edited}");
-    assert!((read - 0.5).abs() < 1e-9, "read_only.rs should be exactly half of edited.rs, got {read}");
+    assert!(
+        (edited - 1.0).abs() < 1e-9,
+        "edited.rs should normalize to 1.0, got {edited}"
+    );
+    assert!(
+        (read - 0.5).abs() < 1e-9,
+        "read_only.rs should be exactly half of edited.rs, got {read}"
+    );
 }
 
 #[test]
@@ -297,10 +309,24 @@ fn error_sink_join_boosts_only_the_matching_candidate() {
     };
     let bundle = score_signals(&HashMap::new(), &[], &[], &errors, &candidates, &opts);
 
-    let checkout = bundle.session.get("src/routes/checkout.ts").copied().unwrap_or(0.0);
-    let profile = bundle.session.get("src/routes/profile.ts").copied().unwrap_or(0.0);
-    assert!(checkout > 0.0, "checkout.ts must be boosted by the matching live error");
-    assert_eq!(profile, 0.0, "profile.ts must get no boost from an unrelated error");
+    let checkout = bundle
+        .session
+        .get("src/routes/checkout.ts")
+        .copied()
+        .unwrap_or(0.0);
+    let profile = bundle
+        .session
+        .get("src/routes/profile.ts")
+        .copied()
+        .unwrap_or(0.0);
+    assert!(
+        checkout > 0.0,
+        "checkout.ts must be boosted by the matching live error"
+    );
+    assert_eq!(
+        profile, 0.0,
+        "profile.ts must get no boost from an unrelated error"
+    );
 
     assert!(
         bundle.error_reasons.iter().any(|r| r.contains("#42")),
@@ -362,11 +388,18 @@ fn rerank_never_lets_a_p2_candidate_outrank_any_p0_candidate() {
     // enormously larger than p0_weak's (0.01), the output must still place
     // every P0 before every P1 before every P2.
     let tiers: Vec<&str> = out.iter().map(|c| c.tier.as_str()).collect();
-    assert_eq!(tiers, vec!["P0", "P1", "P2"], "tier order must never be violated: {tiers:?}");
+    assert_eq!(
+        tiers,
+        vec!["P0", "P1", "P2"],
+        "tier order must never be violated: {tiers:?}"
+    );
 
     let p0_index = out.iter().position(|c| c.tier == "P0").unwrap();
     let p2_index = out.iter().position(|c| c.tier == "P2").unwrap();
-    assert!(p0_index < p2_index, "P0 candidate must rank ahead of the P2 candidate");
+    assert!(
+        p0_index < p2_index,
+        "P0 candidate must rank ahead of the P2 candidate"
+    );
 
     // Sanity: the P2 candidate's score really was amplified far past the P0
     // candidate's score, proving this isn't a vacuous pass because the
@@ -405,7 +438,10 @@ fn rerank_reorders_within_a_tier_by_amplified_score() {
         error_reasons: vec![],
     };
     let out = rerank(candidates, &signals, |_| 1.0);
-    assert_eq!(out[0].path, "src/b.rs", "b.rs's activity boost should move it ahead of tied a.rs");
+    assert_eq!(
+        out[0].path, "src/b.rs",
+        "b.rs's activity boost should move it ahead of tied a.rs"
+    );
     assert_eq!(out[1].path, "src/a.rs");
 }
 
@@ -438,7 +474,10 @@ fn rerank_targets_preserves_tier_non_promotion_on_target_file_shape() {
         error_reasons: vec![],
     };
     let out = rerank_targets(targets, &signals, |_| 1.0);
-    assert_eq!(out[0].tier, "P0", "P0 must still lead even though P2 has an amplified score");
+    assert_eq!(
+        out[0].tier, "P0",
+        "P0 must still lead even though P2 has an amplified score"
+    );
     assert_eq!(out[1].tier, "P2");
 }
 
@@ -466,7 +505,10 @@ fn test_penalty_detects_test_and_spec_mentions() {
 fn inputs_digest_is_deterministic_and_sensitive_to_every_input() {
     let base = inputs_digest("oid-a", &["dirty1.rs".to_string()], 100, 200, 1);
     let same = inputs_digest("oid-a", &["dirty1.rs".to_string()], 100, 200, 1);
-    assert_eq!(base, same, "identical inputs must produce a byte-identical digest");
+    assert_eq!(
+        base, same,
+        "identical inputs must produce a byte-identical digest"
+    );
 
     let diff_head = inputs_digest("oid-b", &["dirty1.rs".to_string()], 100, 200, 1);
     let diff_dirty = inputs_digest("oid-a", &["dirty2.rs".to_string()], 100, 200, 1);
@@ -481,6 +523,9 @@ fn inputs_digest_is_deterministic_and_sensitive_to_every_input() {
         ("error_sink_high_water", diff_error_hw),
         ("weights_version", diff_weights),
     ] {
-        assert_ne!(base, other, "changing {name} must change the digest (not a placeholder constant)");
+        assert_ne!(
+            base, other,
+            "changing {name} must change the digest (not a placeholder constant)"
+        );
     }
 }

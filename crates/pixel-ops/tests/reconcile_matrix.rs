@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use tempfile::TempDir;
 
-use pixel_ops::reconcile::{reconcile, reconcile_with_hooks, ReconcileOptions};
+use pixel_ops::reconcile::{ReconcileOptions, reconcile, reconcile_with_hooks};
 
 static ENV_GUARD: Mutex<()> = Mutex::new(());
 
@@ -111,7 +111,11 @@ fn new_remote_and_local() -> (TempDir, TempDir) {
         .arg(local.path())
         .output()
         .unwrap();
-    assert!(out.status.success(), "clone failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "clone failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     git(local.path(), &["config", "user.email", "t@t"]);
     git(local.path(), &["config", "user.name", "t"]);
     git(local.path(), &["checkout", "-qb", "main"]);
@@ -129,7 +133,11 @@ fn clone_of(remote: &Path) -> TempDir {
         .arg(dir.path())
         .output()
         .unwrap();
-    assert!(out.status.success(), "clone failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "clone failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     git(dir.path(), &["config", "user.email", "t@t"]);
     git(dir.path(), &["config", "user.name", "t"]);
     dir
@@ -294,7 +302,10 @@ fn state_ahead_lease_race_does_a_single_refetch_and_reclassify_never_a_second_bl
         );
         // Reclassified: our own commit still unpushed (ahead) AND the
         // racer's commit now present remotely (behind) => diverged.
-        assert_eq!(result["reclassified"]["state"], "diverged", "result={result}");
+        assert_eq!(
+            result["reclassified"]["state"], "diverged",
+            "result={result}"
+        );
         assert!(result["reclassified"]["ahead"].as_u64().unwrap() >= 1);
         assert!(result["reclassified"]["behind"].as_u64().unwrap() >= 1);
 
@@ -319,14 +330,22 @@ fn state_diverged_report_never_filters_conflicts_and_separates_non_conflicting_p
         let (remote, local) = new_remote_and_local();
 
         // Local: change conflict.txt AND add a local-only file.
-        write(local.path(), "conflict.txt", "local version\nsame base line\n");
+        write(
+            local.path(),
+            "conflict.txt",
+            "local version\nsame base line\n",
+        );
         write(local.path(), "local_only.txt", "local only\n");
         commit_all(local.path(), "local diverges");
 
         // Remote: different content in the SAME lines of conflict.txt, from
         // a clone taken before local's commit, plus a remote-only file.
         let other = clone_of(remote.path());
-        write(other.path(), "conflict.txt", "remote version\nsame base line\n");
+        write(
+            other.path(),
+            "conflict.txt",
+            "remote version\nsame base line\n",
+        );
         write(other.path(), "remote_only.txt", "remote only\n");
         commit_all(other.path(), "remote diverges");
         git(other.path(), &["push", "-q"]);
@@ -349,13 +368,29 @@ fn state_diverged_report_never_filters_conflicts_and_separates_non_conflicting_p
             !conflicts.is_empty(),
             "conflicts must not be empty on a genuine conflict — result={result}"
         );
-        let paths: Vec<&str> = conflicts.iter().map(|c| c["path"].as_str().unwrap()).collect();
+        let paths: Vec<&str> = conflicts
+            .iter()
+            .map(|c| c["path"].as_str().unwrap())
+            .collect();
         assert!(paths.contains(&"conflict.txt"), "paths={paths:?}");
-        let entry = conflicts.iter().find(|c| c["path"] == "conflict.txt").unwrap();
-        assert!(entry["ours"]["oid"].as_str().is_some_and(|s| !s.is_empty()), "entry={entry}");
-        assert!(entry["theirs"]["oid"].as_str().is_some_and(|s| !s.is_empty()), "entry={entry}");
+        let entry = conflicts
+            .iter()
+            .find(|c| c["path"] == "conflict.txt")
+            .unwrap();
         assert!(
-            entry["conflict_kind"].as_str().is_some_and(|s| !s.is_empty()),
+            entry["ours"]["oid"].as_str().is_some_and(|s| !s.is_empty()),
+            "entry={entry}"
+        );
+        assert!(
+            entry["theirs"]["oid"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "entry={entry}"
+        );
+        assert!(
+            entry["conflict_kind"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
             "entry={entry}"
         );
 
@@ -373,14 +408,23 @@ fn state_diverged_report_never_filters_conflicts_and_separates_non_conflicting_p
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert!(ours_only.contains(&"local_only.txt"), "ours_only={ours_only:?}");
-        assert!(theirs_only.contains(&"remote_only.txt"), "theirs_only={theirs_only:?}");
+        assert!(
+            ours_only.contains(&"local_only.txt"),
+            "ours_only={ours_only:?}"
+        );
+        assert!(
+            theirs_only.contains(&"remote_only.txt"),
+            "theirs_only={theirs_only:?}"
+        );
         assert!(!ours_only.contains(&"conflict.txt"));
         assert!(!theirs_only.contains(&"conflict.txt"));
 
         // Default strategy is report-only: no mutation whatsoever.
         let head_after = git(local.path(), &["rev-parse", "HEAD"]);
-        assert_eq!(head_before, head_after, "report strategy must never mutate the repo");
+        assert_eq!(
+            head_before, head_after,
+            "report strategy must never mutate the repo"
+        );
         assert!(result["backup_ref"].is_null());
     });
 }
@@ -413,7 +457,10 @@ fn rebase_if_clean_happy_path_rebases_linearly_backs_up_and_pushes() {
         assert_eq!(result["state"], "rebased", "result={result}");
         assert_eq!(result["pushed"], true, "result={result}");
 
-        let backup_ref = result["backup_ref"].as_str().expect("backup_ref present").to_string();
+        let backup_ref = result["backup_ref"]
+            .as_str()
+            .expect("backup_ref present")
+            .to_string();
         assert_eq!(backup_ref, format!("refs/pixel/reconcile-backup/{branch}"));
         let backup_oid = git(local.path(), &["rev-parse", &backup_ref]);
         assert_eq!(
@@ -449,12 +496,20 @@ fn rebase_if_clean_auto_resolves_when_merge_tree_predicts_a_conflict() {
         let (remote, local) = new_remote_and_local();
 
         // Genuine same-line divergence.
-        write(local.path(), "conflict.txt", "local version\nsame base line\n");
+        write(
+            local.path(),
+            "conflict.txt",
+            "local version\nsame base line\n",
+        );
         commit_all(local.path(), "local diverges with conflict");
         let head_before = git(local.path(), &["rev-parse", "HEAD"]);
 
         let other = clone_of(remote.path());
-        write(other.path(), "conflict.txt", "remote version\nsame base line\n");
+        write(
+            other.path(),
+            "conflict.txt",
+            "remote version\nsame base line\n",
+        );
         commit_all(other.path(), "remote diverges with conflict");
         git(other.path(), &["push", "-q"]);
 
@@ -483,8 +538,8 @@ fn rebase_if_clean_auto_resolves_when_merge_tree_predicts_a_conflict() {
                 "no rebase sequencer state must remain after successful rebase"
             );
             // The file should contain both versions (union merge).
-            let content = std::fs::read_to_string(local.path().join("conflict.txt"))
-                .unwrap_or_default();
+            let content =
+                std::fs::read_to_string(local.path().join("conflict.txt")).unwrap_or_default();
             assert!(
                 content.contains("local version") && content.contains("remote version"),
                 "union merge should contain both sides: {content}"
@@ -607,7 +662,10 @@ fn into_clean_integration_rebases_feature_fast_forwards_target_and_pushes_both()
 
         // Local develop was fast-forwarded to the rebased feature head.
         let dev_oid = git(local.path(), &["rev-parse", "refs/heads/develop"]);
-        assert_eq!(dev_oid, new_head, "local develop must be ff'd to the rebased head");
+        assert_eq!(
+            dev_oid, new_head,
+            "local develop must be ff'd to the rebased head"
+        );
 
         // The rebased head contains the remote develop advance (a true
         // rebase onto origin/develop, not a stale-base replay).
@@ -615,17 +673,29 @@ fn into_clean_integration_rebases_feature_fast_forwards_target_and_pushes_both()
             local.path(),
             &["merge-base", "--is-ancestor", &remote_dev_head, &new_head],
         );
-        assert!(is_anc, "rebased head must descend from the fetched origin/develop tip");
+        assert!(
+            is_anc,
+            "rebased head must descend from the fetched origin/develop tip"
+        );
 
         // Still on the feature branch; linear history — no merge commit.
-        assert_eq!(git(local.path(), &["symbolic-ref", "--short", "HEAD"]), "feature/x");
+        assert_eq!(
+            git(local.path(), &["symbolic-ref", "--short", "HEAD"]),
+            "feature/x"
+        );
         assert!(parent_counts(local.path()).iter().all(|&p| p <= 1));
 
         // Both pushes actually landed on the remote — verified via a fresh
         // clone, not local belief.
         let verify = clone_of(remote.path());
-        assert_eq!(git(verify.path(), &["rev-parse", "origin/develop"]), new_head);
-        assert_eq!(git(verify.path(), &["rev-parse", "origin/feature/x"]), new_head);
+        assert_eq!(
+            git(verify.path(), &["rev-parse", "origin/develop"]),
+            new_head
+        );
+        assert_eq!(
+            git(verify.path(), &["rev-parse", "origin/feature/x"]),
+            new_head
+        );
         git(verify.path(), &["checkout", "-q", "develop"]);
         assert!(verify.path().join("feature.txt").exists());
         assert!(verify.path().join("remote_dev.txt").exists());
@@ -680,25 +750,37 @@ fn into_auto_resolves_conflict_and_rebases() {
         git(local.path(), &["push", "-q", "-u", "origin", "develop"]);
 
         git(local.path(), &["checkout", "-qb", "feature/x"]);
-        write(local.path(), "conflict.txt", "feature version\nsame base line\n");
+        write(
+            local.path(),
+            "conflict.txt",
+            "feature version\nsame base line\n",
+        );
         commit_all(local.path(), "feature conflicting");
         let head_before = git(local.path(), &["rev-parse", "HEAD"]);
         let dev_before = git(local.path(), &["rev-parse", "refs/heads/develop"]);
 
         let other = clone_of(remote.path());
         git(other.path(), &["checkout", "-q", "develop"]);
-        write(other.path(), "conflict.txt", "remote version\nsame base line\n");
+        write(
+            other.path(),
+            "conflict.txt",
+            "remote version\nsame base line\n",
+        );
         commit_all(other.path(), "remote develop conflicting");
         git(other.path(), &["push", "-q"]);
 
         let result = reconcile(local.path(), &opts_into("develop", "auto")).unwrap();
         let state = result["state"].as_str().expect("state");
-        assert_eq!(result["into_target"], "develop", "report must name the target: {result}");
+        assert_eq!(
+            result["into_target"], "develop",
+            "report must name the target: {result}"
+        );
 
         if state == "rebased" {
             // Auto-resolve succeeded — HEAD moved, no sequencer state.
             assert_ne!(
-                git(local.path(), &["rev-parse", "HEAD"]), head_before,
+                git(local.path(), &["rev-parse", "HEAD"]),
+                head_before,
                 "rebase should have moved HEAD"
             );
             assert!(
@@ -711,12 +793,21 @@ fn into_auto_resolves_conflict_and_rebases() {
             assert_eq!(state, "diverged", "result={result}");
             assert_eq!(result["clean_rebase_possible"], false, "result={result}");
             let conflicts = result["conflicts"].as_array().expect("conflicts array");
-            assert!(!conflicts.is_empty(), "conflicts must be reported: {result}");
-            let paths: Vec<&str> = conflicts.iter().map(|c| c["path"].as_str().unwrap()).collect();
+            assert!(
+                !conflicts.is_empty(),
+                "conflicts must be reported: {result}"
+            );
+            let paths: Vec<&str> = conflicts
+                .iter()
+                .map(|c| c["path"].as_str().unwrap())
+                .collect();
             assert!(paths.contains(&"conflict.txt"), "paths={paths:?}");
             // No mutation: feature HEAD unmoved, local develop unmoved.
             assert_eq!(git(local.path(), &["rev-parse", "HEAD"]), head_before);
-            assert_eq!(git(local.path(), &["rev-parse", "refs/heads/develop"]), dev_before);
+            assert_eq!(
+                git(local.path(), &["rev-parse", "refs/heads/develop"]),
+                dev_before
+            );
         }
     });
 }
@@ -754,7 +845,10 @@ fn into_refuses_when_local_target_is_not_an_ancestor_of_remote_target() {
 
         // The refusal precedes ALL mutation: nothing moved, no rebase ran.
         assert_eq!(git(local.path(), &["rev-parse", "HEAD"]), head_before);
-        assert_eq!(git(local.path(), &["rev-parse", "refs/heads/develop"]), dev_before);
+        assert_eq!(
+            git(local.path(), &["rev-parse", "refs/heads/develop"]),
+            dev_before
+        );
     });
 }
 

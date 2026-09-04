@@ -22,7 +22,10 @@ pub const CONTENT_PROBE_BYTES: usize = 4096;
 pub fn skip_path(path: &str) -> bool {
     let segments: Vec<&str> = path.split('/').collect();
     let name = segments.last().copied().unwrap_or(path);
-    if segments.iter().any(|s| matches!(*s, "node_modules" | "vendor" | "dist")) {
+    if segments
+        .iter()
+        .any(|s| matches!(*s, "node_modules" | "vendor" | "dist"))
+    {
         return true;
     }
     if matches!(

@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use pixel_git::GitRunner;
 
@@ -66,7 +66,10 @@ pub fn inspect(root: &Path) -> Result<Value, String> {
     const CLEAN_LIST_CAP: usize = 200;
     let all_tracked = runner.ls_files();
     let dirty_set: std::collections::HashSet<&String> = dirty.iter().map(|(_, p)| p).collect();
-    let clean_total = all_tracked.iter().filter(|p| !dirty_set.contains(p)).count();
+    let clean_total = all_tracked
+        .iter()
+        .filter(|p| !dirty_set.contains(p))
+        .count();
     let clean: Vec<String> = all_tracked
         .into_iter()
         .filter(|p| !dirty_set.contains(p))

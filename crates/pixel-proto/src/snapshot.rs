@@ -23,7 +23,10 @@ impl SnapshotToken {
     /// Parse and validate a token string. Rejects wrong length, uppercase,
     /// or non-hex characters.
     pub fn parse(value: &str) -> Result<Self, String> {
-        let is_valid = value.len() == 12 && value.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+        let is_valid = value.len() == 12
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
         if !is_valid {
             return Err(format!(
                 "invalid snapshot token {value:?}: must match ^[a-f0-9]{{12}}$"
@@ -150,10 +153,7 @@ mod tests {
             dirty: vec![],
         };
         let value = serde_json::to_value(&info).unwrap();
-        assert_eq!(
-            value,
-            serde_json::json!({"head": "abc123"})
-        );
+        assert_eq!(value, serde_json::json!({"head": "abc123"}));
     }
 
     #[test]

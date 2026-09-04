@@ -170,30 +170,28 @@ mod tests {
     /// updating a stored fixture.
     #[test]
     fn golden_success_envelope() {
-        let envelope: Envelope<serde_json::Value> = Envelope::success(
-            "ping",
-            json!({"pong": true}),
-        )
-        .with_request_id("req-1")
-        .with_snapshot(SnapshotInfo {
-            token: Some("abcdef012345".into()),
-            head: Some("deadbeefcafefeed0000000000000000deadbee".into()),
-            branch: Some("main".into()),
-            dirty: vec!["src/a.rs".into()],
-        })
-        .with_epistemics(Epistemics {
-            closed_world: true,
-            lower_bound: false,
-            basis: "index".into(),
-            staleness_ms: Some(120),
-            confidence: None,
-        })
-        .with_budget(BudgetInfo {
-            byte_cap: 1024,
-            used: 10,
-            truncated: false,
-            cursor: None,
-        });
+        let envelope: Envelope<serde_json::Value> =
+            Envelope::success("ping", json!({"pong": true}))
+                .with_request_id("req-1")
+                .with_snapshot(SnapshotInfo {
+                    token: Some("abcdef012345".into()),
+                    head: Some("deadbeefcafefeed0000000000000000deadbee".into()),
+                    branch: Some("main".into()),
+                    dirty: vec!["src/a.rs".into()],
+                })
+                .with_epistemics(Epistemics {
+                    closed_world: true,
+                    lower_bound: false,
+                    basis: "index".into(),
+                    staleness_ms: Some(120),
+                    confidence: None,
+                })
+                .with_budget(BudgetInfo {
+                    byte_cap: 1024,
+                    used: 10,
+                    truncated: false,
+                    cursor: None,
+                });
 
         let actual = serde_json::to_value(&envelope).unwrap();
         let expected = json!({
@@ -279,26 +277,27 @@ mod tests {
     /// and `staleness_ms` as an optional integer.
     #[test]
     fn v2_fields_serialize_with_correct_shapes() {
-        let envelope: Envelope<serde_json::Value> = Envelope::success("inspect", json!({"head": "abc"}))
-            .with_snapshot(SnapshotInfo {
-                token: None,
-                head: Some("abc123".into()),
-                branch: Some("feature/x".into()),
-                dirty: vec!["src/main.rs".into(), "README.md".into()],
-            })
-            .with_epistemics(Epistemics {
-                closed_world: false,
-                lower_bound: true,
-                basis: "graph".into(),
-                staleness_ms: None,
-                confidence: None,
-            })
-            .with_budget(BudgetInfo {
-                byte_cap: 8192,
-                used: 4096,
-                truncated: true,
-                cursor: Some("page-2".into()),
-            });
+        let envelope: Envelope<serde_json::Value> =
+            Envelope::success("inspect", json!({"head": "abc"}))
+                .with_snapshot(SnapshotInfo {
+                    token: None,
+                    head: Some("abc123".into()),
+                    branch: Some("feature/x".into()),
+                    dirty: vec!["src/main.rs".into(), "README.md".into()],
+                })
+                .with_epistemics(Epistemics {
+                    closed_world: false,
+                    lower_bound: true,
+                    basis: "graph".into(),
+                    staleness_ms: None,
+                    confidence: None,
+                })
+                .with_budget(BudgetInfo {
+                    byte_cap: 8192,
+                    used: 4096,
+                    truncated: true,
+                    cursor: Some("page-2".into()),
+                });
 
         let value = serde_json::to_value(&envelope).unwrap();
 
@@ -352,8 +351,8 @@ mod tests {
     /// Envelope v2: `with_metadata` with all `None` leaves fields untouched.
     #[test]
     fn with_metadata_none_leaves_untouched() {
-        let envelope: Envelope<serde_json::Value> = Envelope::success("ping", json!({}))
-            .with_metadata(None, None, None);
+        let envelope: Envelope<serde_json::Value> =
+            Envelope::success("ping", json!({})).with_metadata(None, None, None);
 
         assert!(envelope.snapshot.is_none());
         assert!(envelope.epistemics.is_none());

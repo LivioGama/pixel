@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use pixel_git::GitRunner;
 
@@ -41,7 +41,9 @@ pub fn diff(
         args.extend(ps.iter().cloned());
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let diff_bytes = runner.run(&arg_refs).map_err(|e| format!("git diff: {e}"))?;
+    let diff_bytes = runner
+        .run(&arg_refs)
+        .map_err(|e| format!("git diff: {e}"))?;
     let diff_text = String::from_utf8_lossy(&diff_bytes);
 
     // Truncate diff text to byte cap.

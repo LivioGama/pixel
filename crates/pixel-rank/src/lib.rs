@@ -155,7 +155,10 @@ const SEMANTIC_RELATIONS: &[(&str, &[&str])] = &[
     ("email", &["mail"]),
     ("mail", &["email"]),
     // Languages, compilers, parser & AST
-    ("csharp", &["language", "extract", "grammar", "c_sharp", "cs"]),
+    (
+        "csharp",
+        &["language", "extract", "grammar", "c_sharp", "cs"],
+    ),
     ("python", &["language", "extract", "grammar", "py"]),
     ("rust", &["language", "extract", "grammar", "rs"]),
     ("javascript", &["language", "extract", "grammar", "js"]),
@@ -169,7 +172,8 @@ const SEMANTIC_RELATIONS: &[(&str, &[&str])] = &[
 ];
 
 pub const SHORT_TECH_KEYWORDS: &[&str] = &[
-    "c", "r", "go", "rs", "ts", "js", "py", "rb", "sh", "ui", "ci", "cd", "db", "os", "io", "ip", "ai", "ml",
+    "c", "r", "go", "rs", "ts", "js", "py", "rb", "sh", "ui", "ci", "cd", "db", "os", "io", "ip",
+    "ai", "ml",
 ];
 
 /// Normalize compound technical terms (e.g. "c#", "c++", ".net", "node.js")
@@ -262,7 +266,8 @@ pub fn tokenize_task(task: &str) -> Result<TaskQuery, String> {
                       truncated: &mut bool| {
         for chunk in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
             for w in split_ident_words(chunk) {
-                let is_valid_len = w.len() >= MIN_KEYWORD_LEN || SHORT_TECH_KEYWORDS.contains(&w.as_str());
+                let is_valid_len =
+                    w.len() >= MIN_KEYWORD_LEN || SHORT_TECH_KEYWORDS.contains(&w.as_str());
                 if is_valid_len && !stop.contains(w.as_str()) {
                     if keywords.len() >= MAX_KEYWORDS {
                         // A distinct searchable word was dropped by the cap —
@@ -334,7 +339,11 @@ pub struct TargetsOptions {
 
 impl Default for TargetsOptions {
     fn default() -> Self {
-        TargetsOptions { limit: 20, max_tier: None, precision_mode: false }
+        TargetsOptions {
+            limit: 20,
+            max_tier: None,
+            precision_mode: false,
+        }
     }
 }
 
@@ -553,7 +562,12 @@ fn filename_rank(all_paths: &[String], keywords: &[String]) -> Vec<(String, Vec<
 /// Purely deterministic — same candidate pool, same scores.
 fn idf_weight(kw: &str, content_hits: &BTreeMap<String, Vec<(String, u32)>>) -> f64 {
     let df = content_hits.get(kw).map(|v| v.len()).unwrap_or(1).max(1);
-    let n = content_hits.values().map(|v| v.len()).max().unwrap_or(1).max(1) as f64;
+    let n = content_hits
+        .values()
+        .map(|v| v.len())
+        .max()
+        .unwrap_or(1)
+        .max(1) as f64;
     1.0 + (n / df as f64).ln()
 }
 
@@ -661,10 +675,13 @@ pub fn lexical_rank(
         .map(|(p, _)| p)
         .collect();
 
-    rrf_fuse(&[(&s1, W_FILENAME), (&s2, W_SYMBOL), (&s3, W_CONTENT)], RRF_K)
-        .into_iter()
-        .map(|(p, _)| p)
-        .collect()
+    rrf_fuse(
+        &[(&s1, W_FILENAME), (&s2, W_SYMBOL), (&s3, W_CONTENT)],
+        RRF_K,
+    )
+    .into_iter()
+    .map(|(p, _)| p)
+    .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -845,7 +862,8 @@ pub fn compute_targets(
     //    #2, keep only files within RATIO of #1.
     let mut precision_dropped = 0usize;
     if opts.precision_mode && targets.len() > 1 {
-        let p0_scores: Vec<f64> = targets.iter()
+        let p0_scores: Vec<f64> = targets
+            .iter()
             .filter(|t| t.tier == "P0")
             .map(|t| t.score)
             .collect();
@@ -946,9 +964,8 @@ pub fn compute_targets(
     if lower_bound {
         // Explicitly-bounded partial answer: name every reason the list may
         // be incomplete instead of claiming exhaustiveness.
-        closed_world.push_str(
-            "This list is a bounded partial answer, NOT exhaustive — EXCEPT clauses: ",
-        );
+        closed_world
+            .push_str("This list is a bounded partial answer, NOT exhaustive — EXCEPT clauses: ");
         let mut reasons: Vec<String> = Vec::new();
         if !note.is_empty() {
             reasons.push(note.clone());
@@ -1146,7 +1163,16 @@ mod tests {
             exact_tokens: vec![],
             keywords: vec!["login".into()],
         };
-        let report = compute_targets("t", &q, inputs, &TargetsOptions { limit: 8, max_tier: None, precision_mode: false });
+        let report = compute_targets(
+            "t",
+            &q,
+            inputs,
+            &TargetsOptions {
+                limit: 8,
+                max_tier: None,
+                precision_mode: false,
+            },
+        );
         assert_eq!(report.targets.len(), 8);
         let p2 = report.targets.iter().filter(|t| t.tier == "P2").count();
         assert!(p2 <= 2); // ceil(8/4)
@@ -1225,7 +1251,11 @@ mod tests {
     }
 
     fn bm25_doc(path: &str, tfs: &[u32], len: u32) -> Bm25Doc {
-        Bm25Doc { path: path.into(), term_freqs: tfs.to_vec(), len }
+        Bm25Doc {
+            path: path.into(),
+            term_freqs: tfs.to_vec(),
+            len,
+        }
     }
 
     #[test]
@@ -1239,7 +1269,10 @@ mod tests {
             bm25_doc("b.rs", &[1, 3], 100),
         ];
         let ranked = bm25_rank(&terms, &docs).expect("signal present");
-        assert_eq!(ranked[0], "b.rs", "rare-term match must outrank common-term volume");
+        assert_eq!(
+            ranked[0], "b.rs",
+            "rare-term match must outrank common-term volume"
+        );
     }
 
     #[test]
@@ -1247,7 +1280,10 @@ mod tests {
         // Same single term, same length: 5 hits vs 50 hits. The 50-hit doc
         // still wins, but by far less than 10x — that is saturation.
         let terms = vec!["ledger".to_string()];
-        let few = vec![bm25_doc("few.rs", &[5], 100), bm25_doc("many.rs", &[50], 100)];
+        let few = vec![
+            bm25_doc("few.rs", &[5], 100),
+            bm25_doc("many.rs", &[50], 100),
+        ];
         let ranked = bm25_rank(&terms, &few).expect("signal present");
         assert_eq!(ranked[0], "many.rs");
         // Score ratio must be well under the 10x raw-count ratio.
@@ -1255,7 +1291,10 @@ mod tests {
             let norm = 1.0 - BM25_B + BM25_B * 1.0;
             (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * norm)
         };
-        assert!(score(50.0) / score(5.0) < 2.0, "tf must saturate, not scale linearly");
+        assert!(
+            score(50.0) / score(5.0) < 2.0,
+            "tf must saturate, not scale linearly"
+        );
     }
 
     #[test]
@@ -1268,13 +1307,19 @@ mod tests {
             bm25_doc("short.rs", &[3], 50),
         ];
         let ranked = bm25_rank(&terms, &docs).expect("signal present");
-        assert_eq!(ranked[0], "short.rs", "shorter doc with same tf must rank first");
+        assert_eq!(
+            ranked[0], "short.rs",
+            "shorter doc with same tf must rank first"
+        );
     }
 
     #[test]
     fn bm25_returns_none_without_signal() {
         let terms = vec!["ledger".to_string()];
-        assert!(bm25_rank(&[], &[bm25_doc("a.rs", &[], 10)]).is_none(), "no terms");
+        assert!(
+            bm25_rank(&[], &[bm25_doc("a.rs", &[], 10)]).is_none(),
+            "no terms"
+        );
         assert!(bm25_rank(&terms, &[]).is_none(), "no docs");
         // Every doc scores zero -> caller must fall back, not get path order.
         let zero = vec![bm25_doc("a.rs", &[0], 10), bm25_doc("b.rs", &[0], 10)];
@@ -1293,9 +1338,17 @@ mod tests {
             bm25_doc("m.rs", &[3], 100),
         ];
         let first = bm25_rank(&terms, &docs).expect("signal present");
-        assert_eq!(first, vec!["a.rs", "m.rs", "z.rs"], "identical scores tie by path asc");
+        assert_eq!(
+            first,
+            vec!["a.rs", "m.rs", "z.rs"],
+            "identical scores tie by path asc"
+        );
         for _ in 0..5 {
-            assert_eq!(bm25_rank(&terms, &docs).unwrap(), first, "must be deterministic");
+            assert_eq!(
+                bm25_rank(&terms, &docs).unwrap(),
+                first,
+                "must be deterministic"
+            );
         }
     }
 
@@ -1314,10 +1367,7 @@ mod tests {
                 ("src/b.rs".to_string(), 1u32),
             ],
         );
-        content.insert(
-            "ledger".to_string(),
-            vec![("src/b.rs".to_string(), 2u32)],
-        );
+        content.insert("ledger".to_string(), vec![("src/b.rs".to_string(), 2u32)]);
         let ranked = content_rank(&content);
         // 'b.rs' hits the rare, high-IDF term 'ledger'; 'a.rs' only hits the
         // common 'fn'. IDF must push b.rs ahead despite a.rs's higher raw count.

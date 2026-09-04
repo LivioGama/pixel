@@ -117,7 +117,11 @@ mod tests {
             (ErrorCode::NotIndexed, "\"NOT_INDEXED\""),
             (ErrorCode::NotFound, "\"NOT_FOUND\""),
         ];
-        assert_eq!(cases.len(), 22, "expected 18 usable-git codes + 4 pixel codes");
+        assert_eq!(
+            cases.len(),
+            22,
+            "expected 18 usable-git codes + 4 pixel codes"
+        );
         for (code, expected) in cases {
             let serialized = serde_json::to_string(code).unwrap();
             assert_eq!(&serialized, expected, "serialize({code:?})");

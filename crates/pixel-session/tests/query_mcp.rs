@@ -110,7 +110,11 @@ fn seeded_store(state: &TempRoot) -> (Store, i64) {
         })
         .unwrap();
     store
-        .record_error(&error(Surface::Vitest, "2 failed | 108 passed (312s)", Some(now - 500)))
+        .record_error(&error(
+            Surface::Vitest,
+            "2 failed | 108 passed (312s)",
+            Some(now - 500),
+        ))
         .unwrap();
     (store, now)
 }
@@ -144,7 +148,10 @@ fn show_correlates_events_and_run() {
     assert_eq!(shown.correlated_events.len(), 3);
     let run = shown.run.unwrap();
     assert_eq!(run.run_id, "01B");
-    assert_eq!(run.changed_since_last_run.as_deref(), Some(&["vite-deps".to_owned()][..]));
+    assert_eq!(
+        run.changed_since_last_run.as_deref(),
+        Some(&["vite-deps".to_owned()][..])
+    );
     assert!(query::show(&store, 999).unwrap().is_none());
 }
 
@@ -153,12 +160,21 @@ fn hmr_filters_updates_by_file() {
     let state = TempRoot::new();
     let (store, _) = seeded_store(&state);
     let all = query::hmr(&store, None).unwrap();
-    assert_eq!(all.last_update.as_ref().unwrap().data.as_ref().unwrap()["rev"], 8);
+    assert_eq!(
+        all.last_update.as_ref().unwrap().data.as_ref().unwrap()["rev"],
+        8
+    );
     let filtered = query::hmr(&store, Some("src/routes/chat.tssx")).unwrap();
     assert!(filtered.last_update.is_none());
     let filtered = query::hmr(&store, Some("src/routes/chat.tsx")).unwrap();
     assert_eq!(
-        filtered.last_update.as_ref().unwrap().data.as_ref().unwrap()["rev"],
+        filtered
+            .last_update
+            .as_ref()
+            .unwrap()
+            .data
+            .as_ref()
+            .unwrap()["rev"],
         7
     );
 }
@@ -209,7 +225,13 @@ fn mcp_lists_exactly_the_five_tools() {
     // rmcp's ToolRouter::list_all returns tools sorted by name.
     assert_eq!(
         mcp::SniperServer::tool_names(),
-        ["env_fingerprint", "error_show", "errors_query", "errors_since", "hmr_status"]
+        [
+            "env_fingerprint",
+            "error_show",
+            "errors_query",
+            "errors_since",
+            "hmr_status"
+        ]
     );
 }
 
@@ -233,8 +255,7 @@ fn mcp_results_equal_cli_json() {
     let (store, _) = seeded_store(&state);
 
     let call = |name: &str, args: Value| -> Value {
-        mcp::call_tool(&store, name, &args)
-            .unwrap_or_else(|e| panic!("tool {name} errored: {e}"))
+        mcp::call_tool(&store, name, &args).unwrap_or_else(|e| panic!("tool {name} errored: {e}"))
     };
 
     assert_eq!(

@@ -35,7 +35,10 @@ fn make_repo() -> TempDir {
     )
     .unwrap();
     git(root, &["add", "."]);
-    git(root, &["commit", "-q", "-m", "Add main with hello world greeting"]);
+    git(
+        root,
+        &["commit", "-q", "-m", "Add main with hello world greeting"],
+    );
 
     // Commit 2: modify the file (diff content has a new function).
     fs::write(
@@ -46,7 +49,12 @@ fn make_repo() -> TempDir {
     git(root, &["add", "."]);
     git(
         root,
-        &["commit", "-q", "-m", "Add helper with secret_token variable"],
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "Add helper with secret_token variable",
+        ],
     );
 
     // Commit 3: add a generated/lock file (should be poison-skipped).
@@ -193,7 +201,10 @@ fn path_lifecycle_reports_first_seen_and_last_changed() {
 #[test]
 fn poison_detection_skips_lock_and_generated_files() {
     // Structural skip rules.
-    assert!(skip_path("package-lock.json"), "package-lock.json should be skipped");
+    assert!(
+        skip_path("package-lock.json"),
+        "package-lock.json should be skipped"
+    );
     assert!(skip_path("Cargo.lock"), "Cargo.lock should be skipped");
     assert!(skip_path("yarn.lock"), "yarn.lock should be skipped");
     assert!(
@@ -210,8 +221,14 @@ fn poison_detection_skips_lock_and_generated_files() {
     );
 
     // Normal source files should NOT be skipped.
-    assert!(!skip_path("src/main.rs"), "normal source should not be skipped");
-    assert!(!skip_path("src/components/Form.tsx"), "normal tsx should not be skipped");
+    assert!(
+        !skip_path("src/main.rs"),
+        "normal source should not be skipped"
+    );
+    assert!(
+        !skip_path("src/components/Form.tsx"),
+        "normal tsx should not be skipped"
+    );
 
     // Content classification: binary (NUL byte).
     let binary = b"hello\x00world";
@@ -356,7 +373,8 @@ fn query_never_blocks_on_in_progress_ingest() {
     // excavate/index_state touch no ingest code path at all), not a tight
     // timing assertion.
     let start = Instant::now();
-    let search_result = search(&store, "helper", SearchFacet::Message, 50).expect("search must not error mid-ingest");
+    let search_result = search(&store, "helper", SearchFacet::Message, 50)
+        .expect("search must not error mid-ingest");
     let excavate_result = store
         .excavate(Some("secret_token"), None, None, None, 50)
         .expect("excavate must not error mid-ingest");
@@ -371,7 +389,10 @@ fn query_never_blocks_on_in_progress_ingest() {
     // landed), but the diff facet has nothing yet — index_state must report
     // that honestly rather than claiming fresh.
     assert!(
-        search_result.candidates.iter().any(|h| h.subject.to_lowercase().contains("helper")),
+        search_result
+            .candidates
+            .iter()
+            .any(|h| h.subject.to_lowercase().contains("helper")),
         "message search should still work from phase-A-only metadata"
     );
     let _ = excavate_result; // must not panic/error; content presence isn't the point here.
@@ -402,7 +423,9 @@ fn file_text_cap_genuinely_bounds_a_single_files_stored_diff_text() {
     // itself, exactly the property this test exists to prove.
     let mut content = String::new();
     for i in 0..3000 {
-        content.push_str(&format!("let line_{i}_value = {i}; // padding text to add real bytes\n"));
+        content.push_str(&format!(
+            "let line_{i}_value = {i}; // padding text to add real bytes\n"
+        ));
     }
     assert!(
         content.len() > FILE_TEXT_CAP_BYTES * 2,
@@ -412,12 +435,23 @@ fn file_text_cap_genuinely_bounds_a_single_files_stored_diff_text() {
     );
     fs::write(root.join("big.rs"), &content).unwrap();
     git(root, &["add", "."]);
-    git(root, &["commit", "-q", "-m", "Add an oversized generated-looking source file"]);
+    git(
+        root,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "Add an oversized generated-looking source file",
+        ],
+    );
 
     let mut store = FactsStore::open(root).expect("open store");
     let opts = IngestOptions::default();
     let report = ingest_until_fresh(&mut store, &opts).expect("ingest until fresh");
-    assert!(report.fresh, "ingest should still converge to fresh even with an over-cap file");
+    assert!(
+        report.fresh,
+        "ingest should still converge to fresh even with an over-cap file"
+    );
 
     let (added_len, truncated): (i64, i64) = store
         .conn()
@@ -444,7 +478,10 @@ fn file_text_cap_genuinely_bounds_a_single_files_stored_diff_text() {
          to the {FILE_TEXT_CAP_BYTES}-byte cap — the per-file budget check may \
          be double-counting and truncating far earlier than intended"
     );
-    assert_eq!(truncated, 1, "the oversized file's hunk must be flagged truncated, never silently clipped");
+    assert_eq!(
+        truncated, 1,
+        "the oversized file's hunk must be flagged truncated, never silently clipped"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -474,7 +511,11 @@ fn phase_a_reruns_when_refs_change() {
     assert!(store.index_state().fresh, "should be fresh after ingest");
 
     // Add a new commit: refs moved, so the index is stale again.
-    fs::write(root.join("src/main.rs"), "fn main() {\n    println!(\"v2\");\n}\n").unwrap();
+    fs::write(
+        root.join("src/main.rs"),
+        "fn main() {\n    println!(\"v2\");\n}\n",
+    )
+    .unwrap();
     git(root, &["add", "."]);
     git(root, &["commit", "-q", "-m", "bump to v2"]);
 
@@ -550,8 +591,14 @@ fn concurrent_open_on_poisoned_db_never_ioerrors() {
         .collect();
 
     for h in handles {
-        let state = h.join().expect("thread panicked").expect("concurrent open must not error");
-        assert_eq!(state.schema_version, pixel_facts::store::FACTS_SCHEMA_VERSION);
+        let state = h
+            .join()
+            .expect("thread panicked")
+            .expect("concurrent open must not error");
+        assert_eq!(
+            state.schema_version,
+            pixel_facts::store::FACTS_SCHEMA_VERSION
+        );
     }
 }
 
@@ -563,6 +610,12 @@ fn lazy_ingest_is_bounded_and_converges() {
     // A generous budget still converges for a tiny 3-commit repo.
     let report = pixel_facts::ingest::ingest_until_fresh_bounded(&mut store, 5000)
         .expect("bounded lazy ingest");
-    assert!(report.fresh, "bounded lazy ingest should converge on a tiny repo");
-    assert!(store.index_state().fresh, "index_state should be fresh after lazy ingest");
+    assert!(
+        report.fresh,
+        "bounded lazy ingest should converge on a tiny repo"
+    );
+    assert!(
+        store.index_state().fresh,
+        "index_state should be fresh after lazy ingest"
+    );
 }

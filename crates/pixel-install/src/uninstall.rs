@@ -17,9 +17,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::InstallError;
 use crate::config;
 use crate::install::{self, CheckStatus, InstallReport, InstallStep, InstallSummary};
-use crate::InstallError;
 
 pub type Result<T> = std::result::Result<T, InstallError>;
 
@@ -95,9 +95,18 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
     // 6. Remove the pixel binary.
     steps.push(remove_binary(&binary_path, dry_run)?);
 
-    let green = steps.iter().filter(|s| s.status == CheckStatus::Green).count();
-    let yellow = steps.iter().filter(|s| s.status == CheckStatus::Yellow).count();
-    let red = steps.iter().filter(|s| s.status == CheckStatus::Red).count();
+    let green = steps
+        .iter()
+        .filter(|s| s.status == CheckStatus::Green)
+        .count();
+    let yellow = steps
+        .iter()
+        .filter(|s| s.status == CheckStatus::Yellow)
+        .count();
+    let red = steps
+        .iter()
+        .filter(|s| s.status == CheckStatus::Red)
+        .count();
     let ok = red == 0;
 
     Ok(InstallReport {
@@ -154,7 +163,8 @@ fn strip_agent_configs(home: &Path, dry_run: bool) -> Result<InstallStep> {
         stripped += 1;
     }
 
-    let summary = format!("stripped managed block from {stripped} file(s) ({skipped} already clean)");
+    let summary =
+        format!("stripped managed block from {stripped} file(s) ({skipped} already clean)");
     let detail = if backups.is_empty() {
         None
     } else {
@@ -340,8 +350,14 @@ fn remove_zcode_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let mut value = install::read_settings(&config_path)?;
     let mut removed = 0usize;
     // zcode nests hooks under `hooks.events.<Event>`.
-    if let Some(hooks_root) = value.get_mut("hooks").and_then(serde_json::Value::as_object_mut) {
-        if let Some(events) = hooks_root.get_mut("events").and_then(serde_json::Value::as_object_mut) {
+    if let Some(hooks_root) = value
+        .get_mut("hooks")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if let Some(events) = hooks_root
+            .get_mut("events")
+            .and_then(serde_json::Value::as_object_mut)
+        {
             let event_keys: Vec<String> = events.keys().cloned().collect();
             for event in event_keys {
                 if let Some(existing) = events.get(&event) {
@@ -391,7 +407,11 @@ fn remove_zcode_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
 
     let summary = format!(
         "removed {removed} zcode hook entry/entries{}",
-        if agents_stripped { " + stripped AGENTS.md managed block" } else { "" }
+        if agents_stripped {
+            " + stripped AGENTS.md managed block"
+        } else {
+            ""
+        }
     );
     Ok(InstallStep {
         id: "hooks.zcode".into(),
@@ -420,7 +440,10 @@ fn remove_cursor_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
     }
     let mut value = install::read_settings(&config_path)?;
     let mut removed = 0usize;
-    if let Some(hooks) = value.get_mut("hooks").and_then(serde_json::Value::as_object_mut) {
+    if let Some(hooks) = value
+        .get_mut("hooks")
+        .and_then(serde_json::Value::as_object_mut)
+    {
         let event_keys: Vec<String> = hooks.keys().cloned().collect();
         for event in event_keys {
             if let Some(existing) = hooks.get(&event) {
@@ -505,8 +528,16 @@ fn remove_pi_extension(home: &Path, dry_run: bool) -> Result<InstallStep> {
 
     let summary = format!(
         "{}{}",
-        if ext_removed { "removed pi guard extension" } else { "no pi extension found" },
-        if agents_stripped { " + stripped AGENTS.md managed block" } else { "" },
+        if ext_removed {
+            "removed pi guard extension"
+        } else {
+            "no pi extension found"
+        },
+        if agents_stripped {
+            " + stripped AGENTS.md managed block"
+        } else {
+            ""
+        },
     );
     Ok(InstallStep {
         id: "hooks.pi".into(),
@@ -535,7 +566,10 @@ fn remove_project_codex_hooks(home: &Path, dry_run: bool) -> Result<InstallStep>
     let summary = if patched.is_empty() {
         "no project-level .codex/hooks.json needed patching".to_string()
     } else {
-        format!("patched {} project-level .codex/hooks.json file(s)", patched.len())
+        format!(
+            "patched {} project-level .codex/hooks.json file(s)",
+            patched.len()
+        )
     };
     Ok(InstallStep {
         id: "hooks.codex_project_shadow".into(),
@@ -636,7 +670,10 @@ fn remove_pixel_hooks_from_settings(
     }
     let mut value = install::read_settings(config_path)?;
     let mut removed = 0usize;
-    if let Some(hooks) = value.get_mut("hooks").and_then(serde_json::Value::as_object_mut) {
+    if let Some(hooks) = value
+        .get_mut("hooks")
+        .and_then(serde_json::Value::as_object_mut)
+    {
         let event_keys: Vec<String> = hooks.keys().cloned().collect();
         for event in event_keys {
             if let Some(existing) = hooks.get(&event) {

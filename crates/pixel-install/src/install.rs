@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::config;
 use crate::InstallError;
+use crate::config;
 
 pub type Result<T> = std::result::Result<T, InstallError>;
 
@@ -115,7 +115,10 @@ fn installed_agents(home: &Path) -> InstalledAgents {
             || home.join(config::CLAUDE_HOOKS_DIR).is_dir(),
         codex: command_available("codex") || home.join(config::CODEX_HOOKS_FILE).is_file(),
         devin: command_available("devin")
-            || home.join(config::DEVIN_CONFIG_DIR).join(config::DEVIN_CONFIG_FILE).is_file(),
+            || home
+                .join(config::DEVIN_CONFIG_DIR)
+                .join(config::DEVIN_CONFIG_FILE)
+                .is_file(),
         gemini: command_available("gemini") || home.join(config::GEMINI_SETTINGS_FILE).is_file(),
         zcode: command_available("zcode") || home.join(config::ZCODE_CONFIG_FILE).is_file(),
         cursor: command_available("cursor-agent") || home.join(config::CURSOR_HOOKS_FILE).is_file(),
@@ -185,20 +188,29 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         steps.push(install_prompt_submit_hook(&home, &exe, dry_run)?);
         steps.push(install_post_compaction_hook(&home, &exe, dry_run)?);
     } else {
-        steps.push(skipped_agent_step("hooks.claude", "Claude not installed — skipping hooks"));
+        steps.push(skipped_agent_step(
+            "hooks.claude",
+            "Claude not installed — skipping hooks",
+        ));
     }
 
     // 4. Wire passive lifecycle hooks only for installed/supported agents.
     if agents.devin {
         steps.push(install_devin_hooks(&home, &exe, dry_run)?);
     } else {
-        steps.push(skipped_agent_step("hooks.devin", "Devin not installed — skipping hooks"));
+        steps.push(skipped_agent_step(
+            "hooks.devin",
+            "Devin not installed — skipping hooks",
+        ));
     }
     if agents.codex {
         steps.push(install_codex_hooks(&home, &exe, dry_run)?);
         steps.push(patch_project_codex_hooks(&home, dry_run)?);
     } else {
-        steps.push(skipped_agent_step("hooks.codex", "Codex not installed — skipping hooks"));
+        steps.push(skipped_agent_step(
+            "hooks.codex",
+            "Codex not installed — skipping hooks",
+        ));
         steps.push(skipped_agent_step(
             "hooks.codex_project_shadow",
             "Codex not installed — skipping project hook scan",
@@ -207,30 +219,51 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     if agents.gemini {
         steps.push(install_gemini_hooks(&home, &exe, dry_run)?);
     } else {
-        steps.push(skipped_agent_step("hooks.gemini", "Gemini not installed — skipping hooks"));
+        steps.push(skipped_agent_step(
+            "hooks.gemini",
+            "Gemini not installed — skipping hooks",
+        ));
     }
     if agents.zcode {
         steps.push(install_zcode_hooks(&home, &exe, dry_run)?);
     } else {
-        steps.push(skipped_agent_step("hooks.zcode", "zcode not installed — skipping hooks"));
+        steps.push(skipped_agent_step(
+            "hooks.zcode",
+            "zcode not installed — skipping hooks",
+        ));
     }
     if agents.cursor {
         steps.push(install_cursor_hooks(&home, &exe, dry_run)?);
     } else {
-        steps.push(skipped_agent_step("hooks.cursor", "Cursor not installed — skipping hooks"));
+        steps.push(skipped_agent_step(
+            "hooks.cursor",
+            "Cursor not installed — skipping hooks",
+        ));
     }
     if agents.pi {
         steps.push(install_pi_rules(&home, &exe, dry_run)?);
     } else {
-        steps.push(skipped_agent_step("hooks.pi", "pi not installed — skipping rules"));
+        steps.push(skipped_agent_step(
+            "hooks.pi",
+            "pi not installed — skipping rules",
+        ));
     }
 
     // 5. Rewrite agent-config with managed markers.
     steps.push(rewrite_agent_configs(&home, &exe, dry_run)?);
 
-    let green = steps.iter().filter(|s| s.status == CheckStatus::Green).count();
-    let yellow = steps.iter().filter(|s| s.status == CheckStatus::Yellow).count();
-    let red = steps.iter().filter(|s| s.status == CheckStatus::Red).count();
+    let green = steps
+        .iter()
+        .filter(|s| s.status == CheckStatus::Green)
+        .count();
+    let yellow = steps
+        .iter()
+        .filter(|s| s.status == CheckStatus::Yellow)
+        .count();
+    let red = steps
+        .iter()
+        .filter(|s| s.status == CheckStatus::Red)
+        .count();
     let ok = red == 0;
 
     Ok(InstallReport {
@@ -304,7 +337,8 @@ fn remove_existing_guard_hooks(home: &Path, dry_run: bool) -> Result<InstallStep
 
     let nested_files = [
         home.join(".claude/settings.json"),
-        home.join(config::DEVIN_CONFIG_DIR).join(config::DEVIN_CONFIG_FILE),
+        home.join(config::DEVIN_CONFIG_DIR)
+            .join(config::DEVIN_CONFIG_FILE),
         home.join(config::CODEX_HOOKS_FILE),
         home.join(config::GEMINI_SETTINGS_FILE),
     ];
@@ -384,7 +418,9 @@ fn remove_guard_from_settings_file(
             }));
         };
         for key in hooks_path {
-            let Some(next) = current.get_mut(*key).and_then(serde_json::Value::as_object_mut)
+            let Some(next) = current
+                .get_mut(*key)
+                .and_then(serde_json::Value::as_object_mut)
             else {
                 return Ok(false);
             };
@@ -405,25 +441,28 @@ fn remove_guard_from_settings_file(
 fn install_session_start_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
     let path = hooks_dir.join(config::SESSION_START_HOOK);
-    let body = format!("#!/bin/sh\nexec {} hook session-start \"$@\"\n", exe.display());
+    let body = format!(
+        "#!/bin/sh\nexec {} hook session-start \"$@\"\n",
+        exe.display()
+    );
 
     let settings = home.join(".claude").join("settings.json");
     let mut value = read_settings(&settings)?;
-    let hooks = value
-        .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+    let hooks = value.as_object_mut().ok_or_else(|| {
+        InstallError::Config(config::ConfigError::InvalidSettings {
             path: settings.clone(),
             reason: "settings.json root is not an object".into(),
-        }))?;
+        })
+    })?;
     let hooks_obj = hooks
         .entry("hooks".to_string())
         .or_insert_with(|| serde_json::json!({}));
-    let obj = hooks_obj
-        .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+    let obj = hooks_obj.as_object_mut().ok_or_else(|| {
+        InstallError::Config(config::ConfigError::InvalidSettings {
             path: settings.clone(),
             reason: "hooks is not an object".into(),
-        }))?;
+        })
+    })?;
     // Merge, never blind-overwrite: a real settings.json can already carry
     // multiple unrelated SessionStart entries registered by other tools
     // (e.g. separate matcher groups for "startup"/"resume"/"clear"). Replace
@@ -432,14 +471,18 @@ fn install_session_start_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<
     // else's hooks.
     let existing_session_start = obj.get("SessionStart").cloned();
     let pixel_command = format!("{} hook session-start", exe.display());
-    let merged = config::merge_hook_entry(existing_session_start.as_ref(), "hook session-start", serde_json::json!({
-        "matcher": "SessionStart",
-        "hooks": [{
-            "type": "command",
-            "timeout": config::HOOK_TIMEOUT,
-            "command": pixel_command,
-        }],
-    }));
+    let merged = config::merge_hook_entry(
+        existing_session_start.as_ref(),
+        "hook session-start",
+        serde_json::json!({
+            "matcher": "SessionStart",
+            "hooks": [{
+                "type": "command",
+                "timeout": config::HOOK_TIMEOUT,
+                "command": pixel_command,
+            }],
+        }),
+    );
     obj.insert("SessionStart".to_string(), merged);
 
     if dry_run {
@@ -463,44 +506,54 @@ fn install_session_start_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<
         id: "hook.session-start".into(),
         status: CheckStatus::Green,
         summary: "SessionStart hook installed".into(),
-        detail: Some(with_backup_note(format!("wrote {}", path.display()), backup_path)),
+        detail: Some(with_backup_note(
+            format!("wrote {}", path.display()),
+            backup_path,
+        )),
     })
 }
 
 fn install_prompt_submit_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
     let path = hooks_dir.join(config::PROMPT_SUBMIT_HOOK);
-    let body = format!("#!/bin/sh\nexec {} hook prompt-submit \"$@\"\n", exe.display());
+    let body = format!(
+        "#!/bin/sh\nexec {} hook prompt-submit \"$@\"\n",
+        exe.display()
+    );
 
     let settings = home.join(".claude").join("settings.json");
     let mut value = read_settings(&settings)?;
-    let hooks = value
-        .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+    let hooks = value.as_object_mut().ok_or_else(|| {
+        InstallError::Config(config::ConfigError::InvalidSettings {
             path: settings.clone(),
             reason: "settings.json root is not an object".into(),
-        }))?;
+        })
+    })?;
     let hooks_obj = hooks
         .entry("hooks".to_string())
         .or_insert_with(|| serde_json::json!({}));
-    let obj = hooks_obj
-        .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+    let obj = hooks_obj.as_object_mut().ok_or_else(|| {
+        InstallError::Config(config::ConfigError::InvalidSettings {
             path: settings.clone(),
             reason: "hooks is not an object".into(),
-        }))?;
+        })
+    })?;
     // Merge, never blind-overwrite — same idempotent pattern as guard and
     // session-start. Replace only a prior pixel-authored entry.
     let existing = obj.get("UserPromptSubmit").cloned();
     let pixel_command = format!("{} hook prompt-submit", exe.display());
-    let merged = config::merge_hook_entry(existing.as_ref(), "hook prompt-submit", serde_json::json!({
-        "matcher": "*",
-        "hooks": [{
-            "type": "command",
-            "timeout": config::HOOK_TIMEOUT,
-            "command": pixel_command,
-        }],
-    }));
+    let merged = config::merge_hook_entry(
+        existing.as_ref(),
+        "hook prompt-submit",
+        serde_json::json!({
+            "matcher": "*",
+            "hooks": [{
+                "type": "command",
+                "timeout": config::HOOK_TIMEOUT,
+                "command": pixel_command,
+            }],
+        }),
+    );
     obj.insert("UserPromptSubmit".to_string(), merged);
 
     if dry_run {
@@ -524,32 +577,38 @@ fn install_prompt_submit_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<
         id: "hook.prompt-submit".into(),
         status: CheckStatus::Green,
         summary: "UserPromptSubmit hook installed".into(),
-        detail: Some(with_backup_note(format!("wrote {}", path.display()), backup_path)),
+        detail: Some(with_backup_note(
+            format!("wrote {}", path.display()),
+            backup_path,
+        )),
     })
 }
 
 fn install_post_compaction_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
     let path = hooks_dir.join(config::POST_COMPACTION_HOOK);
-    let body = format!("#!/bin/sh\nexec {} hook post-compaction \"$@\"\n", exe.display());
+    let body = format!(
+        "#!/bin/sh\nexec {} hook post-compaction \"$@\"\n",
+        exe.display()
+    );
 
     let settings = home.join(".claude").join("settings.json");
     let mut value = read_settings(&settings)?;
-    let hooks = value
-        .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+    let hooks = value.as_object_mut().ok_or_else(|| {
+        InstallError::Config(config::ConfigError::InvalidSettings {
             path: settings.clone(),
             reason: "settings.json root is not an object".into(),
-        }))?;
+        })
+    })?;
     let hooks_obj = hooks
         .entry("hooks".to_string())
         .or_insert_with(|| serde_json::json!({}));
-    let obj = hooks_obj
-        .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+    let obj = hooks_obj.as_object_mut().ok_or_else(|| {
+        InstallError::Config(config::ConfigError::InvalidSettings {
             path: settings.clone(),
             reason: "hooks is not an object".into(),
-        }))?;
+        })
+    })?;
     // The event is `PostCompact`. `PostCompaction` is NOT a valid Claude Code
     // hook event — settings.json carrying that key is silently ignored with
     // "Unknown hook event", so the manifest was never re-injected after a
@@ -559,15 +618,19 @@ fn install_post_compaction_hook(home: &Path, exe: &Path, dry_run: bool) -> Resul
     // hooks. Replace only a prior pixel-authored entry.
     let existing = obj.get("PostCompact").cloned();
     let pixel_command = format!("{} hook post-compaction", exe.display());
-    let merged = config::merge_hook_entry(existing.as_ref(), "hook post-compaction", serde_json::json!({
-        // PostCompact matches on what triggered the compaction.
-        "matcher": "manual|auto",
-        "hooks": [{
-            "type": "command",
-            "timeout": config::HOOK_TIMEOUT,
-            "command": pixel_command,
-        }],
-    }));
+    let merged = config::merge_hook_entry(
+        existing.as_ref(),
+        "hook post-compaction",
+        serde_json::json!({
+            // PostCompact matches on what triggered the compaction.
+            "matcher": "manual|auto",
+            "hooks": [{
+                "type": "command",
+                "timeout": config::HOOK_TIMEOUT,
+                "command": pixel_command,
+            }],
+        }),
+    );
     obj.insert("PostCompact".to_string(), merged);
 
     if dry_run {
@@ -591,7 +654,10 @@ fn install_post_compaction_hook(home: &Path, exe: &Path, dry_run: bool) -> Resul
         id: "hook.post-compaction".into(),
         status: CheckStatus::Green,
         summary: "PostCompact hook installed".into(),
-        detail: Some(with_backup_note(format!("wrote {}", path.display()), backup_path)),
+        detail: Some(with_backup_note(
+            format!("wrote {}", path.display()),
+            backup_path,
+        )),
     })
 }
 
@@ -735,18 +801,20 @@ fn install_devin_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
 
     let hooks_obj = value
         .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
-            path: config_path.clone(),
-            reason: "config.json root is not an object".into(),
-        }))?
+        .ok_or_else(|| {
+            InstallError::Config(config::ConfigError::InvalidSettings {
+                path: config_path.clone(),
+                reason: "config.json root is not an object".into(),
+            })
+        })?
         .entry("hooks".to_string())
         .or_insert_with(|| serde_json::json!({}));
-    let hooks_map = hooks_obj
-        .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+    let hooks_map = hooks_obj.as_object_mut().ok_or_else(|| {
+        InstallError::Config(config::ConfigError::InvalidSettings {
             path: config_path.clone(),
             reason: "hooks is not an object".into(),
-        }))?;
+        })
+    })?;
 
     // SessionStart — same hook script as Claude.
     let session_start_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
@@ -803,7 +871,10 @@ fn install_devin_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
         return Ok(InstallStep {
             id: "hooks.devin".into(),
             status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "Devin hooks wired (SessionStart + UserPromptSubmit + PostCompaction)"),
+            summary: dry_run_summary(
+                dry_run,
+                "Devin hooks wired (SessionStart + UserPromptSubmit + PostCompaction)",
+            ),
             detail: Some(format!("would write {}", config_path.display())),
         });
     }
@@ -827,18 +898,20 @@ fn install_codex_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
 
     let hooks_obj = value
         .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
-            path: config_path.clone(),
-            reason: "hooks.json root is not an object".into(),
-        }))?
+        .ok_or_else(|| {
+            InstallError::Config(config::ConfigError::InvalidSettings {
+                path: config_path.clone(),
+                reason: "hooks.json root is not an object".into(),
+            })
+        })?
         .entry("hooks".to_string())
         .or_insert_with(|| serde_json::json!({}));
-    let hooks_map = hooks_obj
-        .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+    let hooks_map = hooks_obj.as_object_mut().ok_or_else(|| {
+        InstallError::Config(config::ConfigError::InvalidSettings {
             path: config_path.clone(),
             reason: "hooks is not an object".into(),
-        }))?;
+        })
+    })?;
 
     let session_start_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
     let existing_session_start = hooks_map.get("SessionStart").cloned();
@@ -894,7 +967,10 @@ fn install_codex_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
         return Ok(InstallStep {
             id: "hooks.codex".into(),
             status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "Codex hooks wired (SessionStart + UserPromptSubmit + PostCompaction)"),
+            summary: dry_run_summary(
+                dry_run,
+                "Codex hooks wired (SessionStart + UserPromptSubmit + PostCompaction)",
+            ),
             detail: Some(format!("would write {}", config_path.display())),
         });
     }
@@ -919,18 +995,20 @@ fn install_gemini_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Insta
 
     let hooks_obj = value
         .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
-            path: config_path.clone(),
-            reason: "settings.json root is not an object".into(),
-        }))?
+        .ok_or_else(|| {
+            InstallError::Config(config::ConfigError::InvalidSettings {
+                path: config_path.clone(),
+                reason: "settings.json root is not an object".into(),
+            })
+        })?
         .entry("hooks".to_string())
         .or_insert_with(|| serde_json::json!({}));
-    let hooks_map = hooks_obj
-        .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+    let hooks_map = hooks_obj.as_object_mut().ok_or_else(|| {
+        InstallError::Config(config::ConfigError::InvalidSettings {
             path: config_path.clone(),
             reason: "hooks is not an object".into(),
-        }))?;
+        })
+    })?;
 
     let session_start_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
     let existing_session_start = hooks_map.get("SessionStart").cloned();
@@ -987,7 +1065,10 @@ fn install_gemini_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Insta
         return Ok(InstallStep {
             id: "hooks.gemini".into(),
             status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "Gemini hooks wired (SessionStart + BeforeAgent + PostCompaction)"),
+            summary: dry_run_summary(
+                dry_run,
+                "Gemini hooks wired (SessionStart + BeforeAgent + PostCompaction)",
+            ),
             detail: Some(format!("would write {}", config_path.display())),
         });
     }
@@ -1103,7 +1184,9 @@ fn patch_project_codex_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> 
 
     let status = CheckStatus::Green;
     let summary = if patched.is_empty() {
-        format!("no shadowed project-level .codex/hooks.json found ({already_ok} already carry hooks)")
+        format!(
+            "no shadowed project-level .codex/hooks.json found ({already_ok} already carry hooks)"
+        )
     } else {
         format!(
             "{} shadowed project-level .codex/hooks.json patched ({already_ok} already fine)",
@@ -1145,17 +1228,21 @@ fn install_zcode_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
     // default — `hooks.enabled: true` MUST be set or none of the events fire.
     let hooks_root = value
         .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
-            path: config_path.clone(),
-            reason: "config.json root is not an object".into(),
-        }))?
+        .ok_or_else(|| {
+            InstallError::Config(config::ConfigError::InvalidSettings {
+                path: config_path.clone(),
+                reason: "config.json root is not an object".into(),
+            })
+        })?
         .entry("hooks".to_string())
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
-            path: config_path.clone(),
-            reason: "hooks is not an object".into(),
-        }))?;
+        .ok_or_else(|| {
+            InstallError::Config(config::ConfigError::InvalidSettings {
+                path: config_path.clone(),
+                reason: "hooks is not an object".into(),
+            })
+        })?;
     // Enable config-file hooks (disabled by default in zcode).
     hooks_root.insert("enabled".to_string(), serde_json::Value::Bool(true));
 
@@ -1163,10 +1250,12 @@ fn install_zcode_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
         .entry("events".to_string())
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
-            path: config_path.clone(),
-            reason: "hooks.events is not an object".into(),
-        }))?;
+        .ok_or_else(|| {
+            InstallError::Config(config::ConfigError::InvalidSettings {
+                path: config_path.clone(),
+                reason: "hooks.events is not an object".into(),
+            })
+        })?;
 
     let session_start_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
     let existing_session_start = hooks_obj.get("SessionStart").cloned();
@@ -1406,7 +1495,11 @@ export default function activate(pi) {{
             id: "hooks.pi".into(),
             status: CheckStatus::Green,
             summary: dry_run_summary(dry_run, "pi guard extension + AGENTS.md rules installed"),
-            detail: Some(format!("would write {} + {}", ext_file.display(), agents_md.display())),
+            detail: Some(format!(
+                "would write {} + {}",
+                ext_file.display(),
+                agents_md.display()
+            )),
         });
     }
 
@@ -1452,7 +1545,11 @@ pub(crate) fn read_settings(path: &Path) -> Result<serde_json::Value> {
 /// Serialize and write `value` to `path`, backing up any pre-existing,
 /// content-differing file first. In dry-run mode, performs no write, no
 /// backup, and no directory creation, and always returns `Ok(None)`.
-pub(crate) fn write_settings(path: &Path, value: &serde_json::Value, dry_run: bool) -> Result<Option<PathBuf>> {
+pub(crate) fn write_settings(
+    path: &Path,
+    value: &serde_json::Value,
+    dry_run: bool,
+) -> Result<Option<PathBuf>> {
     let serialized = format!("{}\n", serde_json::to_string_pretty(value)?);
     if dry_run {
         return Ok(None);

@@ -7,7 +7,7 @@ use std::process::Command;
 use serde_json::Value;
 use tempfile::tempdir;
 
-use pixel_ops::provenance::{provenance, ProvenanceOptions};
+use pixel_ops::provenance::{ProvenanceOptions, provenance};
 
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -66,7 +66,11 @@ fn multi_author_repo_attribution() {
     let result = provenance(root, &opts("app.txt")).unwrap();
 
     let regions = result["regions"].as_array().unwrap();
-    assert_eq!(regions.len(), 2, "expected two contiguous regions: {result}");
+    assert_eq!(
+        regions.len(),
+        2,
+        "expected two contiguous regions: {result}"
+    );
     assert_eq!(regions[0]["author"], "Alice");
     assert_eq!(regions[0]["start_line"], 1);
     assert_eq!(regions[0]["end_line"], 3);
@@ -77,10 +81,7 @@ fn multi_author_repo_attribution() {
     assert!(regions[0]["oid"].as_str().unwrap().len() == 40);
     assert_eq!(regions[1]["author_mail"], "bob@example.com");
     assert_eq!(regions[1]["summary"], "bob appends two lines");
-    assert!(regions[0]["author_time"]
-        .as_str()
-        .unwrap()
-        .contains('T'));
+    assert!(regions[0]["author_time"].as_str().unwrap().contains('T'));
 
     // Histogram over all regions.
     assert_eq!(result["authors"]["Alice"], 3);
@@ -111,7 +112,11 @@ fn line_range_restricts_regions() {
     let result = provenance(root, &o).unwrap();
 
     let regions = result["regions"].as_array().unwrap();
-    assert_eq!(regions.len(), 1, "range should cover only Bob's block: {result}");
+    assert_eq!(
+        regions.len(),
+        1,
+        "range should cover only Bob's block: {result}"
+    );
     assert_eq!(regions[0]["author"], "Bob");
     assert_eq!(regions[0]["start_line"], 4);
     assert_eq!(regions[0]["end_line"], 5);
@@ -181,10 +186,7 @@ fn introduced_by_follows_rename() {
         result["introduced_by"]["author"], "Alice",
         "introduced_by must cross the rename: {result}"
     );
-    assert_eq!(
-        result["introduced_by"]["summary"],
-        "alice creates old.txt"
-    );
+    assert_eq!(result["introduced_by"]["summary"], "alice creates old.txt");
     assert_eq!(result["last_modified"]["author"], "Bob");
     // Blame content is unchanged by the rename, still Alice's.
     let regions = result["regions"].as_array().unwrap();

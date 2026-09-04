@@ -126,9 +126,12 @@ impl VectorStore {
                 for (q, v) in quantized.iter_mut().zip(vec) {
                     *q = (v / scale).round().clamp(-127.0, 127.0) as i8;
                 }
-                w.write_all(&chunk_id.to_le_bytes()).map_err(|e| e.to_string())?;
-                w.write_all(&scale.to_le_bytes()).map_err(|e| e.to_string())?;
-                w.write_all(&0u32.to_le_bytes()).map_err(|e| e.to_string())?;
+                w.write_all(&chunk_id.to_le_bytes())
+                    .map_err(|e| e.to_string())?;
+                w.write_all(&scale.to_le_bytes())
+                    .map_err(|e| e.to_string())?;
+                w.write_all(&0u32.to_le_bytes())
+                    .map_err(|e| e.to_string())?;
                 let bytes: &[u8] =
                     unsafe { std::slice::from_raw_parts(quantized.as_ptr() as *const u8, dim) };
                 w.write_all(bytes).map_err(|e| e.to_string())?;

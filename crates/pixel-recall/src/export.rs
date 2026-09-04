@@ -73,12 +73,7 @@ pub fn export(
             .session_by_id(id)
             .map_err(|e| e.to_string())?
             .into_iter()
-            .filter(|s| {
-                filters
-                    .agent
-                    .as_deref()
-                    .is_none_or(|a| a == s.agent)
-            })
+            .filter(|s| filters.agent.as_deref().is_none_or(|a| a == s.agent))
             .collect(),
         // Date filters are applied in Rust below (not in SQL) so sessions
         // lacking timestamps can be REPORTED rather than silently dropped.
@@ -117,8 +112,7 @@ pub fn export(
         selected.push(s);
     }
 
-    std::fs::create_dir_all(out_dir)
-        .map_err(|e| format!("create {}: {e}", out_dir.display()))?;
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("create {}: {e}", out_dir.display()))?;
 
     let mut used_names: HashSet<String> = HashSet::new();
     let mut sessions_exported = 0usize;
@@ -210,9 +204,9 @@ fn date_stamp(ms: i64) -> String {
 fn ts_source_note(ts_source: TsSource) -> String {
     let base = format!("ts_source: {}", ts_source.as_str());
     match ts_source {
-        TsSource::Mtime => format!(
-            "{base} (approximate — derived from file mtime, not per-turn records)"
-        ),
+        TsSource::Mtime => {
+            format!("{base} (approximate — derived from file mtime, not per-turn records)")
+        }
         TsSource::Absent => format!("{base} (no timestamps recorded in the source)"),
         TsSource::Iso | TsSource::UnixMs => base,
     }

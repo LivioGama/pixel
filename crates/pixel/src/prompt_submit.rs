@@ -210,10 +210,7 @@ fn recent_context_and_summary(cwd: &Path, n: usize) -> (String, String) {
 /// Format the prompt text for embedding, matching the recall corpus's
 /// `embed_text` convention so similarity is comparable.
 fn embed_text_for_prompt(prompt: &str, cwd: &Path) -> String {
-    let repo = cwd
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("-");
+    let repo = cwd.file_name().and_then(|n| n.to_str()).unwrap_or("-");
     format!("[prompt] [{repo}] user: {prompt}")
 }
 
@@ -244,7 +241,9 @@ fn recent_completion_signal(cwd: &Path) -> bool {
 /// Parse action log entries from the tail of the file to stay bounded in memory and CPU.
 fn check_action_log_file(mut file: std::fs::File, cwd: &Path, cutoff: i64) -> bool {
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
-    let Ok(metadata) = file.metadata() else { return false; };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
     let len = metadata.len();
     if len == 0 {
         return false;
@@ -304,11 +303,39 @@ fn is_trivial_continuation(prompt: &str) -> bool {
         // Single-word or common short affirmative/acknowledgment phrases
         if matches!(
             trimmed.as_str(),
-            "yes" | "y" | "no" | "n" | "ok" | "okay" | "continue" | "go" | "proceed"
-                | "thanks" | "thank you" | "done" | "next" | "sure" | "correct" | "right"
-                | "exactly" | "yep" | "yeah" | "nope" | "fine" | "good" | "great" | "perfect"
-                | "looks good" | "lgtm" | "go ahead" | "sounds good" | "do it" | "ship it"
-                | "go for it" | "proceed with that" | "all good"
+            "yes"
+                | "y"
+                | "no"
+                | "n"
+                | "ok"
+                | "okay"
+                | "continue"
+                | "go"
+                | "proceed"
+                | "thanks"
+                | "thank you"
+                | "done"
+                | "next"
+                | "sure"
+                | "correct"
+                | "right"
+                | "exactly"
+                | "yep"
+                | "yeah"
+                | "nope"
+                | "fine"
+                | "good"
+                | "great"
+                | "perfect"
+                | "looks good"
+                | "lgtm"
+                | "go ahead"
+                | "sounds good"
+                | "do it"
+                | "ship it"
+                | "go for it"
+                | "proceed with that"
+                | "all good"
         ) {
             return true;
         }
@@ -375,7 +402,10 @@ fn write_boundary_file(event: &BoundaryEvent) {
         "completion_signal": event.completion_signal,
         "context_summary": event.context_summary,
     });
-    let _ = std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap_or_default());
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&json).unwrap_or_default(),
+    );
 }
 
 #[cfg(test)]
@@ -436,7 +466,9 @@ mod tests {
     fn non_trivial_prompts_not_flagged() {
         assert!(!is_trivial_continuation("now let's set up docker"));
         assert!(!is_trivial_continuation("fix the login bug"));
-        assert!(!is_trivial_continuation("can you also add tests for the auth module"));
+        assert!(!is_trivial_continuation(
+            "can you also add tests for the auth module"
+        ));
     }
 
     #[test]
@@ -446,13 +478,22 @@ mod tests {
 
     #[test]
     fn cwd_parent_child() {
-        assert!(cwd_matches(Path::new("/tmp/foo"), Path::new("/tmp/foo/bar")));
-        assert!(cwd_matches(Path::new("/tmp/foo/bar"), Path::new("/tmp/foo")));
+        assert!(cwd_matches(
+            Path::new("/tmp/foo"),
+            Path::new("/tmp/foo/bar")
+        ));
+        assert!(cwd_matches(
+            Path::new("/tmp/foo/bar"),
+            Path::new("/tmp/foo")
+        ));
     }
 
     #[test]
     fn cwd_no_prefix_confusion() {
-        assert!(!cwd_matches(Path::new("/tmp/foo"), Path::new("/tmp/foobar")));
+        assert!(!cwd_matches(
+            Path::new("/tmp/foo"),
+            Path::new("/tmp/foobar")
+        ));
         assert!(!cwd_matches(Path::new("/tmp/foo"), Path::new("/tmp/baz")));
     }
 }

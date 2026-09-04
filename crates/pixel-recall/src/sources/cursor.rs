@@ -87,8 +87,7 @@ impl SourceAdapter for Adapter {
                     let fpath = f.path();
                     if fpath.extension().is_some_and(|e| e == "jsonl") {
                         units.extend(unit_for(fpath));
-                    } else if fpath.is_dir()
-                        && fpath.file_name().is_some_and(|n| n == "subagents")
+                    } else if fpath.is_dir() && fpath.file_name().is_some_and(|n| n == "subagents")
                     {
                         // <conv-uuid>/subagents/<uuid>.jsonl
                         let Ok(subs) = fs::read_dir(&fpath) else {
@@ -169,8 +168,7 @@ impl SourceAdapter for Adapter {
             extract_record(&record, line_start, n as u64, ts, &mut turns);
         }
 
-        let has_conversation =
-            !turns.is_empty() || matches!(change, Change::Appended { .. });
+        let has_conversation = !turns.is_empty() || matches!(change, Change::Appended { .. });
         let op = match change {
             Change::Appended { .. } => SessionOp::Append,
             _ => SessionOp::Replace,
@@ -218,9 +216,7 @@ fn extract_record(
     if role != "user" && role != "assistant" {
         return;
     }
-    let content = record
-        .get("message")
-        .and_then(|m| m.get("content"));
+    let content = record.get("message").and_then(|m| m.get("content"));
 
     let mut push = |role: Role, text: String, truncated: bool, intent: Option<IntentSource>| {
         if text.trim().is_empty() {
@@ -282,10 +278,8 @@ fn extract_record(
                                 .get("name")
                                 .and_then(Value::as_str)
                                 .unwrap_or("unknown");
-                            let input = part
-                                .get("input")
-                                .map(|v| v.to_string())
-                                .unwrap_or_default();
+                            let input =
+                                part.get("input").map(|v| v.to_string()).unwrap_or_default();
                             let (capped, truncated) = cap_text(&input, TOOL_INPUT_CAP);
                             any_truncated |= truncated;
                             if !text.is_empty() {

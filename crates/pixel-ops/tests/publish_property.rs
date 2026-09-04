@@ -18,7 +18,7 @@ use proptest::prelude::*;
 use serde_json::json;
 use tempfile::TempDir;
 
-use pixel_ops::publish::{publish_with_state, PublishOptions};
+use pixel_ops::publish::{PublishOptions, publish_with_state};
 
 fn git(root: &Path, args: &[&str]) -> String {
     let output = Command::new("git")

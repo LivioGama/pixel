@@ -89,9 +89,7 @@ impl FactsStore {
         // Candidate hunks via trigrams, verified against text.
         let mut rows: Vec<(String, String, String)> = Vec::new();
         let placeholders = hashes.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "SELECT DISTINCT h.id FROM diff_grams WHERE hash IN ({placeholders})"
-        );
+        let sql = format!("SELECT DISTINCT h.id FROM diff_grams WHERE hash IN ({placeholders})");
         let ids: Vec<i64> = {
             let mut stmt = self.conn().prepare(&sql)?;
             let mut q = stmt.query(rusqlite::params_from_iter(hashes.iter().map(|h| *h as i64)))?;
@@ -109,7 +107,15 @@ impl FactsStore {
                      FROM hunks h JOIN commits c ON c.id = h.commit_id
                      WHERE h.id = ?1",
                     [id],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?)),
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, String>(3)?,
+                            r.get::<_, String>(4)?,
+                        ))
+                    },
                 )
                 .ok()
             {
@@ -127,7 +133,15 @@ impl FactsStore {
         rows.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         let present = self
             .runner()
-            .run(&["grep", "-I", "-l", "--fixed-strings", "--end-of-options", token, "HEAD"])
+            .run(&[
+                "grep",
+                "-I",
+                "-l",
+                "--fixed-strings",
+                "--end-of-options",
+                token,
+                "HEAD",
+            ])
             .is_ok();
         let total = rows.len() as u64;
         let first = rows.first().cloned();
@@ -168,7 +182,15 @@ impl FactsStore {
         }
         let present = self
             .runner()
-            .run(&["grep", "-I", "-l", "--fixed-strings", "--end-of-options", token, "HEAD"])
+            .run(&[
+                "grep",
+                "-I",
+                "-l",
+                "--fixed-strings",
+                "--end-of-options",
+                token,
+                "HEAD",
+            ])
             .is_ok();
         let total = found.len() as u64;
         let first = found.first().cloned();

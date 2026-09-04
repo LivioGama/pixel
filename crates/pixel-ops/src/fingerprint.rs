@@ -353,7 +353,10 @@ mod tests {
         let fp1 = fingerprint_change(dir.path(), &change);
         std::fs::write(dir.path().join("a.txt"), b"world").unwrap();
         let fp2 = fingerprint_change(dir.path(), &change);
-        assert_ne!(fp1, fp2, "fingerprint must change when file content changes");
+        assert_ne!(
+            fp1, fp2,
+            "fingerprint must change when file content changes"
+        );
         assert_eq!(fp1.len(), 64);
     }
 

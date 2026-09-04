@@ -124,18 +124,17 @@ impl From<pixel_session::StoreError> for SignalError {
 /// True when `task` mentions test/spec.
 pub fn mentions_tests(task: &str) -> bool {
     task.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| {
-        matches!(t.to_ascii_lowercase().as_str(), "test" | "tests" | "spec" | "specs")
+        matches!(
+            t.to_ascii_lowercase().as_str(),
+            "test" | "tests" | "spec" | "specs"
+        )
     })
 }
 
 /// `0.7` when `task` does NOT mention test/spec (a test file is a worse
 /// target for a non-test task), else `1.0` (task is about tests → no penalty).
 pub fn test_penalty_for(task: &str) -> f64 {
-    if mentions_tests(task) {
-        1.0
-    } else {
-        0.7
-    }
+    if mentions_tests(task) { 1.0 } else { 0.7 }
 }
 
 /// True when `path` looks like a test file: a `test`/`tests`/`__tests__`
@@ -198,9 +197,18 @@ pub fn score_signals(
         *activity.entry(p.clone()).or_default() += 1.0;
     }
 
-    let session = session_score(session_events, opts.now_ms, opts.session_half_life_minutes, opts.session_window_ms);
-    let (error_weights, error_reasons) =
-        error_sink_join(error_records, candidates, opts.now_ms, opts.session_half_life_minutes);
+    let session = session_score(
+        session_events,
+        opts.now_ms,
+        opts.session_half_life_minutes,
+        opts.session_window_ms,
+    );
+    let (error_weights, error_reasons) = error_sink_join(
+        error_records,
+        candidates,
+        opts.now_ms,
+        opts.session_half_life_minutes,
+    );
 
     let mut combined = session;
     for (p, w) in &error_weights {
@@ -290,19 +298,17 @@ pub fn activity_from_git_log(
     half_life_days: f64,
 ) -> HashMap<String, f64> {
     let mut activity: HashMap<String, f64> = HashMap::new();
-    let Some(out) = runner.run_opt(&[
-        "log",
-        "--since=90.days",
-        "--name-only",
-        "--format=%x00%ct",
-    ]) else {
+    let Some(out) = runner.run_opt(&["log", "--since=90.days", "--name-only", "--format=%x00%ct"])
+    else {
         return activity;
     };
     let text = String::from_utf8_lossy(&out);
     for block in text.split('\0') {
         let mut lines = block.lines().filter(|l| !l.trim().is_empty());
         let Some(first) = lines.next() else { continue };
-        let Ok(ts_secs) = first.trim().parse::<i64>() else { continue };
+        let Ok(ts_secs) = first.trim().parse::<i64>() else {
+            continue;
+        };
         // `%ct` is git's commit time in *seconds* since epoch; every other
         // timestamp in this module (`now_ms`, `SessionEvent::ts_ms`,
         // `ErrorRecord::last_ts`) is milliseconds. Without this conversion,
@@ -320,7 +326,8 @@ pub fn activity_from_git_log(
             }
             let age_days = (now_ms as f64 - ts_ms as f64) / 86_400_000.0;
             if age_days >= 0.0 {
-                *activity.entry(file.to_string()).or_default() += (-age_days / half_life_days).exp();
+                *activity.entry(file.to_string()).or_default() +=
+                    (-age_days / half_life_days).exp();
             }
         }
     }
@@ -342,7 +349,11 @@ fn session_score(
         }
         let age_min = age_ms as f64 / 60_000.0;
         let base = (-age_min / half_life_minutes).exp();
-        let mult = if e.kind == SessionEventKind::Edit { 2.0 } else { 1.0 };
+        let mult = if e.kind == SessionEventKind::Edit {
+            2.0
+        } else {
+            1.0
+        };
         *score.entry(e.path.clone()).or_default() += base * mult;
     }
     score
@@ -363,7 +374,11 @@ fn error_sink_join(
         for err in errors {
             if let Some(reason) = error_matches_path(err, path) {
                 let age_min = (now_ms - err.last_ts) as f64 / 60_000.0;
-                let recency = if age_min >= 0.0 { (-age_min / half_life_minutes).exp() } else { 0.0 };
+                let recency = if age_min >= 0.0 {
+                    (-age_min / half_life_minutes).exp()
+                } else {
+                    0.0
+                };
                 *weights.entry(path.clone()).or_default() += recency;
                 reasons.push(reason);
             }
@@ -382,14 +397,23 @@ fn error_matches_path(err: &ErrorRecord, path: &str) -> Option<String> {
         if let Some(url) = http.get("url").and_then(serde_json::Value::as_str) {
             let url_lower = url.to_lowercase();
             if concepts.iter().any(|c| url_lower.contains(c.as_str())) {
-                let status = http.get("status").and_then(serde_json::Value::as_u64).unwrap_or(0);
-                return Some(format!("matches live error #{} ({} on {})", err.id, status, url));
+                let status = http
+                    .get("status")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                return Some(format!(
+                    "matches live error #{} ({} on {})",
+                    err.id, status, url
+                ));
             }
         }
     }
     if let Some(frames) = &err.frames {
         for f in frames {
-            for loc in [f.file.as_deref(), f.mapped_file.as_deref()].into_iter().flatten() {
+            for loc in [f.file.as_deref(), f.mapped_file.as_deref()]
+                .into_iter()
+                .flatten()
+            {
                 let loc_lower = loc.to_lowercase();
                 if concepts.iter().any(|c| loc_lower.contains(c.as_str())) {
                     return Some(format!("matches live error #{} frame {}", err.id, loc));
@@ -407,9 +431,38 @@ fn error_matches_path(err: &ErrorRecord, path: &str) -> Option<String> {
 /// Non-trivial path components used to match a candidate against an error.
 fn path_concepts(path: &str) -> Vec<String> {
     const TRIVIAL: &[&str] = &[
-        "app", "src", "api", "route", "index", "page", "pages", "lib", "components", "component",
-        "ts", "tsx", "js", "jsx", "rs", "py", "go", "json", "yaml", "yml", "css", "html", "vue",
-        "svelte", "test", "spec", "tests", "specs", "node_modules", "public", "static", "server",
+        "app",
+        "src",
+        "api",
+        "route",
+        "index",
+        "page",
+        "pages",
+        "lib",
+        "components",
+        "component",
+        "ts",
+        "tsx",
+        "js",
+        "jsx",
+        "rs",
+        "py",
+        "go",
+        "json",
+        "yaml",
+        "yml",
+        "css",
+        "html",
+        "vue",
+        "svelte",
+        "test",
+        "spec",
+        "tests",
+        "specs",
+        "node_modules",
+        "public",
+        "static",
+        "server",
         "client",
     ];
     path.split(['/', '.', '-', '_'])

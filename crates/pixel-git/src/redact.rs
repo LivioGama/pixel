@@ -39,7 +39,8 @@ mod tests {
 
     #[test]
     fn redacts_credential_url() {
-        let input = "fatal: unable to access 'https://alice:ghp_abcdef1234567890@github.com/x/y.git/'";
+        let input =
+            "fatal: unable to access 'https://alice:ghp_abcdef1234567890@github.com/x/y.git/'";
         let out = redact(input);
         assert!(!out.contains("ghp_abcdef1234567890"));
         assert!(!out.contains("alice:ghp_abcdef1234567890"));

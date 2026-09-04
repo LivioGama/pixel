@@ -66,10 +66,7 @@ impl DeltaState {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         file.write_all(&serde_json::to_vec_pretty(self).expect("state serializes"))?;
         file.sync_all()?;
         drop(file);

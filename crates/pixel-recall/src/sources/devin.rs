@@ -119,10 +119,7 @@ fn content_text(v: &Value) -> String {
             .iter()
             .filter_map(|it| match it {
                 Value::String(s) => Some(s.clone()),
-                Value::Object(_) => it
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                Value::Object(_) => it.get("text").and_then(Value::as_str).map(str::to_string),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -178,8 +175,8 @@ impl SourceAdapter for Adapter {
         // cursor. Full: walk the small sessions table.
         let touched: Vec<String> = match since {
             Some(cursor) => {
-                let mut stmt = conn
-                    .prepare("SELECT session_id FROM message_nodes WHERE row_id > ?1")?;
+                let mut stmt =
+                    conn.prepare("SELECT session_id FROM message_nodes WHERE row_id > ?1")?;
                 let rows = stmt.query_map([cursor], |r| r.get::<_, String>(0))?;
                 let mut seen = HashSet::new();
                 let mut out = Vec::new();
@@ -198,8 +195,8 @@ impl SourceAdapter for Adapter {
             }
         };
 
-        let mut sess_stmt = conn
-            .prepare("SELECT working_directory, title FROM sessions WHERE id = ?1")?;
+        let mut sess_stmt =
+            conn.prepare("SELECT working_directory, title FROM sessions WHERE id = ?1")?;
         let mut node_stmt = conn.prepare(
             "SELECT node_id, parent_node_id, chat_message, created_at, row_id \
              FROM message_nodes WHERE session_id = ?1",
@@ -210,7 +207,10 @@ impl SourceAdapter for Adapter {
 
         for sid in touched {
             let meta = sess_stmt.query_row([&sid], |r| {
-                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
             });
             let (cwd, title) = match meta {
                 Ok(v) => v,
@@ -271,7 +271,9 @@ impl SourceAdapter for Adapter {
                 source_path: source_path.clone(),
                 cwd: cwd.filter(|s| !s.is_empty()),
                 git_branch: None,
-                title: title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
+                title: title
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty()),
                 ts_source: TsSource::UnixMs,
                 is_subagent: false,
                 parent_source_session_id: None,

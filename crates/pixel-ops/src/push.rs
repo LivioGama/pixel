@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use pixel_git::GitRunner;
 
@@ -156,19 +156,26 @@ pub fn push_with_state(
         BeginOutcome::Start => {}
     }
 
-    let mut lock = RepositoryLock::acquire_with_state_root(
-        &common_dir(root),
-        state_root,
-    ).map_err(|_| "repository is busy".to_string())?;
+    let mut lock = RepositoryLock::acquire_with_state_root(&common_dir(root), state_root)
+        .map_err(|_| "repository is busy".to_string())?;
 
     // Probe: journal:started
     if let Some(p) = probe.as_mut() {
-        p("journal:started").map_err(|e| { let _ = lock.release(); e })?;
+        p("journal:started").map_err(|e| {
+            let _ = lock.release();
+            e
+        })?;
     }
 
     // Validate remote ref.
-    pixel_git::validate_ref(&opts.remote).map_err(|e| { let _ = lock.release(); e.to_string() })?;
-    validate_refspec(&opts.refspec).map_err(|e| { let _ = lock.release(); e })?;
+    pixel_git::validate_ref(&opts.remote).map_err(|e| {
+        let _ = lock.release();
+        e.to_string()
+    })?;
+    validate_refspec(&opts.refspec).map_err(|e| {
+        let _ = lock.release();
+        e
+    })?;
 
     // OID of the ref being pushed (not HEAD).
     let source_oid = resolve_source_oid(&runner, &opts.refspec).ok_or("no HEAD")?;
@@ -183,7 +190,10 @@ pub fn push_with_state(
 
     // Probe: journal:push_started
     if let Some(p) = probe.as_mut() {
-        p("journal:push_started").map_err(|e| { let _ = lock.release(); e })?;
+        p("journal:push_started").map_err(|e| {
+            let _ = lock.release();
+            e
+        })?;
     }
 
     // Build push args.
@@ -197,7 +207,10 @@ pub fn push_with_state(
 
     // Probe: remote:returned
     if let Some(p) = probe.as_mut() {
-        p("remote:returned").map_err(|e| { let _ = lock.release(); e })?;
+        p("remote:returned").map_err(|e| {
+            let _ = lock.release();
+            e
+        })?;
     }
 
     let result = json!({
@@ -210,7 +223,10 @@ pub fn push_with_state(
 
     // Probe: journal:terminal
     if let Some(p) = probe.as_mut() {
-        p("journal:terminal").map_err(|e| { let _ = lock.release(); e })?;
+        p("journal:terminal").map_err(|e| {
+            let _ = lock.release();
+            e
+        })?;
     }
 
     let _ = lock.release();
@@ -236,7 +252,8 @@ fn resume_push(
             // If remote matches source_oid, push succeeded.
             let record = journal.read(&repo_key, &opts.request_id);
             if let Some(r) = record {
-                if let Some(source_oid) = r.result
+                if let Some(source_oid) = r
+                    .result
                     .as_ref()
                     .and_then(|v| v.get("source_oid"))
                     .and_then(|v| v.as_str())
@@ -284,13 +301,17 @@ fn continue_push_after_begin(
     let repo_key = repo_key(root);
     let state_root = state_root();
 
-    let mut lock = RepositoryLock::acquire_with_state_root(
-        &common_dir(root),
-        &state_root,
-    ).map_err(|_| "repository is busy".to_string())?;
+    let mut lock = RepositoryLock::acquire_with_state_root(&common_dir(root), &state_root)
+        .map_err(|_| "repository is busy".to_string())?;
 
-    pixel_git::validate_ref(&opts.remote).map_err(|e| { let _ = lock.release(); e.to_string() })?;
-    validate_refspec(&opts.refspec).map_err(|e| { let _ = lock.release(); e })?;
+    pixel_git::validate_ref(&opts.remote).map_err(|e| {
+        let _ = lock.release();
+        e.to_string()
+    })?;
+    validate_refspec(&opts.refspec).map_err(|e| {
+        let _ = lock.release();
+        e
+    })?;
 
     let source_oid = resolve_source_oid(runner, &opts.refspec).ok_or("no HEAD")?;
 
@@ -332,7 +353,10 @@ fn common_dir(root: &Path) -> String {
 }
 
 fn push_input_hash(opts: &PushOptions) -> String {
-    sha256_hex(&format!("{}\u{0}{}\u{0}{}", opts.remote, opts.refspec, opts.force_with_lease))
+    sha256_hex(&format!(
+        "{}\u{0}{}\u{0}{}",
+        opts.remote, opts.refspec, opts.force_with_lease
+    ))
 }
 
 #[cfg(test)]
@@ -506,8 +530,11 @@ mod tests {
             .args(["commit", "-q", "--amend", "-m", "rewritten"])
             .status()
             .unwrap();
-        for r in git(dir.path(), &["for-each-ref", "--format=%(refname)", "refs/remotes"])
-            .lines()
+        for r in git(
+            dir.path(),
+            &["for-each-ref", "--format=%(refname)", "refs/remotes"],
+        )
+        .lines()
         {
             std::process::Command::new("git")
                 .arg("-C")
@@ -535,7 +562,8 @@ mod tests {
         let pushed = git(remote.path(), &["rev-parse", &branch]);
         assert_eq!(local, pushed, "remote must hold the rewritten commit");
         assert_eq!(
-            result["source_oid"], json!(local),
+            result["source_oid"],
+            json!(local),
             "source_oid must be the pushed ref's OID"
         );
     }

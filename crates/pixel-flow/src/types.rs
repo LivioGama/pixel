@@ -199,10 +199,13 @@ mod tests {
 
     #[test]
     fn empty_name_rejected() {
-        let flow = make_flow("", vec![FlowStep {
-            action: "open".into(),
-            ..Default::default()
-        }]);
+        let flow = make_flow(
+            "",
+            vec![FlowStep {
+                action: "open".into(),
+                ..Default::default()
+            }],
+        );
         assert!(flow.validate().is_err());
     }
 

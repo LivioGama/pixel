@@ -137,9 +137,13 @@ pub fn execute(flow: &Flow, vars: &HashMap<String, String>) -> ExecResult {
         let terms = extract_quoted_strings(&signal);
         let signal_met = if terms.is_empty() {
             // No quoted terms — check the whole signal as a keyword.
-            final_snapshot.to_lowercase().contains(&signal.to_lowercase())
+            final_snapshot
+                .to_lowercase()
+                .contains(&signal.to_lowercase())
         } else {
-            terms.iter().any(|t| final_snapshot.to_lowercase().contains(&t.to_lowercase()))
+            terms
+                .iter()
+                .any(|t| final_snapshot.to_lowercase().contains(&t.to_lowercase()))
         };
         if signal_met {
             log.push_str(&format!("# ✓ Success signal detected: {}\n", signal));
@@ -186,7 +190,11 @@ pub fn execute(flow: &Flow, vars: &HashMap<String, String>) -> ExecResult {
         steps_skipped,
         log,
         success: url_ok,
-        error: if url_ok { None } else { Some("success URL check failed".into()) },
+        error: if url_ok {
+            None
+        } else {
+            Some("success URL check failed".into())
+        },
     }
 }
 
@@ -202,7 +210,12 @@ fn exec_step(
 ) -> Result<bool, String> {
     let indent = "  ".repeat(depth);
     if let Some(r) = &step.rationale {
-        log.push_str(&format!("{}# Step {}: {}\n", indent, num, substitute(r, vars)));
+        log.push_str(&format!(
+            "{}# Step {}: {}\n",
+            indent,
+            num,
+            substitute(r, vars)
+        ));
     }
 
     // Per-step tab switching.
@@ -237,15 +250,11 @@ fn exec_step(
         }
         "snapshot" => {
             log.push_str(&format!("{}agent-browser snapshot -i\n", indent));
-            run_agent_browser(&["snapshot", "-i"])
-                .map_err(|e| format!("snapshot failed: {e}"))?;
+            run_agent_browser(&["snapshot", "-i"]).map_err(|e| format!("snapshot failed: {e}"))?;
             Ok(true)
         }
         "click" => {
-            let target = substitute(
-                step.ref_hint.as_deref().unwrap_or("element"),
-                vars,
-            );
+            let target = substitute(step.ref_hint.as_deref().unwrap_or("element"), vars);
             log.push_str(&format!("{}# Finding ref for: {}\n", indent, target));
             let snapshot = run_agent_browser(&["snapshot", "-i"])
                 .map_err(|e| format!("snapshot before click failed: {e}"))?;
@@ -262,17 +271,20 @@ fn exec_step(
             if let Some(ref fix) = step.on_failure {
                 let fix = substitute(fix, vars);
                 let fix_lower = fix.to_lowercase();
-                if fix_lower.contains("eval") || fix_lower.contains("js click") || fix_lower.contains("queryselector") {
+                if fix_lower.contains("eval")
+                    || fix_lower.contains("js click")
+                    || fix_lower.contains("queryselector")
+                {
                     // Check if the page is still on the same URL (click didn't work).
-                    let post_snapshot = run_agent_browser(&["snapshot", "-i"])
-                        .unwrap_or_default();
+                    let post_snapshot = run_agent_browser(&["snapshot", "-i"]).unwrap_or_default();
                     // If the target is still visible, the click didn't navigate.
                     if post_snapshot.contains(&target) {
-                        log.push_str(&format!("{}# click didn't navigate — trying JS click fallback\n", indent));
+                        log.push_str(&format!(
+                            "{}# click didn't navigate — trying JS click fallback\n",
+                            indent
+                        ));
                         // Try eval with querySelector.
-                        let js = format!(
-                            "document.querySelector('button')?.click()"
-                        );
+                        let js = format!("document.querySelector('button')?.click()");
                         run_agent_browser(&["eval", &js])
                             .map_err(|e| format!("JS click fallback failed: {e}"))?;
                         std::thread::sleep(Duration::from_secs(2));
@@ -282,10 +294,7 @@ fn exec_step(
             Ok(true)
         }
         "fill" | "type" => {
-            let target = substitute(
-                step.ref_hint.as_deref().unwrap_or("input"),
-                vars,
-            );
+            let target = substitute(step.ref_hint.as_deref().unwrap_or("input"), vars);
             let value = resolve_value(step, vars);
 
             // Special case: if the ref_hint contains "Code character N of",
@@ -296,7 +305,11 @@ fn exec_step(
                     // Extract N from "Code character N of 9"
                     if let Some(n) = extract_char_number(&target) {
                         if n > 0 && n <= code_clean.len() {
-                            code_clean.chars().nth(n - 1).map(|c| c.to_string()).unwrap_or_default()
+                            code_clean
+                                .chars()
+                                .nth(n - 1)
+                                .map(|c| c.to_string())
+                                .unwrap_or_default()
                         } else {
                             value
                         }
@@ -324,10 +337,7 @@ fn exec_step(
             Ok(true)
         }
         "select" => {
-            let target = substitute(
-                step.ref_hint.as_deref().unwrap_or("select"),
-                vars,
-            );
+            let target = substitute(step.ref_hint.as_deref().unwrap_or("select"), vars);
             let value = resolve_value(step, vars);
             let snapshot = run_agent_browser(&["snapshot", "-i"])
                 .map_err(|e| format!("snapshot before select failed: {e}"))?;
@@ -356,10 +366,7 @@ fn exec_step(
             Ok(true)
         }
         "conditional" => {
-            let cond = substitute(
-                step.condition.as_deref().unwrap_or("condition"),
-                vars,
-            );
+            let cond = substitute(step.condition.as_deref().unwrap_or("condition"), vars);
             log.push_str(&format!("{}# CONDITIONAL: if {}\n", indent, cond));
 
             // Take a snapshot to evaluate the condition.
@@ -374,7 +381,11 @@ fn exec_step(
                 if condition_met { "THEN" } else { "ELSE" }
             ));
 
-            let branch = if condition_met { &step.then } else { &step.otherwise };
+            let branch = if condition_met {
+                &step.then
+            } else {
+                &step.otherwise
+            };
             let mut any_executed = false;
             for (i, sub) in branch.iter().enumerate() {
                 match exec_step(sub, i + 1, vars, flow_tab, log, depth + 1) {
@@ -386,24 +397,17 @@ fn exec_step(
             Ok(any_executed)
         }
         "switch_tab" => {
-            let tab = substitute(
-                step.tab.as_deref().unwrap_or("tab"),
-                vars,
-            );
+            let tab = substitute(step.tab.as_deref().unwrap_or("tab"), vars);
             log.push_str(&format!("{}# Switch to tab: {}\n", indent, tab));
             switch_to_tab(&tab, log)?;
             Ok(true)
         }
         "eval" => {
             // Evaluate JS — for cases where regular click doesn't work.
-            let js = substitute(
-                step.value.as_deref().unwrap_or(""),
-                vars,
-            );
+            let js = substitute(step.value.as_deref().unwrap_or(""), vars);
             if !js.is_empty() {
                 log.push_str(&format!("{}agent-browser eval \"{}\"\n", indent, js));
-                run_agent_browser(&["eval", &js])
-                    .map_err(|e| format!("eval failed: {e}"))?;
+                run_agent_browser(&["eval", &js]).map_err(|e| format!("eval failed: {e}"))?;
             }
             Ok(true)
         }
@@ -458,17 +462,18 @@ fn find_ref_in_snapshot(snapshot: &str, ref_hint: &str) -> Option<String> {
     // Detect element type preference from the hint prefix.
     // e.g. "button containing '...'" → prefer lines starting with "- button"
     let hint_lower = ref_hint.to_lowercase();
-    let type_pref: Option<&str> = if hint_lower.contains("button containing") || hint_lower.contains("button matching") {
-        Some("button")
-    } else if hint_lower.contains("link containing") || hint_lower.contains("link matching") {
-        Some("link")
-    } else if hint_lower.contains("textbox matching") {
-        Some("textbox")
-    } else if hint_lower.contains("heading") {
-        Some("heading")
-    } else {
-        None
-    };
+    let type_pref: Option<&str> =
+        if hint_lower.contains("button containing") || hint_lower.contains("button matching") {
+            Some("button")
+        } else if hint_lower.contains("link containing") || hint_lower.contains("link matching") {
+            Some("link")
+        } else if hint_lower.contains("textbox matching") {
+            Some("textbox")
+        } else if hint_lower.contains("heading") {
+            Some("heading")
+        } else {
+            None
+        };
 
     // If no quoted strings, try to match the whole hint as a fuzzy term.
     let fallback_term = ref_hint
@@ -480,7 +485,9 @@ fn find_ref_in_snapshot(snapshot: &str, ref_hint: &str) -> Option<String> {
         .replace("or", "")
         .trim()
         .to_lowercase();
-    let fallback_term = fallback_term.trim_matches(|c: char| !c.is_alphanumeric()).to_string();
+    let fallback_term = fallback_term
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_string();
 
     // First pass: if a type preference is set, only match lines of that type.
     // This avoids matching generic wrapper elements that contain the button's text.
@@ -506,7 +513,11 @@ fn find_ref_in_snapshot(snapshot: &str, ref_hint: &str) -> Option<String> {
 }
 
 /// Check if a snapshot line has a ref and matches the search terms.
-fn extract_ref_if_matches(line: &str, search_terms: &[&str], fallback_term: &str) -> Option<String> {
+fn extract_ref_if_matches(
+    line: &str,
+    search_terms: &[&str],
+    fallback_term: &str,
+) -> Option<String> {
     let ref_start = line.find("ref=e")?;
     let after_e = &line[ref_start + 4..]; // skip "ref=", now at "eN...]"
     let digits_start = 1; // skip the "e"
@@ -518,7 +529,9 @@ fn extract_ref_if_matches(line: &str, search_terms: &[&str], fallback_term: &str
 
     let line_lower = line.to_lowercase();
     let matched = if !search_terms.is_empty() {
-        search_terms.iter().all(|term| line_lower.contains(&term.to_lowercase()))
+        search_terms
+            .iter()
+            .all(|term| line_lower.contains(&term.to_lowercase()))
     } else if !fallback_term.is_empty() && fallback_term.len() > 2 {
         line_lower.contains(&fallback_term)
     } else {
@@ -599,7 +612,13 @@ fn evaluate_condition(condition: &str, snapshot: &str) -> bool {
         // Check for common condition keywords.
         let keywords: Vec<&str> = cond_lower
             .split_whitespace()
-            .filter(|w| w.len() > 3 && !["page", "shows", "contains", "visible", "button", "field", "input"].contains(w))
+            .filter(|w| {
+                w.len() > 3
+                    && ![
+                        "page", "shows", "contains", "visible", "button", "field", "input",
+                    ]
+                    .contains(w)
+            })
             .collect();
         if keywords.is_empty() {
             return false;
@@ -619,8 +638,8 @@ fn evaluate_condition(condition: &str, snapshot: &str) -> bool {
 
 /// Switch to a tab matching the given pattern.
 fn switch_to_tab(pattern: &str, log: &mut String) -> Result<(), String> {
-    let output = run_agent_browser(&["tab", "list"])
-        .map_err(|e| format!("tab list failed: {e}"))?;
+    let output =
+        run_agent_browser(&["tab", "list"]).map_err(|e| format!("tab list failed: {e}"))?;
 
     // Parse tab list output to find a tab matching the pattern.
     // Output looks like:
@@ -649,8 +668,8 @@ fn switch_to_tab(pattern: &str, log: &mut String) -> Result<(), String> {
 
 /// Close stale tabs matching a pattern.
 fn close_stale_tabs(pattern: &str, log: &mut String) -> Result<(), String> {
-    let output = run_agent_browser(&["tab", "list"])
-        .map_err(|e| format!("tab list failed: {e}"))?;
+    let output =
+        run_agent_browser(&["tab", "list"]).map_err(|e| format!("tab list failed: {e}"))?;
 
     let pat_lower = pattern.to_lowercase();
     for line in output.lines() {
@@ -683,7 +702,9 @@ fn parse_wait_duration(s: &str) -> Duration {
         return Duration::from_secs(2);
     }
     // Try to parse as seconds.
-    s.parse::<u64>().map(Duration::from_secs).unwrap_or(Duration::from_secs(2))
+    s.parse::<u64>()
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(2))
 }
 
 /// Resolve a step's value: `value_var` takes precedence, then `value`,
@@ -758,19 +779,28 @@ mod tests {
     #[test]
     fn evaluate_condition_or() {
         let snapshot = "- heading \"hCaptcha\" [ref=e1]";
-        assert!(evaluate_condition("page contains 'hCaptcha' or 'Drag'", snapshot));
+        assert!(evaluate_condition(
+            "page contains 'hCaptcha' or 'Drag'",
+            snapshot
+        ));
     }
 
     #[test]
     fn evaluate_condition_and() {
         let snapshot = "- button \"Continue\" [ref=e5]\n- text \"signing back in\"";
-        assert!(evaluate_condition("page shows 'Continue' and 'signing back in'", snapshot));
+        assert!(evaluate_condition(
+            "page shows 'Continue' and 'signing back in'",
+            snapshot
+        ));
     }
 
     #[test]
     fn evaluate_condition_not_met() {
         let snapshot = "- heading \"Welcome\" [ref=e1]";
-        assert!(!evaluate_condition("page shows 'Continue with Google'", snapshot));
+        assert!(!evaluate_condition(
+            "page shows 'Continue with Google'",
+            snapshot
+        ));
     }
 
     #[test]

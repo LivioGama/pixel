@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::durable::{ensure_dir, sha256_hex, write_durably, write_new_durably, state_root};
+use crate::durable::{ensure_dir, sha256_hex, state_root, write_durably, write_new_durably};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,7 +86,10 @@ pub enum BeginOutcome {
     /// No existing record — start a new operation.
     Start,
     /// Existing record at an intermediate phase — resume from here.
-    Resume { phase: JournalPhase, result: Option<serde_json::Value> },
+    Resume {
+        phase: JournalPhase,
+        result: Option<serde_json::Value>,
+    },
     /// Terminal record with a result — replay it (idempotent retry).
     Replay(serde_json::Value),
 }
@@ -100,7 +103,9 @@ pub struct OperationJournal {
 
 impl OperationJournal {
     pub fn new() -> Self {
-        Self { state_root: state_root() }
+        Self {
+            state_root: state_root(),
+        }
     }
 
     pub fn with_state_root(state_root: PathBuf) -> Self {
@@ -112,7 +117,8 @@ impl OperationJournal {
     }
 
     fn record_path(&self, repo_key: &str, request_id: &str) -> PathBuf {
-        self.journals_dir(repo_key).join(format!("{}.json", sha256_hex(request_id)))
+        self.journals_dir(repo_key)
+            .join(format!("{}.json", sha256_hex(request_id)))
     }
 
     /// Begin an operation. If a record already exists for this
@@ -169,8 +175,7 @@ impl OperationJournal {
             updated_at: now,
             result: None,
         };
-        let json = serde_json::to_vec_pretty(&record)
-            .map_err(|e| e.to_string())?;
+        let json = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
         write_new_durably(&path, &json).map_err(|e| e.to_string())?;
         Ok(BeginOutcome::Start)
     }
@@ -185,15 +190,14 @@ impl OperationJournal {
     ) -> Result<(), String> {
         let path = self.record_path(repo_key, request_id);
         let data = std::fs::read(&path).map_err(|e| format!("read journal: {e}"))?;
-        let mut record: JournalRecord = serde_json::from_slice(&data)
-            .map_err(|e| format!("parse journal: {e}"))?;
+        let mut record: JournalRecord =
+            serde_json::from_slice(&data).map_err(|e| format!("parse journal: {e}"))?;
         record.phase = phase;
         record.updated_at = now_iso();
         if result.is_some() {
             record.result = result;
         }
-        let json = serde_json::to_vec_pretty(&record)
-            .map_err(|e| e.to_string())?;
+        let json = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
         write_durably(&path, &json).map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -221,7 +225,10 @@ impl OperationJournal {
         if id.is_empty() || id.len() > 128 {
             return Err("requestId must be 1-128 chars".to_string());
         }
-        if !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
             return Err("requestId must be [A-Za-z0-9._-]".to_string());
         }
         Ok(())
@@ -308,7 +315,9 @@ mod tests {
     fn begin_creates_started_record() {
         let dir = tempdir().unwrap();
         let j = make_journal(dir.path());
-        let outcome = j.begin("req-1", JournalOperation::Publish, "repo-key", "hash-1").unwrap();
+        let outcome = j
+            .begin("req-1", JournalOperation::Publish, "repo-key", "hash-1")
+            .unwrap();
         assert!(matches!(outcome, BeginOutcome::Start));
         let record = j.read("repo-key", "req-1").unwrap();
         assert_eq!(record.phase, JournalPhase::Started);
@@ -318,10 +327,15 @@ mod tests {
     fn begin_replays_terminal() {
         let dir = tempdir().unwrap();
         let j = make_journal(dir.path());
-        j.begin("req-2", JournalOperation::Publish, "repo-key", "hash-2").unwrap();
-        j.transition("req-2", "repo-key", JournalPhase::IndexStaged, None).unwrap();
-        j.complete("req-2", "repo-key", serde_json::json!({"ok": true})).unwrap();
-        let outcome = j.begin("req-2", JournalOperation::Publish, "repo-key", "hash-2").unwrap();
+        j.begin("req-2", JournalOperation::Publish, "repo-key", "hash-2")
+            .unwrap();
+        j.transition("req-2", "repo-key", JournalPhase::IndexStaged, None)
+            .unwrap();
+        j.complete("req-2", "repo-key", serde_json::json!({"ok": true}))
+            .unwrap();
+        let outcome = j
+            .begin("req-2", JournalOperation::Publish, "repo-key", "hash-2")
+            .unwrap();
         match outcome {
             BeginOutcome::Replay(val) => assert_eq!(val, serde_json::json!({"ok": true})),
             _ => panic!("expected Replay"),
@@ -332,9 +346,18 @@ mod tests {
     fn begin_resumes_intermediate() {
         let dir = tempdir().unwrap();
         let j = make_journal(dir.path());
-        j.begin("req-3", JournalOperation::Push, "repo-key", "hash-3").unwrap();
-        j.transition("req-3", "repo-key", JournalPhase::PushStarted, Some(serde_json::json!({"meta": "recovery"}))).unwrap();
-        let outcome = j.begin("req-3", JournalOperation::Push, "repo-key", "hash-3").unwrap();
+        j.begin("req-3", JournalOperation::Push, "repo-key", "hash-3")
+            .unwrap();
+        j.transition(
+            "req-3",
+            "repo-key",
+            JournalPhase::PushStarted,
+            Some(serde_json::json!({"meta": "recovery"})),
+        )
+        .unwrap();
+        let outcome = j
+            .begin("req-3", JournalOperation::Push, "repo-key", "hash-3")
+            .unwrap();
         match outcome {
             BeginOutcome::Resume { phase, result } => {
                 assert_eq!(phase, JournalPhase::PushStarted);
@@ -348,8 +371,11 @@ mod tests {
     fn begin_rejects_idempotency_conflict() {
         let dir = tempdir().unwrap();
         let j = make_journal(dir.path());
-        j.begin("req-4", JournalOperation::Publish, "repo-key", "hash-a").unwrap();
-        let err = j.begin("req-4", JournalOperation::Push, "repo-key", "hash-b").unwrap_err();
+        j.begin("req-4", JournalOperation::Publish, "repo-key", "hash-a")
+            .unwrap();
+        let err = j
+            .begin("req-4", JournalOperation::Push, "repo-key", "hash-b")
+            .unwrap_err();
         assert!(err.contains("idempotency"));
     }
 
@@ -357,8 +383,10 @@ mod tests {
     fn transition_durably_updates() {
         let dir = tempdir().unwrap();
         let j = make_journal(dir.path());
-        j.begin("req-5", JournalOperation::Publish, "repo-key", "hash-5").unwrap();
-        j.transition("req-5", "repo-key", JournalPhase::IndexStaged, None).unwrap();
+        j.begin("req-5", JournalOperation::Publish, "repo-key", "hash-5")
+            .unwrap();
+        j.transition("req-5", "repo-key", JournalPhase::IndexStaged, None)
+            .unwrap();
         let record = j.read("repo-key", "req-5").unwrap();
         assert_eq!(record.phase, JournalPhase::IndexStaged);
     }
@@ -367,9 +395,18 @@ mod tests {
     fn validate_request_id_rejects_bad_chars() {
         let dir = tempdir().unwrap();
         let j = make_journal(dir.path());
-        assert!(j.begin("req with spaces", JournalOperation::Publish, "k", "h").is_err());
+        assert!(
+            j.begin("req with spaces", JournalOperation::Publish, "k", "h")
+                .is_err()
+        );
         assert!(j.begin("", JournalOperation::Publish, "k", "h").is_err());
-        assert!(j.begin(&"x".repeat(129), JournalOperation::Publish, "k", "h").is_err());
-        assert!(j.begin("good-id.123", JournalOperation::Publish, "k", "h").is_ok());
+        assert!(
+            j.begin(&"x".repeat(129), JournalOperation::Publish, "k", "h")
+                .is_err()
+        );
+        assert!(
+            j.begin("good-id.123", JournalOperation::Publish, "k", "h")
+                .is_ok()
+        );
     }
 }

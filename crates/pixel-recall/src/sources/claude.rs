@@ -162,9 +162,8 @@ impl SourceAdapter for ClaudeAdapter {
 
         // A file with no conversation and no session identity yields no
         // session row; the ingester records the consumed bytes regardless.
-        let has_conversation = !turns.is_empty()
-            || session.cwd.is_some()
-            || matches!(change, Change::Appended { .. });
+        let has_conversation =
+            !turns.is_empty() || session.cwd.is_some() || matches!(change, Change::Appended { .. });
         let op = match change {
             Change::Appended { .. } => SessionOp::Append,
             _ => SessionOp::Replace,
@@ -195,10 +194,7 @@ impl SourceAdapter for ClaudeAdapter {
 
 /// `.../projects/<slug>/<parent-uuid>/subagents/agent-x.jsonl` → parent uuid.
 fn subagent_parent(path: &Path) -> (bool, Option<String>) {
-    let comps: Vec<&str> = path
-        .iter()
-        .filter_map(|c| c.to_str())
-        .collect();
+    let comps: Vec<&str> = path.iter().filter_map(|c| c.to_str()).collect();
     if comps.len() >= 3 && comps[comps.len() - 2] == "subagents" {
         return (true, Some(comps[comps.len() - 3].to_string()));
     }
@@ -309,10 +305,8 @@ fn extract_record(
                                 .get("name")
                                 .and_then(Value::as_str)
                                 .unwrap_or("unknown");
-                            let input = part
-                                .get("input")
-                                .map(|v| v.to_string())
-                                .unwrap_or_default();
+                            let input =
+                                part.get("input").map(|v| v.to_string()).unwrap_or_default();
                             let (capped, truncated) = cap_text(&input, TOOL_INPUT_CAP);
                             any_truncated |= truncated;
                             if !text.is_empty() {

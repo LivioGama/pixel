@@ -84,12 +84,18 @@ mod tests {
         let _guard = BuildLock::acquire(&dir).unwrap();
         // Try-acquire (non-blocking) should return None while held.
         let second = BuildLock::try_acquire(&dir).unwrap();
-        assert!(second.is_none(), "second try_acquire should fail while lock is held");
+        assert!(
+            second.is_none(),
+            "second try_acquire should fail while lock is held"
+        );
 
         // After dropping, try-acquire succeeds.
         drop(_guard);
         let third = BuildLock::try_acquire(&dir).unwrap();
-        assert!(third.is_some(), "try_acquire should succeed after lock is released");
+        assert!(
+            third.is_some(),
+            "try_acquire should succeed after lock is released"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

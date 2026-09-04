@@ -21,12 +21,8 @@ pub const MANAGED_END: &str = "<!-- pixel:managed:end -->";
 
 /// Substrings that identify a stale GitNexus / codebase-memory block that
 /// must be deleted from agent config during install.
-const STALE_BLOCK_MARKERS: &[&str] = &[
-    "gitnexus",
-    "GitNexus",
-    "codebase-memory",
-    "codebase memory",
-];
+const STALE_BLOCK_MARKERS: &[&str] =
+    &["gitnexus", "GitNexus", "codebase-memory", "codebase memory"];
 
 /// The Claude hooks directory (relative to home).
 pub const CLAUDE_HOOKS_DIR: &str = ".claude/hooks";
@@ -109,8 +105,7 @@ pub const PI_SETTINGS_FILE: &str = ".pi/agent/settings.json";
 /// Antigravity:  run_command (bash), view_file (read), replace_file_content (edit),
 ///               write_to_file (write), grep_search (grep), find_by_name (find), list_dir (ls)
 /// pi:           read, bash, edit, write, grep, find, ls (no PreToolUse hooks — rules only)
-pub const GUARD_MATCHER: &str =
-    "Bash|Read|Grep|Glob|Edit|MultiEdit|NotebookEdit|Write|\
+pub const GUARD_MATCHER: &str = "Bash|Read|Grep|Glob|Edit|MultiEdit|NotebookEdit|Write|\
      exec|read|grep|find_file_by_name|glob|edit|write|notebook_read|notebook_edit|\
      bash|apply_patch|read_file|write_file|execute|run_shell_command|search|\
      find|ls|Shell|\
@@ -181,7 +176,12 @@ pub struct ScrubOutcome {
 /// into invalid JSON.
 pub fn find_agent_configs(home: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    for rel in ["CLAUDE.md", "AGENTS.md", ".claude/CLAUDE.md", ".claude/AGENTS.md"] {
+    for rel in [
+        "CLAUDE.md",
+        "AGENTS.md",
+        ".claude/CLAUDE.md",
+        ".claude/AGENTS.md",
+    ] {
         let p = home.join(rel);
         if p.is_file() {
             out.push(p);
@@ -473,8 +473,8 @@ pub fn scrub_settings_json(path: &Path, dry_run: bool) -> Result<ScrubOutcome> {
         });
     }
     let raw = fs::read_to_string(path)?;
-    let mut value: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| ConfigError::InvalidSettings {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| ConfigError::InvalidSettings {
             path: path.to_path_buf(),
             reason: e.to_string(),
         })?;
@@ -554,20 +554,29 @@ fn rewrite_guard_hook_commands(hooks: &mut serde_json::Map<String, serde_json::V
         if event == "PreToolUse" {
             // Repoint in place, preserving every other field.
             for entry in entries.iter_mut() {
-                let Some(inner) = entry.get_mut("hooks").and_then(serde_json::Value::as_array_mut) else {
+                let Some(inner) = entry
+                    .get_mut("hooks")
+                    .and_then(serde_json::Value::as_array_mut)
+                else {
                     continue;
                 };
                 for hook in inner {
                     let Some(hook_obj) = hook.as_object_mut() else {
                         continue;
                     };
-                    let Some(command) = hook_obj.get("command").and_then(|c| c.as_str()).map(str::to_string)
+                    let Some(command) = hook_obj
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .map(str::to_string)
                     else {
                         continue;
                     };
                     if command.contains(OLD_GUARD_HOOK) {
                         let new_command = command.replace(OLD_GUARD_HOOK, GUARD_HOOK);
-                        hook_obj.insert("command".to_string(), serde_json::Value::String(new_command));
+                        hook_obj.insert(
+                            "command".to_string(),
+                            serde_json::Value::String(new_command),
+                        );
                         changed += 1;
                     }
                 }
@@ -578,7 +587,10 @@ fn rewrite_guard_hook_commands(hooks: &mut serde_json::Map<String, serde_json::V
             // the guard-hook entries instead of repointing them.
             let mut kept: Vec<serde_json::Value> = Vec::with_capacity(entries.len());
             for mut entry in std::mem::take(entries) {
-                let Some(inner) = entry.get_mut("hooks").and_then(serde_json::Value::as_array_mut) else {
+                let Some(inner) = entry
+                    .get_mut("hooks")
+                    .and_then(serde_json::Value::as_array_mut)
+                else {
                     kept.push(entry);
                     continue;
                 };
@@ -677,7 +689,9 @@ pub fn strip_managed_block(text: &str) -> String {
         return text.to_string();
     };
     let end_pos = end + MANAGED_END.len();
-    let after = text[end_pos..].strip_prefix('\n').unwrap_or(&text[end_pos..]);
+    let after = text[end_pos..]
+        .strip_prefix('\n')
+        .unwrap_or(&text[end_pos..]);
     let mut result = String::with_capacity(start + after.len());
     result.push_str(&text[..start]);
     result.push_str(after);
@@ -688,10 +702,7 @@ pub fn strip_managed_block(text: &str) -> String {
 /// `hooks[].command` contains `marker`. Returns the filtered array (or the
 /// original value unchanged if it is not an array). The inverse of
 /// [`merge_hook_entry`].
-pub fn remove_hook_entries(
-    existing: &serde_json::Value,
-    marker: &str,
-) -> serde_json::Value {
+pub fn remove_hook_entries(existing: &serde_json::Value, marker: &str) -> serde_json::Value {
     match existing {
         serde_json::Value::Array(arr) => {
             let filtered: Vec<serde_json::Value> = arr
@@ -741,10 +752,7 @@ pub fn remove_hook_entries(
 /// Same as [`remove_hook_entries`] but for Cursor's FLAT hooks.json schema
 /// where each entry carries `command` directly (no nested `hooks` array).
 /// The inverse of [`merge_flat_hook_entry`].
-pub fn remove_flat_hook_entries(
-    existing: &serde_json::Value,
-    marker: &str,
-) -> serde_json::Value {
+pub fn remove_flat_hook_entries(existing: &serde_json::Value, marker: &str) -> serde_json::Value {
     match existing {
         serde_json::Value::Array(arr) => {
             let filtered: Vec<serde_json::Value> = arr
@@ -779,7 +787,10 @@ pub fn remove_guard_hook_entries(hooks: &mut serde_json::Map<String, serde_json:
         filtered = remove_hook_entries(&filtered, OLD_GUARD_HOOK);
         if filtered != existing {
             changed += 1;
-            if filtered.as_array().is_some_and(|entries| entries.is_empty()) {
+            if filtered
+                .as_array()
+                .is_some_and(|entries| entries.is_empty())
+            {
                 hooks.remove(&event);
             } else {
                 hooks.insert(event, filtered);
@@ -805,7 +816,10 @@ pub fn remove_flat_guard_hook_entries(
         filtered = remove_flat_hook_entries(&filtered, OLD_GUARD_HOOK);
         if filtered != existing {
             changed += 1;
-            if filtered.as_array().is_some_and(|entries| entries.is_empty()) {
+            if filtered
+                .as_array()
+                .is_some_and(|entries| entries.is_empty())
+            {
                 hooks.remove(&event);
             } else {
                 hooks.insert(event, filtered);
@@ -857,12 +871,16 @@ mod tests {
         let changed = rewrite_guard_hook_commands(&mut hooks);
 
         // PreToolUse guard command repointed to the new filename.
-        let pre = hooks["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
+        let pre = hooks["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
         assert_eq!(pre, "~/.claude/hooks/pixel-targets-guard");
         // PostToolUse guard entry removed entirely (empty array left behind).
         assert_eq!(hooks["PostToolUse"].as_array().unwrap().len(), 0);
         // Unrelated SessionStart entry untouched.
-        let session = hooks["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap();
+        let session = hooks["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
         assert_eq!(session, "~/.claude/hooks/pixel-session-start");
 
         // One repoint (PreToolUse) + one removal (PostToolUse).
@@ -890,7 +908,10 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         let inner = remaining[0]["hooks"].as_array().unwrap();
         assert_eq!(inner.len(), 1);
-        assert_eq!(inner[0]["command"].as_str().unwrap(), "~/.claude/hooks/other-tool");
+        assert_eq!(
+            inner[0]["command"].as_str().unwrap(),
+            "~/.claude/hooks/other-tool"
+        );
         assert_eq!(changed, 1);
     }
 

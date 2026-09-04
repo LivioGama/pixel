@@ -11,20 +11,20 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+mod call_guard;
 mod guard;
 mod post_compaction;
 mod prompt_submit;
 mod recall_cmd;
 mod rescue_cmd;
 mod sniper_cmd;
-mod call_guard;
+use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service};
+use pixel_daemon::daemon;
 use pixel_index::index::{build, shard_path};
 use pixel_index::shard::Shard;
 use pixel_index::{Crc32Weigher, GramExtractor, SparseGramExtractor, TrigramExtractor};
-use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service};
-use pixel_daemon::daemon;
-use pixel_proto::{compile_query, QueryKind, QueryStatus};
-use serde_json::{json, Value};
+use pixel_proto::{QueryKind, QueryStatus, compile_query};
+use serde_json::{Value, json};
 
 #[derive(Parser)]
 #[command(
@@ -932,7 +932,10 @@ fn parse_line_range(s: &str) -> Result<(u32, u32), String> {
     let (a, b) = s
         .split_once(',')
         .ok_or_else(|| format!("expected 'start,end', got '{s}'"))?;
-    let a: u32 = a.trim().parse().map_err(|e| format!("bad start line: {e}"))?;
+    let a: u32 = a
+        .trim()
+        .parse()
+        .map_err(|e| format!("bad start line: {e}"))?;
     let b: u32 = b.trim().parse().map_err(|e| format!("bad end line: {e}"))?;
     if a == 0 || b < a {
         return Err(format!("invalid range {a},{b}: need 1 <= start <= end"));
@@ -1105,12 +1108,18 @@ fn unwrap_response(resp: Response) -> Result<Value, String> {
         if let Some(e) = epistemics
             && !obj.contains_key("epistemics")
         {
-            obj.insert("epistemics".into(), serde_json::to_value(e).unwrap_or(Value::Null));
+            obj.insert(
+                "epistemics".into(),
+                serde_json::to_value(e).unwrap_or(Value::Null),
+            );
         }
         if let Some(s) = snapshot
             && !obj.contains_key("snapshot")
         {
-            obj.insert("snapshot".into(), serde_json::to_value(s).unwrap_or(Value::Null));
+            obj.insert(
+                "snapshot".into(),
+                serde_json::to_value(s).unwrap_or(Value::Null),
+            );
         }
         if !warnings.is_empty() && !obj.contains_key("warnings") {
             obj.insert(
@@ -1291,7 +1300,11 @@ fn targets_task_id(task: &str) -> String {
 /// Tasks older than the 24h TTL are dropped; a task with the same id as the
 /// new one is replaced. Pure function — file I/O stays in the caller.
 fn merge_targets_manifest(existing: Option<&str>, new_task: Value, now: u64) -> Value {
-    let new_id = new_task.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let new_id = new_task
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let mut tasks: Vec<Value> = Vec::new();
     if let Some(text) = existing {
         if let Ok(v) = serde_json::from_str::<Value>(text) {
@@ -1439,7 +1452,11 @@ mod targets_manifest_tests {
             now - TARGETS_TTL_SECS - 1,
         );
         let text = old.to_string();
-        let v2 = merge_targets_manifest(Some(&text), task_entry("fresh task", now, "src/fresh.rs"), now);
+        let v2 = merge_targets_manifest(
+            Some(&text),
+            task_entry("fresh task", now, "src/fresh.rs"),
+            now,
+        );
         let tasks = v2["tasks"].as_array().unwrap();
         assert_eq!(tasks.len(), 1, "expired task must be dropped on merge");
         assert_eq!(tasks[0]["task"], "fresh task");
@@ -1457,9 +1474,17 @@ mod targets_manifest_tests {
             "files": [{"path": "src/legacy.rs", "tier": "P0"}],
         })
         .to_string();
-        let v2 = merge_targets_manifest(Some(&legacy), task_entry("new task", now, "src/new.rs"), now);
+        let v2 = merge_targets_manifest(
+            Some(&legacy),
+            task_entry("new task", now, "src/new.rs"),
+            now,
+        );
         let tasks = v2["tasks"].as_array().unwrap();
-        assert_eq!(tasks.len(), 2, "legacy singleton must be preserved as a v2 task");
+        assert_eq!(
+            tasks.len(),
+            2,
+            "legacy singleton must be preserved as a v2 task"
+        );
         assert_eq!(tasks[0]["task"], "legacy task");
         assert_eq!(tasks[0]["targets"][0]["path"], "src/legacy.rs");
         assert_eq!(tasks[1]["task"], "new task");
@@ -1468,7 +1493,11 @@ mod targets_manifest_tests {
     #[test]
     fn merge_survives_corrupt_existing() {
         let now = 1_000_000;
-        let v2 = merge_targets_manifest(Some("{not json"), task_entry("task A", now, "src/a.rs"), now);
+        let v2 = merge_targets_manifest(
+            Some("{not json"),
+            task_entry("task A", now, "src/a.rs"),
+            now,
+        );
         assert_eq!(v2["tasks"].as_array().unwrap().len(), 1);
     }
 
@@ -1482,12 +1511,8 @@ mod targets_manifest_tests {
     #[test]
     fn merge_caps_at_max_manifest_tasks() {
         let mut now = 1_000_000u64;
-        let mut text = merge_targets_manifest(
-            None,
-            task_entry("task 0", now, "src/a0.rs"),
-            now,
-        )
-        .to_string();
+        let mut text =
+            merge_targets_manifest(None, task_entry("task 0", now, "src/a0.rs"), now).to_string();
 
         // Add MAX_MANIFEST_TASKS more tasks (total = MAX+1, should cap).
         for i in 1..=MAX_MANIFEST_TASKS {
@@ -1507,8 +1532,7 @@ mod targets_manifest_tests {
             "manifest must be capped at MAX_MANIFEST_TASKS"
         );
         // Oldest task ("task 0") must be evicted; newest ("task {MAX}") kept.
-        let names: Vec<&str> =
-            tasks.iter().map(|t| t["task"].as_str().unwrap()).collect();
+        let names: Vec<&str> = tasks.iter().map(|t| t["task"].as_str().unwrap()).collect();
         assert!(!names.contains(&"task 0"), "oldest task must be evicted");
         assert!(
             names.contains(&format!("task {MAX_MANIFEST_TASKS}").as_str()),
@@ -1721,7 +1745,11 @@ fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
     };
     let mut cache: HashMap<PathBuf, Option<String>> = HashMap::new();
     for m in matches.iter_mut() {
-        let rel = m.get("path").and_then(Value::as_str).unwrap_or("").to_string();
+        let rel = m
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         if rel.is_empty() {
             continue;
         }
@@ -1749,7 +1777,11 @@ fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
         let mut ctx_lines = Vec::with_capacity(to - from);
         for (i, l) in lines[from..to].iter().enumerate() {
             let ln = from + i + 1;
-            let marker = if ln >= start_line && ln <= end_line { ">>" } else { "  " };
+            let marker = if ln >= start_line && ln <= end_line {
+                ">>"
+            } else {
+                "  "
+            };
             ctx_lines.push(format!("{marker} {ln:>5}: {l}"));
         }
         m["context"] = Value::String(ctx_lines.join("\n"));
@@ -1776,14 +1808,19 @@ fn print_resolve_human(data: &Value) -> Result<(), String> {
             .and_then(Value::as_str)
             .unwrap_or("");
 
-        output.push_str(&format!("{path}:{start_line} ({kind}, score: {score:.2}) {raw}\n"));
+        output.push_str(&format!(
+            "{path}:{start_line} ({kind}, score: {score:.2}) {raw}\n"
+        ));
         if let Some(ctx) = m.get("context").and_then(Value::as_str) {
             output.push_str(ctx);
             output.push('\n');
         }
         output.push('\n');
     }
-    let confidence = data.get("confidence").and_then(Value::as_str).unwrap_or("unknown");
+    let confidence = data
+        .get("confidence")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
     let basis = data.get("basis").and_then(Value::as_str).unwrap_or("");
     output.push_str(&format!("Confidence: {confidence} ({basis})\n"));
     write_stdout(&output)
@@ -1841,7 +1878,18 @@ fn run_search(
         let whole_repo = rels.iter().any(String::is_empty);
         let req_paths = if whole_repo { None } else { Some(rels) };
         run_search_one(
-            &effective_pattern, &root, req_paths, multi_root, json, stats, limit, offset, no_daemon, scope.clone(), context, logger,
+            &effective_pattern,
+            &root,
+            req_paths,
+            multi_root,
+            json,
+            stats,
+            limit,
+            offset,
+            no_daemon,
+            scope.clone(),
+            context,
+            logger,
         )?;
     }
     Ok(())
@@ -2131,7 +2179,10 @@ fn facts_status(root: &Path) -> Option<Value> {
 fn run() -> Result<(), String> {
     let started = std::time::Instant::now();
     let argv: Vec<String> = std::env::args().collect();
-    let command_label = argv.get(1).cloned().unwrap_or_else(|| "unknown".to_string());
+    let command_label = argv
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
     let args_summary = argv[1..].join(" ");
 
     let cli = Cli::parse();
@@ -2194,8 +2245,8 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
             // In-process fallback (with build lock to prevent concurrent
             // build races when multiple CLI invocations hit the same root).
-            let _lock = pixel_index::BuildLock::acquire(&path)
-                .map_err(|e| format!("build lock: {e}"))?;
+            let _lock =
+                pixel_index::BuildLock::acquire(&path).map_err(|e| format!("build lock: {e}"))?;
             let ex = make_extractor(extractor, max_gram);
             let stats = build(&path, ex.as_ref()).map_err(|e| e.to_string())?;
             eprintln!(
@@ -2203,8 +2254,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 stats.files, stats.bytes, stats.grams, stats.shard_bytes, stats.elapsed_ms
             );
             if history {
-                let mut store =
-                    pixel_facts::FactsStore::open(&path).map_err(|e| e.to_string())?;
+                let mut store = pixel_facts::FactsStore::open(&path).map_err(|e| e.to_string())?;
                 let opts = pixel_facts::ingest::IngestOptions::default();
                 let report = pixel_facts::ingest::ingest_until_fresh(&mut store, &opts)
                     .map_err(|e| e.to_string())?;
@@ -2233,11 +2283,28 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             if call_guard_check("search", &format!("{pattern} {:?}", paths)) {
                 return Err("circuit breaker: repeated search calls".to_string());
             }
-            run_search(pattern, paths, json, stats, limit, offset, no_daemon, scope, context, ignore_case, logger)
+            run_search(
+                pattern,
+                paths,
+                json,
+                stats,
+                limit,
+                offset,
+                no_daemon,
+                scope,
+                context,
+                ignore_case,
+                logger,
+            )
         }
-        Command::Query { intent, path, kind, budget, json, no_daemon } => {
-            run_query(intent, path, &kind, budget, json, no_daemon, logger)
-        }
+        Command::Query {
+            intent,
+            path,
+            kind,
+            budget,
+            json,
+            no_daemon,
+        } => run_query(intent, path, &kind, budget, json, no_daemon, logger),
         Command::Ask {
             question,
             path,
@@ -2713,9 +2780,8 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                         f.get("hunks_with_text").and_then(Value::as_u64),
                         f.get("diff_grams").and_then(Value::as_u64),
                     ) {
-                        output.push_str(&format!(
-                            "facts-text: hunks_with_text={h} diff_grams={g}\n"
-                        ));
+                        output
+                            .push_str(&format!("facts-text: hunks_with_text={h} diff_grams={g}\n"));
                     }
                 }
                 output.push_str(&format!(
@@ -2773,15 +2839,19 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     });
                 }
                 if let Some(clean) = data.get_mut("clean").and_then(Value::as_array_mut) {
-                    clean.retain(|c| {
-                        c.as_str().is_some_and(|p| files.iter().any(|f| f == p))
-                    });
+                    clean.retain(|c| c.as_str().is_some_and(|p| files.iter().any(|f| f == p)));
                 }
                 data["dirty_count"] = json!(
-                    data.get("dirty").and_then(Value::as_array).map(Vec::len).unwrap_or(0)
+                    data.get("dirty")
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                        .unwrap_or(0)
                 );
                 data["clean_count"] = json!(
-                    data.get("clean").and_then(Value::as_array).map(Vec::len).unwrap_or(0)
+                    data.get("clean")
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                        .unwrap_or(0)
                 );
             }
             print_data(&data, json)
@@ -2793,11 +2863,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             json,
         } => {
             let root = discover_root(&path)?;
-            let data = pixel_ops::review::review(
-                &root,
-                cursor.as_deref(),
-                byte_cap,
-            )?;
+            let data = pixel_ops::review::review(&root, cursor.as_deref(), byte_cap)?;
             print_data(&data, json)
         }
         Command::History {
@@ -2834,13 +2900,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             } else {
                 Some(paths.as_slice())
             };
-            let data = pixel_ops::diff::diff(
-                &root,
-                &from,
-                to.as_deref(),
-                paths_opt,
-                byte_cap,
-            )?;
+            let data = pixel_ops::diff::diff(&root, &from, to.as_deref(), paths_opt, byte_cap)?;
             print_data(&data, json)
         }
         Command::Publish {
@@ -2960,14 +3020,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             if call_guard_check("resolve", &format!("{phrase} {}", path.display())) {
                 return Err("circuit breaker: repeated resolve calls".to_string());
             }
-            let mut data = execute(
-                &path,
-                Request::Resolve {
-                    phrase,
-                    limit,
-                },
-                false,
-            )?;
+            let mut data = execute(&path, Request::Resolve { phrase, limit }, false)?;
             if let Ok(root) = discover_root(&path) {
                 enrich_resolve_matches_with_context(&mut data, &root);
             }
@@ -3001,14 +3054,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             token,
             json,
         } => {
-            let data = execute(
-                &path,
-                Request::Lifecycle {
-                    path: file,
-                    token,
-                },
-                false,
-            )?;
+            let data = execute(&path, Request::Lifecycle { path: file, token }, false)?;
             print_data(&data, json)
         }
         Command::Excavate {
@@ -3080,27 +3126,43 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         // M5/M6 — install / doctor / migrate / hook
         // -------------------------------------------------------------
         Command::Install { json } => {
-            let report = pixel_install::install::install(
-                &pixel_install::install::InstallOptions::default(),
+            let report =
+                pixel_install::install::install(&pixel_install::install::InstallOptions::default())
+                    .map_err(|e| e.to_string())?;
+            print_data(
+                &serde_json::to_value(&report).map_err(|e| e.to_string())?,
+                json,
             )
-            .map_err(|e| e.to_string())?;
-            print_data(&serde_json::to_value(&report).map_err(|e| e.to_string())?, json)
         }
-        Command::Uninstall { json, dry_run, binary_path } => {
-            let report = pixel_install::uninstall::uninstall(
-                &pixel_install::uninstall::UninstallOptions {
+        Command::Uninstall {
+            json,
+            dry_run,
+            binary_path,
+        } => {
+            let report =
+                pixel_install::uninstall::uninstall(&pixel_install::uninstall::UninstallOptions {
                     binary_path,
                     dry_run,
                     ..Default::default()
-                },
+                })
+                .map_err(|e| e.to_string())?;
+            print_data(
+                &serde_json::to_value(&report).map_err(|e| e.to_string())?,
+                json,
             )
-            .map_err(|e| e.to_string())?;
-            print_data(&serde_json::to_value(&report).map_err(|e| e.to_string())?, json)
         }
-        Command::Upgrade { build, install_path, restart_daemon, repo } => {
+        Command::Upgrade {
+            build,
+            install_path,
+            restart_daemon,
+            repo,
+        } => {
             let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
             let dest = install_path.unwrap_or_else(|| {
-                PathBuf::from(&home).join(".local").join("bin").join("pixel")
+                PathBuf::from(&home)
+                    .join(".local")
+                    .join("bin")
+                    .join("pixel")
             });
             // 1. Build.
             eprintln!("Building: {build}");
@@ -3128,10 +3190,16 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 .arg("pixel daemon")
                 .status();
             std::thread::sleep(std::time::Duration::from_secs(1));
-            // 4. Copy.
+            // 4. Atomic install: copy to temp, then rename. In-place cp
+            //    overwrites a mapped Mach-O on macOS, invalidating the
+            //    ad-hoc code signature and causing SIGKILL on next run.
             eprintln!("Installing to {}", dest.display());
-            std::fs::copy(&src, &dest)
-                .map_err(|e| format!("copy failed: {e}"))?;
+            let tmp = dest.with_extension("tmp.$$");
+            std::fs::copy(&src, &tmp).map_err(|e| format!("copy failed: {e}"))?;
+            std::fs::rename(&tmp, &dest).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("rename failed: {e}")
+            })?;
             eprintln!("Upgrade complete: {} -> {}", src.display(), dest.display());
             // 5. Optionally restart daemon.
             if restart_daemon {
@@ -3157,12 +3225,18 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 ..Default::default()
             })
             .map_err(|e| e.to_string())?;
-            print_data(&serde_json::to_value(&report).map_err(|e| e.to_string())?, json)
+            print_data(
+                &serde_json::to_value(&report).map_err(|e| e.to_string())?,
+                json,
+            )
         }
         Command::Migrate { path, json } => {
             let root = discover_root(&path)?;
             let report = pixel_install::install::migrate(&root).map_err(|e| e.to_string())?;
-            print_data(&serde_json::to_value(&report).map_err(|e| e.to_string())?, json)
+            print_data(
+                &serde_json::to_value(&report).map_err(|e| e.to_string())?,
+                json,
+            )
         }
         Command::Hook { cmd } => match cmd {
             HookCmd::Guard { path: _ } => {
@@ -3265,7 +3339,11 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             json,
             clear,
         } => run_log(&path, limit, errors_only, json, clear),
-        Command::Savings { path, json, since_hours } => run_savings(&path, json, since_hours),
+        Command::Savings {
+            path,
+            json,
+            since_hours,
+        } => run_savings(&path, json, since_hours),
         Command::Rewrite {
             path,
             onto,
@@ -3335,7 +3413,16 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     create_file,
                     path,
                     json,
-                } => (path, json, EnvAction::Set { file, key, value, create_file }),
+                } => (
+                    path,
+                    json,
+                    EnvAction::Set {
+                        file,
+                        key,
+                        value,
+                        create_file,
+                    },
+                ),
                 EnvCmd::Restore {
                     file,
                     snapshot,
@@ -3460,15 +3547,27 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     if let Some(log) = data.get("log").and_then(|v| v.as_str()) {
                         eprintln!("{log}");
                     }
-                    let success = data.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let steps = data.get("steps_executed").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let skipped = data.get("steps_skipped").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let success = data
+                        .get("success")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let steps = data
+                        .get("steps_executed")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let skipped = data
+                        .get("steps_skipped")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     if success {
                         println!("✓ Flow executed: {} steps, {} skipped", steps, skipped);
                     } else if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
                         println!("✗ Flow failed after {} steps: {}", steps, err);
                     } else {
-                        println!("~ Flow completed with warnings: {} steps, {} skipped", steps, skipped);
+                        println!(
+                            "~ Flow completed with warnings: {} steps, {} skipped",
+                            steps, skipped
+                        );
                     }
                     Ok(())
                 }
@@ -3504,15 +3603,52 @@ fn run_query(
     let operation = result.plan[0].operations[0].as_str();
     let evidence = match operation {
         "resolve" => {
-            let phrase = intent.trim().trim_start_matches("where is `").trim_end_matches('`');
-            execute(&path, Request::Resolve { phrase: phrase.into(), limit: None }, no_daemon)?
+            let phrase = intent
+                .trim()
+                .trim_start_matches("where is `")
+                .trim_end_matches('`');
+            execute(
+                &path,
+                Request::Resolve {
+                    phrase: phrase.into(),
+                    limit: None,
+                },
+                no_daemon,
+            )?
         }
-        "targets" => execute(&path, Request::Targets { task: intent.clone(), limit: None, max_tier: None, precision: false }, no_daemon)?,
+        "targets" => execute(
+            &path,
+            Request::Targets {
+                task: intent.clone(),
+                limit: None,
+                max_tier: None,
+                precision: false,
+            },
+            no_daemon,
+        )?,
         "impact" => {
             let target = intent.trim().trim_start_matches("show impact of ");
-            execute(&path, Request::Impact { uid_or_name: target.into(), direction: "upstream".into(), depth: Some(3) }, no_daemon)?
+            execute(
+                &path,
+                Request::Impact {
+                    uid_or_name: target.into(),
+                    direction: "upstream".into(),
+                    depth: Some(3),
+                },
+                no_daemon,
+            )?
         }
-        "excavate" => execute(&path, Request::Excavate { phrase: Some(intent.clone()), path: None, from: None, to: None, limit: None }, no_daemon)?,
+        "excavate" => execute(
+            &path,
+            Request::Excavate {
+                phrase: Some(intent.clone()),
+                path: None,
+                from: None,
+                to: None,
+                limit: None,
+            },
+            no_daemon,
+        )?,
         "inspect" => execute(&path, Request::Inspect { files: None }, no_daemon)?,
         _ => return Err(format!("unsupported query operation '{operation}'")),
     };
@@ -3552,7 +3688,11 @@ fn run_log(
     }
     // Over-fetch when filtering to errors so `limit` still means "the last
     // N errors", not "the last N entries, some of which happen to be errors".
-    let fetch = if errors_only { limit.max(1) * 20 } else { limit.max(1) };
+    let fetch = if errors_only {
+        limit.max(1) * 20
+    } else {
+        limit.max(1)
+    };
     let mut events = pixel_actionlog::tail(&log_path, fetch)
         .map_err(|e| format!("read {}: {e}", log_path.display()))?;
     if errors_only {
@@ -3564,10 +3704,7 @@ fn run_log(
     }
     if json {
         for e in &events {
-            println!(
-                "{}",
-                serde_json::to_string(e).map_err(|e| e.to_string())?
-            );
+            println!("{}", serde_json::to_string(e).map_err(|e| e.to_string())?);
         }
         return Ok(());
     }
@@ -3580,7 +3717,10 @@ fn run_log(
         let when = relative_time(e.ts_ms, now);
         match e.outcome {
             pixel_actionlog::Outcome::Ok => {
-                println!("{when:>8}  ok     {:<10} {} ({} ms)", e.command, e.args, e.duration_ms);
+                println!(
+                    "{when:>8}  ok     {:<10} {} ({} ms)",
+                    e.command, e.args, e.duration_ms
+                );
             }
             pixel_actionlog::Outcome::Error => {
                 println!(
@@ -3602,11 +3742,7 @@ fn run_log(
 /// fraction of the candidate pool the agent did NOT have to read. Reports
 /// per-command aggregates plus an overall weighted figure — a measured
 /// counter to semble's '99% fewer tokens' claim.
-fn run_savings(
-    path: &Path,
-    json: bool,
-    since_hours: Option<u64>,
-) -> Result<(), String> {
+fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), String> {
     let root = discover_root(path)?;
     let log_path = pixel_actionlog::ActionLog::path_for_root(&root);
     // Over-fetch; savings is a lightweight aggregate read.
@@ -3691,7 +3827,10 @@ fn run_savings(
     }
 
     println!("token savings (snippet vs candidate-pool chars, by command)");
-    println!("{:<14} {:>5}  {:>12}  {:>14}  {:>7}", "command", "calls", "pool_chars", "snippet_chars", "savings");
+    println!(
+        "{:<14} {:>5}  {:>12}  {:>14}  {:>7}",
+        "command", "calls", "pool_chars", "snippet_chars", "savings"
+    );
     for (cmd, a) in &by_cmd {
         let ratio = if a.pool > 0 {
             1.0 - (a.snippet as f64 / a.pool as f64)
@@ -3758,7 +3897,13 @@ fn run_ask(
     }
     println!("semantic matches for \"{question}\":");
     for (i, h) in hits.iter().enumerate() {
-        println!("  {}. {:>6.3}  {} : \"{}\"", i + 1, h.score, h.path, h.snippet);
+        println!(
+            "  {}. {:>6.3}  {} : \"{}\"",
+            i + 1,
+            h.score,
+            h.path,
+            h.snippet
+        );
     }
     Ok(())
 }
@@ -3903,11 +4048,15 @@ mod tests {
 
         // With a shard present, the `.pixel` ancestor anchors as before.
         std::fs::write(
-            base.join("home/.pixel").join(pixel_index::index::SHARD_FILE),
+            base.join("home/.pixel")
+                .join(pixel_index::index::SHARD_FILE),
             b"shard",
         )
         .unwrap();
-        assert_eq!(discover_root(&work).unwrap(), std::fs::canonicalize(base.join("home")).unwrap());
+        assert_eq!(
+            discover_root(&work).unwrap(),
+            std::fs::canonicalize(base.join("home")).unwrap()
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -3969,9 +4118,18 @@ mod tests {
     #[test]
     fn known_bad_rule_command_lines_are_rejected() {
         for bad in [
-            vec!["pixel".to_string(), "search".into(), "--no-such-flag".into()],
+            vec![
+                "pixel".to_string(),
+                "search".into(),
+                "--no-such-flag".into(),
+            ],
             vec!["pixel".to_string(), "frobnicate".into()],
-            vec!["pixel".to_string(), "rescue".into(), "--limit".into(), "3".into()],
+            vec![
+                "pixel".to_string(),
+                "rescue".into(),
+                "--limit".into(),
+                "3".into(),
+            ],
         ] {
             assert!(
                 validate_cli_syntax(&bad).is_err(),
@@ -4003,14 +4161,32 @@ mod tests {
         });
 
         let enriched = enrich_with_context(&match_val, &root, 2, false, &mut HashMap::new());
-        let ctx = enriched.get("context").and_then(Value::as_str).unwrap_or("");
+        let ctx = enriched
+            .get("context")
+            .and_then(Value::as_str)
+            .unwrap_or("");
 
         // Should contain lines 2-6 (context=2 around line 4)
-        assert!(ctx.contains(">>     4: pub const FOO"), "match line should be marked with >>");
-        assert!(ctx.contains("      2: line 2"), "should include 2 lines before");
-        assert!(ctx.contains("      6: line 6"), "should include 2 lines after");
-        assert!(!ctx.contains("line 1"), "should not include lines outside context window");
-        assert!(!ctx.contains("line 7"), "should not include lines outside context window");
+        assert!(
+            ctx.contains(">>     4: pub const FOO"),
+            "match line should be marked with >>"
+        );
+        assert!(
+            ctx.contains("      2: line 2"),
+            "should include 2 lines before"
+        );
+        assert!(
+            ctx.contains("      6: line 6"),
+            "should include 2 lines after"
+        );
+        assert!(
+            !ctx.contains("line 1"),
+            "should not include lines outside context window"
+        );
+        assert!(
+            !ctx.contains("line 7"),
+            "should not include lines outside context window"
+        );
 
         std::fs::remove_file(&path).ok();
     }
@@ -4018,17 +4194,26 @@ mod tests {
     #[test]
     fn enrich_with_context_zero_context_returns_original() {
         let match_val = serde_json::json!({"path": "nonexistent.rs", "line": 1, "text": "foo"});
-        let enriched = enrich_with_context(&match_val, Path::new("/tmp"), 0, false, &mut HashMap::new());
+        let enriched =
+            enrich_with_context(&match_val, Path::new("/tmp"), 0, false, &mut HashMap::new());
         // context=0 means no enrichment — original returned
-        assert!(enriched.get("context").is_none(), "context=0 should not add context field");
+        assert!(
+            enriched.get("context").is_none(),
+            "context=0 should not add context field"
+        );
     }
 
     #[test]
     fn enrich_with_context_missing_file_returns_original() {
-        let match_val = serde_json::json!({"path": "does_not_exist_xyz.rs", "line": 1, "text": "foo"});
-        let enriched = enrich_with_context(&match_val, Path::new("/tmp"), 5, false, &mut HashMap::new());
+        let match_val =
+            serde_json::json!({"path": "does_not_exist_xyz.rs", "line": 1, "text": "foo"});
+        let enriched =
+            enrich_with_context(&match_val, Path::new("/tmp"), 5, false, &mut HashMap::new());
         // File doesn't exist — should return original without context
-        assert!(enriched.get("context").is_none(), "missing file should not add context");
+        assert!(
+            enriched.get("context").is_none(),
+            "missing file should not add context"
+        );
     }
 
     #[test]
@@ -4048,8 +4233,14 @@ mod tests {
 
         // Request 10 lines of context but file only has 1
         let enriched = enrich_with_context(&match_val, &root, 10, false, &mut HashMap::new());
-        let ctx = enriched.get("context").and_then(Value::as_str).unwrap_or("");
-        assert!(ctx.contains(">>     1: only line"), "should contain the match line");
+        let ctx = enriched
+            .get("context")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert!(
+            ctx.contains(">>     1: only line"),
+            "should contain the match line"
+        );
         assert!(!ctx.contains("line 0"), "should not go before line 1");
 
         std::fs::remove_file(&path).ok();

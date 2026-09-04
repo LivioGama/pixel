@@ -57,11 +57,14 @@ pub fn group_by_code(errors: &[TscError]) -> BTreeMap<String, Vec<&TscError>> {
 
 /// `"23 errors in 7 files"` — the human summary for the summary record.
 pub fn summary_message(errors: &[TscError]) -> String {
-    let files: std::collections::BTreeSet<&str> =
-        errors.iter().map(|e| e.file.as_str()).collect();
+    let files: std::collections::BTreeSet<&str> = errors.iter().map(|e| e.file.as_str()).collect();
     let error_word = if errors.len() == 1 { "error" } else { "errors" };
     let file_word = if files.len() == 1 { "file" } else { "files" };
-    format!("{} {error_word} in {} {file_word}", errors.len(), files.len())
+    format!(
+        "{} {error_word} in {} {file_word}",
+        errors.len(),
+        files.len()
+    )
 }
 
 #[cfg(test)]
@@ -95,8 +98,7 @@ error TS9999 without location is not a diagnostic
 
     #[test]
     fn handles_parens_in_path() {
-        let error =
-            parse_line("src/app (copy)/x.ts(1,2): error TS1005: ';' expected.").unwrap();
+        let error = parse_line("src/app (copy)/x.ts(1,2): error TS1005: ';' expected.").unwrap();
         assert_eq!(error.file, "src/app (copy)/x.ts");
         assert_eq!(error.line, 1);
         assert_eq!(error.code, "TS1005");

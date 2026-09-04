@@ -406,7 +406,8 @@ impl GraphStore {
             "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
             params![file_id],
         )?;
-        self.conn.execute("DELETE FROM concepts WHERE file_id = ?1", params![file_id])?;
+        self.conn
+            .execute("DELETE FROM concepts WHERE file_id = ?1", params![file_id])?;
         Ok(())
     }
 
@@ -555,8 +556,10 @@ impl GraphStore {
              )",
             Self::CONCEPT_COLS
         );
-        let mut p: Vec<Box<dyn rusqlite::ToSql>> =
-            words.iter().map(|w| Box::new(*w) as Box<dyn rusqlite::ToSql>).collect();
+        let mut p: Vec<Box<dyn rusqlite::ToSql>> = words
+            .iter()
+            .map(|w| Box::new(*w) as Box<dyn rusqlite::ToSql>)
+            .collect();
         if let Some(k) = kind {
             sql.push_str(" AND c.kind = ?");
             p.push(Box::new(k.as_str()));
@@ -974,7 +977,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let external = dir.join("external.db");
         let conn = Connection::open(&external).unwrap();
-        conn.execute("CREATE TABLE sentinel (id INTEGER)", []).unwrap();
+        conn.execute("CREATE TABLE sentinel (id INTEGER)", [])
+            .unwrap();
         drop(conn);
         let graph = dir.join("graph.db");
         symlink(&external, &graph).unwrap();

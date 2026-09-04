@@ -4,14 +4,18 @@
 
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use pixel_git::GitRunner;
 
 /// Review the working tree: staged, unstaged, untracked, and conflicted
 /// paths. Unlike usable-git's `review` which filtered conflicted paths to
 /// zero, pixel surfaces them as structured conflict hunks.
-pub fn review(root: &Path, _cursor: Option<&str>, byte_cap: Option<usize>) -> Result<Value, String> {
+pub fn review(
+    root: &Path,
+    _cursor: Option<&str>,
+    byte_cap: Option<usize>,
+) -> Result<Value, String> {
     let runner = GitRunner::new(root);
     const DEFAULT_BYTE_CAP: usize = 64_000;
     let cap = byte_cap.unwrap_or(DEFAULT_BYTE_CAP).clamp(128, 1_000_000);
@@ -27,9 +31,7 @@ pub fn review(root: &Path, _cursor: Option<&str>, byte_cap: Option<usize>) -> Re
             "kind": kind,
             "status": xy.trim(),
         });
-        let entry_bytes = serde_json::to_vec(&entry)
-            .map_err(|e| e.to_string())?
-            .len();
+        let entry_bytes = serde_json::to_vec(&entry).map_err(|e| e.to_string())?.len();
         if bytes.saturating_add(entry_bytes) > cap {
             break;
         }
@@ -172,7 +174,15 @@ mod tests {
 
         let result = review(dir.path(), None, None).unwrap();
         let items = result["items"].as_array().unwrap();
-        assert!(items.iter().any(|i| i["path"] == "b.txt" && i["kind"] == "staged"));
-        assert!(items.iter().any(|i| i["path"] == "c.txt" && i["kind"] == "untracked"));
+        assert!(
+            items
+                .iter()
+                .any(|i| i["path"] == "b.txt" && i["kind"] == "staged")
+        );
+        assert!(
+            items
+                .iter()
+                .any(|i| i["path"] == "c.txt" && i["kind"] == "untracked")
+        );
     }
 }

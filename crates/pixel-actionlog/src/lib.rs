@@ -249,7 +249,11 @@ fn writer_loop(path: PathBuf, rx: mpsc::Receiver<ActionEvent>, done_tx: Sender<(
 /// it doesn't exist yet. The action log may contain fill values (passwords,
 /// OTPs) from flow replay, so it must not be world-readable.
 fn open_log_file(path: &Path) -> Option<File> {
-    let file = OpenOptions::new().create(true).append(true).open(path).ok()?;
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -307,7 +311,8 @@ pub fn tail(path: &Path, limit: usize) -> std::io::Result<Vec<ActionEvent>> {
         Err(e) => return Err(e),
     };
     let reader = BufReader::new(file);
-    let mut ring: std::collections::VecDeque<ActionEvent> = std::collections::VecDeque::with_capacity(limit.min(4096));
+    let mut ring: std::collections::VecDeque<ActionEvent> =
+        std::collections::VecDeque::with_capacity(limit.min(4096));
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -424,8 +429,7 @@ mod tests {
     fn old_records_without_savings_fields_still_parse() {
         // Backward compatibility: a pre-savings-schema line (no snippet/
         // pool fields) must deserialize to an ActionEvent with None volumes.
-        let line =
-            "{\"ts_ms\":1,\"pid\":2,\"command\":\"search\",\"args\":\"x\",\"cwd\":\"/tmp\",\
+        let line = "{\"ts_ms\":1,\"pid\":2,\"command\":\"search\",\"args\":\"x\",\"cwd\":\"/tmp\",\
              \"outcome\":\"ok\",\"duration_ms\":3}";
         let ev: ActionEvent = serde_json::from_str(line).unwrap();
         assert_eq!(ev.command, "search");
@@ -457,7 +461,10 @@ mod tests {
             assert!(after <= before);
             let events = tail(&path, usize::MAX).unwrap();
             assert!(events.len() <= MAX_KEPT_LINES);
-            assert_eq!(events.last().unwrap().args, format!("n={}", MAX_KEPT_LINES + 499));
+            assert_eq!(
+                events.last().unwrap().args,
+                format!("n={}", MAX_KEPT_LINES + 499)
+            );
         }
     }
 }

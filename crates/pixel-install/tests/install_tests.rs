@@ -135,10 +135,7 @@ fn install_creates_config_with_managed_markers() {
 
     assert!(report.ok, "install should succeed (ok=true)");
     assert!(report.summary.red == 0, "no red steps");
-    assert!(
-        report.summary.green > 0,
-        "should have green steps"
-    );
+    assert!(report.summary.green > 0, "should have green steps");
 
     // CLAUDE.md should now contain managed markers.
     let claude = fs::read_to_string(home.join("CLAUDE.md")).expect("CLAUDE.md");
@@ -219,19 +216,31 @@ fn install_wires_codex_lifecycle_hooks_without_blocking_guard() {
 
     let after: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&codex_path).unwrap()).unwrap();
-    assert_eq!(after["unrelated"], true, "unrelated Codex config must survive");
-    let pre = after["hooks"]["PreToolUse"].as_array().unwrap();
-    assert_eq!(pre.len(), 1, "the outer PreToolUse group should be preserved");
     assert_eq!(
-        pre[0]["hooks"][0]["command"],
-        "~/.claude/hooks/keep-this-hook",
+        after["unrelated"], true,
+        "unrelated Codex config must survive"
+    );
+    let pre = after["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(
+        pre.len(),
+        1,
+        "the outer PreToolUse group should be preserved"
+    );
+    assert_eq!(
+        pre[0]["hooks"][0]["command"], "~/.claude/hooks/keep-this-hook",
         "unrelated hook in the same group must survive guard removal"
     );
     let hooks = after["hooks"].as_object().unwrap();
-    assert!(!after.to_string().contains(pixel_install::config::GUARD_HOOK));
+    assert!(
+        !after
+            .to_string()
+            .contains(pixel_install::config::GUARD_HOOK)
+    );
     for event in ["SessionStart", "UserPromptSubmit", "PostCompaction"] {
         assert!(
-            hooks[event].as_array().is_some_and(|entries| !entries.is_empty()),
+            hooks[event]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty()),
             "Codex {event} hook should be installed"
         );
     }
@@ -411,7 +420,10 @@ protocol (codebase-memory, gitnexus, generic exploration).
 - Some other rule entirely.
 ";
     let (cleaned, removed) = pixel_install::config::strip_stale_blocks(original);
-    assert_eq!(removed, 0, "no genuine stale block header exists; nothing should be removed");
+    assert_eq!(
+        removed, 0,
+        "no genuine stale block header exists; nothing should be removed"
+    );
     assert_eq!(
         cleaned, original,
         "a bare incidental mention of gitnexus/codebase-memory in hand-written prose must survive verbatim"
@@ -438,7 +450,10 @@ fn dry_run_writes_nothing_on_a_clean_home() {
     // step anymore. A dry-run on a clean home should report ok (all steps
     // green, nothing to write) and leave nothing on disk.
     assert!(report.dry_run, "report should mark itself as a dry run");
-    assert!(report.ok, "dry-run on clean home should report ok: {report:?}");
+    assert!(
+        report.ok,
+        "dry-run on clean home should report ok: {report:?}"
+    );
 
     // Nothing should exist on disk: no .claude dir, no CLAUDE.md, no hooks.
     assert!(
@@ -496,7 +511,8 @@ fn install_removes_deprecated_mcp_servers_unconditionally() {
     );
 
     let after: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).expect("still valid JSON");
+        serde_json::from_str(&fs::read_to_string(&settings_path).unwrap())
+            .expect("still valid JSON");
     assert!(
         after["mcpServers"].get("usable-git").is_none(),
         "the deprecated usable-git MCP server must be removed — pixel replaces it via Bash + the guard hook"
@@ -548,7 +564,9 @@ fn install_scrubs_deprecated_mcp_servers_from_global_claude_json() {
         "unrelated MCP servers in ~/.claude.json must be preserved"
     );
     assert!(
-        after["unrelatedTopLevelKey"]["kept"].as_bool().unwrap_or(false),
+        after["unrelatedTopLevelKey"]["kept"]
+            .as_bool()
+            .unwrap_or(false),
         "unrelated top-level keys in ~/.claude.json must be preserved"
     );
 }
@@ -626,7 +644,11 @@ fn reinstall_backs_up_claude_md_only_when_content_actually_changes() {
     let backups_after_first: Vec<_> = fs::read_dir(home)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().contains("CLAUDE.md.pixel-bak"))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .contains("CLAUDE.md.pixel-bak")
+        })
         .collect();
     assert_eq!(
         backups_after_first.len(),
@@ -650,7 +672,11 @@ fn reinstall_backs_up_claude_md_only_when_content_actually_changes() {
     let backups_after_second: Vec<_> = fs::read_dir(home)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().contains("CLAUDE.md.pixel-bak"))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .contains("CLAUDE.md.pixel-bak")
+        })
         .collect();
     assert_eq!(
         backups_after_second.len(),
@@ -706,7 +732,11 @@ fn install_against_realistic_settings_json_is_safe() {
     fs::create_dir_all(&settings_dir).unwrap();
     let settings_path = settings_dir.join("settings.json");
     let before = realistic_settings_json();
-    fs::write(&settings_path, serde_json::to_string_pretty(&before).unwrap()).unwrap();
+    fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&before).unwrap(),
+    )
+    .unwrap();
 
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
@@ -718,11 +748,14 @@ fn install_against_realistic_settings_json_is_safe() {
 
     // (a) settings.json must still be valid JSON.
     let raw = fs::read_to_string(&settings_path).expect("settings.json readable");
-    let after: serde_json::Value =
-        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("settings.json corrupted: {e}\ncontent:\n{raw}"));
+    let after: serde_json::Value = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("settings.json corrupted: {e}\ncontent:\n{raw}"));
 
     // (b) unrelated top-level content and unrelated entries survive.
-    assert_eq!(after["model"], "claude-sonnet-5", "unrelated top-level key must survive");
+    assert_eq!(
+        after["model"], "claude-sonnet-5",
+        "unrelated top-level key must survive"
+    );
     assert_eq!(
         after["mcpServers"]["github"]["command"], "gh-mcp-server",
         "unrelated MCP server must survive"
@@ -731,9 +764,18 @@ fn install_against_realistic_settings_json_is_safe() {
         after["mcpServers"].get("usable-git").is_none(),
         "deprecated usable-git MCP server should be removed"
     );
-    let stop_hooks = after["hooks"]["Stop"].as_array().expect("Stop hooks array survives");
-    assert_eq!(stop_hooks.len(), 1, "unrelated Stop hook must survive untouched");
-    assert_eq!(stop_hooks[0]["hooks"][0]["command"], "~/.claude/hooks/verify-before-done");
+    let stop_hooks = after["hooks"]["Stop"]
+        .as_array()
+        .expect("Stop hooks array survives");
+    assert_eq!(
+        stop_hooks.len(),
+        1,
+        "unrelated Stop hook must survive untouched"
+    );
+    assert_eq!(
+        stop_hooks[0]["hooks"][0]["command"],
+        "~/.claude/hooks/verify-before-done"
+    );
 
     // The three pre-existing, unrelated SessionStart entries from another
     // tool must all survive — install must MERGE, not overwrite.
@@ -767,13 +809,22 @@ fn install_against_realistic_settings_json_is_safe() {
             .map(|c| c.contains("hook session-start"))
             .unwrap_or(false)
     });
-    assert!(has_pixel_session_start, "pixel's own SessionStart entry should be present");
+    assert!(
+        has_pixel_session_start,
+        "pixel's own SessionStart entry should be present"
+    );
 
     // The old blocking guard is removed during migration, but the unrelated
     // PreToolUse bridge remains untouched. Default install rewires lifecycle
     // behavior without blocking ordinary commands.
-    let pre_tool_use = after["hooks"]["PreToolUse"].as_array().expect("PreToolUse array survives");
-    assert_eq!(pre_tool_use.len(), 1, "PreToolUse should retain only the unrelated bridge entry");
+    let pre_tool_use = after["hooks"]["PreToolUse"]
+        .as_array()
+        .expect("PreToolUse array survives");
+    assert_eq!(
+        pre_tool_use.len(),
+        1,
+        "PreToolUse should retain only the unrelated bridge entry"
+    );
     assert!(
         !raw.contains(pixel_install::config::GUARD_HOOK),
         "default install must not leave Pixel's blocking guard wired"
@@ -782,7 +833,10 @@ fn install_against_realistic_settings_json_is_safe() {
         .iter()
         .find(|e| e["matcher"] == "*")
         .expect("unrelated bridge PreToolUse entry survives");
-    assert_eq!(bridge_entry["hooks"][0]["command"], "/bin/sh -c 'echo bridge'");
+    assert_eq!(
+        bridge_entry["hooks"][0]["command"],
+        "/bin/sh -c 'echo bridge'"
+    );
 
     // (d) a .bak was written before the destructive rewrite. `install()`
     // touches settings.json across separate steps (scrub deprecated entries,
@@ -795,9 +849,16 @@ fn install_against_realistic_settings_json_is_safe() {
     let mut backups: Vec<_> = fs::read_dir(&settings_dir)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().contains("settings.json.pixel-bak"))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .contains("settings.json.pixel-bak")
+        })
         .collect();
-    assert!(!backups.is_empty(), "settings.json must be backed up before rewrite");
+    assert!(
+        !backups.is_empty(),
+        "settings.json must be backed up before rewrite"
+    );
     backups.sort_by_key(|e| {
         e.file_name()
             .to_string_lossy()
@@ -820,7 +881,8 @@ fn install_against_realistic_settings_json_is_safe() {
     // no duplicate MCP server, no re-corruption.
     install(&options).expect("second install");
     let raw2 = fs::read_to_string(&settings_path).unwrap();
-    let after2: serde_json::Value = serde_json::from_str(&raw2).expect("still valid JSON after re-install");
+    let after2: serde_json::Value =
+        serde_json::from_str(&raw2).expect("still valid JSON after re-install");
     let session_start2 = after2["hooks"]["SessionStart"].as_array().unwrap();
     let pixel_count2 = session_start2
         .iter()
@@ -831,8 +893,15 @@ fn install_against_realistic_settings_json_is_safe() {
                 .unwrap_or(false)
         })
         .count();
-    assert_eq!(pixel_count2, 1, "re-install must not duplicate pixel's own SessionStart entry");
-    assert_eq!(session_start2.len(), 4, "3 foreign entries + 1 pixel entry, stable across re-install");
+    assert_eq!(
+        pixel_count2, 1,
+        "re-install must not duplicate pixel's own SessionStart entry"
+    );
+    assert_eq!(
+        session_start2.len(),
+        4,
+        "3 foreign entries + 1 pixel entry, stable across re-install"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -844,7 +913,9 @@ fn install_against_realistic_settings_json_is_safe() {
 #[test]
 fn session_capabilities_registry_is_live_and_excludes_internal_ops() {
     let caps = pixel_proto::op::SESSION_CAPABILITIES;
-    for expected in ["search", "targets", "publish", "push", "ship", "resolve", "impact"] {
+    for expected in [
+        "search", "targets", "publish", "push", "ship", "resolve", "impact",
+    ] {
         assert!(
             caps.contains(&expected),
             "expected capability {expected} missing from SESSION_CAPABILITIES"
@@ -895,7 +966,10 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
     let claude_path = home.join(".claude").join("CLAUDE.md");
     let claude = fs::read_to_string(&claude_path)
         .expect(".claude/CLAUDE.md should be created even when no agent-config file pre-existed");
-    assert!(!home.join("CLAUDE.md").exists(), "fresh install must not create root CLAUDE.md");
+    assert!(
+        !home.join("CLAUDE.md").exists(),
+        "fresh install must not create root CLAUDE.md"
+    );
     assert!(claude.contains(MANAGED_BEGIN));
     assert!(claude.contains(MANAGED_END));
 }
@@ -928,7 +1002,11 @@ fn doctor_prompt_submit_check_permissions_and_settings() {
     {
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o644)).unwrap();
         let report = doctor(&doc_opts).expect("doctor runs");
-        let check = report.checks.iter().find(|c| c.id == "install.prompt-submit-hook").unwrap();
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.id == "install.prompt-submit-hook")
+            .unwrap();
         assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
         assert!(check.reason.as_ref().unwrap().contains("is not executable"));
     }
@@ -941,14 +1019,32 @@ fn doctor_prompt_submit_check_permissions_and_settings() {
     let settings_path = home.join(".claude").join("settings.json");
     fs::write(&settings_path, "{}").unwrap();
     let report = doctor(&doc_opts).expect("doctor runs");
-    let check = report.checks.iter().find(|c| c.id == "install.prompt-submit-hook").unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.prompt-submit-hook")
+        .unwrap();
     assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
-    assert!(check.reason.as_ref().unwrap().contains("not wired in ~/.claude/settings.json"));
+    assert!(
+        check
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("not wired in ~/.claude/settings.json")
+    );
 
     // 3. Settings.json wires prompt-submit, without cached model
-    fs::write(&settings_path, r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"pixel hook prompt-submit"}]}]}}"#).unwrap();
+    fs::write(
+        &settings_path,
+        r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"pixel hook prompt-submit"}]}]}}"#,
+    )
+    .unwrap();
     let report = doctor(&doc_opts).expect("doctor runs");
-    let check = report.checks.iter().find(|c| c.id == "install.prompt-submit-hook").unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.prompt-submit-hook")
+        .unwrap();
     assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
     assert!(check.summary.contains("(model not cached)"));
     assert_eq!(check.detail.as_ref().unwrap()["model_cached"], false);
@@ -958,7 +1054,11 @@ fn doctor_prompt_submit_check_permissions_and_settings() {
     fs::create_dir_all(&models_dir).unwrap();
     fs::write(models_dir.join("potion.ok"), "ok").unwrap();
     let report = doctor(&doc_opts).expect("doctor runs");
-    let check = report.checks.iter().find(|c| c.id == "install.prompt-submit-hook").unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.prompt-submit-hook")
+        .unwrap();
     assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
     assert!(check.summary.contains("model cached"));
     assert_eq!(check.detail.as_ref().unwrap()["model_cached"], true);
@@ -987,9 +1087,19 @@ fn doctor_checks_devin_hooks_wiring() {
     fs::write(&config_path, serde_json::to_string(&partial_hooks).unwrap()).unwrap();
 
     let report = doctor(&doc_opts).expect("doctor runs");
-    let check = report.checks.iter().find(|c| c.id == "install.devin-hooks").unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.devin-hooks")
+        .unwrap();
     assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
-    assert!(check.reason.as_ref().unwrap().contains("Devin UserPromptSubmit hook not wired"));
+    assert!(
+        check
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("Devin UserPromptSubmit hook not wired")
+    );
 
     // Full hooks
     let full_hooks = serde_json::json!({
@@ -1001,7 +1111,11 @@ fn doctor_checks_devin_hooks_wiring() {
     fs::write(&config_path, serde_json::to_string(&full_hooks).unwrap()).unwrap();
 
     let report = doctor(&doc_opts).expect("doctor runs");
-    let check = report.checks.iter().find(|c| c.id == "install.devin-hooks").unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.devin-hooks")
+        .unwrap();
     assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
     assert!(check.summary.contains("SessionStart + UserPromptSubmit"));
 }
@@ -1030,9 +1144,19 @@ fn doctor_checks_codex_hooks_wiring() {
     fs::write(&config_path, serde_json::to_string(&partial).unwrap()).unwrap();
 
     let report = doctor(&doc_opts).expect("doctor runs");
-    let check = report.checks.iter().find(|c| c.id == "install.codex-hooks").unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.codex-hooks")
+        .unwrap();
     assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
-    assert!(check.reason.as_ref().unwrap().contains("Codex UserPromptSubmit hook not wired"));
+    assert!(
+        check
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("Codex UserPromptSubmit hook not wired")
+    );
 
     // With UserPromptSubmit
     let full = serde_json::json!({
@@ -1044,7 +1168,11 @@ fn doctor_checks_codex_hooks_wiring() {
     fs::write(&config_path, serde_json::to_string(&full).unwrap()).unwrap();
 
     let report = doctor(&doc_opts).expect("doctor runs");
-    let check = report.checks.iter().find(|c| c.id == "install.codex-hooks").unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.codex-hooks")
+        .unwrap();
     assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
     assert!(check.summary.contains("UserPromptSubmit"));
 }
@@ -1073,9 +1201,19 @@ fn doctor_checks_gemini_hooks_wiring() {
     fs::write(&config_path, serde_json::to_string(&partial).unwrap()).unwrap();
 
     let report = doctor(&doc_opts).expect("doctor runs");
-    let check = report.checks.iter().find(|c| c.id == "install.gemini-hooks").unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.gemini-hooks")
+        .unwrap();
     assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
-    assert!(check.reason.as_ref().unwrap().contains("Gemini BeforeAgent (task boundary) hook not wired"));
+    assert!(
+        check
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("Gemini BeforeAgent (task boundary) hook not wired")
+    );
 
     // With BeforeAgent
     let full = serde_json::json!({
@@ -1087,7 +1225,11 @@ fn doctor_checks_gemini_hooks_wiring() {
     fs::write(&config_path, serde_json::to_string(&full).unwrap()).unwrap();
 
     let report = doctor(&doc_opts).expect("doctor runs");
-    let check = report.checks.iter().find(|c| c.id == "install.gemini-hooks").unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.gemini-hooks")
+        .unwrap();
     assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
     assert!(check.summary.contains("BeforeAgent"));
 }
@@ -1104,7 +1246,11 @@ fn doctor_checks_zcode_hooks_wiring() {
     if let Some(parent) = agents_md.parent() {
         fs::create_dir_all(parent).unwrap();
     }
-    fs::write(agents_md, format!("{}\n# pixel rules\n", pixel_install::config::MANAGED_BEGIN)).unwrap();
+    fs::write(
+        agents_md,
+        format!("{}\n# pixel rules\n", pixel_install::config::MANAGED_BEGIN),
+    )
+    .unwrap();
 
     let doc_opts = DoctorOptions {
         home: Some(home.to_path_buf()),
@@ -1124,9 +1270,19 @@ fn doctor_checks_zcode_hooks_wiring() {
     fs::write(&config_path, serde_json::to_string(&partial).unwrap()).unwrap();
 
     let report = doctor(&doc_opts).expect("doctor runs");
-    let check = report.checks.iter().find(|c| c.id == "install.zcode-hooks").unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.zcode-hooks")
+        .unwrap();
     assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
-    assert!(check.reason.as_ref().unwrap().contains("zcode UserPromptSubmit hook not wired"));
+    assert!(
+        check
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("zcode UserPromptSubmit hook not wired")
+    );
 
     // With UserPromptSubmit
     let full = serde_json::json!({
@@ -1141,9 +1297,17 @@ fn doctor_checks_zcode_hooks_wiring() {
     fs::write(&config_path, serde_json::to_string(&full).unwrap()).unwrap();
 
     let report = doctor(&doc_opts).expect("doctor runs");
-    let check = report.checks.iter().find(|c| c.id == "install.zcode-hooks").unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.zcode-hooks")
+        .unwrap();
     assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
-    assert!(check.summary.contains("PreToolUse, UserPromptSubmit, hooks.enabled"));
+    assert!(
+        check
+            .summary
+            .contains("PreToolUse, UserPromptSubmit, hooks.enabled")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1168,7 +1332,10 @@ fn uninstall_removes_managed_block_and_preserves_user_content() {
     install(&install_opts).expect("install");
 
     let claude = fs::read_to_string(home.join("CLAUDE.md")).unwrap();
-    assert!(claude.contains(MANAGED_BEGIN), "install should add managed block");
+    assert!(
+        claude.contains(MANAGED_BEGIN),
+        "install should add managed block"
+    );
 
     // Uninstall
     let uninstall_opts = UninstallOptions {
@@ -1213,10 +1380,22 @@ fn uninstall_removes_claude_hooks_and_scripts() {
         !settings_content.contains("pixel-targets-guard"),
         "default install must not wire the blocking guard hook"
     );
-    let guard_script = home.join(".claude").join("hooks").join("pixel-targets-guard");
-    assert!(!guard_script.is_file(), "default install should not create the guard script");
-    let session_script = home.join(".claude").join("hooks").join("pixel-session-start");
-    assert!(session_script.is_file(), "session-start script should be installed");
+    let guard_script = home
+        .join(".claude")
+        .join("hooks")
+        .join("pixel-targets-guard");
+    assert!(
+        !guard_script.is_file(),
+        "default install should not create the guard script"
+    );
+    let session_script = home
+        .join(".claude")
+        .join("hooks")
+        .join("pixel-session-start");
+    assert!(
+        session_script.is_file(),
+        "session-start script should be installed"
+    );
 
     // Uninstall
     let uninstall_opts = UninstallOptions {
@@ -1243,7 +1422,10 @@ fn uninstall_removes_claude_hooks_and_scripts() {
 
     // Hook scripts should be deleted
     assert!(!guard_script.is_file(), "guard script should be deleted");
-    assert!(!session_script.is_file(), "session-start script should be deleted");
+    assert!(
+        !session_script.is_file(),
+        "session-start script should be deleted"
+    );
 }
 
 /// Uninstall removes the pixel binary.
@@ -1306,7 +1488,10 @@ fn uninstall_dry_run_does_not_modify() {
     install(&install_opts).expect("install");
 
     let bin = home.join("fake-pixel");
-    assert!(bin.is_file(), "binary should exist before dry-run uninstall");
+    assert!(
+        bin.is_file(),
+        "binary should exist before dry-run uninstall"
+    );
 
     // Dry-run uninstall
     let uninstall_opts = UninstallOptions {
@@ -1318,7 +1503,10 @@ fn uninstall_dry_run_does_not_modify() {
     assert!(report.dry_run, "report should be dry-run");
 
     // Nothing should have changed
-    assert!(bin.is_file(), "binary should still exist after dry-run uninstall");
+    assert!(
+        bin.is_file(),
+        "binary should still exist after dry-run uninstall"
+    );
     let claude = fs::read_to_string(home.join(".claude").join("CLAUDE.md")).unwrap_or_default();
     assert!(
         claude.contains(MANAGED_BEGIN),

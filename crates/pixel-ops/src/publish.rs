@@ -25,7 +25,7 @@
 
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use pixel_git::GitRunner;
 
@@ -153,7 +153,11 @@ fn run_body(
         pre_head: current_head.clone(),
         files: opts.files.clone(),
         owned_index_checksum: recovery::index_checksum(root),
-        mode: Some(if opts.amend { "amend".to_string() } else { "append".to_string() }),
+        mode: Some(if opts.amend {
+            "amend".to_string()
+        } else {
+            "append".to_string()
+        }),
         resolved_message: Some(opts.message.clone()),
         pre_index_hex: recovery::capture_index_snapshot(root),
     };
@@ -211,8 +215,12 @@ fn run_body(
     // Commit — scope to requested files with pathspec to avoid sweeping
     // unrelated staged files into the commit.
     let commit_mode = if opts.amend { "--amend" } else { "--no-edit" };
-    let mut commit_args: Vec<String> =
-        vec!["commit".into(), commit_mode.into(), "-m".into(), opts.message.clone()];
+    let mut commit_args: Vec<String> = vec![
+        "commit".into(),
+        commit_mode.into(),
+        "-m".into(),
+        opts.message.clone(),
+    ];
     if !opts.files.is_empty() {
         commit_args.push("--".into());
         commit_args.extend(opts.files.iter().cloned());
@@ -351,9 +359,7 @@ fn resume_publish(
                 Err("journal record lost".to_string())
             }
         }
-        JournalPhase::RefUpdateStarted => {
-            Err("unexpected phase for publish".to_string())
-        }
+        JournalPhase::RefUpdateStarted => Err("unexpected phase for publish".to_string()),
     }
 }
 
@@ -370,13 +376,15 @@ fn common_dir(root: &Path) -> String {
 
 fn publish_input_hash(opts: &PublishOptions) -> String {
     use crate::durable::sha256_hex;
-    let mut input = format!("{}\u{0}{}\u{0}{}\u{0}{}",
+    let mut input = format!(
+        "{}\u{0}{}\u{0}{}\u{0}{}",
         opts.message,
         opts.files.join(","),
         opts.expected_head.as_deref().unwrap_or(""),
         opts.push,
     );
-    let mut fps: Vec<String> = opts.expected_fingerprints
+    let mut fps: Vec<String> = opts
+        .expected_fingerprints
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
         .collect();
@@ -506,7 +514,10 @@ mod tests {
         };
 
         let err = publish(dir.path(), &opts, None).unwrap_err();
-        assert!(err.contains("STALE_STATE"), "expected STALE_STATE, got: {err}");
+        assert!(
+            err.contains("STALE_STATE"),
+            "expected STALE_STATE, got: {err}"
+        );
     }
 
     #[test]

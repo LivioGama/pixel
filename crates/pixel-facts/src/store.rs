@@ -329,11 +329,7 @@ impl FactsStore {
                 |r| r.get(0),
             )
             .unwrap_or(0);
-        if pending_diff > 0 {
-            "phase_c"
-        } else {
-            "fresh"
-        }
+        if pending_diff > 0 { "phase_c" } else { "fresh" }
     }
 
     fn phase_a_done(&self) -> bool {

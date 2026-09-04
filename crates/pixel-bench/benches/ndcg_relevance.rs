@@ -32,7 +32,7 @@
 //! semble's cross-repo number, only as pixel's own measured quality and as a
 //! regression gate for the ranking layer and the `ask` semantic channel.
 
-use std::collections::{HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -71,18 +71,12 @@ fn qrels(crate_dir: &std::path::Path) -> Vec<(&'static str, Vec<String>)> {
             "imports dependency resolved graph edge",
             vec![tag("imports.rs")],
         ),
-        (
-            "process execution flow detection",
-            vec![tag("process.rs")],
-        ),
+        ("process execution flow detection", vec![tag("process.rs")]),
         (
             "resolution ranked candidate ambiguity disambiguation",
             vec![tag("resolve.rs")],
         ),
-        (
-            "symbol store database query index",
-            vec![tag("store.rs")],
-        ),
+        ("symbol store database query index", vec![tag("store.rs")]),
         (
             "changes blast radius working tree diff",
             vec![tag("changes.rs")],
@@ -124,11 +118,7 @@ fn ndcg_at_k(ranking: &[String], relevant: &HashSet<String>, k: usize) -> f64 {
     for j in 0..k.min(rel_count) {
         idcg += 1.0 / ((j + 2) as f64).log2();
     }
-    if idcg == 0.0 {
-        0.0
-    } else {
-        dcg / idcg
-    }
+    if idcg == 0.0 { 0.0 } else { dcg / idcg }
 }
 
 fn run_ndcg(
@@ -150,15 +140,14 @@ fn run_ndcg(
         } else {
             words.join("|")
         };
-        let resp = svc
-            .handle(Request::from(Op::Search {
-                pattern,
-                json: true,
-                limit: Some(50),
-                offset: None,
-                paths: Some(vec!["crates/pixel-graph/src".to_string()]),
-                scope: scope.map(str::to_string),
-            }));
+        let resp = svc.handle(Request::from(Op::Search {
+            pattern,
+            json: true,
+            limit: Some(50),
+            offset: None,
+            paths: Some(vec!["crates/pixel-graph/src".to_string()]),
+            scope: scope.map(str::to_string),
+        }));
         if resp.ok {
             let order = file_order_from_response(&resp);
             sum += ndcg_at_k(&order, &rel_set, k);
@@ -172,11 +161,7 @@ fn run_ndcg(
 /// relativize them against the workspace root so they compare against the
 /// qrels' `crates/pixel-graph/src/<name>` form. Same query strings as the
 /// lexical lane → identical inputs, isolated channel effect.
-fn run_ndcg_ask(
-    root: &std::path::Path,
-    qrels: &[(&'static str, Vec<String>)],
-    k: usize,
-) -> f64 {
+fn run_ndcg_ask(root: &std::path::Path, qrels: &[(&'static str, Vec<String>)], k: usize) -> f64 {
     let subtree = root.join("crates/pixel-graph/src");
     let mut sum = 0.0;
     for (q, relevant) in qrels {
@@ -261,26 +246,20 @@ fn bench(c: &mut Criterion) {
     use criterion::BenchmarkId;
     let mut ranked_grp = c.benchmark_group("ndcg10");
     ranked_grp.sample_size(10);
-    ranked_grp.bench_with_input(
-        BenchmarkId::new("ranked_search", 10),
-        &ranked,
-        |b, _| b.iter(|| run_ndcg(&mut svc, &suite, Some("code"), 10)),
-    );
+    ranked_grp.bench_with_input(BenchmarkId::new("ranked_search", 10), &ranked, |b, _| {
+        b.iter(|| run_ndcg(&mut svc, &suite, Some("code"), 10))
+    });
     ranked_grp.bench_with_input(
         BenchmarkId::new("unranked_search", 10),
         &unranked,
         |b, _| b.iter(|| run_ndcg(&mut svc, &suite, None, 10)),
     );
-    ranked_grp.bench_with_input(
-        BenchmarkId::new("hybrid_search", 10),
-        &hybrid,
-        |b, _| b.iter(|| run_ndcg(&mut svc, &suite, Some("hybrid"), 10)),
-    );
-    ranked_grp.bench_with_input(
-        BenchmarkId::new("semantic_ask", 10),
-        &semantic,
-        |b, _| b.iter(|| run_ndcg_ask(&root, &suite, 10)),
-    );
+    ranked_grp.bench_with_input(BenchmarkId::new("hybrid_search", 10), &hybrid, |b, _| {
+        b.iter(|| run_ndcg(&mut svc, &suite, Some("hybrid"), 10))
+    });
+    ranked_grp.bench_with_input(BenchmarkId::new("semantic_ask", 10), &semantic, |b, _| {
+        b.iter(|| run_ndcg_ask(&root, &suite, 10))
+    });
     ranked_grp.finish();
 }
 

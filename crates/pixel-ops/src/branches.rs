@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use pixel_git::GitRunner;
 
@@ -92,11 +92,7 @@ pub fn branches(root: &Path, opts: &BranchesOptions) -> Result<Value, String> {
                   %(upstream:track)%00%(committerdate:unix)%00\
                   %(committerdate:iso-strict)%00%(authorname)%00%(subject)";
     let raw = runner
-        .run(&[
-            "for-each-ref",
-            &format!("--format={format}"),
-            "refs/heads",
-        ])
+        .run(&["for-each-ref", &format!("--format={format}"), "refs/heads"])
         .map_err(|e| format!("git for-each-ref: {e}"))?;
     let refs = parse_for_each_ref(&String::from_utf8_lossy(&raw));
 
@@ -160,10 +156,7 @@ pub fn branches(root: &Path, opts: &BranchesOptions) -> Result<Value, String> {
             None => Value::Null,
         };
 
-        let stale = r
-            .committer_unix
-            .map(|t| t < stale_cutoff)
-            .unwrap_or(false);
+        let stale = r.committer_unix.map(|t| t < stale_cutoff).unwrap_or(false);
 
         // Summary bookkeeping.
         let has_live_upstream = r.upstream.is_some() && !r.upstream_gone;
@@ -232,9 +225,11 @@ pub fn branches(root: &Path, opts: &BranchesOptions) -> Result<Value, String> {
 /// `<remote>/HEAD` symref first (e.g. "origin/main" → "main"), then
 /// fall back to whichever of main/master exists as a local branch.
 fn detect_default_branch(runner: &GitRunner, remote: &str) -> Option<String> {
-    if let Some(out) =
-        runner.run_opt(&["symbolic-ref", "--short", &format!("refs/remotes/{remote}/HEAD")])
-    {
+    if let Some(out) = runner.run_opt(&[
+        "symbolic-ref",
+        "--short",
+        &format!("refs/remotes/{remote}/HEAD"),
+    ]) {
         let short = String::from_utf8_lossy(&out).trim().to_string();
         if let Some(stripped) = short.strip_prefix(&format!("{remote}/"))
             && !stripped.is_empty()

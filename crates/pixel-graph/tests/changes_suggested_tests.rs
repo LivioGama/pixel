@@ -110,8 +110,18 @@ fn fixture(name: &str) -> (PathBuf, GraphStore) {
         "tests/alpha.test.ts",
         "testAlpha",
     );
-    let test_mid = sym(&store, ids["tests/mid.test.ts"], "tests/mid.test.ts", "testMid");
-    let _own = sym(&store, ids["tests/own.test.ts"], "tests/own.test.ts", "ownTest");
+    let test_mid = sym(
+        &store,
+        ids["tests/mid.test.ts"],
+        "tests/mid.test.ts",
+        "testMid",
+    );
+    let _own = sym(
+        &store,
+        ids["tests/own.test.ts"],
+        "tests/own.test.ts",
+        "ownTest",
+    );
     call(&store, mid, alpha); // mid -> alpha
     call(&store, test_alpha, alpha); // testAlpha -> alpha (depth 1)
     call(&store, test_mid, mid); // testMid -> mid -> alpha (depth 2)

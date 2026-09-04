@@ -145,9 +145,8 @@ fn overlaps(ranges: &[(u32, u32)], start: u32, end: u32) -> bool {
 /// contract without depending on pixel-git's internal error type.
 #[cfg(test)]
 fn validate_base_ref(r: &str) -> Result<&str, BoxError> {
-    pixel_git::validate_ref(r).map_err(|e| -> BoxError {
-        format!("invalid base ref {r:?}: {e}").into()
-    })?;
+    pixel_git::validate_ref(r)
+        .map_err(|e| -> BoxError { format!("invalid base ref {r:?}: {e}").into() })?;
     Ok(r)
 }
 
@@ -304,10 +303,11 @@ fn suggest_tests(
 ) -> Result<(Vec<SuggestedTest>, bool, String), BoxError> {
     // file -> (min depth, matched changed-symbol names)
     let mut by_file: BTreeMap<String, (u8, BTreeSet<String>)> = BTreeMap::new();
-    let record = |file: String, depth: u8, symbol: &str, map: &mut BTreeMap<String, (u8, BTreeSet<String>)>| {
-        let entry = map
-            .entry(file)
-            .or_insert_with(|| (depth, BTreeSet::new()));
+    let record = |file: String,
+                  depth: u8,
+                  symbol: &str,
+                  map: &mut BTreeMap<String, (u8, BTreeSet<String>)>| {
+        let entry = map.entry(file).or_insert_with(|| (depth, BTreeSet::new()));
         entry.0 = entry.0.min(depth);
         entry.1.insert(symbol.to_string());
     };

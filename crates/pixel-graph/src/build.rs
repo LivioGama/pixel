@@ -462,8 +462,8 @@ pub fn update_files(root: &Path, db_path: &Path, files: &[(&str, bool)]) -> Resu
         insert_concepts(&store, file_id, rel, &content, &ids, &lines)?;
 
         for imp in &fx.imports {
-            let resolved =
-                resolve_import(&imp.spec, rel, &all_paths).and_then(|p| path_to_id.get(&p).copied());
+            let resolved = resolve_import(&imp.spec, rel, &all_paths)
+                .and_then(|p| path_to_id.get(&p).copied());
             store.insert_import(file_id, &imp.spec, resolved, &imp.bindings)?;
         }
 

@@ -180,9 +180,8 @@ impl SourceAdapter for Adapter {
             );
         }
 
-        let has_conversation = !turns.is_empty()
-            || session.cwd.is_some()
-            || matches!(change, Change::Appended { .. });
+        let has_conversation =
+            !turns.is_empty() || session.cwd.is_some() || matches!(change, Change::Appended { .. });
         let op = match change {
             Change::Appended { .. } => SessionOp::Append,
             _ => SessionOp::Replace,

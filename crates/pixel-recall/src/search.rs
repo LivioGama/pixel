@@ -160,9 +160,13 @@ pub fn search(
             }
         }
     } else {
-        scan_ordered(store, filters, candidates.as_ref(), tail_floor, &mut |row| {
-            visit(row)
-        })
+        scan_ordered(
+            store,
+            filters,
+            candidates.as_ref(),
+            tail_floor,
+            &mut |row| visit(row),
+        )
         .map(|stopped_early| result.truncated = stopped_early)?;
     }
     Ok(result)
@@ -245,7 +249,8 @@ fn tail_turn_ids(store: &RecallStore, floor: i64) -> Result<Vec<i64>, String> {
     let rows = stmt
         .query_map([floor], |r| r.get(0))
         .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<i64>, _>>().map_err(|e| e.to_string())
+    rows.collect::<Result<Vec<i64>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 fn fetch_rows_by_ids(
@@ -256,8 +261,10 @@ fn fetch_rows_by_ids(
     let mut rows = Vec::new();
     for chunk in ids.chunks(500) {
         let placeholders = vec!["?"; chunk.len()].join(",");
-        let mut args: Vec<Box<dyn rusqlite::types::ToSql>> =
-            chunk.iter().map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>).collect();
+        let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = chunk
+            .iter()
+            .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
+            .collect();
         let mut sql = format!("{ROW_SELECT} WHERE t.id IN ({placeholders})");
         sql.push_str(&filter_sql(filters, &mut args));
         let mut stmt = store
@@ -327,10 +334,9 @@ pub fn candidate_count(segments: &SegmentSet, pattern: &str) -> Option<usize> {
 
 /// Compact one-line rendering of a hit, shared by CLI and daemon.
 pub fn format_hit(h: &SearchHit) -> String {
-    let ts = h
-        .ts
-        .map(crate::model::format_ms)
-        .unwrap_or_else(|| "?".to_string());
+    let ts =
+        h.ts.map(crate::model::format_ms)
+            .unwrap_or_else(|| "?".to_string());
     let cwd = h.cwd.as_deref().unwrap_or("-");
     format!(
         "{}:{} #{} t{} {} {} {} \"{}\"",

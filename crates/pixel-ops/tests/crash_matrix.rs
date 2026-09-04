@@ -40,8 +40,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::json;
 use tempfile::TempDir;
 
-use pixel_ops::publish::{publish_with_state, PublishOptions, PublishProbe};
-use pixel_ops::push::{push_with_state, PushOptions, PushProbe};
+use pixel_ops::publish::{PublishOptions, PublishProbe, publish_with_state};
+use pixel_ops::push::{PushOptions, PushProbe, push_with_state};
 
 // ---------------------------------------------------------------------------
 // Serialization + env-var guard
@@ -299,7 +299,10 @@ fn assert_no_leftover_recovery(state_root: &Path) {
 
 /// Return the sorted list of file paths changed in the HEAD commit.
 fn commit_files_in_head(root: &Path) -> Vec<String> {
-    let out = git(root, &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]);
+    let out = git(
+        root,
+        &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+    );
     let mut files: Vec<String> = out
         .lines()
         .map(|s| s.trim().to_string())
@@ -341,9 +344,9 @@ fn verify_non_target_refs_untouched(
         if name == target_ref {
             continue;
         }
-        let actual = after
-            .get(name)
-            .unwrap_or_else(|| panic!("phase {phase}: non-target ref {name} disappeared from remote"));
+        let actual = after.get(name).unwrap_or_else(|| {
+            panic!("phase {phase}: non-target ref {name} disappeared from remote")
+        });
         assert_eq!(
             actual, oid,
             "phase {phase}: non-target ref {name} changed ({oid} -> {actual})",
@@ -415,7 +418,9 @@ fn publish_crash_at_phase(phase: &str) {
     if ambiguous {
         let retry_err = publish_with_state(root, &opts, None, &state_root)
             .err()
-            .unwrap_or_else(|| panic!("phase {phase}: expected retry to fail with GIT_FAILED, got Ok"));
+            .unwrap_or_else(|| {
+                panic!("phase {phase}: expected retry to fail with GIT_FAILED, got Ok")
+            });
         assert!(
             retry_err.contains("GIT_FAILED"),
             "phase {phase}: expected GIT_FAILED, got: {retry_err}",
@@ -495,7 +500,12 @@ fn publish_crash_journal_terminal() {
 /// untracked local file that must survive the push attempt untouched.
 fn init_push_fixture(root: &Path, remote: &Path) {
     Command::new("git")
-        .args(["init", "-q", "--initial-branch=main", root.to_str().unwrap()])
+        .args([
+            "init",
+            "-q",
+            "--initial-branch=main",
+            root.to_str().unwrap(),
+        ])
         .status()
         .unwrap();
     git(root, &["config", "user.email", "crash-matrix@pixel"]);

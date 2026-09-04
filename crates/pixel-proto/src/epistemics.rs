@@ -50,7 +50,10 @@ impl Epistemics {
             closed_world,
             lower_bound: !closed_world,
             basis: basis.into(),
-            staleness_ms: sources.iter().filter_map(|source| source.freshness_ms).max(),
+            staleness_ms: sources
+                .iter()
+                .filter_map(|source| source.freshness_ms)
+                .max(),
             confidence: None,
         }
     }

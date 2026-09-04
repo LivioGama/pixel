@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use pixel_git::GitRunner;
 
-use crate::durable::{ensure_dir, sha256_hex, write_durably, state_root};
+use crate::durable::{ensure_dir, sha256_hex, state_root, write_durably};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,7 +50,9 @@ pub struct PublishRecoveryStore {
 
 impl PublishRecoveryStore {
     pub fn new() -> Self {
-        Self { state_root: state_root() }
+        Self {
+            state_root: state_root(),
+        }
     }
 
     pub fn with_state_root(state_root: PathBuf) -> Self {
@@ -58,11 +60,14 @@ impl PublishRecoveryStore {
     }
 
     fn recovery_dir(&self, repo_key: &str) -> PathBuf {
-        self.state_root.join("publish-recovery").join(sha256_hex(repo_key))
+        self.state_root
+            .join("publish-recovery")
+            .join(sha256_hex(repo_key))
     }
 
     fn recovery_path(&self, repo_key: &str, request_id: &str) -> PathBuf {
-        self.recovery_dir(repo_key).join(format!("{}.json", sha256_hex(request_id)))
+        self.recovery_dir(repo_key)
+            .join(format!("{}.json", sha256_hex(request_id)))
     }
 
     pub fn write(&self, state: &PublishRecoveryState) -> Result<(), String> {
@@ -124,7 +129,9 @@ fn index_path(repo_root: &Path) -> PathBuf {
 /// Capture a byte-exact, restorable snapshot of `.git/index` as it exists
 /// right now. Returns `None` if the index file does not exist yet.
 pub fn capture_index_snapshot(repo_root: &Path) -> Option<String> {
-    std::fs::read(index_path(repo_root)).ok().map(|bytes| hex::encode(bytes))
+    std::fs::read(index_path(repo_root))
+        .ok()
+        .map(|bytes| hex::encode(bytes))
 }
 
 /// Restore `.git/index` to exactly the bytes captured by
@@ -136,8 +143,9 @@ pub fn restore_snapshot(repo_root: &Path, state: &PublishRecoveryState) -> Resul
     let path = index_path(repo_root);
     match &state.pre_index_hex {
         Some(hex_bytes) => {
-            let bytes = hex::decode(hex_bytes)
-                .map_err(|e| format!("GIT_FAILED: corrupt recovery snapshot (bad index hex): {e}"))?;
+            let bytes = hex::decode(hex_bytes).map_err(|e| {
+                format!("GIT_FAILED: corrupt recovery snapshot (bad index hex): {e}")
+            })?;
             write_durably(&path, &bytes)
                 .map_err(|e| format!("GIT_FAILED: failed to restore .git/index: {e}"))?;
         }
@@ -208,15 +216,33 @@ mod tests {
     }
 
     fn init_repo(root: &Path) {
-        std::process::Command::new("git").arg("init").arg("-q").arg(root).status().unwrap();
         std::process::Command::new("git")
-            .arg("-C").arg(root).args(["config", "user.email", "t@t"]).status().unwrap();
+            .arg("init")
+            .arg("-q")
+            .arg(root)
+            .status()
+            .unwrap();
         std::process::Command::new("git")
-            .arg("-C").arg(root).args(["config", "user.name", "t"]).status().unwrap();
+            .arg("-C")
+            .arg(root)
+            .args(["config", "user.email", "t@t"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["config", "user.name", "t"])
+            .status()
+            .unwrap();
     }
 
     fn git(root: &Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git").arg("-C").arg(root).args(args).output().unwrap();
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
@@ -253,9 +279,16 @@ mod tests {
         };
         restore_snapshot(root, &state).unwrap();
 
-        assert_eq!(git(root, &["rev-parse", "HEAD"]), pre_head, "HEAD must be restored");
+        assert_eq!(
+            git(root, &["rev-parse", "HEAD"]),
+            pre_head,
+            "HEAD must be restored"
+        );
         let restored_index = std::fs::read(root.join(".git").join("index")).unwrap();
         let expected_index = hex::decode(state.pre_index_hex.unwrap()).unwrap();
-        assert_eq!(restored_index, expected_index, "index bytes must be byte-identical");
+        assert_eq!(
+            restored_index, expected_index,
+            "index bytes must be byte-identical"
+        );
     }
 }

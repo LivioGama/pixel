@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use pixel_git::GitRunner;
 
@@ -22,13 +22,22 @@ pub struct UpdateOptions {
 
 pub fn update(root: &Path, opts: &UpdateOptions) -> Result<Value, String> {
     let runner = GitRunner::new(root);
-    let repo_key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf()).display().to_string();
+    let repo_key = root
+        .canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .display()
+        .to_string();
     let input_hash = sha256_hex(&format!("{}\u{0}{}", opts.expected_head, opts.target_oid));
 
     let state_root = state_root();
     let journal = OperationJournal::with_state_root(state_root.clone());
 
-    let outcome = journal.begin(&opts.request_id, JournalOperation::Update, &repo_key, &input_hash)?;
+    let outcome = journal.begin(
+        &opts.request_id,
+        JournalOperation::Update,
+        &repo_key,
+        &input_hash,
+    )?;
     if let BeginOutcome::Replay(result) = outcome {
         return Ok(result);
     }
@@ -36,7 +45,8 @@ pub fn update(root: &Path, opts: &UpdateOptions) -> Result<Value, String> {
     let mut lock = RepositoryLock::acquire_with_state_root(
         &root.join(".git").display().to_string(),
         &state_root,
-    ).map_err(|_| "repository is busy".to_string())?;
+    )
+    .map_err(|_| "repository is busy".to_string())?;
 
     // Validate refs.
     pixel_git::validate_ref(&opts.target_oid).map_err(|e| e.to_string())?;
@@ -45,15 +55,16 @@ pub fn update(root: &Path, opts: &UpdateOptions) -> Result<Value, String> {
     let current_head = runner.rev_parse_head().ok_or("no HEAD")?;
     if current_head != opts.expected_head {
         let _ = lock.release();
-        return Err(format!("STALE_STATE: expected {}, got {}", opts.expected_head, current_head));
+        return Err(format!(
+            "STALE_STATE: expected {}, got {}",
+            opts.expected_head, current_head
+        ));
     }
 
     // Check if target is a descendant of HEAD (fast-forward possible).
-    let merge_base = runner.run_opt(&[
-        "merge-base",
-        &opts.expected_head,
-        &opts.target_oid,
-    ]).unwrap_or_default();
+    let merge_base = runner
+        .run_opt(&["merge-base", &opts.expected_head, &opts.target_oid])
+        .unwrap_or_default();
     let merge_base = String::from_utf8_lossy(&merge_base).trim().to_string();
 
     if merge_base == opts.expected_head {
@@ -84,10 +95,8 @@ pub fn update(root: &Path, opts: &UpdateOptions) -> Result<Value, String> {
                          refusing to proceed while dirty files are present: {e}"
                     )
                 })?;
-            let changed_paths: std::collections::HashSet<String> = changes
-                .iter()
-                .map(|(_, p)| p.clone())
-                .collect();
+            let changed_paths: std::collections::HashSet<String> =
+                changes.iter().map(|(_, p)| p.clone()).collect();
             let dirty_intersect: Vec<String> = dirty
                 .iter()
                 .filter(|(_, p)| changed_paths.contains(p))
@@ -103,10 +112,12 @@ pub fn update(root: &Path, opts: &UpdateOptions) -> Result<Value, String> {
         }
 
         // Perform the fast-forward.
-        runner.run(&["merge", "--ff-only", &opts.target_oid]).map_err(|e| {
-            let _ = lock.release();
-            format!("git merge --ff-only: {e}")
-        })?;
+        runner
+            .run(&["merge", "--ff-only", &opts.target_oid])
+            .map_err(|e| {
+                let _ = lock.release();
+                format!("git merge --ff-only: {e}")
+            })?;
 
         let result = json!({
             "updated": true,
@@ -133,12 +144,37 @@ mod tests {
     use tempfile::tempdir;
 
     fn init_repo(root: &Path) {
-        std::process::Command::new("git").arg("init").arg("-q").arg(root).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["config", "user.email", "t@t"]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["config", "user.name", "t"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(root)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["config", "user.email", "t@t"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["config", "user.name", "t"])
+            .status()
+            .unwrap();
         std::fs::write(root.join("a.txt"), b"a").unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["add", "."]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(root).args(["commit", "-qm", "init"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["commit", "-qm", "init"])
+            .status()
+            .unwrap();
     }
 
     #[test]
@@ -148,11 +184,26 @@ mod tests {
         let head = GitRunner::new(dir.path()).rev_parse_head().unwrap();
         // Make a new commit.
         std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["add", "."]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["commit", "-qm", "new"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["commit", "-qm", "new"])
+            .status()
+            .unwrap();
         let target = GitRunner::new(dir.path()).rev_parse_head().unwrap();
         // Reset back to old head.
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["reset", "--hard", &head]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["reset", "--hard", &head])
+            .status()
+            .unwrap();
 
         let opts = UpdateOptions {
             expected_head: head,
@@ -170,14 +221,39 @@ mod tests {
         let head = GitRunner::new(dir.path()).rev_parse_head().unwrap();
         // Diverge: make a commit on the current branch.
         std::fs::write(dir.path().join("c.txt"), b"c").unwrap();
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["add", "."]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["commit", "-qm", "c"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["commit", "-qm", "c"])
+            .status()
+            .unwrap();
         let diverged = GitRunner::new(dir.path()).rev_parse_head().unwrap();
         // Reset to head and make a different commit.
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["reset", "--hard", &head]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["reset", "--hard", &head])
+            .status()
+            .unwrap();
         std::fs::write(dir.path().join("d.txt"), b"d").unwrap();
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["add", "."]).status().unwrap();
-        std::process::Command::new("git").arg("-C").arg(dir.path()).args(["commit", "-qm", "d"]).status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["commit", "-qm", "d"])
+            .status()
+            .unwrap();
 
         let opts = UpdateOptions {
             expected_head: GitRunner::new(dir.path()).rev_parse_head().unwrap(),

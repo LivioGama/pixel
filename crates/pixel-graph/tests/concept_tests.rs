@@ -2,12 +2,8 @@
 
 use std::fs;
 
-use pixel_graph::concept::{
-    ConceptKind, extract_concepts,
-};
-use pixel_graph::concept_resolve::{
-    Confidence, ResolveOptions, Tier, resolve,
-};
+use pixel_graph::concept::{ConceptKind, extract_concepts};
+use pixel_graph::concept_resolve::{Confidence, ResolveOptions, Tier, resolve};
 use pixel_graph::store::{GraphStore, SymbolKind};
 use tempfile::TempDir;
 
@@ -118,9 +114,7 @@ fn extract_concepts_finds_route_concept() {
         "should extract a route concept from fetch('/api/contact')"
     );
     // The route raw should mention /api/contact.
-    let found = routes
-        .iter()
-        .any(|r| r.raw.contains("/api/contact"));
+    let found = routes.iter().any(|r| r.raw.contains("/api/contact"));
     assert!(found, "route concept should contain /api/contact");
 }
 
@@ -143,14 +137,20 @@ fn extract_concepts_finds_attr_text() {
 #[test]
 fn extract_concepts_skips_unsupported_extensions() {
     let concepts = extract_concepts("readme.md", b"# Hello\nWorld");
-    assert!(concepts.is_empty(), "unsupported extensions produce no concepts");
+    assert!(
+        concepts.is_empty(),
+        "unsupported extensions produce no concepts"
+    );
 }
 
 #[test]
 fn extract_concepts_skips_oversized_files() {
     let huge = vec![b'a'; 2 * 1024 * 1024]; // > 1MB
     let concepts = extract_concepts("src/big.tsx", &huge);
-    assert!(concepts.is_empty(), "files > 1MB should produce no concepts");
+    assert!(
+        concepts.is_empty(),
+        "files > 1MB should produce no concepts"
+    );
 }
 
 #[test]
@@ -225,21 +225,13 @@ fn resolve_exact_match_t0() {
 
     // "submit the form" is a JSX text node — its normalized form should be
     // an exact T0 match.
-    let outcome = resolve(
-        &store,
-        "submit the form",
-        &ResolveOptions::default(),
-    )
-    .expect("resolve");
+    let outcome = resolve(&store, "submit the form", &ResolveOptions::default()).expect("resolve");
 
     assert!(
         outcome.confidence != Confidence::Unresolved,
         "should resolve 'submit the form'"
     );
-    assert!(
-        outcome.tier.is_some(),
-        "should have a tier"
-    );
+    assert!(outcome.tier.is_some(), "should have a tier");
     assert!(
         !outcome.matches.is_empty(),
         "should have at least one match"
@@ -261,10 +253,7 @@ fn resolve_the_form_finds_form_concept() {
     // T1 kind-directed should fire (head noun "form" → ConceptKind::Form).
     if outcome.tier == Some(Tier::T1) {
         // At least one match should be a form concept.
-        let has_form = outcome
-            .matches
-            .iter()
-            .any(|m| m.kind == ConceptKind::Form);
+        let has_form = outcome.matches.iter().any(|m| m.kind == ConceptKind::Form);
         assert!(has_form, "T1 'the form' should match a form concept");
     }
     // Even if it fell to T0 or T2, we should have matches.
@@ -322,7 +311,10 @@ fn resolve_carries_index_state() {
 
     let outcome = resolve(&store, "form", &ResolveOptions::default()).expect("resolve");
 
-    assert!(outcome.index_state.concepts > 0, "should report concept count");
+    assert!(
+        outcome.index_state.concepts > 0,
+        "should report concept count"
+    );
     assert!(
         outcome.index_state.concepts_version.is_some(),
         "should report concepts_version"
@@ -410,12 +402,7 @@ fn resolve_identifier_prefers_symbol_over_string_concept() {
     // The bug: T2 word-intersection matches the string concepts in guard.rs
     // (which literally contain "guard" and "matcher" as words), so the symbol
     // fallback never runs, and the const definition in config.rs is missed.
-    let outcome = resolve(
-        &store,
-        "GUARD_MATCHER",
-        &ResolveOptions::default(),
-    )
-    .expect("resolve");
+    let outcome = resolve(&store, "GUARD_MATCHER", &ResolveOptions::default()).expect("resolve");
 
     assert!(
         outcome.confidence != Confidence::Unresolved,
@@ -447,12 +434,7 @@ fn resolve_natural_language_phrase_still_uses_concepts() {
     // fix being too aggressive.
     let (_dir, store, _file_id) = make_store_with_concepts();
 
-    let outcome = resolve(
-        &store,
-        "submit the form",
-        &ResolveOptions::default(),
-    )
-    .expect("resolve");
+    let outcome = resolve(&store, "submit the form", &ResolveOptions::default()).expect("resolve");
 
     assert!(
         outcome.confidence != Confidence::Unresolved,

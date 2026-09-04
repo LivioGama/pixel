@@ -10,10 +10,14 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::durable::{ensure_dir, sha256_hex, write_durably, state_root};
+use crate::durable::{ensure_dir, sha256_hex, state_root, write_durably};
 
 /// 12-char hex snapshot token (first 12 of sha256).
-pub fn snapshot_token(root: &str, head: Option<&str>, fingerprints: &BTreeMap<String, String>) -> String {
+pub fn snapshot_token(
+    root: &str,
+    head: Option<&str>,
+    fingerprints: &BTreeMap<String, String>,
+) -> String {
     // Sort fingerprints by path for determinism (BTreeMap is already sorted).
     let mut sorted: Vec<(String, String)> = fingerprints
         .iter()
@@ -54,7 +58,9 @@ const RETENTION_MAX_COUNT: usize = 200;
 
 impl SnapshotStore {
     pub fn new() -> Self {
-        Self { state_root: state_root() }
+        Self {
+            state_root: state_root(),
+        }
     }
 
     pub fn with_state_root(state_root: PathBuf) -> Self {
@@ -215,7 +221,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = SnapshotStore::with_state_root(dir.path().to_path_buf());
         let root = "/test/repo";
-        let record = make_record(root, "abc123def456", &[("a.txt", "hash1"), ("b.txt", "hash2")]);
+        let record = make_record(
+            root,
+            "abc123def456",
+            &[("a.txt", "hash1"), ("b.txt", "hash2")],
+        );
         let token = store.record(&record).unwrap();
         let read = store.read(root, &token).unwrap();
         assert_eq!(read.root, root);

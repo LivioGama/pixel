@@ -12,8 +12,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use serde_json::{Value, json};
 use pixel_git::{GitError, GitRunner};
+use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
 // git plumbing — now delegated to pixel_git::GitRunner (single wrapper,
@@ -45,12 +45,14 @@ fn blob_oid(root: &Path, commit: &str, path: &str) -> Option<String> {
 /// with no strategy flag given, whenever a large untracked tree pushed
 /// `status --porcelain` past the output cap.
 fn dirty_map(root: &Path) -> Result<BTreeMap<String, String>, String> {
-    let entries = GitRunner::new(root).status_porcelain_or_err().map_err(|e| {
-        format!(
-            "could not determine working-tree status, refusing to proceed \
+    let entries = GitRunner::new(root)
+        .status_porcelain_or_err()
+        .map_err(|e| {
+            format!(
+                "could not determine working-tree status, refusing to proceed \
              (would otherwise risk treating dirty files as clean): {e}"
-        )
-    })?;
+            )
+        })?;
     let mut map = BTreeMap::new();
     for (xy, path) in entries {
         map.insert(path, xy.trim().to_string());
@@ -153,11 +155,9 @@ pub fn plan(
             let short = versions[i].oid[..7.min(versions[i].oid.len())].to_string();
             match (&contents[i], &before) {
                 (Some(after), Some(before_text)) => {
-                    if let Some(kw) = pixel_facts::excavate::phrase_removed_between(
-                        before_text,
-                        after,
-                        keywords,
-                    ) {
+                    if let Some(kw) =
+                        pixel_facts::excavate::phrase_removed_between(before_text, after, keywords)
+                    {
                         versions[i].suspect = true;
                         versions[i].suspect_basis =
                             Some(format!("diff-content: {kw:?} removed in {short}"));
@@ -393,9 +393,7 @@ pub fn apply(
             std::fs::remove_file(&tmp_theirs).ok();
             let code = status.code().unwrap_or(-1);
             if code < 0 {
-                return Err(format!(
-                    "merge-file failed for {path}"
-                ));
+                return Err(format!("merge-file failed for {path}"));
             }
             results.push(json!({
                 "path": path,

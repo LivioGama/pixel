@@ -398,8 +398,8 @@ mod tests {
 
     #[test]
     fn targets_omits_defaulted_limit_on_deserialize() {
-        let op: Op = serde_json::from_value(json!({"op": "targets", "task": "fix the bug"}))
-            .unwrap();
+        let op: Op =
+            serde_json::from_value(json!({"op": "targets", "task": "fix the bug"})).unwrap();
         assert_eq!(
             op,
             Op::Targets {
@@ -425,8 +425,14 @@ mod tests {
 
     #[test]
     fn graph_and_status_serialize_as_empty_object_variants() {
-        assert_eq!(serde_json::to_value(Op::Graph {}).unwrap(), json!({"op": "graph"}));
-        assert_eq!(serde_json::to_value(Op::Status {}).unwrap(), json!({"op": "status"}));
+        assert_eq!(
+            serde_json::to_value(Op::Graph {}).unwrap(),
+            json!({"op": "graph"})
+        );
+        assert_eq!(
+            serde_json::to_value(Op::Status {}).unwrap(),
+            json!({"op": "status"})
+        );
     }
 
     #[test]
@@ -437,7 +443,10 @@ mod tests {
 
     #[test]
     fn resolve_round_trips() {
-        let op = Op::Resolve { phrase: "the form".into(), limit: Some(5) };
+        let op = Op::Resolve {
+            phrase: "the form".into(),
+            limit: Some(5),
+        };
         let value = serde_json::to_value(&op).unwrap();
         assert_eq!(value["op"], "resolve");
         assert_eq!(value["phrase"], "the form");
@@ -449,7 +458,15 @@ mod tests {
     #[test]
     fn reconcile_round_trips_with_defaults() {
         let op: Op = serde_json::from_value(json!({"op": "reconcile"})).unwrap();
-        assert_eq!(op, Op::Reconcile { strategy: None, push: None, into: None, request_id: None });
+        assert_eq!(
+            op,
+            Op::Reconcile {
+                strategy: None,
+                push: None,
+                into: None,
+                request_id: None
+            }
+        );
     }
 
     #[test]
@@ -503,35 +520,205 @@ mod tests {
         // request that triggered it.
         let cases: &[(Op, &str)] = &[
             (Op::Ping, "ping"),
-            (Op::Recall { action: "x".into(), params: json!(null) }, "recall"),
-            (Op::Search { pattern: "".into(), json: false, limit: None, offset: None, paths: None, scope: None }, "search"),
-            (Op::Targets { task: "".into(), limit: None, max_tier: None, precision: false }, "targets"),
+            (
+                Op::Recall {
+                    action: "x".into(),
+                    params: json!(null),
+                },
+                "recall",
+            ),
+            (
+                Op::Search {
+                    pattern: "".into(),
+                    json: false,
+                    limit: None,
+                    offset: None,
+                    paths: None,
+                    scope: None,
+                },
+                "search",
+            ),
+            (
+                Op::Targets {
+                    task: "".into(),
+                    limit: None,
+                    max_tier: None,
+                    precision: false,
+                },
+                "targets",
+            ),
             (Op::Symbol { name: "".into() }, "symbol"),
-            (Op::Context { uid: "".into(), budget_tokens: None }, "context"),
-            (Op::Impact { uid_or_name: "".into(), direction: "".into(), depth: None }, "impact"),
-            (Op::Uses { uid_or_name: "".into(), role: "".into(), offset: None }, "uses"),
-            (Op::Trace { from: "".into(), to: "".into() }, "trace"),
+            (
+                Op::Context {
+                    uid: "".into(),
+                    budget_tokens: None,
+                },
+                "context",
+            ),
+            (
+                Op::Impact {
+                    uid_or_name: "".into(),
+                    direction: "".into(),
+                    depth: None,
+                },
+                "impact",
+            ),
+            (
+                Op::Uses {
+                    uid_or_name: "".into(),
+                    role: "".into(),
+                    offset: None,
+                },
+                "uses",
+            ),
+            (
+                Op::Trace {
+                    from: "".into(),
+                    to: "".into(),
+                },
+                "trace",
+            ),
             (Op::Processes { offset: None }, "processes"),
             (Op::Clusters { offset: None }, "clusters"),
-            (Op::Changes { base: None, offset: None, include_tests: false }, "changes"),
+            (
+                Op::Changes {
+                    base: None,
+                    offset: None,
+                    include_tests: false,
+                },
+                "changes",
+            ),
             (Op::Graph {}, "graph"),
             (Op::Status {}, "status"),
-            (Op::Resolve { phrase: "".into(), limit: None }, "resolve"),
-            (Op::History { query: "".into(), facet: None, limit: None }, "history"),
-            (Op::Lifecycle { path: None, token: None }, "lifecycle"),
-            (Op::Excavate { phrase: None, path: None, from: None, to: None, limit: None }, "excavate"),
-            (Op::Reconcile { strategy: None, push: None, into: None, request_id: None }, "reconcile"),
-            (Op::Journal { kind: "".into(), path: None, detail: None }, "journal"),
+            (
+                Op::Resolve {
+                    phrase: "".into(),
+                    limit: None,
+                },
+                "resolve",
+            ),
+            (
+                Op::History {
+                    query: "".into(),
+                    facet: None,
+                    limit: None,
+                },
+                "history",
+            ),
+            (
+                Op::Lifecycle {
+                    path: None,
+                    token: None,
+                },
+                "lifecycle",
+            ),
+            (
+                Op::Excavate {
+                    phrase: None,
+                    path: None,
+                    from: None,
+                    to: None,
+                    limit: None,
+                },
+                "excavate",
+            ),
+            (
+                Op::Reconcile {
+                    strategy: None,
+                    push: None,
+                    into: None,
+                    request_id: None,
+                },
+                "reconcile",
+            ),
+            (
+                Op::Journal {
+                    kind: "".into(),
+                    path: None,
+                    detail: None,
+                },
+                "journal",
+            ),
             (Op::Inspect { files: None }, "inspect"),
-            (Op::Review { cursor: None, byte_cap: None }, "review"),
-            (Op::Diff { from: "".into(), to: None, paths: None, byte_cap: None }, "diff"),
-            (Op::HistoryOp { ref_name: None, limit: None, detail: None, cursor: None, byte_cap: None }, "history_op"),
-            (Op::Publish { message: "".into(), files: vec![], expected_head: None, push: None, amend: None, request_id: "".into() }, "publish"),
-            (Op::Push { remote: "".into(), refspec: "".into(), force_with_lease: None, request_id: "".into() }, "push"),
-            (Op::Ship { message: "".into(), files: vec![], remote: "".into(), refspec: "".into(), request_id: "".into() }, "ship"),
-            (Op::BranchOp { name: "".into(), from: None, request_id: "".into() }, "branch_op"),
-            (Op::Update { expected_head: "".into(), target_oid: "".into(), request_id: "".into() }, "update"),
-            (Op::Sync { remote: "".into(), refspec: None }, "sync"),
+            (
+                Op::Review {
+                    cursor: None,
+                    byte_cap: None,
+                },
+                "review",
+            ),
+            (
+                Op::Diff {
+                    from: "".into(),
+                    to: None,
+                    paths: None,
+                    byte_cap: None,
+                },
+                "diff",
+            ),
+            (
+                Op::HistoryOp {
+                    ref_name: None,
+                    limit: None,
+                    detail: None,
+                    cursor: None,
+                    byte_cap: None,
+                },
+                "history_op",
+            ),
+            (
+                Op::Publish {
+                    message: "".into(),
+                    files: vec![],
+                    expected_head: None,
+                    push: None,
+                    amend: None,
+                    request_id: "".into(),
+                },
+                "publish",
+            ),
+            (
+                Op::Push {
+                    remote: "".into(),
+                    refspec: "".into(),
+                    force_with_lease: None,
+                    request_id: "".into(),
+                },
+                "push",
+            ),
+            (
+                Op::Ship {
+                    message: "".into(),
+                    files: vec![],
+                    remote: "".into(),
+                    refspec: "".into(),
+                    request_id: "".into(),
+                },
+                "ship",
+            ),
+            (
+                Op::BranchOp {
+                    name: "".into(),
+                    from: None,
+                    request_id: "".into(),
+                },
+                "branch_op",
+            ),
+            (
+                Op::Update {
+                    expected_head: "".into(),
+                    target_oid: "".into(),
+                    request_id: "".into(),
+                },
+                "update",
+            ),
+            (
+                Op::Sync {
+                    remote: "".into(),
+                    refspec: None,
+                },
+                "sync",
+            ),
             (Op::Shutdown, "shutdown"),
         ];
         for (op, expected) in cases {
@@ -543,7 +730,14 @@ mod tests {
 
     #[test]
     fn session_usage_names_all_five_mandatory_scenarios() {
-        for scenario in ["targets", "resolve", "rescue", "reconcile", "impact", "changes"] {
+        for scenario in [
+            "targets",
+            "resolve",
+            "rescue",
+            "reconcile",
+            "impact",
+            "changes",
+        ] {
             assert!(
                 SESSION_USAGE.contains(scenario),
                 "SESSION_USAGE must name the mandatory scenario '{scenario}' — \
@@ -559,11 +753,38 @@ mod tests {
         // same as op_name_matches_serde_tag's `cases` above, so the two lists
         // can't silently drift in the same direction and still agree.
         let all_real_ops: &[&str] = &[
-            "ping", "recall", "search", "targets", "symbol", "context", "impact", "uses",
-            "trace", "processes", "clusters", "changes", "graph", "status", "resolve",
-            "history", "lifecycle", "excavate", "reconcile", "journal", "inspect", "review",
-            "diff", "history_op", "publish", "push", "ship", "branch_op", "update", "sync",
-            "flow", "shutdown",
+            "ping",
+            "recall",
+            "search",
+            "targets",
+            "symbol",
+            "context",
+            "impact",
+            "uses",
+            "trace",
+            "processes",
+            "clusters",
+            "changes",
+            "graph",
+            "status",
+            "resolve",
+            "history",
+            "lifecycle",
+            "excavate",
+            "reconcile",
+            "journal",
+            "inspect",
+            "review",
+            "diff",
+            "history_op",
+            "publish",
+            "push",
+            "ship",
+            "branch_op",
+            "update",
+            "sync",
+            "flow",
+            "shutdown",
         ];
         // Every advertised capability must be a real op.
         for cap in SESSION_CAPABILITIES {

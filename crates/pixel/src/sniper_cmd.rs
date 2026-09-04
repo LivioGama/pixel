@@ -132,7 +132,11 @@ fn open_store(repo: &std::path::Path) -> Result<Store, String> {
     Store::open(&root).map_err(|e| e.to_string())
 }
 
-fn emit<T: serde::Serialize>(value: &T, json: bool, pretty: impl FnOnce(&T) -> String) -> Result<(), String> {
+fn emit<T: serde::Serialize>(
+    value: &T,
+    json: bool,
+    pretty: impl FnOnce(&T) -> String,
+) -> Result<(), String> {
     let text = if json {
         let mut s = serde_json::to_string(value).map_err(|e| e.to_string())?;
         s.push('\n');
@@ -155,13 +159,23 @@ fn parse_surface(raw: Option<String>) -> Result<Option<Surface>, String> {
 
 pub fn run_sniper(cmd: SniperCmd) -> Result<(), String> {
     match cmd {
-        SniperCmd::Last { n, surface, repo, json } => {
+        SniperCmd::Last {
+            n,
+            surface,
+            repo,
+            json,
+        } => {
             let store = open_store(&repo)?;
             let surface = parse_surface(surface)?;
             let list = query::last(&store, n, surface).map_err(|e| e.to_string())?;
             emit(&list, json, |l| format::render_error_list(l, now_ms()))
         }
-        SniperCmd::Since { cursor, ts, repo, json } => {
+        SniperCmd::Since {
+            cursor,
+            ts,
+            repo,
+            json,
+        } => {
             let store = open_store(&repo)?;
             let list = match (cursor, ts) {
                 (Some(cursor), None) => query::since(&store, cursor),

@@ -36,7 +36,7 @@
 
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use pixel_git::GitRunner;
 
@@ -108,12 +108,24 @@ pub fn rewrite_with_state(
 
     match outcome {
         BeginOutcome::Replay(result) => Ok(result),
-        BeginOutcome::Resume { phase, .. } => {
-            resume_rewrite(root, opts, &request_id, &journal, phase, &runner, state_root)
-        }
-        BeginOutcome::Start => {
-            run_body(root, opts, &request_id, &journal, &runner, state_root, probe)
-        }
+        BeginOutcome::Resume { phase, .. } => resume_rewrite(
+            root,
+            opts,
+            &request_id,
+            &journal,
+            phase,
+            &runner,
+            state_root,
+        ),
+        BeginOutcome::Start => run_body(
+            root,
+            opts,
+            &request_id,
+            &journal,
+            &runner,
+            state_root,
+            probe,
+        ),
     }
 }
 
@@ -149,7 +161,9 @@ fn run_body(
 
     // Refuse detached HEAD.
     let Some(branch) = runner.current_branch() else {
-        bail!("UNSUPPORTED_STATE: detached HEAD — rewrite requires a checked-out branch".to_string());
+        bail!(
+            "UNSUPPORTED_STATE: detached HEAD — rewrite requires a checked-out branch".to_string()
+        );
     };
     let Some(old_head) = runner.rev_parse_head() else {
         bail!("UNSUPPORTED_STATE: no HEAD commit".to_string());
@@ -218,7 +232,10 @@ fn run_body(
             let total = rev_list_count(runner, &[&format!("{base_oid}..{old_head}")]);
             let outside = rev_list_count(
                 runner,
-                &[&format!("{base_oid}..{old_head}"), &format!("^{remote_default}")],
+                &[
+                    &format!("{base_oid}..{old_head}"),
+                    &format!("^{remote_default}"),
+                ],
             );
             if outside < total {
                 bail!(format!(
@@ -236,7 +253,12 @@ fn run_body(
     // Gather what we are squashing (subjects oldest-first for the message).
     let commits_squashed = rev_list_count(runner, &[&format!("{base_oid}..{old_head}")]);
     let subjects: Vec<String> = runner
-        .run_opt(&["log", "--reverse", "--format=%s", &format!("{base_oid}..{old_head}")])
+        .run_opt(&[
+            "log",
+            "--reverse",
+            "--format=%s",
+            &format!("{base_oid}..{old_head}"),
+        ])
         .map(|o| {
             String::from_utf8_lossy(&o)
                 .lines()
@@ -382,7 +404,11 @@ fn run_body(
                      succeeded; fetch/reconcile, then push with a fresh lease. Never retried \
                      with plain --force. ({e})",
                     opts.remote,
-                    if old_remote_oid.is_empty() { "<absent>" } else { &old_remote_oid },
+                    if old_remote_oid.is_empty() {
+                        "<absent>"
+                    } else {
+                        &old_remote_oid
+                    },
                 ));
             }
         }
@@ -530,7 +556,9 @@ fn resolve_base(
             .run_opt(&["rev-parse", "--verify", "--quiet", &spec])
             .map(|o| String::from_utf8_lossy(&o).trim().to_string())
             .filter(|s| !s.is_empty())
-            .ok_or(format!("REFUSED: --onto {onto} does not resolve to a commit"));
+            .ok_or(format!(
+                "REFUSED: --onto {onto} does not resolve to a commit"
+            ));
     }
 
     // Upstream tracking base. A branch tracking its OWN remote ref

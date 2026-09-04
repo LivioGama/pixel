@@ -100,11 +100,10 @@ fn read_manifest(cwd: &Path) -> Result<Option<String>, String> {
         None => return Ok(None),
     };
 
-    let data = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("read manifest: {e}"))?;
+    let data =
+        std::fs::read_to_string(&manifest_path).map_err(|e| format!("read manifest: {e}"))?;
 
-    let m: Value = serde_json::from_str(&data)
-        .map_err(|e| format!("parse manifest: {e}"))?;
+    let m: Value = serde_json::from_str(&data).map_err(|e| format!("parse manifest: {e}"))?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -122,7 +121,11 @@ fn read_manifest(cwd: &Path) -> Result<Option<String>, String> {
                 if now.saturating_sub(created) > MANIFEST_MAX_AGE_SECS {
                     continue; // expired
                 }
-                let task = t.get("task").and_then(Value::as_str).unwrap_or("?").to_string();
+                let task = t
+                    .get("task")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string();
                 let files = parse_targets(t.get("targets").and_then(Value::as_array));
                 if !files.is_empty() {
                     all_tasks.push((task, files));
@@ -133,7 +136,11 @@ fn read_manifest(cwd: &Path) -> Result<Option<String>, String> {
         // legacy v1 format.
         let created = m.get("created_unix").and_then(Value::as_u64).unwrap_or(0);
         if now.saturating_sub(created) <= MANIFEST_MAX_AGE_SECS {
-            let task = m.get("task").and_then(Value::as_str).unwrap_or("?").to_string();
+            let task = m
+                .get("task")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string();
             let files = parse_targets(m.get("files").and_then(Value::as_array));
             if !files.is_empty() {
                 all_tasks.push((task, files));

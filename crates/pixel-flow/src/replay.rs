@@ -22,10 +22,7 @@ pub fn replay(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, Str
         }
     }
     let mut out = String::new();
-    out.push_str(&format!(
-        "# Flow: {} ({})\n",
-        flow.name, flow.title
-    ));
+    out.push_str(&format!("# Flow: {} ({})\n", flow.name, flow.title));
     if !flow.description.is_empty() {
         out.push_str(&format!("# {}\n", flow.description));
     }
@@ -125,7 +122,12 @@ fn render_step(
 ) {
     let indent = "  ".repeat(depth);
     if let Some(r) = &step.rationale {
-        out.push_str(&format!("{}# Step {}: {}\n", indent, num, substitute(r, vars)));
+        out.push_str(&format!(
+            "{}# Step {}: {}\n",
+            indent,
+            num,
+            substitute(r, vars)
+        ));
     } else {
         out.push_str(&format!("{}# Step {}\n", indent, num));
     }
@@ -162,13 +164,13 @@ fn render_step(
             }
         }
         "snapshot" => {
-            out.push_str(&format!("{}agent-browser --session comet snapshot -i\n", indent));
+            out.push_str(&format!(
+                "{}agent-browser --session comet snapshot -i\n",
+                indent
+            ));
         }
         "click" => {
-            let target = substitute(
-                step.ref_hint.as_deref().unwrap_or("element"),
-                vars,
-            );
+            let target = substitute(step.ref_hint.as_deref().unwrap_or("element"), vars);
             out.push_str(&format!(
                 "{}agent-browser --session comet snapshot -i   # find the actual @eN ref for: {}\n",
                 indent, target
@@ -179,10 +181,7 @@ fn render_step(
             ));
         }
         "fill" | "type" => {
-            let target = substitute(
-                step.ref_hint.as_deref().unwrap_or("input"),
-                vars,
-            );
+            let target = substitute(step.ref_hint.as_deref().unwrap_or("input"), vars);
             let value = resolve_value(step, vars);
             out.push_str(&format!(
                 "{}agent-browser --session comet snapshot -i   # find the actual @eN ref for: {}\n",
@@ -194,10 +193,7 @@ fn render_step(
             ));
         }
         "select" => {
-            let target = substitute(
-                step.ref_hint.as_deref().unwrap_or("select"),
-                vars,
-            );
+            let target = substitute(step.ref_hint.as_deref().unwrap_or("select"), vars);
             let value = resolve_value(step, vars);
             out.push_str(&format!(
                 "{}agent-browser --session comet snapshot -i   # find the actual @eN ref for: {}\n",
@@ -209,10 +205,7 @@ fn render_step(
             ));
         }
         "press" => {
-            let key = step
-                .key
-                .as_deref()
-                .unwrap_or("Enter");
+            let key = step.key.as_deref().unwrap_or("Enter");
             out.push_str(&format!(
                 "{}agent-browser --session comet press {}\n",
                 indent,
@@ -233,10 +226,7 @@ fn render_step(
             ));
         }
         "conditional" => {
-            let cond = substitute(
-                step.condition.as_deref().unwrap_or("condition"),
-                vars,
-            );
+            let cond = substitute(step.condition.as_deref().unwrap_or("condition"), vars);
             out.push_str(&format!("{}# CONDITIONAL: if {}\n", indent, cond));
             if !step.then.is_empty() {
                 out.push_str(&format!("{}# → THEN:\n", indent));
@@ -252,10 +242,7 @@ fn render_step(
             }
         }
         "switch_tab" => {
-            let tab = substitute(
-                step.tab.as_deref().unwrap_or("tab"),
-                vars,
-            );
+            let tab = substitute(step.tab.as_deref().unwrap_or("tab"), vars);
             out.push_str(&format!(
                 "{}agent-browser --session comet tab list   # find tab matching '{}'\n",
                 indent, tab
@@ -278,7 +265,9 @@ fn render_step(
     if let Some(ref fix) = step.on_failure {
         out.push_str(&format!(
             "{}# ON FAILURE (max {} retries): {}\n",
-            indent, step.max_retries, substitute(fix, vars)
+            indent,
+            step.max_retries,
+            substitute(fix, vars)
         ));
     }
 
@@ -468,10 +457,13 @@ mod tests {
 
     #[test]
     fn replay_success_signal() {
-        let mut flow = make_flow(vec![FlowStep {
-            action: "snapshot".into(),
-            ..Default::default()
-        }], vec![]);
+        let mut flow = make_flow(
+            vec![FlowStep {
+                action: "snapshot".into(),
+                ..Default::default()
+            }],
+            vec![],
+        );
         flow.success_signal = Some("page contains 'authorized'".into());
         let out = replay(&flow, &HashMap::new()).unwrap();
         assert!(out.contains("Success signal: page contains 'authorized'"));

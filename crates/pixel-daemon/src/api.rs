@@ -13,11 +13,11 @@ use std::time::Instant;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use pixel_facts::FactsStore;
+use pixel_graph::{EdgeKind, EdgeRow, GraphStore, SymbolKind, SymbolRow};
 use pixel_index::TrigramExtractor;
 use pixel_index::index::{MAX_FILE_BYTES, open_regular_bounded};
 use pixel_index::indexset::{IndexSet, IndexSetError};
-use pixel_facts::FactsStore;
-use pixel_graph::{EdgeKind, EdgeRow, GraphStore, SymbolKind, SymbolRow};
 use pixel_proto::{Envelope, Epistemics, ErrorCode, PixelError, SnapshotInfo, Warning};
 use pixel_recall::embed::{EmbedKind, Embedder, open_default_embedder};
 
@@ -417,10 +417,7 @@ impl Service {
         // Group matched lines by file.
         let mut by_file: HashMap<String, String> = HashMap::new();
         for m in matches {
-            by_file
-                .entry(m.path.clone())
-                .or_default()
-                .push_str(&m.line);
+            by_file.entry(m.path.clone()).or_default().push_str(&m.line);
             by_file.entry(m.path.clone()).or_default().push('\n');
         }
         if by_file.is_empty() {
@@ -745,12 +742,8 @@ impl Service {
             } else {
                 None
             };
-            let ranked_pool = rank_search_matches(
-                &pool,
-                pattern,
-                &ranking_graph,
-                semantic_rank.as_deref(),
-            );
+            let ranked_pool =
+                rank_search_matches(&pool, pattern, &ranking_graph, semantic_rank.as_deref());
 
             let start = offset.min(ranked_pool.len());
             // More ranked rows remain beyond this page (independent of the
@@ -848,9 +841,15 @@ impl Service {
     /// fuse, tier. Graph failure degrades to lexical-only (envelope says so)
     /// instead of erroring — a scoping request must never die on a broken
     /// graph build.
-    fn op_targets(&mut self, task: &str, limit: Option<usize>, max_tier: Option<&str>, precision: bool) -> Result<Value, String> {
-        use pixel_rank as engine;
+    fn op_targets(
+        &mut self,
+        task: &str,
+        limit: Option<usize>,
+        max_tier: Option<&str>,
+        precision: bool,
+    ) -> Result<Value, String> {
         use pixel_graph::targets as graph_targets;
+        use pixel_rank as engine;
 
         let started = Instant::now();
         let query = engine::tokenize_task(task)?;
@@ -1002,14 +1001,12 @@ impl Service {
         // Per-path test penalty: demote a test file only when the task does
         // NOT mention tests/specs (a test file is a *worse* target for a
         // non-test task, but a *better* one for a test task).
-        let mentions_tests = task
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .any(|t| {
-                matches!(
-                    t.to_ascii_lowercase().as_str(),
-                    "test" | "tests" | "spec" | "specs"
-                )
-            });
+        let mentions_tests = task.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| {
+            matches!(
+                t.to_ascii_lowercase().as_str(),
+                "test" | "tests" | "spec" | "specs"
+            )
+        });
         let penalty = |path: &str| -> f64 {
             if pixel_rank::signals::is_test_path(path) && !mentions_tests {
                 0.7
@@ -1524,9 +1521,8 @@ impl Service {
             Err(e) => return json!({"present": false, "error": e.to_string()}),
         };
         let state = facts.index_state();
-        let count = |sql: &str| -> i64 {
-            facts.conn().query_row(sql, [], |r| r.get(0)).unwrap_or(0)
-        };
+        let count =
+            |sql: &str| -> i64 { facts.conn().query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
         let phase_a_done: bool = facts
             .conn()
             .query_row(
@@ -1545,7 +1541,12 @@ impl Service {
             .current_dir(&self.root)
             .output()
             .ok()
-            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
             .unwrap_or(0)
             .max(state.total_commits);
         json!({
@@ -1648,16 +1649,13 @@ impl Service {
         )
         .map_err(|e| e.to_string())?;
         let mut value = serde_json::to_value(&result).map_err(|e| e.to_string())?;
-        value["index_state"] = serde_json::to_value(facts.index_state()).map_err(|e| e.to_string())?;
+        value["index_state"] =
+            serde_json::to_value(facts.index_state()).map_err(|e| e.to_string())?;
         Ok(value)
     }
 
     /// Engine 2: lifecycle of a path or token.
-    fn op_lifecycle(
-        &mut self,
-        path: Option<&str>,
-        token: Option<&str>,
-    ) -> Result<Value, String> {
+    fn op_lifecycle(&mut self, path: Option<&str>, token: Option<&str>) -> Result<Value, String> {
         let facts = self.facts_open_and_catch_up()?;
         let result = match (path, token) {
             (Some(p), _) => facts.path_lifecycle(p).map_err(|e| e.to_string())?,
@@ -1856,8 +1854,7 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
 
     // Graph honesty envelope (impact/uses/symbol/context; targets folds its
     // graph state into envelope.caps + note instead).
-    let graph_lower =
-        v.pointer("/envelope/lower_bound").and_then(Value::as_bool) == Some(true);
+    let graph_lower = v.pointer("/envelope/lower_bound").and_then(Value::as_bool) == Some(true);
     if graph_lower {
         let unresolved = v
             .pointer("/envelope/unresolved_same_name")
@@ -1875,8 +1872,9 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
 
     // Resolve's bounded fallback scans.
     if v.get("scan_capped").and_then(Value::as_bool) == Some(true) {
-        caps.push("fallback table scan hit its row cap; unscanned rows were never considered"
-            .to_string());
+        caps.push(
+            "fallback table scan hit its row cap; unscanned rows were never considered".to_string(),
+        );
     }
 
     let source = match op_name {
@@ -1953,14 +1951,12 @@ struct EngineReranker {
 impl EngineReranker {
     fn new(task: &str) -> Self {
         EngineReranker {
-            mentions_tests: task
-                .split(|c: char| !c.is_ascii_alphanumeric())
-                .any(|t| {
-                    matches!(
-                        t.to_ascii_lowercase().as_str(),
-                        "test" | "tests" | "spec" | "specs"
-                    )
-                }),
+            mentions_tests: task.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| {
+                matches!(
+                    t.to_ascii_lowercase().as_str(),
+                    "test" | "tests" | "spec" | "specs"
+                )
+            }),
             test_penalty: 0.7,
         }
     }
@@ -2616,7 +2612,11 @@ fn rank_search_matches(
                         name_lc.contains(&pat_lower)
                     })
                     .count();
-                if count > 0 { Some((f.clone(), count)) } else { None }
+                if count > 0 {
+                    Some((f.clone(), count))
+                } else {
+                    None
+                }
             })
             .collect();
         hits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -2632,40 +2632,40 @@ fn rank_search_matches(
     // Seeds are the matched files' symbol-name hits, so a file that both
     // contains a match and is graph-adjacent to a sibling match file (or
     // shares a functional cluster with it) ranks higher.
-    let (graph_rank, cluster_rank): (Vec<String>, Vec<String>) =
-        if let Some(store) = graph {
-            use pixel_graph::targets as graph_targets_th;
-            let matched: HashSet<&str> = files.iter().map(String::as_str).collect();
-            let kw: Vec<String> =
-                pixel_graph::split_ident_words(pattern).into_iter().collect();
-            let matched_sym_ids: Vec<i64> = graph_targets_th::symbol_hits(store, &kw, &[])
-                .ok()
+    let (graph_rank, cluster_rank): (Vec<String>, Vec<String>) = if let Some(store) = graph {
+        use pixel_graph::targets as graph_targets_th;
+        let matched: HashSet<&str> = files.iter().map(String::as_str).collect();
+        let kw: Vec<String> = pixel_graph::split_ident_words(pattern)
+            .into_iter()
+            .collect();
+        let matched_sym_ids: Vec<i64> = graph_targets_th::symbol_hits(store, &kw, &[])
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter(|h| matched.contains(h.path.as_str()))
+            .flat_map(|h| h.symbols.into_iter().map(|(s, _)| s.id))
+            .collect();
+        if matched_sym_ids.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            let neighbor: Vec<String> = graph_targets_th::neighbor_files(store, &matched_sym_ids)
+                .unwrap_or_default()
                 .into_iter()
-                .flatten()
-                .filter(|h| matched.contains(h.path.as_str()))
-                .flat_map(|h| h.symbols.into_iter().map(|(s, _)| s.id))
+                .map(|(p, _)| p)
+                .filter(|p| matched.contains(p.as_str()))
                 .collect();
-            if matched_sym_ids.is_empty() {
-                (Vec::new(), Vec::new())
-            } else {
-                let neighbor: Vec<String> = graph_targets_th::neighbor_files(store, &matched_sym_ids)
+            let cluster: Vec<String> =
+                graph_targets_th::cluster_co_files(store, &matched_sym_ids, &kw)
                     .unwrap_or_default()
                     .into_iter()
                     .map(|(p, _)| p)
                     .filter(|p| matched.contains(p.as_str()))
                     .collect();
-                let cluster: Vec<String> =
-                    graph_targets_th::cluster_co_files(store, &matched_sym_ids, &kw)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|(p, _)| p)
-                        .filter(|p| matched.contains(p.as_str()))
-                        .collect();
-                (neighbor, cluster)
-            }
-        } else {
-            (Vec::new(), Vec::new())
-        };
+            (neighbor, cluster)
+        }
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     // --- Signal 3: content relevance (BM25 over the matched pool) ---
     // Was: raw match count per file. Raw counts have none of BM25's three
@@ -2705,7 +2705,11 @@ fn rank_search_matches(
                     }
                 }
             }
-            pixel_rank::Bm25Doc { path: f.clone(), term_freqs, len }
+            pixel_rank::Bm25Doc {
+                path: f.clone(),
+                term_freqs,
+                len,
+            }
         })
         .collect();
     // Fall back to raw density when BM25 has no usable signal — e.g. a regex
@@ -2784,11 +2788,7 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
         nb += y * y;
     }
     let denom = (na * nb).sqrt();
-    if denom > 0.0 {
-        dot / denom
-    } else {
-        0.0
-    }
+    if denom > 0.0 { dot / denom } else { 0.0 }
 }
 
 #[cfg(test)]
@@ -2981,7 +2981,11 @@ mod tests {
             serialized.len()
         );
         // Text must be empty or very small when budget < overhead.
-        let text = resp.data().get("text").and_then(Value::as_str).unwrap_or("");
+        let text = resp
+            .data()
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         assert!(
             text.is_empty() || pixel_context::estimate_tokens(text) <= 50,
             "text should be empty or tiny when budget is 50, got {} tokens",
@@ -3074,7 +3078,11 @@ mod tests {
             scope: None,
         });
         assert!(resp.ok, "search: {:?}", resp);
-        let matches = resp.data().get("matches").and_then(Value::as_array).unwrap();
+        let matches = resp
+            .data()
+            .get("matches")
+            .and_then(Value::as_array)
+            .unwrap();
         // Default limit is 100; 120 matching files must return one full page
         // with an exact continuation offset.
         assert_eq!(
@@ -3097,7 +3105,11 @@ mod tests {
             scope: None,
         });
         assert!(resp.ok);
-        let matches = resp.data().get("matches").and_then(Value::as_array).unwrap();
+        let matches = resp
+            .data()
+            .get("matches")
+            .and_then(Value::as_array)
+            .unwrap();
         let truncated = resp
             .data()
             .get("truncated")
@@ -3116,7 +3128,11 @@ mod tests {
             scope: None,
         });
         assert!(resp.ok);
-        let second_page = resp.data().get("matches").and_then(Value::as_array).unwrap();
+        let second_page = resp
+            .data()
+            .get("matches")
+            .and_then(Value::as_array)
+            .unwrap();
         assert_eq!(second_page.len(), 5);
         assert!(
             first_page.iter().all(|item| !second_page.contains(item)),
@@ -3170,7 +3186,11 @@ mod tests {
             unranked.data().get("ranked").and_then(Value::as_bool),
             Some(false)
         );
-        let unranked_matches = unranked.data().get("matches").and_then(Value::as_array).unwrap();
+        let unranked_matches = unranked
+            .data()
+            .get("matches")
+            .and_then(Value::as_array)
+            .unwrap();
         let unranked_set: std::collections::HashSet<(String, u64)> = unranked_matches
             .iter()
             .map(|m| {
@@ -3196,7 +3216,11 @@ mod tests {
             ranked.data().get("ranked").and_then(Value::as_bool),
             Some(true)
         );
-        let ranked_matches = ranked.data().get("matches").and_then(Value::as_array).unwrap();
+        let ranked_matches = ranked
+            .data()
+            .get("matches")
+            .and_then(Value::as_array)
+            .unwrap();
         let ranked_set: std::collections::HashSet<(String, u64)> = ranked_matches
             .iter()
             .map(|m| {
@@ -3247,7 +3271,10 @@ mod tests {
             vec!["resolve", "concept", "phrase", "snake", "case"],
             "camelCase and snake_case must still split"
         );
-        assert!(tokenize_words("   ;;;   ").is_empty(), "punctuation-only yields no terms");
+        assert!(
+            tokenize_words("   ;;;   ").is_empty(),
+            "punctuation-only yields no terms"
+        );
     }
 
     /// Content channel is BM25, not raw match count. `index` appears in BOTH
@@ -3278,7 +3305,10 @@ mod tests {
         // Sanity: raw density really does favour alpha.rs here.
         let alpha_hits = matches.iter().filter(|m| m.path == "alpha.rs").count();
         let beta_hits = matches.iter().filter(|m| m.path == "beta.rs").count();
-        assert!(alpha_hits > beta_hits, "precondition: alpha has more raw matches");
+        assert!(
+            alpha_hits > beta_hits,
+            "precondition: alpha has more raw matches"
+        );
 
         let ranked = rank_search_matches(&matches, "index|disambiguation", &None, None);
         assert_eq!(
@@ -3353,7 +3383,11 @@ mod tests {
             scope: Some("code".into()),
         });
         assert!(resp.ok, "ranked search: {:?}", resp.error);
-        let matches = resp.data().get("matches").and_then(Value::as_array).unwrap();
+        let matches = resp
+            .data()
+            .get("matches")
+            .and_then(Value::as_array)
+            .unwrap();
         let paths: Vec<&str> = matches.iter().filter_map(|m| m["path"].as_str()).collect();
         assert_eq!(
             paths.len(),
@@ -3404,7 +3438,11 @@ mod tests {
                 scope: Some("code".into()),
             });
             assert!(resp.ok, "page at offset {o}: {:?}", resp.error);
-            let matches = resp.data().get("matches").and_then(Value::as_array).unwrap();
+            let matches = resp
+                .data()
+                .get("matches")
+                .and_then(Value::as_array)
+                .unwrap();
             for m in matches {
                 seen.push(m["path"].as_str().unwrap().to_string());
             }
@@ -3414,7 +3452,10 @@ mod tests {
                 .and_then(Value::as_u64)
                 .map(|v| v as usize);
             pages += 1;
-            assert!(pages <= TOTAL, "pagination did not terminate: seen={seen:?}");
+            assert!(
+                pages <= TOTAL,
+                "pagination did not terminate: seen={seen:?}"
+            );
         }
 
         let unique: std::collections::HashSet<&String> = seen.iter().collect();
@@ -3549,7 +3590,11 @@ mod tests {
             offset: None,
             scope: None,
         });
-        assert!(unranked.ok, "no scope must remain valid: {:?}", unranked.error);
+        assert!(
+            unranked.ok,
+            "no scope must remain valid: {:?}",
+            unranked.error
+        );
 
         let upper = svc.handle(Request::Search {
             paths: None,
@@ -3559,7 +3604,11 @@ mod tests {
             offset: None,
             scope: Some("CODE".into()),
         });
-        assert!(upper.ok, "scope must be case-insensitive: {:?}", upper.error);
+        assert!(
+            upper.ok,
+            "scope must be case-insensitive: {:?}",
+            upper.error
+        );
         assert_eq!(
             upper.data().get("ranked").and_then(Value::as_bool),
             Some(true)
@@ -3591,13 +3640,20 @@ mod tests {
             precision: false,
         });
         assert!(resp.ok, "targets: {:?}", resp.error);
-        let targets = resp.data().get("targets").and_then(Value::as_array).unwrap();
+        let targets = resp
+            .data()
+            .get("targets")
+            .and_then(Value::as_array)
+            .unwrap();
         let ledger = targets
             .iter()
             .find(|t| t["path"].as_str() == Some("ledger.rs"))
             .expect("ledger.rs should be a target");
         let evidence = ledger.get("evidence").and_then(Value::as_array).unwrap();
-        assert!(!evidence.is_empty(), "expected content evidence on ledger.rs");
+        assert!(
+            !evidence.is_empty(),
+            "expected content evidence on ledger.rs"
+        );
         assert!(
             evidence.iter().any(|e| {
                 e["keyword"].as_str() == Some("ledger")
@@ -3634,7 +3690,11 @@ mod tests {
             scope: Some("code".into()),
         });
         assert!(resp.ok, "ranked search: {:?}", resp.error);
-        let matches = resp.data().get("matches").and_then(Value::as_array).unwrap();
+        let matches = resp
+            .data()
+            .get("matches")
+            .and_then(Value::as_array)
+            .unwrap();
         let paths: Vec<&str> = matches.iter().filter_map(|m| m["path"].as_str()).collect();
         assert_eq!(
             paths.first().copied(),
@@ -3672,35 +3732,87 @@ mod tests {
 
         let mut svc = Service::open(&root).unwrap();
         let uid = {
-            let sym = svc.handle(Request::Symbol { name: "alpha".into() });
-            sym.data()["symbols"][0]["uid"].as_str().unwrap().to_string()
+            let sym = svc.handle(Request::Symbol {
+                name: "alpha".into(),
+            });
+            sym.data()["symbols"][0]["uid"]
+                .as_str()
+                .unwrap()
+                .to_string()
         };
 
-        let requests: Vec<(& str, Request)> = vec![
-            ("search", Request::Search {
-                pattern: "alpha".into(),
-                json: true,
-                limit: Some(10),
-                offset: None,
-                paths: None,
-                scope: None,
-            }),
-            ("resolve", Request::Resolve { phrase: "alpha".into(), limit: Some(5) }),
-            ("targets", Request::Targets { task: "alpha beta".into(), limit: Some(5), max_tier: None, precision: false }),
-            ("impact", Request::Impact {
-                uid_or_name: "alpha".into(),
-                direction: "upstream".into(),
-                depth: Some(2),
-            }),
-            ("uses", Request::Uses {
-                uid_or_name: "alpha".into(),
-                role: "callers".into(),
-                offset: None,
-            }),
-            ("trace", Request::Trace { from: "beta".into(), to: "alpha".into() }),
-            ("changes", Request::Changes { base: None, offset: None, include_tests: false }),
-            ("context", Request::Context { uid, budget_tokens: Some(2000) }),
-            ("symbol", Request::Symbol { name: "alpha".into() }),
+        let requests: Vec<(&str, Request)> = vec![
+            (
+                "search",
+                Request::Search {
+                    pattern: "alpha".into(),
+                    json: true,
+                    limit: Some(10),
+                    offset: None,
+                    paths: None,
+                    scope: None,
+                },
+            ),
+            (
+                "resolve",
+                Request::Resolve {
+                    phrase: "alpha".into(),
+                    limit: Some(5),
+                },
+            ),
+            (
+                "targets",
+                Request::Targets {
+                    task: "alpha beta".into(),
+                    limit: Some(5),
+                    max_tier: None,
+                    precision: false,
+                },
+            ),
+            (
+                "impact",
+                Request::Impact {
+                    uid_or_name: "alpha".into(),
+                    direction: "upstream".into(),
+                    depth: Some(2),
+                },
+            ),
+            (
+                "uses",
+                Request::Uses {
+                    uid_or_name: "alpha".into(),
+                    role: "callers".into(),
+                    offset: None,
+                },
+            ),
+            (
+                "trace",
+                Request::Trace {
+                    from: "beta".into(),
+                    to: "alpha".into(),
+                },
+            ),
+            (
+                "changes",
+                Request::Changes {
+                    base: None,
+                    offset: None,
+                    include_tests: false,
+                },
+            ),
+            (
+                "context",
+                Request::Context {
+                    uid,
+                    budget_tokens: Some(2000),
+                },
+            ),
+            (
+                "symbol",
+                Request::Symbol {
+                    name: "alpha".into(),
+                },
+            ),
             ("processes", Request::Processes { offset: None }),
             ("clusters", Request::Clusters { offset: None }),
         ];
@@ -3710,7 +3822,10 @@ mod tests {
         let walked: std::collections::HashSet<&str> =
             requests.iter().map(|(name, _)| *name).collect();
         for op in super::RETRIEVAL_OPS {
-            assert!(walked.contains(op), "RETRIEVAL_OPS entry {op:?} not exercised by this test");
+            assert!(
+                walked.contains(op),
+                "RETRIEVAL_OPS entry {op:?} not exercised by this test"
+            );
         }
 
         for (name, req) in requests {

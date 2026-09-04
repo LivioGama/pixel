@@ -161,10 +161,7 @@ impl ShardBuilder {
             Err(error) => return Err(ShardError::Io(error)),
         }
         {
-            let file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)?;
+            let file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
             let mut w = BufWriter::new(file);
 
             // Sections are assembled in memory first (v1 simplicity; the

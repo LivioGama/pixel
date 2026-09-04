@@ -44,7 +44,9 @@ pub fn classify(argv: &[String]) -> CommandClass {
         return CommandClass::Test;
     }
     for pair in argv.windows(2) {
-        if (pair[0].ends_with("cargo") || pair[0] == "cargo" || pair[0].ends_with("bun")
+        if (pair[0].ends_with("cargo")
+            || pair[0] == "cargo"
+            || pair[0].ends_with("bun")
             || pair[0] == "bun")
             && pair[1] == "test"
         {
@@ -205,7 +207,9 @@ fn record_generic_failure(
 /// command's exit code (which the CLI mirrors).
 pub fn run_wrapped(store: &Store, label: Option<&str>, argv: &[String]) -> Result<i32, String> {
     let Some(program) = argv.first() else {
-        return Err("no command given (usage: sniper run [--label name] -- <cmd> [args...])".into());
+        return Err(
+            "no command given (usage: sniper run [--label name] -- <cmd> [args...])".into(),
+        );
     };
     let label = label.unwrap_or(program).to_owned();
     let class = classify(argv);
@@ -336,7 +340,13 @@ mod tests {
     #[test]
     fn classify_build_fallback() {
         assert_eq!(classify(&argv(&["cargo", "build"])), CommandClass::Build);
-        assert_eq!(classify(&argv(&["sh", "-c", "exit 3"])), CommandClass::Build);
-        assert_eq!(classify(&argv(&["bun", "run", "build"])), CommandClass::Build);
+        assert_eq!(
+            classify(&argv(&["sh", "-c", "exit 3"])),
+            CommandClass::Build
+        );
+        assert_eq!(
+            classify(&argv(&["bun", "run", "build"])),
+            CommandClass::Build
+        );
     }
 }

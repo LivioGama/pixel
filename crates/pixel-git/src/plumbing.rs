@@ -98,7 +98,11 @@ impl GitRunner {
     /// an undetermined changed-path set must abort that decision, never be
     /// silently read as "nothing changed" (which would let a mutation
     /// proceed as if no dirty file were ever at risk).
-    pub fn diff_name_status_or_err(&self, from: &str, to: &str) -> Result<Vec<(char, String)>, GitError> {
+    pub fn diff_name_status_or_err(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<(char, String)>, GitError> {
         validate_ref(from)?;
         validate_ref(to)?;
         let out = self
@@ -182,7 +186,11 @@ impl GitRunner {
     /// `git log --follow -n <depth> --format=%H%x1f%ct%x1f%s -- <path>`,
     /// parsed into (oid, commit_unix_timestamp, subject) tuples. Port of
     /// `pixel-cli::rescue_cmd::plan`'s history walk.
-    pub fn log_follow(&self, path: &str, depth: usize) -> Result<Vec<(String, i64, String)>, GitError> {
+    pub fn log_follow(
+        &self,
+        path: &str,
+        depth: usize,
+    ) -> Result<Vec<(String, i64, String)>, GitError> {
         let depth_str = depth.to_string();
         let out = self.run(&[
             "log",
@@ -201,7 +209,11 @@ impl GitRunner {
             else {
                 continue;
             };
-            rows.push((oid.to_string(), ct.parse().unwrap_or(0), subject.to_string()));
+            rows.push((
+                oid.to_string(),
+                ct.parse().unwrap_or(0),
+                subject.to_string(),
+            ));
         }
         Ok(rows)
     }
@@ -244,7 +256,8 @@ impl GitRunner {
     pub fn rev_verify_commit(&self, oid: &str) -> Result<(), GitError> {
         validate_ref(oid)?;
         let spec = format!("{oid}^{{commit}}");
-        self.run(&["rev-parse", "--verify", "-q", &spec]).map(|_| ())
+        self.run(&["rev-parse", "--verify", "-q", &spec])
+            .map(|_| ())
     }
 
     /// `git show <oid>:<path>` returning the blob content as a String.
@@ -508,10 +521,16 @@ mod tests {
         git(&root, &["commit", "-q", "-m", "c1"]);
         let runner = GitRunner::new(&root);
         let head = runner.rev_parse_head().unwrap();
-        let content = runner.show_blob_string(&head, "c.txt").expect("blob string");
+        let content = runner
+            .show_blob_string(&head, "c.txt")
+            .expect("blob string");
         assert_eq!(content, "content here");
         // Flag injection rejected.
-        assert!(runner.show_blob_string("--output=/tmp/evil", "c.txt").is_err());
+        assert!(
+            runner
+                .show_blob_string("--output=/tmp/evil", "c.txt")
+                .is_err()
+        );
     }
 
     #[test]
@@ -530,7 +549,10 @@ mod tests {
             .expect("stash push paths");
         // a.txt stashed (clean), b.txt still dirty
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "a");
-        assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), "b-dirty");
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.txt")).unwrap(),
+            "b-dirty"
+        );
     }
 
     // -----------------------------------------------------------------

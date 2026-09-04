@@ -305,7 +305,9 @@ impl<'a> TsWalker<'a> {
 
     fn push_res_status(&mut self, node: Node) {
         for arg in self.call_args(node) {
-            if let Some(n) = parse_int(&self.text(arg)) && (100..=599).contains(&n) {
+            if let Some(n) = parse_int(&self.text(arg))
+                && (100..=599).contains(&n)
+            {
                 self.push_status(n, node);
             }
         }
@@ -313,7 +315,9 @@ impl<'a> TsWalker<'a> {
 
     fn push_abort_status(&mut self, node: Node) {
         for arg in self.call_args(node) {
-            if let Some(n) = parse_int(&self.text(arg)) && (100..=599).contains(&n) {
+            if let Some(n) = parse_int(&self.text(arg))
+                && (100..=599).contains(&n)
+            {
                 self.push_status(n, node);
             }
         }
@@ -392,7 +396,8 @@ fn walk_ts_concepts(w: &mut TsWalker, node: Node, depth: usize) {
             if let Some(name_node) = node.child(0) {
                 let name = w.text(name_node);
                 if ATTR_NAMES.contains(&name.trim())
-                    && let Some(value_node) = each_child(node).into_iter().find(|c| c.kind() == "string")
+                    && let Some(value_node) =
+                        each_child(node).into_iter().find(|c| c.kind() == "string")
                 {
                     let text = strip_quotes(&w.text(value_node));
                     w.push_attr_text(name.trim().to_string(), text, node);
@@ -687,7 +692,12 @@ fn handle_tag(tag: &str, line: u32, out: &mut Vec<RawConcept>) {
             end_line: line,
             owner_symbol_id: None,
         });
-    } else if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    } else if name
+        .chars()
+        .next()
+        .map(|c| c.is_uppercase())
+        .unwrap_or(false)
+    {
         out.push(RawConcept {
             kind: ConceptKind::Component,
             raw: name.clone(),
@@ -784,11 +794,7 @@ fn extract_yaml_config(content: &[u8]) -> Vec<RawConcept> {
             continue;
         };
         let indent = line.len() - line.trim_start().len();
-        let key = key
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .to_string();
+        let key = key.trim().trim_matches('"').trim_matches('\'').to_string();
         while let Some(&(si, _)) = stack.last() {
             if si >= indent {
                 stack.pop();
@@ -946,7 +952,10 @@ fn line_of(text: &str, byte_offset: usize) -> u32 {
 }
 
 fn is_uppercase_component(name: &str) -> bool {
-    name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+    name.chars()
+        .next()
+        .map(|c| c.is_uppercase())
+        .unwrap_or(false)
 }
 
 fn parse_int(s: &str) -> Option<i64> {

@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::durable::{ensure_dir, write_durably};
 
@@ -94,7 +94,9 @@ fn snapshot_dir_for(root: &Path, file: &Path) -> PathBuf {
 }
 
 fn journal_path(root: &Path) -> PathBuf {
-    root.join(".pixel").join("env-snapshots").join("journal.jsonl")
+    root.join(".pixel")
+        .join("env-snapshots")
+        .join("journal.jsonl")
 }
 
 /// UTC timestamp `YYYYMMDDTHHMMSS.NNNNNNNNNZ` — lexicographically sortable,
@@ -119,9 +121,7 @@ fn utc_timestamp() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if month <= 2 { y + 1 } else { y };
-    format!(
-        "{year:04}{month:02}{d:02}T{h:02}{m:02}{s:02}.{nanos:09}Z"
-    )
+    format!("{year:04}{month:02}{d:02}T{h:02}{m:02}{s:02}.{nanos:09}Z")
 }
 
 /// Copy the current file content into the snapshot store. Returns the
@@ -183,9 +183,7 @@ fn parse_env_line(line: &str) -> Option<(String, usize)> {
         return None;
     }
     // Optional `export ` prefix.
-    if line[i..].starts_with("export")
-        && matches!(bytes.get(i + 6), Some(b' ') | Some(b'\t'))
-    {
+    if line[i..].starts_with("export") && matches!(bytes.get(i + 6), Some(b' ') | Some(b'\t')) {
         i += 6;
         while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
             i += 1;
@@ -256,8 +254,7 @@ fn key_names(content: &str) -> Vec<String> {
 fn read_env_text(path: &Path) -> Result<String, String> {
     let bytes =
         fs::read(path).map_err(|e| format!("cannot read env file {}: {e}", path.display()))?;
-    String::from_utf8(bytes)
-        .map_err(|_| format!("env file {} is not valid UTF-8", path.display()))
+    String::from_utf8(bytes).map_err(|_| format!("env file {} is not valid UTF-8", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -456,8 +453,8 @@ fn restore(root: &Path, file: &Path, snapshot: Option<&str>) -> Result<Value, St
 
     // Make restore itself undoable: snapshot current state first.
     if path.exists() {
-        let current = fs::read(&path)
-            .map_err(|e| format!("cannot read env file {}: {e}", path.display()))?;
+        let current =
+            fs::read(&path).map_err(|e| format!("cannot read env file {}: {e}", path.display()))?;
         take_snapshot(root, &path, &current)?;
     }
 

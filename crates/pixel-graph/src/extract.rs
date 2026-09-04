@@ -938,7 +938,10 @@ namespace MyApp.Services {
             "Add",
             "Predicate",
         ] {
-            assert!(names.contains(&expected), "missing symbol {expected}: {names:?}");
+            assert!(
+                names.contains(&expected),
+                "missing symbol {expected}: {names:?}"
+            );
         }
 
         // Call into List<string>.Add via member access: receiver `list`.
@@ -948,7 +951,9 @@ namespace MyApp.Services {
             .filter(|c| c.receiver.is_some())
             .collect();
         assert!(
-            member_calls.iter().any(|c| c.callee_name == "Add" && c.receiver.as_deref() == Some("list")),
+            member_calls
+                .iter()
+                .any(|c| c.callee_name == "Add" && c.receiver.as_deref() == Some("list")),
             "expected member call Add() on receiver `list`: {:?}",
             extraction.calls
         );

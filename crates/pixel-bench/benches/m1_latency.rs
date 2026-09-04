@@ -177,9 +177,12 @@ fn bench_search_service_time(c: &mut Criterion) {
     let _ = svc.handle(make_req());
 
     // Real gate: fails this `cargo bench` run if the budget is violated.
-    assert_service_time_budget("search_service_time", SERVICE_TIME_BUDGET, FAST_GATE_ITERS, || {
-        svc.handle(make_req())
-    });
+    assert_service_time_budget(
+        "search_service_time",
+        SERVICE_TIME_BUDGET,
+        FAST_GATE_ITERS,
+        || svc.handle(make_req()),
+    );
 
     c.bench_function("search_service_time", |b| b.iter(|| svc.handle(make_req())));
 }
@@ -203,11 +206,16 @@ fn bench_targets_service_time(c: &mut Criterion) {
     // Real gate: fails this `cargo bench` run if the budget is violated.
     // If `targets` is still over budget, this MUST fail loudly -- do not
     // raise the threshold to paper over a real regression.
-    assert_service_time_budget("targets_service_time", SERVICE_TIME_BUDGET, FAST_GATE_ITERS, || {
-        svc.handle(make_req())
-    });
+    assert_service_time_budget(
+        "targets_service_time",
+        SERVICE_TIME_BUDGET,
+        FAST_GATE_ITERS,
+        || svc.handle(make_req()),
+    );
 
-    c.bench_function("targets_service_time", |b| b.iter(|| svc.handle(make_req())));
+    c.bench_function("targets_service_time", |b| {
+        b.iter(|| svc.handle(make_req()))
+    });
 }
 
 /// M1 gate: ranked search service time must be <1ms (the ranking adds
@@ -247,9 +255,12 @@ fn bench_ping_service_time(c: &mut Criterion) {
     let (_root, mut svc) = fixture_with_needle(10, "needle");
 
     // Real gate: fails this `cargo bench` run if the budget is violated.
-    assert_service_time_budget("ping_service_time", SERVICE_TIME_BUDGET, FAST_GATE_ITERS, || {
-        svc.handle(Request::from(Op::Ping))
-    });
+    assert_service_time_budget(
+        "ping_service_time",
+        SERVICE_TIME_BUDGET,
+        FAST_GATE_ITERS,
+        || svc.handle(Request::from(Op::Ping)),
+    );
 
     c.bench_function("ping_service_time", |b| {
         b.iter(|| svc.handle(Request::from(Op::Ping)))
@@ -287,9 +298,12 @@ criterion_main!(m1_gates);
 #[test]
 fn gate_ping_service_time() {
     let (_root, mut svc) = fixture_with_needle(10, "needle");
-    assert_service_time_budget("ping_service_time", SERVICE_TIME_BUDGET, FAST_GATE_ITERS, || {
-        svc.handle(Request::from(Op::Ping))
-    });
+    assert_service_time_budget(
+        "ping_service_time",
+        SERVICE_TIME_BUDGET,
+        FAST_GATE_ITERS,
+        || svc.handle(Request::from(Op::Ping)),
+    );
 }
 
 #[test]
@@ -306,9 +320,12 @@ fn gate_search_service_time() {
         })
     };
     let _ = svc.handle(make_req());
-    assert_service_time_budget("search_service_time", SERVICE_TIME_BUDGET, FAST_GATE_ITERS, || {
-        svc.handle(make_req())
-    });
+    assert_service_time_budget(
+        "search_service_time",
+        SERVICE_TIME_BUDGET,
+        FAST_GATE_ITERS,
+        || svc.handle(make_req()),
+    );
 }
 
 #[test]
@@ -349,7 +366,10 @@ fn gate_targets_service_time() {
         })
     };
     let _ = svc.handle(make_req());
-    assert_service_time_budget("targets_service_time", SERVICE_TIME_BUDGET, FAST_GATE_ITERS, || {
-        svc.handle(make_req())
-    });
+    assert_service_time_budget(
+        "targets_service_time",
+        SERVICE_TIME_BUDGET,
+        FAST_GATE_ITERS,
+        || svc.handle(make_req()),
+    );
 }

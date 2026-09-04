@@ -213,7 +213,10 @@ fn concepts_of(store: &GraphStore, kind: &str) -> Vec<RawRow> {
 fn build_graph_extracts_ui_text_from_jsx() {
     let (_dir, store) = build_fixture();
     let rows = concepts_of(&store, "ui_text");
-    assert!(!rows.is_empty(), "expected ui_text rows, got none: {rows:?}");
+    assert!(
+        !rows.is_empty(),
+        "expected ui_text rows, got none: {rows:?}"
+    );
     assert!(
         rows.iter().any(|r| r.norm == "email address"),
         "expected a ui_text row normalizing to 'email address', got {rows:?}"
@@ -262,7 +265,8 @@ fn build_graph_extracts_string_literal() {
         "expected the long WELCOME_MESSAGE literal as a string concept, got {rows:?}"
     );
     assert!(
-        rows.iter().any(|r| r.raw == "Service is currently unavailable"),
+        rows.iter()
+            .any(|r| r.raw == "Service is currently unavailable"),
         "expected the Error-call-style string arg to be extracted, got {rows:?}"
     );
 }
@@ -528,8 +532,8 @@ fn t2_word_intersection_fallback() {
     // — wait, use a phrase whose head noun carries no kind mapping so T1
     // is a genuine no-op, forcing T2's word intersection/OR degrade.
     let (_dir, store) = build_fixture();
-    let outcome = resolve(&store, "personalized dashboard", &ResolveOptions::default())
-        .expect("resolve");
+    let outcome =
+        resolve(&store, "personalized dashboard", &ResolveOptions::default()).expect("resolve");
     assert_ne!(outcome.confidence, Confidence::Unresolved, "{outcome:?}");
     assert_eq!(outcome.tier, Some(Tier::T2), "{outcome:?}");
 }
@@ -559,13 +563,20 @@ fn t3_trigram_fallback_is_real_not_a_stub() {
 #[test]
 fn unresolved_phrase_reports_every_tier_attempted_honestly() {
     let (_dir, store) = build_fixture();
-    let outcome = resolve(&store, "qzxfnprglotchwibble", &ResolveOptions::default())
-        .expect("resolve");
+    let outcome =
+        resolve(&store, "qzxfnprglotchwibble", &ResolveOptions::default()).expect("resolve");
     assert_eq!(outcome.confidence, Confidence::Unresolved, "{outcome:?}");
     assert!(outcome.matches.is_empty(), "{outcome:?}");
     assert_eq!(
         outcome.tiers_attempted,
-        vec![Tier::Ident, Tier::T0, Tier::T1, Tier::T2, Tier::T3, Tier::Symbol],
+        vec![
+            Tier::Ident,
+            Tier::T0,
+            Tier::T1,
+            Tier::T2,
+            Tier::T3,
+            Tier::Symbol
+        ],
         "an honest miss must report every tier it actually tried: {outcome:?}"
     );
 }
@@ -645,12 +656,10 @@ fn real_scoring_exact_beats_word_overlap() {
     // Word-overlap-only match ("email address field" shares words with the
     // "Email Address" concept but has no exact norm) scores in the 0.3–0.7
     // band.
-    let overlap = resolve(&store, "email address field", &ResolveOptions::default())
-        .expect("resolve");
+    let overlap =
+        resolve(&store, "email address field", &ResolveOptions::default()).expect("resolve");
     assert!(
         overlap.matches.iter().all(|m| m.score < 0.8),
         "word-overlap matches should score <0.8, got {overlap:?}"
     );
 }
-
-

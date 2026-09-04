@@ -257,7 +257,9 @@ fn message_search(store: &FactsStore, units: &[String], limit: usize) -> Result<
         let (id, oid, at, author, message) = row?;
         let rel = relevance_of(&message, units) as f64;
         let score = rel + recency_score(id, max_id);
-        hits.push(to_hit(&oid, &at, &message, &author, 0, "message", None, None, score));
+        hits.push(to_hit(
+            &oid, &at, &message, &author, 0, "message", None, None, score,
+        ));
     }
     Ok(hits)
 }
@@ -307,13 +309,33 @@ fn path_search(store: &FactsStore, units: &[String], limit: usize) -> Result<Vec
                  JOIN commits c ON c.id = f.commit_id
                  WHERE f.id = ?1",
                 [change_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
             )
             .ok();
         if let Some((id, oid, at, author, message, path, ft)) = row {
             let rel = relevance_of(&path, units) as f64;
             let score = rel + recency_score(id, max_id);
-            hits.push(to_hit(&oid, &at, &message, &author, ft, "path", Some(&path), Some(&path), score));
+            hits.push(to_hit(
+                &oid,
+                &at,
+                &message,
+                &author,
+                ft,
+                "path",
+                Some(&path),
+                Some(&path),
+                score,
+            ));
         }
     }
     Ok(hits)
@@ -331,7 +353,9 @@ fn diff_search(store: &FactsStore, units: &[String], limit: usize) -> Result<Vec
     let mut hunk_ids: Vec<i64> = Vec::new();
     {
         let placeholders = hashes.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT DISTINCT hunk_id FROM diff_grams WHERE hash IN ({placeholders}) LIMIT 10000");
+        let sql = format!(
+            "SELECT DISTINCT hunk_id FROM diff_grams WHERE hash IN ({placeholders}) LIMIT 10000"
+        );
         let mut stmt = store.conn().prepare(&sql)?;
         let mut rows = stmt.query(rusqlite::params_from_iter(hashes.iter().map(|h| *h as i64)))?;
         while let Some(row) = rows.next()? {
@@ -355,7 +379,18 @@ fn diff_search(store: &FactsStore, units: &[String], limit: usize) -> Result<Vec
                  JOIN commits c ON c.id = h.commit_id
                  WHERE h.id = ?1",
                 [hunk_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                    ))
+                },
             )
             .ok();
         if let Some((id, oid, at, author, message, ft, added, removed)) = row {
@@ -367,7 +402,17 @@ fn diff_search(store: &FactsStore, units: &[String], limit: usize) -> Result<Vec
             }
             let score = rel + recency_score(id, max_id);
             let snippet = make_snippet(&text, &units);
-            hits.push(to_hit(&oid, &at, &message, &author, ft, "diff", None, Some(&snippet), score));
+            hits.push(to_hit(
+                &oid,
+                &at,
+                &message,
+                &author,
+                ft,
+                "diff",
+                None,
+                Some(&snippet),
+                score,
+            ));
         }
     }
     Ok(hits)

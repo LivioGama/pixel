@@ -228,8 +228,7 @@ fn is_identifier_shaped(norm: &str) -> bool {
     if norm.len() < 2 || norm.contains(' ') {
         return false;
     }
-    norm.chars()
-        .all(|c| c.is_alphanumeric() || c == '_')
+    norm.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
 /// Map a head noun to the concept kind(s) it implies. Returns empty when the
@@ -317,7 +316,15 @@ pub fn resolve(
             syms = store.symbols_by_name(&norm, limit as u32)?;
         }
         if !syms.is_empty() {
-            return finish_symbols(store, phrase, syms, opts, tiers_attempted, Tier::Ident, false);
+            return finish_symbols(
+                store,
+                phrase,
+                syms,
+                opts,
+                tiers_attempted,
+                Tier::Ident,
+                false,
+            );
         }
     }
 
@@ -331,7 +338,16 @@ pub fn resolve(
             } else {
                 (Confidence::Ranked, Tier::T0)
             };
-            return finish(store, phrase, exact, confidence, tier, opts, tiers_attempted, false);
+            return finish(
+                store,
+                phrase,
+                exact,
+                confidence,
+                tier,
+                opts,
+                tiers_attempted,
+                false,
+            );
         }
     }
 
@@ -365,9 +381,11 @@ pub fn resolve(
             // contains (its norm is just the bare digits), so search on the
             // code alone rather than on `remaining`.
             let word_refs = [h.as_str()];
-            t1_rows.extend(
-                store.concepts_by_kind_words(ConceptKind::Status, &word_refs, limit as u32)?,
-            );
+            t1_rows.extend(store.concepts_by_kind_words(
+                ConceptKind::Status,
+                &word_refs,
+                limit as u32,
+            )?);
         } else if let Some(h) = &head {
             for kind in kind_for_head_noun(h) {
                 t1_rows.extend(store.concepts_by_kind_words(kind, &remaining, limit as u32)?);
@@ -527,10 +545,7 @@ fn finish(
     }
 
     // Rerank within the tier via the pluggable reranker.
-    let reranker: &dyn Reranker = opts
-        .reranker
-        .as_deref()
-        .unwrap_or(&LexicalReranker);
+    let reranker: &dyn Reranker = opts.reranker.as_deref().unwrap_or(&LexicalReranker);
     let reordered = reranker.rerank(candidates, &opts.signals);
     let mut ordered: Vec<ConceptMatch> = reordered
         .into_iter()
@@ -546,7 +561,10 @@ fn finish(
             tier.as_str()
         )
     } else {
-        format!("tier {} (concept index, scanned to completion)", tier.as_str())
+        format!(
+            "tier {} (concept index, scanned to completion)",
+            tier.as_str()
+        )
     };
     Ok(ResolveOutcome {
         confidence,
@@ -633,10 +651,7 @@ fn finish_symbols(
         });
     }
 
-    let reranker: &dyn Reranker = opts
-        .reranker
-        .as_deref()
-        .unwrap_or(&LexicalReranker);
+    let reranker: &dyn Reranker = opts.reranker.as_deref().unwrap_or(&LexicalReranker);
     let reordered = reranker.rerank(candidates, &opts.signals);
     let mut ordered: Vec<ConceptMatch> = reordered
         .into_iter()
@@ -797,7 +812,11 @@ fn symbol_words(name: &str) -> Vec<String> {
         if c.is_alphanumeric() {
             let boundary = !cur.is_empty()
                 && c.is_ascii_uppercase()
-                && cur.chars().last().map(|x| x.is_ascii_lowercase()).unwrap_or(false);
+                && cur
+                    .chars()
+                    .last()
+                    .map(|x| x.is_ascii_lowercase())
+                    .unwrap_or(false);
             if boundary {
                 out.push(cur.to_lowercase());
                 cur.clear();
@@ -1076,10 +1095,28 @@ mod tests {
         let f1 = add_file(&mut store, "src/app.tsx");
         let f2 = add_file(&mut store, "src/app.test.tsx");
         store
-            .insert_concept(f1, ConceptKind::UiText, "Submit", "submit", "", 10, 10, None)
+            .insert_concept(
+                f1,
+                ConceptKind::UiText,
+                "Submit",
+                "submit",
+                "",
+                10,
+                10,
+                None,
+            )
             .unwrap();
         store
-            .insert_concept(f1, ConceptKind::UiText, "Submit", "submit", "", 20, 20, None)
+            .insert_concept(
+                f1,
+                ConceptKind::UiText,
+                "Submit",
+                "submit",
+                "",
+                20,
+                20,
+                None,
+            )
             .unwrap();
         store
             .insert_concept(f2, ConceptKind::UiText, "Submit", "submit", "", 5, 5, None)
@@ -1101,14 +1138,27 @@ mod tests {
         let f1 = add_file(&mut store, "src/app.tsx");
         let f2 = add_file(&mut store, "src/app.test.tsx");
         store
-            .insert_concept(f1, ConceptKind::UiText, "Submit", "submit", "", 10, 10, None)
+            .insert_concept(
+                f1,
+                ConceptKind::UiText,
+                "Submit",
+                "submit",
+                "",
+                10,
+                10,
+                None,
+            )
             .unwrap();
         store
             .insert_concept(f2, ConceptKind::UiText, "Submit", "submit", "", 5, 5, None)
             .unwrap();
 
         let out = resolve(&store, "submit", &ResolveOptions::default()).unwrap();
-        let prod = out.matches.iter().find(|m| m.path == "src/app.tsx").unwrap();
+        let prod = out
+            .matches
+            .iter()
+            .find(|m| m.path == "src/app.tsx")
+            .unwrap();
         let test = out
             .matches
             .iter()
@@ -1154,7 +1204,10 @@ mod tests {
         let mut store = store();
         let f1 = add_file(&mut store, "src/a.tsx");
         let f2 = add_file(&mut store, "src/b.tsx");
-        for (f, uid) in [(f1, "src/a.tsx#dup#function"), (f2, "src/b.tsx#dup#function")] {
+        for (f, uid) in [
+            (f1, "src/a.tsx#dup#function"),
+            (f2, "src/b.tsx#dup#function"),
+        ] {
             store
                 .insert_symbol(f, uid, "dup", "dup", SymbolKind::Function, 1, 3, "dup()")
                 .unwrap();
@@ -1195,7 +1248,16 @@ mod tests {
             )
             .unwrap();
         store
-            .insert_concept(f1, ConceptKind::UiText, "Submit", "submit", "", 10, 10, Some(sym))
+            .insert_concept(
+                f1,
+                ConceptKind::UiText,
+                "Submit",
+                "submit",
+                "",
+                10,
+                10,
+                Some(sym),
+            )
             .unwrap();
 
         let out = resolve(&store, "submit button", &ResolveOptions::default()).unwrap();
@@ -1214,4 +1276,3 @@ mod tests {
         assert_eq!(symbol_words("onSubmit"), vec!["on", "submit"]);
     }
 }
-

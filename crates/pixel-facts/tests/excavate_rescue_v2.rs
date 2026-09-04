@@ -82,7 +82,15 @@ fn make_dropped_svelte_repo() -> TempDir {
     )
     .unwrap();
     git(root, &["add", "."]);
-    git(root, &["commit", "-q", "-m", "Extend Widget.svelte with a title prop"]);
+    git(
+        root,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "Extend Widget.svelte with a title prop",
+        ],
+    );
 
     // Commit 3: delete Widget.svelte, add an unrelated Widget.tsx. Subject
     // deliberately says nothing about widget/legacy/renderer.
@@ -100,7 +108,10 @@ fn make_dropped_svelte_repo() -> TempDir {
     git(root, &["checkout", "-q", "feature/only-here"]);
     fs::write(root.join("src/branch_only.txt"), "branch only marker\n").unwrap();
     git(root, &["add", "."]);
-    git(root, &["commit", "-q", "-m", "content that lives only on a branch"]);
+    git(
+        root,
+        &["commit", "-q", "-m", "content that lives only on a branch"],
+    );
     git(root, &["checkout", "-q", "main"]);
 
     // Stash entry reachable only via refs/stash.
@@ -514,7 +525,11 @@ const SUBJ_EXTEND: &str = "Extend Widget.svelte with a title prop";
 const SUBJ_DELETE: &str = "swap to typed component";
 
 fn subjects(result: &pixel_facts::excavate::ExcavateResult) -> Vec<String> {
-    result.candidates.iter().map(|c| c.subject.clone()).collect()
+    result
+        .candidates
+        .iter()
+        .map(|c| c.subject.clone())
+        .collect()
 }
 
 #[test]
@@ -526,11 +541,22 @@ fn excavate_from_to_narrows_candidates_to_the_rev_range() {
     let store = ingest(root);
 
     // Unbounded baseline: all three phrase-bearing commits are present.
-    let all = store.excavate(Some(PHRASE), None, None, None, 50).expect("excavate");
+    let all = store
+        .excavate(Some(PHRASE), None, None, None, 50)
+        .expect("excavate");
     let s = subjects(&all);
-    assert!(s.iter().any(|x| x == SUBJ_ADD), "baseline missing add: {s:?}");
-    assert!(s.iter().any(|x| x == SUBJ_EXTEND), "baseline missing extend: {s:?}");
-    assert!(s.iter().any(|x| x == SUBJ_DELETE), "baseline missing delete: {s:?}");
+    assert!(
+        s.iter().any(|x| x == SUBJ_ADD),
+        "baseline missing add: {s:?}"
+    );
+    assert!(
+        s.iter().any(|x| x == SUBJ_EXTEND),
+        "baseline missing extend: {s:?}"
+    );
+    assert!(
+        s.iter().any(|x| x == SUBJ_DELETE),
+        "baseline missing delete: {s:?}"
+    );
 
     // --to c2: the deleting commit 3 is newer than the bound and must drop.
     let to2 = store
@@ -542,8 +568,14 @@ fn excavate_from_to_narrows_candidates_to_the_rev_range() {
         s.iter().all(|x| x != SUBJ_DELETE),
         "--to <commit2> must exclude the newer deleting commit: {s:?}"
     );
-    assert!(s.iter().any(|x| x == SUBJ_ADD), "--to must keep older commits: {s:?}");
-    assert!(s.iter().any(|x| x == SUBJ_EXTEND), "--to is inclusive of the bound: {s:?}");
+    assert!(
+        s.iter().any(|x| x == SUBJ_ADD),
+        "--to must keep older commits: {s:?}"
+    );
+    assert!(
+        s.iter().any(|x| x == SUBJ_EXTEND),
+        "--to is inclusive of the bound: {s:?}"
+    );
 
     // --from c2: the add commit 1 is older than the bound and must drop;
     // the bound itself stays included.
@@ -555,16 +587,28 @@ fn excavate_from_to_narrows_candidates_to_the_rev_range() {
         s.iter().all(|x| x != SUBJ_ADD),
         "--from <commit2> must exclude older commits: {s:?}"
     );
-    assert!(s.iter().any(|x| x == SUBJ_EXTEND), "--from is inclusive of the bound: {s:?}");
-    assert!(s.iter().any(|x| x == SUBJ_DELETE), "--from must keep newer commits: {s:?}");
+    assert!(
+        s.iter().any(|x| x == SUBJ_EXTEND),
+        "--from is inclusive of the bound: {s:?}"
+    );
+    assert!(
+        s.iter().any(|x| x == SUBJ_DELETE),
+        "--from must keep newer commits: {s:?}"
+    );
 
     // [c1..c2]: inclusive of both ends, excludes the newer deleting commit.
     let mid = store
         .excavate(Some(PHRASE), None, Some(&c1), Some(&c2), 50)
         .expect("excavate --from --to");
     let s = subjects(&mid);
-    assert!(s.iter().any(|x| x == SUBJ_ADD), "[from..to] includes the older bound: {s:?}");
-    assert!(s.iter().any(|x| x == SUBJ_EXTEND), "[from..to] includes the newer bound: {s:?}");
+    assert!(
+        s.iter().any(|x| x == SUBJ_ADD),
+        "[from..to] includes the older bound: {s:?}"
+    );
+    assert!(
+        s.iter().any(|x| x == SUBJ_EXTEND),
+        "[from..to] includes the newer bound: {s:?}"
+    );
     assert!(
         s.iter().all(|x| x != SUBJ_DELETE),
         "[from..to] excludes commits past the newer bound: {s:?}"
@@ -576,7 +620,10 @@ fn excavate_from_to_narrows_candidates_to_the_rev_range() {
         .excavate(Some(PHRASE), None, None, Some(&c1), 50)
         .expect("excavate --to c1");
     let lg = to1.last_good.as_ref().expect("last_good inside the range");
-    assert_eq!(lg.subject, SUBJ_ADD, "last_good must respect the range bound");
+    assert_eq!(
+        lg.subject, SUBJ_ADD,
+        "last_good must respect the range bound"
+    );
 }
 
 #[test]
@@ -586,7 +633,9 @@ fn excavate_unresolvable_range_ref_is_a_structured_error() {
 
     let err = store
         .excavate(Some(PHRASE), None, Some("no-such-ref"), None, 50)
-        .expect_err("an unresolvable --from ref must be an error, not a silently unfiltered answer");
+        .expect_err(
+            "an unresolvable --from ref must be an error, not a silently unfiltered answer",
+        );
     let msg = err.to_string();
     assert!(
         msg.contains("does not resolve") && msg.contains("no-such-ref"),
@@ -596,7 +645,10 @@ fn excavate_unresolvable_range_ref_is_a_structured_error() {
     let err = store
         .excavate(Some(PHRASE), None, None, Some("also-missing"), 50)
         .expect_err("an unresolvable --to ref must be an error");
-    assert!(err.to_string().contains("also-missing"), "error names the ref: {err}");
+    assert!(
+        err.to_string().contains("also-missing"),
+        "error names the ref: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -618,7 +670,10 @@ fn phrase_removed_between_flags_only_actual_removals() {
         None
     );
     // Never present: not a removal.
-    assert_eq!(phrase_removed_between("", "fn apply_discount() {}", &kw), None);
+    assert_eq!(
+        phrase_removed_between("", "fn apply_discount() {}", &kw),
+        None
+    );
     // Case-insensitive matching.
     assert_eq!(
         phrase_removed_between("Apply_DISCOUNT here", "gone", &kw),

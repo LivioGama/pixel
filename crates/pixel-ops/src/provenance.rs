@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use pixel_git::GitRunner;
 
@@ -159,9 +159,7 @@ pub fn provenance(root: &Path, opts: &ProvenanceOptions) -> Result<Value, String
         let q = query.to_lowercase();
         let matches = |name: &str, mail: Option<&str>| {
             name.to_lowercase().contains(&q)
-                || mail
-                    .map(|m| m.to_lowercase().contains(&q))
-                    .unwrap_or(false)
+                || mail.map(|m| m.to_lowercase().contains(&q)).unwrap_or(false)
         };
         let mut lines_owned = 0u64;
         let mut regions_owned = 0u64;
@@ -466,8 +464,7 @@ mod tests {
     fn header_parse_rejects_metadata_lines() {
         assert!(parse_header("author Livio").is_none());
         assert!(parse_header("author-time 1693000000").is_none());
-        let (oid, fin) =
-            parse_header("0123456789abcdef0123456789abcdef01234567 3 7 2").unwrap();
+        let (oid, fin) = parse_header("0123456789abcdef0123456789abcdef01234567 3 7 2").unwrap();
         assert_eq!(oid, "0123456789abcdef0123456789abcdef01234567");
         assert_eq!(fin, 7);
     }

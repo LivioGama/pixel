@@ -3,11 +3,11 @@
 //! history segments, with a dedicated low-priority ingest thread that never
 //! blocks queries.
 
-pub mod store;
-pub mod ingest;
-pub mod search;
-pub mod lifecycle;
 pub mod excavate;
+pub mod ingest;
+pub mod lifecycle;
 pub mod poison;
+pub mod search;
+pub mod store;
 
 pub use store::{FactsError, FactsStore, IndexState};

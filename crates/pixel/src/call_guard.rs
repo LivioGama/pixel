@@ -128,7 +128,9 @@ fn save_calls(calls_path: &Path, calls: &[CallEntry]) {
 /// Find the `.pixel` directory for a given path (walks up like the
 /// guard does). Returns the path to `calls.json` inside it.
 fn calls_path_for(anchor: &Path) -> Option<PathBuf> {
-    let mut dir = anchor.canonicalize().unwrap_or_else(|_| anchor.to_path_buf());
+    let mut dir = anchor
+        .canonicalize()
+        .unwrap_or_else(|_| anchor.to_path_buf());
     loop {
         let candidate = dir.join(".pixel");
         if candidate.is_dir() {
@@ -250,10 +252,8 @@ mod tests {
 
     fn temp_dir() -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-call-guard-test-{}-{n}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pixel-call-guard-test-{}-{n}", std::process::id()));
         std::fs::create_dir_all(dir.join(".pixel")).unwrap();
         dir
     }
@@ -309,7 +309,9 @@ mod tests {
         }
         match check_and_record("search", "another .", &dir) {
             CallGuardResult::Allow => {}
-            CallGuardResult::Block(msg) => panic!("5th search with mixed commands should be allowed: {msg}"),
+            CallGuardResult::Block(msg) => {
+                panic!("5th search with mixed commands should be allowed: {msg}")
+            }
         }
         std::fs::remove_dir_all(&dir).ok();
     }

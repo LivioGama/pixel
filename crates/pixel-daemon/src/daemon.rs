@@ -179,7 +179,10 @@ impl Corpus for Service {
                 }
             })
             .collect();
-        let slice: Vec<(&str, bool)> = rel_changes.iter().map(|(r, rem)| (r.as_str(), *rem)).collect();
+        let slice: Vec<(&str, bool)> = rel_changes
+            .iter()
+            .map(|(r, rem)| (r.as_str(), *rem))
+            .collect();
         self.refresh_files(&slice);
     }
 }
@@ -420,7 +423,10 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
                 let is_shutdown = matches!(req, Request::Shutdown);
                 (service.handle(req), is_shutdown)
             }
-            Err(e) => (failure_response("error", format!("bad request: {e}")), false),
+            Err(e) => (
+                failure_response("error", format!("bad request: {e}")),
+                false,
+            ),
         };
         let out = serde_json::to_string(&resp).unwrap_or_else(|_| {
             // Fallback: a minimal failure envelope if serialization itself

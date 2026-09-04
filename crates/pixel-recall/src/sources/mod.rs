@@ -28,7 +28,9 @@ pub struct SourceUnit {
 pub enum Change {
     New,
     /// Grew append-only; resume parsing from this byte offset.
-    Appended { from: u64 },
+    Appended {
+        from: u64,
+    },
     /// Shrank or changed in place; re-parse from scratch.
     Rewritten,
     Unchanged,
@@ -102,11 +104,7 @@ pub trait SourceAdapter {
     fn discover(&self) -> Result<Vec<SourceUnit>, IngestError>;
 
     /// Compare a unit against its recorded ingest state.
-    fn classify(
-        &self,
-        unit: &SourceUnit,
-        state: Option<&crate::store::IngestState>,
-    ) -> Change {
+    fn classify(&self, unit: &SourceUnit, state: Option<&crate::store::IngestState>) -> Change {
         match state {
             None => Change::New,
             Some(st) => {
@@ -155,8 +153,5 @@ pub fn file_tail_hash(path: &std::path::Path, end: u64) -> Option<String> {
     f.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = vec![0u8; (end - start) as usize];
     f.read_exact(&mut buf).ok()?;
-    Some(format!(
-        "{:016x}",
-        xxhash_rust::xxh3::xxh3_64(&buf)
-    ))
+    Some(format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&buf)))
 }

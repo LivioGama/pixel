@@ -80,7 +80,10 @@ fn open_sets_permissions_and_writes_project_json() {
     let project = Path::new("/tmp/fixture-project");
     let store = Store::open_at(project, state.path()).unwrap();
     let dir = store_directory(project, state.path());
-    assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(
+        fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
     assert_eq!(
         fs::metadata(store.path()).unwrap().permissions().mode() & 0o777,
         0o600
@@ -147,7 +150,10 @@ fn json_columns_round_trip() {
     input.extra = Some(serde_json::json!({"alsoSeenAs": ["browser-console"]}));
     let recorded = store.record_error(&input).unwrap();
     let fetched = store.get_error(recorded.id).unwrap().unwrap();
-    assert_eq!(fetched.frames.as_ref().unwrap()[0].file.as_deref(), Some("src/api.ts"));
+    assert_eq!(
+        fetched.frames.as_ref().unwrap()[0].file.as_deref(),
+        Some("src/api.ts")
+    );
     assert_eq!(fetched.values.unwrap()["evaluatingChain"], "a.b.c");
     assert_eq!(fetched.http.unwrap()["status"], 500);
     assert_eq!(fetched.extra.unwrap()["alsoSeenAs"][0], "browser-console");
@@ -168,7 +174,9 @@ fn surface_filter_and_search() {
     assert_eq!(vitest.len(), 2);
     assert_eq!(vitest[0].message, "1 failed | 11 passed");
     // LIKE wildcards are escaped.
-    store.record_error(&error(Surface::Reported, "100% broken")).unwrap();
+    store
+        .record_error(&error(Surface::Reported, "100% broken"))
+        .unwrap();
     assert_eq!(store.search_errors("100%", 10).unwrap().len(), 1);
     assert_eq!(store.search_errors("nomatch", 10).unwrap().len(), 0);
 }
@@ -253,7 +261,9 @@ fn retention_trims_on_open() {
         let mut ancient = error(Surface::Reported, "ancient");
         ancient.ts = Some(now - 8 * 86_400_000);
         store.record_error(&ancient).unwrap();
-        store.record_error(&error(Surface::Reported, "fresh")).unwrap();
+        store
+            .record_error(&error(Surface::Reported, "fresh"))
+            .unwrap();
         store
             .record_event(&EventInput {
                 kind: EventKind::HmrUpdate,
@@ -304,7 +314,9 @@ fn self_heals_corrupt_database() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("errors-v1.sqlite"), "this is not a sqlite file").unwrap();
     let store = Store::open_at(project, state.path()).unwrap();
-    let recorded = store.record_error(&error(Surface::Reported, "after heal")).unwrap();
+    let recorded = store
+        .record_error(&error(Surface::Reported, "after heal"))
+        .unwrap();
     assert_eq!(
         store.get_error(recorded.id).unwrap().unwrap().message,
         "after heal"
@@ -317,8 +329,12 @@ fn two_handles_share_one_wal_database() {
     let project = Path::new("/tmp/wal");
     let a = Store::open_at(project, state.path()).unwrap();
     let b = Store::open_at(project, state.path()).unwrap();
-    let from_a = a.record_error(&error(Surface::Reported, "written by a")).unwrap();
-    let from_b = b.record_error(&error(Surface::Reported, "written by b")).unwrap();
+    let from_a = a
+        .record_error(&error(Surface::Reported, "written by a"))
+        .unwrap();
+    let from_b = b
+        .record_error(&error(Surface::Reported, "written by b"))
+        .unwrap();
     assert_eq!(
         a.get_error(from_b.id).unwrap().unwrap().message,
         "written by b"

@@ -37,7 +37,9 @@ fn collect_files(root: &Path, max_files: usize) -> Vec<PathBuf> {
         if out.len() >= max_files {
             break;
         }
-        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in read.flatten() {
             let p = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
@@ -63,8 +65,18 @@ fn collect_files(root: &Path, max_files: usize) -> Vec<PathBuf> {
 fn skip_dir(name: &str) -> bool {
     matches!(
         name,
-        "target" | "node_modules" | ".git" | ".pixel" | "dist" | "build" | "vendor"
-            | ".cache" | "assets" | "reference" | "examples" | "tests"
+        "target"
+            | "node_modules"
+            | ".git"
+            | ".pixel"
+            | "dist"
+            | "build"
+            | "vendor"
+            | ".cache"
+            | "assets"
+            | "reference"
+            | "examples"
+            | "tests"
     )
 }
 
@@ -76,9 +88,29 @@ fn is_code_file(name: &str) -> bool {
         .unwrap_or_default();
     matches!(
         ext.as_str(),
-        "rs" | "toml" | "py" | "ts" | "tsx" | "js" | "jsx" | "go" | "c" | "h" | "cpp" | "hpp"
-            | "java" | "rb" | "sh" | "md" | "json" | "yaml" | "yml" | "sql" | "zig" | "swift"
-            | "kt" | "css"
+        "rs" | "toml"
+            | "py"
+            | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "go"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "java"
+            | "rb"
+            | "sh"
+            | "md"
+            | "json"
+            | "yaml"
+            | "yml"
+            | "sql"
+            | "zig"
+            | "swift"
+            | "kt"
+            | "css"
     )
 }
 
@@ -97,11 +129,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
         nb += y * y;
     }
     let denom = (na * nb).sqrt();
-    if denom > 0.0 {
-        dot / denom
-    } else {
-        0.0
-    }
+    if denom > 0.0 { dot / denom } else { 0.0 }
 }
 
 struct CorpusEntry {
@@ -132,7 +160,9 @@ pub fn ask(root: &Path, query: &str, k: usize, max_files: usize) -> Result<Vec<A
     let mut corpus: Vec<CorpusEntry> = Vec::new();
     let mut chunk_texts: Vec<String> = Vec::new();
     for file in &files {
-        let Ok(bytes) = std::fs::read(file) else { continue };
+        let Ok(bytes) = std::fs::read(file) else {
+            continue;
+        };
         if bytes.len() > MAX_FILE_BYTES {
             continue; // skip huge / binary / generated files
         }
@@ -234,7 +264,11 @@ pub fn ask(root: &Path, query: &str, k: usize, max_files: usize) -> Result<Vec<A
 
     Ok(ranked
         .into_iter()
-        .map(|(score, path, snippet)| AskHit { path, score, snippet })
+        .map(|(score, path, snippet)| AskHit {
+            path,
+            score,
+            snippet,
+        })
         .collect())
 }
 fn make_snippet(text: &str) -> String {

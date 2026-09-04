@@ -19,9 +19,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::intent::classify_user_text;
-use crate::model::{
-    Role, TOOL_INPUT_CAP, TsSource, UnifiedSession, UnifiedTurn, cap_text,
-};
+use crate::model::{Role, TOOL_INPUT_CAP, TsSource, UnifiedSession, UnifiedTurn, cap_text};
 use crate::sources::{
     Change, IngestError, ParseOutput, ParsedSession, SessionOp, SourceAdapter, SourceUnit,
 };
@@ -175,15 +173,13 @@ pub(crate) fn oc_parse(
         rows.collect::<Result<_, _>>()?
     };
 
-    let mut sess_stmt = conn.prepare(
-        "SELECT parent_id, directory, title FROM session WHERE id = ?1",
-    )?;
+    let mut sess_stmt =
+        conn.prepare("SELECT parent_id, directory, title FROM session WHERE id = ?1")?;
     let mut msg_stmt = conn.prepare(
         "SELECT id, time_created, data FROM message \
          WHERE session_id = ?1 ORDER BY time_created, id",
     )?;
-    let mut part_stmt =
-        conn.prepare("SELECT data FROM part WHERE message_id = ?1 ORDER BY id")?;
+    let mut part_stmt = conn.prepare("SELECT data FROM part WHERE message_id = ?1 ORDER BY id")?;
 
     let source_path = unit.path.to_string_lossy().to_string();
     let mut sessions: Vec<ParsedSession> = Vec::new();
@@ -191,14 +187,13 @@ pub(crate) fn oc_parse(
     for sid in touched {
         // Session metadata (PK lookup); a message whose session row vanished
         // mid-scan is skipped — it gets re-picked next pass if it returns.
-        let meta = sess_stmt
-            .query_row([&sid], |r| {
-                Ok((
-                    r.get::<_, Option<String>>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                ))
-            });
+        let meta = sess_stmt.query_row([&sid], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        });
         let (parent_id, directory, title) = match meta {
             Ok(v) => v,
             Err(rusqlite::Error::QueryReturnedNoRows) => continue,
@@ -243,10 +238,7 @@ pub(crate) fn oc_parse(
                         }
                     }
                     Some("tool") => {
-                        let name = pv
-                            .get("tool")
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown");
+                        let name = pv.get("tool").and_then(Value::as_str).unwrap_or("unknown");
                         let input = pv
                             .pointer("/state/input")
                             .map(|v| v.to_string())
@@ -289,7 +281,9 @@ pub(crate) fn oc_parse(
             source_path: source_path.clone(),
             cwd: directory.filter(|s| !s.is_empty()),
             git_branch: None,
-            title: title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
+            title: title
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty()),
             ts_source: TsSource::UnixMs,
             is_subagent: parent_id.is_some(),
             parent_source_session_id: parent_id,

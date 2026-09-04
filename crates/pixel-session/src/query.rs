@@ -182,8 +182,16 @@ pub fn env(store: &Store, diff: bool) -> Result<EnvFingerprint> {
                 }
             };
             field("git_head", &current.git_head, &prior.git_head);
-            field("lockfile_hash", &current.lockfile_hash, &prior.lockfile_hash);
-            field("vite_dep_hash", &current.vite_dep_hash, &prior.vite_dep_hash);
+            field(
+                "lockfile_hash",
+                &current.lockfile_hash,
+                &prior.lockfile_hash,
+            );
+            field(
+                "vite_dep_hash",
+                &current.vite_dep_hash,
+                &prior.vite_dep_hash,
+            );
             if current.port != prior.port {
                 changes.push(format!(
                     "port: {} -> {}",
