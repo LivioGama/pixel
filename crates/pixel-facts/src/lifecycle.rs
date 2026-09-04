@@ -58,11 +58,10 @@ impl FactsStore {
         // removed-in = the newest touch whose status is D AND it is also the
         // last touch overall.
         let mut removed_in: Option<(String, String, String)> = None;
-        if let Some(last) = &last {
-            if last.3 == "D" {
+        if let Some(last) = &last
+            && last.3 == "D" {
                 removed_in = Some((last.0.clone(), last.1.clone(), last.2.clone()));
             }
-        }
         // present-at-head: check whether the blob exists at HEAD.
         let present = self
             .runner()
@@ -100,7 +99,7 @@ impl FactsStore {
             v
         };
         for id in ids {
-            if let Some((oid, at, msg, added, removed)) = self
+            if let Ok((oid, at, msg, added, removed)) = self
                 .conn
                 .query_row(
                     "SELECT c.oid, c.committed_at, c.message, h.added, h.removed
@@ -117,7 +116,6 @@ impl FactsStore {
                         ))
                     },
                 )
-                .ok()
             {
                 let text = format!("{added}\n{removed}");
                 let rel = relevance_of(&text, &units);

@@ -381,7 +381,7 @@ fn run_context(
     until: Option<String>,
     lexical_only: bool,
 ) -> Result<(), String> {
-    if budget < 100 || budget > 200_000 {
+    if !(100..=200_000).contains(&budget) {
         return Err("--budget must be between 100 and 200000 tokens".to_string());
     }
     let store = open_store()?;
@@ -671,7 +671,7 @@ fn run_maxtest(
             pinned.push(row);
         }
     }
-    pinned.sort_by(|a, b| b.ts_last.cmp(&a.ts_last));
+    pinned.sort_by_key(|a| std::cmp::Reverse(a.ts_last));
     for row in &pinned {
         println!("  {}", session_line(row));
     }

@@ -170,15 +170,15 @@ impl FactsStore {
         if skip_path(path) {
             return Some("structural-skip".to_string());
         }
-        let learned = self
+        
+        self
             .conn
             .query_row(
                 "SELECT reason FROM poison_paths WHERE path = ?1",
                 [path],
                 |r| r.get::<_, String>(0),
             )
-            .ok();
-        learned
+            .ok()
     }
 }
 
@@ -197,12 +197,9 @@ pub fn decide_skips(store: &FactsStore, touched: &[String]) -> SkipPlan {
     let mut excludes = Vec::new();
     let mut skipped = Vec::new();
     for p in touched {
-        match store.skip_reason(p) {
-            Some(reason) => {
-                excludes.push(exclude_pathspec(p));
-                skipped.push((p.clone(), reason));
-            }
-            None => {}
+        if let Some(reason) = store.skip_reason(p) {
+            excludes.push(exclude_pathspec(p));
+            skipped.push((p.clone(), reason));
         }
     }
     excludes.sort();

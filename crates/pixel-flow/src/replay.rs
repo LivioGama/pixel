@@ -51,9 +51,7 @@ pub fn replay(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, Str
                 "#   agent-browser --session comet tab list   # find tabs matching '{}'\n",
                 substitute(pattern, vars)
             ));
-            out.push_str(&format!(
-                "#   agent-browser --session comet tab close <id>   # close each matching tab\n"
-            ));
+            out.push_str("#   agent-browser --session comet tab close <id>   # close each matching tab\n");
         }
         out.push('\n');
     }
@@ -68,9 +66,7 @@ pub fn replay(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, Str
             "agent-browser --session comet tab list   # find the tab matching '{}'\n",
             substitute(tab, vars)
         ));
-        out.push_str(&format!(
-            "agent-browser --session comet tab <id>   # switch to it\n\n"
-        ));
+        out.push_str("agent-browser --session comet tab <id>   # switch to it\n\n");
     }
 
     for (i, step) in flow.steps.iter().enumerate() {
@@ -137,9 +133,9 @@ fn render_step(
     // default tab. Skip if the action itself is `switch_tab` (it emits its
     // own tab commands).
     let effective_tab = step.tab.as_deref().or(flow_tab);
-    if step.action != "switch_tab" {
-        if let Some(tab) = effective_tab {
-            if step.tab.is_some() {
+    if step.action != "switch_tab"
+        && let Some(tab) = effective_tab
+            && step.tab.is_some() {
                 out.push_str(&format!(
                     "{}agent-browser --session comet tab list   # switch to tab matching '{}'\n",
                     indent,
@@ -150,8 +146,6 @@ fn render_step(
                     indent
                 ));
             }
-        }
-    }
 
     match step.action.as_str() {
         "open" => {

@@ -134,11 +134,10 @@ pub(crate) fn is_test_path(path: &str) -> bool {
     if file.contains(".spec.") || file.contains(".test.") {
         return true;
     }
-    if let Some((stem, _ext)) = file.rsplit_once('.') {
-        if stem.ends_with("_test") {
+    if let Some((stem, _ext)) = file.rsplit_once('.')
+        && stem.ends_with("_test") {
             return true;
         }
-    }
     path.split('/').any(|seg| seg == "tests" || seg == "test")
 }
 
@@ -762,8 +761,8 @@ fn walk_json(value: &serde_json::Value, prefix: &str, out: &mut Vec<RawConcept>)
                 walk_json(v, &path, out);
             }
         }
-        serde_json::Value::String(s) => {
-            if !prefix.is_empty() {
+        serde_json::Value::String(s)
+            if !prefix.is_empty() => {
                 out.push(RawConcept {
                     kind: ConceptKind::ConfigKey,
                     raw: s.clone(),
@@ -774,7 +773,6 @@ fn walk_json(value: &serde_json::Value, prefix: &str, out: &mut Vec<RawConcept>)
                     owner_symbol_id: None,
                 });
             }
-        }
         _ => {}
     }
 }
@@ -840,8 +838,8 @@ fn extract_css(content: &[u8]) -> Vec<RawConcept> {
     for (i, line) in text.lines().enumerate() {
         let line_no = i as u32 + 1;
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("--") {
-            if let Some((name, _)) = rest.split_once(':') {
+        if let Some(rest) = trimmed.strip_prefix("--")
+            && let Some((name, _)) = rest.split_once(':') {
                 let name = name.trim().to_string();
                 let path = format!("--{name}");
                 out.push(RawConcept {
@@ -854,7 +852,6 @@ fn extract_css(content: &[u8]) -> Vec<RawConcept> {
                     owner_symbol_id: None,
                 });
             }
-        }
     }
     out
 }

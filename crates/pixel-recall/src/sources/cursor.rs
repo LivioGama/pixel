@@ -240,14 +240,13 @@ fn extract_record(
                 Some(Value::String(s)) => raw.push_str(s),
                 Some(Value::Array(parts)) => {
                     for part in parts {
-                        if part.get("type").and_then(Value::as_str) == Some("text") {
-                            if let Some(t) = part.get("text").and_then(Value::as_str) {
+                        if part.get("type").and_then(Value::as_str) == Some("text")
+                            && let Some(t) = part.get("text").and_then(Value::as_str) {
                                 if !raw.is_empty() {
                                     raw.push('\n');
                                 }
                                 raw.push_str(t);
                             }
-                        }
                     }
                 }
                 _ => {}

@@ -78,7 +78,7 @@ impl SnapshotStore {
         let token = record.token();
         let path = dir.join(format!("{token}.json"));
         let json = serde_json::to_vec_pretty(record)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         write_durably(&path, &json)?;
         self.prune(&record.root)?;
         Ok(token)
@@ -129,7 +129,7 @@ impl SnapshotStore {
             entries.push((path, record.token(), ts));
         }
         // Sort by timestamp descending (newest first).
-        entries.sort_by(|a, b| b.2.cmp(&a.2));
+        entries.sort_by_key(|(_, _, ts)| std::cmp::Reverse(*ts));
         let now = current_unix_ms();
         let mut kept = 0;
         for (path, _token, ts) in &entries {

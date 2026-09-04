@@ -60,6 +60,7 @@ pub struct InstallSummary {
 
 /// Options controlling an install run.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct InstallOptions {
     /// Path to the pixel binary the installed hooks point at. Defaults to
     /// the current exe.
@@ -139,15 +140,6 @@ fn skipped_agent_step(id: &str, summary: &str) -> InstallStep {
     }
 }
 
-impl Default for InstallOptions {
-    fn default() -> Self {
-        InstallOptions {
-            executable_path: None,
-            home: None,
-            dry_run: false,
-        }
-    }
-}
 
 /// Run `pixel install`. Idempotent: safe to re-run.
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {
@@ -1404,7 +1396,7 @@ fn install_pi_rules(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallSte
 // {end}
 import {{ spawnSync }} from "child_process";
 
-const PIXEL_BIN = {exe_literal};
+const PIXEL_BIN = {exe_path:?};
 const GUARD_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls", "sed", "awk", "perl", "ag", "ack", "egrep", "fgrep", "head", "tail", "cat", "xargs",
   // Antigravity/Gemini tool names
   "run_command", "view_file", "replace_file_content", "write_to_file", "grep_search", "find_by_name", "list_dir", "file_search", "edit_file"]);
@@ -1466,7 +1458,7 @@ export default function activate(pi) {{
 "#,
         begin = config::MANAGED_BEGIN,
         end = config::MANAGED_END,
-        exe_literal = format!("{:?}", exe_path),
+        exe_path = exe_path,
     );
 
     // Load the pixel rules for AGENTS.md (strip frontmatter, same as zcode).

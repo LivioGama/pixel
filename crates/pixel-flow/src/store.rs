@@ -118,8 +118,8 @@ pub fn list() -> Result<Value, String> {
             continue;
         }
         // Load just enough metadata — skip corrupt files.
-        if let Ok(data) = fs::read_to_string(&path) {
-            if let Ok(flow) = serde_json::from_str::<Flow>(&data) {
+        if let Ok(data) = fs::read_to_string(&path)
+            && let Ok(flow) = serde_json::from_str::<Flow>(&data) {
                 entries.push(serde_json::json!({
                     "name": flow.name,
                     "title": flow.title,
@@ -129,7 +129,6 @@ pub fn list() -> Result<Value, String> {
                     "revised_unix": flow.revised_unix,
                 }));
             }
-        }
     }
     // Sort by name for deterministic output.
     entries.sort_by(|a, b| {

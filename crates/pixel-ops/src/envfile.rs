@@ -242,11 +242,10 @@ fn key_names(content: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut keys = Vec::new();
     for (line, _) in split_lines(content) {
-        if let Some((key, _)) = parse_env_line(line) {
-            if seen.insert(key.clone()) {
+        if let Some((key, _)) = parse_env_line(line)
+            && seen.insert(key.clone()) {
                 keys.push(key);
             }
-        }
     }
     keys
 }
@@ -263,7 +262,7 @@ fn read_env_text(path: &Path) -> Result<String, String> {
 
 fn inventory(root: &Path) -> Result<Value, String> {
     let mut found: Vec<PathBuf> = Vec::new();
-    walk_env_files(root, root, 0, &mut found);
+    walk_env_files(root, 0, &mut found);
     found.sort();
     let mut files = Vec::new();
     for path in found {
@@ -292,7 +291,7 @@ fn inventory(root: &Path) -> Result<Value, String> {
     }))
 }
 
-fn walk_env_files(root: &Path, dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+fn walk_env_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if depth > 4 {
         return;
     }
@@ -308,7 +307,7 @@ fn walk_env_files(root: &Path, dir: &Path, depth: usize, out: &mut Vec<PathBuf>)
             if matches!(name.as_ref(), "node_modules" | ".git" | "target" | ".pixel") {
                 continue;
             }
-            walk_env_files(root, &path, depth + 1, out);
+            walk_env_files(&path, depth + 1, out);
         } else if name == ".env" || name.starts_with(".env.") {
             // Skip editor backups / examples? No — `.env.example` is still an
             // env file; inventory reports names only, so listing it is safe.
@@ -360,9 +359,9 @@ fn set(
     let mut action = "appended";
     let mut replaced = false;
     for (line, term) in split_lines(&content) {
-        if !replaced {
-            if let Some((k, value_start)) = parse_env_line(line) {
-                if k == key {
+        if !replaced
+            && let Some((k, value_start)) = parse_env_line(line)
+                && k == key {
                     new_content.push_str(&line[..value_start]);
                     new_content.push_str(value);
                     new_content.push_str(term);
@@ -370,8 +369,6 @@ fn set(
                     action = "replaced";
                     continue;
                 }
-            }
-        }
         new_content.push_str(line);
         new_content.push_str(term);
     }
@@ -386,12 +383,11 @@ fn set(
         new_content.push('\n');
     }
 
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
+    if let Some(parent) = path.parent()
+        && !parent.exists() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create dir {}: {e}", parent.display()))?;
         }
-    }
     write_durably(&path, new_content.as_bytes())
         .map_err(|e| format!("cannot write env file {}: {e}", path.display()))?;
     journal_append(root, &path, "set", Some(key))?;

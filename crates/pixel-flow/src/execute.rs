@@ -152,8 +152,8 @@ pub fn execute(flow: &Flow, vars: &HashMap<String, String>) -> ExecResult {
     }
 
     // MFA detection.
-    if !flow.mfa_keywords.is_empty() {
-        if let Ok(snapshot) = run_agent_browser(&["snapshot", "-i"]) {
+    if !flow.mfa_keywords.is_empty()
+        && let Ok(snapshot) = run_agent_browser(&["snapshot", "-i"]) {
             for kw in &flow.mfa_keywords {
                 if snapshot.contains(kw) {
                     log.push_str(&format!(
@@ -174,7 +174,6 @@ pub fn execute(flow: &Flow, vars: &HashMap<String, String>) -> ExecResult {
                 }
             }
         }
-    }
 
     log.push_str(&format!(
         "\n# Flow complete: {} steps executed, {} skipped\n",
@@ -220,13 +219,12 @@ fn exec_step(
 
     // Per-step tab switching.
     let effective_tab = step.tab.as_deref().or(flow_tab);
-    if step.action != "switch_tab" && step.tab.is_some() {
-        if let Some(tab) = effective_tab {
+    if step.action != "switch_tab" && step.tab.is_some()
+        && let Some(tab) = effective_tab {
             let tab = substitute(tab, vars);
             log.push_str(&format!("{}# Switching to tab: {}\n", indent, tab));
             switch_to_tab(&tab, log)?;
         }
-    }
 
     match step.action.as_str() {
         "open" => {
@@ -284,7 +282,7 @@ fn exec_step(
                             indent
                         ));
                         // Try eval with querySelector.
-                        let js = format!("document.querySelector('button')?.click()");
+                        let js = "document.querySelector('button')?.click()".to_string();
                         run_agent_browser(&["eval", &js])
                             .map_err(|e| format!("JS click fallback failed: {e}"))?;
                         std::thread::sleep(Duration::from_secs(2));
@@ -533,7 +531,7 @@ fn extract_ref_if_matches(
             .iter()
             .all(|term| line_lower.contains(&term.to_lowercase()))
     } else if !fallback_term.is_empty() && fallback_term.len() > 2 {
-        line_lower.contains(&fallback_term)
+        line_lower.contains(fallback_term)
     } else {
         true
     };
@@ -550,11 +548,10 @@ fn extract_char_number(hint: &str) -> Option<usize> {
     // Look for "character N of" pattern.
     let parts: Vec<&str> = hint.split_whitespace().collect();
     for i in 0..parts.len().saturating_sub(1) {
-        if parts[i] == "character" {
-            if let Ok(n) = parts[i + 1].parse::<usize>() {
+        if parts[i] == "character"
+            && let Ok(n) = parts[i + 1].parse::<usize>() {
                 return Some(n);
             }
-        }
     }
     None
 }
@@ -673,8 +670,8 @@ fn close_stale_tabs(pattern: &str, log: &mut String) -> Result<(), String> {
 
     let pat_lower = pattern.to_lowercase();
     for line in output.lines() {
-        if line.to_lowercase().contains(&pat_lower) {
-            if let Some(t_start) = line.find("t") {
+        if line.to_lowercase().contains(&pat_lower)
+            && let Some(t_start) = line.find("t") {
                 let after = &line[t_start..];
                 if let Some(end) = after.find(|c: char| !c.is_ascii_digit() && c != 't') {
                     let tab_id = &after[..end];
@@ -682,7 +679,6 @@ fn close_stale_tabs(pattern: &str, log: &mut String) -> Result<(), String> {
                     let _ = run_agent_browser(&["tab", "close", tab_id]);
                 }
             }
-        }
     }
     Ok(())
 }

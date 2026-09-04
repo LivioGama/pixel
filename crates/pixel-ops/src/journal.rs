@@ -261,7 +261,7 @@ impl OperationJournal {
             let ts = parse_iso_ms(&record.updated_at).unwrap_or(0);
             records.push((path, ts));
         }
-        records.sort_by(|a, b| b.1.cmp(&a.1));
+        records.sort_by_key(|(_, ts)| std::cmp::Reverse(*ts));
         let now = current_unix_ms();
         let mut kept = 0;
         for (path, ts) in &records {

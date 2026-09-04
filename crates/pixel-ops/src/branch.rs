@@ -65,12 +65,11 @@ pub fn branch(root: &Path, opts: &BranchOptions) -> Result<Value, String> {
         "--quiet",
         &format!("refs/heads/{}", opts.name),
     ]);
-    if let Some(out) = existing {
-        if !out.is_empty() {
-            let _ = lock.release();
+    if let Some(out) = existing
+        && !out.is_empty() {
+            lock.release();
             return Err(format!("REF_EXISTS: branch '{}' already exists", opts.name));
         }
-    }
 
     // Create branch.
     let from = opts.from.as_deref().unwrap_or("HEAD");
@@ -78,11 +77,11 @@ pub fn branch(root: &Path, opts: &BranchOptions) -> Result<Value, String> {
     runner
         .run(&["branch", opts.name.as_str(), from])
         .map_err(|e| {
-            let _ = lock.release();
+            lock.release();
             format!("git branch: {e}")
         })?;
     runner.run(&["checkout", opts.name.as_str()]).map_err(|e| {
-        let _ = lock.release();
+        lock.release();
         format!("git checkout: {e}")
     })?;
 
@@ -93,7 +92,7 @@ pub fn branch(root: &Path, opts: &BranchOptions) -> Result<Value, String> {
         "checked_out": true,
     });
     journal.complete(&opts.request_id, &repo_key, result.clone())?;
-    let _ = lock.release();
+    lock.release();
     Ok(result)
 }
 

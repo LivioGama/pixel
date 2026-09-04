@@ -88,7 +88,7 @@ pub fn socket_path(root: &Path) -> PathBuf {
 fn runtime_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
-        return std::env::temp_dir();
+        std::env::temp_dir()
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -219,7 +219,7 @@ fn spawn_facts_ingest(root: &Path) {
                 }
                 Ok(_) => {
                     tick_count += 1;
-                    if tick_count % 20 == 0 {
+                    if tick_count.is_multiple_of(20) {
                         let _ = store.wal_checkpoint();
                     }
                     std::thread::sleep(Duration::from_millis(250));

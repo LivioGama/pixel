@@ -341,7 +341,7 @@ fn introduced_by(runner: &GitRunner, file: &str) -> Option<Value> {
         ])
         .ok()?;
     let text = String::from_utf8_lossy(&out);
-    let last = text.lines().filter(|l| !l.trim().is_empty()).last()?;
+    let last = text.lines().rfind(|l| !l.trim().is_empty())?;
     parse_commit_line(last)
 }
 

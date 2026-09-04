@@ -54,7 +54,7 @@ pub fn update(root: &Path, opts: &UpdateOptions) -> Result<Value, String> {
     // Check current HEAD matches expected.
     let current_head = runner.rev_parse_head().ok_or("no HEAD")?;
     if current_head != opts.expected_head {
-        let _ = lock.release();
+        lock.release();
         return Err(format!(
             "STALE_STATE: expected {}, got {}",
             opts.expected_head, current_head
@@ -76,7 +76,7 @@ pub fn update(root: &Path, opts: &UpdateOptions) -> Result<Value, String> {
         // is dirty" — that would let `git merge --ff-only` overwrite a
         // genuinely dirty file with no way for the caller to have known.
         let dirty = runner.status_porcelain_or_err().map_err(|e| {
-            let _ = lock.release();
+            lock.release();
             format!(
                 "could not determine working-tree status, refusing to fast-forward \
                  (would otherwise risk overwriting dirty files as if the tree were clean): {e}"
@@ -89,7 +89,7 @@ pub fn update(root: &Path, opts: &UpdateOptions) -> Result<Value, String> {
             let changes = runner
                 .diff_name_status_or_err(&opts.expected_head, &opts.target_oid)
                 .map_err(|e| {
-                    let _ = lock.release();
+                    lock.release();
                     format!(
                         "could not determine which paths the fast-forward would change, \
                          refusing to proceed while dirty files are present: {e}"
@@ -103,7 +103,7 @@ pub fn update(root: &Path, opts: &UpdateOptions) -> Result<Value, String> {
                 .map(|(_, p)| p.clone())
                 .collect();
             if !dirty_intersect.is_empty() {
-                let _ = lock.release();
+                lock.release();
                 return Err(format!(
                     "UNSUPPORTED_STATE: dirty files would be overwritten: {}",
                     dirty_intersect.join(", ")
@@ -115,7 +115,7 @@ pub fn update(root: &Path, opts: &UpdateOptions) -> Result<Value, String> {
         runner
             .run(&["merge", "--ff-only", &opts.target_oid])
             .map_err(|e| {
-                let _ = lock.release();
+                lock.release();
                 format!("git merge --ff-only: {e}")
             })?;
 
@@ -126,11 +126,11 @@ pub fn update(root: &Path, opts: &UpdateOptions) -> Result<Value, String> {
             "fast_forwarded": true,
         });
         journal.complete(&opts.request_id, &repo_key, result.clone())?;
-        let _ = lock.release();
+        lock.release();
         Ok(result)
     } else {
         // Diverged — NON_FAST_FORWARD.
-        let _ = lock.release();
+        lock.release();
         Err(format!(
             "NON_FAST_FORWARD: merge-base is {}, expected {} to be an ancestor of {}",
             merge_base, opts.expected_head, opts.target_oid

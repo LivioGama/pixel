@@ -209,7 +209,7 @@ impl Service {
         }
         let db = self.graph_db_path();
         if db.exists() {
-            let _ = bridge::update_files(&self.root, &db, files);
+            bridge::update_files(&self.root, &db, files);
             self.graph = None;
         }
     }
@@ -1014,7 +1014,7 @@ impl Service {
                 1.0
             }
         };
-        report.targets = pixel_rank::rerank::rerank_targets(report.targets, &signals, &penalty);
+        report.targets = pixel_rank::rerank::rerank_targets(report.targets, &signals, penalty);
         let mut out = serde_json::to_value(&report).map_err(|e| e.to_string())?;
         // Phase 3 item 1: attach per-file content evidence to each target so
         // the caller can trust a content match without re-searching (S2).
@@ -1034,13 +1034,12 @@ impl Service {
                 if !is_p0 {
                     continue;
                 }
-                if let Some(path) = t.get("path").and_then(Value::as_str) {
-                    if let Some(ev) = evidence.get(path) {
+                if let Some(path) = t.get("path").and_then(Value::as_str)
+                    && let Some(ev) = evidence.get(path) {
                         let trimmed: Vec<&Value> =
                             ev.iter().take(EVIDENCE_MAX_LINES_PER_TARGET).collect();
                         t["evidence"] = json!(trimmed);
                     }
-                }
             }
         }
         if let Some(stats) = out.get_mut("stats") {
@@ -1994,7 +1993,7 @@ impl pixel_graph::concept_resolve::Reranker for EngineReranker {
                 1.0
             }
         };
-        let reordered = pixel_rank::rerank::rerank(pr_candidates, &pr_signals, &penalty);
+        let reordered = pixel_rank::rerank::rerank(pr_candidates, &pr_signals, penalty);
 
         // Restore the pixel-graph candidate shape (incl. `id`) by id — the
         // reranker only reorders, it never adds/removes candidates. Keying by

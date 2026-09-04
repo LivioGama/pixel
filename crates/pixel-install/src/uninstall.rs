@@ -25,6 +25,7 @@ pub type Result<T> = std::result::Result<T, InstallError>;
 
 /// Options controlling an uninstall run.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct UninstallOptions {
     /// Home directory. Defaults to `$HOME`.
     pub home: Option<PathBuf>,
@@ -35,15 +36,6 @@ pub struct UninstallOptions {
     pub dry_run: bool,
 }
 
-impl Default for UninstallOptions {
-    fn default() -> Self {
-        UninstallOptions {
-            home: None,
-            binary_path: None,
-            dry_run: false,
-        }
-    }
-}
 
 /// Markers that identify pixel-authored hook entries in any settings file.
 /// Each corresponds to a hook script filename installed by `pixel install`.
@@ -69,31 +61,26 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         .unwrap_or_else(|| home.join(".local").join("bin").join("pixel"));
 
     let dry_run = options.dry_run;
-    let mut steps = Vec::new();
-
-    // 1. Strip managed blocks from all agent-config Markdown files.
-    steps.push(strip_agent_configs(&home, dry_run)?);
-
-    // 2. Remove pixel hook entries from Claude settings.json + delete hook
-    //    scripts from ~/.claude/hooks/.
-    steps.push(remove_claude_hooks(&home, dry_run)?);
-
-    // 3. Remove pixel hook entries from every other tool's settings file.
-    steps.push(remove_devin_hooks(&home, dry_run)?);
-    steps.push(remove_codex_hooks(&home, dry_run)?);
-    steps.push(remove_gemini_hooks(&home, dry_run)?);
-    steps.push(remove_zcode_hooks(&home, dry_run)?);
-    steps.push(remove_cursor_hooks(&home, dry_run)?);
-    steps.push(remove_pi_extension(&home, dry_run)?);
-
-    // 4. Remove pixel hooks from project-level .codex/hooks.json files.
-    steps.push(remove_project_codex_hooks(&home, dry_run)?);
-
-    // 5. Remove the pixel rule source file.
-    steps.push(remove_rule_source(&home, dry_run)?);
-
-    // 6. Remove the pixel binary.
-    steps.push(remove_binary(&binary_path, dry_run)?);
+    let steps = vec![
+        // 1. Strip managed blocks from all agent-config Markdown files.
+        strip_agent_configs(&home, dry_run)?,
+        // 2. Remove pixel hook entries from Claude settings.json + delete hook
+        //    scripts from ~/.claude/hooks/.
+        remove_claude_hooks(&home, dry_run)?,
+        // 3. Remove pixel hook entries from every other tool's settings file.
+        remove_devin_hooks(&home, dry_run)?,
+        remove_codex_hooks(&home, dry_run)?,
+        remove_gemini_hooks(&home, dry_run)?,
+        remove_zcode_hooks(&home, dry_run)?,
+        remove_cursor_hooks(&home, dry_run)?,
+        remove_pi_extension(&home, dry_run)?,
+        // 4. Remove pixel hooks from project-level .codex/hooks.json files.
+        remove_project_codex_hooks(&home, dry_run)?,
+        // 5. Remove the pixel rule source file.
+        remove_rule_source(&home, dry_run)?,
+        // 6. Remove the pixel binary.
+        remove_binary(&binary_path, dry_run)?,
+    ];
 
     let green = steps
         .iter()
@@ -219,11 +206,10 @@ fn remove_claude_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
                 }
             }
             // If the hooks object is now empty, remove it entirely.
-            if hooks.is_empty() {
-                if let Some(obj) = value.as_object_mut() {
+            if hooks.is_empty()
+                && let Some(obj) = value.as_object_mut() {
                     obj.remove("hooks");
                 }
-            }
         }
         if !dry_run && removed_entries > 0 {
             backup_path = install::write_settings(&settings, &value, dry_run)?;
@@ -378,11 +364,10 @@ fn remove_zcode_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
                 hooks_root.remove("events");
             }
         }
-        if hooks_root.is_empty() {
-            if let Some(obj) = value.as_object_mut() {
+        if hooks_root.is_empty()
+            && let Some(obj) = value.as_object_mut() {
                 obj.remove("hooks");
             }
-        }
     }
     let mut backup_path = None;
     if !dry_run && removed > 0 {
@@ -460,11 +445,10 @@ fn remove_cursor_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
                 }
             }
         }
-        if hooks.is_empty() {
-            if let Some(obj) = value.as_object_mut() {
+        if hooks.is_empty()
+            && let Some(obj) = value.as_object_mut() {
                 obj.remove("hooks");
             }
-        }
     }
     let mut backup_path = None;
     if !dry_run && removed > 0 {
@@ -695,11 +679,10 @@ fn remove_pixel_hooks_from_settings(
                 }
             }
         }
-        if hooks.is_empty() {
-            if let Some(obj) = value.as_object_mut() {
+        if hooks.is_empty()
+            && let Some(obj) = value.as_object_mut() {
                 obj.remove("hooks");
             }
-        }
     }
     let mut backup_path = None;
     if !dry_run && removed > 0 {

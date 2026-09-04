@@ -110,12 +110,11 @@ fn build_push_args(runner: &GitRunner, opts: &PushOptions) -> Vec<String> {
     let mut args: Vec<String> = vec!["push".into()];
     if opts.force_with_lease {
         let (_, dst) = split_refspec(&opts.refspec);
-        match resolve_remote_oid(runner, &opts.remote, &dst) {
-            // Remote has the ref: lease against exactly what we saw.
-            Some(remote_oid) => args.push(format!("--force-with-lease={dst}:{remote_oid}")),
-            // Remote has no such ref: the push creates it, so it cannot
-            // clobber anything and needs no lease.
-            None => {}
+        // Remote has the ref: lease against exactly what we saw.
+        // Remote has no such ref: the push creates it, so it cannot
+        // clobber anything and needs no lease.
+        if let Some(remote_oid) = resolve_remote_oid(runner, &opts.remote, &dst) {
+            args.push(format!("--force-with-lease={dst}:{remote_oid}"));
         }
     }
     args.push("--end-of-options".into());
@@ -161,20 +160,18 @@ pub fn push_with_state(
 
     // Probe: journal:started
     if let Some(p) = probe.as_mut() {
-        p("journal:started").map_err(|e| {
-            let _ = lock.release();
-            e
+        p("journal:started").inspect_err(|_| {
+            lock.release();
         })?;
     }
 
     // Validate remote ref.
     pixel_git::validate_ref(&opts.remote).map_err(|e| {
-        let _ = lock.release();
+        lock.release();
         e.to_string()
     })?;
-    validate_refspec(&opts.refspec).map_err(|e| {
-        let _ = lock.release();
-        e
+    validate_refspec(&opts.refspec).inspect_err(|_| {
+        lock.release();
     })?;
 
     // OID of the ref being pushed (not HEAD).
@@ -190,9 +187,8 @@ pub fn push_with_state(
 
     // Probe: journal:push_started
     if let Some(p) = probe.as_mut() {
-        p("journal:push_started").map_err(|e| {
-            let _ = lock.release();
-            e
+        p("journal:push_started").inspect_err(|_| {
+            lock.release();
         })?;
     }
 
@@ -201,15 +197,14 @@ pub fn push_with_state(
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     runner.run(&arg_refs).map_err(|e| {
-        let _ = lock.release();
+        lock.release();
         format!("git push: {e}")
     })?;
 
     // Probe: remote:returned
     if let Some(p) = probe.as_mut() {
-        p("remote:returned").map_err(|e| {
-            let _ = lock.release();
-            e
+        p("remote:returned").inspect_err(|_| {
+            lock.release();
         })?;
     }
 
@@ -223,13 +218,12 @@ pub fn push_with_state(
 
     // Probe: journal:terminal
     if let Some(p) = probe.as_mut() {
-        p("journal:terminal").map_err(|e| {
-            let _ = lock.release();
-            e
+        p("journal:terminal").inspect_err(|_| {
+            lock.release();
         })?;
     }
 
-    let _ = lock.release();
+    lock.release();
     Ok(result)
 }
 
@@ -251,8 +245,8 @@ fn resume_push(
             // Push may have started — check if remote already has the commit.
             // If remote matches source_oid, push succeeded.
             let record = journal.read(&repo_key, &opts.request_id);
-            if let Some(r) = record {
-                if let Some(source_oid) = r
+            if let Some(r) = record
+                && let Some(source_oid) = r
                     .result
                     .as_ref()
                     .and_then(|v| v.get("source_oid"))
@@ -265,8 +259,8 @@ fn resume_push(
                     // check silently failed to confirm a push that had in fact
                     // completed, and reported NETWORK_AMBIGUITY instead.
                     let (_, dst) = split_refspec(&opts.refspec);
-                    if let Some(remote_ref) = resolve_remote_oid(runner, &opts.remote, &dst) {
-                        if remote_ref == source_oid {
+                    if let Some(remote_ref) = resolve_remote_oid(runner, &opts.remote, &dst)
+                        && remote_ref == source_oid {
                             // Push already succeeded.
                             let result = json!({
                                 "pushed": true,
@@ -277,9 +271,7 @@ fn resume_push(
                             journal.complete(&opts.request_id, &repo_key, result.clone())?;
                             return Ok(result);
                         }
-                    }
                 }
-            }
             Err("NETWORK_AMBIGUITY: push may have started, cannot safely retry".to_string())
         }
         JournalPhase::Terminal => {
@@ -305,12 +297,11 @@ fn continue_push_after_begin(
         .map_err(|_| "repository is busy".to_string())?;
 
     pixel_git::validate_ref(&opts.remote).map_err(|e| {
-        let _ = lock.release();
+        lock.release();
         e.to_string()
     })?;
-    validate_refspec(&opts.refspec).map_err(|e| {
-        let _ = lock.release();
-        e
+    validate_refspec(&opts.refspec).inspect_err(|_| {
+        lock.release();
     })?;
 
     let source_oid = resolve_source_oid(runner, &opts.refspec).ok_or("no HEAD")?;
@@ -326,7 +317,7 @@ fn continue_push_after_begin(
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     runner.run(&arg_refs).map_err(|e| {
-        let _ = lock.release();
+        lock.release();
         format!("git push: {e}")
     })?;
 
@@ -337,7 +328,7 @@ fn continue_push_after_begin(
         "refspec": opts.refspec,
     });
     journal.complete(&opts.request_id, &repo_key, result.clone())?;
-    let _ = lock.release();
+    lock.release();
     Ok(result)
 }
 

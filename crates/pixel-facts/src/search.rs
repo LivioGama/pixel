@@ -18,18 +18,15 @@ pub const PER_SCOPE_CANDIDATES: usize = 200;
 
 /// Facet selector for `search`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum SearchFacet {
     Message,
     Path,
     Diff,
+    #[default]
     All,
 }
 
-impl Default for SearchFacet {
-    fn default() -> Self {
-        SearchFacet::All
-    }
-}
 
 impl From<&str> for SearchFacet {
     fn from(s: &str) -> Self {
@@ -158,12 +155,11 @@ pub fn search(
     // the full diff if needed.
     const SNIPPET_CAP_CHARS: usize = 500;
     for hit in candidates.iter_mut() {
-        if let Some(snippet) = hit.snippet.as_mut() {
-            if snippet.chars().count() > SNIPPET_CAP_CHARS {
+        if let Some(snippet) = hit.snippet.as_mut()
+            && snippet.chars().count() > SNIPPET_CAP_CHARS {
                 let truncated: String = snippet.chars().take(SNIPPET_CAP_CHARS).collect();
                 *snippet = format!("{truncated}… [snippet truncated at {SNIPPET_CAP_CHARS} chars]");
             }
-        }
     }
 
     Ok(SearchResult {
@@ -205,6 +201,7 @@ fn max_commit_id(store: &FactsStore) -> i64 {
         .unwrap_or(0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn to_hit(
     oid: &str,
     at: &str,
@@ -233,7 +230,7 @@ fn message_search(store: &FactsStore, units: &[String], limit: usize) -> Result<
     if units.is_empty() {
         return Ok(Vec::new());
     }
-    let match_expr = fts_match(&units, "and");
+    let match_expr = fts_match(units, "and");
     let max_id = max_commit_id(store);
     let mut stmt = store.conn().prepare(
         "SELECT c.id, c.oid, c.committed_at, c.author, c.message
@@ -369,6 +366,7 @@ fn diff_search(store: &FactsStore, units: &[String], limit: usize) -> Result<Vec
     let mut hits = Vec::new();
     // Verified against hunks text: only count real (non-stale) hits.
     for hunk_id in hunk_ids.iter().take(limit * 2) {
+        #[allow(clippy::type_complexity)]
         let row: Option<(i64, String, String, String, String, u64, String, String)> = store
             .conn()
             .query_row(
@@ -401,7 +399,7 @@ fn diff_search(store: &FactsStore, units: &[String], limit: usize) -> Result<Vec
                 continue; // stale gram or false positive — drop
             }
             let score = rel + recency_score(id, max_id);
-            let snippet = make_snippet(&text, &units);
+            let snippet = make_snippet(&text, units);
             hits.push(to_hit(
                 &oid,
                 &at,

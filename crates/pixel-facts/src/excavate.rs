@@ -383,7 +383,8 @@ impl FactsStore {
             // `last_good` candidate at all (the exact dropped-file restore
             // case excavate exists to serve). `file_changes` is UNIQUE on
             // (commit_id, path), so this join is exact, not a guess.
-            let row: Option<(
+            #[allow(clippy::type_complexity)]
+        let row: Option<(
                 String,
                 String,
                 String,
@@ -428,11 +429,10 @@ impl FactsStore {
                         continue;
                     }
                 }
-                if let Some(p) = path {
-                    if hpath != p {
+                if let Some(p) = path
+                    && hpath != p {
                         continue;
                     }
-                }
                 let text = format!("{added}\n{removed}");
                 let rel = crate::search::relevance_of(&text, &units);
                 if rel == 0 {
@@ -548,11 +548,10 @@ impl FactsStore {
         let mut out = Vec::new();
         for row in rows {
             let (oid, at, message, status, p, seq) = row?;
-            if let Some(rf) = range {
-                if !rf.allows(&oid) {
+            if let Some(rf) = range
+                && !rf.allows(&oid) {
                     continue;
                 }
-            }
             out.push(ExcavateCandidate {
                 oid: short_oid(&oid),
                 path: p,
@@ -601,11 +600,10 @@ impl FactsStore {
         let mut out = Vec::new();
         for row in rows {
             let (oid, at, message, status, p, seq) = row?;
-            if let Some(rf) = range {
-                if !rf.allows(&oid) {
+            if let Some(rf) = range
+                && !rf.allows(&oid) {
                     continue;
                 }
-            }
             out.push(ExcavateCandidate {
                 oid: short_oid(&oid),
                 path: p.clone(),

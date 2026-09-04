@@ -1306,8 +1306,8 @@ fn merge_targets_manifest(existing: Option<&str>, new_task: Value, now: u64) -> 
         .unwrap_or("")
         .to_string();
     let mut tasks: Vec<Value> = Vec::new();
-    if let Some(text) = existing {
-        if let Ok(v) = serde_json::from_str::<Value>(text) {
+    if let Some(text) = existing
+        && let Ok(v) = serde_json::from_str::<Value>(text) {
             if v.get("version").and_then(Value::as_u64) == Some(2) {
                 tasks = v
                     .get("tasks")
@@ -1327,7 +1327,6 @@ fn merge_targets_manifest(existing: Option<&str>, new_task: Value, now: u64) -> 
                 })];
             }
         }
-    }
     tasks.retain(|t| {
         let created = t.get("created_unix").and_then(Value::as_u64).unwrap_or(0);
         let id = t.get("id").and_then(Value::as_str).unwrap_or("");
@@ -1854,6 +1853,7 @@ fn group_by_root(paths: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<String>)>, Strin
     Ok(groups)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_search(
     pattern: String,
     paths: Vec<PathBuf>,
@@ -2012,16 +2012,15 @@ fn run_search_one(
                 } else {
                     root.join(p).display().to_string()
                 };
-                if seen_files.insert(abs.clone()) {
-                    if let Ok(meta) = std::fs::metadata(&abs) {
+                if seen_files.insert(abs.clone())
+                    && let Ok(meta) = std::fs::metadata(&abs) {
                         pool_chars = pool_chars.saturating_add(meta.len());
                     }
-                }
             }
         }
         if pool_chars > 0 && pool_chars > snippet_chars {
             logger.log(
-                pixel_actionlog::ActionEvent::new("search", format!("{pattern}"))
+                pixel_actionlog::ActionEvent::new("search", pattern.to_string())
                     .with_savings(snippet_chars, pool_chars),
             );
         }
@@ -2728,11 +2727,10 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             // (schema version, phase-A state, hunk/gram counts). Only fill in
             // the client-side fallback when talking to an older daemon that
             // doesn't send one.
-            if data.get("facts").map(|f| f.is_null()).unwrap_or(true) {
-                if let Some(facts) = facts_status(&path) {
+            if data.get("facts").map(|f| f.is_null()).unwrap_or(true)
+                && let Some(facts) = facts_status(&path) {
                     data["facts"] = facts;
                 }
-            }
             if json {
                 print_data(&data, true)?;
             } else {

@@ -208,7 +208,7 @@ fn save_flow(
 
 fn get_flow(name: &str) -> Result<Value, String> {
     let flow = load(name)?;
-    Ok(serde_json::to_value(&flow).map_err(|e| format!("cannot serialize flow: {e}"))?)
+    serde_json::to_value(&flow).map_err(|e| format!("cannot serialize flow: {e}"))
 }
 
 fn list_flows(tag: &Option<String>) -> Result<Value, String> {

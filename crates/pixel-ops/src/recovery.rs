@@ -131,7 +131,7 @@ fn index_path(repo_root: &Path) -> PathBuf {
 pub fn capture_index_snapshot(repo_root: &Path) -> Option<String> {
     std::fs::read(index_path(repo_root))
         .ok()
-        .map(|bytes| hex::encode(bytes))
+        .map(hex::encode)
 }
 
 /// Restore `.git/index` to exactly the bytes captured by

@@ -156,16 +156,13 @@ fn command_text(v: &Value) -> String {
                 return String::new();
             }
             // argv form: ["bash", "-lc", "<script>"] → "<script>"
-            if SHELL_WRAPPERS.contains(&normalize_bin(parts[0])) {
-                if let Some(pos) = parts
+            if SHELL_WRAPPERS.contains(&normalize_bin(parts[0]))
+                && let Some(pos) = parts
                     .iter()
                     .position(|t| t.starts_with('-') && t.contains('c'))
-                {
-                    if let Some(script) = parts.get(pos + 1) {
+                    && let Some(script) = parts.get(pos + 1) {
                         return unwrap_shell_c(script);
                     }
-                }
-            }
             unwrap_shell_c(&parts.join(" "))
         }
         _ => String::new(),
@@ -244,11 +241,10 @@ struct Manifest {
 /// from stdin. Never returns an `Err` that would surface as exit 1 — every
 /// failure path is a deliberate exit 0 (allow, optionally with advice).
 pub fn run() -> ! {
-    if let Ok(kill) = std::env::var("PIXEL_TARGETS_GUARD") {
-        if matches!(kill.as_str(), "0" | "false" | "off") {
+    if let Ok(kill) = std::env::var("PIXEL_TARGETS_GUARD")
+        && matches!(kill.as_str(), "0" | "false" | "off") {
             std::process::exit(0);
         }
-    }
 
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
@@ -297,7 +293,7 @@ pub fn run() -> ! {
     let anchor = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
 
     let idx_root = find_up(&anchor, ".pixel");
-    let manifest_root = find_up(&anchor, &Path::new(".pixel").join("targets.json"));
+    let manifest_root = find_up(&anchor, Path::new(".pixel").join("targets.json"));
     let (manifest, manifest_expired) = match manifest_root.as_deref().map(load_manifest_state) {
         Some(ManifestState::Active(m)) => (Some(m), false),
         Some(ManifestState::Expired) => (None, true),
@@ -343,14 +339,13 @@ pub fn run() -> ! {
         // Advisories (scoping, transcript) call advise() which exits, precluding
         // the rewrite. By checking rewrite first, we ensure the rewrite takes
         // priority over the advisory — the rewrite IS the resolution.
-        if idx_root.is_some() {
-            if let Some(rewritten) = try_rewrite_bash(cmd, &cwd) {
+        if idx_root.is_some()
+            && let Some(rewritten) = try_rewrite_bash(cmd, &cwd) {
                 // Read-only search rewrites are semantically equivalent, so
                 // transparently replace the input and let the normal tool
                 // permission flow continue.
                 allow_rewrite(&rewritten);
             }
-        }
 
         // ADVISORY TIER (only if no rewrite applied): scoping advisory
         check_bash_advisories(cmd, &cwd, idx_root.as_deref(), manifest.as_ref());
@@ -368,7 +363,7 @@ pub fn run() -> ! {
             // In indexed repos, recommend pixel search for Grep tool calls.
             // The hook cannot change the tool type (Grep→Bash), so this is an
             // advisory and the original Grep call proceeds.
-            if idx_root.is_some() && is_grep_tool(tool, &tool_input) {
+            if idx_root.is_some() && is_grep_tool(tool, tool_input) {
                 let pattern = tool_input
                     .get("pattern")
                     .and_then(Value::as_str)
@@ -377,7 +372,7 @@ pub fn run() -> ! {
                     .or_else(|| tool_input.get("Query").and_then(Value::as_str))
                     .unwrap_or("");
                 if !pattern.is_empty() {
-                    advise(&grep_redirect_advisory_lines(&pattern, &cwd, &tool_input));
+                    advise(&grep_redirect_advisory_lines(pattern, &cwd, tool_input));
                 }
             }
             // RETRIEVAL ADVISORY — in an indexed repo with NO active manifest,
@@ -386,25 +381,21 @@ pub fn run() -> ! {
             // but gets an advisory in indexed repos with no manifest if the
             // file is a source file — suggesting `pixel targets` first.
             // `PIXEL_GUARD_RETRIEVAL=0` disables this tier.
-            if idx_root.is_some() && manifest.is_none() && !manifest_expired && is_retrieval_tool(tool) {
-                if !env_flag_off("PIXEL_GUARD_RETRIEVAL") {
+            if idx_root.is_some() && manifest.is_none() && !manifest_expired && is_retrieval_tool(tool)
+                && !env_flag_off("PIXEL_GUARD_RETRIEVAL") {
                     retrieval_guard_advisory(&cwd, idx_root.as_deref().unwrap());
                 }
-            }
             // Retrieval-first advisory for Read of source files: in an indexed
             // repo with no active manifest, suggest `pixel targets` before
             // reading source files. Advisory only — the read proceeds. This
             // catches the "massive token waste via redundant reads" failure
             // mode where agents read entire files instead of using pixel search.
-            if idx_root.is_some() && manifest.is_none() && !manifest_expired && is_read_tool(tool) {
-                if let Some(p) = resolve(raw_path, &cwd) {
-                    if p.is_file() && is_source_file(&p) && !is_exempt(&p, idx_root.as_deref().unwrap()) {
-                        if !env_flag_off("PIXEL_GUARD_READ") {
+            if idx_root.is_some() && manifest.is_none() && !manifest_expired && is_read_tool(tool)
+                && let Some(p) = resolve(raw_path, &cwd)
+                    && p.is_file() && is_source_file(&p) && !is_exempt(&p, idx_root.as_deref().unwrap())
+                        && !env_flag_off("PIXEL_GUARD_READ") {
                             read_scoping_advisory(&p, idx_root.as_deref().unwrap());
                         }
-                    }
-                }
-            }
             if let Some(m) = &manifest {
                 let p = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
                 if !allowed(&p, m) {
@@ -528,8 +519,8 @@ enum ManifestState {
 /// Read the enforcement manifest, accepting BOTH shapes:
 /// - v2 (multi-task): `{version: 2, tasks: [{id, task, created_unix, targets: [...]}]}`
 /// - legacy (v1/singleton): `{task, created_unix, files: [...]}`
-/// Expired tasks (older than the 24h TTL) are dropped individually; a
-/// manifest whose tasks have all expired reports `Expired`.
+///   Expired tasks (older than the 24h TTL) are dropped individually; a
+///   manifest whose tasks have all expired reports `Expired`.
 fn load_manifest_state(root: &Path) -> ManifestState {
     let Ok(text) = std::fs::read_to_string(root.join(".pixel").join("targets.json")) else {
         return ManifestState::Absent;
@@ -626,7 +617,7 @@ fn all_files(m: &Manifest) -> impl Iterator<Item = &(String, String)> {
     m.tasks.iter().flat_map(|t| t.files.iter())
 }
 
-fn rel_of<'a>(abs: &Path, root: &Path) -> String {
+fn rel_of(abs: &Path, root: &Path) -> String {
     abs.strip_prefix(root)
         .map(|r| r.to_string_lossy().into_owned())
         .unwrap_or_else(|_| abs.to_string_lossy().into_owned())
@@ -938,18 +929,15 @@ fn check_bash_advisories(
         return;
     }
     // Bypass-pattern advisories for indexed repos
-    if let Some(root) = idx_root {
-        if let Some(lines) = bypass_advisory_lines(effective_cmd, &effective_cwd, root) {
+    if let Some(root) = idx_root
+        && let Some(lines) = bypass_advisory_lines(effective_cmd, &effective_cwd, root) {
             advise(&non_blocking_advisory_lines(&lines));
         }
-    }
-    if let Some(m) = manifest {
-        if let Some(first_file) = single_reader_target(effective_cmd, &effective_cwd) {
-            if !allowed(&first_file, m) {
+    if let Some(m) = manifest
+        && let Some(first_file) = single_reader_target(effective_cmd, &effective_cwd)
+            && !allowed(&first_file, m) {
                 scoping_advisory(&first_file, m);
             }
-        }
-    }
 }
 
 /// Advisory messages for common grep/search bypass patterns that should use pixel
@@ -1383,11 +1371,10 @@ fn git_mutation_substitute_lines(
             if sub == "rebase" {
                 let alt_root =
                     extract_cd_target(cmd, cwd).or_else(|| extract_git_c_path(&args, cwd));
-                if let Some(alt) = alt_root {
-                    if alt != root && reconcile_conflict_pending(&alt) {
+                if let Some(alt) = alt_root
+                    && alt != root && reconcile_conflict_pending(&alt) {
                         return None;
                     }
-                }
             }
             return Some(lines);
         }
@@ -1402,7 +1389,7 @@ fn extract_cd_target(cmd: &str, cwd: &Path) -> Option<PathBuf> {
     let cd_idx = cmd.find("cd ")?;
     let rest = &cmd[cd_idx + 3..];
     let end = rest
-        .find(|c: char| c == '&' || c == ';')
+        .find(['&', ';'])
         .unwrap_or(rest.len());
     let path = rest[..end]
         .trim()
@@ -1609,8 +1596,8 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                 // the actual modified files, so the agent doesn't burn a full LLM
                 // turn guessing what to stage. Falls back to the generic message
                 // on any failure.
-                if let Some(files) = git_status_porcelain_files(root) {
-                    if !files.is_empty() {
+                if let Some(files) = git_status_porcelain_files(root)
+                    && !files.is_empty() {
                         let files_str = files
                             .iter()
                             .map(|f| format!("--files {}", shell_quote(f)))
@@ -1625,7 +1612,6 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                         );
                         return Some(lines);
                     }
-                }
                 lines.push(format!(
                     "  pixel publish --files <file> [--files <file2> …] --message \"<msg>\" --request-id <id> {root_q}"
                 ));
@@ -1894,7 +1880,7 @@ fn single_reader_target(cmd: &str, cwd: &Path) -> Option<PathBuf> {
     let first_segment = cmd.split([';', '|']).next()?.split("&&").next()?.trim();
     let tokens = simple_tokenize(first_segment);
     let (mut tokens, eff_cwd) = if tokens.first().map(String::as_str) == Some("cd") {
-        let rest_after_cd = cmd.splitn(2, "&&").nth(1)?.trim();
+        let rest_after_cd = cmd.split_once("&&")?.1.trim();
         let new_cwd = resolve(tokens.get(1)?, cwd)?;
         let rest_tokens = simple_tokenize(rest_after_cd.split([';', '|']).next()?.trim());
         (rest_tokens, new_cwd)

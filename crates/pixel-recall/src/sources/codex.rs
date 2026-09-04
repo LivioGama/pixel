@@ -278,8 +278,8 @@ fn extract_record(
             }
             // Subagent threads announce themselves: thread_source "subagent"
             // plus the parent thread id.
-            if payload.get("thread_source").and_then(Value::as_str) == Some("subagent") {
-                if let Some(parent) = payload
+            if payload.get("thread_source").and_then(Value::as_str) == Some("subagent")
+                && let Some(parent) = payload
                     .get("parent_thread_id")
                     .or_else(|| payload.get("session_id"))
                     .and_then(Value::as_str)
@@ -288,7 +288,6 @@ fn extract_record(
                     session.is_subagent = true;
                     session.parent_source_session_id = Some(parent.to_string());
                 }
-            }
         }
         "response_item" => {
             let ptype = payload.get("type").and_then(Value::as_str).unwrap_or("");

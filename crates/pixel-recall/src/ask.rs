@@ -134,7 +134,7 @@ pub fn ask(
     store: &RecallStore,
     segments: &SegmentSet,
     vectors: &VectorStore,
-    mut embedder: Option<&mut (dyn Embedder + 'static)>,
+    embedder: Option<&mut (dyn Embedder + 'static)>,
     query: &str,
     filters: &SearchFilters,
     k: usize,
@@ -221,7 +221,7 @@ pub fn ask(
     let mut semantic: Vec<i64> = Vec::new();
     let mut chunk_start_by_turn: HashMap<i64, i64> = HashMap::new();
     let mut notice = None;
-    match embedder.as_deref_mut() {
+    match embedder {
         None => {
             notice = Some(
                 "semantic channel unavailable (no embedding model) — lexical-only answer"

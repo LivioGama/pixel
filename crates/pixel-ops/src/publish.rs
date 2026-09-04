@@ -110,23 +110,21 @@ fn run_body(
 
     // Probe: journal:started
     if let Some(p) = probe.as_mut() {
-        p("journal:started").map_err(|e| {
-            let _ = lock.release();
-            e
+        p("journal:started").inspect_err(|_| {
+            lock.release();
         })?;
     }
 
     // STALE_STATE: expected HEAD.
     let current_head = runner.rev_parse_head();
-    if let Some(expected) = &opts.expected_head {
-        if current_head.as_deref() != Some(expected.as_str()) {
-            let _ = lock.release();
+    if let Some(expected) = &opts.expected_head
+        && current_head.as_deref() != Some(expected.as_str()) {
+            lock.release();
             return Err(format!(
                 "STALE_STATE: expected head {}, got {:?}",
                 expected, current_head
             ));
         }
-    }
 
     // STALE_STATE: expected fingerprints for the files being published —
     // catches concurrent modification of exactly the files this request
@@ -134,7 +132,7 @@ fn run_body(
     for (path, expected_fp) in &opts.expected_fingerprints {
         let actual_fp = fingerprint::fingerprint_path(root, path);
         if &actual_fp != expected_fp {
-            let _ = lock.release();
+            lock.release();
             return Err(format!(
                 "STALE_STATE: fingerprint mismatch for {path}: expected {expected_fp}, got {actual_fp}"
             ));
@@ -161,16 +159,14 @@ fn run_body(
         resolved_message: Some(opts.message.clone()),
         pre_index_hex: recovery::capture_index_snapshot(root),
     };
-    recovery_store.write(&recovery_state).map_err(|e| {
-        let _ = lock.release();
-        e
+    recovery_store.write(&recovery_state).inspect_err(|_| {
+        lock.release();
     })?;
 
     // Probe: recovery:snapshotted
     if let Some(p) = probe.as_mut() {
-        p("recovery:snapshotted").map_err(|e| {
-            let _ = lock.release();
-            e
+        p("recovery:snapshotted").inspect_err(|_| {
+            lock.release();
         })?;
     }
 
@@ -180,7 +176,7 @@ fn run_body(
         args.extend(opts.files.iter().cloned());
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         runner.run(&arg_refs).map_err(|e| {
-            let _ = lock.release();
+            lock.release();
             format!("git add: {e}")
         })?;
     }
@@ -190,25 +186,22 @@ fn run_body(
 
     // Probe: journal:index_staged
     if let Some(p) = probe.as_mut() {
-        p("journal:index_staged").map_err(|e| {
-            let _ = lock.release();
-            e
+        p("journal:index_staged").inspect_err(|_| {
+            lock.release();
         })?;
     }
 
     // Advance the recovery record's phase (the snapshot bytes themselves
     // never change — only the marker of how far we got).
     recovery_state.phase = RecoveryPhase::CommitStarted;
-    recovery_store.write(&recovery_state).map_err(|e| {
-        let _ = lock.release();
-        e
+    recovery_store.write(&recovery_state).inspect_err(|_| {
+        lock.release();
     })?;
 
     // Probe: recovery:commit_started
     if let Some(p) = probe.as_mut() {
-        p("recovery:commit_started").map_err(|e| {
-            let _ = lock.release();
-            e
+        p("recovery:commit_started").inspect_err(|_| {
+            lock.release();
         })?;
     }
 
@@ -227,7 +220,7 @@ fn run_body(
     }
     let arg_refs: Vec<&str> = commit_args.iter().map(String::as_str).collect();
     runner.run(&arg_refs).map_err(|e| {
-        let _ = lock.release();
+        lock.release();
         format!("git commit: {e}")
     })?;
 
@@ -247,9 +240,8 @@ fn run_body(
 
     // Probe: journal:commit_observed
     if let Some(p) = probe.as_mut() {
-        p("journal:commit_observed").map_err(|e| {
-            let _ = lock.release();
-            e
+        p("journal:commit_observed").inspect_err(|_| {
+            lock.release();
         })?;
     }
 
@@ -257,13 +249,12 @@ fn run_body(
     if opts.push {
         journal.transition(&opts.request_id, &repo_key, JournalPhase::PushStarted, None)?;
         if let Some(p) = probe.as_mut() {
-            p("journal:push_started").map_err(|e| {
-                let _ = lock.release();
-                e
+            p("journal:push_started").inspect_err(|_| {
+                lock.release();
             })?;
         }
         runner.run(&["push"]).map_err(|e| {
-            let _ = lock.release();
+            lock.release();
             format!("git push: {e}")
         })?;
     }
@@ -278,13 +269,12 @@ fn run_body(
 
     // Probe: journal:terminal
     if let Some(p) = probe.as_mut() {
-        p("journal:terminal").map_err(|e| {
-            let _ = lock.release();
-            e
+        p("journal:terminal").inspect_err(|_| {
+            lock.release();
         })?;
     }
 
-    let _ = lock.release();
+    lock.release();
     Ok(result)
 }
 

@@ -210,7 +210,7 @@ pub fn normalize_task_compounds(task: &str) -> String {
 pub fn semantic_expand(word: &str) -> Vec<&'static str> {
     for (term, related) in SEMANTIC_RELATIONS {
         if *term == word {
-            return related.iter().copied().collect();
+            return related.to_vec();
         }
     }
     Vec::new()
@@ -615,7 +615,7 @@ fn content_rank(
                 -scaled,
                 acc.total,
                 p,
-                acc.per_kw.into_iter().map(|(k, c)| (k, c)).collect(),
+                acc.per_kw.into_iter().collect(),
             )
         })
         .collect();
@@ -663,7 +663,7 @@ pub fn lexical_rank(
     let ranking_keywords: Vec<String> = keywords
         .iter()
         .cloned()
-        .chain(expand_keywords(keywords).into_iter())
+        .chain(expand_keywords(keywords))
         .collect();
     let s1: Vec<String> = filename_rank(all_paths, &ranking_keywords)
         .into_iter()
@@ -715,7 +715,7 @@ pub fn compute_targets(
         .keywords
         .iter()
         .cloned()
-        .chain(expand_keywords(&query.keywords).into_iter())
+        .chain(expand_keywords(&query.keywords))
         .collect();
 
     // Per-signal ranked lists.

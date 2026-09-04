@@ -153,7 +153,7 @@ pub fn is_test_path(path: &str) -> bool {
     let file = comps.last().copied().unwrap_or("");
     let parts: Vec<&str> = file.split('.').collect();
     // *_test.*
-    if parts.first().map_or(false, |stem| stem.ends_with("_test")) {
+    if parts.first().is_some_and(|stem| stem.ends_with("_test")) {
         return true;
     }
     // *.spec.* / *.test.*
@@ -393,8 +393,8 @@ fn error_matches_path(err: &ErrorRecord, path: &str) -> Option<String> {
     if concepts.is_empty() {
         return None;
     }
-    if let Some(http) = &err.http {
-        if let Some(url) = http.get("url").and_then(serde_json::Value::as_str) {
+    if let Some(http) = &err.http
+        && let Some(url) = http.get("url").and_then(serde_json::Value::as_str) {
             let url_lower = url.to_lowercase();
             if concepts.iter().any(|c| url_lower.contains(c.as_str())) {
                 let status = http
@@ -407,7 +407,6 @@ fn error_matches_path(err: &ErrorRecord, path: &str) -> Option<String> {
                 ));
             }
         }
-    }
     if let Some(frames) = &err.frames {
         for f in frames {
             for loc in [f.file.as_deref(), f.mapped_file.as_deref()]
@@ -500,7 +499,7 @@ fn session_reasons(events: &[SessionEvent], now_ms: i64, window_ms: i64) -> Vec<
         };
         reasons.push((e.ts_ms, format!("{kind} {} {:.0}m ago", e.path, age_min)));
     }
-    reasons.sort_by(|a, b| b.0.cmp(&a.0));
+    reasons.sort_by_key(|&(ts, _)| std::cmp::Reverse(ts));
     reasons.into_iter().map(|(_, r)| r).collect()
 }
 

@@ -438,7 +438,7 @@ fn run_body(
         bail!(e);
     }
 
-    let _ = lock.release();
+    lock.release();
     Ok(result)
 }
 

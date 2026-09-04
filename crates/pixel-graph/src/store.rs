@@ -413,6 +413,7 @@ impl GraphStore {
 
     /// Insert one concept row plus its inverted words. `owner_symbol_id` is
     /// the smallest enclosing symbol's id when one exists, else `None`.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_concept(
         &self,
         file_id: i64,

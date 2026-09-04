@@ -38,11 +38,10 @@ struct PostCompactionPayload {
 /// path is a silent exit 0 (compaction proceeds normally).
 pub fn run() -> ! {
     // Allow opt-out via env var.
-    if let Ok(kill) = std::env::var("PIXEL_POST_COMPACTION") {
-        if matches!(kill.as_str(), "0" | "false" | "off") {
+    if let Ok(kill) = std::env::var("PIXEL_POST_COMPACTION")
+        && matches!(kill.as_str(), "0" | "false" | "off") {
             std::process::exit(0);
         }
-    }
 
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
@@ -71,11 +70,11 @@ pub fn run() -> ! {
 
 /// Try to read the active targets manifest and emit it as additional context.
 /// If no manifest is active, or reading fails, exit 0 silently.
-fn try_emit_manifest(cwd: &PathBuf) -> ! {
+fn try_emit_manifest(cwd: &Path) -> ! {
     let deadline = Instant::now() + HOOK_DEADLINE;
 
     let (tx, rx) = std::sync::mpsc::channel();
-    let cwd_clone = cwd.clone();
+    let cwd_clone = cwd.to_path_buf();
     std::thread::spawn(move || {
         let result = read_manifest(&cwd_clone);
         let _ = tx.send(result);

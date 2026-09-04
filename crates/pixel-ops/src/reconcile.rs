@@ -228,13 +228,13 @@ fn auto_resolve_conflict_markers(_runner: &GitRunner, root: &Path, path: &str) -
     }
 
     let mut resolved_lines: Vec<String> = Vec::new();
-    let mut lines = content.lines().peekable();
+    let lines = content.lines().peekable();
     let mut in_ours = false;
     let mut in_theirs = false;
     let mut ours_lines: Vec<String> = Vec::new();
     let mut theirs_lines: Vec<String> = Vec::new();
 
-    while let Some(line) = lines.next() {
+    for line in lines {
         if line.starts_with("<<<<<<<") {
             in_ours = true;
             ours_lines.clear();
@@ -245,8 +245,8 @@ fn auto_resolve_conflict_markers(_runner: &GitRunner, root: &Path, path: &str) -
         } else if line.starts_with(">>>>>>>") && in_theirs {
             in_theirs = false;
             // Union: ours first, then theirs.
-            resolved_lines.extend(ours_lines.drain(..));
-            resolved_lines.extend(theirs_lines.drain(..));
+            resolved_lines.append(&mut ours_lines);
+            resolved_lines.append(&mut theirs_lines);
         } else if in_ours {
             ours_lines.push(line.to_string());
         } else if in_theirs {
@@ -365,7 +365,7 @@ pub fn reconcile_with_hooks(
     if let Some(target) = opts.into_target.as_deref() {
         let result = reconcile_into(root, &runner, &mut lock, &head, &branch, target, push_mode)?;
         journal.complete(&request_id, &repo_key, result.clone())?;
-        let _ = lock.release();
+        lock.release();
         return Ok(result);
     }
 
@@ -379,7 +379,7 @@ pub fn reconcile_with_hooks(
     runner
         .run(&["fetch", "--end-of-options", "origin", &branch])
         .map_err(|e| {
-            let _ = lock.release();
+            lock.release();
             format!("git fetch: {e}")
         })?;
 
@@ -436,14 +436,14 @@ pub fn reconcile_with_hooks(
             // paths the fast-forward would change, so untracked sidecar
             // entries can never block it — filtering would be redundant.
             let dirty = runner.status_porcelain_or_err().map_err(|e| {
-                let _ = lock.release();
+                lock.release();
                 format!("could not determine working-tree status, refusing to fast-forward: {e}")
             })?;
             if !dirty.is_empty() {
                 let changes = runner
                     .diff_name_status_or_err(&head, &upstream)
                     .map_err(|e| {
-                        let _ = lock.release();
+                        lock.release();
                         format!(
                             "could not determine which paths the fast-forward would change, \
                          refusing to proceed while dirty files are present: {e}"
@@ -457,7 +457,7 @@ pub fn reconcile_with_hooks(
                     .map(|(_, p)| p.clone())
                     .collect();
                 if !dirty_intersect.is_empty() {
-                    let _ = lock.release();
+                    lock.release();
                     return Err(format!(
                         "UNSUPPORTED_STATE: dirty files would be overwritten: {}",
                         dirty_intersect.join(", ")
@@ -469,7 +469,7 @@ pub fn reconcile_with_hooks(
             runner
                 .run(&["merge", "--ff-only", &upstream])
                 .map_err(|e| {
-                    let _ = lock.release();
+                    lock.release();
                     format!("git merge --ff-only: {e}")
                 })?;
             json!({
@@ -543,12 +543,11 @@ pub fn reconcile_with_hooks(
                         &runner,
                         "could not determine working-tree status, refusing rebase-if-clean",
                     )
-                    .map_err(|e| {
-                        let _ = lock.release();
-                        e
+                    .inspect_err(|_| {
+                        lock.release();
                     })?;
                     if !dirty.is_empty() {
-                        let _ = lock.release();
+                        lock.release();
                         return Err(format!(
                             "UNSUPPORTED_STATE: rebase-if-clean requires clean worktree, {} dirty files",
                             dirty.len()
@@ -561,7 +560,7 @@ pub fn reconcile_with_hooks(
                     runner
                         .run(&["update-ref", &backup_ref, &head])
                         .map_err(|e| {
-                            let _ = lock.release();
+                            lock.release();
                             format!("git update-ref (backup): {e}")
                         })?;
 
@@ -884,7 +883,7 @@ pub fn reconcile_with_hooks(
     };
 
     journal.complete(&request_id, &repo_key, result.clone())?;
-    let _ = lock.release();
+    lock.release();
     Ok(result)
 }
 
@@ -904,6 +903,7 @@ pub fn reconcile_with_hooks(
 ///   5. dirty worktree → UNSUPPORTED_STATE (same rule as rebase-if-clean).
 ///   6. merge-tree predicts conflicts → diverged report naming the target,
 ///      no rebase attempted.
+///
 /// Only once all of those pass does the rebase run; the ff of `<target>` is
 /// then guaranteed (target_old ≤ origin/<target> ≤ rebased head).
 ///
@@ -920,14 +920,14 @@ fn reconcile_into(
     push_mode: &str,
 ) -> Result<Value, String> {
     if branch == "HEAD" {
-        let _ = lock.release();
+        lock.release();
         return Err(
             "UNSUPPORTED_STATE: detached HEAD; --into requires a checked-out feature branch"
                 .to_string(),
         );
     }
     if branch == target {
-        let _ = lock.release();
+        lock.release();
         return Err(format!(
             "UNSUPPORTED_STATE: --into target {target:?} is the currently checked-out branch; \
              check out the feature branch and name the integration target"
@@ -941,7 +941,7 @@ fn reconcile_into(
         .map(|o| String::from_utf8_lossy(&o).trim().to_string())
         .filter(|s| !s.is_empty());
     let Some(target_old_oid) = target_old_oid else {
-        let _ = lock.release();
+        lock.release();
         return Err(format!(
             "UNSUPPORTED_STATE: local branch {target:?} does not exist; --into fast-forwards \
              the local target branch, so it must already exist locally"
@@ -953,7 +953,7 @@ fn reconcile_into(
     runner
         .run(&["fetch", "--end-of-options", "origin", target])
         .map_err(|e| {
-            let _ = lock.release();
+            lock.release();
             format!("git fetch origin {target}: {e}")
         })?;
     // Tolerant fetch of the feature branch: it may not exist on the remote
@@ -967,7 +967,7 @@ fn reconcile_into(
         .map(|o| String::from_utf8_lossy(&o).trim().to_string())
         .unwrap_or_default();
     if remote_target_oid.is_empty() {
-        let _ = lock.release();
+        lock.release();
         return Err(format!(
             "UNSUPPORTED_STATE: {remote_target} not found after fetch; --into rebases onto the \
              remote-tracking target, which must exist"
@@ -993,7 +993,7 @@ fn reconcile_into(
         ])
         .is_some();
     if !target_is_ancestor {
-        let _ = lock.release();
+        lock.release();
         return Err(format!(
             "NON_FAST_FORWARD: local branch {target:?} ({target_old_oid}) is not an ancestor of \
              {remote_target} ({remote_target_oid}); refusing to move it — never force, never \
@@ -1005,15 +1005,14 @@ fn reconcile_into(
     // same fail-closed status source. Pixel's own `.pixel/` sidecar is
     // excluded (see `rebase-if-clean` comment for rationale).
     let dirty = dirty_excluding_sidecar(
-        &runner,
+        runner,
         "could not determine working-tree status, refusing --into integration",
     )
-    .map_err(|e| {
-        let _ = lock.release();
-        e
+    .inspect_err(|_| {
+        lock.release();
     })?;
     if !dirty.is_empty() {
-        let _ = lock.release();
+        lock.release();
         return Err(format!(
             "UNSUPPORTED_STATE: --into requires a clean worktree, {} dirty files",
             dirty.len()
@@ -1046,7 +1045,7 @@ fn reconcile_into(
     runner
         .run(&["update-ref", &backup_ref, head])
         .map_err(|e| {
-            let _ = lock.release();
+            lock.release();
             format!("git update-ref (backup): {e}")
         })?;
 
@@ -1171,7 +1170,7 @@ fn reconcile_into(
     runner
         .run(&["update-ref", &target_ref, &new_head, &target_old_oid])
         .map_err(|e| {
-            let _ = lock.release();
+            lock.release();
             format!("git update-ref {target_ref}: {e}")
         })?;
 

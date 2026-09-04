@@ -56,11 +56,10 @@ pub fn run() -> ! {
     std::panic::set_hook(Box::new(|_| {}));
 
     // Allow opt-out via env var.
-    if let Ok(kill) = std::env::var("PIXEL_TASK_BOUNDARY") {
-        if matches!(kill.as_str(), "0" | "false" | "off") {
+    if let Ok(kill) = std::env::var("PIXEL_TASK_BOUNDARY")
+        && matches!(kill.as_str(), "0" | "false" | "off") {
             std::process::exit(0);
         }
-    }
 
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
@@ -142,11 +141,7 @@ fn detect_boundary(prompt: &str, cwd: &Path) -> Result<Option<BoundaryEvent>, St
     // 5. Decision logic.
     let is_boundary = if similarity < SIMILARITY_THRESHOLD && completion {
         true
-    } else if similarity < WEAK_THRESHOLD {
-        true
-    } else {
-        false
-    };
+    } else { similarity < WEAK_THRESHOLD };
 
     if !is_boundary {
         return Ok(None);
@@ -229,16 +224,16 @@ fn recent_completion_signal(cwd: &Path) -> bool {
     let cutoff = now_ms - (COMPLETION_LOOKBACK_SECS * 1000);
 
     for path in log_paths {
-        if let Ok(file) = std::fs::File::open(&path) {
-            if check_action_log_file(file, cwd, cutoff) {
+        if let Ok(file) = std::fs::File::open(&path)
+            && check_action_log_file(file, cwd, cutoff) {
                 return true;
             }
-        }
     }
     false
 }
 
 /// Parse action log entries from the tail of the file to stay bounded in memory and CPU.
+#[allow(clippy::lines_filter_map_ok)]
 fn check_action_log_file(mut file: std::fs::File, cwd: &Path, cutoff: i64) -> bool {
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
     let Ok(metadata) = file.metadata() else {

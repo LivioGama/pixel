@@ -151,6 +151,7 @@ impl FactsStore {
         let lock_file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(true)
             .open(&lock_path)?;
         lock_file.lock()?;
         // Self-healing: rebuild on structural corruption OR a schema-version
@@ -158,10 +159,7 @@ impl FactsStore {
         // derived data, never load-bearing for correctness, so wiping it is
         // always safe — and this auto-heals every poisoned DB on next open
         // with no manual `rm` required.
-        let rebuild = match Self::needs_rebuild(&path) {
-            Ok(b) => b,
-            Err(_) => true, // can't even read the version → corrupt → rebuild
-        };
+        let rebuild = Self::needs_rebuild(&path).unwrap_or(true);
         let conn = if rebuild {
             Self::remove_db(&path);
             Self::open_conn(&path)?
