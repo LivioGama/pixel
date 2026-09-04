@@ -220,27 +220,6 @@ fn transcript_store_hit(cmd: &str) -> Option<&'static str> {
     }
 }
 
-/// Best-effort agent name for a store marker, for `--agent` suggestions.
-fn transcript_store_agent(store: &str) -> &'static str {
-    if store.contains("devin") {
-        "devin"
-    } else if store.contains(".claude") {
-        "claude"
-    } else if store.contains(".cursor") {
-        "cursor"
-    } else if store.contains(".codex") {
-        "codex"
-    } else if store.contains(".gemini") {
-        "gemini"
-    } else if store.contains(".zcode") {
-        "zcode"
-    } else if store.contains("opencode") {
-        "opencode"
-    } else {
-        "<agent>"
-    }
-}
-
 /// Advisory (non-blocking) lines for a transcript-store poke.
 fn transcript_archaeology_advisory_lines(store: &str) -> Vec<String> {
     vec![
@@ -3681,17 +3660,6 @@ mod tests {
         let msg = transcript_archaeology_advisory_lines(store.unwrap()).join("\n");
         assert!(msg.contains("Advisory") && !msg.contains("BLOCKED"), "{msg}");
         assert!(msg.contains("pixel recall"), "{msg}");
-    }
-
-    #[test]
-    fn transcript_store_agent_mapping() {
-        assert_eq!(transcript_store_agent(".claude/projects"), "claude");
-        assert_eq!(transcript_store_agent(".codex/sessions"), "codex");
-        assert_eq!(transcript_store_agent(".cursor/chats"), "cursor");
-        assert_eq!(transcript_store_agent(".gemini/tmp"), "gemini");
-        assert_eq!(transcript_store_agent(".zcode/cli/db"), "zcode");
-        assert_eq!(transcript_store_agent(".local/share/opencode"), "opencode");
-        assert_eq!(transcript_store_agent(".config/devin"), "devin");
     }
 
     #[test]
