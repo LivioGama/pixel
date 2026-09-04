@@ -35,10 +35,17 @@ use crate::lock::RepositoryLock;
 /// `--abort` without an active rebase is a git error that can mask the
 /// real failure in the surrounding error-handling path.
 fn rebase_in_progress(root: &Path) -> bool {
+    let git_dir = resolve_git_dir(root);
+    git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir()
+}
+
+/// Resolve the real git directory for `root`.
+///
+/// Worktree support: `.git` may be a file containing `gitdir: <path>`
+/// rather than a directory.
+fn resolve_git_dir(root: &Path) -> std::path::PathBuf {
     let git_dir = root.join(".git");
-    // Worktree support: `.git` may be a file pointing at the real git dir.
-    let git_dir = if git_dir.is_file() {
-        // `gitdir: <path>` — read the pointer.
+    if git_dir.is_file() {
         std::fs::read_to_string(&git_dir)
             .ok()
             .and_then(|s| {
@@ -50,8 +57,31 @@ fn rebase_in_progress(root: &Path) -> bool {
             .unwrap_or(git_dir)
     } else {
         git_dir
-    };
-    git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir()
+    }
+}
+
+/// Name of the git operation already in progress in `root`, if any.
+///
+/// `reconcile` drives `git rebase` and aborts it on failure. If the user
+/// is *already* mid-rebase, mid-merge, or mid-cherry-pick when reconcile
+/// is invoked, that abort would destroy their in-progress work — and a
+/// paused `rebase -i` leaves a clean `status --porcelain`, so the dirty
+/// check does not catch it. Refuse up front instead.
+fn integration_in_progress(root: &Path) -> Option<&'static str> {
+    let git_dir = resolve_git_dir(root);
+    if git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir() {
+        return Some("a rebase");
+    }
+    if git_dir.join("MERGE_HEAD").exists() {
+        return Some("a merge");
+    }
+    if git_dir.join("CHERRY_PICK_HEAD").exists() {
+        return Some("a cherry-pick");
+    }
+    if git_dir.join("REVERT_HEAD").exists() {
+        return Some("a revert");
+    }
+    None
 }
 
 /// Abort the current rebase if one is in progress. No-op if the repo is
@@ -248,6 +278,19 @@ pub fn reconcile_with_hooks(
     opts: &ReconcileOptions,
     mut pre_push_hook: Option<Box<dyn FnMut()>>,
 ) -> Result<Value, String> {
+    // Refuse BEFORE touching any state: reconcile drives `git rebase` and
+    // aborts it on failure, which would destroy an operation the user
+    // started themselves. A paused `rebase -i` has a clean working tree,
+    // so the dirty check below does not cover this.
+    if let Some(op) = integration_in_progress(root) {
+        return Err(format!(
+            "{op} is already in progress in this repository; \
+             pixel reconcile would abort it. Finish it (git rebase --continue, \
+             git merge --continue, git cherry-pick --continue) or abort it \
+             yourself, then re-run pixel reconcile."
+        ));
+    }
+
     // Clear any stale conflict state from a previous reconcile attempt.
     // If this call finds a new conflict, it will write a fresh state file.
     clear_conflict_state(root);

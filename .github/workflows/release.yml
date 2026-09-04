@@ -42,9 +42,11 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo install cross
 
-      - name: Build (Linux musl via cross, no fastembed)
+      # fastembed (ONNX) has no musl build; model2vec is pure Rust and does,
+      # so the Linux binaries keep a working semantic channel.
+      - name: Build (Linux musl via cross, model2vec only)
         if: runner.os == 'Linux'
-        run: cross build --release --no-default-features --target ${{ matrix.target }} -p pixel-cli
+        run: cross build --release --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
 
       - name: Build (macOS native)
         if: runner.os == 'macOS'

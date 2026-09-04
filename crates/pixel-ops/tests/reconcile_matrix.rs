@@ -864,3 +864,97 @@ fn into_refuses_when_target_is_the_current_branch() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// (g) precondition — reconcile must REFUSE when the user already has a
+//     rebase/merge/cherry-pick in progress. reconcile drives `git rebase`
+//     and aborts it on failure, so running it mid-operation would destroy
+//     work the user started. A paused `rebase -i` leaves a clean
+//     `status --porcelain`, so the dirty check does not cover this case.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn refuses_to_run_when_a_rebase_is_already_in_progress() {
+    with_isolated_state(|| {
+        let (_remote, local) = new_remote_and_local();
+
+        // Create a real conflicting rebase and leave it paused mid-flight.
+        git(local.path(), &["checkout", "-qb", "feature"]);
+        write(local.path(), "conflict.txt", "feature side\n");
+        commit_all(local.path(), "feature change");
+
+        git(local.path(), &["checkout", "-q", "main"]);
+        write(local.path(), "conflict.txt", "main side\n");
+        commit_all(local.path(), "main change");
+
+        git(local.path(), &["checkout", "-q", "feature"]);
+        // Expected to stop with a conflict, leaving .git/rebase-merge/ behind.
+        let _ = Command::new("git")
+            .args(["rebase", "main"])
+            .current_dir(local.path())
+            .output()
+            .unwrap();
+
+        let git_dir = local.path().join(".git");
+        assert!(
+            git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir(),
+            "fixture must leave a rebase in progress"
+        );
+        let head_before = git(local.path(), &["rev-parse", "HEAD"]);
+
+        let err = reconcile(local.path(), &opts("report", "none"))
+            .expect_err("reconcile must refuse while a rebase is in progress");
+        assert!(
+            err.contains("rebase") && err.contains("in progress"),
+            "error should name the in-progress operation, got: {err}"
+        );
+
+        // The user's rebase is still there — reconcile did not abort it.
+        assert!(
+            git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir(),
+            "reconcile must not abort the user's in-progress rebase"
+        );
+        assert_eq!(
+            git(local.path(), &["rev-parse", "HEAD"]),
+            head_before,
+            "reconcile must not move HEAD"
+        );
+    });
+}
+
+#[test]
+fn refuses_to_run_when_a_merge_is_in_progress() {
+    with_isolated_state(|| {
+        let (_remote, local) = new_remote_and_local();
+
+        git(local.path(), &["checkout", "-qb", "feature"]);
+        write(local.path(), "conflict.txt", "feature side\n");
+        commit_all(local.path(), "feature change");
+
+        git(local.path(), &["checkout", "-q", "main"]);
+        write(local.path(), "conflict.txt", "main side\n");
+        commit_all(local.path(), "main change");
+
+        // Conflicting merge leaves MERGE_HEAD behind.
+        let _ = Command::new("git")
+            .args(["merge", "feature"])
+            .current_dir(local.path())
+            .output()
+            .unwrap();
+        assert!(
+            local.path().join(".git/MERGE_HEAD").exists(),
+            "fixture must leave a merge in progress"
+        );
+
+        let err = reconcile(local.path(), &opts("report", "none"))
+            .expect_err("reconcile must refuse while a merge is in progress");
+        assert!(
+            err.contains("merge") && err.contains("in progress"),
+            "error should name the in-progress operation, got: {err}"
+        );
+        assert!(
+            local.path().join(".git/MERGE_HEAD").exists(),
+            "reconcile must not abort the user's in-progress merge"
+        );
+    });
+}

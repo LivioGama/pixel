@@ -25,10 +25,7 @@ pub fn discover_root(start: &Path) -> Option<PathBuf> {
         if cur.join(".git").exists() {
             return Some(cur);
         }
-        match cur.parent() {
-            Some(p) => cur = p.to_path_buf(),
-            None => return None,
-        }
+        cur = cur.parent()?.to_path_buf();
     }
 }
 

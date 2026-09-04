@@ -9,8 +9,13 @@ name = "pixel"
 path = "src/main.rs"
 
 [features]
-default = ["fastembed"]
+default = ["fastembed", "model2vec"]
+# ONNX-backed embeddings. Cannot build for *-unknown-linux-musl: ort-sys
+# downloads a prebuilt ONNX Runtime and upstream publishes no musl build.
 fastembed = ["pixel-recall/fastembed"]
+# Pure-Rust embeddings. No ONNX, no OpenSSL, no C++ — builds fine for musl,
+# so the Linux release keeps a working semantic channel without fastembed.
+model2vec = ["pixel-recall/model2vec"]
 
 [dependencies]
 pixel-index = { path = "../pixel-index" }
