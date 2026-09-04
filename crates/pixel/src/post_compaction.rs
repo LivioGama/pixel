@@ -154,7 +154,7 @@ fn read_manifest(cwd: &Path) -> Result<Option<String>, String> {
     // Build a compact manifest summary for re-injection.
     let mut lines = Vec::new();
     lines.push(
-        "[PIXEL:POST_COMPACTION] Context was compacted. Your active `pixel targets` manifest has been re-injected below — do NOT read or edit files outside this list. Re-run `pixel targets` if the task has changed.\n"
+        "[PIXEL:POST_COMPACTION] Context was compacted. Your active `pixel targets` manifest is re-injected below; it is the scoped file list for the current task, so work from it and treat files outside it as out of scope unless the task requires them. Re-run `pixel targets` if the task has changed.\n"
             .to_string(),
     );
 
