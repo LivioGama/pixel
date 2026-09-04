@@ -2460,7 +2460,6 @@ dependencies = [
  "pixel-facts",
  "pixel-flow",
  "pixel-git",
- "pixel-graph",
  "pixel-index",
  "pixel-install",
  "pixel-ops",
@@ -2506,14 +2505,11 @@ dependencies = [
 name = "pixel-facts"
 version = "0.1.0"
 dependencies = [
- "hex",
  "pixel-git",
  "pixel-index",
- "pixel-proto",
  "rusqlite",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror",
  "xxhash-rust",
@@ -2600,7 +2596,6 @@ dependencies = [
  "hex",
  "libc",
  "pixel-git",
- "pixel-proto",
  "proptest",
  "rusqlite",
  "serde",

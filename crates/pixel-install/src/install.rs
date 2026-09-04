@@ -59,8 +59,7 @@ pub struct InstallSummary {
 }
 
 /// Options controlling an install run.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct InstallOptions {
     /// Path to the pixel binary the installed hooks point at. Defaults to
     /// the current exe.
@@ -139,7 +138,6 @@ fn skipped_agent_step(id: &str, summary: &str) -> InstallStep {
         detail: Some("detected=false".into()),
     }
 }
-
 
 /// Run `pixel install`. Idempotent: safe to re-run.
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {

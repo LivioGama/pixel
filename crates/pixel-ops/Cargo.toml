@@ -7,7 +7,6 @@ publish = false
 
 [dependencies]
 pixel-git = { path = "../pixel-git" }
-pixel-proto = { path = "../pixel-proto" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"

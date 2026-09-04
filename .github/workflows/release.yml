@@ -22,8 +22,6 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-apple-darwin
             os: macos-latest
-          - target: x86_64-apple-darwin
-            os: macos-13
     steps:
       - uses: actions/checkout@v4
 
@@ -91,7 +89,6 @@ jobs:
           VERSION="${GITHUB_REF#refs/tags/}"
           # Extract SHA256 for each target from the downloaded .sha256 files.
           ARM_MAC=$(awk '{print $1}' "artifacts/pixel-${VERSION}-aarch64-apple-darwin.tar.gz.sha256")
-          INTEL_MAC=$(awk '{print $1}' "artifacts/pixel-${VERSION}-x86_64-apple-darwin.tar.gz.sha256")
           ARM_LINUX=$(awk '{print $1}' "artifacts/pixel-${VERSION}-aarch64-unknown-linux-musl.tar.gz.sha256")
           INTEL_LINUX=$(awk '{print $1}' "artifacts/pixel-${VERSION}-x86_64-unknown-linux-musl.tar.gz.sha256")
 
@@ -110,10 +107,9 @@ jobs:
                 url "https://github.com/LivioGama/pixel/releases/download/${VERSION}/pixel-${VERSION}-aarch64-apple-darwin.tar.gz"
                 sha256 "${ARM_MAC}"
               end
-              on_intel do
-                url "https://github.com/LivioGama/pixel/releases/download/${VERSION}/pixel-${VERSION}-x86_64-apple-darwin.tar.gz"
-                sha256 "${INTEL_MAC}"
-              end
+              # Intel Macs (pre-2020): no prebuilt binary. Build from source via:
+              #   cargo build --release -p pixel-cli
+              # or run the ARM64 binary under Rosetta.
             end
 
             on_linux do

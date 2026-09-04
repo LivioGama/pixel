@@ -19,7 +19,6 @@ model2vec = ["pixel-recall/model2vec"]
 
 [dependencies]
 pixel-index = { path = "../pixel-index" }
-pixel-graph = { path = "../pixel-graph" }
 pixel-git = { path = "../pixel-git" }
 pixel-recall = { path = "../pixel-recall", default-features = false }
 pixel-daemon = { path = "../pixel-daemon" }

@@ -118,13 +118,14 @@ fn run_body(
     // STALE_STATE: expected HEAD.
     let current_head = runner.rev_parse_head();
     if let Some(expected) = &opts.expected_head
-        && current_head.as_deref() != Some(expected.as_str()) {
-            lock.release();
-            return Err(format!(
-                "STALE_STATE: expected head {}, got {:?}",
-                expected, current_head
-            ));
-        }
+        && current_head.as_deref() != Some(expected.as_str())
+    {
+        lock.release();
+        return Err(format!(
+            "STALE_STATE: expected head {}, got {:?}",
+            expected, current_head
+        ));
+    }
 
     // STALE_STATE: expected fingerprints for the files being published —
     // catches concurrent modification of exactly the files this request

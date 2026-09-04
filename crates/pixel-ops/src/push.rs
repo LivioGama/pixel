@@ -251,27 +251,28 @@ fn resume_push(
                     .as_ref()
                     .and_then(|v| v.get("source_oid"))
                     .and_then(|v| v.as_str())
+            {
+                // Ask the REMOTE what it holds, rather than trusting a
+                // local remote-tracking ref. The tracking ref may be stale,
+                // absent (tags never have one), or removed by a
+                // history-rewriting tool — in all of which cases the old
+                // check silently failed to confirm a push that had in fact
+                // completed, and reported NETWORK_AMBIGUITY instead.
+                let (_, dst) = split_refspec(&opts.refspec);
+                if let Some(remote_ref) = resolve_remote_oid(runner, &opts.remote, &dst)
+                    && remote_ref == source_oid
                 {
-                    // Ask the REMOTE what it holds, rather than trusting a
-                    // local remote-tracking ref. The tracking ref may be stale,
-                    // absent (tags never have one), or removed by a
-                    // history-rewriting tool — in all of which cases the old
-                    // check silently failed to confirm a push that had in fact
-                    // completed, and reported NETWORK_AMBIGUITY instead.
-                    let (_, dst) = split_refspec(&opts.refspec);
-                    if let Some(remote_ref) = resolve_remote_oid(runner, &opts.remote, &dst)
-                        && remote_ref == source_oid {
-                            // Push already succeeded.
-                            let result = json!({
-                                "pushed": true,
-                                "source_oid": source_oid,
-                                "remote": opts.remote,
-                                "refspec": opts.refspec,
-                            });
-                            journal.complete(&opts.request_id, &repo_key, result.clone())?;
-                            return Ok(result);
-                        }
+                    // Push already succeeded.
+                    let result = json!({
+                        "pushed": true,
+                        "source_oid": source_oid,
+                        "remote": opts.remote,
+                        "refspec": opts.refspec,
+                    });
+                    journal.complete(&opts.request_id, &repo_key, result.clone())?;
+                    return Ok(result);
                 }
+            }
             Err("NETWORK_AMBIGUITY: push may have started, cannot safely retry".to_string())
         }
         JournalPhase::Terminal => {

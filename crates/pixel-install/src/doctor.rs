@@ -63,8 +63,7 @@ pub struct DoctorSummary {
 }
 
 /// Options controlling a doctor run.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct DoctorOptions {
     /// Path to the pixel binary to check. Defaults to the current exe.
     pub executable_path: Option<PathBuf>,
@@ -82,7 +81,6 @@ pub struct DoctorOptions {
     #[allow(clippy::type_complexity)]
     pub syntax_validator: Option<fn(&[String]) -> std::result::Result<(), String>>,
 }
-
 
 /// Run `pixel doctor`.
 pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
@@ -270,12 +268,13 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             {
                 use std::os::unix::fs::PermissionsExt;
                 if let Ok(meta) = path.metadata()
-                    && meta.permissions().mode() & 0o111 == 0 {
-                        return Err(format!(
-                            "{} is not executable (chmod +x needed)",
-                            path.display()
-                        ));
-                    }
+                    && meta.permissions().mode() & 0o111 == 0
+                {
+                    return Err(format!(
+                        "{} is not executable (chmod +x needed)",
+                        path.display()
+                    ));
+                }
             }
             let settings_path = home.join(".claude").join("settings.json");
             if settings_path.is_file() {

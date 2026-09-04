@@ -170,9 +170,8 @@ impl FactsStore {
         if skip_path(path) {
             return Some("structural-skip".to_string());
         }
-        
-        self
-            .conn
+
+        self.conn
             .query_row(
                 "SELECT reason FROM poison_paths WHERE path = ?1",
                 [path],

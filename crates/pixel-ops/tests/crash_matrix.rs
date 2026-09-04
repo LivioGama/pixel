@@ -78,12 +78,14 @@ fn lock_env(state_dir: &Path) -> (std::sync::MutexGuard<'static, ()>, XdgEnvGuar
 // ---------------------------------------------------------------------------
 
 type Observed = Arc<Mutex<Vec<String>>>;
+/// A crash-injection probe: called with each phase name, errors on the target phase.
+type Probe = Box<dyn FnMut(&str) -> Result<(), String>>;
 
-fn crash_probe(target: &str) -> (Observed, Box<dyn FnMut(&str) -> Result<(), String>>) {
+fn crash_probe(target: &str) -> (Observed, Probe) {
     let observed: Observed = Arc::new(Mutex::new(Vec::new()));
     let observed_for_probe = observed.clone();
     let t = target.to_string();
-    let probe: Box<dyn FnMut(&str) -> Result<(), String>> = Box::new(move |phase: &str| {
+    let probe: Probe = Box::new(move |phase: &str| {
         observed_for_probe.lock().unwrap().push(phase.to_string());
         if phase == t {
             Err(format!("CRASH@{t}"))

@@ -1035,11 +1035,12 @@ impl Service {
                     continue;
                 }
                 if let Some(path) = t.get("path").and_then(Value::as_str)
-                    && let Some(ev) = evidence.get(path) {
-                        let trimmed: Vec<&Value> =
-                            ev.iter().take(EVIDENCE_MAX_LINES_PER_TARGET).collect();
-                        t["evidence"] = json!(trimmed);
-                    }
+                    && let Some(ev) = evidence.get(path)
+                {
+                    let trimmed: Vec<&Value> =
+                        ev.iter().take(EVIDENCE_MAX_LINES_PER_TARGET).collect();
+                    t["evidence"] = json!(trimmed);
+                }
             }
         }
         if let Some(stats) = out.get_mut("stats") {
@@ -3656,7 +3657,7 @@ mod tests {
         assert!(
             evidence.iter().any(|e| {
                 e["keyword"].as_str() == Some("ledger")
-                    && e["text"].as_str().map_or(false, |t| t.contains("ledger"))
+                    && e["text"].as_str().is_some_and(|t| t.contains("ledger"))
             }),
             "expected a 'ledger' evidence entry, got {evidence:?}"
         );

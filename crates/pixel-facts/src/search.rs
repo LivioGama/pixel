@@ -17,8 +17,7 @@ use crate::store::{FactsStore, Result, short_oid, subject_of};
 pub const PER_SCOPE_CANDIDATES: usize = 200;
 
 /// Facet selector for `search`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SearchFacet {
     Message,
     Path,
@@ -26,7 +25,6 @@ pub enum SearchFacet {
     #[default]
     All,
 }
-
 
 impl From<&str> for SearchFacet {
     fn from(s: &str) -> Self {
@@ -156,10 +154,11 @@ pub fn search(
     const SNIPPET_CAP_CHARS: usize = 500;
     for hit in candidates.iter_mut() {
         if let Some(snippet) = hit.snippet.as_mut()
-            && snippet.chars().count() > SNIPPET_CAP_CHARS {
-                let truncated: String = snippet.chars().take(SNIPPET_CAP_CHARS).collect();
-                *snippet = format!("{truncated}… [snippet truncated at {SNIPPET_CAP_CHARS} chars]");
-            }
+            && snippet.chars().count() > SNIPPET_CAP_CHARS
+        {
+            let truncated: String = snippet.chars().take(SNIPPET_CAP_CHARS).collect();
+            *snippet = format!("{truncated}… [snippet truncated at {SNIPPET_CAP_CHARS} chars]");
+        }
     }
 
     Ok(SearchResult {
