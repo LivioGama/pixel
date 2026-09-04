@@ -182,7 +182,7 @@ pixel upgrade
 pixel log .
 ```
 
-Run `pixel --help` or `pixel <command> --help` for the complete command and option reference. Add `--json` to supported commands when another tool needs machine-readable output.
+Run `pixel --help` or `pixel <command> --help` for the complete command and option reference. Contributors should read [`ARCHITECTURE.md`](ARCHITECTURE.md) for the crate map, on-disk state, and daemon wire contract. Add `--json` to supported commands when another tool needs machine-readable output.
 
 ## 🌍 Platform
 
