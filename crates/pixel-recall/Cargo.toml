@@ -15,6 +15,8 @@ pixel-index = { path = "../pixel-index" }
 pixel-rank = { path = "../pixel-rank" }
 memmap2 = "0.9.11"
 model2vec-rs = { version = "0.2", optional = true }
+# Vendored openssl ensures musl static builds work without system OpenSSL.
+openssl = { workspace = true }
 regex = "1.13"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
