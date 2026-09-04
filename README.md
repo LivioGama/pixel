@@ -41,7 +41,16 @@ That combination is Pixel’s purpose: not merely finding code, but helping an a
 
 ## 🚀 Quick start
 
-### 1. Build Pixel
+### 1. Install Pixel
+
+**macOS (Apple Silicon) or Linux — via Homebrew:**
+
+```bash
+brew tap LivioGama/tap
+brew install pixel
+```
+
+**From source (Intel Mac, or manual build):**
 
 ```bash
 git clone https://github.com/LivioGama/pixel.git
