@@ -856,7 +856,7 @@ fn retrieval_guard_advisory(_cwd: &Path, idx_root: &Path) -> ! {
         "In an indexed directory, consider running `pixel targets` before searching the codebase."
             .into(),
         format!("  pixel targets \"<one-line task description>\" {root}"),
-        "That returns the P0/P1/P2 file list in <50ms. Work P0 first, then P1.".into(),
+        "That returns the P0/P1/P2 file list.".into(),
         "After scoping, use `pixel search` / `pixel resolve` for code search — not grep/glob."
             .into(),
         "Proceeding with the original retrieval call.".into(),
