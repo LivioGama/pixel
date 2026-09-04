@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 rmcp = { version = "3.1.4", features = ["transport-io"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
