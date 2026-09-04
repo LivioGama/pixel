@@ -12,6 +12,7 @@ model2vec = ["dep:model2vec-rs"]
 [dependencies]
 fastembed = { version = "6", optional = true }
 pixel-index = { path = "../pixel-index" }
+pixel-rank = { path = "../pixel-rank" }
 memmap2 = "0.9.11"
 model2vec-rs = { version = "0.2", optional = true }
 regex = "1.13"

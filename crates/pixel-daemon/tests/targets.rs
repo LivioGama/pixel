@@ -51,9 +51,11 @@ fn run_targets(dir: &Path, task: &str) -> serde_json::Value {
     let resp = svc.handle(Request::Targets {
         task: task.to_string(),
         limit: Some(10),
+        max_tier: None,
+        precision: false,
     });
     assert!(resp.ok, "targets op failed: {:?}", resp.error);
-    resp.data
+    resp.into_data()
 }
 
 #[test]
@@ -123,8 +125,74 @@ fn targets_rejects_empty_task() {
     let resp = svc.handle(Request::Targets {
         task: "fix the code".to_string(),
         limit: None,
+        max_tier: None,
+        precision: false,
     });
     assert!(!resp.ok);
-    assert!(resp.error.unwrap().contains("no searchable keywords"));
+    assert!(resp.error.unwrap().message.contains("no searchable keywords"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+
+/// A bare directory (NO `.git`) now builds a graph from the filesystem walk
+/// (capped by PIXEL_GRAPH_MAX_FILES, default 50000) instead of refusing.
+/// The graph is fresh because the file-hash signature matches; the envelope
+/// reports `graph: "fresh"` and `gitless: true` in the build info. This is a
+/// net improvement over the old behavior (hard refusal → "unavailable"):
+/// `resolve`, `impact`, `context`, and `symbol` all work in non-git dirs now.
+/// Regression for the `pi-fanout-flash` no-`.git` hang (6+ min, 732MB RAM) —
+/// the file-count cap prevents that pathological case.
+#[test]
+fn targets_no_git_builds_graphless() {
+    // A gitless temp dir — no `.git`, no ancestor `.pixel`/`.git` — and
+    // `Service::open` uses the given path directly (not the upward
+    // `discover_root` walk), so the root is precisely this dir.
+
+    let dir = std::env::temp_dir().join(format!("gpx-targets-nogit-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/login.rs"),
+        "pub fn login_user(name: &str) -> bool {\n    !name.is_empty()\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/session.rs"),
+        "use crate::login::login_user;\n\npub fn start_session(name: &str) -> bool {\n    login_user(name)\n}\n",
+    )
+    .unwrap();
+
+    let mut svc = Service::open(&dir).unwrap();
+    let resp = svc.handle(Request::Targets {
+        task: "fix `login_user` auth flow".to_string(),
+        limit: Some(10),
+        max_tier: None,
+        precision: false,
+    });
+    assert!(resp.ok, "targets op failed on a no-git dir: {:?}", resp.error);
+    let data = resp.into_data();
+
+    // The graph IS built (gitless mode) — the file-count cap keeps it safe.
+    // The build info marks it as gitless.
+    assert_eq!(
+        data["envelope"]["graph"], "fresh",
+        "no-git dir should build a fresh graph (gitless mode): {data}"
+    );
+    assert_eq!(
+        data["graph_build"]["gitless"], true,
+        "build info should mark gitless: {data}"
+    );
+
+    // Graph signal finds the defining file AND the caller.
+    let targets = data["targets"].as_array().unwrap();
+    assert!(
+        targets.iter().any(|t| t["path"] == "src/login.rs"),
+        "graph-signals target missing login.rs: {targets:?}",
+    );
+    assert!(
+        targets.iter().any(|t| t["path"] == "src/session.rs"),
+        "graph-signals target missing session.rs (caller): {targets:?}",
+    );
+
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -222,12 +222,26 @@ pub mod potion {
     pub struct PotionEmbedder {
         model: model2vec_rs::model::StaticModel,
         dims: usize,
+        model_id: String,
     }
 
     const REPO: &str = "minishlab/potion-multilingual-128M";
 
+    /// Resolve the potion repo to load. `PIXEL_RECALL_MODEL_REPO` overrides
+    /// the default so `pixel ask` can select a code-specialized static model
+    /// (e.g. `minishlab/potion-code-16M-v2`, distilled from CodeRankEmbed)
+    /// for much better code-domain recall, while the transcript path keeps
+    /// the multilingual default.
+    fn resolved_repo() -> String {
+        match std::env::var("PIXEL_RECALL_MODEL_REPO") {
+            Ok(v) if !v.is_empty() => v,
+            _ => REPO.to_string(),
+        }
+    }
+
     impl PotionEmbedder {
         pub fn open(cache_dir: &Path, download: bool) -> Result<Self, String> {
+            let repo = resolved_repo();
             let marker = cache_dir.join("potion.ok");
             if !download && !marker.exists() {
                 return Err(
@@ -241,22 +255,26 @@ pub mod potion {
             unsafe {
                 std::env::set_var("HF_HOME", cache_dir.join("hf"));
             }
-            let model = model2vec_rs::model::StaticModel::from_pretrained(REPO, None, None, None)
+            let model = model2vec_rs::model::StaticModel::from_pretrained(&repo, None, None, None)
                 .map_err(|e| format!("potion model load: {e}"))?;
             let dims = model.encode_single("probe").len();
             if dims == 0 {
                 return Err("potion model produced empty embeddings".to_string());
             }
             if download {
-                let _ = std::fs::write(&marker, REPO);
+                let _ = std::fs::write(&marker, &repo);
             }
-            Ok(Self { model, dims })
+            Ok(Self {
+                model,
+                dims,
+                model_id: repo,
+            })
         }
     }
 
     impl Embedder for PotionEmbedder {
         fn model_id(&self) -> &str {
-            super::POTION_MODEL_ID
+            &self.model_id
         }
 
         fn dims(&self) -> usize {

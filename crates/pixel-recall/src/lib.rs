@@ -7,7 +7,9 @@
 //! global: transcripts belong to the machine, not to a repository.
 
 pub mod ask;
+pub mod code_search;
 pub mod embed;
+pub mod export;
 pub mod hybrid;
 pub mod ingest;
 pub mod intent;

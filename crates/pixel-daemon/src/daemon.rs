@@ -12,11 +12,44 @@ use std::time::{Duration, Instant};
 
 use notify::{RecursiveMode, Watcher};
 
-use crate::api::{Request, Response, ServeError, Service};
+use crate::api::{Request, Response, ServeError, Service, failure_response};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const DEBOUNCE: Duration = Duration::from_millis(500);
-const IGNORED_DIRS: &[&str] = [".pixel", ".git", "target", "node_modules"].as_slice();
+/// Idle poll interval for the facts ingest thread once fresh. A ref move
+/// re-triggers ingest on the next poll without blocking queries.
+const INGEST_IDLE_POLL: Duration = Duration::from_secs(5);
+/// Backoff after a transient ingest error (e.g. a git lock held by another
+/// process) before retrying.
+const INGEST_ERROR_BACKOFF: Duration = Duration::from_secs(2);
+const IGNORED_DIRS: &[&str] = &[
+    ".pixel",
+    ".git",
+    "target",
+    "node_modules",
+    "bower_components",
+    "Pods",
+    "vendor",
+    "_build",
+    "DerivedData",
+    "dist",
+    "build",
+    "out",
+    ".gradle",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    "site-packages",
+    ".terraform",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".cache",
+    ".npm",
+    ".yarn",
+    ".pnpm-store",
+];
 /// Maximum length of a single NDJSON request line. A request larger than this
 /// is rejected to prevent a malicious client from exhausting memory with a
 /// multi-GB line. The largest legitimate request (a search pattern) is well
@@ -28,11 +61,17 @@ const CONNECTION_DEADLINE: Duration = Duration::from_secs(5);
 /// single-threaded daemon indefinitely.
 const MAX_REQUESTS_PER_CONN: u32 = 64;
 
-/// $TMPDIR/gitpixel-<xxh3-of-canonical-root>.sock
+/// $TMPDIR/pixel-<xxh3-of-canonical-root>.sock
+///
+/// Deliberately distinct from the legacy gitpixel tool's `gitpixel-*.sock`
+/// prefix: the two daemons speak incompatible response envelopes (gitpixel's
+/// `{ok,error,data}` vs pixel's `{op,protocol,...}`), so an old gitpixel
+/// daemon and this one must bind to different socket paths and coexist
+/// independently rather than collide on the same one.
 pub fn socket_path(root: &Path) -> PathBuf {
     let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let h = xxhash_rust::xxh3::xxh3_64(canon.to_string_lossy().as_bytes());
-    std::env::temp_dir().join(format!("gitpixel-{h:016x}.sock"))
+    std::env::temp_dir().join(format!("pixel-{h:016x}.sock"))
 }
 
 pub fn pid_path(root: &Path) -> PathBuf {
@@ -53,6 +92,12 @@ pub trait Corpus {
     fn handle(&mut self, req: Request) -> Response;
     /// Debounced watcher callback with the absolute changed path.
     fn apply_change(&mut self, abs: &Path, removed: bool);
+    /// Debounced watcher callback with a batch of changed paths (default: loops apply_change).
+    fn apply_changes(&mut self, changes: &[(PathBuf, bool)]) {
+        for (abs, removed) in changes {
+            self.apply_change(abs, *removed);
+        }
+    }
     /// Directories the watcher observes (default: the root).
     fn watch_paths(&self) -> Vec<PathBuf> {
         vec![self.root().to_path_buf()]
@@ -83,19 +128,90 @@ impl Corpus for Service {
             self.refresh_file(&rel);
         }
     }
+
+    fn apply_changes(&mut self, changes: &[(PathBuf, bool)]) {
+        let root = Service::root(self).to_path_buf();
+        let rel_changes: Vec<(String, bool)> = changes
+            .iter()
+            .filter_map(|(abs, removed)| {
+                let rel = abs.strip_prefix(&root).ok()?.to_string_lossy().into_owned();
+                if rel.is_empty() {
+                    None
+                } else {
+                    Some((rel, *removed))
+                }
+            })
+            .collect();
+        let slice: Vec<(&str, bool)> = rel_changes.iter().map(|(r, rem)| (r.as_str(), *rem)).collect();
+        self.refresh_files(&slice);
+    }
 }
 
 /// Run the repo daemon in the foreground until Shutdown, idle timeout, or
 /// error.
 pub fn run(root: &Path) -> Result<(), ServeError> {
     let service = Service::open(root)?;
+    spawn_facts_ingest(root);
     run_corpus(service)
+}
+
+/// Spawn a low-priority background thread that periodically ticks the facts
+/// ingest (history.db) until fresh, then idle-polls so a ref move re-triggers
+/// ingest. Queries never block on it: the ingest shares the WAL-mode
+/// connection and yields every tick budget.
+fn spawn_facts_ingest(root: &Path) {
+    let root = root.to_path_buf();
+    std::thread::spawn(move || {
+        let mut store = match pixel_facts::FactsStore::open(&root) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let opts = pixel_facts::ingest::IngestOptions::default();
+        // Periodic tick loop: keep ingesting until fresh, then idle-poll so a
+        // ref move re-triggers ingest. Each tick is budget-bounded, so queries
+        // on the same WAL-mode connection are never starved.
+        let mut tick_count = 0u64;
+        loop {
+            match pixel_facts::ingest::ingest_tick(&mut store, &opts) {
+                Ok(report) if report.fresh => {
+                    let _ = store.wal_checkpoint();
+                    std::thread::sleep(INGEST_IDLE_POLL);
+                }
+                Ok(_) => {
+                    tick_count += 1;
+                    if tick_count % 20 == 0 {
+                        let _ = store.wal_checkpoint();
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                Err(_) => {
+                    // Transient error (e.g. git lock): back off and retry.
+                    std::thread::sleep(INGEST_ERROR_BACKOFF);
+                }
+            }
+        }
+    });
 }
 
 /// Run any corpus daemon in the foreground.
 pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
     let root = service.root().to_path_buf();
     let sock = socket_path(&root);
+
+    // Advisory lock on pid_path to prevent concurrent startup race and duplicate running daemons.
+    let lock_path = pid_path(&root).with_extension("lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    use fs2::FileExt;
+    if lock_file.try_lock_exclusive().is_err() {
+        return Err(ServeError::Msg(format!(
+            "daemon lock already held by another process for {}",
+            root.display()
+        )));
+    }
 
     // A live socket means another daemon owns this root.
     if UnixStream::connect(&sock).is_ok() {
@@ -145,7 +261,7 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
     }
 
     eprintln!(
-        "gitpixel daemon: root={} socket={}",
+        "pixel daemon: root={} socket={}",
         root.display(),
         sock.display()
     );
@@ -184,20 +300,20 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
         if let Some(at) = flush_at
             && Instant::now() >= at
         {
-            for (abs, removed) in std::mem::take(&mut pending) {
-                service.apply_change(&abs, removed);
-            }
+            let batch: Vec<(PathBuf, bool)> = std::mem::take(&mut pending).into_iter().collect();
+            service.apply_changes(&batch);
             flush_at = None;
         }
 
         if last_activity.elapsed() >= IDLE_TIMEOUT {
-            eprintln!("gitpixel daemon: idle timeout, exiting");
+            eprintln!("pixel daemon: idle timeout, exiting");
             break;
         }
     }
 
     let _ = std::fs::remove_file(&sock);
     let _ = std::fs::remove_file(pid_path(&root));
+    let _ = std::fs::remove_file(&lock_path);
     Ok(())
 }
 
@@ -231,8 +347,9 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
     loop {
         // Cap requests per connection to prevent starvation.
         if request_count >= MAX_REQUESTS_PER_CONN {
-            let _ = writer
-                .write_all(b"{\"ok\":false,\"error\":\"request limit exceeded\",\"data\":null}\n");
+            let resp = failure_response("error", "request limit exceeded");
+            let _ = writer.write_all(serde_json::to_vec(&resp).unwrap_or_default().as_slice());
+            let _ = writer.write_all(b"\n");
             break;
         }
         line.clear();
@@ -242,16 +359,16 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
             ReadResult::Ok => {}
             ReadResult::Eof => break,
             ReadResult::TooLong => {
-                let _ = writer.write_all(
-                    b"{\"ok\":false,\"error\":\"request line too long\",\"data\":null}\n",
-                );
+                let resp = failure_response("error", "request line too long");
+                let _ = writer.write_all(serde_json::to_vec(&resp).unwrap_or_default().as_slice());
+                let _ = writer.write_all(b"\n");
                 break;
             }
             ReadResult::InvalidUtf8 => {
                 request_count += 1;
-                let _ = writer.write_all(
-                    b"{\"ok\":false,\"error\":\"request is not valid UTF-8\",\"data\":null}\n",
-                );
+                let resp = failure_response("error", "request is not valid UTF-8");
+                let _ = writer.write_all(serde_json::to_vec(&resp).unwrap_or_default().as_slice());
+                let _ = writer.write_all(b"\n");
                 continue;
             }
             ReadResult::TimedOut | ReadResult::Err => break,
@@ -266,11 +383,15 @@ fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool
                 let is_shutdown = matches!(req, Request::Shutdown);
                 (service.handle(req), is_shutdown)
             }
-            Err(e) => (Response::err(format!("bad request: {e}")), false),
+            Err(e) => (failure_response("error", format!("bad request: {e}")), false),
         };
-        let mut out = serde_json::to_string(&resp).unwrap_or_else(|_| {
-            r#"{"ok":false,"error":"serialize failure","data":null}"#.to_string()
+        let out = serde_json::to_string(&resp).unwrap_or_else(|_| {
+            // Fallback: a minimal failure envelope if serialization itself
+            // fails (should never happen for a Value-typed envelope).
+            r#"{"ok":false,"op":"error","protocol":1,"error":{"code":"INVARIANT_VIOLATION","message":"serialize failure"}}"#
+                .to_string()
         });
+        let mut out = out;
         out.push('\n');
         if writer.write_all(out.as_bytes()).is_err() || writer.flush().is_err() {
             break;
