@@ -611,12 +611,7 @@ fn content_rank(
             // so the primary sort stays deterministic and free of float-path
             // hazards. Negate so ascending sort yields best-first.
             let scaled = (acc.idf_sum * 1000.0) as i64;
-            (
-                -scaled,
-                acc.total,
-                p,
-                acc.per_kw.into_iter().collect(),
-            )
+            (-scaled, acc.total, p, acc.per_kw.into_iter().collect())
         })
         .collect();
     scored.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));

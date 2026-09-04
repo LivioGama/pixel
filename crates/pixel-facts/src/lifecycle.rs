@@ -59,9 +59,10 @@ impl FactsStore {
         // last touch overall.
         let mut removed_in: Option<(String, String, String)> = None;
         if let Some(last) = &last
-            && last.3 == "D" {
-                removed_in = Some((last.0.clone(), last.1.clone(), last.2.clone()));
-            }
+            && last.3 == "D"
+        {
+            removed_in = Some((last.0.clone(), last.1.clone(), last.2.clone()));
+        }
         // present-at-head: check whether the blob exists at HEAD.
         let present = self
             .runner()
@@ -99,24 +100,21 @@ impl FactsStore {
             v
         };
         for id in ids {
-            if let Ok((oid, at, msg, added, removed)) = self
-                .conn
-                .query_row(
-                    "SELECT c.oid, c.committed_at, c.message, h.added, h.removed
+            if let Ok((oid, at, msg, added, removed)) = self.conn.query_row(
+                "SELECT c.oid, c.committed_at, c.message, h.added, h.removed
                      FROM hunks h JOIN commits c ON c.id = h.commit_id
                      WHERE h.id = ?1",
-                    [id],
-                    |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                            r.get::<_, String>(3)?,
-                            r.get::<_, String>(4)?,
-                        ))
-                    },
-                )
-            {
+                [id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                },
+            ) {
                 let text = format!("{added}\n{removed}");
                 let rel = relevance_of(&text, &units);
                 if rel == 0 {

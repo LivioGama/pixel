@@ -284,10 +284,10 @@ fn extract_record(
                     .or_else(|| payload.get("session_id"))
                     .and_then(Value::as_str)
                     .filter(|p| *p != session.source_session_id)
-                {
-                    session.is_subagent = true;
-                    session.parent_source_session_id = Some(parent.to_string());
-                }
+            {
+                session.is_subagent = true;
+                session.parent_source_session_id = Some(parent.to_string());
+            }
         }
         "response_item" => {
             let ptype = payload.get("type").and_then(Value::as_str).unwrap_or("");

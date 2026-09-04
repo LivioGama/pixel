@@ -56,5 +56,8 @@ jobs:
       - name: Install cross
         run: cargo install cross
 
-      - name: Cross-build (no fastembed — ort-sys has no musl prebuilts)
-        run: cross build --release --no-default-features --target ${{ matrix.target }} -p pixel-cli
+      # Must match release.yml exactly: fastembed (ONNX) has no musl build,
+      # but model2vec is pure Rust and ships in the Linux release. Building
+      # without it here would leave the released feature set untested.
+      - name: Cross-build (model2vec only — ort-sys has no musl prebuilts)
+        run: cross build --release --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli

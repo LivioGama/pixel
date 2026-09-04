@@ -1307,26 +1307,27 @@ fn merge_targets_manifest(existing: Option<&str>, new_task: Value, now: u64) -> 
         .to_string();
     let mut tasks: Vec<Value> = Vec::new();
     if let Some(text) = existing
-        && let Ok(v) = serde_json::from_str::<Value>(text) {
-            if v.get("version").and_then(Value::as_u64) == Some(2) {
-                tasks = v
-                    .get("tasks")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-            } else if let Some(old_task) = v.get("task").and_then(Value::as_str) {
-                // Legacy single-task shape — wrap it as one v2 task so a
-                // concurrent agent's active scope survives this write.
-                tasks = vec![serde_json::json!({
-                    "id": targets_task_id(old_task),
-                    "task": old_task,
-                    "created_unix": v.get("created_unix").cloned().unwrap_or(Value::Null),
-                    "head_oid": v.get("head_oid").cloned().unwrap_or(Value::Null),
-                    "limit": v.get("limit").cloned().unwrap_or(Value::Null),
-                    "targets": v.get("files").cloned().unwrap_or_else(|| Value::Array(vec![])),
-                })];
-            }
+        && let Ok(v) = serde_json::from_str::<Value>(text)
+    {
+        if v.get("version").and_then(Value::as_u64) == Some(2) {
+            tasks = v
+                .get("tasks")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+        } else if let Some(old_task) = v.get("task").and_then(Value::as_str) {
+            // Legacy single-task shape — wrap it as one v2 task so a
+            // concurrent agent's active scope survives this write.
+            tasks = vec![serde_json::json!({
+                "id": targets_task_id(old_task),
+                "task": old_task,
+                "created_unix": v.get("created_unix").cloned().unwrap_or(Value::Null),
+                "head_oid": v.get("head_oid").cloned().unwrap_or(Value::Null),
+                "limit": v.get("limit").cloned().unwrap_or(Value::Null),
+                "targets": v.get("files").cloned().unwrap_or_else(|| Value::Array(vec![])),
+            })];
         }
+    }
     tasks.retain(|t| {
         let created = t.get("created_unix").and_then(Value::as_u64).unwrap_or(0);
         let id = t.get("id").and_then(Value::as_str).unwrap_or("");
@@ -2013,9 +2014,10 @@ fn run_search_one(
                     root.join(p).display().to_string()
                 };
                 if seen_files.insert(abs.clone())
-                    && let Ok(meta) = std::fs::metadata(&abs) {
-                        pool_chars = pool_chars.saturating_add(meta.len());
-                    }
+                    && let Ok(meta) = std::fs::metadata(&abs)
+                {
+                    pool_chars = pool_chars.saturating_add(meta.len());
+                }
             }
         }
         if pool_chars > 0 && pool_chars > snippet_chars {
@@ -2728,9 +2730,10 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             // the client-side fallback when talking to an older daemon that
             // doesn't send one.
             if data.get("facts").map(|f| f.is_null()).unwrap_or(true)
-                && let Some(facts) = facts_status(&path) {
-                    data["facts"] = facts;
-                }
+                && let Some(facts) = facts_status(&path)
+            {
+                data["facts"] = facts;
+            }
             if json {
                 print_data(&data, true)?;
             } else {
@@ -3192,7 +3195,15 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             //    overwrites a mapped Mach-O on macOS, invalidating the
             //    ad-hoc code signature and causing SIGKILL on next run.
             eprintln!("Installing to {}", dest.display());
-            let tmp = dest.with_extension("tmp.$$");
+            // `$$` is a shell idiom and is NOT expanded by Rust, so a literal
+            // name would collide between concurrent upgrades. Use the real pid,
+            // and keep the temp file in `dest`'s directory so the rename stays
+            // atomic (same filesystem). Mirrors scripts/install.sh's `.pixel.tmp.$$`.
+            let tmp = dest.with_file_name(format!(
+                ".{}.tmp.{}",
+                dest.file_name().and_then(|n| n.to_str()).unwrap_or("pixel"),
+                std::process::id()
+            ));
             std::fs::copy(&src, &tmp).map_err(|e| format!("copy failed: {e}"))?;
             std::fs::rename(&tmp, &dest).map_err(|e| {
                 let _ = std::fs::remove_file(&tmp);

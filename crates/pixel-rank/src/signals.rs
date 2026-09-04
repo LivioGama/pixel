@@ -394,19 +394,20 @@ fn error_matches_path(err: &ErrorRecord, path: &str) -> Option<String> {
         return None;
     }
     if let Some(http) = &err.http
-        && let Some(url) = http.get("url").and_then(serde_json::Value::as_str) {
-            let url_lower = url.to_lowercase();
-            if concepts.iter().any(|c| url_lower.contains(c.as_str())) {
-                let status = http
-                    .get("status")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-                return Some(format!(
-                    "matches live error #{} ({} on {})",
-                    err.id, status, url
-                ));
-            }
+        && let Some(url) = http.get("url").and_then(serde_json::Value::as_str)
+    {
+        let url_lower = url.to_lowercase();
+        if concepts.iter().any(|c| url_lower.contains(c.as_str())) {
+            let status = http
+                .get("status")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            return Some(format!(
+                "matches live error #{} ({} on {})",
+                err.id, status, url
+            ));
         }
+    }
     if let Some(frames) = &err.frames {
         for f in frames {
             for loc in [f.file.as_deref(), f.mapped_file.as_deref()]

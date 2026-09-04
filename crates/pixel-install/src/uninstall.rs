@@ -24,8 +24,7 @@ use crate::install::{self, CheckStatus, InstallReport, InstallStep, InstallSumma
 pub type Result<T> = std::result::Result<T, InstallError>;
 
 /// Options controlling an uninstall run.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct UninstallOptions {
     /// Home directory. Defaults to `$HOME`.
     pub home: Option<PathBuf>,
@@ -35,7 +34,6 @@ pub struct UninstallOptions {
     /// run would, but perform no filesystem writes.
     pub dry_run: bool,
 }
-
 
 /// Markers that identify pixel-authored hook entries in any settings file.
 /// Each corresponds to a hook script filename installed by `pixel install`.
@@ -207,9 +205,10 @@ fn remove_claude_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
             }
             // If the hooks object is now empty, remove it entirely.
             if hooks.is_empty()
-                && let Some(obj) = value.as_object_mut() {
-                    obj.remove("hooks");
-                }
+                && let Some(obj) = value.as_object_mut()
+            {
+                obj.remove("hooks");
+            }
         }
         if !dry_run && removed_entries > 0 {
             backup_path = install::write_settings(&settings, &value, dry_run)?;
@@ -365,9 +364,10 @@ fn remove_zcode_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
             }
         }
         if hooks_root.is_empty()
-            && let Some(obj) = value.as_object_mut() {
-                obj.remove("hooks");
-            }
+            && let Some(obj) = value.as_object_mut()
+        {
+            obj.remove("hooks");
+        }
     }
     let mut backup_path = None;
     if !dry_run && removed > 0 {
@@ -446,9 +446,10 @@ fn remove_cursor_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
             }
         }
         if hooks.is_empty()
-            && let Some(obj) = value.as_object_mut() {
-                obj.remove("hooks");
-            }
+            && let Some(obj) = value.as_object_mut()
+        {
+            obj.remove("hooks");
+        }
     }
     let mut backup_path = None;
     if !dry_run && removed > 0 {
@@ -680,9 +681,10 @@ fn remove_pixel_hooks_from_settings(
             }
         }
         if hooks.is_empty()
-            && let Some(obj) = value.as_object_mut() {
-                obj.remove("hooks");
-            }
+            && let Some(obj) = value.as_object_mut()
+        {
+            obj.remove("hooks");
+        }
     }
     let mut backup_path = None;
     if !dry_run && removed > 0 {

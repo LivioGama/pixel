@@ -192,7 +192,9 @@ Pixel is written in Rust (requires Rust ≥ 1.85, edition 2024) and is designed 
 
 Pixel is local-first, but two features require network access on first use:
 
-- **Semantic search** (`pixel ask`, `pixel recall`): the `fastembed` feature (enabled by default) downloads embedding models from Hugging Face on first use via `pixel recall setup`. After download, all inference is local (CPU). Disable with `--no-default-features` at build time if offline-only operation is required.
+- **Semantic search** (`pixel ask`, `pixel recall`): downloads an embedding model from Hugging Face on first use via `pixel recall setup`. After download, all inference is local (CPU). Disable with `--no-default-features` at build time if offline-only operation is required.
+  - Source builds default to `fastembed` (ONNX) **and** `model2vec`.
+  - **Prebuilt Linux binaries ship `model2vec` only.** `fastembed` depends on ONNX Runtime, which publishes no musl build, so the release binaries are built with `--no-default-features --features model2vec`. `model2vec` is pure Rust, but it still fetches its model from Hugging Face on first use — so a Linux install needs network access once before semantic search works.
 - **Git remote operations** (`pixel publish`, `pixel push`, `pixel ship`): these intentionally talk to your configured Git remote.
 
 All other operations — indexing, search, graph analysis, flow replay, history excavation — run entirely locally after any required model download.

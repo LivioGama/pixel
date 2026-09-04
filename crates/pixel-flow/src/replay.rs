@@ -51,7 +51,9 @@ pub fn replay(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, Str
                 "#   agent-browser --session comet tab list   # find tabs matching '{}'\n",
                 substitute(pattern, vars)
             ));
-            out.push_str("#   agent-browser --session comet tab close <id>   # close each matching tab\n");
+            out.push_str(
+                "#   agent-browser --session comet tab close <id>   # close each matching tab\n",
+            );
         }
         out.push('\n');
     }
@@ -135,17 +137,18 @@ fn render_step(
     let effective_tab = step.tab.as_deref().or(flow_tab);
     if step.action != "switch_tab"
         && let Some(tab) = effective_tab
-            && step.tab.is_some() {
-                out.push_str(&format!(
-                    "{}agent-browser --session comet tab list   # switch to tab matching '{}'\n",
-                    indent,
-                    substitute(tab, vars)
-                ));
-                out.push_str(&format!(
-                    "{}agent-browser --session comet tab <id>\n",
-                    indent
-                ));
-            }
+        && step.tab.is_some()
+    {
+        out.push_str(&format!(
+            "{}agent-browser --session comet tab list   # switch to tab matching '{}'\n",
+            indent,
+            substitute(tab, vars)
+        ));
+        out.push_str(&format!(
+            "{}agent-browser --session comet tab <id>\n",
+            indent
+        ));
+    }
 
     match step.action.as_str() {
         "open" => {

@@ -88,8 +88,7 @@ impl RepositoryLock {
             acquired_at: iso_now(),
             common_directory: common_dir.to_string(),
         };
-        let json = serde_json::to_vec_pretty(&owner)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_vec_pretty(&owner).map_err(std::io::Error::other)?;
         let owner_path = lock_dir.join("owner.json");
         let mut f = fs::OpenOptions::new()
             .write(true)
@@ -127,9 +126,10 @@ impl RepositoryLock {
         let owner_path = self.lock_dir.join("owner.json");
         if let Ok(data) = fs::read(&owner_path)
             && let Ok(owner) = serde_json::from_slice::<LockOwner>(&data)
-                && owner.token == self.token {
-                    let _ = fs::remove_dir_all(&self.lock_dir);
-                }
+            && owner.token == self.token
+        {
+            let _ = fs::remove_dir_all(&self.lock_dir);
+        }
         self.acquired = false;
     }
 }

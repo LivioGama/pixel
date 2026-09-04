@@ -135,9 +135,10 @@ pub(crate) fn is_test_path(path: &str) -> bool {
         return true;
     }
     if let Some((stem, _ext)) = file.rsplit_once('.')
-        && stem.ends_with("_test") {
-            return true;
-        }
+        && stem.ends_with("_test")
+    {
+        return true;
+    }
     path.split('/').any(|seg| seg == "tests" || seg == "test")
 }
 
@@ -761,18 +762,17 @@ fn walk_json(value: &serde_json::Value, prefix: &str, out: &mut Vec<RawConcept>)
                 walk_json(v, &path, out);
             }
         }
-        serde_json::Value::String(s)
-            if !prefix.is_empty() => {
-                out.push(RawConcept {
-                    kind: ConceptKind::ConfigKey,
-                    raw: s.clone(),
-                    norm: normalize(s),
-                    detail: format!("value of {prefix}"),
-                    start_line: 0,
-                    end_line: 0,
-                    owner_symbol_id: None,
-                });
-            }
+        serde_json::Value::String(s) if !prefix.is_empty() => {
+            out.push(RawConcept {
+                kind: ConceptKind::ConfigKey,
+                raw: s.clone(),
+                norm: normalize(s),
+                detail: format!("value of {prefix}"),
+                start_line: 0,
+                end_line: 0,
+                owner_symbol_id: None,
+            });
+        }
         _ => {}
     }
 }
@@ -839,19 +839,20 @@ fn extract_css(content: &[u8]) -> Vec<RawConcept> {
         let line_no = i as u32 + 1;
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("--")
-            && let Some((name, _)) = rest.split_once(':') {
-                let name = name.trim().to_string();
-                let path = format!("--{name}");
-                out.push(RawConcept {
-                    kind: ConceptKind::ConfigKey,
-                    raw: path.clone(),
-                    norm: normalize(&path),
-                    detail: "css custom property".into(),
-                    start_line: line_no,
-                    end_line: line_no,
-                    owner_symbol_id: None,
-                });
-            }
+            && let Some((name, _)) = rest.split_once(':')
+        {
+            let name = name.trim().to_string();
+            let path = format!("--{name}");
+            out.push(RawConcept {
+                kind: ConceptKind::ConfigKey,
+                raw: path.clone(),
+                norm: normalize(&path),
+                detail: "css custom property".into(),
+                start_line: line_no,
+                end_line: line_no,
+                owner_symbol_id: None,
+            });
+        }
     }
     out
 }

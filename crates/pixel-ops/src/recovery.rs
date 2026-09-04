@@ -129,9 +129,7 @@ fn index_path(repo_root: &Path) -> PathBuf {
 /// Capture a byte-exact, restorable snapshot of `.git/index` as it exists
 /// right now. Returns `None` if the index file does not exist yet.
 pub fn capture_index_snapshot(repo_root: &Path) -> Option<String> {
-    std::fs::read(index_path(repo_root))
-        .ok()
-        .map(hex::encode)
+    std::fs::read(index_path(repo_root)).ok().map(hex::encode)
 }
 
 /// Restore `.git/index` to exactly the bytes captured by

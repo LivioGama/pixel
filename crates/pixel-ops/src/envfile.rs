@@ -243,9 +243,10 @@ fn key_names(content: &str) -> Vec<String> {
     let mut keys = Vec::new();
     for (line, _) in split_lines(content) {
         if let Some((key, _)) = parse_env_line(line)
-            && seen.insert(key.clone()) {
-                keys.push(key);
-            }
+            && seen.insert(key.clone())
+        {
+            keys.push(key);
+        }
     }
     keys
 }
@@ -361,14 +362,15 @@ fn set(
     for (line, term) in split_lines(&content) {
         if !replaced
             && let Some((k, value_start)) = parse_env_line(line)
-                && k == key {
-                    new_content.push_str(&line[..value_start]);
-                    new_content.push_str(value);
-                    new_content.push_str(term);
-                    replaced = true;
-                    action = "replaced";
-                    continue;
-                }
+            && k == key
+        {
+            new_content.push_str(&line[..value_start]);
+            new_content.push_str(value);
+            new_content.push_str(term);
+            replaced = true;
+            action = "replaced";
+            continue;
+        }
         new_content.push_str(line);
         new_content.push_str(term);
     }
@@ -384,10 +386,11 @@ fn set(
     }
 
     if let Some(parent) = path.parent()
-        && !parent.exists() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("cannot create dir {}: {e}", parent.display()))?;
-        }
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create dir {}: {e}", parent.display()))?;
+    }
     write_durably(&path, new_content.as_bytes())
         .map_err(|e| format!("cannot write env file {}: {e}", path.display()))?;
     journal_append(root, &path, "set", Some(key))?;
