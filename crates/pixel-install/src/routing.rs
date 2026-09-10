@@ -485,6 +485,7 @@ pub(crate) fn install_provider(
 
 /// Verify the installed transform, including matchers, executable, shell
 /// overlap and saved delegation. Merely finding a command string is not proof.
+#[allow(dead_code)]
 pub(crate) fn configuration_status(
     home: &Path,
     exe: &Path,
