@@ -240,8 +240,19 @@ fn worker_config() -> crate::task_scheduler::WorkerConfig {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("claude"));
+    let system_prompt_file = std::env::var_os("PIXEL_WORKER_SYSTEM_PROMPT_FILE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            // Fall back to the file deployed by `pixel install` so workers are
+            // Pixel-aware without any env-var configuration.
+            let home = std::env::var_os("HOME")?;
+            let default = PathBuf::from(home).join(".local/share/pixel/agent-prompt.md");
+            default.is_file().then_some(default)
+        });
     crate::task_scheduler::WorkerConfig {
         executable,
+        system_prompt_file,
         ..Default::default()
     }
 }
