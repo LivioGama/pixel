@@ -240,8 +240,12 @@ fn worker_config() -> crate::task_scheduler::WorkerConfig {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("claude"));
+    let system_prompt_file = std::env::var_os("PIXEL_WORKER_SYSTEM_PROMPT_FILE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
     crate::task_scheduler::WorkerConfig {
         executable,
+        system_prompt_file,
         ..Default::default()
     }
 }

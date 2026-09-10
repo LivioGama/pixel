@@ -100,6 +100,12 @@ pub(crate) struct ClaudeWorkerOptions<'a> {
     pub(crate) model: Option<&'a str>,
     pub(crate) max_turns: Option<u32>,
     pub(crate) max_budget_usd: Option<&'a str>,
+    /// Path to a file whose contents are appended to Claude's default system
+    /// prompt via `--append-system-prompt-file`. Non-destructive: Claude's
+    /// safety guidelines and tool descriptions remain intact. Used to inject
+    /// Pixel retrieval rules so workers are Pixel-aware without relying on
+    /// CLAUDE.md discovery.
+    pub(crate) system_prompt_file: Option<&'a Path>,
 }
 
 /// Construct a worker command with explicit scheduler-provided limits. This
@@ -148,6 +154,14 @@ pub(crate) fn build_worker_command_with_options(
     }
     if let Some(max_budget_usd) = options.max_budget_usd {
         command.arg("--max-budget-usd").arg(max_budget_usd);
+    }
+    if let Some(prompt_file) = options.system_prompt_file {
+        if prompt_file.as_os_str().is_empty() {
+            return Err("Claude worker system prompt file must not be empty".to_string());
+        }
+        command
+            .arg("--append-system-prompt-file")
+            .arg(prompt_file);
     }
     command.arg(worker_prompt(launch));
     Ok(command)
@@ -245,6 +259,7 @@ mod tests {
                 model: None,
                 max_turns: None,
                 max_budget_usd: None,
+                system_prompt_file: None,
             },
         )
         .unwrap();
@@ -294,12 +309,93 @@ mod tests {
     }
 
     #[test]
+    fn system_prompt_file_injects_append_flag() {
+        let prompt_file = Path::new("/tmp/pixel-worker-rules.md");
+        let command = build_worker_command_with_options(
+            &ClaudeWorkerLaunch {
+                task_id: "task-42",
+                worktree_id: "worktree-7",
+                worktree: Path::new("/tmp/pixel-task-42"),
+                objective: "Change greeting behavior",
+            },
+            &ClaudeWorkerOptions {
+                executable: Path::new("claude"),
+                model: None,
+                max_turns: None,
+                max_budget_usd: None,
+                system_prompt_file: Some(prompt_file),
+            },
+        )
+        .unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--append-system-prompt-file", "/tmp/pixel-worker-rules.md"]),
+            "expected --append-system-prompt-file flag, args were: {args:?}"
+        );
+    }
+
+    #[test]
+    fn no_system_prompt_file_omits_append_flag() {
+        let command = build_worker_command_with_options(
+            &ClaudeWorkerLaunch {
+                task_id: "task-42",
+                worktree_id: "worktree-7",
+                worktree: Path::new("/tmp/pixel-task-42"),
+                objective: "Change greeting behavior",
+            },
+            &ClaudeWorkerOptions {
+                executable: Path::new("claude"),
+                model: None,
+                max_turns: None,
+                max_budget_usd: None,
+                system_prompt_file: None,
+            },
+        )
+        .unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--append-system-prompt-file"),
+            "flag must be absent when system_prompt_file is None"
+        );
+    }
+
+    #[test]
+    fn empty_system_prompt_file_path_is_rejected() {
+        let result = build_worker_command_with_options(
+            &ClaudeWorkerLaunch {
+                task_id: "task-42",
+                worktree_id: "worktree-7",
+                worktree: Path::new("/tmp/pixel-task-42"),
+                objective: "Change greeting behavior",
+            },
+            &ClaudeWorkerOptions {
+                executable: Path::new("claude"),
+                model: None,
+                max_turns: None,
+                max_budget_usd: None,
+                system_prompt_file: Some(Path::new("")),
+            },
+        );
+        assert!(result.is_err(), "empty system_prompt_file must be rejected");
+    }
+
+    #[test]
     fn command_rejects_missing_identity_or_relative_worktree() {
         let opts = ClaudeWorkerOptions {
             executable: Path::new("claude"),
             model: None,
             max_turns: None,
             max_budget_usd: None,
+            system_prompt_file: None,
         };
         let relative = ClaudeWorkerLaunch {
             task_id: "task-42",
