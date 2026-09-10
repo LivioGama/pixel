@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use crate::InstallError;
 use crate::config;
 use crate::install::{self, CheckStatus, InstallReport, InstallStep, InstallSummary};
+use crate::routing;
 
 pub type Result<T> = std::result::Result<T, InstallError>;
 
@@ -178,6 +179,25 @@ fn remove_claude_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
             .get_mut("hooks")
             .and_then(serde_json::Value::as_object_mut)
         {
+            let saved = if routing::has_delegate(hooks) {
+                let saved = routing::load_rtk_backup(home)?;
+                if saved.is_empty() {
+                    return Err(InstallError::InvalidSettings {
+                        path: home.join(routing::RTK_BACKUP),
+                        reason: "RTK delegate backup missing; refusing to lose its registration"
+                            .into(),
+                    });
+                }
+                saved
+            } else {
+                Vec::new()
+            };
+            let before = hooks.clone();
+            routing::remove_pixel_hooks(hooks);
+            if !saved.is_empty() {
+                routing::restore_rtk(hooks, &saved);
+            }
+            removed_entries += usize::from(*hooks != before);
             // Remove pixel entries from every event. Events that pixel
             // registered under: PreToolUse, SessionStart, UserPromptSubmit,
             // PostCompaction. But iterate ALL event keys — a user may have
@@ -212,6 +232,9 @@ fn remove_claude_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
         }
         if !dry_run && removed_entries > 0 {
             backup_path = install::write_settings(&settings, &value, dry_run)?;
+        }
+        if !dry_run && home.join(routing::RTK_BACKUP).is_file() {
+            fs::remove_file(home.join(routing::RTK_BACKUP))?;
         }
     }
 
@@ -538,34 +561,191 @@ fn remove_pi_extension(home: &Path, dry_run: bool) -> Result<InstallStep> {
 
 fn remove_project_codex_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let mut patched = Vec::new();
+    let mut conflicts = Vec::new();
     for root in project_hook_search_roots(home) {
         let config_path = root.join(".codex").join("hooks.json");
         if !config_path.is_file() {
             continue;
+        }
+        match restore_project_codex_composed_guard(&config_path, dry_run)? {
+            ComposedGuardRestore::Restored => {
+                patched.push(config_path.display().to_string());
+                continue;
+            }
+            // A snapshot exists but its schema or the managed guard has been
+            // edited.  Do not fall through to generic Pixel-hook removal: it
+            // would delete the only record needed to recover the user's
+            // original guard configuration.
+            ComposedGuardRestore::Conflict => {
+                conflicts.push(config_path.display().to_string());
+                continue;
+            }
+            ComposedGuardRestore::NotManaged => {}
         }
         let (removed, _) = remove_pixel_hooks_from_settings(&config_path, dry_run)?;
         if removed > 0 {
             patched.push(config_path.display().to_string());
         }
     }
-    let summary = if patched.is_empty() {
+    let summary = if patched.is_empty() && conflicts.is_empty() {
         "no project-level .codex/hooks.json needed patching".to_string()
     } else {
         format!(
-            "patched {} project-level .codex/hooks.json file(s)",
-            patched.len()
+            "patched {} project-level .codex/hooks.json file(s); {} composed guard conflict(s) preserved",
+            patched.len(),
+            conflicts.len()
         )
     };
     Ok(InstallStep {
         id: "hooks.codex_project_shadow".into(),
-        status: CheckStatus::Green,
+        status: if conflicts.is_empty() {
+            CheckStatus::Green
+        } else {
+            CheckStatus::Yellow
+        },
         summary: install::dry_run_summary(dry_run, &summary),
-        detail: if patched.is_empty() {
+        detail: if patched.is_empty() && conflicts.is_empty() {
             None
         } else {
-            Some(patched.join(", "))
+            let mut detail = Vec::new();
+            if !patched.is_empty() {
+                detail.push(format!("restored=[{}]", patched.join(", ")));
+            }
+            if !conflicts.is_empty() {
+                // Paths explain the actionable conflict without exposing the
+                // snapshot payload, which may contain arbitrary user hooks.
+                detail.push(format!("preserved_conflicts=[{}]", conflicts.join(", ")));
+            }
+            Some(detail.join("; "))
         },
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposedGuardRestore {
+    /// No sidecar belongs to this project; generic Pixel-hook cleanup may run.
+    NotManaged,
+    /// Exact original `PreToolUse` was restored and the sidecar was removed.
+    Restored,
+    /// A sidecar exists, but the current managed value was changed or the
+    /// sidecar is invalid.  Preserve both files for manual reconciliation.
+    Conflict,
+}
+
+/// Restore a project-local Codex guard adoption without ever overwriting a
+/// user change made after install.
+///
+/// New sidecars carry `managed_pre_tool_use`, so comparison is byte-for-byte
+/// at the JSON value layer.  Early compositions did not record that field; a
+/// deliberately strict legacy signature permits their recovery only when the
+/// current array is exactly one unfiltered composed-guard command pointing at
+/// this project's own sidecar.
+fn restore_project_codex_composed_guard(
+    config_path: &Path,
+    dry_run: bool,
+) -> Result<ComposedGuardRestore> {
+    let Some(codex_dir) = config_path.parent() else {
+        return Ok(ComposedGuardRestore::NotManaged);
+    };
+    let sidecar = codex_dir.join(routing::CODEX_COMPOSED_BACKUP);
+    if !sidecar.is_file() {
+        return Ok(ComposedGuardRestore::NotManaged);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if fs::metadata(&sidecar)?.permissions().mode() & 0o077 != 0 {
+            return Ok(ComposedGuardRestore::Conflict);
+        }
+    }
+
+    let snapshot: serde_json::Value = match fs::read_to_string(&sidecar)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+    {
+        Some(value) => value,
+        None => return Ok(ComposedGuardRestore::Conflict),
+    };
+    if snapshot.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+        || snapshot.get("provider").and_then(serde_json::Value::as_str) != Some("codex")
+    {
+        return Ok(ComposedGuardRestore::Conflict);
+    }
+    let Some(original_pre) = snapshot
+        .get("pre_tool_use")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(ComposedGuardRestore::Conflict);
+    };
+
+    let mut settings = install::read_settings(config_path)?;
+    let Some(current_pre) = settings
+        .get("hooks")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|hooks| hooks.get("PreToolUse"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(ComposedGuardRestore::Conflict);
+    };
+
+    let unchanged = snapshot
+        .get("managed_pre_tool_use")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|managed| managed == current_pre)
+        || (snapshot.get("managed_pre_tool_use").is_none()
+            && legacy_composed_guard_signature(current_pre, &sidecar));
+    if !unchanged {
+        return Ok(ComposedGuardRestore::Conflict);
+    }
+
+    if !dry_run {
+        let hooks = settings
+            .get_mut("hooks")
+            .and_then(serde_json::Value::as_object_mut)
+            // `current_pre` above proves this cannot fail unless an internal
+            // mutation happened between reads, which it cannot in this value.
+            .expect("validated hooks object");
+        hooks.insert(
+            "PreToolUse".into(),
+            serde_json::Value::Array(original_pre.clone()),
+        );
+        install::write_settings(config_path, &settings, false)?;
+        // Delete only after the restored settings are durable.  If deletion
+        // fails, retain the sidecar rather than risk silently losing recovery
+        // data; a subsequent uninstall will report a conflict instead of
+        // overwriting user state.
+        fs::remove_file(&sidecar)?;
+    }
+    Ok(ComposedGuardRestore::Restored)
+}
+
+fn legacy_composed_guard_signature(current_pre: &[serde_json::Value], sidecar: &Path) -> bool {
+    let [group] = current_pre else {
+        return false;
+    };
+    let Some(group) = group.as_object() else {
+        return false;
+    };
+    // An unfiltered group has no matcher and no opaque fields that could be
+    // meaningful to Codex.  `hooks` must contain exactly one command hook.
+    if group.len() != 1 || !group.contains_key("hooks") {
+        return false;
+    }
+    let Some(hooks) = group.get("hooks").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    let [hook] = hooks.as_slice() else {
+        return false;
+    };
+    if hook.get("type").and_then(serde_json::Value::as_str) != Some("command") {
+        return false;
+    }
+    let Some(command) = hook.get("command").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let escaped_sidecar = sidecar.to_string_lossy().replace('\'', "'\\''");
+    command.contains(" hook composed-guard --provider codex --backup ")
+        && command.ends_with(&format!("'{escaped_sidecar}'"))
 }
 
 /// Directories commonly holding project checkouts — mirrors the same logic
@@ -659,6 +839,9 @@ fn remove_pixel_hooks_from_settings(
         .get_mut("hooks")
         .and_then(serde_json::Value::as_object_mut)
     {
+        let before = hooks.clone();
+        routing::remove_pixel_hooks(hooks);
+        removed += usize::from(*hooks != before);
         let event_keys: Vec<String> = hooks.keys().cloned().collect();
         for event in event_keys {
             if let Some(existing) = hooks.get(&event) {
@@ -691,4 +874,143 @@ fn remove_pixel_hooks_from_settings(
         backup_path = install::write_settings(config_path, &value, dry_run)?;
     }
     Ok((removed, backup_path))
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn routing_uninstall_restores_rtk_fragment_and_preserves_later_user_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let path = home.join(".claude/settings.json");
+        let rtk =
+            json!({"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]});
+        let foreign = json!({"matcher":"startup","hooks":[{"type":"command","command":"keep-security-check"}]});
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":[rtk.clone()],"SessionStart":[foreign.clone()]}}),
+            false,
+        )
+        .unwrap();
+        routing::install_provider(
+            home,
+            Path::new("/tmp/pixel"),
+            routing::Provider::Claude,
+            false,
+        )
+        .unwrap();
+        assert!(home.join(routing::RTK_BACKUP).is_file());
+        let mut installed = install::read_settings(&path).unwrap();
+        installed["later_user_change"] = json!(true);
+        install::write_settings(&path, &installed, false).unwrap();
+        remove_claude_hooks(home, true).unwrap();
+        assert_eq!(install::read_settings(&path).unwrap(), installed);
+        remove_claude_hooks(home, false).unwrap();
+        let restored = install::read_settings(&path).unwrap();
+        assert_eq!(restored["hooks"]["PreToolUse"], json!([rtk]));
+        assert_eq!(restored["hooks"]["SessionStart"], json!([foreign]));
+        assert_eq!(restored["later_user_change"], true);
+        assert!(!home.join(routing::RTK_BACKUP).exists());
+        remove_claude_hooks(home, false).unwrap();
+        assert_eq!(install::read_settings(&path).unwrap(), restored);
+    }
+
+    #[test]
+    fn routing_uninstall_removes_direct_codex_and_devin_commands() {
+        for provider in [routing::Provider::Codex, routing::Provider::Devin] {
+            let home = tempfile::tempdir().unwrap();
+            routing::install_provider(home.path(), Path::new("/tmp/pixel"), provider, false)
+                .unwrap();
+            let path = provider.path(home.path());
+            assert!(remove_pixel_hooks_from_settings(&path, false).unwrap().0 > 0);
+            assert_eq!(install::read_settings(&path).unwrap(), json!({}));
+        }
+    }
+
+    #[test]
+    fn project_composed_guard_uninstall_restores_exact_snapshot() {
+        let home = tempfile::tempdir().unwrap();
+        let codex = home.path().join("Documents/project/.codex");
+        let path = codex.join("hooks.json");
+        let original =
+            json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep-guard"}]}]);
+        let managed = json!([{"hooks":[{"type":"command","command":"'/tmp/pixel' hook composed-guard --provider codex --backup '/unused'"}]}]);
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":managed.clone()}}),
+            false,
+        )
+        .unwrap();
+        install::write_settings(
+            &codex.join(routing::CODEX_COMPOSED_BACKUP),
+            &json!({
+                "version": 1,
+                "provider": "codex",
+                "pre_tool_use": original.clone(),
+                "managed_pre_tool_use": managed,
+            }),
+            false,
+        )
+        .unwrap();
+        make_private(&codex.join(routing::CODEX_COMPOSED_BACKUP));
+
+        let step = remove_project_codex_hooks(home.path(), false).unwrap();
+        assert_eq!(step.status, CheckStatus::Green);
+        assert_eq!(
+            install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
+            original
+        );
+        assert!(!codex.join(routing::CODEX_COMPOSED_BACKUP).exists());
+    }
+
+    #[test]
+    fn project_composed_guard_uninstall_preserves_changed_managed_value() {
+        let home = tempfile::tempdir().unwrap();
+        let codex = home.path().join("Documents/project/.codex");
+        let path = codex.join("hooks.json");
+        let managed = json!([{"hooks":[{"type":"command","command":"'/tmp/pixel' hook composed-guard --provider codex --backup '/unused'"}]}]);
+        let changed = json!([
+            {"hooks":[{"type":"command","command":"'/tmp/pixel' hook composed-guard --provider codex --backup '/unused'"}]},
+            {"matcher":"Bash","hooks":[{"type":"command","command":"user-change"}]}
+        ]);
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":changed.clone()}}),
+            false,
+        )
+        .unwrap();
+        install::write_settings(
+            &codex.join(routing::CODEX_COMPOSED_BACKUP),
+            &json!({
+                "version": 1,
+                "provider": "codex",
+                "pre_tool_use": [],
+                "managed_pre_tool_use": managed,
+            }),
+            false,
+        )
+        .unwrap();
+        make_private(&codex.join(routing::CODEX_COMPOSED_BACKUP));
+
+        let step = remove_project_codex_hooks(home.path(), false).unwrap();
+        assert_eq!(step.status, CheckStatus::Yellow);
+        assert_eq!(
+            install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
+            changed
+        );
+        assert!(codex.join(routing::CODEX_COMPOSED_BACKUP).is_file());
+    }
+
+    fn make_private(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+    }
 }

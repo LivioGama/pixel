@@ -102,6 +102,137 @@ fn run_guard_env(payload: &serde_json::Value, envs: &[(&str, &str)]) -> (i32, St
     )
 }
 
+fn run_composed_codex(raw: &[u8], backup: &Path) -> (i32, String, String) {
+    let mut cmd = Command::new(PIXEL);
+    cmd.args([
+        "hook",
+        "composed-guard",
+        "--provider",
+        "codex",
+        "--backup",
+        backup.to_str().unwrap(),
+    ])
+    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+    .env("GIT_CONFIG_SYSTEM", "/dev/null")
+    .env("PIXEL_TEST", "1")
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    child.stdin.as_mut().unwrap().write_all(raw).unwrap();
+    let out = child.wait_with_output().unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn composed_backup(dir: &Path, command: &str) -> PathBuf {
+    let path = dir.join("codex-foreign-pretooluse.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "version": 1,
+            "provider": "codex",
+            "pre_tool_use": [{
+                "matcher": "shell",
+                "hooks": [{"type": "command", "command": command}]
+            }],
+            "managed_pre_tool_use": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    path
+}
+
+#[test]
+fn composed_codex_merges_context_and_rewrites_after_exact_stdin_replay() {
+    let repo = indexed_repo("composed-context");
+    let expected = repo.join("expected.json");
+    let script = repo.join("foreign-context.sh");
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "shell",
+        "cwd": repo.to_str().unwrap(),
+        "tool_input": {"command": "grep -n GUARD_NEEDLE_XYZ src/lib.rs"},
+    });
+    let raw = format!("  {}\n", payload);
+    std::fs::write(&expected, &raw).unwrap();
+    std::fs::write(
+        &script,
+        format!(
+            "cmp -s {} /dev/stdin || exit 9\nprintf '%s' '{{\"hookSpecificOutput\":{{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"foreign context\"}}}}'\n",
+            expected.display()
+        ),
+    )
+    .unwrap();
+    let backup = composed_backup(&repo, "/bin/sh \"$PWD/foreign-context.sh\"");
+    let (code, stdout, stderr) = run_composed_codex(raw.as_bytes(), &backup);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("pixel search-compat"), "{stdout}");
+    assert!(stdout.contains("foreign context"), "{stdout}");
+}
+
+#[test]
+fn composed_codex_preserves_foreign_denial_without_pixel_rewrite() {
+    let repo = indexed_repo("composed-deny");
+    let backup = composed_backup(
+        &repo,
+        "printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"foreign guard\"}}'",
+    );
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse", "tool_name": "shell", "cwd": repo,
+        "tool_input": {"command": "grep -n GUARD_NEEDLE_XYZ src/lib.rs"}
+    });
+    let (code, stdout, stderr) = run_composed_codex(payload.to_string().as_bytes(), &backup);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("foreign guard"), "{stdout}");
+    assert!(!stdout.contains("updatedInput"), "{stdout}");
+}
+
+#[test]
+fn composed_codex_malformed_foreign_response_fails_open_without_rewrite() {
+    let repo = indexed_repo("composed-malformed");
+    let backup = composed_backup(&repo, "printf '%s' not-json");
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse", "tool_name": "shell", "cwd": repo,
+        "tool_input": {"command": "grep -n GUARD_NEEDLE_XYZ src/lib.rs"}
+    });
+    let (code, stdout, stderr) = run_composed_codex(payload.to_string().as_bytes(), &backup);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.is_empty(),
+        "malformed foreign response must not rewrite: {stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn composed_codex_refuses_a_non_private_backup() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = indexed_repo("composed-permissions");
+    let backup = composed_backup(&repo, "printf '%s' '{}'");
+    std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse", "tool_name": "shell", "cwd": repo,
+        "tool_input": {"command": "grep -n GUARD_NEEDLE_XYZ src/lib.rs"}
+    });
+    let (code, stdout, stderr) = run_composed_codex(payload.to_string().as_bytes(), &backup);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.is_empty(),
+        "non-private backup must not rewrite: {stdout}"
+    );
+}
+
 fn bash_payload(cwd: &Path, command: &str) -> serde_json::Value {
     serde_json::json!({
         "hook_event_name": "PreToolUse",
@@ -113,9 +244,12 @@ fn bash_payload(cwd: &Path, command: &str) -> serde_json::Value {
 
 /// Equivalent Bash searches are transparently rewritten to Pixel search.
 #[test]
-fn bash_grep_denies_rather_than_racing_rtk_with_a_rewrite() {
+fn bash_literal_file_search_uses_compatibility_rewrite() {
     let repo = indexed_repo("rtk-race");
-    for cmd in ["grep -rn GUARD_NEEDLE_XYZ .", "rg GUARD_NEEDLE_XYZ"] {
+    for cmd in [
+        "grep -n GUARD_NEEDLE_XYZ src/lib.rs",
+        "rg GUARD_NEEDLE_XYZ src/lib.rs",
+    ] {
         let (code, stdout, stderr) = run_guard_env(&bash_payload(&repo, cmd), &[]);
         assert_eq!(code, 0, "`{cmd}` must remain available: {stderr}");
         assert!(
@@ -125,18 +259,22 @@ fn bash_grep_denies_rather_than_racing_rtk_with_a_rewrite() {
     }
 }
 
-/// A pipeline keeps the transparent-rewrite path: denying it would discard
-/// the agent's downstream filters, and RTK does not claim pipelines.
+/// A pipeline must remain native: enriched search output is not a compatible
+/// input to downstream filters, counts or control flow.
 #[test]
-fn bash_grep_pipeline_still_rewrites_rather_than_denying() {
+fn bash_grep_pipeline_preserves_original_execution() {
     let repo = indexed_repo("rtk-race-pipe");
-    let cmd = "grep -rln GUARD_NEEDLE_XYZ . | sort";
-    let (code, stdout, stderr) = run_guard_env(&bash_payload(&repo, cmd), &[]);
-    assert_ne!(code, 2, "pipeline must not be denied: {stderr}");
-    assert!(
-        stdout.contains("updatedInput") && stdout.contains("| sort"),
-        "pipeline must be rewritten with its filters intact: {stdout}"
-    );
+    for cmd in [
+        "grep -rln GUARD_NEEDLE_XYZ . | sort",
+        "bash -lc 'grep -n GUARD_NEEDLE_XYZ src/lib.rs'",
+    ] {
+        let (code, stdout, stderr) = run_guard_env(&bash_payload(&repo, cmd), &[]);
+        assert_eq!(code, 0, "compound command must remain native: {stderr}");
+        assert!(
+            !stdout.contains("updatedInput"),
+            "pipeline/wrapper must not receive a non-equivalent rewrite: {stdout}"
+        );
+    }
 }
 
 /// `~/.config/<devin>/` is a CONFIG directory (config.json, mcp_config.json,
@@ -179,15 +317,14 @@ fn devin_config_dir_is_not_treated_as_a_transcript_store() {
     );
 }
 
-/// Codex's shell tools were absent from the guard's tool-name match list, so
-/// every `grep`/`rg`/`find` run from a Codex session passed through untouched.
-/// Codex also sends `command` as an argv array rather than a string, which the
-/// old `as_str()` extraction read as empty — so the name alone is not enough.
+/// These noncanonical historical shell shapes are not current Codex hook
+/// events (which use Bash/command string). They remain native, not guessed
+/// into a different executable or authorized by the compatibility router.
 #[test]
-fn codex_shell_tools_are_guarded() {
+fn noncanonical_shell_shapes_preserve_native_execution() {
     let repo = indexed_repo("codex_shell");
     for tool in ["shell", "unified_exec", "local_shell"] {
-        // argv-array form, as Codex actually sends it
+        // Unfamiliar argv-array form.
         let payload = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "tool_name": tool,
@@ -195,13 +332,11 @@ fn codex_shell_tools_are_guarded() {
             "tool_input": {"command": ["bash", "-lc", "grep -rn GUARD_NEEDLE_XYZ ."]},
         });
         let (code, stdout, stderr) = run_guard_env(&payload, &[]);
-        assert!(
-            code == 2 || stdout.contains("pixel search"),
-            "{tool} with argv-array command must be guarded (code={code}) \
-             stdout={stdout} stderr={stderr}"
-        );
+        assert_eq!(code, 0, "{tool}: {stderr}");
+        assert!(!stdout.contains("updatedInput"), "{tool}: {stdout}");
+        assert!(!stdout.contains("permissionDecision"), "{tool}: {stdout}");
 
-        // string form must keep working through the same path
+        // A string payload does not make a recursive search equivalent.
         let payload = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "tool_name": tool,
@@ -209,11 +344,9 @@ fn codex_shell_tools_are_guarded() {
             "tool_input": {"command": "grep -rn GUARD_NEEDLE_XYZ ."},
         });
         let (code, stdout, stderr) = run_guard_env(&payload, &[]);
-        assert!(
-            code == 2 || stdout.contains("pixel search"),
-            "{tool} with string command must be guarded (code={code}) \
-             stdout={stdout} stderr={stderr}"
-        );
+        assert_eq!(code, 0, "{tool}: {stderr}");
+        assert!(!stdout.contains("updatedInput"), "{tool}: {stdout}");
+        assert!(!stdout.contains("permissionDecision"), "{tool}: {stdout}");
     }
 }
 

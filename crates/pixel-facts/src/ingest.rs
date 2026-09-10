@@ -115,7 +115,11 @@ pub fn ingest_tick(store: &mut FactsStore, options: &IngestOptions) -> Result<Ti
     let (b_done, p) = phase_b(store, &deadline)?;
     poisoned += p;
     if b_done {
-        let (_c_done, p, s) = phase_c(store, &deadline)?;
+        // Phase B may have consumed most of the tick budget. Give phase C a
+        // fresh deadline so diff text ingestion always gets time to run,
+        // even on large repos where phase B eats the entire original budget.
+        let c_deadline = Instant::now() + Duration::from_millis(options.tick_budget_ms);
+        let (_c_done, p, s) = phase_c(store, &c_deadline)?;
         poisoned += p;
         skipped += s;
         let _ = evict_to_budget(store, crate::store::DEFAULT_DIFF_BUDGET_BYTES);
@@ -138,7 +142,7 @@ pub fn ingest_tick(store: &mut FactsStore, options: &IngestOptions) -> Result<Ti
 /// condition is a footgun on its own — if some future change reintroduces a
 /// no-progress tick, this turns a silent hang into an explicit error instead
 /// of a livelock indistinguishable from a slow legitimate ingest.
-pub const MAX_INGEST_UNTIL_FRESH_WALL_CLOCK: Duration = Duration::from_secs(600);
+pub const MAX_INGEST_UNTIL_FRESH_WALL_CLOCK: Duration = Duration::from_secs(1800);
 
 /// Convenience: run ticks until fresh or the caller gives up. Bounded by
 /// `MAX_INGEST_UNTIL_FRESH_WALL_CLOCK` — see its doc comment.

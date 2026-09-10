@@ -22,7 +22,7 @@ use tempfile::TempDir;
 #[cfg(unix)]
 fn fake_pixel_exe(dir: &std::path::Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("fake-pixel");
+    let path = dir.join("pixel");
     fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     path
@@ -236,7 +236,7 @@ fn install_wires_codex_lifecycle_hooks_without_blocking_guard() {
             .to_string()
             .contains(pixel_install::config::GUARD_HOOK)
     );
-    for event in ["SessionStart", "UserPromptSubmit", "PostCompaction"] {
+    for event in ["SessionStart", "UserPromptSubmit"] {
         assert!(
             hooks[event]
                 .as_array()
@@ -909,8 +909,8 @@ fn install_against_realistic_settings_json_is_safe() {
     );
     assert_eq!(
         session_start2.len(),
-        4,
-        "3 foreign entries + 1 pixel entry, stable across re-install"
+        5,
+        "3 foreign entries + 2 Pixel lifecycle entries, stable across re-install"
     );
 }
 
@@ -1084,7 +1084,7 @@ fn doctor_checks_devin_hooks_wiring() {
 
     let doc_opts = DoctorOptions {
         home: Some(home.to_path_buf()),
-        executable_path: None,
+        executable_path: Some(fake_pixel_exe(home)),
         ..Default::default()
     };
 
@@ -1108,17 +1108,16 @@ fn doctor_checks_devin_hooks_wiring() {
             .reason
             .as_ref()
             .unwrap()
-            .contains("Devin UserPromptSubmit hook not wired")
+            .contains("provider hook configuration differs")
     );
 
-    // Full hooks
-    let full_hooks = serde_json::json!({
-        "hooks": {
-            "SessionStart": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-session-start" }] }],
-            "UserPromptSubmit": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-prompt-submit" }] }]
-        }
-    });
-    fs::write(&config_path, serde_json::to_string(&full_hooks).unwrap()).unwrap();
+    // Install the full supported contract, not a substring-only fixture.
+    install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: doc_opts.executable_path.clone(),
+        dry_run: false,
+    })
+    .unwrap();
 
     let report = doctor(&doc_opts).expect("doctor runs");
     let check = report
@@ -1127,7 +1126,7 @@ fn doctor_checks_devin_hooks_wiring() {
         .find(|c| c.id == "install.devin-hooks")
         .unwrap();
     assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
-    assert!(check.summary.contains("SessionStart + UserPromptSubmit"));
+    assert!(check.summary.contains("lifecycle configured"));
 }
 
 #[test]
@@ -1141,7 +1140,7 @@ fn doctor_checks_codex_hooks_wiring() {
 
     let doc_opts = DoctorOptions {
         home: Some(home.to_path_buf()),
-        executable_path: None,
+        executable_path: Some(fake_pixel_exe(home)),
         ..Default::default()
     };
 
@@ -1165,17 +1164,16 @@ fn doctor_checks_codex_hooks_wiring() {
             .reason
             .as_ref()
             .unwrap()
-            .contains("Codex UserPromptSubmit hook not wired")
+            .contains("provider hook configuration differs")
     );
 
-    // With UserPromptSubmit
-    let full = serde_json::json!({
-        "hooks": {
-            "SessionStart": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-session-start" }] }],
-            "UserPromptSubmit": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-prompt-submit" }] }]
-        }
-    });
-    fs::write(&config_path, serde_json::to_string(&full).unwrap()).unwrap();
+    // Install the full supported contract, not a substring-only fixture.
+    install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: doc_opts.executable_path.clone(),
+        dry_run: false,
+    })
+    .unwrap();
 
     let report = doctor(&doc_opts).expect("doctor runs");
     let check = report
@@ -1184,7 +1182,7 @@ fn doctor_checks_codex_hooks_wiring() {
         .find(|c| c.id == "install.codex-hooks")
         .unwrap();
     assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
-    assert!(check.summary.contains("UserPromptSubmit"));
+    assert!(check.summary.contains("lifecycle configured"));
 }
 
 #[test]
@@ -1350,7 +1348,7 @@ fn uninstall_removes_managed_block_and_preserves_user_content() {
     // Uninstall
     let uninstall_opts = UninstallOptions {
         home: Some(home.to_path_buf()),
-        binary_path: Some(home.join("fake-pixel")),
+        binary_path: Some(home.join("pixel")),
         dry_run: false,
     };
     let report = uninstall(&uninstall_opts).expect("uninstall");
@@ -1415,7 +1413,7 @@ fn uninstall_removes_claude_hooks_and_scripts() {
     // Uninstall
     let uninstall_opts = UninstallOptions {
         home: Some(home.to_path_buf()),
-        binary_path: Some(home.join("fake-pixel")),
+        binary_path: Some(home.join("pixel")),
         dry_run: false,
     };
     uninstall(&uninstall_opts).expect("uninstall");
@@ -1448,7 +1446,7 @@ fn uninstall_removes_claude_hooks_and_scripts() {
 fn uninstall_removes_binary() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
-    let bin = home.join("fake-pixel");
+    let bin = home.join("pixel");
     fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
 
     let opts = UninstallOptions {
@@ -1476,7 +1474,7 @@ fn uninstall_is_idempotent() {
 
     let uninstall_opts = UninstallOptions {
         home: Some(home.to_path_buf()),
-        binary_path: Some(home.join("fake-pixel")),
+        binary_path: Some(home.join("pixel")),
         dry_run: false,
     };
     let r1 = uninstall(&uninstall_opts).expect("uninstall 1");
@@ -1502,7 +1500,7 @@ fn uninstall_dry_run_does_not_modify() {
     };
     install(&install_opts).expect("install");
 
-    let bin = home.join("fake-pixel");
+    let bin = home.join("pixel");
     assert!(
         bin.is_file(),
         "binary should exist before dry-run uninstall"
@@ -1551,7 +1549,7 @@ fn uninstall_removes_codex_hooks_preserving_others() {
 
     let opts = UninstallOptions {
         home: Some(home.to_path_buf()),
-        binary_path: Some(home.join("fake-pixel")),
+        binary_path: Some(home.join("pixel")),
         dry_run: false,
     };
     uninstall(&opts).expect("uninstall");
@@ -1581,10 +1579,153 @@ fn uninstall_removes_rule_source() {
 
     let opts = UninstallOptions {
         home: Some(home.to_path_buf()),
-        binary_path: Some(home.join("fake-pixel")),
+        binary_path: Some(home.join("pixel")),
         dry_run: false,
     };
     uninstall(&opts).expect("uninstall");
 
     assert!(!rule_file.is_file(), "rule source file should be deleted");
+}
+
+#[test]
+fn routing_full_install_rtk_round_trip_preserves_foreign_hooks() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let settings = home.join(".claude/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let rtk = serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]});
+    let foreign = serde_json::json!({"matcher":"startup","hooks":[{"type":"command","command":"keep-session-check"}]});
+    let original = serde_json::json!({"hooks":{"PreToolUse":[rtk.clone()],"SessionStart":[foreign.clone()]},"unrelated":true});
+    fs::write(&settings, serde_json::to_vec(&original).unwrap()).unwrap();
+    let exe = fake_pixel_exe(home);
+    let opts = InstallOptions {
+        home: Some(home.into()),
+        executable_path: Some(exe.clone()),
+        dry_run: false,
+    };
+    install(&opts).unwrap();
+    let once = fs::read(&settings).unwrap();
+    install(&opts).unwrap();
+    assert_eq!(
+        fs::read(&settings).unwrap(),
+        once,
+        "repeat install must keep delegation and backup stable"
+    );
+    let installed: serde_json::Value = serde_json::from_slice(&once).unwrap();
+    assert_eq!(
+        installed["hooks"]["PreToolUse"].as_array().unwrap().len(),
+        1
+    );
+    assert!(
+        installed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("--delegate-rtk")
+    );
+    uninstall(&UninstallOptions {
+        home: Some(home.into()),
+        binary_path: Some(exe),
+        dry_run: false,
+    })
+    .unwrap();
+    let restored: serde_json::Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+    assert_eq!(restored, original);
+}
+
+#[test]
+#[cfg(unix)]
+fn routing_providers_install_and_execute_without_ambient_claude() {
+    for provider in ["claude", "codex", "devin"] {
+        let home = TempDir::new().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "routing_isolated_provider_child", "--nocapture"])
+            .env("PIXEL_INSTALL_TEST_CHILD", provider)
+            .env("HOME", home.path())
+            .env("PATH", "")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{provider}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn routing_isolated_provider_child() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(provider) = std::env::var("PIXEL_INSTALL_TEST_CHILD") else {
+        return;
+    };
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let config = home.join(match provider.as_str() {
+        "claude" => ".claude/settings.json",
+        "codex" => ".codex/hooks.json",
+        "devin" => ".config/devin/config.json",
+        _ => panic!("unexpected provider"),
+    });
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, "{}").unwrap();
+    let bin_dir = home.join("Pixel hook tools' directory");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let exe = bin_dir.join("pixel");
+    fs::write(&exe, "#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s' \"$*\"\n").unwrap();
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    let opts = InstallOptions {
+        home: Some(home.clone()),
+        executable_path: Some(exe),
+        dry_run: false,
+    };
+    install(&opts).unwrap();
+    let first = fs::read(&config).unwrap();
+    install(&opts).unwrap();
+    assert_eq!(fs::read(&config).unwrap(), first);
+    if provider != "claude" {
+        assert!(!home.join(".claude/hooks").exists());
+    }
+    let value: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    let hooks = value["hooks"].as_object().unwrap();
+    assert!(!hooks.contains_key("PostCompact"));
+    assert_eq!(
+        hooks["PreToolUse"][0]["matcher"],
+        match provider.as_str() {
+            "devin" => "exec",
+            "codex" => "Bash|shell|unified_exec|local_shell",
+            _ => "Bash",
+        }
+    );
+    for (event, groups) in hooks {
+        for group in groups.as_array().unwrap() {
+            let command = group["hooks"][0]["command"].as_str().unwrap();
+            assert!(!command.contains(".claude/hooks"));
+            let mut child = std::process::Command::new("/bin/sh")
+                .args(["-c", command])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(serde_json::json!({"hook_event_name":event,"source":"compact","tool_name":"Bash","tool_input":{"command":"printf probe"},"cwd":home}).to_string().as_bytes()).unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success());
+            let actual = String::from_utf8(output.stdout).unwrap();
+            assert!(actual.starts_with("hook "));
+            if event == "PreToolUse" {
+                assert_eq!(actual, format!("hook guard --provider {provider}"));
+            }
+            if group.get("matcher").and_then(|v| v.as_str()) == Some("compact") {
+                assert_eq!(
+                    actual,
+                    if provider == "claude" {
+                        "hook post-compaction --provider claude"
+                    } else {
+                        "hook post-compaction"
+                    }
+                );
+            }
+        }
+    }
 }

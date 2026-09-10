@@ -1,11 +1,6 @@
-//! Idempotent `pixel install` — removes the deprecated
-//! usable-git/gitpixel/sniper MCP entries, installs the passive lifecycle
-//! hooks, and rewrites agent-config with managed markers.
-//!
-//! pixel is a CLI + lifecycle integration tool, not an MCP server. The five
-//! mandatory scenarios are guided by rule text and passive lifecycle hooks.
-//! The old PreToolUse guard is intentionally not installed: pixel rewires
-//! agent work instead of blocking ordinary commands.
+//! Idempotent provider integration: safe shell routing and lifecycle context.
+//! Unknown overlapping hooks are preserved rather than double-rewritten.
+//! Configuration alone is not proof that an agent has executed the hooks.
 
 use std::fs;
 use std::io;
@@ -15,6 +10,7 @@ use serde::Serialize;
 
 use crate::InstallError;
 use crate::config;
+use crate::routing::{self, Provider};
 
 pub type Result<T> = std::result::Result<T, InstallError>;
 
@@ -177,6 +173,12 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         steps.push(install_session_start_hook(&home, &exe, dry_run)?);
         steps.push(install_prompt_submit_hook(&home, &exe, dry_run)?);
         steps.push(install_post_compaction_hook(&home, &exe, dry_run)?);
+        steps.push(routing::install_provider(
+            &home,
+            &exe,
+            Provider::Claude,
+            dry_run,
+        )?);
     } else {
         steps.push(skipped_agent_step(
             "hooks.claude",
@@ -195,7 +197,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     }
     if agents.codex {
         steps.push(install_codex_hooks(&home, &exe, dry_run)?);
-        steps.push(patch_project_codex_hooks(&home, dry_run)?);
+        steps.push(patch_project_codex_hooks(&home, &exe, dry_run)?);
     } else {
         steps.push(skipped_agent_step(
             "hooks.codex",
@@ -428,227 +430,63 @@ fn remove_guard_from_settings_file(
     Ok(changed)
 }
 
-fn install_session_start_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
-    let path = hooks_dir.join(config::SESSION_START_HOOK);
+// Compatibility scripts remain for other integrations; the three supported
+// providers invoke the quoted binary directly and do not depend on Claude.
+fn install_lifecycle_script(
+    home: &Path,
+    exe: &Path,
+    dry_run: bool,
+    filename: &str,
+    verb: &str,
+) -> Result<InstallStep> {
+    let path = home.join(config::CLAUDE_HOOKS_DIR).join(filename);
     let body = format!(
-        "#!/bin/sh\nexec {} hook session-start \"$@\"\n",
-        exe.display()
+        "#!/bin/sh\nexec {} hook {verb} \"$@\"\n",
+        routing::quoted_executable(exe)
     );
-
-    let settings = home.join(".claude").join("settings.json");
-    let mut value = read_settings(&settings)?;
-    let hooks = value.as_object_mut().ok_or_else(|| {
-        InstallError::Config(config::ConfigError::InvalidSettings {
-            path: settings.clone(),
-            reason: "settings.json root is not an object".into(),
-        })
-    })?;
-    let hooks_obj = hooks
-        .entry("hooks".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    let obj = hooks_obj.as_object_mut().ok_or_else(|| {
-        InstallError::Config(config::ConfigError::InvalidSettings {
-            path: settings.clone(),
-            reason: "hooks is not an object".into(),
-        })
-    })?;
-    // Merge, never blind-overwrite: a real settings.json can already carry
-    // multiple unrelated SessionStart entries registered by other tools
-    // (e.g. separate matcher groups for "startup"/"resume"/"clear"). Replace
-    // only a prior *pixel-authored* entry (identified by its own command
-    // substring), so re-installs stay idempotent without destroying anyone
-    // else's hooks.
-    let existing_session_start = obj.get("SessionStart").cloned();
-    let pixel_command = format!("{} hook session-start", exe.display());
-    let merged = config::merge_hook_entry(
-        existing_session_start.as_ref(),
-        "hook session-start",
-        serde_json::json!({
-            "matcher": "SessionStart",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": pixel_command,
-            }],
-        }),
-    );
-    obj.insert("SessionStart".to_string(), merged);
-
-    if dry_run {
-        return Ok(InstallStep {
-            id: "hook.session-start".into(),
-            status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "SessionStart hook installed"),
-            detail: Some(format!("would write {}", path.display())),
-        });
+    let mut backup = None;
+    if !dry_run {
+        fs::create_dir_all(path.parent().expect("hook directory"))?;
+        backup = config::backup_if_changing(&path, body.as_bytes())?;
+        fs::write(&path, body)?;
+        set_executable(&path);
     }
-
-    fs::create_dir_all(&hooks_dir)?;
-    let hook_backup = config::backup_if_changing(&path, body.as_bytes())?;
-    fs::write(&path, &body)?;
-    set_executable(&path);
-
-    let settings_backup = write_settings(&settings, &value, dry_run)?;
-    let backup_path = hook_backup.or(settings_backup);
-
     Ok(InstallStep {
-        id: "hook.session-start".into(),
+        id: format!("hook.{verb}"),
         status: CheckStatus::Green,
-        summary: "SessionStart hook installed".into(),
-        detail: Some(with_backup_note(
-            format!("wrote {}", path.display()),
-            backup_path,
-        )),
+        summary: dry_run_summary(dry_run, &format!("{verb} compatibility script installed")),
+        detail: Some(with_backup_note(path.display().to_string(), backup)),
     })
+}
+
+fn install_session_start_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    install_lifecycle_script(
+        home,
+        exe,
+        dry_run,
+        config::SESSION_START_HOOK,
+        "session-start",
+    )
 }
 
 fn install_prompt_submit_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
-    let path = hooks_dir.join(config::PROMPT_SUBMIT_HOOK);
-    let body = format!(
-        "#!/bin/sh\nexec {} hook prompt-submit \"$@\"\n",
-        exe.display()
-    );
-
-    let settings = home.join(".claude").join("settings.json");
-    let mut value = read_settings(&settings)?;
-    let hooks = value.as_object_mut().ok_or_else(|| {
-        InstallError::Config(config::ConfigError::InvalidSettings {
-            path: settings.clone(),
-            reason: "settings.json root is not an object".into(),
-        })
-    })?;
-    let hooks_obj = hooks
-        .entry("hooks".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    let obj = hooks_obj.as_object_mut().ok_or_else(|| {
-        InstallError::Config(config::ConfigError::InvalidSettings {
-            path: settings.clone(),
-            reason: "hooks is not an object".into(),
-        })
-    })?;
-    // Merge, never blind-overwrite — same idempotent pattern as guard and
-    // session-start. Replace only a prior pixel-authored entry.
-    let existing = obj.get("UserPromptSubmit").cloned();
-    let pixel_command = format!("{} hook prompt-submit", exe.display());
-    let merged = config::merge_hook_entry(
-        existing.as_ref(),
-        "hook prompt-submit",
-        serde_json::json!({
-            "matcher": "*",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": pixel_command,
-            }],
-        }),
-    );
-    obj.insert("UserPromptSubmit".to_string(), merged);
-
-    if dry_run {
-        return Ok(InstallStep {
-            id: "hook.prompt-submit".into(),
-            status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "UserPromptSubmit hook installed"),
-            detail: Some(format!("would write {}", path.display())),
-        });
-    }
-
-    fs::create_dir_all(&hooks_dir)?;
-    let hook_backup = config::backup_if_changing(&path, body.as_bytes())?;
-    fs::write(&path, &body)?;
-    set_executable(&path);
-
-    let settings_backup = write_settings(&settings, &value, dry_run)?;
-    let backup_path = hook_backup.or(settings_backup);
-
-    Ok(InstallStep {
-        id: "hook.prompt-submit".into(),
-        status: CheckStatus::Green,
-        summary: "UserPromptSubmit hook installed".into(),
-        detail: Some(with_backup_note(
-            format!("wrote {}", path.display()),
-            backup_path,
-        )),
-    })
+    install_lifecycle_script(
+        home,
+        exe,
+        dry_run,
+        config::PROMPT_SUBMIT_HOOK,
+        "prompt-submit",
+    )
 }
 
 fn install_post_compaction_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
-    let path = hooks_dir.join(config::POST_COMPACTION_HOOK);
-    let body = format!(
-        "#!/bin/sh\nexec {} hook post-compaction \"$@\"\n",
-        exe.display()
-    );
-
-    let settings = home.join(".claude").join("settings.json");
-    let mut value = read_settings(&settings)?;
-    let hooks = value.as_object_mut().ok_or_else(|| {
-        InstallError::Config(config::ConfigError::InvalidSettings {
-            path: settings.clone(),
-            reason: "settings.json root is not an object".into(),
-        })
-    })?;
-    let hooks_obj = hooks
-        .entry("hooks".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    let obj = hooks_obj.as_object_mut().ok_or_else(|| {
-        InstallError::Config(config::ConfigError::InvalidSettings {
-            path: settings.clone(),
-            reason: "hooks is not an object".into(),
-        })
-    })?;
-    // The event is `PostCompact`. `PostCompaction` is NOT a valid Claude Code
-    // hook event — settings.json carrying that key is silently ignored with
-    // "Unknown hook event", so the manifest was never re-injected after a
-    // compaction. Drop any previously-written dead key on the way through.
-    obj.remove("PostCompaction");
-    // Merge, never blind-overwrite — same idempotent pattern as the other
-    // hooks. Replace only a prior pixel-authored entry.
-    let existing = obj.get("PostCompact").cloned();
-    let pixel_command = format!("{} hook post-compaction", exe.display());
-    let merged = config::merge_hook_entry(
-        existing.as_ref(),
-        "hook post-compaction",
-        serde_json::json!({
-            // PostCompact matches on what triggered the compaction.
-            "matcher": "manual|auto",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": pixel_command,
-            }],
-        }),
-    );
-    obj.insert("PostCompact".to_string(), merged);
-
-    if dry_run {
-        return Ok(InstallStep {
-            id: "hook.post-compaction".into(),
-            status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "PostCompact hook installed"),
-            detail: Some(format!("would write {}", path.display())),
-        });
-    }
-
-    fs::create_dir_all(&hooks_dir)?;
-    let hook_backup = config::backup_if_changing(&path, body.as_bytes())?;
-    fs::write(&path, &body)?;
-    set_executable(&path);
-
-    let settings_backup = write_settings(&settings, &value, dry_run)?;
-    let backup_path = hook_backup.or(settings_backup);
-
-    Ok(InstallStep {
-        id: "hook.post-compaction".into(),
-        status: CheckStatus::Green,
-        summary: "PostCompact hook installed".into(),
-        detail: Some(with_backup_note(
-            format!("wrote {}", path.display()),
-            backup_path,
-        )),
-    })
+    install_lifecycle_script(
+        home,
+        exe,
+        dry_run,
+        config::POST_COMPACTION_HOOK,
+        "post-compaction",
+    )
 }
 
 /// Load the canonical pixel usage-rule text from `~/.agent-config/rules/pixel.md`
@@ -780,201 +618,12 @@ fn rewrite_agent_configs(home: &Path, exe: &Path, dry_run: bool) -> Result<Insta
     })
 }
 
-/// Wire PreToolUse + SessionStart hooks into Devin's `~/.config/devin/config.json`.
-/// Devin reads `~/.claude/settings.json` via its Claude compat layer by
-/// default, but writing directly to Devin's own config ensures the hooks
-/// fire even if that compat layer is disabled.
-fn install_devin_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let config_dir = home.join(config::DEVIN_CONFIG_DIR);
-    let config_path = config_dir.join(config::DEVIN_CONFIG_FILE);
-    let mut value = read_settings(&config_path)?;
-
-    let hooks_obj = value
-        .as_object_mut()
-        .ok_or_else(|| {
-            InstallError::Config(config::ConfigError::InvalidSettings {
-                path: config_path.clone(),
-                reason: "config.json root is not an object".into(),
-            })
-        })?
-        .entry("hooks".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    let hooks_map = hooks_obj.as_object_mut().ok_or_else(|| {
-        InstallError::Config(config::ConfigError::InvalidSettings {
-            path: config_path.clone(),
-            reason: "hooks is not an object".into(),
-        })
-    })?;
-
-    // SessionStart — same hook script as Claude.
-    let session_start_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
-    let existing_session_start = hooks_map.get("SessionStart").cloned();
-    let merged_session_start = config::merge_hook_entry(
-        existing_session_start.as_ref(),
-        &session_start_command,
-        serde_json::json!({
-            "matcher": "SessionStart",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": session_start_command,
-            }],
-        }),
-    );
-    hooks_map.insert("SessionStart".to_string(), merged_session_start);
-
-    // UserPromptSubmit — task boundary detector hook.
-    let prompt_submit_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
-    let existing_prompt_submit = hooks_map.get("UserPromptSubmit").cloned();
-    let merged_prompt_submit = config::merge_hook_entry(
-        existing_prompt_submit.as_ref(),
-        &prompt_submit_command,
-        serde_json::json!({
-            "matcher": "*",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": prompt_submit_command,
-            }],
-        }),
-    );
-    hooks_map.insert("UserPromptSubmit".to_string(), merged_prompt_submit);
-
-    // PostCompaction — re-inject targets manifest after context compaction.
-    let post_compaction_command = format!("~/.claude/hooks/{}", config::POST_COMPACTION_HOOK);
-    let existing_post_compaction = hooks_map.get("PostCompaction").cloned();
-    let merged_post_compaction = config::merge_hook_entry(
-        existing_post_compaction.as_ref(),
-        &post_compaction_command,
-        serde_json::json!({
-            "matcher": "*",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": post_compaction_command,
-            }],
-        }),
-    );
-    hooks_map.insert("PostCompaction".to_string(), merged_post_compaction);
-
-    if dry_run {
-        return Ok(InstallStep {
-            id: "hooks.devin".into(),
-            status: CheckStatus::Green,
-            summary: dry_run_summary(
-                dry_run,
-                "Devin hooks wired (SessionStart + UserPromptSubmit + PostCompaction)",
-            ),
-            detail: Some(format!("would write {}", config_path.display())),
-        });
-    }
-
-    let backup_path = write_settings(&config_path, &value, dry_run)?;
-    Ok(InstallStep {
-        id: "hooks.devin".into(),
-        status: CheckStatus::Green,
-        summary: "Devin hooks wired (SessionStart + UserPromptSubmit + PostCompaction)".into(),
-        detail: Some(with_backup_note(
-            format!("wrote {}", config_path.display()),
-            backup_path,
-        )),
-    })
+fn install_devin_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    routing::install_provider(home, exe, Provider::Devin, dry_run)
 }
 
-/// Wire passive lifecycle hooks into Codex's `~/.codex/hooks.json`.
-fn install_codex_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let config_path = home.join(config::CODEX_HOOKS_FILE);
-    let mut value = read_settings(&config_path)?;
-
-    let hooks_obj = value
-        .as_object_mut()
-        .ok_or_else(|| {
-            InstallError::Config(config::ConfigError::InvalidSettings {
-                path: config_path.clone(),
-                reason: "hooks.json root is not an object".into(),
-            })
-        })?
-        .entry("hooks".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    let hooks_map = hooks_obj.as_object_mut().ok_or_else(|| {
-        InstallError::Config(config::ConfigError::InvalidSettings {
-            path: config_path.clone(),
-            reason: "hooks is not an object".into(),
-        })
-    })?;
-
-    let session_start_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
-    let existing_session_start = hooks_map.get("SessionStart").cloned();
-    let merged_session_start = config::merge_hook_entry(
-        existing_session_start.as_ref(),
-        &session_start_command,
-        serde_json::json!({
-            "matcher": "SessionStart",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": session_start_command,
-            }],
-        }),
-    );
-    hooks_map.insert("SessionStart".to_string(), merged_session_start);
-
-    // UserPromptSubmit — task boundary detector hook.
-    let prompt_submit_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
-    let existing_prompt_submit = hooks_map.get("UserPromptSubmit").cloned();
-    let merged_prompt_submit = config::merge_hook_entry(
-        existing_prompt_submit.as_ref(),
-        &prompt_submit_command,
-        serde_json::json!({
-            "matcher": "*",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": prompt_submit_command,
-            }],
-        }),
-    );
-    hooks_map.insert("UserPromptSubmit".to_string(), merged_prompt_submit);
-
-    // PostCompaction — re-inject targets manifest after context compaction.
-    let post_compaction_command = format!("~/.claude/hooks/{}", config::POST_COMPACTION_HOOK);
-    let existing_post_compaction = hooks_map.get("PostCompaction").cloned();
-    let merged_post_compaction = config::merge_hook_entry(
-        existing_post_compaction.as_ref(),
-        &post_compaction_command,
-        serde_json::json!({
-            "matcher": "*",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": post_compaction_command,
-            }],
-        }),
-    );
-    hooks_map.insert("PostCompaction".to_string(), merged_post_compaction);
-
-    if dry_run {
-        return Ok(InstallStep {
-            id: "hooks.codex".into(),
-            status: CheckStatus::Green,
-            summary: dry_run_summary(
-                dry_run,
-                "Codex hooks wired (SessionStart + UserPromptSubmit + PostCompaction)",
-            ),
-            detail: Some(format!("would write {}", config_path.display())),
-        });
-    }
-
-    let backup_path = write_settings(&config_path, &value, dry_run)?;
-    Ok(InstallStep {
-        id: "hooks.codex".into(),
-        status: CheckStatus::Green,
-        summary: "Codex hooks wired (SessionStart + UserPromptSubmit + PostCompaction)".into(),
-        detail: Some(with_backup_note(
-            format!("wrote {}", config_path.display()),
-            backup_path,
-        )),
-    })
+fn install_codex_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    routing::install_provider(home, exe, Provider::Codex, dry_run)
 }
 
 /// Wire BeforeTool + SessionStart hooks into Gemini's `~/.gemini/settings.json`.
@@ -1123,74 +772,39 @@ fn project_hook_search_roots(home: &Path) -> Vec<PathBuf> {
     roots
 }
 
-/// Ensure the passive prompt hook is present in every project-level
-/// `.codex/hooks.json` found under `home`'s common project directories. One
-/// `pixel install` run heals every shadowed project on the machine, not just
-/// the repo it happens to run from.
-fn patch_project_codex_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
-    let mut patched = Vec::new();
-    let mut already_ok = 0usize;
+/// Preserve project hooks while installing the same provider contract as home.
+fn patch_project_codex_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let mut paths = Vec::new();
+    let mut conflicts = 0;
     for root in project_hook_search_roots(home) {
-        let config_path = root.join(".codex").join("hooks.json");
-        if !config_path.is_file() {
+        let path = root.join(".codex/hooks.json");
+        if !path.is_file() {
             continue;
         }
-        let carries_hooks = fs::read_to_string(&config_path)
-            .map(|s| s.contains(config::PROMPT_SUBMIT_HOOK))
-            .unwrap_or(true); // unreadable => don't touch it, don't count it broken
-        if carries_hooks {
-            already_ok += 1;
-            continue;
+        let step = routing::install_project_codex_at(home, &path, exe, dry_run)?;
+        if step.status == CheckStatus::Yellow {
+            conflicts += 1;
         }
-        if dry_run {
-            patched.push(config_path.display().to_string());
-            continue;
-        }
-        let mut value = read_settings(&config_path)?;
-        let Some(root_obj) = value.as_object_mut() else {
-            continue;
-        };
-        let hooks_obj = root_obj
-            .entry("hooks".to_string())
-            .or_insert_with(|| serde_json::json!({}));
-        let Some(hooks_map) = hooks_obj.as_object_mut() else {
-            continue;
-        };
-        let prompt_submit_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
-        let existing_prompt = hooks_map.get("UserPromptSubmit").cloned();
-        let merged_prompt = config::merge_hook_entry(
-            existing_prompt.as_ref(),
-            &prompt_submit_command,
-            serde_json::json!({
-                "matcher": "*",
-                "hooks": [{"type": "command", "timeout": config::HOOK_TIMEOUT, "command": prompt_submit_command}],
-            }),
-        );
-        hooks_map.insert("UserPromptSubmit".to_string(), merged_prompt);
-
-        write_settings(&config_path, &value, dry_run)?;
-        patched.push(config_path.display().to_string());
+        paths.push(path.display().to_string());
     }
-
-    let status = CheckStatus::Green;
-    let summary = if patched.is_empty() {
-        format!(
-            "no shadowed project-level .codex/hooks.json found ({already_ok} already carry hooks)"
-        )
-    } else {
-        format!(
-            "{} shadowed project-level .codex/hooks.json patched ({already_ok} already fine)",
-            patched.len()
-        )
-    };
     Ok(InstallStep {
         id: "hooks.codex_project_shadow".into(),
-        status,
-        summary: dry_run_summary(dry_run, &summary),
-        detail: if patched.is_empty() {
+        status: if conflicts == 0 {
+            CheckStatus::Green
+        } else {
+            CheckStatus::Yellow
+        },
+        summary: dry_run_summary(
+            dry_run,
+            &format!(
+                "{} project hook configuration(s) checked; {conflicts} routing overlap(s); live unverified",
+                paths.len()
+            ),
+        ),
+        detail: if paths.is_empty() {
             None
         } else {
-            Some(patched.join(", "))
+            Some(paths.join(", "))
         },
     })
 }
