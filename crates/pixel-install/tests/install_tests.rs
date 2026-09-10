@@ -28,6 +28,19 @@ fn fake_pixel_exe(dir: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
+// The new install writes shell wrappers (a pixel-managed block) into the
+// user's shell profile. `shell_profile_path` and the managed markers are
+// `pub(crate)` in install.rs, so this mirrors the same logic for tests.
+fn shell_profile_path(home: &std::path::Path) -> std::path::PathBuf {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    if shell.contains("bash") {
+        home.join(".bashrc")
+    } else {
+        home.join(".zshrc")
+    }
+}
+const PIXEL_MANAGED_BEGIN: &str = "# >>> pixel-managed >>>";
+
 // ---------------------------------------------------------------------------
 // doctor tests
 // ---------------------------------------------------------------------------
@@ -103,14 +116,40 @@ fn doctor_after_install_reports_green_mcp() {
     let prompt_check = report
         .checks
         .iter()
-        .find(|c| c.id == "install.prompt-submit-hook")
-        .expect("should have install.prompt-submit-hook check");
+        .find(|c| c.id == "install.agent-prompt")
+        .expect("should have install.agent-prompt check");
     assert_eq!(
         prompt_check.status,
         pixel_install::doctor::CheckStatus::Green,
-        "install.prompt-submit-hook should be green after install, got {:?}: {:?}",
+        "install.agent-prompt should be green after install, got {:?}: {:?}",
         prompt_check.status,
         prompt_check.reason
+    );
+
+    let wrappers_check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.shell-wrappers")
+        .expect("should have install.shell-wrappers check");
+    assert_eq!(
+        wrappers_check.status,
+        pixel_install::doctor::CheckStatus::Green,
+        "install.shell-wrappers should be green after install, got {:?}: {:?}",
+        wrappers_check.status,
+        wrappers_check.reason
+    );
+
+    let old_hooks_check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.old-hooks-clean")
+        .expect("should have install.old-hooks-clean check");
+    assert_eq!(
+        old_hooks_check.status,
+        pixel_install::doctor::CheckStatus::Green,
+        "install.old-hooks-clean should be green after install, got {:?}: {:?}",
+        old_hooks_check.status,
+        old_hooks_check.reason
     );
 }
 
@@ -123,8 +162,14 @@ fn install_creates_config_with_managed_markers() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
 
-    // Pre-create a CLAUDE.md with some existing content.
-    fs::write(home.join("CLAUDE.md"), "# My Project\n\nSome notes.\n").unwrap();
+    // Pre-create a CLAUDE.md with some existing content AND a stale pixel
+    // managed block from a previous (hook-based) install.
+    let original = format!(
+        "# My Project\n\nSome notes.\n\n{begin}\n# old pixel rules\n{end}\n",
+        begin = MANAGED_BEGIN,
+        end = MANAGED_END
+    );
+    fs::write(home.join("CLAUDE.md"), original).unwrap();
 
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
@@ -137,20 +182,33 @@ fn install_creates_config_with_managed_markers() {
     assert!(report.summary.red == 0, "no red steps");
     assert!(report.summary.green > 0, "should have green steps");
 
-    // CLAUDE.md should now contain managed markers.
+    // The new install strips old managed blocks; it never writes new ones.
     let claude = fs::read_to_string(home.join("CLAUDE.md")).expect("CLAUDE.md");
     assert!(
-        claude.contains(MANAGED_BEGIN),
-        "CLAUDE.md should have managed begin marker"
+        !claude.contains(MANAGED_BEGIN),
+        "CLAUDE.md should have no managed begin marker after install"
     );
     assert!(
-        claude.contains(MANAGED_END),
-        "CLAUDE.md should have managed end marker"
+        !claude.contains(MANAGED_END),
+        "CLAUDE.md should have no managed end marker after install"
     );
-    // Original content should be preserved.
+    // Original user content should be preserved.
     assert!(
         claude.contains("Some notes."),
         "original CLAUDE.md content should be preserved"
+    );
+    // The shell wrappers + agent prompt are the new install artifacts.
+    assert!(
+        home.join(".local/share/pixel/agent-prompt.md").is_file(),
+        "agent-prompt.md should be deployed"
+    );
+    let profile = shell_profile_path(home);
+    assert!(
+        fs::read_to_string(&profile)
+            .unwrap_or_default()
+            .contains(PIXEL_MANAGED_BEGIN),
+        "shell wrappers should be installed in {}",
+        profile.display()
     );
 }
 
@@ -174,12 +232,30 @@ fn install_is_idempotent() {
     assert!(r2.ok, "second install should succeed");
     assert!(r2.summary.red == 0, "no red steps on re-install");
 
-    // CLAUDE.md should still have exactly one managed block.
-    let claude = fs::read_to_string(home.join(".claude").join("CLAUDE.md")).unwrap_or_default();
-    let begin_count = claude.matches(MANAGED_BEGIN).count();
+    // The new install deploys the agent prompt and shell wrappers (no
+    // managed blocks, no hooks). Both must be stable across re-installs.
+    let prompt = home.join(".local/share/pixel/agent-prompt.md");
+    let p1 = fs::read(&prompt).expect("agent-prompt deployed");
+    let profile = shell_profile_path(home);
+    let s1 = fs::read(&profile).expect("shell wrappers installed");
+
+    install(&options).expect("install 3");
     assert_eq!(
-        begin_count, 1,
-        "should have exactly one managed begin marker after re-install, got {begin_count}"
+        fs::read(&prompt).unwrap(),
+        p1,
+        "agent-prompt must be byte-identical across re-installs"
+    );
+    assert_eq!(
+        fs::read(&profile).unwrap(),
+        s1,
+        "shell wrappers must be byte-identical across re-installs"
+    );
+
+    // No managed blocks are ever written by the new install.
+    let claude = fs::read_to_string(home.join(".claude").join("CLAUDE.md")).unwrap_or_default();
+    assert!(
+        !claude.contains(MANAGED_BEGIN),
+        "install must not write managed blocks"
     );
 }
 
@@ -230,18 +306,20 @@ fn install_wires_codex_lifecycle_hooks_without_blocking_guard() {
         pre[0]["hooks"][0]["command"], "~/.claude/hooks/keep-this-hook",
         "unrelated hook in the same group must survive guard removal"
     );
-    let hooks = after["hooks"].as_object().unwrap();
     assert!(
         !after
             .to_string()
-            .contains(pixel_install::config::GUARD_HOOK)
+            .contains(pixel_install::config::GUARD_HOOK),
+        "the blocking guard must be removed"
     );
+    // The new install wires NO lifecycle hooks. SessionStart and
+    // UserPromptSubmit must be absent after install.
+    let hooks = after["hooks"].as_object().unwrap();
     for event in ["SessionStart", "UserPromptSubmit"] {
         assert!(
-            hooks[event]
-                .as_array()
-                .is_some_and(|entries| !entries.is_empty()),
-            "Codex {event} hook should be installed"
+            hooks.get(event).is_none(),
+            "Codex {event} hook should NOT be installed by the new install, got: {:?}",
+            hooks.get(event)
         );
     }
 }
@@ -343,12 +421,14 @@ fn install_strips_stale_gitnexus_blocks() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
 
-    // Pre-create CLAUDE.md with two genuine, header-bounded stale blocks —
-    // modeling how a real GitNexus-generated block actually looks (a
-    // dedicated section with its own subsections), not a bare inline
-    // mention. See `stale_block_removal_never_deletes_incidental_mentions`
-    // below for the false-positive this design specifically avoids.
-    let original = "\
+    // Pre-create CLAUDE.md carrying (a) a stale pixel managed block from a
+    // previous hook-based install and (b) a genuine GitNexus-generated
+    // section. The new install only strips pixel-managed blocks — it no
+    // longer rewrites agent-config or scrubs third-party stale blocks, so
+    // the GitNexus section must survive (its cleanup is the user's job now
+    // that install no longer rewrites CLAUDE.md).
+    let original = format!(
+        "\
 # Project
 
 ## GitNexus — Code Intelligence
@@ -357,12 +437,16 @@ This project is indexed by GitNexus.
 ### Always Do
 MUST run impact analysis before editing any symbol.
 
-## codebase-memory setup
-Legacy codebase-memory config lived here.
+{begin}
+# old pixel managed rules
+{end}
 
 ## Notes
 Real project notes.
-";
+",
+        begin = MANAGED_BEGIN,
+        end = MANAGED_END
+    );
     fs::write(home.join("CLAUDE.md"), original).unwrap();
 
     let options = InstallOptions {
@@ -372,35 +456,32 @@ Real project notes.
     };
     let report = install(&options).expect("install");
 
-    // The agent-config step should report stale blocks removed.
-    let agent_step = report
+    // The strip-old-blocks step should report the pixel managed block
+    // removed (1 file stripped).
+    let strip_step = report
         .steps
         .iter()
-        .find(|s| s.id == "agent-config")
-        .expect("should have agent-config step");
-    assert!(
-        agent_step
-            .detail
-            .as_ref()
-            .map(|d| d.contains("stale_blocks_removed=2"))
-            .unwrap_or(false),
-        "should remove 2 stale blocks, got detail: {:?}",
-        agent_step.detail
+        .find(|s| s.id == "strip-old-blocks")
+        .expect("should have strip-old-blocks step");
+    assert_eq!(
+        strip_step.status,
+        pixel_install::install::CheckStatus::Green,
+        "strip-old-blocks should be green: {:?}",
+        strip_step.detail
     );
 
     let claude = fs::read_to_string(home.join("CLAUDE.md")).unwrap();
+    // The pixel managed block is stripped.
     assert!(
-        !claude.to_lowercase().contains("gitnexus"),
-        "GitNexus section (header + all its subsections) should be stripped entirely"
+        !claude.contains(MANAGED_BEGIN),
+        "pixel managed block should be stripped entirely"
     );
     assert!(
-        !claude.contains("codebase-memory"),
-        "codebase-memory section should be stripped entirely"
+        !claude.contains("old pixel managed rules"),
+        "the managed block body should be gone"
     );
-    assert!(
-        !claude.contains("Legacy codebase-memory config"),
-        "the stale section's BODY content must also be gone, not just its header"
-    );
+    // Non-pixel content survives, including the (now unmanaged) GitNexus
+    // section — install no longer scrubs third-party stale blocks.
     assert!(
         claude.contains("Real project notes."),
         "non-stale content (a later, unrelated section) should be preserved"
@@ -595,9 +676,11 @@ fn dry_run_leaves_pre_existing_files_byte_identical() {
     install(&real_options).expect("real install");
 
     let settings_path = home.join(".claude").join("settings.json");
-    let claude_path = home.join(".claude").join("CLAUDE.md");
+    let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
+    let profile_path = shell_profile_path(home);
     let before_settings = fs::read(&settings_path).unwrap();
-    let before_claude = fs::read(&claude_path).unwrap();
+    let before_prompt = fs::read(&prompt_path).unwrap();
+    let before_profile = fs::read(&profile_path).unwrap();
 
     // A dry-run install afterwards must not touch anything, even though a
     // real install already exists (idempotent no-op path).
@@ -609,25 +692,30 @@ fn dry_run_leaves_pre_existing_files_byte_identical() {
     assert!(report.dry_run);
 
     let after_settings = fs::read(&settings_path).unwrap();
-    let after_claude = fs::read(&claude_path).unwrap();
+    let after_prompt = fs::read(&prompt_path).unwrap();
+    let after_profile = fs::read(&profile_path).unwrap();
     assert_eq!(
         before_settings, after_settings,
         "dry-run must not modify settings.json"
     );
     assert_eq!(
-        before_claude, after_claude,
-        "dry-run must not modify CLAUDE.md"
+        before_prompt, after_prompt,
+        "dry-run must not modify agent-prompt.md"
+    );
+    assert_eq!(
+        before_profile, after_profile,
+        "dry-run must not modify the shell profile"
     );
 
     // And it must not have written any backup files either.
-    let claude_dir_entries: Vec<String> = fs::read_dir(home)
+    let home_entries: Vec<String> = fs::read_dir(home)
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     assert!(
-        !claude_dir_entries.iter().any(|n| n.contains("pixel-bak")),
-        "dry-run must not create backup files, got: {claude_dir_entries:?}"
+        !home_entries.iter().any(|n| n.contains("pixel-bak")),
+        "dry-run must not create backup files, got: {home_entries:?}"
     );
 }
 
@@ -640,9 +728,17 @@ fn reinstall_backs_up_claude_md_only_when_content_actually_changes() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
 
-    // Pre-create a CLAUDE.md with hand-written content that install will
-    // need to rewrite (adds managed markers => content changes).
-    fs::write(home.join("CLAUDE.md"), "# Project\n\nHand-written notes.\n").unwrap();
+    // Pre-create a CLAUDE.md with hand-written content AND a stale pixel
+    // managed block from a previous hook-based install. The new install
+    // strips managed blocks (content changes) but, unlike the old
+    // rewrite-agent-config path, the strip step writes directly without a
+    // backup — so no CLAUDE.md.pixel-bak should appear.
+    let original = format!(
+        "# Project\n\nHand-written notes.\n\n{begin}\n# old pixel rules\n{end}\n",
+        begin = MANAGED_BEGIN,
+        end = MANAGED_END
+    );
+    fs::write(home.join("CLAUDE.md"), original).unwrap();
 
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
@@ -651,6 +747,18 @@ fn reinstall_backs_up_claude_md_only_when_content_actually_changes() {
     };
     install(&options).expect("install 1");
 
+    // The managed block is stripped, hand-written content preserved.
+    let claude = fs::read_to_string(home.join("CLAUDE.md")).unwrap();
+    assert!(
+        !claude.contains(MANAGED_BEGIN),
+        "managed block should be stripped after install"
+    );
+    assert!(
+        claude.contains("Hand-written notes."),
+        "hand-written content should be preserved"
+    );
+
+    // No backup file is written by the strip step.
     let backups_after_first: Vec<_> = fs::read_dir(home)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -662,23 +770,19 @@ fn reinstall_backs_up_claude_md_only_when_content_actually_changes() {
         .collect();
     assert_eq!(
         backups_after_first.len(),
-        1,
-        "first install should back up the original hand-written CLAUDE.md exactly once"
+        0,
+        "the new strip-old-blocks step writes directly without a backup, got: {backups_after_first:?}"
     );
 
-    // The backup should contain the ORIGINAL (pre-managed-markers) content.
-    let backup_content = fs::read_to_string(backups_after_first[0].path()).unwrap();
-    assert!(
-        backup_content.contains("Hand-written notes."),
-        "backup should preserve the original content verbatim, got: {backup_content}"
-    );
-    assert!(
-        !backup_content.contains(MANAGED_BEGIN),
-        "backup should be the pre-rewrite content, not the managed version"
-    );
-
-    // Second install: content won't change (idempotent), so no new backup.
+    // Second install: content won't change (no managed block left), so the
+    // file is untouched and still no backup.
+    let before = fs::read(home.join("CLAUDE.md")).unwrap();
     install(&options).expect("install 2");
+    let after = fs::read(home.join("CLAUDE.md")).unwrap();
+    assert_eq!(
+        before, after,
+        "idempotent re-install must not change CLAUDE.md at all"
+    );
     let backups_after_second: Vec<_> = fs::read_dir(home)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -690,8 +794,8 @@ fn reinstall_backs_up_claude_md_only_when_content_actually_changes() {
         .collect();
     assert_eq!(
         backups_after_second.len(),
-        1,
-        "idempotent re-install must not create a second backup when nothing changed"
+        0,
+        "idempotent re-install must not create a backup when nothing changed"
     );
 }
 
@@ -806,9 +910,10 @@ fn install_against_realistic_settings_json_is_safe() {
         "all 3 pre-existing SessionStart entries from another tool must survive, got session_start={session_start:?}"
     );
 
-    // (c) pixel's own passive entries were correctly added. pixel is a CLI +
-    // hooks tool, not an MCP server — so we check the SessionStart hook was
-    // merged in, NOT that a pixel MCP server entry was registered.
+    // (c) The new install wires NO hooks — it only scrubs deprecated MCP
+    // entries and removes the old blocking guard. pixel is a CLI + hooks
+    // tool, not an MCP server, so it must NOT be registered as one, and it
+    // must NOT add its own SessionStart/PreToolUse entries.
     assert!(
         after["mcpServers"].get("pixel").is_none(),
         "pixel must NOT be registered as an MCP server — it is a CLI + hooks tool"
@@ -820,13 +925,13 @@ fn install_against_realistic_settings_json_is_safe() {
             .unwrap_or(false)
     });
     assert!(
-        has_pixel_session_start,
-        "pixel's own SessionStart entry should be present"
+        !has_pixel_session_start,
+        "pixel's own SessionStart entry should NOT be added by the new install"
     );
 
     // The old blocking guard is removed during migration, but the unrelated
-    // PreToolUse bridge remains untouched. Default install rewires lifecycle
-    // behavior without blocking ordinary commands.
+    // PreToolUse bridge remains untouched. The new install removes the guard
+    // without adding any new PreToolUse entry.
     let pre_tool_use = after["hooks"]["PreToolUse"]
         .as_array()
         .expect("PreToolUse array survives");
@@ -850,12 +955,13 @@ fn install_against_realistic_settings_json_is_safe() {
 
     // (d) a .bak was written before the destructive rewrite. `install()`
     // touches settings.json across separate steps (scrub deprecated entries,
-    // remove the old guard entry, wire the SessionStart hook) — each backs up independently when its own write actually
-    // changes the content, so multiple backup files can legitimately exist
-    // in one install run. `fs::read_dir`'s order is unspecified, so pick
-    // the EARLIEST one by its embedded nanosecond timestamp (filenames are
-    // `settings.json.pixel-bak.<nanos>-<seq>`) to find the TRUE pre-install
-    // snapshot rather than an arbitrary intermediate one.
+    // remove the old guard entry) — each backs up independently when its own
+    // write actually changes the content, so multiple backup files can
+    // legitimately exist in one install run. `fs::read_dir`'s order is
+    // unspecified, so pick the EARLIEST one by its embedded nanosecond
+    // timestamp (filenames are `settings.json.pixel-bak.<nanos>-<seq>`) to
+    // find the TRUE pre-install snapshot rather than an arbitrary
+    // intermediate one.
     let mut backups: Vec<_> = fs::read_dir(&settings_dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -887,8 +993,9 @@ fn install_against_realistic_settings_json_is_safe() {
         "the earliest backup should preserve the ORIGINAL pre-install content, got {backups:?}"
     );
 
-    // Re-running install must stay idempotent: no duplicate pixel entries,
-    // no duplicate MCP server, no re-corruption.
+    // Re-running install must stay idempotent: no new pixel entries, no
+    // duplicate MCP server, no re-corruption. The new install adds no
+    // hooks, so SessionStart stays at exactly the 3 foreign entries.
     install(&options).expect("second install");
     let raw2 = fs::read_to_string(&settings_path).unwrap();
     let after2: serde_json::Value =
@@ -904,13 +1011,13 @@ fn install_against_realistic_settings_json_is_safe() {
         })
         .count();
     assert_eq!(
-        pixel_count2, 1,
-        "re-install must not duplicate pixel's own SessionStart entry"
+        pixel_count2, 0,
+        "re-install must not add pixel's own SessionStart entry"
     );
     assert_eq!(
         session_start2.len(),
-        5,
-        "3 foreign entries + 2 Pixel lifecycle entries, stable across re-install"
+        3,
+        "3 foreign entries only, stable across re-install (no pixel lifecycle entries)"
     );
 }
 
@@ -973,15 +1080,47 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
         dry_run: false,
     };
     install(&options).expect("install on fresh home");
-    let claude_path = home.join(".claude").join("CLAUDE.md");
-    let claude = fs::read_to_string(&claude_path)
-        .expect(".claude/CLAUDE.md should be created even when no agent-config file pre-existed");
+
+    // The new install does NOT create or rewrite any CLAUDE.md/AGENTS.md —
+    // it deploys the agent system prompt and shell wrappers instead.
     assert!(
         !home.join("CLAUDE.md").exists(),
         "fresh install must not create root CLAUDE.md"
     );
-    assert!(claude.contains(MANAGED_BEGIN));
-    assert!(claude.contains(MANAGED_END));
+    assert!(
+        !home.join(".claude").join("CLAUDE.md").exists(),
+        "fresh install must not create .claude/CLAUDE.md"
+    );
+    assert!(
+        !home.join("AGENTS.md").exists(),
+        "fresh install must not create root AGENTS.md"
+    );
+
+    // The agent system prompt is deployed.
+    let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
+    let prompt = fs::read_to_string(&prompt_path)
+        .expect("agent-prompt.md should be deployed on a fresh home");
+    assert!(
+        prompt.contains("REPLACEMENT MAP"),
+        "agent-prompt.md should carry the replacement map"
+    );
+
+    // Shell wrappers are installed in the shell profile.
+    let profile = shell_profile_path(home);
+    let profile_content = fs::read_to_string(&profile)
+        .expect("shell profile should be created on a fresh home");
+    assert!(
+        profile_content.contains(PIXEL_MANAGED_BEGIN),
+        "shell profile should carry the pixel-managed wrapper block"
+    );
+    assert!(
+        profile_content.contains("claude()"),
+        "shell profile should define the claude() wrapper"
+    );
+    assert!(
+        profile_content.contains("codex()"),
+        "shell profile should define the codex() wrapper"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -990,16 +1129,15 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
 
 #[test]
 fn doctor_prompt_submit_check_permissions_and_settings() {
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-
+    // The old `install.prompt-submit-hook` check is gone — the new install
+    // wires no hooks. Doctor now verifies the new install artifacts:
+    //   - install.agent-prompt: the agent system prompt is deployed & fresh
+    //   - install.shell-wrappers: the claude()/codex() wrappers are present
+    //   - install.old-hooks-clean: no stale hook scripts linger in
+    //     ~/.claude/hooks/
+    // This test walks each check through its red and green states.
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
-
-    let hooks_dir = home.join(".claude").join("hooks");
-    fs::create_dir_all(&hooks_dir).unwrap();
-    let hook_path = hooks_dir.join("pixel-prompt-submit");
-    fs::write(&hook_path, "#!/bin/sh\nexit 0\n").unwrap();
 
     let doc_opts = DoctorOptions {
         home: Some(home.to_path_buf()),
@@ -1007,71 +1145,91 @@ fn doctor_prompt_submit_check_permissions_and_settings() {
         ..Default::default()
     };
 
-    // 1. Non-executable hook fails on unix
-    #[cfg(unix)]
-    {
-        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o644)).unwrap();
-        let report = doctor(&doc_opts).expect("doctor runs");
-        let check = report
-            .checks
-            .iter()
-            .find(|c| c.id == "install.prompt-submit-hook")
-            .unwrap();
-        assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
-        assert!(check.reason.as_ref().unwrap().contains("is not executable"));
-    }
-
-    // Set executable
-    #[cfg(unix)]
-    fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
-
-    // 2. Settings.json exists but doesn't wire prompt-submit
-    let settings_path = home.join(".claude").join("settings.json");
-    fs::write(&settings_path, "{}").unwrap();
+    // 1. With nothing installed, agent-prompt and shell-wrappers are red.
     let report = doctor(&doc_opts).expect("doctor runs");
-    let check = report
+    let prompt_check = report
         .checks
         .iter()
-        .find(|c| c.id == "install.prompt-submit-hook")
+        .find(|c| c.id == "install.agent-prompt")
         .unwrap();
-    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
-    assert!(
-        check
-            .reason
-            .as_ref()
-            .unwrap()
-            .contains("not wired in ~/.claude/settings.json")
+    assert_eq!(
+        prompt_check.status,
+        pixel_install::doctor::CheckStatus::Red,
+        "agent-prompt should be red when not deployed"
+    );
+    let wrappers_check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.shell-wrappers")
+        .unwrap();
+    assert_eq!(
+        wrappers_check.status,
+        pixel_install::doctor::CheckStatus::Red,
+        "shell-wrappers should be red when not installed"
     );
 
-    // 3. Settings.json wires prompt-submit, without cached model
-    fs::write(
-        &settings_path,
-        r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"pixel hook prompt-submit"}]}]}}"#,
-    )
-    .unwrap();
+    // 2. A stale old guard hook script makes install.old-hooks-clean red.
+    //    (install only removes the guard scripts; the session-start/prompt-
+    //    submit scripts are not cleaned by install, only by uninstall.)
+    let hooks_dir = home.join(".claude").join("hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+    let stale_script = hooks_dir.join(pixel_install::config::GUARD_HOOK);
+    fs::write(&stale_script, "#!/bin/sh\nexit 0\n").unwrap();
     let report = doctor(&doc_opts).expect("doctor runs");
-    let check = report
+    let old_hooks_check = report
         .checks
         .iter()
-        .find(|c| c.id == "install.prompt-submit-hook")
+        .find(|c| c.id == "install.old-hooks-clean")
         .unwrap();
-    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
-    assert!(check.summary.contains("(model not cached)"));
-    assert_eq!(check.detail.as_ref().unwrap()["model_cached"], false);
+    assert_eq!(
+        old_hooks_check.status,
+        pixel_install::doctor::CheckStatus::Red,
+        "old-hooks-clean should be red when a stale hook script lingers"
+    );
 
-    // 4. With cached model
-    let models_dir = home.join(".local/share/gitpixel/models");
-    fs::create_dir_all(&models_dir).unwrap();
-    fs::write(models_dir.join("potion.ok"), "ok").unwrap();
+    // 3. Run install: deploys agent-prompt + shell wrappers and removes the
+    //    stale hook script → all three checks go green.
+    install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        dry_run: false,
+    })
+    .expect("install");
+
     let report = doctor(&doc_opts).expect("doctor runs");
-    let check = report
+    for id in [
+        "install.agent-prompt",
+        "install.shell-wrappers",
+        "install.old-hooks-clean",
+    ] {
+        let check = report.checks.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(
+            check.status,
+            pixel_install::doctor::CheckStatus::Green,
+            "{id} should be green after install, got {:?}: {:?}",
+            check.status,
+            check.reason
+        );
+    }
+    assert!(
+        !stale_script.is_file(),
+        "install should remove the stale hook script"
+    );
+
+    // 4. Corrupting the agent prompt makes install.agent-prompt red (stale).
+    let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
+    fs::write(&prompt_path, "# stale prompt without the required markers\n").unwrap();
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let prompt_check = report
         .checks
         .iter()
-        .find(|c| c.id == "install.prompt-submit-hook")
+        .find(|c| c.id == "install.agent-prompt")
         .unwrap();
-    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
-    assert!(check.summary.contains("model cached"));
-    assert_eq!(check.detail.as_ref().unwrap()["model_cached"], true);
+    assert_eq!(
+        prompt_check.status,
+        pixel_install::doctor::CheckStatus::Red,
+        "agent-prompt should be red when the deployed prompt is stale"
+    );
 }
 
 #[test]
@@ -1111,7 +1269,10 @@ fn doctor_checks_devin_hooks_wiring() {
             .contains("provider hook configuration differs")
     );
 
-    // Install the full supported contract, not a substring-only fixture.
+    // The new install wires NO provider hooks — it only scrubs deprecated
+    // MCP entries, removes old guard hooks, deploys the agent prompt, and
+    // installs shell wrappers. So the devin hooks config stays partial and
+    // the install.devin-hooks check remains red after install.
     install(&InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: doc_opts.executable_path.clone(),
@@ -1125,8 +1286,29 @@ fn doctor_checks_devin_hooks_wiring() {
         .iter()
         .find(|c| c.id == "install.devin-hooks")
         .unwrap();
-    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
-    assert!(check.summary.contains("lifecycle configured"));
+    assert_eq!(
+        check.status,
+        pixel_install::doctor::CheckStatus::Red,
+        "install.devin-hooks should stay red — install no longer wires devin hooks, got {:?}: {:?}",
+        check.status,
+        check.reason
+    );
+
+    // The new install artifacts, however, must be green after install.
+    for id in [
+        "install.agent-prompt",
+        "install.shell-wrappers",
+        "install.old-hooks-clean",
+    ] {
+        let check = report.checks.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(
+            check.status,
+            pixel_install::doctor::CheckStatus::Green,
+            "{id} should be green after install, got {:?}: {:?}",
+            check.status,
+            check.reason
+        );
+    }
 }
 
 #[test]
@@ -1167,7 +1349,10 @@ fn doctor_checks_codex_hooks_wiring() {
             .contains("provider hook configuration differs")
     );
 
-    // Install the full supported contract, not a substring-only fixture.
+    // The new install wires NO provider hooks — it only scrubs deprecated
+    // MCP entries, removes old guard hooks, deploys the agent prompt, and
+    // installs shell wrappers. So the codex hooks config stays partial and
+    // the install.codex-hooks check remains red after install.
     install(&InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: doc_opts.executable_path.clone(),
@@ -1181,8 +1366,29 @@ fn doctor_checks_codex_hooks_wiring() {
         .iter()
         .find(|c| c.id == "install.codex-hooks")
         .unwrap();
-    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
-    assert!(check.summary.contains("lifecycle configured"));
+    assert_eq!(
+        check.status,
+        pixel_install::doctor::CheckStatus::Red,
+        "install.codex-hooks should stay red — install no longer wires codex hooks, got {:?}: {:?}",
+        check.status,
+        check.reason
+    );
+
+    // The new install artifacts, however, must be green after install.
+    for id in [
+        "install.agent-prompt",
+        "install.shell-wrappers",
+        "install.old-hooks-clean",
+    ] {
+        let check = report.checks.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(
+            check.status,
+            pixel_install::doctor::CheckStatus::Green,
+            "{id} should be green after install, got {:?}: {:?}",
+            check.status,
+            check.reason
+        );
+    }
 }
 
 #[test]
@@ -1322,27 +1528,28 @@ fn doctor_checks_zcode_hooks_wiring() {
 // uninstall tests
 // ---------------------------------------------------------------------------
 
-/// After install then uninstall, CLAUDE.md should have no managed block
-/// but the original user content should be preserved.
+/// After uninstall, CLAUDE.md should have no managed block but the original
+/// user content should be preserved. The new install no longer writes
+/// managed blocks, so the fixture manually creates one (modeling a leftover
+/// from a previous hook-based install) for uninstall to strip.
 #[test]
 fn uninstall_removes_managed_block_and_preserves_user_content() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
 
-    fs::write(home.join("CLAUDE.md"), "# My Project\n\nSome notes.\n").unwrap();
-
-    // Install
-    let install_opts = InstallOptions {
-        home: Some(home.to_path_buf()),
-        executable_path: Some(fake_pixel_exe(home)),
-        dry_run: false,
-    };
-    install(&install_opts).expect("install");
+    // Manually create a CLAUDE.md with user content AND a stale pixel
+    // managed block (install() no longer writes these).
+    let original = format!(
+        "# My Project\n\nSome notes.\n\n{begin}\n# old pixel rules\n{end}\n",
+        begin = MANAGED_BEGIN,
+        end = MANAGED_END
+    );
+    fs::write(home.join("CLAUDE.md"), original).unwrap();
 
     let claude = fs::read_to_string(home.join("CLAUDE.md")).unwrap();
     assert!(
         claude.contains(MANAGED_BEGIN),
-        "install should add managed block"
+        "fixture should carry a managed block"
     );
 
     // Uninstall
@@ -1366,49 +1573,52 @@ fn uninstall_removes_managed_block_and_preserves_user_content() {
     );
 }
 
-/// After install then uninstall, Claude settings.json should have no
-/// pixel hook entries, and the hook scripts should be deleted.
+/// After uninstall, Claude settings.json should have no pixel hook entries,
+/// and the hook scripts should be deleted. The new install no longer
+/// installs hooks or scripts, so the fixture manually creates them
+/// (modeling a leftover from a previous hook-based install) for uninstall
+/// to remove.
 #[test]
 fn uninstall_removes_claude_hooks_and_scripts() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
-    // Pre-create .claude/settings.json so installed_agents detects Claude
-    // even when the `claude` binary is not on PATH (e.g. Linux CI).
     let claude_dir = home.join(".claude");
-    fs::create_dir_all(&claude_dir).unwrap();
-    fs::write(claude_dir.join("settings.json"), "{}").unwrap();
+    let hooks_dir = claude_dir.join("hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
 
-    // Install
-    let install_opts = InstallOptions {
-        home: Some(home.to_path_buf()),
-        executable_path: Some(fake_pixel_exe(home)),
-        dry_run: false,
-    };
-    install(&install_opts).expect("install");
+    // Manually wire pixel hook entries into settings.json (install() no
+    // longer does this) — including the blocking guard, a session-start,
+    // and a prompt-submit entry.
+    let settings = claude_dir.join("settings.json");
+    fs::write(
+        &settings,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{ "type": "command", "command": "~/.claude/hooks/pixel-targets-guard" }]
+                }],
+                "SessionStart": [{
+                    "hooks": [{ "type": "command", "command": "~/.claude/hooks/pixel-session-start" }]
+                }],
+                "UserPromptSubmit": [{
+                    "hooks": [{ "type": "command", "command": "~/.claude/hooks/pixel-prompt-submit" }]
+                }]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
-    // Verify passive hooks were installed and the blocking guard was not.
-    let settings = home.join(".claude").join("settings.json");
-    let settings_content = fs::read_to_string(&settings).unwrap();
-    assert!(
-        !settings_content.contains("pixel-targets-guard"),
-        "default install must not wire the blocking guard hook"
-    );
-    let guard_script = home
-        .join(".claude")
-        .join("hooks")
-        .join("pixel-targets-guard");
-    assert!(
-        !guard_script.is_file(),
-        "default install should not create the guard script"
-    );
-    let session_script = home
-        .join(".claude")
-        .join("hooks")
-        .join("pixel-session-start");
-    assert!(
-        session_script.is_file(),
-        "session-start script should be installed"
-    );
+    // Manually create the hook scripts (install() no longer does this).
+    let guard_script = hooks_dir.join("pixel-targets-guard");
+    let session_script = hooks_dir.join("pixel-session-start");
+    let prompt_script = hooks_dir.join("pixel-prompt-submit");
+    for script in [&guard_script, &session_script, &prompt_script] {
+        fs::write(script, "#!/bin/sh\nexit 0\n").unwrap();
+    }
+    assert!(guard_script.is_file(), "fixture guard script present");
+    assert!(session_script.is_file(), "fixture session script present");
 
     // Uninstall
     let uninstall_opts = UninstallOptions {
@@ -1418,7 +1628,7 @@ fn uninstall_removes_claude_hooks_and_scripts() {
     };
     uninstall(&uninstall_opts).expect("uninstall");
 
-    // Settings should have no pixel hook references
+    // Settings should have no pixel hook references.
     let settings_content = fs::read_to_string(&settings).unwrap_or_default();
     assert!(
         !settings_content.contains("pixel-targets-guard"),
@@ -1433,11 +1643,15 @@ fn uninstall_removes_claude_hooks_and_scripts() {
         "settings should have no pixel prompt-submit hook after uninstall"
     );
 
-    // Hook scripts should be deleted
+    // Hook scripts should be deleted.
     assert!(!guard_script.is_file(), "guard script should be deleted");
     assert!(
         !session_script.is_file(),
         "session-start script should be deleted"
+    );
+    assert!(
+        !prompt_script.is_file(),
+        "prompt-submit script should be deleted"
     );
 }
 
@@ -1486,25 +1700,30 @@ fn uninstall_is_idempotent() {
     assert_eq!(r2.summary.red, 0, "no red steps on re-uninstall");
 }
 
-/// Dry-run uninstall does not modify the filesystem.
+/// Dry-run uninstall does not modify the filesystem. The new install no
+/// longer writes managed blocks, so the fixture manually creates one (plus
+/// the pixel binary) for the dry-run to report against without touching.
 #[test]
 fn uninstall_dry_run_does_not_modify() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
 
-    // Install
-    let install_opts = InstallOptions {
-        home: Some(home.to_path_buf()),
-        executable_path: Some(fake_pixel_exe(home)),
-        dry_run: false,
-    };
-    install(&install_opts).expect("install");
-
+    // Manually create a CLAUDE.md with a stale pixel managed block (install()
+    // no longer writes these) and the pixel binary.
+    let claude_path = home.join("CLAUDE.md");
+    fs::write(
+        &claude_path,
+        format!(
+            "# Project\n\n{begin}\n# old pixel rules\n{end}\n",
+            begin = MANAGED_BEGIN,
+            end = MANAGED_END
+        ),
+    )
+    .unwrap();
     let bin = home.join("pixel");
-    assert!(
-        bin.is_file(),
-        "binary should exist before dry-run uninstall"
-    );
+    fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+    let before_claude = fs::read(&claude_path).unwrap();
+    let before_bin = fs::read(&bin).unwrap();
 
     // Dry-run uninstall
     let uninstall_opts = UninstallOptions {
@@ -1515,15 +1734,25 @@ fn uninstall_dry_run_does_not_modify() {
     let report = uninstall(&uninstall_opts).expect("dry-run uninstall");
     assert!(report.dry_run, "report should be dry-run");
 
-    // Nothing should have changed
+    // Nothing should have changed.
     assert!(
         bin.is_file(),
         "binary should still exist after dry-run uninstall"
     );
-    let claude = fs::read_to_string(home.join(".claude").join("CLAUDE.md")).unwrap_or_default();
+    assert_eq!(
+        fs::read(&bin).unwrap(),
+        before_bin,
+        "binary must be byte-identical after dry-run uninstall"
+    );
+    let claude = fs::read_to_string(&claude_path).unwrap();
     assert!(
         claude.contains(MANAGED_BEGIN),
         "managed block should still exist after dry-run uninstall"
+    );
+    assert_eq!(
+        fs::read(&claude_path).unwrap(),
+        before_claude,
+        "CLAUDE.md must be byte-identical after dry-run uninstall"
     );
 }
 
@@ -1603,24 +1832,36 @@ fn routing_full_install_rtk_round_trip_preserves_foreign_hooks() {
         executable_path: Some(exe.clone()),
         dry_run: false,
     };
+    // The new install wires NO hooks — it only scrubs deprecated MCP entries
+    // and removes old guard hooks. The foreign RTK + SessionStart entries
+    // are neither, so settings.json must pass through install untouched.
     install(&opts).unwrap();
     let once = fs::read(&settings).unwrap();
     install(&opts).unwrap();
     assert_eq!(
         fs::read(&settings).unwrap(),
         once,
-        "repeat install must keep delegation and backup stable"
+        "repeat install must leave foreign hooks stable"
     );
     let installed: serde_json::Value = serde_json::from_slice(&once).unwrap();
+    // No pixel delegate is added; the RTK entry survives verbatim.
     assert_eq!(
         installed["hooks"]["PreToolUse"].as_array().unwrap().len(),
-        1
+        1,
+        "PreToolUse should retain only the foreign RTK entry"
     );
-    assert!(
+    assert_eq!(
         installed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
             .as_str()
-            .unwrap()
-            .contains("--delegate-rtk")
+            .unwrap(),
+        "rtk hook claude",
+        "the foreign RTK entry must survive untouched (no delegate added)"
+    );
+    assert!(
+        !installed
+            .to_string()
+            .contains(pixel_install::config::GUARD_HOOK),
+        "install must not wire any pixel guard"
     );
     uninstall(&UninstallOptions {
         home: Some(home.into()),
@@ -1656,7 +1897,6 @@ fn routing_providers_install_and_execute_without_ambient_claude() {
 #[test]
 #[cfg(unix)]
 fn routing_isolated_provider_child() {
-    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     let Ok(provider) = std::env::var("PIXEL_INSTALL_TEST_CHILD") else {
         return;
@@ -1680,52 +1920,36 @@ fn routing_isolated_provider_child() {
         executable_path: Some(exe),
         dry_run: false,
     };
+    // The new install wires NO provider hooks. The provider config must
+    // pass through install untouched (still "{}"), and no hooks directory
+    // or hook scripts are created for any provider.
     install(&opts).unwrap();
     let first = fs::read(&config).unwrap();
     install(&opts).unwrap();
-    assert_eq!(fs::read(&config).unwrap(), first);
-    if provider != "claude" {
-        assert!(!home.join(".claude/hooks").exists());
-    }
-    let value: serde_json::Value = serde_json::from_slice(&first).unwrap();
-    let hooks = value["hooks"].as_object().unwrap();
-    assert!(!hooks.contains_key("PostCompact"));
     assert_eq!(
-        hooks["PreToolUse"][0]["matcher"],
-        match provider.as_str() {
-            "devin" => "exec",
-            "codex" => "Bash|shell|unified_exec|local_shell",
-            _ => "Bash",
-        }
+        fs::read(&config).unwrap(),
+        first,
+        "repeat install must leave the provider config stable"
     );
-    for (event, groups) in hooks {
-        for group in groups.as_array().unwrap() {
-            let command = group["hooks"][0]["command"].as_str().unwrap();
-            assert!(!command.contains(".claude/hooks"));
-            let mut child = std::process::Command::new("/bin/sh")
-                .args(["-c", command])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .unwrap();
-            child.stdin.take().unwrap().write_all(serde_json::json!({"hook_event_name":event,"source":"compact","tool_name":"Bash","tool_input":{"command":"printf probe"},"cwd":home}).to_string().as_bytes()).unwrap();
-            let output = child.wait_with_output().unwrap();
-            assert!(output.status.success());
-            let actual = String::from_utf8(output.stdout).unwrap();
-            assert!(actual.starts_with("hook "));
-            if event == "PreToolUse" {
-                assert_eq!(actual, format!("hook guard --provider {provider}"));
-            }
-            if group.get("matcher").and_then(|v| v.as_str()) == Some("compact") {
-                assert_eq!(
-                    actual,
-                    if provider == "claude" {
-                        "hook post-compaction --provider claude"
-                    } else {
-                        "hook post-compaction"
-                    }
-                );
-            }
-        }
-    }
+    assert_eq!(
+        first.as_slice(),
+        b"{}",
+        "provider config must stay {{}} — install wires no hooks"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    assert!(
+        value.get("hooks").is_none(),
+        "no hooks key should be written by the new install, got: {value}"
+    );
+    // No provider gets a ~/.claude/hooks directory from the new install.
+    assert!(
+        !home.join(".claude/hooks").exists(),
+        "install must not create ~/.claude/hooks for any provider"
+    );
+    // The new install artifacts (agent-prompt + shell wrappers) are deployed
+    // regardless of provider.
+    assert!(
+        home.join(".local/share/pixel/agent-prompt.md").is_file(),
+        "agent-prompt.md should be deployed"
+    );
 }

@@ -207,99 +207,74 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     ));
 
     checks.push(check(
-        "install.guard-hook",
+        "install.agent-prompt",
         || -> std::result::Result<DoctorCheckDetail, String> {
-            if !install::claude_installed(&home) {
-                return Ok(DoctorCheckDetail {
-                    summary: "Claude not installed — blocking guard skipped".into(),
-                    detail: None,
-                });
-            }
-            let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
-            let new = hooks_dir.join(config::GUARD_HOOK);
-            let old = hooks_dir.join(config::OLD_GUARD_HOOK);
-            if old.exists() {
-                return Err("old gitpixel-targets-guard hook still present".into());
-            }
-            if new.exists() {
-                return Err("blocking pixel guard hook still installed".into());
-            }
-            Ok(DoctorCheckDetail {
-                summary: "legacy blocking script absent; routing checked separately".into(),
-                detail: None,
-            })
-        },
-    ));
-
-    checks.push(check(
-        "install.session-start",
-        || -> std::result::Result<DoctorCheckDetail, String> {
-            if !install::claude_installed(&home) {
-                return Ok(DoctorCheckDetail {
-                    summary: "Claude not installed — SessionStart skipped".into(),
-                    detail: None,
-                });
-            }
-            let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
-            let path = hooks_dir.join(config::SESSION_START_HOOK);
+            let path = home.join(".local/share/pixel/agent-prompt.md");
             if !path.is_file() {
-                return Err("SessionStart hook not installed".into());
+                return Err("agent-prompt.md not deployed — run `pixel install`".into());
+            }
+            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let has_replacement_map = content.contains("REPLACEMENT MAP");
+            let has_workflow = content.contains("MANDATORY WORKFLOW");
+            if !has_replacement_map || !has_workflow {
+                return Err("agent-prompt.md is stale — run `pixel install` to update".into());
             }
             Ok(DoctorCheckDetail {
-                summary: "SessionStart hook installed".into(),
+                summary: format!("agent-prompt.md deployed ({} bytes)", content.len()),
                 detail: Some(serde_json::json!({ "path": path.display().to_string() })),
             })
         },
     ));
 
     checks.push(check(
-        "install.prompt-submit-hook",
+        "install.shell-wrappers",
         || -> std::result::Result<DoctorCheckDetail, String> {
-            if !install::claude_installed(&home) {
-                return Ok(DoctorCheckDetail {
-                    summary: "Claude not installed — UserPromptSubmit skipped".into(),
-                    detail: None,
-                });
+            let profile = install::shell_profile_path(&home);
+            let content = fs::read_to_string(&profile).unwrap_or_default();
+            let has_begin = content.contains(install::PIXEL_MANAGED_BEGIN);
+            let has_end = content.contains(install::PIXEL_MANAGED_END);
+            let has_claude = content.contains("claude()") && content.contains("--append-system-prompt-file");
+            let has_codex = content.contains("codex()") && content.contains("model_instructions_file");
+            if !has_begin || !has_end {
+                return Err(format!(
+                    "shell wrappers not found in {} — run `pixel install`",
+                    profile.display()
+                ));
             }
-            let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
-            let path = hooks_dir.join(config::PROMPT_SUBMIT_HOOK);
-            if !path.is_file() {
-                return Err("UserPromptSubmit (task boundary) hook not installed".into());
+            if !has_claude || !has_codex {
+                return Err("shell wrappers present but incomplete — run `pixel install`".into());
             }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = path.metadata()
-                    && meta.permissions().mode() & 0o111 == 0
-                {
-                    return Err(format!(
-                        "{} is not executable (chmod +x needed)",
-                        path.display()
-                    ));
-                }
-            }
-            let settings_path = home.join(".claude").join("settings.json");
-            if settings_path.is_file() {
-                let raw = fs::read_to_string(&settings_path).unwrap_or_default();
-                if !raw.contains("hook prompt-submit") && !raw.contains(config::PROMPT_SUBMIT_HOOK)
-                {
-                    return Err("UserPromptSubmit hook not wired in ~/.claude/settings.json".into());
-                }
-            }
-            let model_cached = home
-                .join(".local/share/gitpixel/models/potion.ok")
-                .is_file();
-            let summary = if model_cached {
-                "UserPromptSubmit (task boundary) hook installed & model cached".into()
-            } else {
-                "UserPromptSubmit (task boundary) hook installed (model not cached)".into()
-            };
             Ok(DoctorCheckDetail {
-                summary,
-                detail: Some(serde_json::json!({
-                    "path": path.display().to_string(),
-                    "model_cached": model_cached,
-                })),
+                summary: format!("shell wrappers installed in {}", profile.display()),
+                detail: Some(serde_json::json!({ "profile": profile.display().to_string() })),
+            })
+        },
+    ));
+
+    checks.push(check(
+        "install.old-hooks-clean",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
+            let stale: Vec<String> = [
+                config::GUARD_HOOK,
+                config::OLD_GUARD_HOOK,
+                config::SESSION_START_HOOK,
+                config::PROMPT_SUBMIT_HOOK,
+                config::POST_COMPACTION_HOOK,
+            ]
+            .iter()
+            .filter(|name| hooks_dir.join(name).exists())
+            .map(|s| s.to_string())
+            .collect();
+            if !stale.is_empty() {
+                return Err(format!(
+                    "old hook scripts still in ~/.claude/hooks/ — run `pixel install` to clean: {}",
+                    stale.join(", ")
+                ));
+            }
+            Ok(DoctorCheckDetail {
+                summary: "no old hook scripts in ~/.claude/hooks/".into(),
+                detail: None,
             })
         },
     ));

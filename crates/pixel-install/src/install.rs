@@ -10,7 +10,6 @@ use serde::Serialize;
 
 use crate::InstallError;
 use crate::config;
-use crate::routing::{self, Provider};
 
 pub type Result<T> = std::result::Result<T, InstallError>;
 
@@ -69,17 +68,13 @@ pub struct InstallOptions {
     pub dry_run: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 struct InstalledAgents {
     claude: bool,
-    codex: bool,
-    devin: bool,
-    gemini: bool,
-    zcode: bool,
-    cursor: bool,
-    pi: bool,
 }
 
+#[allow(dead_code)]
 fn command_available(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -104,38 +99,27 @@ fn command_available(name: &str) -> bool {
     })
 }
 
+#[allow(dead_code)]
 fn installed_agents(home: &Path) -> InstalledAgents {
     InstalledAgents {
         claude: command_available("claude")
             || home.join(".claude/settings.json").is_file()
             || home.join(config::CLAUDE_HOOKS_DIR).is_dir(),
-        codex: command_available("codex") || home.join(config::CODEX_HOOKS_FILE).is_file(),
-        devin: command_available("devin")
-            || home
-                .join(config::DEVIN_CONFIG_DIR)
-                .join(config::DEVIN_CONFIG_FILE)
-                .is_file(),
-        gemini: command_available("gemini") || home.join(config::GEMINI_SETTINGS_FILE).is_file(),
-        zcode: command_available("zcode") || home.join(config::ZCODE_CONFIG_FILE).is_file(),
-        cursor: command_available("cursor-agent") || home.join(config::CURSOR_HOOKS_FILE).is_file(),
-        pi: command_available("pi") || home.join(config::PI_CONFIG_DIR).is_dir(),
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn claude_installed(home: &Path) -> bool {
     installed_agents(home).claude
 }
 
-fn skipped_agent_step(id: &str, summary: &str) -> InstallStep {
-    InstallStep {
-        id: id.into(),
-        status: CheckStatus::Green,
-        summary: summary.into(),
-        detail: Some("detected=false".into()),
-    }
-}
-
 /// Run `pixel install`. Idempotent: safe to re-run.
+///
+/// The install is deliberately minimal: it deploys the agent system prompt
+/// and sets up shell wrappers so every `claude`/`codex` invocation includes
+/// the Pixel retrieval protocol. No hooks, no managed blocks in CLAUDE.md/
+/// AGENTS.md, no provider-specific routing — the system prompt is the single
+/// enforcement mechanism.
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     let home = options
         .home
@@ -151,101 +135,16 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         .unwrap_or_else(|_| executable_path.clone());
 
     let dry_run = options.dry_run;
-    let agents = installed_agents(&home);
-    let mut steps = Vec::new();
-
-    // 1. Remove deprecated MCP servers + old guard hooks from Claude
-    //    settings.json. pixel is a CLI + hooks tool, not an MCP server —
-    //    the deprecated usable-git/gitpixel/sniper MCP entries are retired
-    //    unconditionally (pixel replaces them via Bash, not MCP).
-    steps.push(scrub_deprecated(&home, dry_run)?);
-
-    // 2. Remove any guard entries from an earlier install. This migration is
-    //    deliberately narrow: unrelated user hooks remain untouched, while
-    //    the default install becomes rewire-first instead of blocking.
-    steps.push(remove_existing_guard_hooks(&home, dry_run)?);
-
-    // 3. Install Claude's passive lifecycle hooks only when Claude is
-    //    installed (or already has a Claude settings file). The fallback
-    //    ~/.claude/CLAUDE.md rules file is independent and is always handled
-    //    below.
-    if agents.claude {
-        steps.push(install_session_start_hook(&home, &exe, dry_run)?);
-        steps.push(install_prompt_submit_hook(&home, &exe, dry_run)?);
-        steps.push(install_post_compaction_hook(&home, &exe, dry_run)?);
-        steps.push(routing::install_provider(
-            &home,
-            &exe,
-            Provider::Claude,
-            dry_run,
-        )?);
-    } else {
-        steps.push(skipped_agent_step(
-            "hooks.claude",
-            "Claude not installed — skipping hooks",
-        ));
-    }
-
-    // 4. Wire passive lifecycle hooks only for installed/supported agents.
-    if agents.devin {
-        steps.push(install_devin_hooks(&home, &exe, dry_run)?);
-    } else {
-        steps.push(skipped_agent_step(
-            "hooks.devin",
-            "Devin not installed — skipping hooks",
-        ));
-    }
-    if agents.codex {
-        steps.push(install_codex_hooks(&home, &exe, dry_run)?);
-        steps.push(patch_project_codex_hooks(&home, &exe, dry_run)?);
-    } else {
-        steps.push(skipped_agent_step(
-            "hooks.codex",
-            "Codex not installed — skipping hooks",
-        ));
-        steps.push(skipped_agent_step(
-            "hooks.codex_project_shadow",
-            "Codex not installed — skipping project hook scan",
-        ));
-    }
-    if agents.gemini {
-        steps.push(install_gemini_hooks(&home, &exe, dry_run)?);
-    } else {
-        steps.push(skipped_agent_step(
-            "hooks.gemini",
-            "Gemini not installed — skipping hooks",
-        ));
-    }
-    if agents.zcode {
-        steps.push(install_zcode_hooks(&home, &exe, dry_run)?);
-    } else {
-        steps.push(skipped_agent_step(
-            "hooks.zcode",
-            "zcode not installed — skipping hooks",
-        ));
-    }
-    if agents.cursor {
-        steps.push(install_cursor_hooks(&home, &exe, dry_run)?);
-    } else {
-        steps.push(skipped_agent_step(
-            "hooks.cursor",
-            "Cursor not installed — skipping hooks",
-        ));
-    }
-    if agents.pi {
-        steps.push(install_pi_rules(&home, &exe, dry_run)?);
-    } else {
-        steps.push(skipped_agent_step(
-            "hooks.pi",
-            "pi not installed — skipping rules",
-        ));
-    }
-
-    // 5. Rewrite agent-config with managed markers.
-    steps.push(rewrite_agent_configs(&home, &exe, dry_run)?);
-
-    // 6. Deploy the Pixel agent system prompt for worker injection.
-    steps.push(deploy_agent_prompt(&home, dry_run)?);
+    // 1. Clean up any remnants from previous hook-based installs.
+    // 2. Deploy the Pixel agent system prompt.
+    // 3. Install shell wrappers so claude/codex always use the system prompt.
+    let steps = vec![
+        scrub_deprecated(&home, dry_run)?,
+        remove_existing_guard_hooks(&home, dry_run)?,
+        strip_old_managed_blocks(&home, dry_run)?,
+        deploy_agent_prompt(&home, dry_run)?,
+        install_shell_wrappers(&home, dry_run)?,
+    ];
 
     let green = steps
         .iter()
@@ -269,6 +168,38 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         dry_run,
         steps,
         summary: InstallSummary { green, yellow, red },
+    })
+}
+
+/// Strip old pixel-managed blocks from all agent-config files (CLAUDE.md,
+/// AGENTS.md, etc.). The system prompt replaces these — managed blocks are
+/// no longer written by install, but old ones from previous installs must
+/// be cleaned up.
+fn strip_old_managed_blocks(home: &Path, dry_run: bool) -> Result<InstallStep> {
+    let targets = config::find_agent_configs(home);
+    let mut stripped = 0usize;
+    for path in &targets {
+        let original = match fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let cleaned = config::strip_managed_block(&original);
+        if cleaned != original {
+            stripped += 1;
+            if !dry_run {
+                fs::write(path, &cleaned)?;
+            }
+        }
+    }
+    Ok(InstallStep {
+        id: "strip-old-blocks".into(),
+        status: CheckStatus::Green,
+        summary: format!(
+            "{} {} agent-config managed block(s)",
+            if dry_run { "would strip" } else { "stripped" },
+            stripped
+        ),
+        detail: Some(format!("files_checked={}", targets.len())),
     })
 }
 
@@ -433,194 +364,6 @@ fn remove_guard_from_settings_file(
     Ok(changed)
 }
 
-// Compatibility scripts remain for other integrations; the three supported
-// providers invoke the quoted binary directly and do not depend on Claude.
-fn install_lifecycle_script(
-    home: &Path,
-    exe: &Path,
-    dry_run: bool,
-    filename: &str,
-    verb: &str,
-) -> Result<InstallStep> {
-    let path = home.join(config::CLAUDE_HOOKS_DIR).join(filename);
-    let body = format!(
-        "#!/bin/sh\nexec {} hook {verb} \"$@\"\n",
-        routing::quoted_executable(exe)
-    );
-    let mut backup = None;
-    if !dry_run {
-        fs::create_dir_all(path.parent().expect("hook directory"))?;
-        backup = config::backup_if_changing(&path, body.as_bytes())?;
-        fs::write(&path, body)?;
-        set_executable(&path);
-    }
-    Ok(InstallStep {
-        id: format!("hook.{verb}"),
-        status: CheckStatus::Green,
-        summary: dry_run_summary(dry_run, &format!("{verb} compatibility script installed")),
-        detail: Some(with_backup_note(path.display().to_string(), backup)),
-    })
-}
-
-fn install_session_start_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    install_lifecycle_script(
-        home,
-        exe,
-        dry_run,
-        config::SESSION_START_HOOK,
-        "session-start",
-    )
-}
-
-fn install_prompt_submit_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    install_lifecycle_script(
-        home,
-        exe,
-        dry_run,
-        config::PROMPT_SUBMIT_HOOK,
-        "prompt-submit",
-    )
-}
-
-fn install_post_compaction_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    install_lifecycle_script(
-        home,
-        exe,
-        dry_run,
-        config::POST_COMPACTION_HOOK,
-        "post-compaction",
-    )
-}
-
-/// Load the canonical pixel usage-rule text from `~/.agent-config/rules/pixel.md`
-/// and strip its YAML frontmatter so the body can be embedded directly into a
-/// CLAUDE.md/AGENTS.md managed block. Returns `None` if the file is missing or
-/// unreadable (the caller falls back to the short summary).
-fn load_usage_rules(home: &Path) -> Option<String> {
-    let path = home.join(config::PIXEL_RULES_REL);
-    let text = fs::read_to_string(&path).ok()?;
-    // Strip a leading `---\n...\n---\n` YAML frontmatter block if present.
-    let body = if let Some(rest) = text.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---\n") {
-            &rest[end + "\n---\n".len()..]
-        } else {
-            &text
-        }
-    } else {
-        &text
-    };
-    // Remove the conflicting usable-git rule: usable-git is retired, so the
-    // installed rules must not frame pixel's mutation ops as a "1:1
-    // replacement" for it or cite its old benchmark as a live reference.
-    // The retirement statements ("NEVER use gitpixel or usable-git") are
-    // kept — only the live-comparison framing is stripped.
-    let cleaned = body
-        .replace("## Git operations — mutation ops replace usable-git 1:1", "## Git operations — mutation ops")
-        .replace(
-            "the same crash-safety discipline usable-git proved across a 960-trial benchmark (0 fsck failures, 0 lost unrelated work)",
-            "the same crash-safety discipline that made the mutation surface trustworthy",
-        );
-    Some(cleaned.trim_end().to_string())
-}
-
-fn rewrite_agent_configs(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    // Ship the real usage rules (the five mandatory scenarios, the doctrine,
-    // the git-op table) in the managed block, not just a 3-line summary. The
-    // rules live in ~/.agent-config/rules/pixel.md; if that file is missing we
-    // fall back to the short summary so install never hard-fails on it.
-    let managed = match load_usage_rules(home) {
-        Some(rules) => format!(
-            "pixel is the unified retrieval + git engine. Use `pixel <verb>` for\n\
-             search, resolve, targets, history, and safe git ops.\n\
-             Binary: {}\n\n\
-             {}\n",
-            exe.display(),
-            rules
-        ),
-        None => format!(
-            "pixel is the unified retrieval + git engine. Use `pixel <verb>` for\n\
-             search, resolve, targets, history, and safe git ops.\n\
-             Binary: {}\n",
-            exe.display()
-        ),
-    };
-    let mut targets = config::find_agent_configs(home);
-    if targets.is_empty() {
-        // No CLAUDE.md/AGENTS.md exists anywhere pixel looks yet. Without
-        // this fallback, `find_agent_configs` (which only returns files
-        // that already exist) would return an empty list and this whole
-        // step would silently no-op — a brand-new machine would get zero
-        // pixel usage instructions written anywhere, forever. Ensure at
-        // least the canonical Claude user config carries the managed block.
-        targets.push(home.join(".claude").join("CLAUDE.md"));
-    }
-
-    let mut rewritten = 0usize;
-    let mut stale_removed = 0usize;
-    let mut backups: Vec<String> = Vec::new();
-    for path in targets {
-        // If the file already contains the pixel rule text (deployed by
-        // build-agent-config's aggregate), skip writing a managed block —
-        // it would only create a duplicate. Still strip any stale managed
-        // blocks from a previous install that ran before build-agent-config
-        // included pixel.md in the aggregate.
-        let existing = fs::read_to_string(&path).unwrap_or_default();
-        let has_pixel_rule = existing.contains("# pixel — Deterministic");
-        let has_managed = existing.contains(config::MANAGED_BEGIN);
-
-        if has_pixel_rule && !has_managed {
-            // Pixel rule already present via aggregate, no stale managed
-            // block to clean — nothing to do.
-            rewritten += 1;
-            continue;
-        }
-
-        if has_pixel_rule && has_managed {
-            // Pixel rule present via aggregate AND a stale managed block
-            // exists — strip the managed block only, don't write a new one.
-            let stripped = config::strip_stale_blocks(&existing).0;
-            if dry_run {
-                rewritten += 1;
-                continue;
-            }
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let bk = config::backup_if_changing(&path, stripped.as_bytes())?;
-            fs::write(&path, &stripped)?;
-            if bk.is_some() {
-                backups.push(path.display().to_string());
-            }
-            stale_removed += 1;
-            rewritten += 1;
-            continue;
-        }
-
-        let outcome = config::rewrite_agent_config(&path, &managed, dry_run)?;
-        if outcome.rewritten || (dry_run && outcome.would_change) {
-            rewritten += 1;
-        }
-        stale_removed += outcome.stale_blocks_removed;
-        if let Some(b) = outcome.backup_path {
-            backups.push(b.display().to_string());
-        }
-    }
-    let verb = if dry_run { "would rewrite" } else { "rewrote" };
-    Ok(InstallStep {
-        id: "agent-config".into(),
-        status: CheckStatus::Green,
-        summary: format!("{verb} {rewritten} agent-config file(s)"),
-        detail: Some(format!(
-            "stale_blocks_removed={stale_removed}{}",
-            if backups.is_empty() {
-                String::new()
-            } else {
-                format!(" backups={}", backups.join(","))
-            }
-        )),
-    })
-}
-
 /// Copy the bundled Pixel agent system prompt to `~/.local/share/pixel/agent-prompt.md`.
 /// This file is injected into Claude workers via `--append-system-prompt-file` and
 /// can be used with Codex via `model_instructions_file`. The prompt instructs
@@ -658,129 +401,134 @@ fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     })
 }
 
-fn install_devin_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    routing::install_provider(home, exe, Provider::Devin, dry_run)
+/// Detect the user's shell profile path (~/.zshrc on macOS, ~/.bashrc on Linux).
+pub(crate) fn shell_profile_path(home: &Path) -> PathBuf {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    if shell.contains("bash") {
+        home.join(".bashrc")
+    } else {
+        home.join(".zshrc")
+    }
 }
 
-fn install_codex_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    routing::install_provider(home, exe, Provider::Codex, dry_run)
+pub(crate) const PIXEL_MANAGED_BEGIN: &str = "# >>> pixel-managed >>>";
+pub(crate) const PIXEL_MANAGED_END: &str = "# <<< pixel-managed <<<";
+
+/// Build the managed shell-wrapper block. Uses shell functions (not aliases)
+/// because functions handle subcommands correctly (`codex exec ...` works).
+fn shell_wrapper_block(prompt_path: &str) -> String {
+    format!(
+        "{begin}\n\
+         # Pixel agent system prompt — added by `pixel install`\n\
+         # Remove with `pixel uninstall`\n\
+         claude() {{ command claude --append-system-prompt-file \"{prompt}\" \"$@\"; }}\n\
+         codex() {{ command codex -c \"model_instructions_file=\\\"{prompt}\\\"\" \"$@\"; }}\n\
+         {end}",
+        begin = PIXEL_MANAGED_BEGIN,
+        end = PIXEL_MANAGED_END,
+        prompt = prompt_path,
+    )
 }
 
-/// Wire BeforeTool + SessionStart hooks into Gemini's `~/.gemini/settings.json`.
-/// Gemini uses `BeforeTool` instead of `PreToolUse`, but the same hook format.
-fn install_gemini_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let config_path = home.join(config::GEMINI_SETTINGS_FILE);
-    let mut value = read_settings(&config_path)?;
+/// Strip an existing pixel-managed block from a file's content.
+fn strip_shell_wrappers(content: &str) -> String {
+    let begin = PIXEL_MANAGED_BEGIN;
+    let end = PIXEL_MANAGED_END;
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in content.lines() {
+        if line.trim_start().starts_with(begin) {
+            skipping = true;
+            continue;
+        }
+        if skipping && line.trim_start().starts_with(end) {
+            skipping = false;
+            continue;
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    // Remove trailing blank lines left by the stripped block.
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
+    out
+}
 
-    let hooks_obj = value
-        .as_object_mut()
-        .ok_or_else(|| {
-            InstallError::Config(config::ConfigError::InvalidSettings {
-                path: config_path.clone(),
-                reason: "settings.json root is not an object".into(),
-            })
-        })?
-        .entry("hooks".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    let hooks_map = hooks_obj.as_object_mut().ok_or_else(|| {
-        InstallError::Config(config::ConfigError::InvalidSettings {
-            path: config_path.clone(),
-            reason: "hooks is not an object".into(),
-        })
-    })?;
-
-    let session_start_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
-    let existing_session_start = hooks_map.get("SessionStart").cloned();
-    let merged_session_start = config::merge_hook_entry(
-        existing_session_start.as_ref(),
-        &session_start_command,
-        serde_json::json!({
-            "matcher": "SessionStart",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": session_start_command,
-            }],
-        }),
-    );
-    hooks_map.insert("SessionStart".to_string(), merged_session_start);
-
-    // BeforeAgent — task boundary detector hook in Gemini CLI.
-    let prompt_submit_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
-    hooks_map.remove("UserPromptSubmit"); // Scrub stale key if previously registered
-    let existing_prompt_submit = hooks_map.get("BeforeAgent").cloned();
-    let merged_prompt_submit = config::merge_hook_entry(
-        existing_prompt_submit.as_ref(),
-        &prompt_submit_command,
-        serde_json::json!({
-            "matcher": "*",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": prompt_submit_command,
-            }],
-        }),
-    );
-    hooks_map.insert("BeforeAgent".to_string(), merged_prompt_submit);
-
-    // PostCompaction — re-inject targets manifest after context compaction.
-    let post_compaction_command = format!("~/.claude/hooks/{}", config::POST_COMPACTION_HOOK);
-    let existing_post_compaction = hooks_map.get("PostCompaction").cloned();
-    let merged_post_compaction = config::merge_hook_entry(
-        existing_post_compaction.as_ref(),
-        &post_compaction_command,
-        serde_json::json!({
-            "matcher": "*",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": post_compaction_command,
-            }],
-        }),
-    );
-    hooks_map.insert("PostCompaction".to_string(), merged_post_compaction);
-
+/// Install shell wrappers for `claude` and `codex` in the user's shell profile
+/// so every invocation automatically includes the Pixel system prompt.
+fn install_shell_wrappers(home: &Path, dry_run: bool) -> Result<InstallStep> {
+    let profile = shell_profile_path(home);
+    let prompt_path = "$HOME/.local/share/pixel/agent-prompt.md";
+    let block = shell_wrapper_block(prompt_path);
     if dry_run {
         return Ok(InstallStep {
-            id: "hooks.gemini".into(),
+            id: "shell-wrappers".into(),
             status: CheckStatus::Green,
-            summary: dry_run_summary(
-                dry_run,
-                "Gemini hooks wired (SessionStart + BeforeAgent + PostCompaction)",
-            ),
-            detail: Some(format!("would write {}", config_path.display())),
+            summary: format!("would write shell wrappers to {}", profile.display()),
+            detail: Some(format!("profile={}", profile.display())),
         });
     }
-
-    let backup_path = write_settings(&config_path, &value, dry_run)?;
+    let existing = fs::read_to_string(&profile).unwrap_or_default();
+    let cleaned = strip_shell_wrappers(&existing);
+    let had_old_block = cleaned != existing;
+    let mut new_content = cleaned;
+    if !new_content.ends_with('\n') && !new_content.is_empty() {
+        new_content.push('\n');
+    }
+    if !new_content.is_empty() {
+        new_content.push('\n');
+    }
+    new_content.push_str(&block);
+    new_content.push('\n');
+    // Always write — the block may need refreshing even if old content was clean.
+    fs::write(&profile, &new_content)?;
+    let _ = had_old_block; // tracked for summary accuracy
     Ok(InstallStep {
-        id: "hooks.gemini".into(),
+        id: "shell-wrappers".into(),
         status: CheckStatus::Green,
-        summary: "Gemini hooks wired (SessionStart + BeforeAgent + PostCompaction)".into(),
-        detail: Some(with_backup_note(
-            format!("wrote {}", config_path.display()),
-            backup_path,
-        )),
+        summary: format!(
+            "{} shell wrappers in {}",
+            if had_old_block { "updated" } else { "installed" },
+            profile.display()
+        ),
+        detail: Some(format!("profile={}", profile.display())),
     })
 }
 
-/// Leave Cursor's hooks untouched after the shared guard cleanup. Cursor's
-/// only verified Pixel integration was the blocking `preToolUse` hook; there
-/// is no passive lifecycle hook to install here.
-fn install_cursor_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let config_path = home.join(config::CURSOR_HOOKS_FILE);
+/// Remove the pixel-managed shell wrapper block from the user's shell profile.
+pub(crate) fn remove_shell_wrappers(home: &Path, dry_run: bool) -> Result<InstallStep> {
+    let profile = shell_profile_path(home);
+    let existing = match fs::read_to_string(&profile) {
+        Ok(s) => s,
+        Err(_) => {
+            return Ok(InstallStep {
+                id: "shell-wrappers".into(),
+                status: CheckStatus::Green,
+                summary: dry_run_summary(dry_run, "no shell profile — skipping"),
+                detail: Some(format!("profile={}", profile.display())),
+            });
+        }
+    };
+    let cleaned = strip_shell_wrappers(&existing);
+    if cleaned == existing {
+        return Ok(InstallStep {
+            id: "shell-wrappers".into(),
+            status: CheckStatus::Green,
+            summary: dry_run_summary(dry_run, "no shell wrappers found — skipping"),
+            detail: Some(format!("profile={}", profile.display())),
+        });
+    }
+    if !dry_run {
+        fs::write(&profile, &cleaned)?;
+    }
     Ok(InstallStep {
-        id: "hooks.cursor".into(),
+        id: "shell-wrappers".into(),
         status: CheckStatus::Green,
-        summary: dry_run_summary(
-            dry_run,
-            if config_path.is_file() {
-                "Cursor hooks left untouched (rewire-first)"
-            } else {
-                "no Cursor hooks.json — skipping"
-            },
-        ),
-        detail: None,
+        summary: dry_run_summary(dry_run, "removed shell wrappers"),
+        detail: Some(format!("profile={}", profile.display())),
     })
 }
 
@@ -810,372 +558,6 @@ fn project_hook_search_roots(home: &Path) -> Vec<PathBuf> {
         }
     }
     roots
-}
-
-/// Preserve project hooks while installing the same provider contract as home.
-fn patch_project_codex_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let mut paths = Vec::new();
-    let mut conflicts = 0;
-    for root in project_hook_search_roots(home) {
-        let path = root.join(".codex/hooks.json");
-        if !path.is_file() {
-            continue;
-        }
-        let step = routing::install_project_codex_at(home, &path, exe, dry_run)?;
-        if step.status == CheckStatus::Yellow {
-            conflicts += 1;
-        }
-        paths.push(path.display().to_string());
-    }
-    Ok(InstallStep {
-        id: "hooks.codex_project_shadow".into(),
-        status: if conflicts == 0 {
-            CheckStatus::Green
-        } else {
-            CheckStatus::Yellow
-        },
-        summary: dry_run_summary(
-            dry_run,
-            &format!(
-                "{} project hook configuration(s) checked; {conflicts} routing overlap(s); live unverified",
-                paths.len()
-            ),
-        ),
-        detail: if paths.is_empty() {
-            None
-        } else {
-            Some(paths.join(", "))
-        },
-    })
-}
-
-/// Wire passive lifecycle hooks into zcode's
-/// `~/.zcode/cli/config.json` and deploy the pixel rules to
-/// `~/.zcode/AGENTS.md`. zcode is a Claude Code variant that uses the same
-/// hooks format as Claude — hooks under `hooks.events.<Event>`, event
-/// `PreToolUse` with a `matcher` field. zcode reads user-level instructions
-/// from `~/.zcode/AGENTS.md` (loaded into model context every session).
-fn install_zcode_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let config_path = home.join(config::ZCODE_CONFIG_FILE);
-    if !config_path.is_file() {
-        return Ok(InstallStep {
-            id: "hooks.zcode".into(),
-            status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "no zcode config.json — skipping"),
-            detail: None,
-        });
-    }
-    let mut value = read_settings(&config_path)?;
-
-    // zcode nests hooks under `hooks.events.<Event>` (one level deeper than
-    // Claude's `hooks.<Event>`). Configuration-file hooks are DISABLED by
-    // default — `hooks.enabled: true` MUST be set or none of the events fire.
-    let hooks_root = value
-        .as_object_mut()
-        .ok_or_else(|| {
-            InstallError::Config(config::ConfigError::InvalidSettings {
-                path: config_path.clone(),
-                reason: "config.json root is not an object".into(),
-            })
-        })?
-        .entry("hooks".to_string())
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .ok_or_else(|| {
-            InstallError::Config(config::ConfigError::InvalidSettings {
-                path: config_path.clone(),
-                reason: "hooks is not an object".into(),
-            })
-        })?;
-    // Enable config-file hooks (disabled by default in zcode).
-    hooks_root.insert("enabled".to_string(), serde_json::Value::Bool(true));
-
-    let hooks_obj = hooks_root
-        .entry("events".to_string())
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .ok_or_else(|| {
-            InstallError::Config(config::ConfigError::InvalidSettings {
-                path: config_path.clone(),
-                reason: "hooks.events is not an object".into(),
-            })
-        })?;
-
-    let session_start_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
-    let existing_session_start = hooks_obj.get("SessionStart").cloned();
-    let merged_session_start = config::merge_hook_entry(
-        existing_session_start.as_ref(),
-        &session_start_command,
-        serde_json::json!({
-            "matcher": ".*",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": session_start_command,
-            }],
-        }),
-    );
-    hooks_obj.insert("SessionStart".to_string(), merged_session_start);
-
-    // UserPromptSubmit — task boundary detector hook.
-    let prompt_submit_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
-    let existing_prompt_submit = hooks_obj.get("UserPromptSubmit").cloned();
-    let merged_prompt_submit = config::merge_hook_entry(
-        existing_prompt_submit.as_ref(),
-        &prompt_submit_command,
-        serde_json::json!({
-            "matcher": ".*",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": prompt_submit_command,
-            }],
-        }),
-    );
-    hooks_obj.insert("UserPromptSubmit".to_string(), merged_prompt_submit);
-
-    // PostCompaction — re-inject targets manifest after context compaction.
-    let post_compaction_command = format!("~/.claude/hooks/{}", config::POST_COMPACTION_HOOK);
-    let existing_post_compaction = hooks_obj.get("PostCompaction").cloned();
-    let merged_post_compaction = config::merge_hook_entry(
-        existing_post_compaction.as_ref(),
-        &post_compaction_command,
-        serde_json::json!({
-            "matcher": "*",
-            "hooks": [{
-                "type": "command",
-                "timeout": config::HOOK_TIMEOUT,
-                "command": post_compaction_command,
-            }],
-        }),
-    );
-    hooks_obj.insert("PostCompaction".to_string(), merged_post_compaction);
-
-    // Deploy pixel rules to ~/.zcode/AGENTS.md (zcode's user-level
-    // instruction file, loaded into model context every session). Uses
-    // managed markers so re-installs replace only pixel's block.
-    let agents_md = home.join(".zcode").join("AGENTS.md");
-    let rules_path = home.join(config::PIXEL_RULES_REL);
-    let rules_content = fs::read_to_string(&rules_path).unwrap_or_default();
-    // Strip frontmatter — AGENTS.md is pure markdown, no YAML. Pass only
-    // the body to apply_managed_markers (it adds the markers itself).
-    let managed_body = if rules_content.is_empty() {
-        String::new()
-    } else if rules_content.starts_with("---") {
-        // Frontmatter is `---\n...\n---\n<content>`. `splitn(3, "---")`
-        // gives ["", "\n...yaml...\n", "\n<content>"].
-        rules_content
-            .splitn(3, "---")
-            .nth(2)
-            .unwrap_or("")
-            .trim_start()
-            .to_string()
-    } else {
-        rules_content.clone()
-    };
-
-    if dry_run {
-        return Ok(InstallStep {
-            id: "hooks.zcode".into(),
-            status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "zcode hooks + AGENTS.md rules wired"),
-            detail: Some(format!(
-                "would write {} + {}",
-                config_path.display(),
-                agents_md.display()
-            )),
-        });
-    }
-
-    let config_backup = write_settings(&config_path, &value, dry_run)?;
-
-    // Write AGENTS.md with managed markers (idempotent replace of pixel's block).
-    let agents_backup = if !managed_body.is_empty() {
-        let existing = fs::read_to_string(&agents_md).unwrap_or_default();
-        let rewritten = config::apply_managed_markers(&existing, &managed_body);
-        if let Some(parent) = agents_md.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let bk = config::backup_if_changing(&agents_md, rewritten.as_bytes())?;
-        fs::write(&agents_md, &rewritten)?;
-        bk
-    } else {
-        None
-    };
-
-    let backup_path = config_backup.or(agents_backup);
-    Ok(InstallStep {
-        id: "hooks.zcode".into(),
-        status: CheckStatus::Green,
-        summary: "zcode hooks + AGENTS.md rules wired".into(),
-        detail: Some(with_backup_note(
-            format!("wrote {} + {}", config_path.display(), agents_md.display()),
-            backup_path,
-        )),
-    })
-}
-
-/// Install a pixel guard extension into pi's extensions directory AND deploy
-/// the pixel rules to `~/.pi/agent/AGENTS.md` (pi's global instruction file,
-/// loaded into model context at startup). pi uses a TypeScript extension API
-/// with a `tool_call` event that CAN block or rewrite tool calls by mutating
-/// `event.input` in place. The extension shells out to `pixel hook guard`
-/// with the same JSON payload the Bash/PreToolUse hooks use, and:
-///   - leaves the tool call available when the guard exits non-zero;
-///   - rewrites the tool input by mutating `event.input` in place when the
-///     guard emits `updatedInput` JSON (pi docs: "Mutations to event.input
-///     affect the actual tool execution");
-///   - allows otherwise.
-///
-/// pi auto-discovers extensions from `~/.pi/agent/extensions/*.ts` (global
-/// scope). The extension is wrapped in managed markers so re-installs
-/// replace only pixel's own content, preserving any other extension files.
-/// The AGENTS.md rules use the same managed-marker approach so pi knows
-/// WHEN to use pixel proactively (the extension only enforces/rewrites).
-fn install_pi_rules(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let config_dir = home.join(config::PI_CONFIG_DIR);
-    let extensions_dir = config_dir.join("extensions");
-    let ext_file = extensions_dir.join("pixel-guard.ts");
-    let agents_md = config_dir.join("AGENTS.md");
-
-    // The guard script path — pi extensions run in Node, so use the
-    // absolute path to the pixel binary's guard subcommand.
-    let exe_path = exe.display().to_string();
-
-    let extension_body = format!(
-        r#"// pixel-guard extension — managed by `pixel install`
-// {begin}
-// {end}
-import {{ spawnSync }} from "child_process";
-
-const PIXEL_BIN = {exe_path:?};
-const GUARD_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls", "sed", "awk", "perl", "ag", "ack", "egrep", "fgrep", "head", "tail", "cat", "xargs",
-  // Antigravity/Gemini tool names
-  "run_command", "view_file", "replace_file_content", "write_to_file", "grep_search", "find_by_name", "list_dir", "file_search", "edit_file"]);
-
-export default function activate(pi) {{
-  pi.on("tool_call", async (event, ctx) => {{
-    const toolName = event.toolName;
-    if (!GUARD_TOOLS.has(toolName)) return;
-
-    // Build the PreToolUse-compatible payload that `pixel hook guard`
-    // expects on stdin.
-    const cwd = ctx?.cwd ?? process.cwd();
-    const payload = {{
-      hook_event_name: "PreToolUse",
-      tool_name: toolName,
-      tool_input: event.input ?? {{}},
-      cwd,
-    }};
-
-    try {{
-      const result = spawnSync(PIXEL_BIN, ["hook", "guard"], {{
-        input: JSON.stringify(payload),
-        timeout: 5000,
-        encoding: "utf-8",
-      }});
-
-      // Keep the tool available even if a legacy guard path returns exit 2.
-      if (result.status === 2) {{
-        const reason = (result.stderr || "").trim() || "blocked by pixel guard";
-        console.warn(`[pixel] advisory: ${{reason}}`);
-        return;
-      }}
-
-      // exit 0 with stdout = possibly a rewrite (hookSpecificOutput.updatedInput).
-      // pi docs: "Mutations to event.input affect the actual tool execution"
-      // — mutate in place rather than returning a separate object.
-      if (result.status === 0 && result.stdout) {{
-        try {{
-          const parsed = JSON.parse(result.stdout);
-          const updated = parsed?.hookSpecificOutput?.updatedInput;
-          if (updated && typeof updated === "object") {{
-            Object.assign(event.input, updated);
-            return;
-          }}
-        }} catch {{
-          // stdout wasn't JSON — that's fine, the guard just allowed the call
-        }}
-      }}
-
-      // Any other exit (including crash/timeout) = allow, don't block the
-      // agent on a guard failure.
-      return;
-    }} catch {{
-      // spawn failure — allow, don't block the agent.
-      return;
-    }}
-  }});
-}}
-"#,
-        begin = config::MANAGED_BEGIN,
-        end = config::MANAGED_END,
-        exe_path = exe_path,
-    );
-
-    // Load the pixel rules for AGENTS.md (strip frontmatter, same as zcode).
-    let rules_path = home.join(config::PIXEL_RULES_REL);
-    let rules_content = fs::read_to_string(&rules_path).unwrap_or_default();
-    let managed_body = if rules_content.is_empty() {
-        format!(
-            "pixel is the unified retrieval + git engine. Use `pixel <verb>` for\n\
-             search, resolve, targets, history, and safe git ops.\n\
-             Binary: {}\n",
-            exe.display()
-        )
-    } else if rules_content.starts_with("---") {
-        rules_content
-            .splitn(3, "---")
-            .nth(2)
-            .unwrap_or("")
-            .trim_start()
-            .to_string()
-    } else {
-        rules_content.clone()
-    };
-
-    if dry_run {
-        return Ok(InstallStep {
-            id: "hooks.pi".into(),
-            status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "pi guard extension + AGENTS.md rules installed"),
-            detail: Some(format!(
-                "would write {} + {}",
-                ext_file.display(),
-                agents_md.display()
-            )),
-        });
-    }
-
-    // Write the extension file.
-    fs::create_dir_all(&extensions_dir)?;
-    let ext_backup = config::backup_if_changing(&ext_file, extension_body.as_bytes())?;
-    fs::write(&ext_file, &extension_body)?;
-
-    // Write AGENTS.md with managed markers (idempotent replace of pixel's block).
-    let agents_backup = if !managed_body.is_empty() {
-        let existing = fs::read_to_string(&agents_md).unwrap_or_default();
-        let rewritten = config::apply_managed_markers(&existing, &managed_body);
-        if let Some(parent) = agents_md.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let bk = config::backup_if_changing(&agents_md, rewritten.as_bytes())?;
-        fs::write(&agents_md, &rewritten)?;
-        bk
-    } else {
-        None
-    };
-
-    let backup_path = ext_backup.or(agents_backup);
-    Ok(InstallStep {
-        id: "hooks.pi".into(),
-        status: CheckStatus::Green,
-        summary: "pi guard extension + AGENTS.md rules installed".into(),
-        detail: Some(with_backup_note(
-            format!("wrote {} + {}", ext_file.display(), agents_md.display()),
-            backup_path,
-        )),
-    })
 }
 
 pub(crate) fn read_settings(path: &Path) -> Result<serde_json::Value> {
@@ -1218,18 +600,6 @@ pub(crate) fn with_backup_note(detail: String, backup_path: Option<PathBuf>) -> 
     match backup_path {
         Some(p) => format!("{detail} (backup={})", p.display()),
         None => detail,
-    }
-}
-
-fn set_executable(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
     }
 }
 
