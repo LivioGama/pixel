@@ -244,6 +244,9 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     // 5. Rewrite agent-config with managed markers.
     steps.push(rewrite_agent_configs(&home, &exe, dry_run)?);
 
+    // 6. Deploy the Pixel agent system prompt for worker injection.
+    steps.push(deploy_agent_prompt(&home, dry_run)?);
+
     let green = steps
         .iter()
         .filter(|s| s.status == CheckStatus::Green)
@@ -615,6 +618,43 @@ fn rewrite_agent_configs(home: &Path, exe: &Path, dry_run: bool) -> Result<Insta
                 format!(" backups={}", backups.join(","))
             }
         )),
+    })
+}
+
+/// Copy the bundled Pixel agent system prompt to `~/.local/share/pixel/agent-prompt.md`.
+/// This file is injected into Claude workers via `--append-system-prompt-file` and
+/// can be used with Codex via `model_instructions_file`. The prompt instructs
+/// agents to use `pixel search`/`pixel resolve`/`pixel impact` instead of
+/// `grep`/`rg` for code discovery in indexed repositories.
+fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
+    let dest_dir = home.join(".local/share/pixel");
+    let dest = dest_dir.join("agent-prompt.md");
+    if dry_run {
+        return Ok(InstallStep {
+            id: "agent-prompt".into(),
+            status: CheckStatus::Green,
+            summary: "would deploy agent-prompt.md".into(),
+            detail: Some(format!("dest={}", dest.display())),
+        });
+    }
+    fs::create_dir_all(&dest_dir)?;
+    // The asset is embedded at compile time so the installed binary is self-contained.
+    const ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
+    let needs_write = match fs::read_to_string(&dest) {
+        Ok(existing) => existing != ASSET,
+        Err(_) => true,
+    };
+    if needs_write {
+        fs::write(&dest, ASSET)?;
+    }
+    Ok(InstallStep {
+        id: "agent-prompt".into(),
+        status: CheckStatus::Green,
+        summary: format!(
+            "{} agent-prompt.md",
+            if needs_write { "deployed" } else { "verified" }
+        ),
+        detail: Some(format!("path={}", dest.display())),
     })
 }
 
