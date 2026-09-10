@@ -77,7 +77,9 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         remove_project_codex_hooks(&home, dry_run)?,
         // 5. Remove the pixel rule source file.
         remove_rule_source(&home, dry_run)?,
-        // 6. Remove the pixel binary.
+        // 6. Remove the pixel agent system prompt.
+        remove_agent_prompt(&home, dry_run)?,
+        // 7. Remove the pixel binary.
         remove_binary(&binary_path, dry_run)?,
     ];
 
@@ -798,7 +800,32 @@ fn remove_rule_source(home: &Path, dry_run: bool) -> Result<InstallStep> {
 }
 
 // -------------------------------------------------------------------------
-// Step 6: remove the pixel binary
+// Step 6: remove the pixel agent system prompt
+// -------------------------------------------------------------------------
+
+fn remove_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
+    let path = home.join(".local/share/pixel/agent-prompt.md");
+    if !path.is_file() {
+        return Ok(InstallStep {
+            id: "agent-prompt".into(),
+            status: CheckStatus::Green,
+            summary: install::dry_run_summary(dry_run, "no agent-prompt file — skipping"),
+            detail: None,
+        });
+    }
+    if !dry_run {
+        let _ = fs::remove_file(&path);
+    }
+    Ok(InstallStep {
+        id: "agent-prompt".into(),
+        status: CheckStatus::Green,
+        summary: install::dry_run_summary(dry_run, "removed agent-prompt.md"),
+        detail: Some(format!("path={}", path.display())),
+    })
+}
+
+// -------------------------------------------------------------------------
+// Step 7: remove the pixel binary
 // -------------------------------------------------------------------------
 
 fn remove_binary(binary_path: &Path, dry_run: bool) -> Result<InstallStep> {
