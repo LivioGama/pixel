@@ -2,15 +2,17 @@
 //! index/graph/facts freshness, reporting green/red per check.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
 use crate::InstallError;
 use crate::config;
 use crate::install;
+use crate::routing::{self, Provider};
 
 pub type Result<T> = std::result::Result<T, InstallError>;
 
@@ -223,7 +225,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 return Err("blocking pixel guard hook still installed".into());
             }
             Ok(DoctorCheckDetail {
-                summary: "blocking guard disabled; ordinary commands remain available".into(),
+                summary: "legacy blocking script absent; routing checked separately".into(),
                 detail: None,
             })
         },
@@ -302,170 +304,14 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     ));
 
-    checks.push(check(
-        "install.devin-hooks",
-        || -> std::result::Result<DoctorCheckDetail, String> {
-            let config_path = home
-                .join(config::DEVIN_CONFIG_DIR)
-                .join(config::DEVIN_CONFIG_FILE);
-            if !config_path.is_file() {
-                return Ok(DoctorCheckDetail {
-                    summary: "no Devin config.json — skipping".into(),
-                    detail: None,
-                });
-            }
-            let raw = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
-            let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-            let hooks = value.get("hooks").and_then(serde_json::Value::as_object);
-            if hooks.is_none() {
-                return Err("Devin config.json has no hooks key".into());
-            }
-            let hooks = hooks.unwrap();
-            let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
-            let has_guard = hooks
-                .get("PreToolUse")
-                .and_then(serde_json::Value::as_array)
-                .map(|entries| {
-                    entries.iter().any(|e| {
-                        e.get("hooks")
-                            .and_then(serde_json::Value::as_array)
-                            .map(|hs| {
-                                hs.iter().any(|h| {
-                                    h.get("command")
-                                        .and_then(|c| c.as_str())
-                                        .map(|c| c.contains(&guard_command))
-                                        .unwrap_or(false)
-                                })
-                            })
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false);
-            if has_guard {
-                return Err("Devin blocking PreToolUse guard hook still wired".into());
-            }
-            let session_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
-            let has_session = hooks
-                .get("SessionStart")
-                .and_then(serde_json::Value::as_array)
-                .map(|entries| {
-                    entries.iter().any(|e| {
-                        e.get("hooks")
-                            .and_then(serde_json::Value::as_array)
-                            .map(|hs| {
-                                hs.iter().any(|h| {
-                                    h.get("command")
-                                        .and_then(|c| c.as_str())
-                                        .map(|c| c.contains(&session_command))
-                                        .unwrap_or(false)
-                                })
-                            })
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false);
-            if !has_session {
-                return Err("Devin SessionStart hook not wired".into());
-            }
-            let prompt_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
-            let has_prompt = hooks
-                .get("UserPromptSubmit")
-                .and_then(serde_json::Value::as_array)
-                .map(|entries| {
-                    entries.iter().any(|e| {
-                        e.get("hooks")
-                            .and_then(serde_json::Value::as_array)
-                            .map(|hs| {
-                                hs.iter().any(|h| {
-                                    h.get("command")
-                                        .and_then(|c| c.as_str())
-                                        .map(|c| c.contains(&prompt_command))
-                                        .unwrap_or(false)
-                                })
-                            })
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false);
-            if !has_prompt {
-                return Err("Devin UserPromptSubmit hook not wired".into());
-            }
-            Ok(DoctorCheckDetail {
-                summary: "Devin passive hooks wired (SessionStart + UserPromptSubmit)".into(),
-                detail: Some(serde_json::json!({ "path": config_path.display().to_string() })),
-            })
-        },
-    ));
-
-    checks.push(check(
-        "install.codex-hooks",
-        || -> std::result::Result<DoctorCheckDetail, String> {
-            let config_path = home.join(config::CODEX_HOOKS_FILE);
-            if !config_path.is_file() {
-                return Ok(DoctorCheckDetail {
-                    summary: "no Codex hooks.json — skipping".into(),
-                    detail: None,
-                });
-            }
-            let raw = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
-            let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-            let hooks = value.get("hooks").and_then(serde_json::Value::as_object);
-            if hooks.is_none() {
-                return Err("Codex hooks.json has no hooks key".into());
-            }
-            let hooks = hooks.unwrap();
-            let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
-            let has_guard = hooks
-                .get("PreToolUse")
-                .and_then(serde_json::Value::as_array)
-                .map(|entries| {
-                    entries.iter().any(|e| {
-                        e.get("hooks")
-                            .and_then(serde_json::Value::as_array)
-                            .map(|hs| {
-                                hs.iter().any(|h| {
-                                    h.get("command")
-                                        .and_then(|c| c.as_str())
-                                        .map(|c| c.contains(&guard_command))
-                                        .unwrap_or(false)
-                                })
-                            })
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false);
-            if has_guard {
-                return Err("Codex blocking PreToolUse guard hook still wired".into());
-            }
-            let prompt_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
-            let has_prompt = hooks
-                .get("UserPromptSubmit")
-                .and_then(serde_json::Value::as_array)
-                .map(|entries| {
-                    entries.iter().any(|e| {
-                        e.get("hooks")
-                            .and_then(serde_json::Value::as_array)
-                            .map(|hs| {
-                                hs.iter().any(|h| {
-                                    h.get("command")
-                                        .and_then(|c| c.as_str())
-                                        .map(|c| c.contains(&prompt_command))
-                                        .unwrap_or(false)
-                                })
-                            })
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false);
-            if !has_prompt {
-                return Err("Codex UserPromptSubmit hook not wired".into());
-            }
-            Ok(DoctorCheckDetail {
-                summary: "Codex passive hooks wired (UserPromptSubmit)".into(),
-                detail: Some(serde_json::json!({ "path": config_path.display().to_string() })),
-            })
-        },
-    ));
+    for provider in [Provider::Claude, Provider::Codex, Provider::Devin] {
+        checks.extend(provider_checks(
+            &home,
+            &exe,
+            options.repo_root.as_deref(),
+            provider,
+        ));
+    }
 
     checks.push(check(
         "install.gemini-hooks",
@@ -971,6 +817,153 @@ struct DoctorCheckDetail {
     detail: Option<serde_json::Value>,
 }
 
+/// Configuration, executable protocol, and live harness delivery are separate
+/// claims. Never execute arbitrary configured hooks or RTK/security delegates.
+fn provider_checks(
+    home: &Path,
+    exe: &Path,
+    repo: Option<&Path>,
+    provider: Provider,
+) -> Vec<DoctorCheck> {
+    let path = provider.path(home);
+    let mut configured = check_status(&format!("install.{}-hooks", provider.name()), || {
+        if !path.is_file() {
+            return Ok((
+                CheckStatus::Yellow,
+                DoctorCheckDetail {
+                    summary: format!("{} hooks not configured", provider.name()),
+                    detail: Some(serde_json::json!({"configured":false,"path":path})),
+                },
+            ));
+        }
+        let enabled =
+            routing::configuration_status(home, exe, provider).map_err(|e| e.to_string())?;
+        Ok((
+            if enabled {
+                CheckStatus::Green
+            } else {
+                CheckStatus::Yellow
+            },
+            DoctorCheckDetail {
+                summary: format!(
+                    "{} lifecycle configured; shell routing {}",
+                    provider.name(),
+                    if enabled {
+                        "configured"
+                    } else {
+                        "deferred: overlapping user hook preserved"
+                    }
+                ),
+                detail: Some(
+                    serde_json::json!({"configured":true,"shell_routing":enabled,"path":path}),
+                ),
+            },
+        ))
+    });
+    configured.required = path.is_file();
+    let mut protocol = check_status(&format!("routing.{}.protocol", provider.name()), || {
+        if !path.is_file() {
+            return Ok((
+                CheckStatus::Yellow,
+                DoctorCheckDetail {
+                    summary: "protocol not probed: provider not configured".into(),
+                    detail: None,
+                },
+            ));
+        }
+        probe_provider(exe, home, repo.unwrap_or(home), provider)?;
+        Ok((
+            CheckStatus::Yellow,
+            DoctorCheckDetail {
+                summary: "hook callable; pass-through observed, rewrite protocol unverified".into(),
+                detail: Some(
+                    serde_json::json!({"callable":true,"rewrite_protocol_verified":false,"delegate_tested":false,"live_verified":false}),
+                ),
+            },
+        ))
+    });
+    protocol.required = path.is_file();
+    let live = DoctorCheck {
+        id: format!("routing.{}.live", provider.name()),
+        status: CheckStatus::Yellow,
+        required: false,
+        duration_ms: 0,
+        summary: "live harness delivery unverified; automatic task context needs a warm matching daemon".into(),
+        reason: Some("doctor does not launch an agent session; configuration/protocol checks are not end-to-end proof".into()),
+        detail: Some(serde_json::json!({"live_verified":false})),
+    };
+    vec![configured, protocol, live]
+}
+
+fn probe_provider(
+    exe: &Path,
+    home: &Path,
+    cwd: &Path,
+    provider: Provider,
+) -> std::result::Result<(), String> {
+    let payload = serde_json::json!({
+        "hook_event_name":"PreToolUse", "tool_name":provider.shell(),
+        "tool_input":{"command":"printf pixel-routing-probe"}, "cwd":cwd,
+    });
+    let mut child = Command::new(exe)
+        .args(["hook", "guard", "--provider", provider.name()])
+        .env("HOME", home)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("could not start protocol probe: {e}"))?;
+    let input_result = child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(payload.to_string().as_bytes());
+    if let Err(error) = input_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("could not send protocol payload: {error}"));
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(match result {
+                    Err(e) => e.to_string(),
+                    _ => "protocol probe timed out after 3s".into(),
+                });
+            }
+        }
+    }
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("protocol probe exited unsuccessfully".into());
+    }
+    if output.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Ok(());
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "protocol probe did not return JSON".to_string())?;
+    let hook = value
+        .get("hookSpecificOutput")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("protocol probe missing hookSpecificOutput")?;
+    if hook
+        .get("hookEventName")
+        .and_then(serde_json::Value::as_str)
+        != Some("PreToolUse")
+        || hook.contains_key("permissionDecision")
+        || hook.contains_key("updatedInput")
+    {
+        return Err("pass-through probe returned an unexpected event, decision, or rewrite".into());
+    }
+    Ok(())
+}
+
 fn check(
     id: &str,
     run: impl FnOnce() -> std::result::Result<DoctorCheckDetail, String>,
@@ -1440,5 +1433,55 @@ git clone https://example.com/repo.git
     fn healthy_and_trivially_empty_cases_are_not_red() {
         assert_eq!(facts_dead_reason(21, 21, 50_000), None, "healthy db");
         assert_eq!(facts_dead_reason(0, 0, 0), None, "empty repo, empty db");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod provider_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn fixture(home: &Path, output: &str) -> PathBuf {
+        let exe = home.join("pixel");
+        fs::write(
+            &exe,
+            format!("#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s' '{}'\n", output),
+        )
+        .unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        exe
+    }
+
+    #[test]
+    fn routing_doctor_distinguishes_configured_callable_and_live_unverified() {
+        for provider in [Provider::Claude, Provider::Codex, Provider::Devin] {
+            let home = tempfile::tempdir().unwrap();
+            let exe = fixture(home.path(), "");
+            routing::install_provider(home.path(), &exe, provider, false).unwrap();
+            let checks = provider_checks(home.path(), &exe, None, provider);
+            assert_eq!(checks[0].status, CheckStatus::Green);
+            assert_eq!(checks[1].status, CheckStatus::Yellow);
+            assert_eq!(checks[1].detail.as_ref().unwrap()["callable"], true);
+            assert_eq!(checks[2].status, CheckStatus::Yellow);
+            assert!(!checks[2].required);
+            let path = provider.path(home.path());
+            let mut stale = install::read_settings(&path).unwrap();
+            stale["hooks"]["SessionStart"][0]["matcher"] = serde_json::json!("SessionStart");
+            install::write_settings(&path, &stale, false).unwrap();
+            assert_eq!(
+                provider_checks(home.path(), &exe, None, provider)[0].status,
+                CheckStatus::Red
+            );
+        }
+    }
+
+    #[test]
+    fn routing_doctor_rejects_unexpected_approval_on_passthrough() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = fixture(
+            home.path(),
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#,
+        );
+        assert!(probe_provider(&exe, home.path(), home.path(), Provider::Codex).is_err());
     }
 }

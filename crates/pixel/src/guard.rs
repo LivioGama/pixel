@@ -1,10 +1,8 @@
-//! `pixel hook guard` — mechanical enforcement of the sniper-targets
-//! contract, ported from the original working `gitpixel-targets-guard`
-//! Python hook (kept as `~/.claude/hooks/gitpixel-targets-guard.pixel-bak.*`
-//! on this machine). The hook provides transparent read-only rewrites and
-//! non-blocking guidance through the PreToolUse protocol.
+//! `pixel hook guard` — provider-aware, exact-subset search routing.
+//! Explicit providers preserve unsupported calls silently. Without a
+//! provider, legacy non-blocking task-scoping guidance remains available.
 //!
-//! Contract:
+//! Legacy advisory contract (without `--provider`):
 //! 1. SCOPING (ADVISORY) — while `<repo>/.pixel/targets.json` is active
 //!    (younger than 24h), reads/greps/edits of repo files OUTSIDE the
 //!    target list emit a NON-BLOCKING advisory note and proceed. The
@@ -34,14 +32,15 @@
 //!    enumerate paths, and the Read/Edit of any result is itself guarded by
 //!    the scoping rules above. Blocking enumeration would be pure noise.
 //!
-//! Rewrites NEVER change command semantics beyond read-only enrichment: a
-//! rewrite must never add a write, push, or destructive step the original
-//! command didn't have.
+//! Rewrites preserve native search bytes and status within a narrow
+//! literal-file subset; they do not substitute enriched Pixel output.
+//! Uncovered execution shapes fall back to the original native command.
 //!
 //! The hook never blocks ordinary work: advisories exit 0 with a JSON note
 //! (systemMessage + additionalContext), no permissionDecision, and transparent
-//! read-only rewrites use `updatedInput`. The normal permission flow is
-//! untouched.
+//! read-only rewrites use `updatedInput`. Claude/Devin retain their normal
+//! permission flow. Codex requires an explicit `allow` for the user-approved
+//! literal-file rewrite subset only; credential-shaped paths are excluded.
 //! Fails open (exit 0) on any parse error or unexpected shape — a guard
 //! that crashes or wedges the session is worse than a guard that misses a
 //! case.
@@ -52,6 +51,17 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+
+const COMPOSED_MAX_INPUT: usize = 1024 * 1024;
+const COMPOSED_MAX_OUTPUT: usize = 1024 * 1024;
+const COMPOSED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Provider {
+    Claude,
+    Codex,
+    Devin,
+}
 
 const MANIFEST_MAX_AGE_SECS: u64 = 24 * 3600;
 const ORIENTATION_ANY: &[&str] = &["CLAUDE.md", "AGENTS.md", "README.md"];
@@ -170,6 +180,32 @@ fn command_text(v: &Value) -> String {
     }
 }
 
+/// Preserve a provider's command representation while replacing only the
+/// script executed by a known shell wrapper. Arbitrary argv arrays stay on the
+/// native path: converting them into `sh -c` would change quoting semantics.
+fn rewritten_command_value(original: &Value, rewritten: String) -> Option<Value> {
+    match original {
+        Value::String(_) => Some(Value::String(rewritten)),
+        Value::Array(items) => {
+            let parts: Vec<&str> = items.iter().map(Value::as_str).collect::<Option<_>>()?;
+            if parts.is_empty() || !SHELL_WRAPPERS.contains(&normalize_bin(parts[0])) {
+                return None;
+            }
+            let script_index = parts
+                .iter()
+                .position(|token| token.starts_with('-') && token.contains('c'))?
+                + 1;
+            if script_index >= items.len() {
+                return None;
+            }
+            let mut updated = items.clone();
+            updated[script_index] = Value::String(rewritten);
+            Some(Value::Array(updated))
+        }
+        _ => None,
+    }
+}
+
 /// On-disk transcript stores `pixel recall` already ingests into one
 /// queryable corpus (`pixel recall search`/`sessions`/`index`). A raw
 /// sqlite3/python/cat/grep session digging through one of these by hand —
@@ -238,10 +274,452 @@ struct Manifest {
     tasks: Vec<TaskEntry>,
 }
 
+/// Provider adapters only change the command field. Timeouts, cwd, metadata
+/// and future provider arguments survive untouched. Codex requires allow
+/// alongside updatedInput; that authorization is restricted to this exact
+/// read-only compatibility subset, never applied to fallback calls.
+fn rewrite_json(provider: Provider, updated_input: Value) -> Value {
+    let mut output = serde_json::json!({
+        "hookEventName": "PreToolUse",
+        "updatedInput": updated_input,
+    });
+    if provider == Provider::Codex {
+        output["permissionDecision"] = Value::String("allow".into());
+        output["permissionDecisionReason"] =
+            Value::String("Pixel compatibility routing: single-file literal read only.".into());
+    }
+    serde_json::json!({"hookSpecificOutput": output})
+}
+
+fn provider_rewrite(provider: Provider, payload: &Value) -> Option<Value> {
+    if !is_guard_event(
+        payload,
+        payload
+            .get("hook_event_name")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    ) {
+        return None;
+    }
+    let tool = payload.get("tool_name")?.as_str()?;
+    let shell = match provider {
+        Provider::Claude => tool == "Bash",
+        Provider::Codex => matches!(tool, "Bash" | "shell" | "unified_exec" | "local_shell"),
+        Provider::Devin => tool == "exec" || tool == "Bash",
+    };
+    if !shell {
+        return None;
+    }
+    let input = payload.get("tool_input")?.as_object()?;
+    // An execution-specific environment is not the hook's environment.
+    // In particular, rg config can request a preprocessor: never authorize
+    // that native fallback using only the apparent read-only argv shape.
+    if input.contains_key("env") || input.contains_key("environment") {
+        return None;
+    }
+    let original_command = input.get("command")?;
+    let command = command_text(original_command);
+    if command.is_empty() {
+        return None;
+    }
+    let base = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let cwd = input
+        .get("workdir")
+        .or_else(|| input.get("cwd"))
+        .and_then(Value::as_str)
+        .map(|p| base.join(p))
+        .unwrap_or(base);
+    let rewritten = crate::search_compat::rewrite(&command, &cwd)?;
+    let rewritten_command = rewritten_command_value(original_command, rewritten)?;
+    let mut updated = Value::Object(input.clone());
+    updated["command"] = rewritten_command;
+    Some(rewrite_json(provider, updated))
+}
+
+fn run_provider_guard(provider: Provider, delegate_rtk: bool, raw: &str) -> ! {
+    let Ok(payload) = serde_json::from_str::<Value>(raw) else {
+        std::process::exit(0);
+    };
+    if let Some(response) = provider_rewrite(provider, &payload) {
+        print!("{response}");
+        std::process::exit(0);
+    }
+    if delegate_rtk && provider == Provider::Claude {
+        delegate_rtk_hook(raw);
+    }
+    // Ordinary commands must not receive a fresh context note on every
+    // tool call. No response means no rewrite or permission override.
+    std::process::exit(0);
+}
+
+/// A foreign Codex `PreToolUse` command retained at install time.  This is
+/// deliberately a *command snapshot*, rather than a pointer back to
+/// `hooks.json`: a later edit to the live configuration cannot turn Pixel into
+/// an executor for an arbitrary command.
+#[derive(Debug)]
+struct ComposedForeignHook {
+    matcher: String,
+    command: String,
+}
+
+fn load_composed_backup(path: &Path) -> Option<Vec<ComposedForeignHook>> {
+    // A replacement symlink would make the fixed hook command execute a
+    // different file than the installer sealed. Refuse it rather than follow.
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > COMPOSED_MAX_INPUT as u64 {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return None;
+        }
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take((COMPOSED_MAX_INPUT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > COMPOSED_MAX_INPUT {
+        return None;
+    }
+    let envelope: Value = serde_json::from_slice(&bytes).ok()?;
+    if envelope.get("version").and_then(Value::as_u64) != Some(1)
+        || envelope.get("provider").and_then(Value::as_str) != Some("codex")
+    {
+        return None;
+    }
+    let groups = envelope.get("pre_tool_use")?.as_array()?;
+    let mut result = Vec::new();
+    for group in groups {
+        let matcher = group.get("matcher").and_then(Value::as_str).unwrap_or("");
+        // Codex treats an omitted/empty matcher as a catch-all. `*` is also
+        // accepted by existing configs even though it is not a Rust regex.
+        if !matches!(matcher, "" | "*" | ".*") && regex::Regex::new(matcher).is_err() {
+            return None;
+        }
+        let hooks = group.get("hooks")?.as_array()?;
+        for hook in hooks {
+            if hook.get("type").and_then(Value::as_str) != Some("command") {
+                return None;
+            }
+            let command = hook.get("command").and_then(Value::as_str)?;
+            // Shell snippets legitimately contain newlines; only NUL cannot
+            // be represented as a process argument and is rejected here.
+            if command.is_empty() || command.bytes().any(|byte| byte == 0) {
+                return None;
+            }
+            // A Pixel command in the backup would recurse; installers must
+            // remove Pixel before snapshotting, and this is a second boundary.
+            if command.contains(" pixel hook ") || command.starts_with("pixel hook ") {
+                return None;
+            }
+            result.push(ComposedForeignHook {
+                matcher: matcher.to_owned(),
+                command: command.to_owned(),
+            });
+        }
+    }
+    Some(result)
+}
+
+fn composed_matches(matcher: &str, tool: &str) -> bool {
+    matches!(matcher, "" | "*" | ".*")
+        || regex::Regex::new(matcher)
+            .map(|regex| regex.is_match(tool))
+            .unwrap_or(false)
+}
+
+fn run_foreign_command(command: &str, raw: &[u8], cwd: &Path) -> Option<Value> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    let stderr = child.stderr.take()?;
+    let (out_tx, out_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stdout
+            .take((COMPOSED_MAX_OUTPUT + 1) as u64)
+            .read_to_end(&mut bytes);
+        let _ = out_tx.send(read.map(|_| bytes));
+    });
+    let (err_tx, err_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stderr
+            .take((COMPOSED_MAX_OUTPUT + 1) as u64)
+            .read_to_end(&mut bytes);
+        let _ = err_tx.send(read.map(|_| bytes));
+    });
+    if let Some(mut stdin) = child.stdin.take() {
+        let raw = raw.to_vec();
+        // The command receives exactly the bytes Codex delivered, not a
+        // reserialized JSON value with whitespace/key ordering changed.
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&raw);
+        });
+    }
+    let deadline = std::time::Instant::now() + COMPOSED_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    let stdout = out_rx.recv_timeout(remaining).ok()?.ok()?;
+    let stderr = err_rx.recv_timeout(remaining).ok()?.ok()?;
+    if stdout.len() > COMPOSED_MAX_OUTPUT || stderr.len() > COMPOSED_MAX_OUTPUT {
+        return None;
+    }
+    if stdout.is_empty() {
+        return Some(Value::Null);
+    }
+    serde_json::from_slice(&stdout).ok()
+}
+
+fn foreign_hook_output(value: Value) -> Option<Value> {
+    // Empty stdout is the standard observer result. Any other response must
+    // be a single Codex-shaped PreToolUse response; arbitrary JSON is not
+    // safely mergeable and disables Pixel rewriting for this invocation.
+    if value.is_null() {
+        return Some(value);
+    }
+    let specific = value.get("hookSpecificOutput")?.as_object()?;
+    (specific.get("hookEventName").and_then(Value::as_str) == Some("PreToolUse")).then_some(value)
+}
+
+fn has_foreign_mutation(value: &Value) -> bool {
+    let Some(specific) = value.get("hookSpecificOutput") else {
+        return false;
+    };
+    specific.get("updatedInput").is_some()
+        || specific.get("permissionDecision").is_some()
+        || value.get("permissionDecision").is_some()
+}
+
+fn foreign_denial(value: &Value) -> bool {
+    value
+        .get("hookSpecificOutput")
+        .and_then(|specific| specific.get("permissionDecision"))
+        .and_then(Value::as_str)
+        == Some("deny")
+        || value.get("permissionDecision").and_then(Value::as_str) == Some("deny")
+}
+
+fn foreign_context(value: &Value) -> Option<&str> {
+    value
+        .get("hookSpecificOutput")
+        .and_then(|specific| specific.get("additionalContext"))
+        .and_then(Value::as_str)
+}
+
+fn compose_context(mut response: Value, contexts: &[String]) -> Value {
+    if contexts.is_empty() {
+        return response;
+    }
+    let context = contexts.join("\n");
+    response["hookSpecificOutput"]["additionalContext"] = Value::String(context);
+    response
+}
+
+/// Execute the install-time snapshot of Codex foreign PreToolUse commands,
+/// then apply Pixel's transparent literal-read rewrite only when no foreign
+/// handler returned a denial or input/permission mutation. Every failure is a
+/// fail-open native execution with no Pixel rewrite.
+pub fn run_composed_codex(backup: &Path) -> ! {
+    let mut raw = Vec::new();
+    if std::io::stdin()
+        .take((COMPOSED_MAX_INPUT + 1) as u64)
+        .read_to_end(&mut raw)
+        .is_err()
+        || raw.is_empty()
+        || raw.len() > COMPOSED_MAX_INPUT
+    {
+        std::process::exit(0);
+    }
+    let Ok(payload) = serde_json::from_slice::<Value>(&raw) else {
+        std::process::exit(0);
+    };
+    if !is_guard_event(
+        &payload,
+        payload
+            .get("hook_event_name")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    ) {
+        std::process::exit(0);
+    }
+    let Some(tool) = payload.get("tool_name").and_then(Value::as_str) else {
+        std::process::exit(0);
+    };
+    let Some(cwd) = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+    else {
+        std::process::exit(0);
+    };
+    let Some(hooks) = load_composed_backup(backup) else {
+        std::process::exit(0);
+    };
+
+    let mut contexts = Vec::new();
+    let mut terminal_foreign = None;
+    let mut incomplete_foreign = false;
+    for hook in hooks
+        .into_iter()
+        .filter(|hook| composed_matches(&hook.matcher, tool))
+    {
+        let Some(foreign) =
+            run_foreign_command(&hook.command, &raw, &cwd).and_then(foreign_hook_output)
+        else {
+            // An unavailable, malformed or unbounded foreign handler means we
+            // cannot prove its semantics; preserve native Codex behavior.
+            incomplete_foreign = true;
+            continue;
+        };
+        if foreign.is_null() {
+            continue;
+        }
+        if foreign_denial(&foreign) || has_foreign_mutation(&foreign) {
+            // Codex normally invokes independent handlers concurrently. Keep
+            // dispatching the remaining install-time commands for their side
+            // effects, but retain the first authoritative response because
+            // only one response can be returned from this composed runtime.
+            if terminal_foreign.is_none() {
+                terminal_foreign = Some(foreign);
+            }
+            continue;
+        }
+        if let Some(context) = foreign_context(&foreign) {
+            contexts.push(context.to_owned());
+        } else {
+            // A valid but unknown response shape cannot be merged losslessly.
+            incomplete_foreign = true;
+        }
+    }
+    if let Some(foreign) = terminal_foreign {
+        // Never place a Pixel rewrite after foreign authority. Returning this
+        // one valid response preserves the first foreign decision.
+        print!("{foreign}");
+        std::process::exit(0);
+    }
+    if incomplete_foreign {
+        std::process::exit(0);
+    }
+    if let Some(response) = provider_rewrite(Provider::Codex, &payload) {
+        print!("{}", compose_context(response, &contexts));
+    } else if !contexts.is_empty() {
+        print!("{}", compose_context(advisory_json(""), &contexts));
+    }
+    std::process::exit(0);
+}
+
+/// The installer enables this only after adopting the exact existing RTK
+/// registration. There is one response writer, never two competing hooks.
+fn delegate_rtk_hook(raw: &str) -> ! {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    const MAX_OUTPUT: u64 = 1024 * 1024;
+    let Ok(mut child) = Command::new("rtk")
+        .args(["hook", "claude"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    else {
+        print!(
+            "{}",
+            advisory_json("pixel routing: RTK delegate unavailable; original call proceeds.")
+        );
+        std::process::exit(0);
+    };
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let (out_tx, out_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stdout.take(MAX_OUTPUT + 1).read_to_end(&mut bytes);
+        let _ = out_tx.send(read.map(|_| bytes));
+    });
+    let (err_tx, err_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stderr.take(MAX_OUTPUT + 1).read_to_end(&mut bytes);
+        let _ = err_tx.send(read.map(|_| bytes));
+    });
+    if let Some(mut stdin) = child.stdin.take() {
+        let input = raw.to_owned();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(input.as_bytes());
+        });
+    }
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    // No thread joins: a descendant retaining a pipe must not outlive the
+    // hook deadline. Oversize/partial output is discarded, never serialized
+    // as if it were RTK's complete response.
+    let stdout = out_rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
+    let stderr = err_rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
+    if let (Some(status), Ok(Ok(stdout)), Ok(Ok(stderr))) = (status, stdout, stderr)
+        && stdout.len() as u64 <= MAX_OUTPUT
+        && stderr.len() as u64 <= MAX_OUTPUT
+    {
+        let _ = std::io::stdout().write_all(&stdout);
+        let _ = std::io::stderr().write_all(&stderr);
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    print!(
+        "{}",
+        advisory_json(
+            "pixel routing: RTK delegate timed out or returned incomplete output; original call proceeds."
+        )
+    );
+    std::process::exit(0);
+}
+
 /// Entry point for `pixel hook guard`. Reads the PreToolUse hook payload
 /// from stdin. Never returns an `Err` that would surface as exit 1 — every
 /// failure path is a deliberate exit 0 (allow, optionally with advice).
-pub fn run() -> ! {
+pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     if let Ok(kill) = std::env::var("PIXEL_TARGETS_GUARD")
         && matches!(kill.as_str(), "0" | "false" | "off")
     {
@@ -251,6 +729,9 @@ pub fn run() -> ! {
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
         std::process::exit(0);
+    }
+    if let Some(provider) = provider {
+        run_provider_guard(provider, delegate_rtk, &input);
     }
     let Ok(payload) = serde_json::from_str::<Value>(&input) else {
         std::process::exit(0);
@@ -342,12 +823,16 @@ pub fn run() -> ! {
         // the rewrite. By checking rewrite first, we ensure the rewrite takes
         // priority over the advisory — the rewrite IS the resolution.
         if idx_root.is_some()
-            && let Some(rewritten) = try_rewrite_bash(cmd, &cwd)
+            && let Some(original) = tool_input.get("command").and_then(Value::as_str)
+            && let Some(rewritten) = crate::search_compat::rewrite(original, &cwd)
         {
             // Read-only search rewrites are semantically equivalent, so
             // transparently replace the input and let the normal tool
             // permission flow continue.
-            allow_rewrite(&rewritten);
+            let mut updated = Value::Object(tool_input.clone());
+            updated["command"] = Value::String(rewritten);
+            print!("{}", rewrite_json(Provider::Claude, updated));
+            std::process::exit(0);
         }
 
         // ADVISORY TIER (only if no rewrite applied): scoping advisory
@@ -1987,34 +2472,6 @@ fn tokenize_segments(s: &str) -> Vec<Vec<String>> {
     segments
 }
 
-// ---------------------------------------------------------------------------
-// Command rewriting — transparent upgrade of grep/rg/git to pixel equivalents.
-// Modeled on RTK's rewrite approach: the hook returns updatedInput JSON and
-// the agent receives pixel's enriched output without knowing the command was
-// rewritten. Only fires in indexed repos (.pixel/ exists).
-// ---------------------------------------------------------------------------
-
-/// Bash rewrites remain transparent and are limited to semantically equivalent
-/// read-only operations. Commands that cannot be safely rewritten continue
-/// through the original tool path with an advisory.
-/// Emit a PreToolUse "allow" response with a rewritten Bash command. The
-/// agent receives pixel's output instead of the original tool's output.
-fn allow_rewrite(new_command: &str) -> ! {
-    // Deliberately NO permissionDecision:"allow": the rewritten command must
-    // still go through normal permission evaluation, so the agent sees and
-    // approves the pixel command it is about to run.
-    let resp = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "updatedInput": {
-                "command": new_command
-            }
-        }
-    });
-    print!("{}", resp);
-    std::process::exit(0);
-}
-
 /// Check if a tool call is a Grep-style search (has a pattern/query field).
 fn is_grep_tool(tool: &str, input: &serde_json::Map<String, Value>) -> bool {
     // Claude Code's Grep tool has "pattern"; Devin's grep has "pattern";
@@ -2072,222 +2529,6 @@ fn grep_redirect_advisory_lines(
     ]
 }
 
-/// Try to rewrite a Bash command to a pixel equivalent. Returns the new
-/// command string if a rewrite applies, or None to let the original pass.
-fn try_rewrite_bash(cmd: &str, cwd: &Path) -> Option<String> {
-    let trimmed = cmd.trim();
-
-    // Skip complex commands -- heredocs, command substitution are left alone.
-    if trimmed.contains("<<") || trimmed.contains("$(") || trimmed.contains('`') {
-        return None;
-    }
-
-    // Strip a leading `cd <dir> &&` prefix -- agents commonly generate
-    // `cd /path && grep ...`. The cd changes the cwd for the grep, so we
-    // resolve the new cwd and pass it to the grep rewriter. The rest of
-    // the command (after &&) is what we actually rewrite.
-    let (effective_cwd, body) = strip_cd_prefix(trimmed, cwd);
-
-    let root_dir = find_up(&effective_cwd, ".pixel").unwrap_or_else(|| effective_cwd.clone());
-    let root = root_dir.display().to_string();
-
-    // --- Compound command handling: split on ; and && ---
-    // Agents generate commands like `grep ...; echo "---"` or
-    // `grep ... && git status`. Instead of bailing on these, split on
-    // unquoted ; and &&, try to rewrite each segment, and reassemble.
-    // If ANY segment rewrites, return the full reassembled command.
-    // If NO segment rewrites, fall through to return None.
-    if has_unquoted_semicolon_or_amp(body) {
-        return try_rewrite_compound(body, &effective_cwd, &root_dir, trimmed);
-    }
-
-    // After stripping cd, check for remaining control operators (&, ;, >, <)
-    // that we can't handle. Pipes (|) are handled below.
-    // (The ; and && case is already handled above by try_rewrite_compound.)
-    if has_unquoted_control(body) {
-        return None;
-    }
-
-    // --- rg / grep -> pixel search ---
-    // Handle pipelines: if the command is `grep ... | grep -v ... | sort`,
-    // try to rewrite the FIRST segment (before the first `|`). If the first
-    // segment is a grep/rg that can be replaced by `pixel search`, rewrite
-    // just that segment and keep the rest of the pipeline intact. This is
-    // the common pattern agents generate: `grep -rln "pattern" ... | grep -v
-    // node_modules | sort | wc -l`.
-    if let Some(pipe_idx) = first_unquoted_pipe(body) {
-        let first_segment = body[..pipe_idx].trim();
-        let rest = &body[pipe_idx + 1..];
-        if let Some(rewritten) = try_rewrite_grep(first_segment, &effective_cwd, &root_dir) {
-            // Re-attach the cd prefix if we stripped one, so the rewritten
-            // command still runs in the right directory for the pipeline
-            // filters that follow.
-            if body.len() != trimmed.len() {
-                let cd_prefix = &trimmed[..trimmed.len() - body.len()];
-                return Some(format!("{cd_prefix}{rewritten} |{rest}"));
-            }
-            return Some(format!("{rewritten} |{rest}"));
-        }
-        // First segment isn't a grep -- don't touch the pipeline.
-        return None;
-    }
-
-    if let Some(rewritten) = try_rewrite_grep(body, &effective_cwd, &root_dir) {
-        if body.len() != trimmed.len() {
-            let cd_prefix = &trimmed[..trimmed.len() - body.len()];
-            return Some(format!("{cd_prefix}{rewritten}"));
-        }
-        return Some(rewritten);
-    }
-
-    // --- git log with search intent -> pixel excavate ---
-    if let Some(rewritten) = try_rewrite_git_archaeology(body, &root) {
-        if body.len() != trimmed.len() {
-            let cd_prefix = &trimmed[..trimmed.len() - body.len()];
-            return Some(format!("{cd_prefix}{rewritten}"));
-        }
-        return Some(rewritten);
-    }
-
-    None
-}
-
-/// Check for unquoted `;` or `&&` (compound command separators) in the body.
-/// This is a lighter check than `has_unquoted_control` -- it only looks for
-/// the separators we can handle via `try_rewrite_compound`.
-fn has_unquoted_semicolon_or_amp(cmd: &str) -> bool {
-    let mut quote: Option<char> = None;
-    let mut prev_amp = false;
-    for c in cmd.chars() {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => {}
-            None if c == '\'' || c == '"' => quote = Some(c),
-            None if c == ';' => return true,
-            None if c == '&' => {
-                if prev_amp {
-                    return true; // `&&`
-                }
-                prev_amp = true;
-                continue;
-            }
-            None => {}
-        }
-        prev_amp = false;
-    }
-    false
-}
-
-/// Split a compound command on unquoted `;` and `&&`, try to rewrite each
-/// segment, and reassemble. Returns the full reassembled command if ANY
-/// segment was rewritten, or None if no segment matched.
-fn try_rewrite_compound(
-    body: &str,
-    effective_cwd: &Path,
-    root_dir: &Path,
-    trimmed: &str,
-) -> Option<String> {
-    let segments = split_compound(body);
-    if segments.len() <= 1 {
-        return None; // not actually compound -- fall through to normal handling
-    }
-    let root = root_dir.display().to_string();
-    let mut any_rewritten = false;
-    let mut rewritten_segments: Vec<String> = Vec::with_capacity(segments.len());
-    for (seg, sep) in segments {
-        let seg_trimmed = seg.trim();
-        if seg_trimmed.is_empty() {
-            rewritten_segments.push(seg);
-            if !sep.is_empty() {
-                let last = rewritten_segments.last_mut().unwrap();
-                last.push_str(&sep);
-            }
-            continue;
-        }
-        // Try pipeline-aware rewrite for this segment
-        let rewritten = if let Some(pipe_idx) = first_unquoted_pipe(seg_trimmed) {
-            let first_segment = seg_trimmed[..pipe_idx].trim();
-            let rest = &seg_trimmed[pipe_idx + 1..];
-            if let Some(rw) = try_rewrite_grep(first_segment, effective_cwd, root_dir) {
-                Some(format!("{rw} |{rest}"))
-            } else {
-                try_rewrite_grep(seg_trimmed, effective_cwd, root_dir)
-                    .or_else(|| try_rewrite_git_archaeology(seg_trimmed, &root))
-            }
-        } else {
-            try_rewrite_grep(seg_trimmed, effective_cwd, root_dir)
-                .or_else(|| try_rewrite_git_archaeology(seg_trimmed, &root))
-        };
-        match rewritten {
-            Some(rw) => {
-                any_rewritten = true;
-                rewritten_segments.push(rw);
-            }
-            None => {
-                rewritten_segments.push(seg);
-            }
-        }
-        // Re-attach separator with proper spacing
-        if !sep.is_empty() {
-            let last = rewritten_segments.last_mut().unwrap();
-            last.push(' ');
-            last.push_str(&sep);
-            last.push(' ');
-        }
-    }
-    if !any_rewritten {
-        return None;
-    }
-    let result = rewritten_segments.join("");
-    // Re-attach the cd prefix if we stripped one
-    if body.len() != trimmed.len() {
-        let cd_prefix = &trimmed[..trimmed.len() - body.len()];
-        return Some(format!("{cd_prefix}{result}"));
-    }
-    Some(result)
-}
-
-/// Split a command on unquoted `;` and `&&`, returning (segment, separator)
-/// pairs. The separator is the text that followed the segment (`;`, `&&`,
-/// or empty for the last segment). Quote-aware -- separators inside quotes
-/// are not split.
-fn split_compound(s: &str) -> Vec<(String, String)> {
-    let mut result = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        match quote {
-            Some(q) if c == q => {
-                quote = None;
-                current.push(c);
-            }
-            Some(_) => current.push(c),
-            None if c == '\'' || c == '"' => {
-                quote = Some(c);
-                current.push(c);
-            }
-            None if c == ';' => {
-                result.push((current.clone(), ";".to_string()));
-                current.clear();
-            }
-            None if c == '&' && i + 1 < chars.len() && chars[i + 1] == '&' => {
-                result.push((current.clone(), "&&".to_string()));
-                current.clear();
-                i += 1; // skip the second &
-            }
-            None => current.push(c),
-        }
-        i += 1;
-    }
-    if !current.is_empty() || result.is_empty() {
-        result.push((current, String::new()));
-    }
-    result
-}
-
 /// Strip a leading `cd <dir> && ` prefix from a command, returning the
 /// effective cwd (original cwd + cd target) and the remaining body. If
 /// there's no cd prefix, returns (original_cwd, original_cmd).
@@ -2339,95 +2580,6 @@ fn find_unquoted_double_amp(s: &str) -> Option<usize> {
     None
 }
 
-/// Flags that consume a following value (or an attached `=value`), so they
-/// must be skipped when locating the search pattern.
-const VALUE_FLAGS: &[&str] = &[
-    "-A",
-    "-B",
-    "-C",
-    "-m",
-    "-g",
-    "-t",
-    "-f",
-    "--include",
-    "--exclude",
-    "--glob",
-    "--type",
-    "-d",
-    "--max-depth",
-];
-
-/// Value-consuming flags that also change the match count in ways `pixel
-/// search` can't reproduce. Their presence makes a rewrite non-equivalent,
-/// so the command falls through to the original. File-filter flags
-/// (`--include`/`--exclude`/`--glob`/`--type`) are NOT here — we drop them
-/// and search a superset (see `search_can_replace`).
-const SCOPE_FLAGS: &[&str] = &["-m"];
-
-/// Check for unquoted control operators EXCEPT pipe (`|`) and redirects
-/// (`>`, `<`). Pipes are handled separately by [`first_unquoted_pipe`].
-/// Redirects (`2>/dev/null`, `> out.txt`) are common in grep commands and
-/// don't change the command structure — the guard can safely rewrite the
-/// grep part and leave the redirect in place. `&&` is handled by
-/// [`strip_cd_prefix`] which strips a leading `cd X &&` before this check.
-fn has_unquoted_control(cmd: &str) -> bool {
-    let mut quote: Option<char> = None;
-    let mut prev_amp = false;
-    for c in cmd.chars() {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => {}
-            None if c == '\'' || c == '"' => quote = Some(c),
-            None if c == '&' => {
-                // Single `&` (background) is control; `&&` is handled by
-                // strip_cd_prefix for the leading cd case. A `&&` in the
-                // middle of the body (after cd strip) IS control.
-                if prev_amp {
-                    return true; // `&&` in the body
-                }
-                prev_amp = true;
-                continue;
-            }
-            None if c == ';' || c == '\n' => return true,
-            None => {}
-        }
-        prev_amp = false;
-    }
-    false
-}
-
-/// Find the byte index of the first unquoted pipe (`|`) in the command, or
-/// None if there are no unquoted pipes. Used to split a pipeline into
-/// segments so the first grep/rg segment can be rewritten to `pixel search`
-/// while keeping the rest of the pipe intact.
-fn first_unquoted_pipe(cmd: &str) -> Option<usize> {
-    let mut quote: Option<char> = None;
-    let mut prev_was_pipe = false;
-    for (i, c) in cmd.char_indices() {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => {}
-            None if c == '\'' || c == '"' => quote = Some(c),
-            None if c == '|' => {
-                // Skip `||` (logical OR) — only split on a single `|` pipe.
-                if prev_was_pipe {
-                    prev_was_pipe = false;
-                    continue;
-                }
-                // Look ahead: is the next char also `|`? Then it's `||`.
-                if cmd[i + 1..].starts_with('|') {
-                    prev_was_pipe = true;
-                    continue;
-                }
-                return Some(i);
-            }
-            None => {}
-        }
-        prev_was_pipe = false;
-    }
-    None
-}
-
 /// Single-quote `s` for shell interpolation, leaving it bare when it is
 /// already shell-safe (so common roots like `/repo` stay readable).
 fn shell_quote(s: &str) -> String {
@@ -2441,156 +2593,6 @@ fn shell_quote(s: &str) -> String {
         return s.to_string();
     }
     format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// Parse a grep/rg command into (pattern, path-scope args, unsupported
-/// flags). Returns None if the command isn't a grep-style search.
-/// Splits combined short flags (e.g. `-rl` → `-r` `-l`) to catch
-/// unsupported flags that would otherwise slip through.
-fn parse_grep(cmd: &str) -> Option<(String, Vec<String>, Vec<String>)> {
-    let mut tokens = simple_tokenize(cmd);
-    if tokens.is_empty() {
-        return None;
-    }
-    // Strip shell wrapper prefixes (rtk, command, builtin) so `command grep`
-    // and `builtin grep` are properly intercepted, matching bypass_advisory_lines.
-    while matches!(
-        tokens.first().map(String::as_str),
-        Some("rtk") | Some("command") | Some("builtin")
-    ) {
-        tokens.remove(0);
-        if tokens.is_empty() {
-            return None;
-        }
-    }
-    // Normalize the binary name: strip path prefix so `/usr/bin/grep`,
-    // `/bin/grep`, `/usr/local/bin/rg` etc. all match their base names.
-    // Agents evade the guard by using absolute paths — this closes that bypass.
-    let bin_raw = tokens[0].as_str();
-    let bin = std::path::Path::new(bin_raw)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(bin_raw);
-    if !matches!(bin, "rg" | "grep" | "egrep" | "fgrep") {
-        return None;
-    }
-    // Expand combined short flags: -rl → -r -l, -rc → -r -c, -rn → -r -n
-    let mut expanded: Vec<String> = Vec::new();
-    for t in tokens {
-        if t.starts_with('-') && !t.starts_with("--") && t.len() > 2 {
-            // This is a combined short flag like -rl, -rc, -rn
-            let first = &t[0..2]; // -r
-            for c in t[2..].chars() {
-                expanded.push(format!("{}{}", first, c));
-            }
-        } else {
-            expanded.push(t);
-        }
-    }
-    tokens = expanded;
-
-    let unsupported_flags = [
-        "-l",
-        "--files-with-matches",
-        "-c",
-        "--count",
-        "-v",
-        "--invert",
-        "-o",
-        "--only-matching",
-    ];
-    let mut unsupported: Vec<String> = tokens[1..]
-        .iter()
-        .filter(|t| unsupported_flags.contains(&t.as_str()))
-        .cloned()
-        .collect();
-    // Locate the pattern, skipping value-consuming flags and their values.
-    let mut i = 1;
-    let mut pattern: Option<String> = None;
-    let mut pattern_idx = 0;
-    while i < tokens.len() {
-        let t = &tokens[i];
-        if t == "-e" {
-            pattern = tokens.get(i + 1).cloned();
-            pattern_idx = i + 1;
-            break;
-        }
-        if let Some(p) = t.strip_prefix("--regexp=") {
-            pattern = Some(p.to_string());
-            pattern_idx = i;
-            break;
-        }
-        if t.starts_with('-') {
-            if t.starts_with("--") && t.contains('=') {
-                let base = t.split('=').next().unwrap_or(t);
-                if SCOPE_FLAGS.contains(&base) {
-                    unsupported.push(base.to_string());
-                }
-                i += 1; // self-contained --flag=value
-                continue;
-            }
-            if VALUE_FLAGS.contains(&t.as_str()) {
-                if SCOPE_FLAGS.contains(&t.as_str()) {
-                    unsupported.push(t.clone());
-                }
-                i += 2; // flag + its value
-                continue;
-            }
-            if t.len() > 2 && !t.starts_with("--") {
-                let flag = &t[..2];
-                if VALUE_FLAGS.contains(&flag) {
-                    if SCOPE_FLAGS.contains(&flag) {
-                        unsupported.push(flag.to_string());
-                    }
-                    i += 1; // short flag with attached value, e.g. -A5
-                    continue;
-                }
-            }
-            i += 1;
-            continue;
-        }
-        pattern = Some(t.clone());
-        pattern_idx = i;
-        break;
-    }
-    let pattern = pattern?;
-    // Collect paths AFTER the pattern, skipping value-consuming flags AND
-    // their values (e.g. `-A 25` — `25` is not a path). Without this,
-    // `grep -n "x" -A 25 file.rs` sees paths=["25", "file.rs"] (len 2) and
-    // try_rewrite_grep bails on multi-path — the grep never gets rewritten
-    // to pixel search.
-    let mut paths: Vec<String> = Vec::new();
-    let mut j = pattern_idx + 1;
-    while j < tokens.len() {
-        let t = &tokens[j];
-        if t.starts_with('-') {
-            // Self-contained --flag=value
-            if t.starts_with("--") && t.contains('=') {
-                j += 1;
-                continue;
-            }
-            // Value-consuming flag: skip flag + its value
-            if VALUE_FLAGS.contains(&t.as_str()) {
-                j += 2;
-                continue;
-            }
-            // Short flag with attached value, e.g. -A5
-            if t.len() > 2 && !t.starts_with("--") {
-                let flag = &t[..2];
-                if VALUE_FLAGS.contains(&flag) {
-                    j += 1;
-                    continue;
-                }
-            }
-            // Regular flag — skip just the flag
-            j += 1;
-            continue;
-        }
-        // Non-flag token — it's a path
-        paths.push(t.clone());
-        j += 1;
-    }
-    Some((pattern, paths, unsupported))
 }
 
 /// Shared equivalence predicate: can a grep-style search be transparently
@@ -2635,168 +2637,6 @@ fn search_can_replace(pattern: &str, flags: &[String], root: &str) -> Option<Str
     ))
 }
 
-/// Rewrite `rg PATTERN` / `grep PATTERN` → `pixel search PATTERN --context 5`
-///
-/// A single explicit path argument is preserved as the pixel search scope,
-/// but only when it actually exists (file or directory) and lives inside
-/// the indexed repo — rewriting a grep of `/etc/hosts` (or a typo'd path)
-/// into a pixel search would silently change semantics. Multiple paths
-/// can't be expressed as one pixel root, so they fall through unrewritten.
-fn try_rewrite_grep(cmd: &str, cwd: &Path, root: &Path) -> Option<String> {
-    // Strip trailing redirects (2>/dev/null, >file, <file) — they don't
-    // change the search semantics, just I/O. The rewritten pixel command
-    // doesn't need them (pixel search doesn't write to stderr in a way
-    // that needs suppressing). Keep the redirect in the output so the
-    // agent's intent is preserved.
-    let (cmd_clean, redirect_suffix) = strip_redirects(cmd);
-    let (pattern, paths, unsupported) = parse_grep(&cmd_clean)?;
-    let scope = match paths.len() {
-        0 => root.display().to_string(),
-        1 => {
-            let token = paths.into_iter().next().unwrap();
-            let resolved = resolve(&token, cwd)?;
-            if !resolved.is_file() && !resolved.is_dir() {
-                return None;
-            }
-            let canon_root = canonical(root);
-            if resolved != canon_root && !resolved.starts_with(&canon_root) {
-                return None;
-            }
-            token
-        }
-        _ => return None,
-    };
-    let rewritten = search_can_replace(&pattern, &unsupported, &scope)?;
-    if redirect_suffix.is_empty() {
-        Some(rewritten)
-    } else {
-        Some(format!("{rewritten} {redirect_suffix}"))
-    }
-}
-
-/// Strip trailing I/O redirects from a command segment. Returns (clean_cmd,
-/// redirect_suffix). Handles `2>/dev/null`, `>file`, `2>file`, `<file`,
-/// `&>file`, `1>file`. Only strips from the end — redirects in the middle
-/// of a pipeline are handled by the pipe splitter before this runs.
-fn strip_redirects(cmd: &str) -> (String, String) {
-    let tokens = simple_tokenize(cmd);
-    if tokens.is_empty() {
-        return (cmd.to_string(), String::new());
-    }
-    // Scan from the end for redirect tokens. A redirect token is one that
-    // starts with a digit followed by `>`, or starts with `>`, `<`, or `&>`.
-    // The token may be attached to the filename (e.g. `2>/dev/null`) or
-    // separate (e.g. `2>` `/dev/null`).
-    let mut redirect_start = tokens.len();
-    let mut i = tokens.len();
-    while i > 0 {
-        i -= 1;
-        let t = &tokens[i];
-        // `2>/dev/null` or `>file` or `&>file` — single token with redirect+target
-        if t.starts_with("2>")
-            || t.starts_with("1>")
-            || t.starts_with("&>")
-            || t.starts_with('>')
-            || t.starts_with('<')
-        {
-            redirect_start = i;
-            continue;
-        }
-        // `2>` or `>` or `<` as a separate token — consumes the next token as filename
-        if (t == "2>" || t == "1>" || t == "&>" || t == ">" || t == "<") && i + 1 < tokens.len() {
-            redirect_start = i;
-            continue;
-        }
-        // Non-redirect token — stop scanning
-        break;
-    }
-    if redirect_start == tokens.len() {
-        return (cmd.to_string(), String::new());
-    }
-    let clean = tokens[..redirect_start].join(" ");
-    let redirect = tokens[redirect_start..].join(" ");
-    (clean, redirect)
-}
-
-/// Rewrite `git log` archaeology to `pixel excavate` — but ONLY when the
-/// pixel command is an exact equivalent. The original command must carry
-/// nothing but ONE search term (`-S <term>` / `-Sterm` / `-G <term>` /
-/// `-Gterm` / `--grep=<term>`) and optionally ONE pathspec after `--`.
-/// Anything the rewrite can't represent — `--author`, `-n`/counts, rev
-/// ranges, display flags, bare revs, multiple pathspecs — falls through to
-/// the original command unchanged (fail open: a non-equivalent substitute
-/// is worse than no guard).
-fn try_rewrite_git_archaeology(cmd: &str, root: &str) -> Option<String> {
-    let mut tokens = simple_tokenize(cmd);
-    // Strip shell wrapper prefixes (rtk, command, builtin) — same as parse_grep.
-    while matches!(
-        tokens.first().map(String::as_str),
-        Some("rtk") | Some("command") | Some("builtin")
-    ) {
-        tokens.remove(0);
-    }
-    if tokens.len() < 3 || tokens[0] != "git" || tokens[1] != "log" {
-        return None;
-    }
-    let mut phrase: Option<String> = None;
-    let mut pathspecs: Vec<String> = Vec::new();
-    let mut after_dashdash = false;
-    let mut i = 2;
-    while i < tokens.len() {
-        let t = &tokens[i];
-        if after_dashdash {
-            pathspecs.push(t.clone());
-            i += 1;
-            continue;
-        }
-        if t == "--" {
-            after_dashdash = true;
-            i += 1;
-            continue;
-        }
-        if let Some(p) = t.strip_prefix("--grep=") {
-            if phrase.is_some() || p.is_empty() {
-                return None;
-            }
-            phrase = Some(p.to_string());
-            i += 1;
-            continue;
-        }
-        if t == "-S" || t == "-G" {
-            if phrase.is_some() {
-                return None;
-            }
-            phrase = Some(tokens.get(i + 1)?.clone());
-            i += 2;
-            continue;
-        }
-        if let Some(p) = t.strip_prefix("-S").or_else(|| t.strip_prefix("-G")) {
-            if phrase.is_some() || p.is_empty() {
-                return None;
-            }
-            phrase = Some(p.to_string());
-            i += 1;
-            continue;
-        }
-        // Any other flag, rev, or range makes the rewrite non-equivalent.
-        return None;
-    }
-    let phrase = phrase?;
-    if pathspecs.len() > 1 {
-        return None;
-    }
-    let escaped = phrase.replace('\'', "'\\''");
-    let mut out = format!(
-        "pixel excavate --phrase '{}' {}",
-        escaped,
-        shell_quote(root)
-    );
-    if let Some(p) = pathspecs.first() {
-        out.push_str(&format!(" --file {}", shell_quote(p)));
-    }
-    Some(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2810,109 +2650,6 @@ mod tests {
             std::env::temp_dir().join(format!("pixel-guard-{}-{}", name, std::process::id()));
         std::fs::create_dir_all(root.join("src")).unwrap();
         canonical(&root)
-    }
-
-    #[test]
-    fn rewrite_rg_simple_pattern() {
-        let cmd = "rg GUARD_MATCHER";
-        let rewritten = try_rewrite_grep(cmd, Path::new("/repo"), Path::new("/repo"));
-        assert_eq!(
-            rewritten,
-            Some("pixel search 'GUARD_MATCHER' /repo --context 5".to_string())
-        );
-    }
-
-    #[test]
-    fn rewrite_grep_simple_pattern() {
-        let repo = scratch_repo("dot-path");
-        let cmd = "grep -rn GUARD_MATCHER .";
-        let rewritten = try_rewrite_grep(cmd, &repo, &repo);
-        assert_eq!(
-            rewritten,
-            Some("pixel search 'GUARD_MATCHER' . --context 5".to_string())
-        );
-    }
-
-    #[test]
-    fn rewrite_regex_pattern() {
-        // pixel search is regex-based, so regex patterns are expressible.
-        let cmd = "rg \"foo.*bar\"";
-        let rewritten = try_rewrite_grep(cmd, Path::new("/repo"), Path::new("/repo"));
-        assert_eq!(
-            rewritten,
-            Some("pixel search 'foo.*bar' /repo --context 5".to_string())
-        );
-    }
-
-    #[test]
-    fn no_rewrite_unsupported_flags() {
-        let cmd = "rg -l GUARD_MATCHER";
-        let rewritten = try_rewrite_grep(cmd, Path::new("/repo"), Path::new("/repo"));
-        assert!(rewritten.is_none(), "-l flag should not be rewritten");
-    }
-
-    #[test]
-    fn no_rewrite_non_grep() {
-        let cmd = "ls -la";
-        let rewritten = try_rewrite_grep(cmd, Path::new("/repo"), Path::new("/repo"));
-        assert!(rewritten.is_none());
-    }
-
-    #[test]
-    fn rewrite_git_log_grep() {
-        let cmd = "git log --grep=register_mcp";
-        let rewritten = try_rewrite_git_archaeology(cmd, "/repo");
-        assert_eq!(
-            rewritten,
-            Some("pixel excavate --phrase 'register_mcp' /repo".to_string())
-        );
-    }
-
-    #[test]
-    fn no_rewrite_git_log_without_search() {
-        let cmd = "git log --oneline -10";
-        let rewritten = try_rewrite_git_archaeology(cmd, "/repo");
-        assert!(rewritten.is_none(), "plain git log should not be rewritten");
-    }
-
-    #[test]
-    fn rewrite_git_log_s_with_single_pathspec() {
-        let rewritten = try_rewrite_git_archaeology("git log -S term -- src/", "/repo");
-        assert_eq!(
-            rewritten,
-            Some("pixel excavate --phrase 'term' /repo --file src/".to_string())
-        );
-        // Bare -S with no pathspec keeps the plain form.
-        assert_eq!(
-            try_rewrite_git_archaeology("git log -S term", "/repo"),
-            Some("pixel excavate --phrase 'term' /repo".to_string())
-        );
-        // Attached form -Sterm.
-        assert_eq!(
-            try_rewrite_git_archaeology("git log -Sterm", "/repo"),
-            Some("pixel excavate --phrase 'term' /repo".to_string())
-        );
-    }
-
-    #[test]
-    fn no_rewrite_git_log_unrepresentable() {
-        // Anything the excavate rewrite can't represent must fall through
-        // to the original command (fail open), never a lossy substitute.
-        for cmd in [
-            "git log -S term --author=bob",
-            "git log -S term -n 5",
-            "git log -S term main..dev",
-            "git log -S term v1.0",
-            "git log -S term --oneline",
-            "git log -S term -- src/ lib/",
-            "git log -S term src/",
-            "git log -S term -G other",
-        ] {
-            assert!(
-                try_rewrite_git_archaeology(cmd, "/repo").is_none(),
-                "`{cmd}` is not exactly representable and must not be rewritten"
-            );
-        }
     }
 
     #[test]
@@ -3009,15 +2746,12 @@ mod tests {
         assert!(bash_deny_lines("git pull", Some(repo)).is_none());
         assert!(bash_deny_lines("git pull upstream main", Some(repo)).is_none());
         assert!(bash_deny_lines("git pull --rebase origin main", Some(repo)).is_none());
-        assert!(try_rewrite_bash("git pull", repo).is_none());
-        assert!(try_rewrite_bash("git pull upstream main", repo).is_none());
     }
 
     #[test]
     fn no_deny_git_status() {
         let repo = Path::new("/repo");
         assert!(bash_deny_lines("git status", Some(repo)).is_none());
-        assert!(try_rewrite_bash("git status", Path::new("/tmp")).is_none());
     }
 
     #[test]
@@ -3273,252 +3007,6 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_first_grep_segment_in_pipeline() {
-        // Pipelines: the first grep/rg segment is rewritten to pixel search,
-        // the rest of the pipe is preserved. This is the common agent pattern:
-        // `grep -rln "pattern" ... | grep -v node_modules | sort | wc -l`
-        let rewritten = try_rewrite_bash("rg foo | head -5", Path::new("/tmp"));
-        assert!(
-            rewritten.is_some(),
-            "first grep segment in a pipeline should be rewritten"
-        );
-        let cmd = rewritten.unwrap();
-        assert!(cmd.starts_with("pixel search 'foo'"), "cmd was: {cmd}");
-        assert!(
-            cmd.contains("| head -5"),
-            "rest of pipe must be preserved, cmd was: {cmd}"
-        );
-    }
-
-    #[test]
-    fn pipeline_with_non_grep_first_segment_not_rewritten() {
-        // If the first segment isn't grep/rg, don't touch the pipeline.
-        let rewritten = try_rewrite_bash("cat foo.txt | grep bar", Path::new("/tmp"));
-        assert!(
-            rewritten.is_none(),
-            "non-grep first segment must not be rewritten"
-        );
-    }
-
-    #[test]
-    fn logical_or_not_treated_as_pipe() {
-        // `||` is logical OR, not a pipe — must not be split.
-        let rewritten = try_rewrite_bash("rg foo || echo failed", Path::new("/tmp"));
-        assert!(rewritten.is_none(), "|| must not be treated as a pipe");
-    }
-
-    #[test]
-    fn reject_control_flow_rewrite() {
-        // Redirects (> <) are handled by strip_redirects, not control flow.
-        // In a non-indexed directory, no rewrite applies.
-        let non_idx = Path::new("/tmp/pixel-guard-no-idx-test-xyz");
-        assert!(try_rewrite_bash("rg foo > out.txt", non_idx).is_none());
-    }
-
-    #[test]
-    fn compound_command_rewrites_grep_segment() {
-        // In an indexed dir, `rg foo && echo hi` should rewrite the rg segment
-        // and keep the `&& echo hi` suffix. This is the new compound command
-        // handling that replaces the old bail-on-control-flow behavior.
-        let idx = scratch_repo("compound-idx");
-        std::fs::create_dir_all(idx.join(".pixel")).unwrap();
-        let rewritten = try_rewrite_bash("rg foo && echo hi", &idx);
-        assert!(
-            rewritten.is_some(),
-            "compound command should rewrite grep segment"
-        );
-        let rw = rewritten.unwrap();
-        assert!(rw.contains("pixel search"), "should contain pixel search");
-        assert!(rw.contains("echo hi"), "should preserve the echo suffix");
-    }
-
-    #[test]
-    fn compound_command_semicolon_rewrites_grep_segment() {
-        let idx = scratch_repo("compound-semi");
-        std::fs::create_dir_all(idx.join(".pixel")).unwrap();
-        let rewritten = try_rewrite_bash("rg foo; echo hi", &idx);
-        assert!(
-            rewritten.is_some(),
-            "compound command with ; should rewrite grep segment"
-        );
-        let rw = rewritten.unwrap();
-        assert!(rw.contains("pixel search"), "should contain pixel search");
-        assert!(rw.contains("echo hi"), "should preserve the echo suffix");
-    }
-
-    #[test]
-    fn value_flag_skips_pattern() {
-        // -A 5 consumes "5"; the pattern is "foo", not "5".
-        let rewritten = try_rewrite_grep("grep -A 5 foo", Path::new("/repo"), Path::new("/repo"));
-        assert_eq!(
-            rewritten,
-            Some("pixel search 'foo' /repo --context 5".to_string())
-        );
-    }
-
-    #[test]
-    fn regexp_equals_pattern() {
-        let rewritten =
-            try_rewrite_grep("grep --regexp=foo", Path::new("/repo"), Path::new("/repo"));
-        assert_eq!(
-            rewritten,
-            Some("pixel search 'foo' /repo --context 5".to_string())
-        );
-    }
-
-    #[test]
-    fn rtk_grep_and_rg_rewritten() {
-        let rewritten = try_rewrite_grep("rtk grep 'foo'", Path::new("/repo"), Path::new("/repo"));
-        assert_eq!(
-            rewritten,
-            Some("pixel search 'foo' /repo --context 5".to_string())
-        );
-
-        let rewritten = try_rewrite_grep("rtk rg foo", Path::new("/repo"), Path::new("/repo"));
-        assert_eq!(
-            rewritten,
-            Some("pixel search 'foo' /repo --context 5".to_string())
-        );
-    }
-
-    #[test]
-    fn path_prefixed_grep_rewritten() {
-        // Agents evade guard by using /usr/bin/grep — parse_grep must normalize.
-        let parsed = parse_grep("/usr/bin/grep -rn foo .");
-        assert!(
-            parsed.is_some(),
-            "/usr/bin/grep should be recognized as grep after path normalization"
-        );
-        let (pat, _, unsupported) = parsed.unwrap();
-        assert_eq!(pat, "foo");
-        assert!(unsupported.is_empty());
-
-        // /usr/local/bin/rg should also work
-        let parsed = parse_grep("/usr/local/bin/rg bar .");
-        assert!(
-            parsed.is_some(),
-            "/usr/local/bin/rg should be recognized as rg after path normalization"
-        );
-        let (pat, _, _) = parsed.unwrap();
-        assert_eq!(pat, "bar");
-
-        // /bin/grep should also normalize
-        let parsed = parse_grep("/bin/grep -rn baz .");
-        assert!(
-            parsed.is_some(),
-            "/bin/grep should be recognized as grep after path normalization"
-        );
-    }
-
-    #[test]
-    fn value_flag_after_pattern_does_not_eat_path() {
-        // `grep -n "x" -A 25 file.rs` — the `25` after `-A` is NOT a path.
-        // Without the fix, parse_grep collected paths=["25", "file.rs"] (len
-        // 2) and try_rewrite_grep bailed on multi-path.
-        let repo = scratch_repo("value-flag-path");
-        let file = repo.join("src").join("file.rs");
-        std::fs::write(&file, "fn x() {}\n").unwrap();
-        let cmd = "grep -n \"fn x\" -A 25 src/file.rs";
-        let rewritten = try_rewrite_grep(cmd, &repo, &repo);
-        assert_eq!(
-            rewritten,
-            Some("pixel search 'fn x' src/file.rs --context 5".to_string())
-        );
-    }
-
-    #[test]
-    fn scope_flag_not_rewritten() {
-        // -m changes the match count; pixel search can't honor it → no rewrite.
-        let repo = Path::new("/repo");
-        assert!(try_rewrite_grep("grep -m 5 foo", repo, repo).is_none());
-    }
-
-    #[test]
-    fn file_filter_flags_rewritten_as_superset() {
-        // --include/--glob/--type are file-filter flags that pixel search
-        // doesn't support yet. We rewrite anyway and DROP them — pixel search
-        // searches all code files (a superset), and downstream pipeline
-        // filters handle the rest. The pattern must be correctly identified.
-        let repo = Path::new("/repo");
-        let rewritten = try_rewrite_grep("grep --include=*.rs foo", repo, repo);
-        assert!(
-            rewritten.is_some(),
-            "--include should be rewritten as superset"
-        );
-        assert!(rewritten.unwrap().contains("'foo'"), "pattern must be foo");
-
-        let rewritten = try_rewrite_grep("grep --glob '*.rs' foo", repo, repo);
-        assert!(
-            rewritten.is_some(),
-            "--glob should be rewritten as superset"
-        );
-
-        // `rg --type rust foo` must not misparse "rust" as the pattern.
-        let rewritten = try_rewrite_grep("rg --type rust foo", repo, repo);
-        assert!(
-            rewritten.is_some(),
-            "--type should be rewritten as superset"
-        );
-        assert!(
-            rewritten.unwrap().contains("'foo'"),
-            "pattern must be foo, not rust"
-        );
-
-        let rewritten = try_rewrite_grep("rg -t rust foo", repo, repo);
-        assert!(rewritten.is_some(), "-t should be rewritten as superset");
-        assert!(
-            rewritten.unwrap().contains("'foo'"),
-            "pattern must be foo, not rust"
-        );
-    }
-
-    #[test]
-    fn preserves_path_scope() {
-        let repo = scratch_repo("path-scope");
-        let rewritten = try_rewrite_grep("rg foo src/", &repo, &repo);
-        assert_eq!(
-            rewritten,
-            Some("pixel search 'foo' src/ --context 5".to_string())
-        );
-    }
-
-    #[test]
-    fn nonexistent_path_not_rewritten() {
-        let repo = scratch_repo("no-such-path");
-        assert!(
-            try_rewrite_grep("rg foo no/such/dir", &repo, &repo).is_none(),
-            "a path that doesn't exist must not be silently rescoped"
-        );
-    }
-
-    #[test]
-    fn path_outside_repo_not_rewritten() {
-        let repo = scratch_repo("outside");
-        let outside = std::env::temp_dir();
-        let cmd = format!("rg foo {}", outside.display());
-        assert!(
-            try_rewrite_grep(&cmd, &repo, &repo).is_none(),
-            "a path outside the indexed repo must not be rewritten"
-        );
-    }
-
-    #[test]
-    fn multiple_paths_not_rewritten() {
-        let repo = scratch_repo("multi-path");
-        let rewritten = try_rewrite_grep("rg foo src/ lib/", &repo, &repo);
-        assert!(rewritten.is_none(), "multiple roots can't be expressed");
-    }
-
-    #[test]
-    fn quotes_root_with_space() {
-        let rewritten = try_rewrite_grep("rg foo", Path::new("/my repo"), Path::new("/my repo"));
-        assert_eq!(
-            rewritten,
-            Some("pixel search 'foo' '/my repo' --context 5".to_string())
-        );
-    }
-
-    #[test]
     fn accepts_before_tool_event() {
         let empty = serde_json::json!({});
         assert!(is_guard_event(&empty, "PreToolUse"));
@@ -3542,14 +3030,6 @@ mod tests {
         // shape must NOT be treated as a guard event.
         let unrelated = serde_json::json!({"foo": "bar"});
         assert!(!is_guard_event(&unrelated, ""));
-    }
-
-    #[test]
-    fn destructive_commands_are_not_transparently_rewritten() {
-        // Safety advisories run before the rewrite path; a destructive git
-        // command must remain the original command, not become a Pixel write.
-        let rewritten = try_rewrite_bash("git reset --hard HEAD", Path::new("/tmp"));
-        assert!(rewritten.is_none());
     }
 
     #[test]

@@ -150,7 +150,7 @@ Installation is additive. Pixel checks the current files first, preserves existi
 `agent-config` and `pixel install` have different jobs:
 
 - **agent-config** owns the canonical Pixel rule source and distributes it to the agent configuration directories. It provides guidance; by itself, it does not install all Pixel runtime integrations or hooks.
-- **`pixel install`** owns the runtime layer: passive context and flow-replay hooks, per-agent settings, configuration backups, and the final installation check through `pixel doctor`.
+- **`pixel install`** owns the runtime layer: bounded task context, safe search routing, flow-replay hooks, per-agent settings, configuration backups, and installation checks through `pixel doctor`.
 
 ### How `pixel install` works
 
@@ -160,10 +160,89 @@ Installation is additive. Pixel checks the current files first, preserves existi
 2. Pixel places that guidance in existing `CLAUDE.md` or `AGENTS.md` files using managed markers.
 3. If none exists, Pixel creates `~/.claude/CLAUDE.md`—inside Claude’s configuration directory—so a new machine still gets the guidance.
 4. Pixel detects supported installed CLIs (or existing agent configs), then wires only the integrations that apply. Claude, Devin, Codex, Gemini, zcode, Cursor, and pi are supported where their interfaces allow it. Codex is supported through its native configuration at `~/.codex/hooks.json`.
-5. Passive hooks restore context at session start, after compaction, and at the start of a new prompt. They also support flow replay, so an agent can reuse a proven browser, authentication, or configuration sequence instead of rediscovering it.
+5. Lifecycle hooks deliver context at session start and after compaction. Nontrivial prompts can receive up to 4 KB of ranked task context from a responsive local daemon. Retrieval has a 750 ms worker deadline, excluding process startup and input parsing; this is not a wall-clock latency guarantee under host contention. Cold/unavailable daemons and timeouts leave the prompt usable without retrieval context; task-boundary detection is independent.
 6. Files that need changes are backed up, and `pixel doctor .` checks the resulting installation.
 
+### Claude Code task runtime
+
+For Claude Code, Pixel keeps a session packet at `.pixel/task-runtime.json`
+and an append-only durable task ledger under `.pixel/tasks/`. Neither is a
+read/edit allowlist. Packets preserve bounded ranked evidence across
+compaction; the ledger records acceptance, sandbox ownership, worker lifecycle,
+and promotion facts.
+
+The automatic path is deliberately narrow: an explicit local coding imperative
+may be accepted only after Pixel has created an isolated candidate snapshot and
+started a real worker. Only then does the Claude `UserPromptSubmit` hook reject
+the foreground prompt. Questions, planning, reviews, ambiguous prompts, empty
+repositories, and every launch failure stay in the foreground. The initial
+automatic candidate owns the full tracked snapshot; ranked targets never become
+write permissions.
+
+```bash
+# Inspect the active Claude packet for a known Claude session ID
+pixel task show --session <session-id> . --json
+
+# Make the next meaningful prompt start a new task generation
+pixel task reset --session <session-id> .
+
+# Explicit task lifecycle for a controlled worker run
+pixel task accept "fix parser behavior" . --json
+pixel task sandbox-create <task-id> candidate-a --owned-path crates/pixel/src/main.rs .
+pixel task worker-start <task-id> candidate-a . --json
+
+# Validate a proposed fanout plan without executing it
+pixel task plan-validate <task-id> --file plan.json . --json
+```
+
+Candidates are Git worktrees. Dirty tracked changes are snapshotted into a
+task-owned overlay; untracked or credential-shaped WIP is refused rather than
+copied. Promotion is compare-and-apply: it rejects no-op candidates,
+out-of-ownership changes, and overlapping primary-worktree drift. Race workers
+are capped at three pre-registered candidates and promote only an eligible
+on-disk diff, never a model completion claim.
+
+Pixel does not yet infer safe fanout from prose, treat a plan as a contract,
+or use model output as completion evidence. `task plan-validate` accepts only
+explicit lanes, paths, symbols, dependencies, and bounded candidate counts;
+overlap or incomplete evidence remains serial. Worker output is intentionally
+discarded until a dedicated Pixel log sink exists, so health/failover policy is
+not yet connected to automatic worker retries.
+
 Pixel is a CLI plus rewire-first integrations, not an MCP server.
+
+### Automatic search routing: deliberately narrow
+
+Claude Code, Codex, and Devin use provider-specific hooks. Supported standalone
+literal `grep`/`rg` searches over one explicit indexed file can execute through
+`pixel search-compat <rg|grep> -- <original arguments>`, preserving native output
+and exit status. Ordinary `pixel search` remains the richer, bounded regex API.
+Recursive searches, pipelines, unsupported flags, RTK-wrapped searches, uncertain
+coverage, binary/CRLF files, and output overflow retain native execution. Pixel
+does not drop flags or emit partial results before falling back.
+
+Codex's rewrite protocol requires an explicit `allow` decision for these narrowly
+supported read-only calls; this is not blanket authorization for other commands.
+Codex also requires trust for each current unmanaged hook definition. Installing
+or changing a hook does not grant that trust; review it through Codex's `/hooks`
+interface. Pixel does not bypass trust or manufacture trusted hashes. See the
+[Codex hook trust contract](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
+Claude's recognized `rtk hook claude` registration can be coordinated behind one
+Pixel hook, preserving the original RTK handler for unsupported commands. Unknown
+overlapping hooks are preserved rather than competing to rewrite the same input.
+
+For a project-local Codex configuration whose existing command hooks include
+real deny guards, Pixel can adopt the full `PreToolUse` set into one composed
+runtime. It snapshots the already-enabled handlers privately, replays the
+original hook input to matching handlers, preserves any denial, and performs a
+compatible read-only rewrite only when no foreign handler blocks or mutates the
+input. Reinstall refuses a changed managed group; uninstall restores the exact
+saved `PreToolUse` array. Unknown matcher or handler shapes remain untouched.
+
+Read-only retrieval counts produce advisory warnings, never command rejection.
+Ranked targets and graph edges are evidence to investigate, not proof of exhaustive
+relevance or inevitable breakage. Doctor distinguishes registration/protocol checks
+from live verification: a configured hook is not proof that an agent executed it.
 
 ### Other coding agents
 

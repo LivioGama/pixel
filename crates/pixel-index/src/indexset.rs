@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use crate::delta::{DeltaState, delta_shard_path};
 use crate::gram::GramExtractor;
 use crate::index::{MAX_FILE_BYTES, SHARD_DIR, SHARD_FILE, SearchStats, read_regular_bounded};
-use crate::lock::BuildLock;
+use crate::lock::{BuildLock, is_pixel_only_gitignore};
 use crate::overlay::Overlay;
 use crate::plan::plan_pattern;
 use crate::posting::{GramQuery, resolve_query};
@@ -202,6 +202,14 @@ fn build_shard_from(
         .par_iter()
         .filter(|rel| !is_internal(rel))
         .filter(|rel| {
+            // A `.gitignore` carrying *only* pixel's housekeeping `.pixel/` entry
+            // (created from scratch by `ensure_pixel_gitignored`)is not real
+            // tracked project content — keep it out of the base/delta file
+            // universe just like `.pixel/` itself. A real user `.gitignore`
+            // with any other ignore rule is fully indexed.
+            !(rel.as_str() == ".gitignore" && is_pixel_only_gitignore(root))
+        })
+        .filter(|rel| {
             if !prune_default {
                 return true;
             }
@@ -336,6 +344,14 @@ impl IndexSet {
             // Dirty working tree -> overlay.
             for (xy, path) in gitsync::status_porcelain(root) {
                 if is_internal(&path) {
+                    continue;
+                }
+                // A `.gitignore` carrying *only* pixel's housekeeping `.pixel/` entry
+                // (created from scratch by `ensure_pixel_gitignored`) is not real
+                // project content — keep it out of the file/search universe just
+                // like `.pixel/` itself. A real user `.gitignore` with any other
+                // ignore rule is fully indexed.
+                if path == ".gitignore" && is_pixel_only_gitignore(root) {
                     continue;
                 }
                 if xy.contains('D') {

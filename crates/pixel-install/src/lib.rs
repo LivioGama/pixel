@@ -12,6 +12,7 @@ use thiserror::Error;
 pub mod config;
 pub mod doctor;
 pub mod install;
+mod routing;
 pub mod uninstall;
 
 /// Shared error type for the install/doctor/migrate surface.
