@@ -296,10 +296,16 @@ fn remove_existing_guard_hooks(home: &Path, dry_run: bool) -> Result<InstallStep
         }
     }
 
-    // The old guard script is Pixel-owned and is no longer referenced by any
-    // supported integration. Remove it as part of the migration so doctor can
-    // distinguish a clean rewire-first install from a stale blocking install.
-    for name in [config::GUARD_HOOK, config::OLD_GUARD_HOOK] {
+    // The old hook scripts are Pixel-owned and are no longer referenced by
+    // any supported integration — the system prompt replaces all hooks.
+    // Remove them as part of the migration so doctor reports a clean install.
+    for name in [
+        config::GUARD_HOOK,
+        config::OLD_GUARD_HOOK,
+        config::SESSION_START_HOOK,
+        config::PROMPT_SUBMIT_HOOK,
+        config::POST_COMPACTION_HOOK,
+    ] {
         let path = home.join(config::CLAUDE_HOOKS_DIR).join(name);
         if path.is_file() {
             removed_scripts += 1;

@@ -468,40 +468,30 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     checks.push(check("install.agent-config", || -> std::result::Result<DoctorCheckDetail, String> {
         let configs = config::find_agent_configs(&home);
         if configs.is_empty() {
-            return Err("no CLAUDE.md/AGENTS.md found to manage".into());
+            return Ok(DoctorCheckDetail {
+                summary: "no CLAUDE.md/AGENTS.md found — skipping".into(),
+                detail: None,
+            });
         }
-        // A config file is "managed" if it EITHER:
-        //   (a) contains a pixel managed block (legacy: pixel install wrote it), OR
-        //   (b) contains the pixel rule text (current: build-agent-config's
-        //       aggregate includes pixel.md, so the rule is present without a
-        //       managed block).
-        // The duplicate-prevention logic in rewrite_agent_configs now skips
-        // writing a managed block when the rule is already present via the
-        // aggregate, so (b) is the expected state for agent configs managed
-        // by build-agent-config.
-        let unmanaged: Vec<&PathBuf> = configs
+        // The system prompt replaces managed blocks. Verify no stale
+        // pixel-managed blocks remain in any agent-config file.
+        let stale: Vec<String> = configs
             .iter()
             .filter(|p| {
                 fs::read_to_string(p)
-                    .map(|s| {
-                        !s.contains(config::MANAGED_BEGIN)
-                            && !s.contains("# pixel — Deterministic")
-                    })
-                    .unwrap_or(true)
+                    .map(|s| s.contains(config::MANAGED_BEGIN))
+                    .unwrap_or(false)
             })
+            .map(|p| p.display().to_string())
             .collect();
-        if !unmanaged.is_empty() {
+        if !stale.is_empty() {
             return Err(format!(
-                "agent-config not managed: {}",
-                unmanaged
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "stale pixel managed blocks still present — run `pixel install`: {}",
+                stale.join(", ")
             ));
         }
         Ok(DoctorCheckDetail {
-            summary: format!("{} agent-config file(s) managed", configs.len()),
+            summary: format!("{} agent-config file(s) clean (no managed blocks)", configs.len()),
             detail: Some(serde_json::json!({ "files": configs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>() })),
         })
     }));
