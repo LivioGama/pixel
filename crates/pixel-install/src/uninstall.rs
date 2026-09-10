@@ -61,25 +61,27 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
 
     let dry_run = options.dry_run;
     let steps = vec![
-        // 1. Strip managed blocks from all agent-config Markdown files.
+        // 1. Remove shell wrappers from ~/.zshrc (or ~/.bashrc).
+        install::remove_shell_wrappers(&home, dry_run)?,
+        // 2. Strip managed blocks from all agent-config Markdown files.
         strip_agent_configs(&home, dry_run)?,
-        // 2. Remove pixel hook entries from Claude settings.json + delete hook
+        // 3. Remove pixel hook entries from Claude settings.json + delete hook
         //    scripts from ~/.claude/hooks/.
         remove_claude_hooks(&home, dry_run)?,
-        // 3. Remove pixel hook entries from every other tool's settings file.
+        // 4. Remove pixel hook entries from every other tool's settings file.
         remove_devin_hooks(&home, dry_run)?,
         remove_codex_hooks(&home, dry_run)?,
         remove_gemini_hooks(&home, dry_run)?,
         remove_zcode_hooks(&home, dry_run)?,
         remove_cursor_hooks(&home, dry_run)?,
         remove_pi_extension(&home, dry_run)?,
-        // 4. Remove pixel hooks from project-level .codex/hooks.json files.
+        // 5. Remove pixel hooks from project-level .codex/hooks.json files.
         remove_project_codex_hooks(&home, dry_run)?,
-        // 5. Remove the pixel rule source file.
+        // 6. Remove the pixel rule source file.
         remove_rule_source(&home, dry_run)?,
-        // 6. Remove the pixel agent system prompt.
+        // 7. Remove the pixel agent system prompt.
         remove_agent_prompt(&home, dry_run)?,
-        // 7. Remove the pixel binary.
+        // 8. Remove the pixel binary.
         remove_binary(&binary_path, dry_run)?,
     ];
 

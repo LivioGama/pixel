@@ -17,6 +17,7 @@ pub(crate) const RTK_BACKUP: &str = ".claude/pixel-rtk-hooks.json";
 /// guard.  It deliberately lives next to the project hook config so a runtime
 /// never has to discover or execute the currently mutable hook configuration.
 pub(crate) const CODEX_COMPOSED_BACKUP: &str = "pixel-composed-guard-backup.json";
+#[allow(dead_code)]
 const CODEX_COMPOSED_BACKUP_VERSION: u64 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -472,6 +473,7 @@ fn configure(
     Ok((!blocked, adopted))
 }
 
+#[allow(dead_code)]
 pub(crate) fn install_provider(
     home: &Path,
     exe: &Path,
@@ -483,6 +485,7 @@ pub(crate) fn install_provider(
 
 /// Verify the installed transform, including matchers, executable, shell
 /// overlap and saved delegation. Merely finding a command string is not proof.
+#[allow(dead_code)]
 pub(crate) fn configuration_status(
     home: &Path,
     exe: &Path,
@@ -511,6 +514,7 @@ pub(crate) fn configuration_status(
     Ok(enabled)
 }
 
+#[allow(dead_code)]
 fn composed_backup_path(config_path: &Path) -> Result<PathBuf, String> {
     config_path
         .parent()
@@ -518,6 +522,7 @@ fn composed_backup_path(config_path: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "Codex hook configuration has no parent directory".into())
 }
 
+#[allow(dead_code)]
 fn composed_codex_group(exe: &Path, backup: &Path) -> Value {
     hook_group(
         format!(
@@ -529,6 +534,7 @@ fn composed_codex_group(exe: &Path, backup: &Path) -> Value {
     )
 }
 
+#[allow(dead_code)]
 fn composed_backup(groups: Vec<Value>, managed_pre_tool_use: Value) -> Value {
     json!({
         "version": CODEX_COMPOSED_BACKUP_VERSION,
@@ -538,6 +544,7 @@ fn composed_backup(groups: Vec<Value>, managed_pre_tool_use: Value) -> Value {
     })
 }
 
+#[allow(dead_code)]
 fn read_composed_backup(path: &Path) -> crate::Result<Value> {
     let value: Value = serde_json::from_str(&fs::read_to_string(path)?)?;
     let valid_header = value.get("version").and_then(Value::as_u64)
@@ -568,6 +575,7 @@ fn read_composed_backup(path: &Path) -> crate::Result<Value> {
 /// Persist the immutable runtime input before installing the command that can
 /// consume it. `persist` is an atomic same-directory rename; write mode is
 /// tightened before the file becomes visible.
+#[allow(dead_code)]
 fn write_composed_backup(
     path: &Path,
     groups: &[Value],
@@ -616,6 +624,7 @@ fn write_composed_backup(
 /// deterministic Pixel entrypoint. Reinstalls only accept the exact managed
 /// shape: a user edit to PreToolUse is a hard refusal, never a silent snapshot
 /// refresh that could grant Pixel authority over a newly added command.
+#[allow(dead_code)]
 pub(crate) fn install_project_codex_at(
     _home: &Path,
     path: &Path,
@@ -720,6 +729,7 @@ pub(crate) fn install_project_codex_at(
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn install_at(
     home: &Path,
     path: &Path,
