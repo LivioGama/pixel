@@ -2493,6 +2493,11 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                         report.diff_indexed_pct * 100.0,
                         report.fresh
                     );
+                    // Also ingest transcripts from all LLM CLIs so that
+                    // `pixel recall search/ask` covers this project's sessions.
+                    if let Err(e) = recall_cmd::run_index(None, false, false) {
+                        eprintln!("recall: index warning: {e}");
+                    }
                 }
                 return Ok(());
             }
@@ -2518,6 +2523,11 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     report.diff_indexed_pct * 100.0,
                     report.fresh
                 );
+                // Also ingest transcripts from all LLM CLIs so that
+                // `pixel recall search/ask` covers this project's sessions.
+                if let Err(e) = recall_cmd::run_index(None, false, false) {
+                    eprintln!("recall: index warning: {e}");
+                }
             }
             Ok(())
         }

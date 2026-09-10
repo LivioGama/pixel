@@ -754,7 +754,7 @@ fn adapters(filter: Option<&str>) -> Result<Vec<Box<dyn SourceAdapter>>, String>
     }
 }
 
-fn run_index(source: Option<String>, stats: bool, full: bool) -> Result<(), String> {
+pub fn run_index(source: Option<String>, stats: bool, full: bool) -> Result<(), String> {
     let mut store = open_store()?;
     for adapter in adapters(source.as_deref())? {
         let report = ingest_source(&mut store, adapter.as_ref()).map_err(|e| e.to_string())?;
