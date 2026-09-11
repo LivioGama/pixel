@@ -18,7 +18,7 @@ use crate::imports::resolve_import;
 use crate::resolve::{
     FileCalls, PendingCall, reconsider_resolved_calls, resolve_all, resolve_calls,
 };
-use crate::store::{EdgeKind, extract_crux, GraphStore};
+use crate::store::{EdgeKind, GraphStore, extract_crux};
 
 /// Extract concepts for a file and insert them, linking each to the smallest
 /// enclosing symbol (by line range) when one exists. `symbol_ids` are the ids

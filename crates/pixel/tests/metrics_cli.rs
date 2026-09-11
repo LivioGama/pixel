@@ -88,11 +88,63 @@ impl Drop for Fixture {
 }
 
 fn metric_lines(output: &Output) -> Vec<String> {
-    String::from_utf8_lossy(&output.stderr)
-        .lines()
-        .filter(|line| line.starts_with("🟩 Pixel · "))
-        .map(str::to_owned)
-        .collect()
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<_> = stderr.lines().collect();
+    let mut blocks = Vec::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        if !lines[index].starts_with("🟩 pixel ") {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        index += 1;
+        if lines.get(index) == Some(&"  │") {
+            while index < lines.len() {
+                let is_separator = lines[index].starts_with("  └");
+                index += 1;
+                if is_separator {
+                    break;
+                }
+            }
+        }
+        blocks.push(lines[start..index].join("\n"));
+    }
+
+    blocks
+}
+
+fn short_invocation_id(event: &Value) -> String {
+    let id = event["invocation_id"].as_str().unwrap();
+    id.split('-')
+        .nth(1)
+        .map(|s| {
+            s.chars()
+                .rev()
+                .take(6)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect()
+        })
+        .unwrap_or_else(|| id.to_owned())
+}
+
+fn assert_metric_identity(block: &str, event: &Value) {
+    let header = block.lines().next().unwrap();
+    assert!(
+        header.starts_with(&format!(
+            "🟩 pixel {} ❀ ",
+            event["command"].as_str().unwrap()
+        )),
+        "unexpected metric header: {header}"
+    );
+    assert!(
+        header.ends_with(&format!(" ❀ #{}", short_invocation_id(event))),
+        "unexpected metric header: {header}"
+    );
 }
 
 fn assert_success(output: &Output) {
@@ -129,8 +181,10 @@ fn dual_savings_use_recorded_round_trip_policy_without_changing_search_json() {
         assert_eq!(output.stdout, baseline.stdout);
         let lines = metric_lines(&output);
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("tokens saved (workflow estimate"));
-        assert!(lines[0].contains("s saved (sequential estimate"));
+        assert!(lines[0].contains("estimated LLM context saved:"));
+        if expected_ms > 0 {
+            assert!(lines[0].contains("against ~"));
+        }
         let event = fixture.events("search").pop().unwrap();
         let metrics = &event["metrics"];
         let time = &metrics["time_estimate"];
@@ -146,8 +200,8 @@ fn dual_savings_use_recorded_round_trip_policy_without_changing_search_json() {
         if expected_ms == 0 {
             assert!(time["saved_ms"].as_f64().unwrap() < 0.0);
         }
-        assert_eq!(metrics["reporting_bytes"], lines[0].len() + 1);
-        assert!(lines[0].contains(event["invocation_id"].as_str().unwrap()));
+        assert_eq!(metrics["reporting_bytes"], lines[0].len() + 2);
+        assert_metric_identity(&lines[0], &event);
     }
     let disabled = fixture
         .command()
@@ -193,14 +247,24 @@ fn concurrent_time_policies_stay_with_their_own_invocations() {
         serde_json::from_slice::<Value>(&output.stdout).unwrap();
         let lines = metric_lines(&output);
         assert_eq!(lines.len(), 1);
+        let header = lines[0].lines().next().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| { header.ends_with(&format!("#{}", short_invocation_id(event))) })
+        );
         let event = events
             .iter()
-            .find(|event| lines[0].contains(event["invocation_id"].as_str().unwrap()))
+            .find(|event| event["metrics"]["time_estimate"]["round_trip_ms"] == policy)
             .unwrap();
         assert!(ids.insert(event["invocation_id"].as_str().unwrap()));
-        assert_eq!(event["metrics"]["time_estimate"]["round_trip_ms"], policy);
         assert_eq!(event["metrics"]["time_estimate"]["sequential_steps"], 3);
-        assert_eq!(event["metrics"]["reporting_bytes"], lines[0].len() + 1);
+        assert!(
+            events
+                .iter()
+                .any(|event| event["metrics"]["reporting_bytes"] == lines[0].len() + 2),
+            "each complete emitted block must be fully accounted for"
+        );
     }
 }
 
@@ -268,10 +332,11 @@ fn time_history_preserves_assumptions_legacy_unavailability_and_exact_lines() {
     assert_success(&replay);
     let replay = String::from_utf8(replay.stdout).unwrap();
     for line in historical_lines {
+        let header = line.lines().next().unwrap();
         assert!(
             replay
                 .lines()
-                .any(|saved| saved.strip_prefix("  ") == Some(line.as_str())),
+                .any(|saved| saved.strip_prefix("  ") == Some(header)),
             "{replay}"
         );
     }
@@ -295,10 +360,10 @@ fn search_json_is_identical_with_reporting_on_off_and_env_off() {
     assert_eq!(event["outcome"], "ok");
     assert_eq!(
         event["metrics"]["output_bytes"],
-        on.stdout.len() + on.stderr.len() - lines[0].len() - 1
+        on.stdout.len() + on.stderr.len() - lines[0].len() - 2
     );
-    assert_eq!(event["metrics"]["reporting_bytes"], lines[0].len() + 1);
-    assert!(lines[0].contains(event["invocation_id"].as_str().unwrap()));
+    assert_eq!(event["metrics"]["reporting_bytes"], lines[0].len() + 2);
+    assert_metric_identity(&lines[0], event);
     assert!(
         event["metrics"]["evidence"]["distinct_files"]
             .as_u64()
@@ -362,7 +427,7 @@ fn capped_search_marks_only_returned_evidence_partial() {
     assert_eq!(events[0]["metrics"]["evidence"]["distinct_files"], 1);
     assert_eq!(
         events[0]["metrics"]["output_bytes"],
-        output.stdout.len() + output.stderr.len() - lines[0].len() - 1
+        output.stdout.len() + output.stderr.len() - lines[0].len() - 2
     );
 }
 
@@ -376,15 +441,15 @@ fn operation_error_precedes_metrics_and_preserves_failure() {
     let lines = metric_lines(&output);
     assert_eq!(lines.len(), 1);
     assert!(stderr.starts_with("pixel:"), "{stderr}");
-    assert!(stderr.ends_with(&format!("{}\n", lines[0])));
-    let diagnostics = stderr.strip_suffix(&format!("{}\n", lines[0])).unwrap();
+    assert!(stderr.ends_with(&format!("\n{}\n", lines[0])));
+    let diagnostics = stderr.strip_suffix(&format!("\n{}\n", lines[0])).unwrap();
     assert!(diagnostics.contains("regex") || diagnostics.contains("pattern"));
     let events = fixture.events("search");
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["outcome"], "error");
     assert_eq!(events[0]["metrics"]["output_bytes"], diagnostics.len());
     assert!(events[0]["metrics"]["native_workflow_bytes"].is_null());
-    assert!(lines[0].contains("savings unavailable"));
+    assert_metric_identity(&lines[0], &events[0]);
 
     let disabled = fixture.run(&["--metrics=off", "search", "(", ".", "--json", "--no-daemon"]);
     assert_eq!(output.status.code(), disabled.status.code());
@@ -423,12 +488,17 @@ fn concurrent_invocations_keep_unique_complete_records_and_lines() {
         assert!(document["head"].as_str().unwrap().len() >= 40);
         let lines = metric_lines(&output);
         assert_eq!(lines.len(), 1);
-        let own: Vec<_> = events
+        let event = events
             .iter()
-            .filter(|event| lines[0].contains(event["invocation_id"].as_str().unwrap()))
-            .collect();
-        assert_eq!(own.len(), 1);
-        assert_eq!(own[0]["metrics"]["output_bytes"], output.stdout.len());
+            .find(|event| {
+                lines[0].lines().next().is_some_and(|header| {
+                    header.ends_with(&format!("#{}", short_invocation_id(event)))
+                })
+            })
+            .expect("each live metrics block must identify its own action record");
+        assert_metric_identity(&lines[0], event);
+        assert_eq!(event["metrics"]["output_bytes"], output.stdout.len());
+        assert_eq!(event["metrics"]["reporting_bytes"], lines[0].len() + 2);
     }
 }
 
@@ -482,7 +552,7 @@ fn protected_native_hook_and_statusline_streams_have_no_metrics_line() {
             "protected operation must exercise real output"
         );
         assert!(metric_lines(&output).is_empty());
-        assert!(!String::from_utf8_lossy(&output.stdout).contains("🟩 Pixel · "));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("🟩 pixel "));
         let events = fixture.events(args[0]);
         assert!(!events.is_empty());
         assert!(
@@ -628,8 +698,8 @@ fn negative_workflow_savings_are_not_clamped() {
     let lines = metric_lines(&output);
     assert_eq!(lines.len(), 1);
     assert!(
-        lines[0].contains("~-"),
-        "negative savings missing: {}",
+        !lines[0].contains("estimated LLM context saved:"),
+        "negative token savings must not be presented as a saving: {}",
         lines[0]
     );
     let event = &fixture.events("inspect")[0];

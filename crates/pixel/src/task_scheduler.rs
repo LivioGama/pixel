@@ -90,9 +90,11 @@ pub(crate) fn start(
     }
 
     if let Some(existing) = load(root, task_id, candidate_id)?
-        && existing.state == WorkerState::Running && process_alive(existing.pid) {
-            return Err(format!("worker is already running (pid {})", existing.pid));
-        }
+        && existing.state == WorkerState::Running
+        && process_alive(existing.pid)
+    {
+        return Err(format!("worker is already running (pid {})", existing.pid));
+    }
 
     let record = spawn_candidate(
         root,
@@ -257,9 +259,11 @@ fn spawn_candidate(
     config: &WorkerConfig,
 ) -> Result<WorkerRecord, String> {
     if let Some(existing) = load(root, task_id, candidate_id)?
-        && existing.state == WorkerState::Running && process_alive(existing.pid) {
-            return Err(format!("worker is already running (pid {})", existing.pid));
-        }
+        && existing.state == WorkerState::Running
+        && process_alive(existing.pid)
+    {
+        return Err(format!("worker is already running (pid {})", existing.pid));
+    }
     let launch = crate::claude_controller::ClaudeWorkerLaunch {
         task_id,
         worktree_id: candidate_id,
@@ -530,7 +534,7 @@ mod tests {
         )
         .unwrap();
         let fake = root.join("fake-race-claude");
-        fs::write(&fake, "#!/bin/sh\nif [ \"$PIXEL_WORKTREE_ID\" = winner ]; then printf 'after\\n' > owned.txt; fi\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n").unwrap();
+        fs::write(&fake, "#!/bin/sh\nif [ \"$PIXEL_WORKTREE_ID\" = winner ]; then printf 'after\\n' > owned.txt; git add owned.txt; exit 0; fi\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n").unwrap();
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
         let config = WorkerConfig {
             executable: fake,
@@ -540,10 +544,24 @@ mod tests {
 
         let started = start_race(&root, &accepted.task_id, &ids, &config).unwrap();
         assert_eq!(started.started.len(), 2);
-        // The fixture writes before entering its loop. Marking the winner
-        // stopped simulates a reaped finished child within this in-process test.
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        // Wait for the winner's real write-and-exit path; a fixed delay flakes
+        // under loaded CI runners and stopping it early races its final write.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while status(&root, &accepted.task_id, &winner.candidate_id)
+            .unwrap()
+            .is_some_and(|status| status.alive)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(winner.sandbox_root.join("owned.txt").is_file());
         stop(&root, &accepted.task_id, &winner.candidate_id).unwrap();
+        let inspection = crate::task_sandbox::inspect(&winner).unwrap();
+        assert_eq!(
+            inspection.verdict,
+            crate::task_sandbox::CandidateVerdict::Eligible,
+            "{inspection:?}"
+        );
         let outcome = poll_race(&root, &accepted.task_id, &ids).unwrap();
         // Keep the fixture cleanup deterministic even when an assertion below
         // exposes a race regression before the production cancellation check.

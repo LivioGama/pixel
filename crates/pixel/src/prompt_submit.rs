@@ -98,9 +98,10 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
 
     let is_claude_runtime = matches!(provider, Some(crate::guard::Provider::Claude));
     if is_claude_runtime
-        && let Some(handoff) = start_claude_handoff(&payload, &cwd, worker_config()) {
-            emit_handoff(&handoff);
-        }
+        && let Some(handoff) = start_claude_handoff(&payload, &cwd, worker_config())
+    {
+        emit_handoff(&handoff);
+    }
 
     // Run independently: a missing embedding model must not prevent retrieval.
     let (tx, rx) = std::sync::mpsc::channel();
@@ -366,17 +367,16 @@ fn render_claude_runtime(
         payload.session_id.as_deref(),
         targets,
         crate::discover_root(cwd),
-    )
-        && let Some(packet) = crate::task_runtime::upsert_claude_task(
-            &root,
-            session_id,
-            &payload.prompt,
-            targets,
-            boundary.is_some(),
-        ) && let Some(packet_context) = packet.render_context(TASK_CONTEXT_BYTES)
-        {
-            notes.push(packet_context);
-        }
+    ) && let Some(packet) = crate::task_runtime::upsert_claude_task(
+        &root,
+        session_id,
+        &payload.prompt,
+        targets,
+        boundary.is_some(),
+    ) && let Some(packet_context) = packet.render_context(TASK_CONTEXT_BYTES)
+    {
+        notes.push(packet_context);
+    }
     if let Some(boundary) = boundary {
         notes.push(boundary_note(boundary));
     }

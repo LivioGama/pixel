@@ -293,6 +293,7 @@ pub fn score_signals(
 ///
 /// `activity_from_facts` is the `history.db.file_changes`-derived map once
 /// pixel-facts lands its API; until then pass `None` to use the git fallback.
+#[allow(clippy::too_many_arguments)] // Coordinates independent signal sources; changing this public API would ripple to callers.
 pub fn compute_signals(
     runner: &GitRunner,
     session_store: Option<&Store>,
@@ -639,10 +640,7 @@ mod tests {
         // dilute the 1.0 denominator of real candidates (the closed-world
         // claim held), and it never changes tier membership (tiers are fixed
         // before reranking, in `rerank::rerank`).
-        let candidates = vec![
-            "src/auth.rs".to_string(),
-            "src/api.rs".to_string(),
-        ];
+        let candidates = vec!["src/auth.rs".to_string(), "src/api.rs".to_string()];
         // `src/hot_lib.rs` is NOT in the candidate set but has a huge
         // in-degree.
         let fan_in_raw: HashMap<String, u64> = [
@@ -692,10 +690,7 @@ mod tests {
             rrf_score: rrf,
             tier: tier.to_string(),
         };
-        let candidates = vec![
-            mk("src/auth.rs", 10.0, "P1"),
-            mk("src/api.rs", 1.0, "P1"),
-        ];
+        let candidates = vec![mk("src/auth.rs", 10.0, "P1"), mk("src/api.rs", 1.0, "P1")];
         let opts = SignalOptions {
             now_ms: 1_000_000_000_000,
             ..Default::default()

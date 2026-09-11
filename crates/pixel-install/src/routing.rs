@@ -214,7 +214,11 @@ fn shell_overlap(group: &Value, provider: Provider) -> bool {
 /// overlap that may coexist; every unknown command remains a routing blocker.
 fn passive_cmux_codex_feed(group: &Value, provider: Provider) -> bool {
     if provider != Provider::Codex
-        || !group.get("matcher").and_then(Value::as_str).unwrap_or("").is_empty()
+        || !group
+            .get("matcher")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .is_empty()
     {
         return false;
     }
@@ -440,7 +444,15 @@ fn configure(
         ));
     }
     for (event, verb, matcher) in [
-        ("PostToolUse", "post-tool-use", if provider == Provider::Claude { Some("Edit") } else { None }),
+        (
+            "PostToolUse",
+            "post-tool-use",
+            if provider == Provider::Claude {
+                Some("Edit")
+            } else {
+                None
+            },
+        ),
         ("SessionStart", "session-start", None),
         ("UserPromptSubmit", "prompt-submit", None),
         (

@@ -135,7 +135,7 @@ pub fn render_crux(out: &mut String, crux: &[(u32, &str)]) {
         // Highlight the logic-bearing line; keep `line` as a retrieval hint
         // (the fingerprint is the true anchor, surfaced by whoever loaded the
         // crux from the graph store).
-        let _ = write!(out, "    crux:{line} {text}\n");
+        let _ = writeln!(out, "    crux:{line} {text}");
     }
 }
 
@@ -159,20 +159,29 @@ pub fn crux_lines_from_body(body: &str, threshold: i64) -> Vec<(u32, String)> {
             }
             let mut score = 0i64;
             let guard = [
-                "if ", "else if", "while ", "for ", "match ", "catch",
-                "when ", "guard", "assert", "check", "ensure", "validate",
+                "if ", "else if", "while ", "for ", "match ", "catch", "when ", "guard", "assert",
+                "check", "ensure", "validate",
             ];
             if guard.iter().any(|w| t.contains(w)) {
                 score += 3;
             }
             let bail = [
-                "return ", "break;", "continue;", "throw ", "panic!",
-                "unwrap", "expect", "abort", "exit(",
+                "return ",
+                "break;",
+                "continue;",
+                "throw ",
+                "panic!",
+                "unwrap",
+                "expect",
+                "abort",
+                "exit(",
             ];
             if bail.iter().any(|w| t.contains(w)) || t.ends_with('?') {
                 score += 3;
             }
-            let mut_pats = ["=", "return ", "+=", "-=", "*=", "/=", "push", "insert", "remove", "set", "append"];
+            let mut_pats = [
+                "=", "return ", "+=", "-=", "*=", "/=", "push", "insert", "remove", "set", "append",
+            ];
             if mut_pats.iter().any(|w| t.contains(w)) {
                 score += 3;
             }

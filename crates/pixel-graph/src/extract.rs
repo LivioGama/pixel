@@ -995,18 +995,17 @@ fn walk_generic(w: &mut Walker, node: Node, depth: usize) {
     let mut pushed = false;
 
     // Symbols: declarations and definitions carry a name we can qualify.
-    if kind.ends_with("_declaration") || kind.ends_with("_definition") {
-        if let Some((sym_kind, is_container)) = generic_symbol_kind(kind) {
-            if let Some(name) = generic_name(w, node) {
-                let q = w.qualify(&name, ".");
-                if is_container {
-                    w.push_symbol(name.clone(), q, sym_kind, node);
-                    w.stack.push(name);
-                    pushed = true;
-                } else {
-                    w.push_symbol(name, q, sym_kind, node);
-                }
-            }
+    if (kind.ends_with("_declaration") || kind.ends_with("_definition"))
+        && let Some((sym_kind, is_container)) = generic_symbol_kind(kind)
+        && let Some(name) = generic_name(w, node)
+    {
+        let q = w.qualify(&name, ".");
+        if is_container {
+            w.push_symbol(name.clone(), q, sym_kind, node);
+            w.stack.push(name);
+            pushed = true;
+        } else {
+            w.push_symbol(name, q, sym_kind, node);
         }
     }
 
@@ -1037,25 +1036,37 @@ fn generic_symbol_kind(kind: &str) -> Option<(SymbolKind, bool)> {
     if !(kind.ends_with("_declaration") || kind.ends_with("_definition")) {
         return None;
     }
-    if kind.contains("import") || kind.contains("use") || kind.starts_with("namespace_use")
-        || kind.contains("attribute") || kind.contains("parameter")
-        || kind.contains("argument") || kind.starts_with("preproc")
-        || kind.contains("deinit") || kind.contains("typealias")
-        || kind.contains("associatedtype") || kind.contains("operator")
+    if kind.contains("import")
+        || kind.contains("use")
+        || kind.starts_with("namespace_use")
+        || kind.contains("attribute")
+        || kind.contains("parameter")
+        || kind.contains("argument")
+        || kind.starts_with("preproc")
+        || kind.contains("deinit")
+        || kind.contains("typealias")
+        || kind.contains("associatedtype")
+        || kind.contains("operator")
     {
         return None;
     }
-    if kind.contains("function") || kind.contains("method") || kind.contains("lambda")
+    if kind.contains("function")
+        || kind.contains("method")
+        || kind.contains("lambda")
         || kind.contains("closure")
     {
         return Some((SymbolKind::Function, false));
     }
-    if kind.contains("namespace") || kind.contains("module") || kind.contains("package")
+    if kind.contains("namespace")
+        || kind.contains("module")
+        || kind.contains("package")
         || kind.contains("library")
     {
         return Some((SymbolKind::Module, true));
     }
-    if kind.contains("class") || kind.contains("struct") || kind.contains("record")
+    if kind.contains("class")
+        || kind.contains("struct")
+        || kind.contains("record")
         || kind.contains("actor")
     {
         return Some((SymbolKind::Class, true));
@@ -1120,25 +1131,34 @@ fn generic_call(w: &mut Walker, node: Node) {
         .find_map(|f| node.child_by_field_name(f));
     if let Some(e) = expr {
         match e.kind() {
-            "identifier" | "simple_identifier" | "name" | "type_identifier"
-            | "dotted_name" | "qualified_name" | "namespace_name"
-            | "escaped_identifier" | "variable" => {
+            "identifier" | "simple_identifier" | "name" | "type_identifier" | "dotted_name"
+            | "qualified_name" | "namespace_name" | "escaped_identifier" | "variable" => {
                 callee = Some(w.text(e));
                 receiver = ["receiver", "object", "scope", "target"]
                     .iter()
                     .find_map(|f| node.child_by_field_name(f))
                     .map(|r| w.text(r));
             }
-            k if k.ends_with("_expression") || k.ends_with("_selector")
-                || k.contains("member") || k.contains("attribute")
-                || k.contains("index") || k.contains("access")
-            => {
+            k if k.ends_with("_expression")
+                || k.ends_with("_selector")
+                || k.contains("member")
+                || k.contains("attribute")
+                || k.contains("index")
+                || k.contains("access") =>
+            {
                 let pos_name = ["property", "field", "name", "attribute", "member"]
                     .iter()
                     .find_map(|f| e.child_by_field_name(f));
-                let pos_recv = ["object", "operand", "scope", "expression", "value", "target"]
-                    .iter()
-                    .find_map(|f| e.child_by_field_name(f));
+                let pos_recv = [
+                    "object",
+                    "operand",
+                    "scope",
+                    "expression",
+                    "value",
+                    "target",
+                ]
+                .iter()
+                .find_map(|f| e.child_by_field_name(f));
                 callee = pos_name.map(|n| w.text(n));
                 receiver = pos_recv.map(|r| w.text(r));
             }
@@ -1147,7 +1167,9 @@ fn generic_call(w: &mut Walker, node: Node) {
     }
     // php `scoped_call_expression` members a namelessqualified path; fall back
     // to dots in member name.
-    if callee.is_none() && let Some(t) = node.child_by_field_name("target") {
+    if callee.is_none()
+        && let Some(t) = node.child_by_field_name("target")
+    {
         callee = Some(w.text(t));
     }
     if let (Some(c), r) = (callee, receiver) {

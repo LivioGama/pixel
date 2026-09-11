@@ -116,7 +116,9 @@ fn file_order_from_response(resp: &Response) -> Vec<String> {
 /// across the lexical-search / resolve lanes.
 fn success_at_k(ranking: &[String], relevant: &HashSet<String>, k: usize) -> f64 {
     for path in ranking.iter().take(k) {
-        if relevant.contains(path) { return 1.0; }
+        if relevant.contains(path) {
+            return 1.0;
+        }
     }
     0.0
 }
@@ -126,9 +128,9 @@ fn success_at_k(ranking: &[String], relevant: &HashSet<String>, k: usize) -> f64
 /// match is one of its ground-truth relevant files, else unsolved (0). This is
 /// the correctness / success-rate axis for pixel's own resolve machinery —
 /// deterministic, no API, no agent, measured on identical inputs as the other lanes.
-fn resolve_success_rate(svc: &mut Service, qrels: &[(&'"'"'static str, Vec<String>)]) -> f64 {
+fn resolve_success_rate(svc: &mut Service, qrels: &[(&'static str, Vec<String>)]) -> f64 {
     let mut sum = 0.0;
-    for (q, relevant)in qrels {
+    for (q, relevant) in qrels {
         let rel_set: HashSet<String> = relevant.iter().cloned().collect();
         // `resolve` takes a phrase directly (concept-index engine), not a regex
         // alternation — pass the query string verbatim so the inputs match the
@@ -145,7 +147,7 @@ fn resolve_success_rate(svc: &mut Service, qrels: &[(&'"'"'static str, Vec<Strin
     sum / qrels.len() as f64
 }
 
-fn ndcg_at_k(ranking: &[String], relevant:&: &HashSet<String>, k: usize) -> f64 {
+fn ndcg_at_k(ranking: &[String], relevant: &HashSet<String>, k: usize) -> f64 {
     let mut dcg = 0.0;
     let mut idcg = 0.0;
     let rel_count = relevant.len();
@@ -291,14 +293,15 @@ fn bench(c: &mut Criterion) {
          hybrid search   = {hybrid:.3}  (5ch RRF + semantic S6)\n  \
          semantic ask    = {semantic:.3}  (potion-code-16M-v2 standalone)"
     );
+    eprintln!("resolve success-rate (correctness, P0·1): top-match-is-relevant binary,");
     eprintln!(
-        "resolve success-rate (correctness, P0·1): top-match-is-relevant binary,"
+        "  resolve (Engine-1 cascade) = {:.1}%  of tasks solved  ({:.2}/{})",
+        resolve_ok * 100.0,
+        resolve_ok,
+        suite.len()
     );
-    eprintln!("  resolve (Engine-1 cascade) = {:.1}%  of tasks solved  ({:.2}/{})", resolve_ok * 100.0, resolve_ok, suite.len());
-    eprintln!(
-        "  NOTE: m1_latency.rs latency gates are COST-only; correctness axis is this"
-    );
-    eprintln!("  success-rate lane (+ the agent-level A/B in the isolated harness)。"
+    eprintln!("  NOTE: m1_latency.rs latency gates are COST-only; correctness axis is this");
+    eprintln!("  success-rate lane (+ the agent-level A/B in the isolated harness).");
     use criterion::BenchmarkId;
     let mut ranked_grp = c.benchmark_group("ndcg10");
     ranked_grp.sample_size(10);
@@ -316,9 +319,11 @@ fn bench(c: &mut Criterion) {
     ranked_grp.bench_with_input(BenchmarkId::new("semantic_ask", 10), &semantic, |b, _| {
         b.iter(|| run_ndcg_ask(&root, &suite, 10))
     });
-    ranked_grp.bench_with_input(BenchmarkId::new("resolve_success_rate", 10), &resolve_ok, |b, _| {
-        b.iter(|| resolve_success_rate(&mut svc, &suite))
-    });
+    ranked_grp.bench_with_input(
+        BenchmarkId::new("resolve_success_rate", 10),
+        &resolve_ok,
+        |b, _| b.iter(|| resolve_success_rate(&mut svc, &suite)),
+    );
     ranked_grp.finish();
 }
 

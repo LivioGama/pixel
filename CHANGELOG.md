@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-11
+
 ### Security
 - Removed hardcoded personal email aliases from `resolve_account_alias` — the `--account` flag now accepts full email addresses only.
 - Scrubbed all personal emails from test fixtures (replaced with `@example.com`).
@@ -16,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Disclosed Hugging Face model download egress in README and NOTICE.
 
 ### Fixed
+- Facts-backed history queries now return lazy-ingest failures instead of silently serving stale results.
 - `install.sh`: atomic `mv` instead of in-place `cp` to avoid corrupting the code signature of a running binary on macOS.
 - `install.sh`: helpful error message when no releases exist (suggests `cargo install`).
 - Homebrew formula: now generated at release time with real SHA256 hashes, uploaded as a release asset. Removed stale `.github/pixel.rb` with placeholder hashes.

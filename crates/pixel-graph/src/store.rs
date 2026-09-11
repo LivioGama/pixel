@@ -269,8 +269,8 @@ fn score_crux_line(line: &str) -> (i64, Vec<&'static str>) {
     let mut reasons = Vec::new();
     // (a) guard / branch condition — control-flow that routes the logic.
     let guard_words = [
-        "if ", "else if", "while ", "for ", "match ", "catch", "when ",
-        "guard", "assert", "check", "ensure", "validate", "case ", "switch",
+        "if ", "else if", "while ", "for ", "match ", "catch", "when ", "guard", "assert", "check",
+        "ensure", "validate", "case ", "switch",
     ];
     for w in guard_words {
         if t.contains(w) {
@@ -280,7 +280,17 @@ fn score_crux_line(line: &str) -> (i64, Vec<&'static str>) {
         }
     }
     // early-return / bail — leaves the body before the fall-through path.
-    let bail_pat = ["return ", "break;", "continue;", "throw ", "panic!", "unwrap", "expect", "abort", "exit("];
+    let bail_pat = [
+        "return ",
+        "break;",
+        "continue;",
+        "throw ",
+        "panic!",
+        "unwrap",
+        "expect",
+        "abort",
+        "exit(",
+    ];
     for b in bail_pat {
         if t.contains(b) {
             score += 3;
@@ -297,7 +307,9 @@ fn score_crux_line(line: &str) -> (i64, Vec<&'static str>) {
     //     Mutations are one of the three crux categories (guards, mutations,
     //     early-returns) per P2·3, so a bare mutation line clears the default
     //     threshold (3) on its own — like a lone guard or lone early-return.
-    let mut_pat = ["=", "return ", "+=", "-=", "*=", "/=", "push", "insert", "remove", "set", "append"];
+    let mut_pat = [
+        "=", "return ", "+=", "-=", "*=", "/=", "push", "insert", "remove", "set", "append",
+    ];
     for m in mut_pat {
         if t.contains(m) {
             score += 3;
@@ -330,7 +342,6 @@ pub fn extract_crux(body: &str, threshold: i64) -> Vec<CruxLine> {
         })
         .collect()
 }
-
 
 pub struct GraphStore {
     conn: Connection,
@@ -820,7 +831,9 @@ impl GraphStore {
     pub fn concept_count(&self) -> Result<u64> {
         Ok(self
             .conn
-            .query_row("SELECT COUNT(*) FROM concepts", [], |r| r.get::<_, i64>(0).map(|v| v as u64))?)
+            .query_row("SELECT COUNT(*) FROM concepts", [], |r| {
+                r.get::<_, i64>(0).map(|v| v as u64)
+            })?)
     }
 
     /// The stored concept extractor version, if any.
@@ -992,18 +1005,22 @@ impl GraphStore {
     }
 
     pub fn counts(&self) -> Result<(u64, u64, u64, u64)> {
-        let files: u64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get::<_, i64>(0).map(|v| v as u64))?;
+        let files: u64 = self.conn.query_row("SELECT COUNT(*) FROM files", [], |r| {
+            r.get::<_, i64>(0).map(|v| v as u64)
+        })?;
         let symbols: u64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get::<_, i64>(0).map(|v| v as u64))?;
-        let edges: u64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM edges", [], |r| r.get::<_, i64>(0).map(|v| v as u64))?;
+            .query_row("SELECT COUNT(*) FROM symbols", [], |r| {
+                r.get::<_, i64>(0).map(|v| v as u64)
+            })?;
+        let edges: u64 = self.conn.query_row("SELECT COUNT(*) FROM edges", [], |r| {
+            r.get::<_, i64>(0).map(|v| v as u64)
+        })?;
         let unresolved: u64 =
             self.conn
-                .query_row("SELECT COUNT(*) FROM unresolved_calls", [], |r| r.get::<_, i64>(0).map(|v| v as u64))?;
+                .query_row("SELECT COUNT(*) FROM unresolved_calls", [], |r| {
+                    r.get::<_, i64>(0).map(|v| v as u64)
+                })?;
         Ok((files, symbols, edges, unresolved))
     }
 
@@ -1094,7 +1111,11 @@ impl GraphStore {
     /// the annotations whose `target` matches one of them. Callers attach
     /// these to the matching symbols (so a note follows its symbol through
     /// `resolve`/`targets` output).
-    pub fn annotations_for_symbols(&self, file_path: &str, names: &[&str]) -> Result<Vec<AnnotationRow>> {
+    pub fn annotations_for_symbols(
+        &self,
+        file_path: &str,
+        names: &[&str],
+    ) -> Result<Vec<AnnotationRow>> {
         if names.is_empty() {
             return Ok(Vec::new());
         }
@@ -1104,7 +1125,11 @@ impl GraphStore {
             Self::ANNOTATION_COLS
         );
         let mut p: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(file_path.to_string())];
-        p.extend(names.iter().map(|n| Box::new(n.to_string()) as Box<dyn rusqlite::ToSql>));
+        p.extend(
+            names
+                .iter()
+                .map(|n| Box::new(n.to_string()) as Box<dyn rusqlite::ToSql>),
+        );
         let mut stmt = self.conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();
         let rows = stmt.query_map(param_refs.as_slice(), Self::row_to_annotation)?;
@@ -1114,7 +1139,11 @@ impl GraphStore {
     /// Merge-notes for concept results: given a file's concept `norm`s, return
     /// the annotations whose `target` matches a norm. Callers attach these to
     /// the matching concepts in `targets` output.
-    pub fn annotations_for_norms(&self, file_path: &str, norms: &[&str]) -> Result<Vec<AnnotationRow>> {
+    pub fn annotations_for_norms(
+        &self,
+        file_path: &str,
+        norms: &[&str],
+    ) -> Result<Vec<AnnotationRow>> {
         // annotations are keyed by name/norm; reuse the symbol lookup since the
         // matching column is the same `target` column.
         self.annotations_for_symbols(file_path, norms)
@@ -1150,7 +1179,9 @@ impl GraphStore {
     pub fn annotation_count(&self) -> Result<u64> {
         Ok(self
             .conn
-            .query_row("SELECT COUNT(*) FROM annotations", [], |r| r.get::<_, i64>(0).map(|v| v as u64))?)
+            .query_row("SELECT COUNT(*) FROM annotations", [], |r| {
+                r.get::<_, i64>(0).map(|v| v as u64)
+            })?)
     }
 }
 
@@ -1338,7 +1369,11 @@ mod tests {
                 && texts.iter().any(|t| t.contains("total += x.val"))
         );
         // No pure delimiters or comment-only lines leak through.
-        assert!(!texts.iter().any(|t| *t == "{" || *t == "}" || t.ends_with("comment")));
+        assert!(
+            !texts
+                .iter()
+                .any(|t| *t == "{" || *t == "}" || t.ends_with("comment"))
+        );
         // Fingerprint is content-stable: same text -> same hash, regardless of
         // which line number it sits at.
         // NOTE: the body line is `total += x.val;` (Rust semicolon), so the
@@ -1359,7 +1394,16 @@ mod tests {
         let mut store = GraphStore::open_in_memory().unwrap();
         let fid = store.replace_file("src/lib.rs", "oid1", "rust").unwrap();
         let sid = store
-            .insert_symbol(fid, "src/lib.rs#run#function", "run", "run", SymbolKind::Function, 1, 20, "fn run")
+            .insert_symbol(
+                fid,
+                "src/lib.rs#run#function",
+                "run",
+                "run",
+                SymbolKind::Function,
+                1,
+                20,
+                "fn run",
+            )
             .unwrap();
         store.set_symbol_crux(sid, &crux).unwrap();
         let back = store.symbol_crux_by_id(sid).unwrap();
@@ -1372,7 +1416,16 @@ mod tests {
         assert_eq!(found[0].fingerprint, anchor);
         // Re-index of the file clears the symbol's crux (no stale anchors).
         let sid2 = store
-            .insert_symbol(fid, "src/lib.rs#run2#function", "run2", "run2", SymbolKind::Function, 5, 6, "")
+            .insert_symbol(
+                fid,
+                "src/lib.rs#run2#function",
+                "run2",
+                "run2",
+                SymbolKind::Function,
+                5,
+                6,
+                "",
+            )
             .unwrap();
         let _ = sid2;
         let _ = back;
@@ -1418,11 +1471,18 @@ mod tests {
         // (keyed by file_path + stable target), NOT by the graph. A rebuild
         // (`replace_file`) or a deletions (`remove_file`) must never drop them.
         let mut store = GraphStore::open_in_memory().unwrap();
-        let fid = store
-            .replace_file("src/lib.rs", "oid1", "rust")
-            .unwrap();
+        let fid = store.replace_file("src/lib.rs", "oid1", "rust").unwrap();
         store
-            .insert_symbol(fid, "src/lib.rs#main#function", "main", "main", SymbolKind::Function, 1, 3, "fn main()")
+            .insert_symbol(
+                fid,
+                "src/lib.rs#main#function",
+                "main",
+                "main",
+                SymbolKind::Function,
+                1,
+                3,
+                "fn main()",
+            )
             .unwrap();
         store
             .set_annotation("src/lib.rs", "main", "top entry point")
@@ -1455,7 +1515,12 @@ mod tests {
 
         // Only an explicit delete_annotation is permitted to remove it.
         store.delete_annotation("src/lib.rs", "main").unwrap();
-        assert!(store.get_annotation("src/lib.rs", "main").unwrap().is_none());
+        assert!(
+            store
+                .get_annotation("src/lib.rs", "main")
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(store.annotation_count().unwrap(), 0);
     }
 }
