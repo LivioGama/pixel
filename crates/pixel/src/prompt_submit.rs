@@ -64,10 +64,10 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // Suppress stderr panics in hook mode so unexpected edge cases cleanly exit 0.
     std::panic::set_hook(Box::new(|_| {}));
 
-    // Allow opt-out via env var.
-    if let Ok(kill) = std::env::var("PIXEL_TASK_BOUNDARY")
-        && matches!(kill.as_str(), "0" | "false" | "off")
-    {
+    // The two features have independent opt-outs.
+    let task_context = !crate::env_flag_off("PIXEL_TASK_CONTEXT");
+    let task_boundary = !crate::env_flag_off("PIXEL_TASK_BOUNDARY");
+    if !task_context && !task_boundary {
         std::process::exit(0);
     }
 

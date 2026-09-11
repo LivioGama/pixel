@@ -113,15 +113,6 @@ pub(crate) fn claude_installed(home: &Path) -> bool {
     installed_agents(home).claude
 }
 
-fn skipped_agent_step(id: &str, summary: &str) -> InstallStep {
-    InstallStep {
-        id: id.into(),
-        status: CheckStatus::Green,
-        summary: summary.into(),
-        detail: Some("detected=false".into()),
-    }
-}
-
 /// Run `pixel install`. Idempotent: safe to re-run.
 ///
 /// The install is deliberately minimal: it deploys the agent system prompt

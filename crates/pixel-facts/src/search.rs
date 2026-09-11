@@ -313,7 +313,7 @@ fn path_search(store: &FactsStore, units: &[String], limit: usize) -> Result<Vec
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5)?,
-                        r.get(6)?,
+                        r.get::<_, i64>(6)? as u64,
                     ))
                 },
             )
@@ -383,7 +383,7 @@ fn diff_search(store: &FactsStore, units: &[String], limit: usize) -> Result<Vec
                         r.get(2)?,
                         r.get(3)?,
                         r.get(4)?,
-                        r.get(5)?,
+                        r.get::<_, i64>(5)? as u64,
                         r.get(6)?,
                         r.get(7)?,
                     ))

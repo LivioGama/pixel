@@ -823,12 +823,16 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
         // the rewrite. By checking rewrite first, we ensure the rewrite takes
         // priority over the advisory — the rewrite IS the resolution.
         if idx_root.is_some()
-            && let Some(rewritten) = try_rewrite_bash(cmd, &cwd)
+            && let Some(original) = tool_input.get("command").and_then(Value::as_str)
+            && let Some(rewritten) = crate::search_compat::rewrite(original, &cwd)
         {
             // Read-only search rewrites are semantically equivalent, so
             // transparently replace the input and let the normal tool
             // permission flow continue.
-            allow_rewrite(&rewritten);
+            let mut updated = Value::Object(tool_input.clone());
+            updated["command"] = Value::String(rewritten);
+            print!("{}", rewrite_json(Provider::Claude, updated));
+            std::process::exit(0);
         }
 
         // ADVISORY TIER (only if no rewrite applied): scoping advisory

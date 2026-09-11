@@ -36,11 +36,8 @@ struct PostCompactionPayload {
 /// Entry point for `pixel hook post-compaction`. Reads the PostCompaction
 /// payload from stdin. Never returns an `Err` as exit 1 — every failure
 /// path is a silent exit 0 (compaction proceeds normally).
-pub fn run() -> ! {
-    // Allow opt-out via env var.
-    if let Ok(kill) = std::env::var("PIXEL_POST_COMPACTION")
-        && matches!(kill.as_str(), "0" | "false" | "off")
-    {
+pub fn run(provider: Option<crate::guard::Provider>) -> ! {
+    if crate::env_flag_off("PIXEL_POST_COMPACTION") {
         std::process::exit(0);
     }
 
