@@ -17,6 +17,7 @@ tree-sitter-ruby = "0.23"
 tree-sitter-go = "0.23"
 tree-sitter-java = "0.23"
 tree-sitter-python = "0.25"
+tree-sitter-ruby = "0.23"
 rayon = "1"
 xxhash-rust = { workspace = true }
 serde = { version = "1", features = ["derive"] }
