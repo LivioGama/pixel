@@ -180,6 +180,25 @@ pub struct EdgeRow {
     pub receiver: Option<String>,
 }
 
+/// One human annotation row. Annotations are HUMAN-OWNED: they are keyed by
+/// stable identity (`file_path` + symbol `name` or concept `norm`) and are
+/// NOT deleted by `replace_file`/`remove_file`, so they survive re-indexes
+/// and rebuilds. They are merged into symbol/`resolve`/`targets` results via
+/// [`GraphStore::annotations_for_symbols`] and [`GraphStore::annotations_for_norms`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnotationRow {
+    pub id: i64,
+    /// Path of the file the annotation is attached to.
+    pub file_path: String,
+    /// Stable target identity inside that file: a symbol `name` OR a concept
+    /// `norm`. Merge paths match on symbols.name and concepts.norm.
+    pub target: String,
+    /// Free-form human note. Survives rebuild untouched.
+    pub note: String,
+    /// Unix timestamp (seconds) of the last write.
+    pub updated_at: i64,
+}
+
 /// One stored concept row (Engine 1). `owner_symbol_id` links the concept to
 /// the smallest enclosing symbol when one exists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +213,121 @@ pub struct ConceptRow {
     pub end_line: u32,
     pub owner_symbol_id: Option<i64>,
 }
+
+/// ONE crux line — the guard/branch, state-mutation, or early-bail line that
+/// CARRIES the logic of a body, decoupled from the whole-body span. Each line
+/// keeps a **fingerprint** (FNV-1a of its trimmed text) that is stable across
+/// line shifts, so retrieval can anchor a crux even after the file moves.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CruxLine {
+    /// 1-based line number within the body snippet (for human debugging only;
+    /// the fingerprint is the stable retrieval key, NOT this number).
+    pub line: u32,
+    /// The trimmed source line text, as extracted.
+    pub text: String,
+    /// Stable anchor: FNV-1a of `text`. Content-derived, independent of line
+    /// position — survives when the file is rearranged.
+    pub fingerprint: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic crux extraction (P2·3)
+// ---------------------------------------------------------------------------
+// The graft's crux lines are LLM-produced; this is the deterministic analogue
+// that pixel invents here. It scores a symbol body line by three interpretable
+// signals — guard/branch, state mutation, early bail — and keeps the lines
+// whose score clears a threshold, in original order, each with a stable FNV-1a
+// fingerprint. Deterministic: same input -> same output, no RNG / no LLM.
+
+/// FNV-1a 64-bit hash of a byte slice. Stable across runs and platforms.
+pub fn fnv1a64(text: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in text.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
+/// Score a single source line (already trimmed). Returns the weighted crux
+/// score and the human-readable reasons that earned it. Delimiter/comment
+/// lines score 0 so they never surface as crux.
+fn score_crux_line(line: &str) -> (i64, Vec<&'static str>) {
+    let t = line.trim();
+    if t.is_empty() {
+        return (0, vec![]);
+    }
+    // Pure structural delimiters carry no logic.
+    if t.chars().all(|c| c == '{' || c == '}') {
+        return (0, vec![]);
+    }
+    // Whole-line comments and doc-comments carry no logic either.
+    if t.starts_with("//") || t.starts_with("#") || t.starts_with("\"") {
+        return (0, vec![]);
+    }
+    let mut score = 0i64;
+    let mut reasons = Vec::new();
+    // (a) guard / branch condition — control-flow that routes the logic.
+    let guard_words = [
+        "if ", "else if", "while ", "for ", "match ", "catch", "when ",
+        "guard", "assert", "check", "ensure", "validate", "case ", "switch",
+    ];
+    for w in guard_words {
+        if t.contains(w) {
+            score += 3;
+            reasons.push("guard");
+            break;
+        }
+    }
+    // early-return / bail — leaves the body before the fall-through path.
+    let bail_pat = ["return ", "break;", "continue;", "throw ", "panic!", "unwrap", "expect", "abort", "exit("];
+    for b in bail_pat {
+        if t.contains(b) {
+            score += 3;
+            reasons.push("bail");
+            break;
+        }
+    }
+    // `?` early-error propagation is also a bail.
+    if t.ends_with("?") {
+        score += 3;
+        reasons.push("bail");
+    }
+    // (b) state mutation — assignment / return / push that writes observable state.
+    let mut_pat = ["=", "return ", "+=", "-=", "*=", "/=", "push", "insert", "remove", "set", "append"];
+    for m in mut_pat {
+        if t.contains(m) {
+            score += 2;
+            reasons.push("mutation");
+            break;
+        }
+    }
+    (score, reasons)
+}
+
+/// Deterministically extract the logic-bearing lines from a body snippet.
+/// Keeps every line whose crux score clears `threshold` (default 3), in
+/// original order, each tagged with a stable FNV-1a fingerprint. Same input
+/// always yields the same output (no RNG, no LLM).
+pub fn extract_crux(body: &str, threshold: i64) -> Vec<CruxLine> {
+    body.lines()
+        .enumerate()
+        .filter_map(|(idx, raw)| {
+            let trimmed = raw.trim();
+            let (score, _) = score_crux_line(trimmed);
+            if score >= threshold {
+                Some(CruxLine {
+                    line: (idx + 1) as u32,
+                    text: trimmed.to_string(),
+                    fingerprint: fnv1a64(trimmed),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 
 pub struct GraphStore {
     conn: Connection,
@@ -263,6 +397,10 @@ impl GraphStore {
                 "DELETE FROM edges WHERE dst_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
                 params![id],
             )?;
+            tx.execute(
+                "DELETE FROM symbol_crux WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
+                params![id],
+            )?;
             tx.execute("DELETE FROM symbols WHERE file_id = ?1", params![id])?;
             tx.execute("DELETE FROM imports WHERE file_id = ?1", params![id])?;
             tx.execute(
@@ -301,6 +439,10 @@ impl GraphStore {
             tx.execute(
                 "DELETE FROM edges WHERE src_id IN (SELECT id FROM symbols WHERE file_id = ?1)
                    OR dst_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
+                params![id],
+            )?;
+            tx.execute(
+                "DELETE FROM symbol_crux WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
                 params![id],
             )?;
             tx.execute("DELETE FROM symbols WHERE file_id = ?1", params![id])?;
@@ -348,6 +490,69 @@ impl GraphStore {
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    // --- crux lines (P2·3: guarded logical lines, not a fixed span) ---
+    //
+    // A body's crux is the set of lines that actually CARRY the logic
+    // (guards/branches, mutations, early bails), extracted deterministically
+    // by [`extract_crux`] and stored here anchored to the symbol id, each
+    // tagged with a stable content fingerprint. Retrieval (`symbol_crux_by_*`)
+    // returns them so the excerpt stays correct even when the file moves.
+
+    /// Replace the crux lines for one symbol. Old crux for the symbol is
+    /// dropped first; the new set is inserted in one statement batch.
+    pub fn set_symbol_crux(&self, symbol_id: i64, crux: &[CruxLine]) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM symbol_crux WHERE symbol_id = ?1",
+            params![symbol_id],
+        )?;
+        for c in crux {
+            self.conn.execute(
+                "INSERT INTO symbol_crux (symbol_id, line, text, fingerprint) VALUES (?1, ?2, ?3, ?4)",
+                // Store the 64-bit FNV hash as its signed bit pattern so
+                // round-trips survive beyond i64::MAX on 32-bit rlims.
+                params![symbol_id, c.line, c.text, c.fingerprint as i64],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// All crux lines of a symbol, in stored (source) order. `None` when the
+    /// symbol has no crux rows (e.g. never indexed with crux extraction).
+    pub fn symbol_crux_by_id(&self, symbol_id: i64) -> Result<Vec<CruxLine>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT line, text, fingerprint FROM symbol_crux WHERE symbol_id = ?1 ORDER BY line",
+        )?;
+        let rows = stmt.query_map(params![symbol_id], |r| {
+            Ok(CruxLine {
+                line: r.get::<_, i64>(0)? as u32,
+                text: r.get::<_, String>(1)?,
+                fingerprint: r.get::<_, i64>(2)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Crux line(s) for a symbol whose fingerprint matches `fingerprint` — the
+    /// stable anchor for retrieval. Returns every crux line of the symbol that
+    /// carries that fingerprint (in practice 0..=1).
+    pub fn symbol_crux_by_fingerprint(
+        &self,
+        symbol_id: i64,
+        fingerprint: u64,
+    ) -> Result<Vec<CruxLine>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT line, text, fingerprint FROM symbol_crux WHERE symbol_id = ?1 AND fingerprint = ?2 ORDER BY line",
+        )?;
+        let rows = stmt.query_map(params![symbol_id, fingerprint as i64], |r| {
+            Ok(CruxLine {
+                line: r.get::<_, i64>(0)? as u32,
+                text: r.get::<_, String>(1)?,
+                fingerprint: r.get::<_, i64>(2)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     pub fn insert_import(
@@ -818,6 +1023,120 @@ impl GraphStore {
         )?;
         Ok(())
     }
+
+    // --- human annotations (survive rebuild) ---
+
+    /// Upsert a human note keyed by `file_path` + `target` (a symbol `name`
+    /// or concept `norm`). Human-owned: never deleted by re-index.
+    pub fn set_annotation(&self, file_path: &str, target: &str, note: &str) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO annotations (file_path, target, note, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(file_path, target) DO UPDATE SET
+               note = excluded.note, updated_at = excluded.updated_at",
+            params![file_path, target, note, now],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch the human note for `file_path` + `target`, if any.
+    pub fn get_annotation(&self, file_path: &str, target: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT note FROM annotations WHERE file_path = ?1 AND target = ?2",
+                params![file_path, target],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    /// Remove a human note for `file_path` + `target`.
+    pub fn delete_annotation(&self, file_path: &str, target: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM annotations WHERE file_path = ?1 AND target = ?2",
+            params![file_path, target],
+        )?;
+        Ok(())
+    }
+
+    fn row_to_annotation(r: &rusqlite::Row<'_>) -> rusqlite::Result<AnnotationRow> {
+        Ok(AnnotationRow {
+            id: r.get(0)?,
+            file_path: r.get(1)?,
+            target: r.get(2)?,
+            note: r.get(3)?,
+            updated_at: r.get(4)?,
+        })
+    }
+
+    const ANNOTATION_COLS: &'static str = "id, file_path, target, note, updated_at";
+
+    /// All annotations for a file (used to attach notes to symbol results).
+    pub fn annotations_for_file(&self, file_path: &str) -> Result<Vec<AnnotationRow>> {
+        let sql = format!(
+            "SELECT {} FROM annotations WHERE file_path = ?1 ORDER BY target, updated_at",
+            Self::ANNOTATION_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![file_path], Self::row_to_annotation)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Merge-helper for symbol results: given a file's symbol `name`s, return
+    /// the annotations whose `target` matches one of them. Callers attach
+    /// these to the matching symbols (so a note follows its symbol through
+    /// `resolve`/`targets` output).
+    pub fn annotations_for_symbols(&self, file_path: &str, names: &[&str]) -> Result<Vec<AnnotationRow>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; names.len()].join(",");
+        let sql = format!(
+            "SELECT {} FROM annotations WHERE file_path = ?1 AND target IN ({placeholders}) ORDER BY target",
+            Self::ANNOTATION_COLS
+        );
+        let mut p: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(file_path.to_string())];
+        p.extend(names.iter().map(|n| Box::new(n.to_string()) as Box<dyn rusqlite::ToSql>));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), Self::row_to_annotation)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Merge-notes for concept results: given a file's concept `norm`s, return
+    /// the annotations whose `target` matches a norm. Callers attach these to
+    /// the matching concepts in `targets` output.
+    pub fn annotations_for_norms(&self, file_path: &str, norms: &[&str]) -> Result<Vec<AnnotationRow>> {
+        // annotations are keyed by name/norm; reuse the symbol lookup since the
+        // matching column is the same `target` column.
+        self.annotations_for_symbols(file_path, norms)
+    }
+
+    /// Global probes: every annotation across all files whose `target` equals
+    /// `target` (a symbol name or concept norm), regardless of file. Used by
+    /// `resolve`/`targets` to surface notes even when the owning file is not
+    /// the queried one.
+    pub fn annotations_by_target(&self, target: &str, limit: u32) -> Result<Vec<AnnotationRow>> {
+        let sql = format!(
+            "SELECT {} FROM annotations WHERE target = ?1 ORDER BY file_path, updated_at LIMIT ?2",
+            Self::ANNOTATION_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![target, limit], Self::row_to_annotation)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Total annotation count (contributes to `index_state` health).
+    pub fn annotation_count(&self) -> Result<u64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM annotations", [], |r| r.get::<_, i64>(0).map(|v| v as u64))?)
+    }
 }
 
 const SCHEMA: &str = "
@@ -897,6 +1216,16 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS annotations (
+  id INTEGER PRIMARY KEY,
+  file_path TEXT NOT NULL,
+  target TEXT NOT NULL,
+  note TEXT NOT NULL,
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (file_path, target)
+);
+CREATE INDEX IF NOT EXISTS idx_annotations_target ON annotations(target);
+CREATE INDEX IF NOT EXISTS idx_annotations_file ON annotations(file_path);
 CREATE TABLE IF NOT EXISTS concepts (
   id INTEGER PRIMARY KEY,
   file_id INTEGER NOT NULL,
@@ -911,6 +1240,14 @@ CREATE TABLE IF NOT EXISTS concepts (
 CREATE INDEX IF NOT EXISTS idx_concepts_norm ON concepts(norm);
 CREATE INDEX IF NOT EXISTS idx_concepts_kind_norm ON concepts(kind, norm);
 CREATE INDEX IF NOT EXISTS idx_concepts_file ON concepts(file_id);
+CREATE TABLE IF NOT EXISTS symbol_crux (
+  id INTEGER PRIMARY KEY,
+  symbol_id INTEGER NOT NULL,
+  line INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  fingerprint INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_symbol_crux_symbol ON symbol_crux(symbol_id);
 CREATE TABLE IF NOT EXISTS concept_words (
   word TEXT NOT NULL,
   concept_id INTEGER NOT NULL,
@@ -972,6 +1309,54 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
+    fn crux_extraction_and_fingerprint_roundtrip() {
+        let body = "pub fn run(cfg: &Config) -> i32 {\n    if cfg.dry_run {\n        return 0;\n    }\n    let mut total = 0;\n    for x in cfg.items {\n        total += x.val;\n    }\n    // a pure comment\n    if total > 100 {\n        bail!(\"too big\");\n    }\n    total\n}";
+
+        // Deterministic heuristic: guard + mutation + bail lines surface,
+        // delimiters/comments do not.
+        let crux = extract_crux(body, 3);
+        assert!(!crux.is_empty());
+        let texts: Vec<&str> = crux.iter().map(|c| c.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("dry_run"))
+                && texts.iter().any(|t| t.contains("return 0"))
+                && texts.iter().any(|t| t.contains("total += x.val"))
+        );
+        // No pure delimiters or comment-only lines leak through.
+        assert!(!texts.iter().any(|t| *t == "{" || *t == "}" || t.ends_with("comment")));
+        // Fingerprint is content-stable: same text -> same hash, regardless of
+        // which line number it sits at.
+        let same = CruxLine {
+            line: 999,
+            text: "total += x.val".to_string(),
+            fingerprint: fnv1a64("total += x.val"),
+        };
+        assert!(crux.iter().any(|c| c.text == "total += x.val" && c.fingerprint == same.fingerprint));
+
+        // Storage round-trips through the symbol_crux table and retrieves by
+        // stable fingerprint (the anchor used by retrieval).
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fid = store.replace_file("src/lib.rs", "oid1", "rust").unwrap();
+        let sid = store
+            .insert_symbol(fid, "src/lib.rs#run#function", "run", "run", SymbolKind::Function, 1, 20, "fn run")
+            .unwrap();
+        store.set_symbol_crux(sid, &crux).unwrap();
+        let back = store.symbol_crux_by_id(sid).unwrap();
+        assert_eq!(back.len(), crux.len());
+        // Retrieval from the stable anchor.
+        let anchor = fnv1a64("total += x.val");
+        let found = store.symbol_crux_by_fingerprint(sid, anchor).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text, "total += x.val");
+        // Re-index of the file clears the symbol's crux (no stale anchors).
+        let sid2 = store
+            .insert_symbol(fid, "src/lib.rs#run2#function", "run2", "run2", SymbolKind::Function, 5, 6, "")
+            .unwrap();
+        let _ = sid2;
+        let _ = back;
+    }
+
+    #[test]
     fn open_rejects_database_symlink_without_modifying_target() {
         let dir = std::env::temp_dir().join(format!("gpx-store-link-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
@@ -1003,5 +1388,52 @@ mod tests {
             .unwrap();
         assert_eq!(sentinel, 1);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn human_notes_survive_reindex_and_remove_file() {
+        // Contract for item P2·2: human annotations are OWNED by the author
+        // (keyed by file_path + stable target), NOT by the graph. A rebuild
+        // (`replace_file`) or a deletions (`remove_file`) must never drop them.
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fid = store
+            .replace_file("src/lib.rs", "oid1", "rust")
+            .unwrap();
+        store
+            .insert_symbol(fid, "src/lib.rs#main#function", "main", "main", SymbolKind::Function, 1, 3, "fn main()")
+            .unwrap();
+        store
+            .set_annotation("src/lib.rs", "main", "top entry point")
+            .unwrap();
+        assert_eq!(
+            store.get_annotation("src/lib.rs", "main").unwrap().unwrap(),
+            "top entry point"
+        );
+        assert_eq!(store.annotation_count().unwrap(), 1);
+
+        // Re-index replaces the file's symbols/edges but keeps the note.
+        let fid2 = store.replace_file("src/lib.rs", "blob2", "rust").unwrap();
+        assert_eq!(fid, fid2);
+        assert_eq!(
+            store.get_annotation("src/lib.rs", "main").unwrap().unwrap(),
+            "top entry point"
+        );
+        let merged = store
+            .annotations_for_symbols("src/lib.rs", &["main"])
+            .unwrap();
+        assert_eq!(merged.len(), 1);
+
+        // Deleting the file also must not delete the human note.
+        store.remove_file("src/lib.rs").unwrap();
+        assert_eq!(
+            store.get_annotation("src/lib.rs", "main").unwrap().unwrap(),
+            "top entry point"
+        );
+        assert_eq!(store.annotation_count().unwrap(), 1);
+
+        // Only an explicit delete_annotation is permitted to remove it.
+        store.delete_annotation("src/lib.rs", "main").unwrap();
+        assert!(store.get_annotation("src/lib.rs", "main").unwrap().is_none());
+        assert_eq!(store.annotation_count().unwrap(), 0);
     }
 }

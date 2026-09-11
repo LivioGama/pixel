@@ -740,7 +740,8 @@ fn boundary_note(event: &BoundaryEvent) -> String {
     format!(
         "[PIXEL:TASK_BOUNDARY] Task boundary detected ({signal}, similarity {sim:.2}). \
          Previous task context: {summary}…\n\
-         Suggest the user run /compact before starting this new task; compaction is what actually frees the context.",
+         Suggest the user run /compact to free up context before proceeding with this new task. \
+         Do NOT attempt a mental reset yourself — let the CLI's real compaction do the work.",
         sim = event.similarity,
         summary = event.context_summary.chars().take(150).collect::<String>(),
     )

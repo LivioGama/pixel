@@ -3,6 +3,19 @@
 //!
 //! These are *rerankers*, never candidate channels: they reorder within a
 //! tier but never promote across tiers (protects the closed-world claim).
+//!
+//! P1-2 structural verification — RANK-BY-IN-DEGREE. The `fan_in` signal
+//! (in-degree / number of dependents per candidate) is complete AND
+//! wired end-to-end, but deliberately stays a *reranker*, not a candidate
+//! channel: it only multiplies the RRF score of files that ALREADY made the
+//! candidate set (see `rerank::rerank`: `1 + 0.20*fan_in_norm`). It
+//! never introduces a file that has only dependents but no lexical/graph
+//! evidence, and it never promotes across tiers — so it cannot break the
+//! closed-world claim by surfacing a structural hit outside the announced
+//! tier set. It is deterministic and already calculable from impact edges
+//! (`graph.db` `calls` edges — see `pixel-daemon::api::fan_in_counts`), so
+//! the structural claim is verified at this surface: complete as a reranker,
+//! and correctly closed-world as a candidate channel (it is not one).
 //! Everything here is deterministic — same repo state + session journal +
 //! error sink ⇒ byte-identical output.
 //!
@@ -72,6 +85,16 @@ pub struct SignalOptions {
     pub activity_weight: f64,
     /// `session_norm` coefficient (0.35).
     pub session_weight: f64,
+    /// `fan_in_norm` coefficient (0.20) — symbols with more dependents rank
+    /// higher.
+    ///
+    /// Deterministic, already calculable from impact edges (graph `calls`
+    /// in-degree per candidate file: `pixel-daemon::api::fan_in_counts`),
+    /// and — like every signal herein — applies ONLY as a rerank multiplier,
+    /// never as a candidate channel: a file with dependents but no
+    /// candidate-set membership is never introduced,and tier membership is
+    /// never changed (P0/P1/P2 are fixed before reranking).
+    pub fan_in_weight: f64,
     /// Multiplier applied when the query mentions test/spec (0.7).
     pub test_penalty: f64,
 }
@@ -86,6 +109,7 @@ impl Default for SignalOptions {
             session_window_ms: 24 * 60 * 60 * 1000,
             activity_weight: 0.15,
             session_weight: 0.35,
+            fan_in_weight: 0.20,
             test_penalty: 0.7,
         }
     }
@@ -100,6 +124,8 @@ pub struct SignalBundle {
     pub activity: HashMap<String, f64>,
     /// Normalized session + error-sink weight per path.
     pub session: HashMap<String, f64>,
+    /// Normalized fan-in (in-degree / dependents) per path.
+    pub fan_in: HashMap<String, f64>,
     /// Human-readable session reasons ("edited 12m ago").
     pub session_reasons: Vec<String>,
     /// Human-readable error-sink reasons ("matches live error #42").
@@ -189,6 +215,7 @@ pub fn score_signals(
     dirty_paths: &[String],
     session_events: &[SessionEvent],
     error_records: &[ErrorRecord],
+    fan_in_raw: &HashMap<String, u64>,
     candidates: &[String],
     opts: &SignalOptions,
 ) -> SignalBundle {
@@ -234,9 +261,27 @@ pub fn score_signals(
         .filter(|(p, _)| candidate_set.contains(p.as_str()))
         .collect();
 
+    // Fan-in (in-degree): restrict to the candidate set, then normalize by
+    // the max so the top candidate is 1.0 — same shape as `activity`.
+    //
+    // Restricting to `candidate_set` (same filter as `activity`/`combined`
+    // above) is what keeps fan-in a RERANKER and not a candidate channel:
+    // a high-in-degree file that is NOT a candidate never dilutes the
+    // 1.0 denominator, so no unseen file's structural weight can silently
+    // bend the ranking toward or against a candidate — the candidate set is
+    // fixed here and the structural signal only reorders within it. The
+    // closed-world claim (\"restrict reads/edits to the listed files\") therefore
+    // holds: fan-in introduces no new fileand promotes no path across tiers.
+    let fan_in: HashMap<String, f64> = fan_in_raw
+        .iter()
+        .filter(|(p, _)| candidate_set.contains(p.as_str()))
+        .map(|(p, v)| (p.clone(), *v as f64))
+        .collect();
+
     SignalBundle {
         activity: normalize(&activity),
         session: normalize(&combined),
+        fan_in: normalize(&fan_in),
         session_reasons: session_reasons(session_events, opts.now_ms, opts.session_window_ms),
         error_reasons,
     }
@@ -254,6 +299,7 @@ pub fn compute_signals(
     session_events: &[SessionEvent],
     activity_from_facts: Option<&HashMap<String, f64>>,
     dirty_paths: &[String],
+    fan_in_raw: &HashMap<String, u64>,
     candidates: &[String],
     opts: &SignalOptions,
 ) -> Result<SignalBundle, SignalError> {
@@ -270,6 +316,7 @@ pub fn compute_signals(
         dirty_paths,
         session_events,
         &error_records,
+        fan_in_raw,
         candidates,
         opts,
     ))
@@ -581,5 +628,109 @@ mod tests {
         assert_eq!(test_penalty_for("add tests"), 1.0);
         // Task does NOT mention tests → penalty applies.
         assert_eq!(test_penalty_for("refactor auth"), 0.7);
+    }
+
+    #[test]
+    fn fan_in_normalizes_over_candidate_set_and_ignores_external_hubs() {
+        // P1-2 structural verification — rank-by-in-degree. The fan_in
+        // signal is a RERANKER, not a candidate channel: it normalizes
+        // ONLY over the candidate set, so a high-in-degree file that is NOT a
+        // candidate (an external hub) can neither become a candidate nor
+        // dilute the 1.0 denominator of real candidates (the closed-world
+        // claim held), and it never changes tier membership (tiers are fixed
+        // before reranking, in `rerank::rerank`).
+        let candidates = vec![
+            "src/auth.rs".to_string(),
+            "src/api.rs".to_string(),
+        ];
+        // `src/hot_lib.rs` is NOT in the candidate set but has a huge
+        // in-degree.
+        let fan_in_raw: HashMap<String, u64> = [
+            ("src/auth.rs".into(), 3),
+            ("src/api.rs".into(), 1),
+            ("src/hot_lib.rs".into(), 9000),
+        ]
+        .into_iter()
+        .collect();
+        let opts = SignalOptions {
+            now_ms: 1_000_000_000_000,
+            ..Default::default()
+        };
+        let bundle = score_signals(
+            &HashMap::new(),
+            &[],
+            &[],
+            &[],
+            &fan_in_raw,
+            &candidates,
+            &opts,
+        );
+        // Only candidates survive the filter; the external hub is gone entirely.
+        assert!(bundle.fan_in.get("src/hot_lib.rs").is_none());
+        // Normalization is within-candidate-set: max(3)=1.0, 1/3≈0.333…
+        let auth = bundle.fan_in.get("src/auth.rs").copied().unwrap_or(0.0);
+        let api = bundle.fan_in.get("src/api.rs").copied().unwrap_or(0.0);
+        assert!((auth - 1.0).abs() < 1e-9);
+        assert!((api - (1.0 / 3.0)).abs() < 1e-9);
+        // Without the candidate-set filter, the hub's 9000 would have
+        // crushed every real candidate toward 0 (auth would be ≈0.0003).
+    }
+
+    #[test]
+    fn fan_in_is_wired_into_rerank_and_never_promotes_across_tiers() {
+        // P1-2 structural verification — RANK-BY-IN-DEGREE, wiring check.
+        // The `score_signals` test above proves fan_in is normalized over the
+        // candidate set; this test closes the OTHER half of the verification:
+        // that the reranker actually CONSUMES `SignalBundle.fan_in` (so the
+        // structural signal reaches the final score), and that consuming it
+        // cannot turn fan-in into a candidate channel (tiers stay fixed).
+        use crate::rerank::RankedCandidate;
+
+        let mk = |path: &str, rrf: f64, tier: &str| RankedCandidate {
+            id: 0,
+            path: path.to_string(),
+            rrf_score: rrf,
+            tier: tier.to_string(),
+        };
+        let candidates = vec![
+            mk("src/auth.rs", 10.0, "P1"),
+            mk("src/api.rs", 1.0, "P1"),
+        ];
+        let opts = SignalOptions {
+            now_ms: 1_000_000_000_000,
+            ..Default::default()
+        };
+        // auth has the most dependents (in-degree 3), api 1, hot_lib 9000
+        // but is NOT a candidate and must stay out (closed-world).
+        let fan_in_raw: HashMap<String, u64> = [
+            ("src/auth.rs".into(), 3),
+            ("src/api.rs".into(), 1),
+            ("src/hot_lib.rs".into(), 9000),
+        ]
+        .into_iter()
+        .collect();
+        let signals = score_signals(
+            &HashMap::new(),
+            &[],
+            &[],
+            &[],
+            &fan_in_raw,
+            &["src/auth.rs".to_string(), "src/api.rs".to_string()],
+            &opts,
+        );
+
+        let out = crate::rerank::rerank(candidates, &signals, |_| 1.0);
+        // auth (fan_in_norm 1.0) must outrank api (fan_in_norm ≈0.333):
+        // auth's 10.0 * (1 + 0.2*1.0) beats api's 1.0 * (1 + 0.2*(1/3)).
+        assert_eq!(out[0].path, "src/auth.rs");
+        // The structural multiplier is really in the score: auth keeps
+        // rrf_score 10.0, and after rerank it must be 10.0 * (1 + 0.2 * 1.0).
+        assert!((out[0].rrf_score - 10.0 * (1.0 + 0.2)).abs() < 1e-9);
+        // Both are still P1 — fan-in never promoted one across a tier.
+        for c in &out {
+            assert_eq!(c.tier, "P1");
+        }
+        // The external hub never surfaces as candidate or as a bonus.
+        assert!(signals.fan_in.get("src/hot_lib.rs").is_none());
     }
 }

@@ -61,6 +61,12 @@ pub fn lang_of(path: &str) -> Option<&'static str> {
         "py" => Some("python"),
         "cs" => Some("csharp"),
         "rb" | "rake" | "gemspec" | "ru" => Some("ruby"),
+        // Perfect-expansion languages driven by the generic node-kind walker.
+        "php" => Some("php"),
+        "c" | "h" => Some("c"),
+        "swift" => Some("swift"),
+        "ex" | "exs" => Some("elixir"),
+        "lua" => Some("lua"),
         _ => None,
     }
 }
@@ -85,6 +91,11 @@ fn language_for(lang: &str) -> Option<Language> {
         "python" => tree_sitter_python::LANGUAGE.into(),
         "csharp" => tree_sitter_c_sharp::LANGUAGE.into(),
         "ruby" => tree_sitter_ruby::LANGUAGE.into(),
+        "php" => tree_sitter_php::LANGUAGE_PHP.into(),
+        "c" => tree_sitter_c::LANGUAGE.into(),
+        "swift" => tree_sitter_swift::LANGUAGE.into(),
+        "elixir" => tree_sitter_elixir::LANGUAGE.into(),
+        "lua" => tree_sitter_lua::LANGUAGE.into(),
         _ => return None,
     })
 }
@@ -110,7 +121,10 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         "python" => walk_python(&mut w, root, 0),
         "csharp" => walk_csharp(&mut w, root, 0),
         "ruby" => walk_ruby(&mut w, root, 0),
-        _ => return None,
+        // Any other wired language — or any future language added to the lang
+        // map — falls back to the heuristic node-kind walker. Coarse but better
+        // than absent.
+        _ => walk_generic(&mut w, root, 0),
     }
     let mut fx = FileExtraction {
         lang,
@@ -962,6 +976,217 @@ fn ruby_first_string_argument(w: &Walker, call: Node) -> Option<String> {
         }
     }
     if spec.is_empty() { None } else { Some(spec) }
+}
+
+// --- Generic heuristic walker -------------------------------------------------
+//
+// Languages without a hand-written walker (php, c, swift, elixir, lua,
+// and any future grammar wired into `language_for`) fall back to a node-kind
+// heuristic pass. We match node kinds ending in `_declaration`/`_definition`
+// for symbols、 call/invocation node kinds for call sites, and import/use/require
+// node kinds for import specs. It is deliberately coarse:s a less precise graph
+// beats an absent one. Field names and node kinds degrade gracefully to `None`.
+
+fn walk_generic(w: &mut Walker, node: Node, depth: usize) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let kind = node.kind();
+    let mut pushed = false;
+
+    // Symbols: declarations and definitions carry a name we can qualify.
+    if kind.ends_with("_declaration") || kind.ends_with("_definition") {
+        if let Some((sym_kind, is_container)) = generic_symbol_kind(kind) {
+            if let Some(name) = generic_name(w, node) {
+                let q = w.qualify(&name, ".");
+                if is_container {
+                    w.push_symbol(name.clone(), q, sym_kind, node);
+                    w.stack.push(name);
+                    pushed = true;
+                } else {
+                    w.push_symbol(name, q, sym_kind, node);
+                }
+            }
+        }
+    }
+
+    // Calls: any node kind mentioning call/invocation is a candidate site.
+    if kind.contains("call") || kind.contains("invocation") {
+        generic_call(w, node);
+    }
+
+    // Imports: import/use/require node kinds.
+    if kind.contains("import") || kind.starts_with("use_") || kind.starts_with("require") {
+        generic_import(w, node);
+    }
+
+    for child in each_child(node) {
+        walk_generic(w, child, depth + 1);
+    }
+    if pushed {
+        w.stack.pop();
+    }
+}
+
+/// Classify a `_declaration`/`_definition` node kind into a `SymbolKind`,
+/// plus whether the declared item nests further symbols (containers: class,
+/// struct, interface, trait, protocol, namespace, module, package). Bare
+/// declaration kinds (import/use/attribute/parameter/preproc/deinit/typealias…)
+/// are filtered out —— they inject neither symbols nor qualification.
+fn generic_symbol_kind(kind: &str) -> Option<(SymbolKind, bool)> {
+    if !(kind.ends_with("_declaration") || kind.ends_with("_definition")) {
+        return None;
+    }
+    if kind.contains("import") || kind.contains("use") || kind.starts_with("namespace_use")
+        || kind.contains("attribute") || kind.contains("parameter")
+        || kind.contains("argument") || kind.starts_with("preproc")
+        || kind.contains("deinit") || kind.contains("typealias")
+        || kind.contains("associatedtype") || kind.contains("operator")
+    {
+        return None;
+    }
+    if kind.contains("function") || kind.contains("method") || kind.contains("lambda")
+        || kind.contains("closure")
+    {
+        return Some((SymbolKind::Function, false));
+    }
+    if kind.contains("namespace") || kind.contains("module") || kind.contains("package")
+        || kind.contains("library")
+    {
+        return Some((SymbolKind::Module, true));
+    }
+    if kind.contains("class") || kind.contains("struct") || kind.contains("record")
+        || kind.contains("actor")
+    {
+        return Some((SymbolKind::Class, true));
+    }
+    if kind.contains("interface") {
+        return Some((SymbolKind::Interface, true));
+    }
+    if kind.contains("trait") || kind.contains("protocol") {
+        return Some((SymbolKind::Trait, true));
+    }
+    if kind.contains("enum") {
+        return Some((SymbolKind::Enum, false));
+    }
+    None
+}
+
+/// Best-effort symbol name for a declaration node. Prefers a `name` field,
+/// then a `declarator` field (C function definitions nested type declarator),
+/// then the first identifier-like named child (kotlin simple_identifier etc.).
+fn generic_name(w: &Walker, node: Node) -> Option<String> {
+    if let Some(name) = node.child_by_field_name("name") {
+        let t = w.text(name);
+        if !t.is_empty() && !t.contains(['(', ')', ',']) {
+            return Some(t);
+        }
+    }
+    if let Some(decl) = node.child_by_field_name("declarator") {
+        for child in each_child(decl) {
+            if let Some(n) = generic_name(w, child) {
+                return Some(n);
+            }
+        }
+    }
+    for child in each_child(node) {
+        match child.kind() {
+            "simple_identifier" | "identifier" | "type_identifier" | "name" => {
+                let t = w.text(child);
+                if !t.is_empty() && !t.contains(['(', ')', ',']) {
+                    return Some(t);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Extract a callee + optional receiver from a generic call/invocation node.
+/// Handles direct identifiers (`function`/`callee`/`name`/`method`/`target`
+/// fieldsh and member accesses (php `member_call_expression`, C `field_expression`
+/// member of a join, etc.).
+fn generic_call(w: &mut Walker, node: Node) {
+    // Elixir `call` nodes whose body is a `do_block` are function definitions,
+    // not invocation sites —— skip them.
+    if node.kind() == "call" && node.child_by_field_name("do_block").is_some() {
+        return;
+    }
+    let mut callee: Option<String> = None;
+    let mut receiver: Option<String> = None;
+    let expr = ["function", "callee", "name", "method", "target"]
+        .iter()
+        .find_map(|f| node.child_by_field_name(f));
+    if let Some(e) = expr {
+        match e.kind() {
+            "identifier" | "simple_identifier" | "name" | "type_identifier"
+            | "dotted_name" | "qualified_name" | "namespace_name"
+            | "escaped_identifier" | "variable" => {
+                callee = Some(w.text(e));
+                receiver = ["receiver", "object", "scope", "target"]
+                    .iter()
+                    .find_map(|f| node.child_by_field_name(f))
+                    .map(|r| w.text(r));
+            }
+            k if k.ends_with("_expression") || k.ends_with("_selector")
+                || k.contains("member") || k.contains("attribute")
+                || k.contains("index") || k.contains("access")
+            => {
+                let pos_name = ["property", "field", "name", "attribute", "member"]
+                    .iter()
+                    .find_map(|f| e.child_by_field_name(f));
+                let pos_recv = ["object", "operand", "scope", "expression", "value", "target"]
+                    .iter()
+                    .find_map(|f| e.child_by_field_name(f));
+                callee = pos_name.map(|n| w.text(n));
+                receiver = pos_recv.map(|r| w.text(r));
+            }
+            _ => {}
+        }
+    }
+    // php `scoped_call_expression` members a namelessqualified path; fall back
+    // to dots in member name.
+    if callee.is_none() && let Some(t) = node.child_by_field_name("target") {
+        callee = Some(w.text(t));
+    }
+    if let (Some(c), r) = (callee, receiver) {
+        w.push_call(c, r, node);
+    }
+}
+
+/// Best-effort import spec from import/use/require node kinds. Prefers source-like
+/// fields, then string/identifier children (php `require_expression`, kotlin
+/// `import_header`, swift `import_declaration`).
+fn generic_import(w: &mut Walker, node: Node) {
+    for field in ["source", "path", "module_name", "import_string", "name"] {
+        if let Some(src) = node.child_by_field_name(field) {
+            let spec = strip_quotes(&w.text(src));
+            if !spec.is_empty() {
+                w.push_import(spec, Vec::new());
+                return;
+            }
+        }
+    }
+    for child in each_child(node) {
+        match child.kind() {
+            "string" => {
+                let spec = strip_quotes(&w.text(child));
+                if !spec.is_empty() {
+                    w.push_import(spec, Vec::new());
+                    return;
+                }
+            }
+            "identifier" | "dotted_name" | "qualified_name" | "namespace_name" => {
+                let spec = w.text(child);
+                if !spec.is_empty() {
+                    w.push_import(spec, Vec::new());
+                    return;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

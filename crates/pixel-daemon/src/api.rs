@@ -546,6 +546,7 @@ impl Service {
             } => self.op_search(&pattern, limit, offset, paths.as_deref(), scope.as_deref()),
             Request::Targets { task, limit, max_tier, precision } => self.op_targets(&task, limit, max_tier.as_deref(), precision),
             Request::Symbol { name } => self.op_symbol(&name),
+            Request::Skeleton { file } => self.op_skeleton(&file),
             Request::Context { uid, budget_tokens } => self.op_context(&uid, budget_tokens),
             Request::Impact {
                 uid_or_name,
@@ -1076,6 +1077,30 @@ impl Service {
         let mut out = json!({
             "symbols": syms.iter().map(|s| symbol_json(s, &files)).collect::<Vec<_>>(),
             "envelope": envelope,
+        });
+        merge_build_info(&mut out, built);
+        Ok(out)
+    }
+
+    /// `pixel skeleton <file>` — all signatures in a file at ~10% of Read cost.
+    /// The user-supplied path is converted to repo-relative before lookup.
+    fn op_skeleton(&mut self, file: &str) -> Result<Value, String> {
+        let built = self.ensure_graph()?;
+        let store = self.graph.as_ref().unwrap();
+        let files = file_map(store)?;
+        // Normalize the user path to repo-relative (strip root, forward slashes).
+        let rel = normalize_file_arg(&self.root, file);
+        let file_row = store
+            .file_by_path(&rel)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no indexed file matching '{file}' (looked for '{rel}')"))?;
+        let syms = store
+            .symbols_in_file(file_row.id)
+            .map_err(|e| e.to_string())?;
+        let mut out = json!({
+            "file": file_row.path,
+            "lang": file_row.lang,
+            "symbols": syms.iter().map(|s| symbol_json(s, &files)).collect::<Vec<_>>(),
         });
         merge_build_info(&mut out, built);
         Ok(out)
@@ -1760,12 +1785,78 @@ impl Service {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
+        // Fan-in (in-degree): count incoming `calls` edges per candidate
+        // file via the graph.db escape hatch (`GraphStore::conn`). The graph
+        // is lazily built by `ensure_graph` earlier in the request; if it is
+        // unavailable, fan-in degrades to empty (the reranker then applies
+        // only activity + session + test penalty).
+        let fan_in_raw: std::collections::HashMap<String, u64> = self
+            .graph
+            .as_ref()
+            .map(|store| fan_in_counts(store.conn(), candidates))
+            .unwrap_or_default();
         let opts = SignalOptions {
             now_ms,
             ..Default::default()
         };
-        compute_signals(&runner, None, &[], None, &dirty, candidates, &opts).unwrap_or_default()
+        compute_signals(
+            &runner,
+            None,
+            &[],
+            None,
+            &dirty,
+            &fan_in_raw,
+            candidates,
+            &opts,
+        )
+        .unwrap_or_default()
     }
+}
+
+/// Count incoming `calls` edges per candidate file from the graph.db.
+/// `conn` is the `GraphStore::conn()` escape hatch. Returns a path → count
+/// map; paths with no incoming calls edges are absent (treated as 0 by the
+/// scorer). Any SQL failure degrades to an empty map (the reranker then
+/// ignores fan-in).
+fn fan_in_counts(
+    conn: &rusqlite::Connection,
+    candidates: &[String],
+) -> std::collections::HashMap<String, u64> {
+    use std::collections::HashMap;
+    let mut out: HashMap<String, u64> = HashMap::new();
+    if candidates.is_empty() {
+        return out;
+    }
+    // Build a positional IN-list of placeholders matching the candidate
+    // count; rusqlite's `params!` macro handles the binding.
+    let placeholders: Vec<&str> = (0..candidates.len()).map(|_| "?").collect();
+    let sql = format!(
+        "SELECT f.path, COUNT(*) AS fan_in \
+         FROM edges e \
+         JOIN symbols s ON e.dst_id = s.id \
+         JOIN files f ON s.file_id = f.id \
+         WHERE e.kind = 'calls' AND f.path IN ({}) \
+         GROUP BY f.path",
+        placeholders.join(", ")
+    );
+    let params: Vec<&dyn rusqlite::ToSql> =
+        candidates.iter().map(|c| c as &dyn rusqlite::ToSql).collect();
+    let Ok(mut rows) = conn.prepare(&sql) else {
+        return out;
+    };
+    let queried = rows
+        .query_map(params.as_slice(), |r| {
+            // COUNT(*) is an integer; rusqlite has no `FromSql` for `u64`,
+            // so read it as `i64` and cast (counts are non-negative).
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+        })
+        .ok();
+    if let Some(iter) = queried {
+        for row in iter.flatten() {
+            out.insert(row.0, row.1);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1998,6 +2089,7 @@ impl pixel_graph::concept_resolve::Reranker for EngineReranker {
         let pr_signals = pixel_rank::signals::SignalBundle {
             activity: signals.activity.clone(),
             session: signals.session.clone(),
+            fan_in: std::collections::HashMap::new(),
             session_reasons: signals.session_reasons.clone(),
             error_reasons: signals.error_reasons.clone(),
         };
@@ -2077,6 +2169,20 @@ fn file_map(store: &GraphStore) -> Result<HashMap<i64, String>, String> {
         .into_iter()
         .map(|f| (f.id, f.path))
         .collect())
+}
+
+/// Normalize a user-supplied file path to repo-relative form (strip root,
+/// forward slashes, no leading slash) — matching how `build.rs::rel_path`
+/// stores paths in the `files` table.
+fn normalize_file_arg(root: &Path, file: &str) -> String {
+    let p = Path::new(file);
+    match p.strip_prefix(root) {
+        Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+        Err(_) => {
+            // Not rooted — treat as already relative.
+            file.replace('\\', "/").trim_start_matches('/').to_string()
+        }
+    }
 }
 
 fn symbol_json(s: &SymbolRow, files: &HashMap<i64, String>) -> Value {
@@ -2468,6 +2574,7 @@ mod bridge {
                 end_line: i.end_line,
                 sig: i.sig.clone(),
                 snippet: i.snippet.clone(),
+                crux: Vec::new(),
             })
             .collect();
         if let Some((target, neighbors)) = mapped.split_first() {
@@ -2876,6 +2983,7 @@ mod tests {
             )
             .unwrap(),
             serde_json::from_value(json!({"op":"context","uid":"nope"})).unwrap(),
+            serde_json::from_value(json!({"op":"skeleton","file":"login.rs"})).unwrap(),
             serde_json::from_value(json!({"op":"targets","task":"fix login"})).unwrap(),
             serde_json::from_value(json!({"op":"processes"})).unwrap(),
             serde_json::from_value(json!({"op":"clusters"})).unwrap(),
@@ -2906,6 +3014,105 @@ mod tests {
             );
         }
         assert!(saw_failure, "battery must include at least one failing op");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `pixel skeleton <file>` must render every symbol's signature — kind +
+    /// sig — ordered by start_line, without pulling the file bodies in
+    /// (that's what makes it ~10% of a Read). The lang is surfaced so the
+    /// renderer can keep the `//` comment prefix mute per language.
+    #[test]
+    fn skeleton_renders_signatures_without_bodies() {
+        let root = tmpdir("skeleton-render");
+        std::fs::write(
+            root.join("mod.rs"),
+            concat!(
+                "//! module doc\n",
+                "pub struct Config { pub port: u16 }\n",
+                "pub fn bootstrap(seed: u64) -> u64 {\n",
+                "    seed + 1\n",
+                "}\n",
+                "mod inner { pub fn helper() -> i32 {\n",
+                "    42\n",
+                "} }\n",
+                "pub trait Render { fn draw(&self); }\n",
+            ),
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(Request::Skeleton {
+            file: "mod.rs".into(),
+        });
+        assert!(resp.ok, "{resp:?}");
+        assert_eq!(resp.validate(), Ok(()));
+
+        let data = resp.data();
+        // Path is echoed back repo-relative and lang is detected.
+        assert_eq!(data["file"], "mod.rs");
+        assert_eq!(
+            data["lang"].as_str(),
+            Some("rust"),
+            "skeleton must surface the detected lang: {:?}",
+            data
+        );
+        let syms = data["symbols"].as_array().cloned().unwrap_or_default();
+        assert!(!syms.is_empty(), "skeleton must find the indexed symbols");
+
+        // Ordered by start_line: writers appear before the trait.
+        let mut prev_line: i64 = -1;
+        for s in &syms {
+            let start = s["start_line"].as_i64().expect("every symbol has a start_line");
+            assert!(
+                start >= prev_line,
+                "skeleton symbols must be ordered by start_line: {s:?}"
+            );
+            prev_line = start;
+            // The skeleton contract: kind + sig (no body, no source text).
+            let kind = s["kind"].as_str().unwrap_or("");
+            let sig = s["sig"].as_str().map(str::trim).unwrap_or("");
+            assert!(!kind.is_empty(), "skeleton symbol missing kind: {s:?}");
+            assert!(!sig.is_empty(), "skeleton symbol missing sig: {s:?}");
+            // No `body`/source-text field survives on any skeleton symbol.
+            assert!(
+                !s.as_object().unwrap().contains_key("body"),
+                "skeleton must not emit bodies: {s:?}"
+            );
+            // The stable id and line span survive so the skeleton can be `context`
+            // drawn on via a follow-up op — that's the ~10%-cost value.
+            assert!(
+                !s["uid"].as_str().unwrap_or("").is_empty(),
+                "skeleton symbol missing stable uid: {s:?}"
+            );
+            assert!(
+                s["end_line"].as_i64().is_some(),
+                "skeleton symbol missing end_line span: {s:?}"
+            );
+        }
+        // Spot-check: the struct and fn are both signatures, not bodies.
+        let names: std::collections::HashSet<&str> = syms
+            .iter()
+            .filter_map(|s| s["name"].as_str())
+            .collect();
+        assert!(names.contains("bootstrap"), "skeleton must contain bootstrap: {names:?}");
+        assert!(names.contains("Config"), "skeleton must contain Config: {names:?}");
+        let bootstrap = syms
+            .iter()
+            .find(|s| s["name"] == "bootstrap")
+            .expect("bootstrap");
+        let sig = bootstrap["sig"].as_str().unwrap_or("");
+        assert!(
+            sig.contains("seed"),
+            "skeleton sig must be the signature, not the body: {sig:?}"
+        );
+        assert!(
+            !sig.contains("seed + 1"),
+            "skeleton sig must NOT leak the body expression: {sig:?}"
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -1341,7 +1341,7 @@ fn retrieval_guard_advisory(_cwd: &Path, idx_root: &Path) -> ! {
         "In an indexed directory, consider running `pixel targets` before searching the codebase."
             .into(),
         format!("  pixel targets \"<one-line task description>\" {root}"),
-        "That returns the P0/P1/P2 file list.".into(),
+        "That returns the P0/P1/P2 file list in <50ms. Work P0 first, then P1.".into(),
         "After scoping, use `pixel search` / `pixel resolve` for code search — not grep/glob."
             .into(),
         "Proceeding with the original retrieval call.".into(),
@@ -1582,7 +1582,7 @@ fn bypass_advisory_lines(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<Strin
                 let resolved = resolve(path, cwd)?;
                 if resolved.is_file() {
                     let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    if matches!(ext, "rs" | "ts" | "tsx" | "js" | "py" | "go" | "java" | "c" | "cpp" | "h" | "hpp" | "cs" | "rb") {
+                    if matches!(ext, "rs" | "ts" | "tsx" | "js" | "py" | "go" | "java" | "c" | "cpp" | "h" | "hpp" | "cs") {
                         return Some(vec![
                             "BLOCKED by pixel-guard: cat of source file — use pixel resolve or pixel search.".to_string(),
                             format!("  pixel resolve '<symbol>' {}  # jump to definition", root.display()),
@@ -1602,7 +1602,7 @@ fn bypass_advisory_lines(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<Strin
                 let resolved = resolve(path, cwd)?;
                 if resolved.is_file() {
                     let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    if matches!(ext, "rs" | "ts" | "tsx" | "js" | "py" | "go" | "java" | "c" | "cpp" | "h" | "hpp" | "cs" | "rb") {
+                    if matches!(ext, "rs" | "ts" | "tsx" | "js" | "py" | "go" | "java" | "c" | "cpp" | "h" | "hpp" | "cs") {
                         return Some(vec![
                             format!("BLOCKED by pixel-guard: {} of source file — use pixel search --context or Read.", bin),
                             format!("  pixel search '<pattern>' {} --context 10  # with more lines", root.display()),

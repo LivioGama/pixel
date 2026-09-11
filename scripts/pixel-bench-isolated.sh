@@ -125,6 +125,68 @@ with open(out, "w") as f:
 PY
 }
 
+# ----------------------------------------------------------------------
+# Success-rate (correctness) axis — P0·1.
+#
+# Everything above measures wall-clock latency, which is a COST gate, NOT a
+# correctness claim. Fast and wrong would still look fast. This lane asks the
+# deterministic correctness question directly: does pixel's `resolve` machinery
+# actually LAND ON the ground-truth file for a set of solve scenarios in THIS repo?
+# % tasks whose top resolved match is a ground-truth file = success-rate. No
+# claude, no API, no stochastic agent — fully deterministic, reusing the same
+# `$PIXEL_BIN` the A/B arms invoke. Agent-level solve-success (doctrine-on vs
+# doctrine-off) lives alongside in measured-performance.md; this lane is the pixel
+# machinery's own correctness number.
+
+# Ground-truth solve suite: query phrase -> expected repo-relative path(s).
+# Anchored in this workspace (files the qrels/`resolve` machinery should genuinely
+# answer, labeled from the code's structure, not from search output).
+RESOLVE_SUITE=(
+  "concept phrases resolve map|crates/pixel-graph/src/concept_resolve.rs"
+  "callers call target|reachability|crates/pixel-graph/src/impact.rs"
+  "syntax tree sitter symbols|crates/pixel-graph/src/extract.rs"
+  "imports dependency graph edge|crates/pixel-graph/src/imports.rs"
+  "working tree diff changes|crates/pixel-graph/src/changes.rs"
+  "symbol store index queries|crates/pixel-graph/src/store.rs"
+)
+
+# Run the deterministic resolve success-rate suite. Prints per-task solved/unsolved
+# and the overall success-rate('%%'); exits 0 regardless (measurement, not gate).
+run_resolve_success_rate() {
+  echo "=== RESOLVE SUCCESS-RATE (correctness axis, P0·1) ==="
+  local solved=0 total=0 hit_path
+  for entry in "${RESOLVE_SUITE[@]}"; do
+    local phrase="${entry%%|*}" expected="${entry#*|}"
+    total=$((total + 1))
+    local out json hit_path
+    out=$(cd "$REPO" &&
+           "$PIXEL_BIN" resolve --json "$phrase" 2>/dev/null )
+    # `pixel resolve --json` prints a JSON doc within a {"matches":[{..."path"...}]}
+    json=$(printf '%s' "$out")
+    hit_path=$(printf '%s' "$json" \
+      | python3 -c 'import json,sys
+try:
+  d=json.load(sys.stdin)
+  ms=d.get("matches") or []
+  print(ms[0].get("path","") if ms else "")
+except Exception:
+  print("")')
+    if [ "$hit_path" != "" ] && printf '%s' "$expected" | tr '|' '\n' \
+         | grep -Fxq "$hit_path"; then
+      solved=$((solved + 1))
+      echo "  $phrase -> $hit_path  ✓"
+    else
+      echo "  $phrase -> ${hit_path:-<no match>}  ✗ (expected $expected)"
+    fi
+  done
+  local pct
+  pct=$(awk -v s="$solved" -v t="$total" 'BEGIN{printf "%.1f%%", s/t*100}')
+  echo "  ---"
+  echo "  resolve success-rate: $solved/$total = $pct"
+  echo "  NOTE: the claude-latency numbers above are COST-only; this rate is where"
+  echo "  correctness (the point of P0·1) gets measured — read them together."
+}
+
 pixel_invocation_count() {
   python3 - "$OUTDIR/$1.json" << 'PY'
 import json, re, sys
@@ -215,3 +277,10 @@ for s in scenarios:
     delta = (mb - ma) / ma * 100 if ma else 0
     print(f"{s:<14}{ma/1000:>10.1f}s{mb/1000:>16.1f}s{delta:>+9.0f}%")
 PY
+
+echo ""
+echo "=== CORRECTNESS (P0·1: latency is COST-only; success-rate is the justification) ==="
+run_resolve_success_rate
+echo ""
+echo "Latency tables above = COST. Success-rate lane above = CORRECTNESS. Read"
+echo "them together — fast-and-wrong still passes all latency numbers."

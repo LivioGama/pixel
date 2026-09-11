@@ -11,6 +11,11 @@ use std::collections::HashMap;
 
 use crate::signals::SignalBundle;
 
+/// Fan-in (in-degree) rerank coefficient. Mirrors
+/// `SignalOptions::fan_in_weight` (0.20); `rerank` doesn't take
+/// `SignalOptions`, so the constant is duplicated here.
+const W_FANIN: f64 = 0.20;
+
 /// One candidate as produced by the fusion core before reranking.
 #[derive(Debug, Clone)]
 pub struct RankedCandidate {
@@ -26,7 +31,7 @@ pub struct RankedCandidate {
 }
 
 /// The rerank formula from PLAN.md:
-/// `final = rrf_score * (1 + 0.15*activity_norm + 0.35*session_norm) * penalty(path)`.
+/// `final = rrf_score * (1 + 0.15*activity_norm + 0.35*session_norm + 0.20*fan_in_norm) * penalty(path)`.
 ///
 /// `penalty` is a per-candidate multiplier (e.g. a test penalty that only
 /// applies to test paths when the task does NOT mention tests — see
@@ -43,13 +48,16 @@ where
 {
     let activity = &signals.activity;
     let session = &signals.session;
+    let fan_in = &signals.fan_in;
 
     let mut out: Vec<RankedCandidate> = candidates
         .into_iter()
         .map(|mut c| {
             let act = activity.get(&c.path).copied().unwrap_or(0.0);
             let ses = session.get(&c.path).copied().unwrap_or(0.0);
-            c.rrf_score = c.rrf_score * (1.0 + 0.15 * act + 0.35 * ses) * penalty(&c.path);
+            let fanin = fan_in.get(&c.path).copied().unwrap_or(0.0);
+            c.rrf_score =
+                c.rrf_score * (1.0 + 0.15 * act + 0.35 * ses + W_FANIN * fanin) * penalty(&c.path);
             c
         })
         .collect();

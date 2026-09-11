@@ -49,6 +49,20 @@
 //!
 //! Run with: cargo bench -p pixel-bench --bench m1_latency
 //! Fast gate-only run: cargo test -p pixel-bench --bench m1_latency
+//!
+//! ## Latency is a COST gate, NOT a correctness claim (per P0·1)
+//!
+//! Nothing in this file asserts that pixel *answers* anything correctly — it only
+//! gates how fast a warmed-up service answers on a trivial fixture. Fast and
+//! wrong would still pass every gate here. Thé correctness / success-rate axis
+//! lives next door in `ndcg_relevance.rs` (the `resolve_success_rate` lane:
+//! per-task binary "did the top resolved match hit a ground-truth file", % solved
+//! over the same qrels the NDCG lanes use), and at the agent level in the isolated
+//! bench harness (doctrine-on/doctrine-off solve-success A/B). If a regression
+//! ever makes pixel fast-but-wrong, the gates here go green while the success-rate
+//! lane goes red — read them together, never latte alone justify a claim.
+//!
+//! Run with: cargo bench -p pixel-bench --bench m1_latency
 
 use std::path::PathBuf;
 use std::time::Duration;

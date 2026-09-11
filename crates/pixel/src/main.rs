@@ -225,6 +225,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// All signatures in a file — the skeleton view at ~10% of Read cost.
+    Skeleton {
+        file: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Budget-fitted context for a symbol uid.
     Context {
         uid: String,
@@ -314,6 +322,9 @@ enum Command {
         path: PathBuf,
         #[arg(long)]
         json: bool,
+        /// Compact one-line summary for shell prompts / statuslines.
+        #[arg(long)]
+        statusline: bool,
     },
     /// Make a repository ready for agent work: index, graph, and warm daemon.
     Ready {
@@ -2877,6 +2888,29 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             })?;
             Ok(())
         }
+        Command::Skeleton { file, path, json } => {
+            let data = execute(&path, Request::Skeleton { file }, false)?;
+            finish_graph_cmd(data, json, |d| {
+                let syms = d.get("symbols")?.as_array()?;
+                let fname = d.get("file")?.as_str().unwrap_or("");
+                let lang = d.get("lang")?.as_str().unwrap_or("");
+                let mut output = format!("// {fname} [{lang}]\n");
+                if syms.is_empty() {
+                    output.push_str("// (no indexed symbols — run `pixel index .` first)\n");
+                } else {
+                    for s in syms {
+                        let kind = s.get("kind")?.as_str().unwrap_or("");
+                        let sig = s.get("sig")?.as_str().unwrap_or("");
+                        let line = s.get("start_line")?.as_u64().unwrap_or(0);
+                        if !sig.is_empty() {
+                            output.push_str(&format!("  L{line:>5}  {kind}  {sig}\n"));
+                        }
+                    }
+                }
+                Some(output)
+            })?;
+            Ok(())
+        }
         Command::Context {
             uid,
             path,
@@ -3064,7 +3098,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             print_data(&v, json)?;
             Ok(())
         }
-        Command::Status { path, json } => {
+        Command::Status { path, json, statusline } => {
             let mut data = execute(&path, Request::Status {}, false)?;
             // The daemon/service now attaches a rich `facts` block itself
             // (schema version, phase-A state, hunk/gram counts). Only fill in
@@ -3074,6 +3108,65 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 && let Some(facts) = facts_status(&path)
             {
                 data["facts"] = facts;
+            }
+            if statusline {
+                // Compact one-liner — size + freshness + enrichment, so a
+                // shell prompt/statusline shows staleness & coverage without
+                // ever needing an explicit `pixel doctor`:
+                //   `pixel: 285f 12k sym 45k edges 180/200 commits 90%diff fresh`
+                let files = data.get("index")
+                    .and_then(|i| i.get("base_files").and_then(Value::as_u64))
+                    .unwrap_or(0);
+                let (sym, edges) = match data.get("graph") {
+                    Some(g) if g.get("present").and_then(Value::as_bool).unwrap_or(false) => (
+                        g.get("symbols").and_then(Value::as_u64).unwrap_or(0),
+                        g.get("edges").and_then(Value::as_u64).unwrap_or(0),
+                    ),
+                    _ => (0, 0),
+                };
+                let fmt = |n: u64| -> String {
+                    if n >= 1000 { format!("{}k", n / 1000) } else { n.to_string() }
+                };
+                let mut line = format!(
+                    "pixel: {}f {} sym {} edges",
+                    fmt(files), fmt(sym), fmt(edges)
+                );
+                // Enrichment coverage (only when the facts db exists and has
+                // enough history to report a meaningful fraction): commits
+                // indexed + diff-text coverage %, plus the fresh/stale state.
+                if let Some(f) = data.get("facts") {
+                    if let (Some(ci), Some(tc)) = (
+                        f.get("commits_indexed").and_then(Value::as_u64),
+                        f.get("total_commits").and_then(Value::as_u64),
+                    ) {
+                        if tc > 0 {
+                            line.push_str(&format!(" {}/{}", ci, tc));
+                        }
+                        let covered = ci == tc;
+                        if let Some(pct) = f.get("diff_indexed_pct").and_then(Value::as_f64) {
+                            line.push_str(&format!(
+                                " {:.0}%diff",
+                                if covered {
+                                    // Full commit coverage implies the diff
+                                    // text is indexed too; report a clean 100%.
+                                    if pct >= 99.0 { 100.0 } else { pct }
+                                } else {
+                                    pct
+                                }
+                            ));
+                        }
+                    }
+                    let state = if f.get("fresh").and_then(Value::as_bool).unwrap_or(false) {
+                        "fresh"
+                    } else {
+                        "stale"
+                    };
+                    line.push_str(&format!(" {}", state));
+                } else {
+                    line.push_str(" ?facts");
+                }
+                write_stdout(&format!("{}\n", line))?;
+                return Ok(());
             }
             if json {
                 print_data(&data, true)?;

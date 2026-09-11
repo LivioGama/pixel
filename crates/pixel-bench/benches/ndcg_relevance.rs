@@ -107,7 +107,45 @@ fn file_order_from_response(resp: &Response) -> Vec<String> {
     order
 }
 
-fn ndcg_at_k(ranking: &[String], relevant: &HashSet<String>, k: usize) -> f64 {
+/// Success-rate (correctness axis), distinct from NDCG: 1.0 if any of the
+/// top-k results is a ground-truth relevant file, else 0.0. This is the "did
+/// we solve the task" binary per task — the axis P0·1 adds on top of (not instead
+/// of) retrieval quality. Where NDCG rewards how high in the ranking the relevant
+/// file lands, success-rate asks the sharper binary question: did hit numberk/#1
+/// actually answer (or not). Mean over tasks = % solved, directly comparable
+/// across the lexical-search / resolve lanes.
+fn success_at_k(ranking: &[String], relevant: &HashSet<String>, k: usize) -> f64 {
+    for path in ranking.iter().take(k) {
+        if relevant.contains(path) { return 1.0; }
+    }
+    0.0
+}
+
+/// Run the Engine-1 `resolve` lane (concept-index cascade rank) over the SAME
+/// qrels the NDCG lanes use, counting each task as solved (1) if the top resolved
+/// match is one of its ground-truth relevant files, else unsolved (0). This is
+/// the correctness / success-rate axis for pixel's own resolve machinery —
+/// deterministic, no API, no agent, measured on identical inputs as the other lanes.
+fn resolve_success_rate(svc: &mut Service, qrels: &[(&'"'"'static str, Vec<String>)]) -> f64 {
+    let mut sum = 0.0;
+    for (q, relevant)in qrels {
+        let rel_set: HashSet<String> = relevant.iter().cloned().collect();
+        // `resolve` takes a phrase directly (concept-index engine), not a regex
+        // alternation — pass the query string verbatim so the inputs match the
+        // semantic ground-truth labels the qrels are labeled from.
+        let resp = svc.handle(Op::Resolve {
+            phrase: q.to_string(),
+            limit: Some(10),
+        });
+        if resp.ok {
+            let order = file_order_from_response(&resp);
+            sum += success_at_k(&order, &rel_set, 1);
+        }
+    }
+    sum / qrels.len() as f64
+}
+
+fn ndcg_at_k(ranking: &[String], relevant:&: &HashSet<String>, k: usize) -> f64 {
     let mut dcg = 0.0;
     let mut idcg = 0.0;
     let rel_count = relevant.len();
@@ -217,6 +255,11 @@ fn bench(c: &mut Criterion) {
     let semantic = run_ndcg_ask(&root, &suite, 10);
     // Precision 1 lane: hybrid search (lexical RRF + semantic channel fused).
     let hybrid = run_ndcg(&mut svc, &suite, Some("hybrid"), 10);
+    // Correctness / success-rate axis (P0·1): doesthe resolve machinery actually
+    // *answer* the tasks, binary per task — not how high the relevant file ranks.
+    // The point this lane adds: latency (m1_latency.rs) is a COST gate, not a
+    // correctness claim. Success rate isthe justification.
+    let resolve_ok = resolve_success_rate(&mut svc, &suite);
 
     // Sanity: ranking must not DECREASE NDCG meaningfully vs unranked, and
     // must be > 0 (retrieval actually finds relevant files).
@@ -236,14 +279,26 @@ fn bench(c: &mut Criterion) {
         hybrid >= 0.0,
         "NDCG@10 hybrid = {hybrid:.3} — negative is impossible; hybrid lane is broken"
     );
+    assert!(
+        resolve_ok >= 0.0,
+        "resolve success-rate = {resolve_ok:.3} — negative is impossible; resolve lane is broken"
+    );
 
     eprintln!(
         "NDCG@10 (pixel-graph qrels, self-bench A/B):\n  \
          lexical unranked= {unranked:.3}\n  \
-         lexical ranked  = {ranked:.3}\n  \
+         lexical ranked   = {ranked:.3}\n  \
          hybrid search   = {hybrid:.3}  (5ch RRF + semantic S6)\n  \
          semantic ask    = {semantic:.3}  (potion-code-16M-v2 standalone)"
     );
+    eprintln!(
+        "resolve success-rate (correctness, P0·1): top-match-is-relevant binary,"
+    );
+    eprintln!("  resolve (Engine-1 cascade) = {:.1}%  of tasks solved  ({:.2}/{})", resolve_ok * 100.0, resolve_ok, suite.len());
+    eprintln!(
+        "  NOTE: m1_latency.rs latency gates are COST-only; correctness axis is this"
+    );
+    eprintln!("  success-rate lane (+ the agent-level A/B in the isolated harness)。"
     use criterion::BenchmarkId;
     let mut ranked_grp = c.benchmark_group("ndcg10");
     ranked_grp.sample_size(10);
@@ -260,6 +315,9 @@ fn bench(c: &mut Criterion) {
     });
     ranked_grp.bench_with_input(BenchmarkId::new("semantic_ask", 10), &semantic, |b, _| {
         b.iter(|| run_ndcg_ask(&root, &suite, 10))
+    });
+    ranked_grp.bench_with_input(BenchmarkId::new("resolve_success_rate", 10), &resolve_ok, |b, _| {
+        b.iter(|| resolve_success_rate(&mut svc, &suite))
     });
     ranked_grp.finish();
 }
