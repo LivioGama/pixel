@@ -165,14 +165,14 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     })
 }
 
-/// Copy the bundled Pixel agent system prompt to `~/.local/share/pixel/agent-prompt.md`.
-/// This file is injected into Claude workers via `--append-system-prompt-file` and
-/// can be used with Codex via `model_instructions_file`. The prompt instructs
-/// agents to use `pixel search`/`pixel resolve`/`pixel impact` instead of
-/// `grep`/`rg` for code discovery in indexed repositories.
+/// Copy the bundled Pixel agent system prompt to `~/.local/share/pixel/agent-prompt.md`
+/// and to `~/.pi/agent/APPEND_SYSTEM.md` (Pi reads this automatically, no flag needed).
+/// The prompt instructs agents to use `pixel search`/`pixel resolve`/`pixel impact`
+/// instead of `grep`/`rg` for code discovery in indexed repositories.
 fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let dest_dir = home.join(".local/share/pixel");
     let dest = dest_dir.join("agent-prompt.md");
+    let pi_dest = home.join(".pi/agent/APPEND_SYSTEM.md");
     if dry_run {
         return Ok(InstallStep {
             id: "agent-prompt".into(),
@@ -191,6 +191,11 @@ fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     if needs_write {
         fs::write(&dest, ASSET)?;
     }
+    // Deploy to Pi's APPEND_SYSTEM.md so pi reads it automatically.
+    if let Some(pi_parent) = pi_dest.parent() {
+        let _ = fs::create_dir_all(pi_parent);
+        let _ = fs::write(&pi_dest, ASSET);
+    }
     Ok(InstallStep {
         id: "agent-prompt".into(),
         status: CheckStatus::Green,
@@ -198,7 +203,7 @@ fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
             "{} agent-prompt.md",
             if needs_write { "deployed" } else { "verified" }
         ),
-        detail: Some(format!("path={}", dest.display())),
+        detail: Some(format!("path={} pi={}", dest.display(), pi_dest.display())),
     })
 }
 

@@ -18,6 +18,15 @@ tree-sitter-go = "0.23"
 tree-sitter-java = "0.23"
 tree-sitter-python = "0.25"
 tree-sitter-ruby = "0.23"
+# Generic-extractor expansion grammars (heuristic node-kind walker). Php, C,
+# Swift, Elixir and Lua ship `LANGUAGE: LanguageFn` constants compatible with our
+# tree-sitter 0.26 via `tree-sitter-language`. Kotlin's crate pins an older
+# tree-sitter (`>= 0.21, < 0.23`) and is thus incompatible —— excluded.
+tree-sitter-php = "0.24"
+tree-sitter-c = "0.24"
+tree-sitter-swift = "0.7"
+tree-sitter-elixir = "0.3"
+tree-sitter-lua = "0.5"
 rayon = "1"
 xxhash-rust = { workspace = true }
 serde = { version = "1", features = ["derive"] }

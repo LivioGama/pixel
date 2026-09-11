@@ -28,7 +28,7 @@ mod redact;
 mod ref_guard;
 mod runner;
 
-pub use discover::discover_root;
+pub use discover::{discover_root, discover_root_follow_submodules};
 pub use error::GitError;
 pub use redact::redact;
 pub use ref_guard::{end_of_options, validate_ref};

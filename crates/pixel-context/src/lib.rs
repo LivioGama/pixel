@@ -21,6 +21,10 @@ pub struct ContextItem {
     pub end_line: u32,
     pub sig: String,
     pub snippet: String,
+    /// The guarded logical lines (from P2·3), each `(line_number, trimmed_text)`.
+    /// Content-anchored, so they stay valid — and preferred over the fixed
+    /// span — when the file moves. Empty when no crux was extracted.
+    pub crux: Vec<(u32, String)>,
 }
 
 /// Output layer controlling how much detail to include.
@@ -104,6 +108,70 @@ pub fn render(items: &[ContextItem], layer: Layer) -> String {
     out
 }
 
+/// Surface crux lines (the guarded logical lines, from P2·3) in context
+/// rendering. Each entry is `(line_number, text)`; order is preserved. Crux
+/// lines are anchored by content fingerprint — they stay valid even when the
+/// file moves — so they replace a budget-clipped body excerpt with the lines
+/// that actually carry the guards, mutations and early bails.
+///
+/// Rendered as an indented `crux ▸` block after the item header. Deterministic:
+/// same crux input yields identical output.
+pub fn render_crux(out: &mut String, crux: &[(u32, &str)]) {
+    use std::fmt::Write;
+    for (line, text) in crux {
+        // Highlight the logic-bearing line; keep `line` as a retrieval hint
+        // (the fingerprint is the true anchor, surfaced by whoever loaded the
+        // crux from the graph store).
+        let _ = write!(out, "    crux:{line} {text}\n");
+    }
+}
+
+/// Deterministic, minimal crux scorer mirroring the graph store's heuristic
+/// (guards/branches, mutations, early bails) so this crate can render crux
+/// from a raw body standalone. The graph store's `extract_crux` is the
+/// canonical implementation; callers that already read crux from storage
+/// should pass those lines straight to [`render_crux`] instead.
+pub fn crux_lines_from_body(body: &str, threshold: i64) -> Vec<(u32, String)> {
+    body.lines()
+        .enumerate()
+        .filter_map(|(idx, raw)| {
+            let t = raw.trim();
+            if t.is_empty()
+                || t.chars().all(|c| c == '{' || c == '}')
+                || t.starts_with("//")
+                || t.starts_with("#")
+                || t.starts_with("\"")
+            {
+                return None;
+            }
+            let mut score = 0i64;
+            let guard = [
+                "if ", "else if", "while ", "for ", "match ", "catch",
+                "when ", "guard", "assert", "check", "ensure", "validate",
+            ];
+            if guard.iter().any(|w| t.contains(w)) {
+                score += 3;
+            }
+            let bail = [
+                "return ", "break;", "continue;", "throw ", "panic!",
+                "unwrap", "expect", "abort", "exit(",
+            ];
+            if bail.iter().any(|w| t.contains(w)) || t.ends_with('?') {
+                score += 3;
+            }
+            let mut_pats = ["=", "return ", "+=", "-=", "*=", "/=", "push", "insert", "remove", "set", "append"];
+            if mut_pats.iter().any(|w| t.contains(w)) {
+                score += 2;
+            }
+            if score >= threshold {
+                Some(((idx + 1) as u32, t.to_string()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Fit items into a token budget.
 ///
 /// Strategy: try the requested layer; if the rendering exceeds the budget,
@@ -179,6 +247,7 @@ mod tests {
             start_line: 10,
             end_line: 10 + snippet_lines as u32,
             sig: format!("fn {name}(input: &str) -> Result<Output, Error>"),
+            crux: Vec::new(),
             snippet: (0..snippet_lines)
                 .map(|i| format!("    let step_{i} = process(input); // long body line {i}"))
                 .collect::<Vec<_>>()
@@ -212,6 +281,28 @@ mod tests {
         let detailed = fit_to_budget_detailed(&items, l1_tokens, Layer::L2);
         assert_eq!(detailed.layer, Layer::L1);
         assert_eq!(detailed.elided_items, 0);
+    }
+
+    #[test]
+    fn crux_rendering_is_deterministic_and_order_preserving() {
+        let crux = vec![(2u32, "if cfg.dry_run {"), (4u32, "return 0;")];
+        let mut a = String::new();
+        let mut b = String::new();
+        render_crux(&mut a, &crux);
+        render_crux(&mut b, &crux);
+        assert_eq!(a, b);
+        assert!(a.contains("crux:2 if cfg.dry_run {"));
+        assert!(a.contains("crux:4 return 0;"));
+        // Line order preserved.
+        assert!(a.find("crux:2").unwrap() < a.find("crux:4").unwrap());
+
+        // Body scorer surfaces guard/mutation/bail, skips delimiters/comments.
+        let body = "pub fn f() {\n    if x {\n        return 1;\n    }\n    // note\n    let y = 2;\n    y\n}";
+        let lines = crux_lines_from_body(body, 3);
+        let texts: Vec<&str> = lines.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(texts.iter().any(|t| t.contains("if x")));
+        assert!(texts.iter().any(|t| t.contains("return 1")));
+        assert!(!texts.iter().any(|t| *t == "{" || *t == "}"));
     }
 
     #[test]

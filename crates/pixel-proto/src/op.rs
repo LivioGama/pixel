@@ -61,6 +61,10 @@ pub enum Op {
     Symbol {
         name: String,
     },
+    /// All signatures in a file — the "skeleton" view at ~10% of Read cost.
+    Skeleton {
+        file: String,
+    },
     Context {
         uid: String,
         #[serde(default)]
@@ -273,6 +277,7 @@ impl Op {
             Op::Search { .. } => "search",
             Op::Targets { .. } => "targets",
             Op::Symbol { .. } => "symbol",
+            Op::Skeleton { .. } => "skeleton",
             Op::Context { .. } => "context",
             Op::Impact { .. } => "impact",
             Op::Uses { .. } => "uses",
@@ -548,6 +553,7 @@ mod tests {
                 "targets",
             ),
             (Op::Symbol { name: "".into() }, "symbol"),
+            (Op::Skeleton { file: "".into() }, "skeleton"),
             (
                 Op::Context {
                     uid: "".into(),
