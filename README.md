@@ -73,7 +73,7 @@ pixel doctor .
 
 ### 3. Keep using your agent
 
-You do not need to learn Pixel’s command vocabulary. After installation, your coding agent can use Pixel’s local tools through its hooks and integration.
+You do not need to learn Pixel’s command vocabulary. After installation, Claude Code and Codex shell launches receive guidance for using Pixel’s local tools; existing native hooks remain a separate integration path.
 
 ```bash
 pixel install
@@ -147,21 +147,79 @@ Installation is additive. Pixel checks the current files first, preserves existi
 
 ### Two installation layers
 
-`agent-config` and `pixel install` have different jobs:
-
-- **agent-config** owns the canonical Pixel rule source and distributes it to the agent configuration directories. It provides guidance; by itself, it does not install all Pixel runtime integrations or hooks.
-- **`pixel install`** owns the runtime layer: bounded task context, safe search routing, flow-replay hooks, per-agent settings, configuration backups, and installation checks through `pixel doctor`.
+- **agent-config** owns canonical user rules and distributes them to agent configuration directories. It remains separate from Pixel's bundled prompt.
+- **`pixel install`** currently deploys `~/.local/share/pixel/agent-prompt.md` and managed shell functions for `claude` and `codex`. It does **not** register provider hooks, rewrite `CLAUDE.md`/`AGENTS.md`, or activate dormant search routing.
 
 ### How `pixel install` works
 
-`pixel install` can work with or without agent-config being present:
+1. Deploy the bundled agent prompt, updating only that Pixel-owned artifact.
+2. Add or update a marked shell-function block in `.bashrc` for Bash or `.zshrc` otherwise, preserving unrelated content and backing up changed files.
+3. The Claude wrapper passes `--append-system-prompt-file`; the Codex wrapper passes `model_instructions_file` through `-c`. These wrappers apply when that profile is loaded, not to already-running agents or direct binary launches that bypass shell functions.
+4. Reinstallation is idempotent. `pixel doctor .` checks the resulting artifacts. Artifact presence is not proof that a live host loaded the prompt or executed a hook.
 
-1. If `~/.agent-config/rules/pixel.md` exists, Pixel uses the distributed rule source as its full agent guidance. If it is missing, Pixel installs a short fallback instruction block and still configures the supported runtime integrations.
-2. Pixel places that guidance in existing `CLAUDE.md` or `AGENTS.md` files using managed markers.
-3. If none exists, Pixel creates `~/.claude/CLAUDE.md`—inside Claude’s configuration directory—so a new machine still gets the guidance.
-4. Pixel detects supported installed CLIs (or existing agent configs), then wires only the integrations that apply. Claude, Devin, Codex, Gemini, zcode, Cursor, and pi are supported where their interfaces allow it. Codex is supported through its native configuration at `~/.codex/hooks.json`.
-5. Lifecycle hooks deliver context at session start and after compaction. Nontrivial prompts can receive up to 4 KB of ranked task context from a responsive local daemon. Retrieval has a 750 ms worker deadline, excluding process startup and input parsing; this is not a wall-clock latency guarantee under host contention. Cold/unavailable daemons and timeouts leave the prompt usable without retrieval context; task-boundary detection is independent.
-6. Files that need changes are backed up, and `pixel doctor .` checks the resulting installation.
+Existing provider hook implementations and explicit task commands remain available.
+Installation deliberately leaves existing agent configuration untouched; it does
+not reactivate the hook paths described below. Existing hooks require independent
+registration and host trust. `pixel uninstall` includes legacy cleanup support.
+
+### Live operation metrics
+
+Ordinary commands report one authoritative `🟩 Pixel · ...` line on stderr after
+their result or error; JSON stdout is unchanged. The line reports measured elapsed
+time, approximate output tokens, and separate versioned **token and time savings
+estimates**, not measured native-workflow savings. Disable live reporting with `--metrics=off` or `PIXEL_METRICS=0`; correlated local accounting remains enabled.
+
+`pixel-actionlog` stores the correlated invocation record used by `pixel log` and
+`pixel savings`, alongside support for legacy records. Token estimates use roughly
+one token per four UTF-8 bytes, including reporting overhead. Measured output covers rendered CLI stdout, CLI-owned diagnostics, and top-level errors; it does not capture lower-level library or subprocess streams. Workflow v1 uses
+returned evidence and relationships plus native operation steps; where volumes
+are unavailable its policy assumptions are **4 KiB per assumed distinct returned
+file read** and **1 KiB per native command output**, not measured averages.
+Zero or negative savings are retained. Capped comparisons are partial; a missing
+meaningful baseline is unavailable. Metrics do not trigger extra searches, source
+sweeps, model calls, external telemetry, or monetary/hidden-reasoning estimates.
+
+Time savings are a separate `sequential-v1` workflow estimate, not measured
+LLM latency. Let `steps = native_commands + distinct_files`; relationships do
+not add round trips. A zero-step baseline is unavailable; otherwise the estimate
+in milliseconds is:
+
+```text
+max(steps - 1, 0) * round_trip_ms - measured_pixel_duration_ms
+```
+
+One shared initial LLM/tool round trip cancels. The default policy assumes
+**2000 ms per sequential round trip** and **0 ms of native command execution**.
+`PIXEL_METRICS_ROUND_TRIP_MS` overrides the round-trip assumption with an unsigned
+integer number of milliseconds (zero is allowed); unset, invalid, non-UTF-8, or
+overflowing values use 2000. These assumptions and the estimator version are
+recorded with each new invocation, not applied retroactively to old records.
+Batching or parallel native workflows may require fewer round trips: this is
+not a measured end-to-end speedup or a guarantee. Negative time savings are
+retained; missing evidence is unavailable, and capped comparisons are partial.
+
+Illustrative line only—not an observed measurement:
+
+```text
+🟩 Pixel · impact · 12.4 ms · ~820 output tokens · ~3100 tokens saved (workflow estimate) · ~3.99 s saved (sequential estimate) · id=<invocation>
+```
+
+For example, three assumed sequential native steps at 2000 ms per round trip,
+minus one shared round trip and 12.4 ms of Pixel execution, yield 3987.6 ms
+(about 3.99 s) estimated time saved. Both savings labels include `partial` when
+coverage is capped. Historical `pixel log`/`pixel savings` reports keep legacy
+records readable and group time estimates by token/time estimator versions,
+round-trip policy and coverage instead of blending incompatible assumptions.
+
+The installed prompt asks the agent to copy the exact line from the **same tool
+call** into chat once, unless the host already relayed that invocation. It never
+uses a global latest operation, which could belong to a concurrent call. Actual
+chat relay and duplicate suppression depend on the host exposing that invocation's
+stderr and the agent following the guidance; installation and mock tests do not
+prove model obedience. Current installation adds no native automatic chat transport.
+Protected streams without supported output-volume capture report unavailable volumes, never fabricated counts. Exact-output search compatibility, hooks, protocol streams, and statuslines must
+remain unchanged: only a separate supported channel may relay a correlated record.
+Metrics failures must not alter command exit status or safety behavior.
 
 ### Claude Code task runtime
 
@@ -211,9 +269,10 @@ not yet connected to automatic worker retries.
 
 Pixel is a CLI plus rewire-first integrations, not an MCP server.
 
-### Automatic search routing: deliberately narrow
+### Existing search-routing implementations: deliberately narrow
 
-Claude Code, Codex, and Devin use provider-specific hooks. Supported standalone
+Provider-specific hook implementations exist for Claude Code, Codex, and Devin,
+but current `pixel install` does not register or activate them. Supported standalone
 literal `grep`/`rg` searches over one explicit indexed file can execute through
 `pixel search-compat <rg|grep> -- <original arguments>`, preserving native output
 and exit status. Ordinary `pixel search` remains the richer, bounded regex API.
@@ -231,8 +290,8 @@ Claude's recognized `rtk hook claude` registration can be coordinated behind one
 Pixel hook, preserving the original RTK handler for unsupported commands. Unknown
 overlapping hooks are preserved rather than competing to rewrite the same input.
 
-For a project-local Codex configuration whose existing command hooks include
-real deny guards, Pixel can adopt the full `PreToolUse` set into one composed
+The dormant routing installer supports a project-local Codex configuration whose
+existing command hooks include real deny guards: it can adopt the full `PreToolUse` set into one composed
 runtime. It snapshots the already-enabled handlers privately, replays the
 original hook input to matching handlers, preserves any denial, and performs a
 compatible read-only rewrite only when no foreign handler blocks or mutates the
@@ -246,7 +305,7 @@ from live verification: a configured hook is not proof that an agent executed it
 
 ### Other coding agents
 
-`pixel install` detects supported installed CLIs and configures the matching integration where available, including Devin, Gemini, zcode, Cursor, and pi where supported. For an unsupported tool such as Warp CLI, there are no native Pixel hooks to install: load `~/.agent-config/rules/pixel.md` when available—or the fallback `~/.claude/CLAUDE.md`—into that tool’s global or project instructions, then use `pixel` directly.
+Current `pixel install` creates shell wrappers only for Claude Code and Codex. Provider support code for Devin, Gemini, zcode, Cursor, and pi is not a claim of active installation or verified live delivery. Other agents can use `pixel` directly with the bundled `~/.local/share/pixel/agent-prompt.md` or canonical `~/.agent-config/rules/pixel.md` as host-supported instructions; there is no automatic hook or metrics-chat guarantee for those hosts.
 
 ## ⚙️ Useful maintenance commands
 

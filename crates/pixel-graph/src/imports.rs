@@ -47,10 +47,17 @@ fn contains(all_files: &[String], candidate: &str) -> bool {
 }
 
 fn first_suffix_match(all_files: &[String], suffix: &str) -> Option<String> {
-    all_files
+    // A suffix is fallback evidence, not a scope: multiple matches must remain
+    // unresolved rather than depend on directory traversal order.
+    let tail = format!("/{suffix}");
+    let mut matches = all_files
         .iter()
-        .find(|f| f.as_str() == suffix || f.ends_with(&format!("/{suffix}")))
-        .cloned()
+        .filter(|f| f.as_str() == suffix || f.ends_with(&tail));
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(first.clone())
 }
 
 // --- TS / JS --------------------------------------------------------------

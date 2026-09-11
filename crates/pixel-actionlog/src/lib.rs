@@ -19,6 +19,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+mod metrics;
+pub use metrics::{
+    OperationMetrics, WorkflowEvidence, WorkflowTimeEstimate, format_metrics_line,
+    summarize_metrics,
+};
+
 pub const LOG_FILE_NAME: &str = "actions.jsonl";
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_KEPT_LINES: usize = 5000;
@@ -44,6 +50,11 @@ pub enum Outcome {
 /// One recorded pixel invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionEvent {
+    /// Correlates one invocation, never a global latest-operation pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<OperationMetrics>,
     pub ts_ms: i64,
     pub pid: u32,
     pub command: String,
@@ -68,6 +79,8 @@ pub struct ActionEvent {
 impl ActionEvent {
     pub fn new(command: impl Into<String>, args: impl Into<String>) -> Self {
         ActionEvent {
+            invocation_id: Some(metrics::invocation_id()),
+            metrics: None,
             ts_ms: now_ms(),
             pid: std::process::id(),
             command: command.into(),
@@ -232,7 +245,11 @@ fn writer_loop(path: PathBuf, rx: mpsc::Receiver<ActionEvent>, done_tx: Sender<(
         if let Some(f) = file.as_mut()
             && let Ok(line) = serde_json::to_string(&event)
         {
-            let _ = writeln!(f, "{line}");
+            // Encode the complete line before appending: formatter writes can
+            // interleave across concurrent CLI invocations.
+            let mut bytes = line.into_bytes();
+            bytes.push(b'\n');
+            let _ = f.write_all(&bytes);
             let _ = f.flush();
         }
         since_rotate_check += 1;

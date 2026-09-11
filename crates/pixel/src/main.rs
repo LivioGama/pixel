@@ -9,11 +9,24 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
+// Count rendered writes without changing descriptors, native streams, or TTY state.
+macro_rules! print {
+    ($($arg:tt)*) => { crate::operation_metrics::print(format_args!($($arg)*)) };
+}
+macro_rules! println {
+    () => { crate::operation_metrics::print(format_args!("\n")) };
+    ($($arg:tt)*) => { crate::operation_metrics::print(format_args!("{}\n", format_args!($($arg)*))) };
+}
+macro_rules! eprintln {
+    () => { crate::operation_metrics::print_error(format_args!("\n")) };
+    ($($arg:tt)*) => { crate::operation_metrics::print_error(format_args!("{}\n", format_args!($($arg)*))) };
+}
 mod call_guard;
 mod claude_controller;
 mod guard;
+mod operation_metrics;
 mod post_compaction;
 mod prompt_submit;
 mod recall_cmd;
@@ -39,6 +52,9 @@ use serde_json::{Value, json};
     about = "Fast, fresh code retrieval for agents"
 )]
 struct Cli {
+    /// Disable live metrics (accounting remains available in the local action log).
+    #[arg(long, global = true, default_value = "on", value_parser = ["on", "off"])]
+    metrics: String,
     #[command(subcommand)]
     command: Command,
 }
@@ -667,7 +683,7 @@ enum Command {
     // -----------------------------------------------------------------
     // M5/M6 — install / doctor / migrate / hook
     // -----------------------------------------------------------------
-    /// Idempotent install: scrub deprecated MCP entries, wire hooks + agent-config.
+    /// Idempotently deploy the agent prompt and Claude/Codex shell wrappers.
     Install {
         #[arg(long)]
         json: bool,
@@ -1435,7 +1451,7 @@ fn announce_graph_build(data: &Value) {
 }
 
 fn write_stdout(text: &str) -> Result<(), String> {
-    match std::io::stdout().write_all(text.as_bytes()) {
+    match operation_metrics::Counted(std::io::stdout().lock()).write_all(text.as_bytes()) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(error) => Err(format!("write stdout: {error}")),
@@ -1451,7 +1467,14 @@ fn write_stdout(text: &str) -> Result<(), String> {
 const STDOUT_BYTE_CAP: usize = 256 * 1024;
 
 fn print_data(data: &Value, raw_json: bool) -> Result<(), String> {
-    write_stdout(&render_data(data, raw_json, STDOUT_BYTE_CAP))
+    let rendered = render_data(data, raw_json, STDOUT_BYTE_CAP);
+    if rendered.contains("OUTPUT TRUNCATED AT") {
+        // Never count evidence hidden behind the final rendering cap.
+        operation_metrics::unavailable();
+    } else {
+        operation_metrics::observe(data);
+    }
+    write_stdout(&rendered)
 }
 
 /// Serialize `data` for stdout under a byte cap.
@@ -1568,6 +1591,7 @@ fn finish_graph_cmd(
         return print_data(&data, true);
     }
     if let Some(cands) = data.get("candidates").and_then(Value::as_array) {
+        operation_metrics::observe(&json!({"candidates": cands}));
         eprintln!("ambiguous name — re-run with one of these uids:");
         let mut output = String::new();
         for c in cands {
@@ -1582,6 +1606,7 @@ fn finish_graph_cmd(
         return write_stdout(&output);
     }
     if let Some(output) = pretty(&data) {
+        operation_metrics::observe(&data);
         write_stdout(&output)
     } else {
         print_data(&data, false)
@@ -2067,7 +2092,7 @@ fn print_search_matches(matches: &[Value], json: bool) -> Result<(), String> {
             output.push_str(&format!("{path}:{line}:{text}\n"));
         }
     }
-    match std::io::stdout().write_all(output.as_bytes()) {
+    match operation_metrics::Counted(std::io::stdout().lock()).write_all(output.as_bytes()) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(error) => Err(format!("write search results: {error}")),
@@ -2173,6 +2198,7 @@ fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
 }
 
 fn print_resolve_human(data: &Value) -> Result<(), String> {
+    operation_metrics::observe(data);
     let Some(matches) = data.get("matches").and_then(Value::as_array) else {
         return print_data(data, false);
     };
@@ -2302,7 +2328,7 @@ fn run_search_one(
     no_daemon: bool,
     scope: Option<String>,
     context: usize,
-    logger: &pixel_actionlog::ActionLog,
+    _logger: &pixel_actionlog::ActionLog,
 ) -> Result<(), String> {
     let data = execute(
         root,
@@ -2387,39 +2413,13 @@ fn run_search_one(
             s.get("elapsed_us").and_then(Value::as_u64).unwrap_or(0),
         );
     }
-    // Record a measured token-savings signal: snippet = serialized bytes of
-    // the matches actually returned; pool = the total bytes of every distinct
-    // matched FILE (the fallback would be reading those files whole to find
-    // the matches). sink: the matched-file set is small (a handful), so one
-    // stat per file is cheap and well under the latency doctrine. This is the
-    // fair counter to 'the agent didn't have to read whole files'.
-    let snippet_chars = serde_json::to_string(&enriched)
-        .map(|s| s.len() as u64)
-        .unwrap_or(0);
-    if !enriched.is_empty() && snippet_chars > 0 {
-        let mut seen_files: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut pool_chars: u64 = 0;
-        for m in &enriched {
-            if let Some(p) = m.get("path").and_then(Value::as_str) {
-                let abs = if Path::new(p).is_absolute() {
-                    p.to_string()
-                } else {
-                    root.join(p).display().to_string()
-                };
-                if seen_files.insert(abs.clone())
-                    && let Ok(meta) = std::fs::metadata(&abs)
-                {
-                    pool_chars = pool_chars.saturating_add(meta.len());
-                }
-            }
-        }
-        if pool_chars > 0 && pool_chars > snippet_chars {
-            logger.log(
-                pixel_actionlog::ActionEvent::new("search", pattern.to_string())
-                    .with_savings(snippet_chars, pool_chars),
-            );
-        }
-    }
+    // One invocation record owns both duration and savings. Count distinct
+    // returned evidence only; no metadata sweeps or duplicate search events.
+    operation_metrics::observe(&json!({
+        "matches": enriched,
+        "truncated": truncated || offset > 0,
+        "epistemics": data.get("epistemics"),
+    }));
     Ok(())
 }
 
@@ -2570,34 +2570,99 @@ fn facts_status(root: &Path) -> Option<Value> {
 /// slow down the command it observes: `discover_root` failures fall back to
 /// a no-op logger, and `ActionLog::finish` bounds the writer's shutdown
 /// window instead of blocking on a slow disk.
+fn operation_path(matches: &clap::ArgMatches) -> Option<PathBuf> {
+    if let Some((_, nested)) = matches.subcommand()
+        && let Some(path) = operation_path(nested)
+    {
+        return Some(path);
+    }
+    for key in ["path", "repo"] {
+        if let Ok(Some(path)) = matches.try_get_one::<PathBuf>(key) {
+            return Some(path.clone());
+        }
+    }
+    matches
+        .try_get_many::<PathBuf>("paths")
+        .ok()
+        .flatten()
+        .and_then(|mut paths| paths.next().cloned())
+}
+
 fn run() -> Result<(), String> {
     let started = std::time::Instant::now();
     let argv: Vec<String> = std::env::args().collect();
-    let command_label = argv
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| "unknown".to_string());
-    let args_summary = argv[1..].join(" ");
-
-    let cli = Cli::parse();
-    // Compatibility fallback must exec the original before any logging can
-    // change its search corpus. The successful Pixel branch records itself.
-    let mut logger = match discover_root(Path::new(".")) {
+    let matches = Cli::command().get_matches();
+    let command_label = matches.subcommand_name().unwrap_or("unknown").to_string();
+    let path = operation_path(&matches).unwrap_or_else(|| PathBuf::from("."));
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    let protected = matches!(
+        &cli.command,
+        Command::SearchCompat { .. }
+            | Command::Hook { .. }
+            | Command::Status {
+                statusline: true,
+                ..
+            }
+            | Command::Daemon {
+                cmd: DaemonCmd::Start {
+                    foreground: true,
+                    ..
+                }
+            }
+            | Command::Sniper {
+                cmd: sniper_cmd::SniperCmd::Mcp { .. } | sniper_cmd::SniperCmd::Run { .. }
+            }
+    );
+    let live = !protected
+        && cli.metrics != "off"
+        && std::env::var_os("PIXEL_METRICS").is_none_or(|v| v != "0");
+    let root = discover_root(&path).or_else(|_| discover_root(Path::new(".")));
+    operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
+    // Compatibility fallback must exec the original before any logging changes
+    // its search corpus; its successful Pixel branch retains existing logging.
+    let mut logger = match &root {
         _ if matches!(&cli.command, Command::SearchCompat { .. }) => {
             pixel_actionlog::ActionLog::noop()
         }
-        Ok(root) => pixel_actionlog::ActionLog::spawn_for_root(&root),
+        Ok(root) => pixel_actionlog::ActionLog::spawn_for_root(root),
         Err(_) => pixel_actionlog::ActionLog::noop(),
     };
-
     let result = run_command(cli.command, &logger);
-
-    logger.log(
-        pixel_actionlog::ActionEvent::new(command_label, args_summary)
-            .with_result(&result, started.elapsed()),
-    );
+    if let Err(error) = &result {
+        // The diagnostic precedes the authoritative metrics line. Its failure
+        // is best-effort and must never change the operation's result.
+        let _ = operation_metrics::Counted(std::io::stderr().lock())
+            .write_all(format!("pixel: {error}\n").as_bytes());
+    }
+    let _ = std::io::stdout().flush();
+    let elapsed = started.elapsed();
+    let mut event = pixel_actionlog::ActionEvent::new(&command_label, argv[1..].join(" "))
+        .with_result(&result, elapsed);
+    if !protected {
+        let mut metrics = pixel_actionlog::OperationMetrics::new(
+            elapsed,
+            operation_metrics::output_bytes(),
+            operation_metrics::evidence(&command_label, result.is_ok()),
+        );
+        // Optional policy input, never a measured LLM latency. Invalid or
+        // non-Unicode values retain the versioned default without affecting
+        // command success, diagnostics, or protected streams.
+        if let Some(round_trip_ms) = std::env::var("PIXEL_METRICS_ROUND_TRIP_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            metrics = metrics.with_round_trip_ms(round_trip_ms);
+        }
+        metrics.output_scope = Some("cli-rendered-streams".to_owned());
+        event = event.with_metrics(metrics);
+    }
+    if live && let Some(line) = event.finalize_metrics_line() {
+        // Never use println!/eprintln! here: reporting failure is not an
+        // operation failure, and overhead is already accounted exactly.
+        let _ = writeln!(std::io::stderr().lock(), "{line}");
+    }
+    logger.log(event);
     logger.finish();
-
     result
 }
 
@@ -2617,13 +2682,13 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 let v = unwrap_response(resp)?;
                 eprintln!(
                     "indexed via daemon: base_files={} delta_files={} overlay_files={}",
-                    v.get("index.base_files")
+                    v.pointer("/index/base_files")
                         .and_then(|x| x.as_u64())
                         .unwrap_or(0),
-                    v.get("index.delta_files")
+                    v.pointer("/index/delta_files")
                         .and_then(|x| x.as_u64())
                         .unwrap_or(0),
-                    v.get("index.overlay_files")
+                    v.pointer("/index/overlay_files")
                         .and_then(|x| x.as_u64())
                         .unwrap_or(0),
                 );
@@ -3031,13 +3096,12 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             json,
         } => {
             let data = execute(&path, Request::Map { markdown }, false)?;
+            operation_metrics::observe(&data);
             if json {
                 return print_data(&data, true);
             }
             announce_graph_build(&data);
-            if markdown
-                && let Some(md) = data.get("markdown").and_then(Value::as_str)
-            {
+            if markdown && let Some(md) = data.get("markdown").and_then(Value::as_str) {
                 return write_stdout(md);
             }
             // Compact outline: one line per file, indented symbol names.
@@ -3249,7 +3313,11 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             print_data(&v, json)?;
             Ok(())
         }
-        Command::Status { path, json, statusline } => {
+        Command::Status {
+            path,
+            json,
+            statusline,
+        } => {
             let mut data = execute(&path, Request::Status {}, false)?;
             // The daemon/service now attaches a rich `facts` block itself
             // (schema version, phase-A state, hunk/gram counts). Only fill in
@@ -3265,7 +3333,8 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 // shell prompt/statusline shows staleness & coverage without
                 // ever needing an explicit `pixel doctor`:
                 //   `pixel: 285f 12k sym 45k edges 180/200 commits 90%diff fresh`
-                let files = data.get("index")
+                let files = data
+                    .get("index")
                     .and_then(|i| i.get("base_files").and_then(Value::as_u64))
                     .unwrap_or(0);
                 let (sym, edges) = match data.get("graph") {
@@ -3276,11 +3345,17 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     _ => (0, 0),
                 };
                 let fmt = |n: u64| -> String {
-                    if n >= 1000 { format!("{}k", n / 1000) } else { n.to_string() }
+                    if n >= 1000 {
+                        format!("{}k", n / 1000)
+                    } else {
+                        n.to_string()
+                    }
                 };
                 let mut line = format!(
                     "pixel: {}f {} sym {} edges",
-                    fmt(files), fmt(sym), fmt(edges)
+                    fmt(files),
+                    fmt(sym),
+                    fmt(edges)
                 );
                 // Enrichment coverage (only when the facts db exists and has
                 // enough history to report a meaningful fraction): commits
@@ -4589,28 +4664,34 @@ fn run_log(
                 );
             }
         }
+        if let Some(line) = pixel_actionlog::format_metrics_line(e) {
+            println!("  {line}");
+        }
     }
     Ok(())
 }
 
-/// Aggregate token-savings across retrieval-shaped action-log events.
-/// For each event that recorded snippet-vs-pool volumes (via
-/// [`pixel_actionlog::ActionEvent::with_savings`]), savings_ratio is the
-/// fraction of the candidate pool the agent did NOT have to read. Reports
-/// per-command aggregates plus an overall weighted figure — a measured
-/// counter to semble's '99% fewer tokens' claim.
+/// Preserve legacy snippet/pool reports, separately aggregate versioned
+/// invocation metrics. Old measurements are never silently reclassified as v1.
 fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), String> {
     let root = discover_root(path)?;
     let log_path = pixel_actionlog::ActionLog::path_for_root(&root);
     // Over-fetch; savings is a lightweight aggregate read.
     let events = pixel_actionlog::tail(&log_path, 1_000_000)
         .map_err(|e| format!("read {}: {e}", log_path.display()))?;
-    if events.is_empty() {
-        println!("no recorded actions at {}", log_path.display());
-        return Ok(());
-    }
-
-    let cutoff_ms = since_hours.map(|h| pixel_actionlog::now_ms() - (h as i64) * 3_600_000);
+    let cutoff_ms = since_hours.map(|h| {
+        pixel_actionlog::now_ms().saturating_sub(
+            i64::try_from(h)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(3_600_000),
+        )
+    });
+    let filtered: Vec<_> = events
+        .iter()
+        .filter(|e| cutoff_ms.is_none_or(|c| e.ts_ms >= c))
+        .cloned()
+        .collect();
+    let workflow_metrics = pixel_actionlog::summarize_metrics(&filtered);
     // Aggregate per command: pool chars, snippet chars, count.
     use std::collections::BTreeMap;
     #[derive(Default)]
@@ -4633,16 +4714,6 @@ fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), 
         agg.count += 1;
         agg.pool = agg.pool.saturating_add(pool);
         agg.snippet = agg.snippet.saturating_add(snippet);
-    }
-
-    if by_cmd.is_empty() {
-        println!(
-            "no retrieval events with recorded token volumes at {} — \
-             savings schema lands on search once the command populates \
-             snippet/pool chars",
-            log_path.display()
-        );
-        return Ok(());
     }
 
     let tot_pool: u64 = by_cmd.values().map(|a| a.pool).sum();
@@ -4678,12 +4749,19 @@ fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), 
                 "total_pool_chars": tot_pool,
                 "total_snippet_chars": tot_snippet,
                 "by_command": rows,
+                "legacy_basis": "legacy snippet/pool byte comparison; not workflow-v1",
+                "workflow_metrics": workflow_metrics,
             })
         );
         return Ok(());
     }
 
-    println!("token savings (snippet vs candidate-pool chars, by command)");
+    println!("workflow metrics (measured bytes/duration; versioned byte-based token estimates)");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&workflow_metrics).map_err(|e| e.to_string())?
+    );
+    println!("legacy savings (snippet vs candidate-pool chars; not workflow-v1)");
     println!(
         "{:<14} {:>5}  {:>12}  {:>14}  {:>7}",
         "command", "calls", "pool_chars", "snippet_chars", "savings"
@@ -4784,10 +4862,7 @@ fn relative_time(ts_ms: i64, now_ms: i64) -> String {
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("pixel: {e}");
-            ExitCode::FAILURE
-        }
+        Err(_) => ExitCode::FAILURE,
     }
 }
 

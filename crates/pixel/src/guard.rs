@@ -784,7 +784,7 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     // before editing a symbol", butthe bench shows agents don't. Here the
     // dependants arrive after the edit, unsolicited.
     if event == "PostToolUse" {
-        post_tool_use_blast_radius(&anchor, idx_root.as_deref(), &tool);
+        post_tool_use_blast_radius(&anchor, idx_root.as_deref(), tool);
         std::process::exit(0);
     }
 
@@ -1007,14 +1007,11 @@ fn find_up(start: &Path, rel: impl AsRef<Path>) -> Option<PathBuf> {
     }
 }
 
-/// P0·3: after an Edit/Write/apply_patch, deliver (unsolicited) the blast
-/// radius of the edited file: how many symbols elsewhere call into the edited
-/// file's symbols. This is the one track that turns an *ignored doctrine rule*
-/// ('run pixel impact before editing a symbol') into a *delivered fact*.
-/// Non-blocking — the edit has already happened; the agent now KNOWS what it
-/// can break. Emits a PostToolUse advisory, or nothing when there is no
-/// indexed graph or the edited path is not a known source file.
-
+/// After an Edit/Write/apply_patch, report bounded references from the existing
+/// graph snapshot, distinguishing same-file and cross-file dependants. This is
+/// advisory evidence, not proof of breakage or current-source freshness. A graph
+/// miss or unknown edited path remains a silent allow; no refresh is triggered.
+///
 /// Entry point for the `pixel hook post-tool-use` hook: the already-written
 /// PostToolUse blast-radius hook invoked by `pixel hook post-tool-use` .
 /// Unlike [`run`] which infers the event from the payload, this *forces* the event
@@ -1062,54 +1059,122 @@ pub fn run_post_tool_use(provider: Option<Provider>) -> ! {
         .unwrap_or("");
     let anchor = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
     let idx_root = find_up(&anchor, ".pixel");
-    post_tool_use_blast_radius(&anchor, idx_root.as_deref(), &tool);
+    post_tool_use_blast_radius(&anchor, idx_root.as_deref(), tool);
     std::process::exit(0);
 }
 
 fn post_tool_use_blast_radius(abs: &Path, idx_root: Option<&Path>, tool: &str) {
-    use std::collections::BTreeSet;
     use pixel_graph::GraphStore;
     let is_edit = matches!(
         tool,
-        "Edit" | "MultiEdit" | "NotebookEdit" | "Write"
-        | "edit" | "write" | "notebook_edit"
-        | "apply_patch" | "write_file"
-        | "replace_file_content" | "write_to_file" | "edit_file"
+        "Edit"
+            | "MultiEdit"
+            | "NotebookEdit"
+            | "Write"
+            | "edit"
+            | "write"
+            | "notebook_edit"
+            | "apply_patch"
+            | "write_file"
+            | "replace_file_content"
+            | "write_to_file"
+            | "edit_file"
     );
     if !is_edit {
         return;
     }
-    let Some(root) = idx_root.map(PathBuf::from) else { return };
+    let Some(root) = idx_root.map(PathBuf::from) else {
+        return;
+    };
     let db = root.join(".pixel").join("graph.db");
     if !db.exists() {
         return;
     }
-    let Ok(store) = GraphStore::open(&db) else { return };
+    let Ok(mut store) = GraphStore::open(&db) else {
+        return;
+    };
     let rel = rel_of(abs, &root);
     if rel.is_empty() || rel.starts_with(".pixel/") {
         return;
     }
-    let Ok(Some(file_row)) = store.file_by_path(&rel) else { return };
-    let file_id = file_row.id;
-    let Ok(symbols) = store.symbols_in_file(file_id) else { return };
-    let mut dependants = BTreeSet::new();
-    for sym in &symbols {
-        if let Ok(edges) = store.edges_to(sym.id, None) {
-            for e in &edges {
-                dependants.insert(e.src_id);
-            }
-        }
-    }
-    if dependants.is_empty() {
+    let Ok(Some(file_row)) = store.file_by_path(&rel) else {
         return;
+    };
+    if let Some(note) = post_edit_snapshot_note(&mut store, file_row.id, &rel) {
+        print!("{}", post_tool_use_advisory(&note));
     }
-    let note = format!(
-        "just edited '{rel}': {n} symbols elsewhere depend on its {k} symbols — check callers before trusting the change.",
-        rel = rel,
-        n = dependants.len(),
-        k = symbols.len()
-    );
-    print!("{}", post_tool_use_advisory(&note));
+}
+
+/// Read the existing graph in one transaction; never refresh or read source in
+/// the post-edit path. Counts concern indexed references, not proven breakages.
+fn post_edit_snapshot_note(
+    store: &mut pixel_graph::GraphStore,
+    file_id: i64,
+    rel: &str,
+) -> Option<String> {
+    const PATH_LIMIT: i64 = 8;
+    const PATH_CHARS: usize = 120;
+    let tx = store.conn_mut().transaction().ok()?;
+    let (symbols, cross_file, same_file, files, unresolved): (i64, i64, i64, i64, i64) = tx
+        .query_row(
+            "WITH incoming AS (
+            SELECT DISTINCT src.id, src.file_id
+            FROM symbols dst JOIN edges e ON e.dst_id = dst.id
+            JOIN symbols src ON src.id = e.src_id WHERE dst.file_id = ?1
+        ) SELECT
+            (SELECT COUNT(*) FROM symbols WHERE file_id = ?1),
+            (SELECT COUNT(*) FROM incoming WHERE file_id != ?1),
+            (SELECT COUNT(*) FROM incoming WHERE file_id = ?1),
+            (SELECT COUNT(DISTINCT file_id) FROM incoming WHERE file_id != ?1),
+            (SELECT COUNT(*) FROM unresolved_calls WHERE name IN
+                (SELECT DISTINCT name FROM symbols WHERE file_id = ?1))",
+            [file_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .ok()?;
+    if cross_file == 0 && same_file == 0 && unresolved == 0 {
+        return None;
+    }
+    let mut paths = tx
+        .prepare(
+            "SELECT DISTINCT f.path FROM symbols dst
+         JOIN edges e ON e.dst_id = dst.id JOIN symbols src ON src.id = e.src_id
+         JOIN files f ON f.id = src.file_id
+         WHERE dst.file_id = ?1 AND src.file_id != ?1 ORDER BY f.path LIMIT ?2",
+        )
+        .ok()?;
+    let rows = paths
+        .query_map([file_id, PATH_LIMIT], |row| row.get::<_, String>(0))
+        .ok()?;
+    let mut paths_capped = files > PATH_LIMIT;
+    let mut rendered_paths = Vec::new();
+    for path in rows {
+        let path = path.ok()?;
+        paths_capped |= path.chars().count() > PATH_CHARS;
+        // Quote control characters and newlines: repository names are data.
+        rendered_paths.push(serde_json::to_string(&short_task(&path, PATH_CHARS)).ok()?);
+    }
+    let paths = if rendered_paths.is_empty() {
+        "none indexed".to_string()
+    } else {
+        rendered_paths.join(", ")
+    };
+    let edited = serde_json::to_string(&short_task(rel, PATH_CHARS)).ok()?;
+    Some(format!(
+        "just edited {edited}: stored graph records {cross_file} cross-file referencing symbols in {files} files and {same_file} same-file referencing symbols for its {symbols} symbols. \
+         Dependent paths: {paths}. paths_capped={paths_capped}; lower_bound={} within the stored snapshot (unresolved same-name calls: {unresolved}). \
+         Freshness unchecked: this graph snapshot may predate the edit; no refresh or source read was performed. \
+         References may be approximate; inspect these dependants and test before trusting the change.",
+        unresolved > 0 || paths_capped,
+    ))
 }
 
 /// PostToolUse advisory: surface the blast-radius note to the model without a

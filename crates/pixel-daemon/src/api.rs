@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -28,7 +28,7 @@ pub const GRAPH_DB_FILE: &str = "graph.db";
 /// `{ok, error, data}` to the full `Envelope` (`ok, op, protocol, requestId,
 /// snapshot, epistemics, budget, result, error, warnings`), gated by
 /// `pixel_proto::ENVELOPE_PROTOCOL_VERSION`.
-pub const PROTOCOL_VERSION: u64 = 7;
+pub const PROTOCOL_VERSION: u64 = 9;
 
 // ---------------------------------------------------------------------------
 // errors
@@ -1167,6 +1167,22 @@ impl Service {
             ));
         }
 
+        // Verify only files whose source will be returned, once per request.
+        // Reuse these exact bytes for excerpts; never pair fresh file contents
+        // with stale graph spans or stored Crux. No repository freshness sweep.
+        let mut sources = HashMap::new();
+        let stale_response = |mut response: Value| -> Result<Value, String> {
+            response["truncated"] = json!(true);
+            response["caps"] = json!(["context truncated: source differs from graph snapshot or is unavailable; stale excerpts and Crux omitted"]);
+            if value_tokens(&response) > budget {
+                return Err("context source is stale or unavailable; budget cannot fit the freshness warning".to_owned());
+            }
+            Ok(response)
+        };
+        if validated_context_source(&self.root, store, sym.file_id, &files, &mut sources).is_none() {
+            return stale_response(minimum_response);
+        }
+
         let mut incoming = store.edges_to(sym.id, None).map_err(|e| e.to_string())?;
         let mut outgoing = store.edges_from(sym.id, None).map_err(|e| e.to_string())?;
         let edge_order = |a: &EdgeRow, b: &EdgeRow| {
@@ -1206,7 +1222,7 @@ impl Service {
         let mut source_remaining = budget.saturating_mul(4).min(MAX_CONTEXT_SOURCE_BYTES);
         let mut items = Vec::new();
         let target_cap = source_remaining.min(MAX_TARGET_SNIPPET_BYTES);
-        let target = context_item(&self.root, &sym, &files, target_cap, &store.symbol_crux_by_id(sym.id).map_err(|e| e.to_string())?.iter().map(|c| (c.line, c.text.clone())).collect::<Vec<_>>());
+        let target = context_item(sources.get(&sym.file_id).and_then(Option::as_deref).unwrap(), &sym, &files, target_cap, &store.symbol_crux_by_id(sym.id).map_err(|e| e.to_string())?.iter().map(|c| (c.line, c.text.clone())).collect::<Vec<_>>());
         source_remaining = source_remaining.saturating_sub(target.snippet.len());
         items.push(target);
         let mut seen_context = std::collections::HashSet::from([sym.id]);
@@ -1224,8 +1240,11 @@ impl Service {
                 continue;
             }
             if let Some(other) = symbol_by_id(store, symbol_id) {
+                if validated_context_source(&self.root, store, other.file_id, &files, &mut sources).is_none() {
+                    return stale_response(minimum_response);
+                }
                 let cap = source_remaining.min(MAX_NEIGHBOR_SNIPPET_BYTES);
-                let item = context_item(&self.root, &other, &files, cap, &store.symbol_crux_by_id(symbol_id).map_err(|e| e.to_string())?.iter().map(|c| (c.line, c.text.clone())).collect::<Vec<_>>());
+                let item = context_item(sources.get(&other.file_id).and_then(Option::as_deref).unwrap(), &other, &files, cap, &store.symbol_crux_by_id(symbol_id).map_err(|e| e.to_string())?.iter().map(|c| (c.line, c.text.clone())).collect::<Vec<_>>());
                 source_remaining = source_remaining.saturating_sub(item.snippet.len());
                 items.push(item);
             }
@@ -1368,9 +1387,29 @@ impl Service {
                 "site_line": e.site_line,
             }));
         }
-        let envelope = store
+        let mut envelope = json!(store
             .envelope_for_name(&sym.name)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?);
+        if role == "callees" {
+            // Name-based uncertainty describes incoming calls. Outgoing queries
+            // must also account for unresolved calls enclosed by this symbol.
+            let unresolved: u64 = store
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM unresolved_calls WHERE enclosing_symbol_id = ?1",
+                    [sym.id],
+                    |row| row.get::<_, i64>(0).map(|count| count as u64),
+                )
+                .map_err(|e| e.to_string())?;
+            envelope["unresolved_outgoing"] = json!(unresolved);
+            if unresolved > 0 {
+                envelope["lower_bound"] = json!(true);
+                envelope["caps"] = json!([format!(
+                    "graph lower bound: {unresolved} unresolved outgoing call site(s) — \
+                     callees beyond this answer may exist"
+                )]);
+            }
+        }
         let returned_edges = arr.len();
         let has_more = offset.saturating_add(returned_edges) < total_edges;
         let mut out = json!({
@@ -2561,8 +2600,32 @@ fn compact_edges(
     Ok(serde_json::to_value(grouped).unwrap_or(Value::Null))
 }
 
-fn context_item(
+/// One bounded read and stored-hash comparison per distinct returned file.
+/// Failed/unavailable files are cached too, so neighbors never retry a bad read.
+fn validated_context_source<'a>(
     root: &Path,
+    store: &GraphStore,
+    file_id: i64,
+    files: &HashMap<i64, String>,
+    sources: &'a mut HashMap<i64, Option<String>>,
+) -> Option<&'a str> {
+    sources.entry(file_id).or_insert_with(|| {
+        let path = files.get(&file_id)?;
+        let row = store.file_by_path(path).ok()??;
+        let file = open_regular_bounded(&root.join(path), MAX_FILE_BYTES).ok()?;
+        let mut bytes = Vec::new();
+        file.take(MAX_FILE_BYTES.saturating_add(1)).read_to_end(&mut bytes).ok()?;
+        if bytes.len() as u64 > MAX_FILE_BYTES
+            || format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&bytes)) != row.blob_oid
+        {
+            return None;
+        }
+        String::from_utf8(bytes).ok()
+    }).as_deref()
+}
+
+fn context_item(
+    source: &str,
     s: &SymbolRow,
     files: &HashMap<i64, String>,
     max_snippet_bytes: usize,
@@ -2570,7 +2633,7 @@ fn context_item(
 ) -> bridge::Item {
     let path = files.get(&s.file_id).cloned().unwrap_or_default();
     let snippet = read_snippet(
-        &root.join(&path),
+        source,
         s.start_line,
         s.end_line,
         60,
@@ -2584,12 +2647,106 @@ fn context_item(
         end_line: s.end_line,
         sig: s.sig.clone(),
         snippet,
-        crux: crux.to_vec(),
+        // Storage keeps body-relative lines for stable fingerprints. Rendering
+        // uses file coordinates, just like the symbol header and source excerpt.
+        // Reject invalid/overflowing offsets rather than inventing a location.
+        crux: crux
+            .iter()
+            .filter_map(|(relative, text)| {
+                let offset = relative.checked_sub(1)?;
+                let line = s.start_line.checked_add(offset)?;
+                (s.start_line > 0 && line <= s.end_line).then(|| (line, text.clone()))
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod context_crux_coordinate_tests {
+    use super::*;
+
+    fn symbol(start_line: u32, end_line: u32) -> SymbolRow {
+        SymbolRow {
+            id: 1,
+            uid: "sample.rs#check#function".to_owned(),
+            file_id: 1,
+            name: "check".to_owned(),
+            qualified: "check".to_owned(),
+            kind: pixel_graph::SymbolKind::Function,
+            start_line,
+            end_line,
+            sig: "pub fn check(flag: bool) -> i32 {".to_owned(),
+        }
+    }
+
+    #[test]
+    fn context_crux_coordinates_match_real_source_after_shift() {
+        let dir = std::env::temp_dir().join(format!("pixel-crux-coordinates-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = "pub fn check(flag: bool) -> i32 {\n    if flag {\n        return 1;\n    }\n    0\n}\n";
+        let crux = vec![(2, "if flag {".to_owned()), (3, "return 1;".to_owned())];
+        let files = HashMap::from([(1, "sample.rs".to_owned())]);
+        for padding in [10, 20] {
+            let source = format!("{}{body}", "// padding\n".repeat(padding));
+            std::fs::write(dir.join("sample.rs"), &source).unwrap();
+            let item = context_item(&source, &symbol(padding as u32 + 1, padding as u32 + 6), &files, 4096, &crux);
+            for (line, text) in &item.crux {
+                assert_eq!(source.lines().nth(*line as usize - 1).unwrap().trim(), text);
+            }
+            let (rendered, _, _) = bridge::render_context(&[item], 2000);
+            assert!(rendered.contains(&format!("crux:{} if flag {{", padding + 2)));
+            assert!(rendered.contains(&format!("crux:{} return 1;", padding + 3)));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn context_crux_rejects_zero_out_of_span_and_overflow_coordinates() {
+        let files = HashMap::new();
+        let crux = vec![(0, "invalid".to_owned()), (2, "valid".to_owned()), (9, "outside".to_owned())];
+        let item = context_item("", &symbol(11, 16), &files, 0, &crux);
+        assert_eq!(item.crux, vec![(12, "valid".to_owned())]);
+        assert!(context_item("", &symbol(0, 6), &files, 0, &crux).crux.is_empty());
+        assert!(context_item("", &symbol(u32::MAX, u32::MAX), &files, 0, &crux).crux.is_empty());
+    }
+
+    #[test]
+    fn context_warm_graph_omits_stale_source_and_crux_with_truthful_warning() {
+        let root = std::env::temp_dir().join(format!("pixel-crux-freshness-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&root).status().unwrap().success());
+        let body = "pub fn check(flag: bool) -> i32 {\n    if flag {\n        return 1;\n    }\n    0\n}\n";
+        let original = format!("{}{body}", "// padding\n".repeat(10));
+        std::fs::write(root.join("sample.rs"), &original).unwrap();
+        let request = || Request::Context { uid: "sample.rs#check#function".to_owned(), budget_tokens: Some(2000) };
+        let mut service = Service::open(&root).unwrap();
+        let before = service.handle(request());
+        assert!(before.ok, "{before:?}");
+        assert!(before.data()["text"].as_str().unwrap().contains("crux:13 return 1;"));
+
+        std::fs::write(root.join("sample.rs"), format!("{}{}", "// shifted\n".repeat(10), original.replace("return 1;", "return 2;"))).unwrap();
+        let stale = service.handle(request());
+        assert!(stale.ok, "{stale:?}");
+        assert_eq!(stale.data()["text"], "");
+        assert!(stale.data().get("symbol").is_none());
+        let wire = serde_json::to_value(&stale).unwrap();
+        assert_eq!(wire["epistemics"]["lower_bound"], true);
+        assert_eq!(wire["epistemics"]["closed_world"], false);
+        assert!(wire["warnings"].as_array().unwrap().iter().any(|warning| warning["message"].as_str().unwrap().contains("source differs")));
+
+        // A fresh graph snapshot recovers normal excerpts and absolute lines.
+        let mut refreshed = Service::open(&root).unwrap();
+        let after = refreshed.handle(request());
+        assert!(after.ok, "{after:?}");
+        assert_eq!(after.data()["symbol"]["start_line"], 21);
+        assert!(after.data()["text"].as_str().unwrap().contains("crux:23 return 2;"));
+        assert!(!after.data()["text"].as_str().unwrap().contains("return 1;"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
 fn read_snippet(
-    abs: &Path,
+    source: &str,
     start_line: u32,
     end_line: u32,
     max_lines: usize,
@@ -2598,20 +2755,15 @@ fn read_snippet(
     if max_bytes == 0 {
         return String::new();
     }
-    let Ok(file) = open_regular_bounded(abs, MAX_FILE_BYTES) else {
-        return String::new();
-    };
     let start = start_line.saturating_sub(1) as usize;
     let mut snippet = String::new();
-    for line in BufReader::new(file.take(MAX_FILE_BYTES.saturating_add(1)))
-        .lines()
+    for line in source.lines()
         .skip(start)
         .take(
             ((end_line as usize).saturating_sub(start))
                 .min(max_lines)
                 .max(1),
         )
-        .filter_map(Result::ok)
     {
         let separator = usize::from(!snippet.is_empty());
         let remaining = max_bytes.saturating_sub(snippet.len() + separator);
@@ -3430,6 +3582,52 @@ mod tests {
             resp.data().get("protocol_version").and_then(Value::as_u64),
             Some(super::PROTOCOL_VERSION)
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn uses_callees_reports_outgoing_uncertainty_without_changing_callers() {
+        let root = tmpdir("uses-outgoing-uncertainty");
+        std::fs::write(
+            root.join("calls.ts"),
+            "export function known() { return 1; }\n\
+             export function entry() { known(); missing(); missing(); }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "outgoing fixture"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let outgoing = svc.handle(Request::Uses {
+            uid_or_name: "entry".into(),
+            role: "callees".into(),
+            offset: None,
+        });
+        assert!(outgoing.ok);
+        assert_eq!(outgoing.data()["total_edges"], 1);
+        assert_eq!(outgoing.data()["envelope"]["unresolved_outgoing"], 2);
+        assert_eq!(outgoing.data()["envelope"]["lower_bound"], true);
+        let epistemics = outgoing.epistemics.as_ref().unwrap();
+        assert!(epistemics.lower_bound);
+        assert!(!epistemics.closed_world);
+        assert!(epistemics.basis.contains("2 unresolved outgoing call site(s)"));
+
+        for (symbol, role, count) in [
+            ("entry", "callers", 0),
+            ("known", "callees", 0),
+            ("known", "callers", 1),
+        ] {
+            let response = svc.handle(Request::Uses {
+                uid_or_name: symbol.into(),
+                role: role.into(),
+                offset: None,
+            });
+            assert!(response.ok);
+            assert_eq!(response.data()["total_edges"], count);
+            assert!(!response.epistemics.as_ref().unwrap().lower_bound);
+            assert!(response.epistemics.as_ref().unwrap().closed_world);
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

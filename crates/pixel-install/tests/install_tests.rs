@@ -41,6 +41,79 @@ fn shell_profile_path(home: &std::path::Path) -> std::path::PathBuf {
 }
 const PIXEL_MANAGED_BEGIN: &str = "# >>> pixel-managed >>>";
 
+/// This proves instruction delivery and stream preservation, not model obedience.
+#[test]
+#[cfg(unix)]
+fn installed_metrics_guidance_reaches_wrapped_agents_without_rewriting_streams() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        dry_run: false,
+    })
+    .unwrap();
+    let prompt = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
+    for required in [
+        "## LIVE OPERATION METRICS",
+        "same tool-call result",
+        "exact line once",
+        "global latest",
+        "already relayed",
+        "PIXEL_METRICS=0",
+        "PIXEL_METRICS_ROUND_TRIP_MS",
+        "sequential-v1",
+        "Default `round_trip_ms` is 2000",
+        "search-compat",
+        "Do not invent",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "missing relay contract: {required}"
+        );
+    }
+
+    // Mock the agent boundary: verify the received prompt, then emit real-shape
+    // tool streams. No model, external service, or paid evaluation is involved.
+    let mock = r#"#!/bin/sh
+case "$1" in
+  --append-system-prompt-file) prompt="$2" ;;
+  -c) prompt="${2#model_instructions_file=\"}"; prompt="${prompt%\"}" ;;
+  *) exit 81 ;;
+esac
+test -r "$prompt" || exit 82
+grep -q '## LIVE OPERATION METRICS' "$prompt" || exit 83
+shift 2
+test "$1" = 'real task with spaces' || exit 84
+printf '%s\n' '{"result":"fixture"}'
+printf '%s\n' '🟩 Pixel · impact · 12.4 ms · ~820 output tokens · ~3100 tokens saved (workflow estimate) · ~3.99 s saved (sequential estimate) · id=fixture-invocation' >&2
+exit 7
+"#;
+    for agent in ["claude", "codex"] {
+        let executable = home.join(agent);
+        fs::write(&executable, mock).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let result = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(". \"$1\"; {agent} 'real task with spaces'"))
+            .arg("fixture")
+            .arg(shell_profile_path(home))
+            .env("HOME", home)
+            .env("PATH", format!("{}:/usr/bin:/bin", home.display()))
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(7), "{agent}: {result:?}");
+        assert_eq!(result.stdout, b"{\"result\":\"fixture\"}\n");
+        assert_eq!(
+            String::from_utf8(result.stderr).unwrap(),
+            "🟩 Pixel · impact · 12.4 ms · ~820 output tokens · ~3100 tokens saved (workflow estimate) · ~3.99 s saved (sequential estimate) · id=fixture-invocation\n"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // doctor tests
 // ---------------------------------------------------------------------------
@@ -478,8 +551,8 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
 
     // Shell wrappers are installed in the shell profile.
     let profile = shell_profile_path(home);
-    let profile_content = fs::read_to_string(&profile)
-        .expect("shell profile should be created on a fresh home");
+    let profile_content =
+        fs::read_to_string(&profile).expect("shell profile should be created on a fresh home");
     assert!(
         profile_content.contains(PIXEL_MANAGED_BEGIN),
         "shell profile should carry the pixel-managed wrapper block"
@@ -557,7 +630,11 @@ fn doctor_install_artifact_checks_red_and_green() {
 
     // 3. Corrupting the agent prompt makes install.agent-prompt red (stale).
     let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
-    fs::write(&prompt_path, "# stale prompt without the required markers\n").unwrap();
+    fs::write(
+        &prompt_path,
+        "# stale prompt without the required markers\n",
+    )
+    .unwrap();
     let report = doctor(&doc_opts).expect("doctor runs");
     let prompt_check = report
         .checks
