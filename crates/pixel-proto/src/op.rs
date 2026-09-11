@@ -262,6 +262,28 @@ pub enum Op {
         #[serde(default)]
         refspec: Option<String>,
     },
+    /// P2·2: human notes — durable annotations keyed by `file` + `target`
+    /// (a symbol `name` or concept `norm`) that survive rebuilds and are
+    /// merged into `resolve`/`targets` results. `action` is one of
+    /// "set" | "get" | "rm" | "list"; `set` requires `note`,
+    /// `get`/`rm` require `file` + `target`, `list` takes an optional
+    /// `file` filter.
+    Note {
+        action: String,
+        #[serde(default)]
+        file: Option<String>,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        note: Option<String>,
+    },
+    /// P2·2: structural repo map — every indexed file with its symbols.
+    /// `markdown` emits the exportable document form (per-file headings +
+    /// symbol bullets); otherwise a compact per-file outline.
+    Map {
+        #[serde(default)]
+        markdown: bool,
+    },
     Shutdown,
 }
 
@@ -303,6 +325,8 @@ impl Op {
             Op::BranchOp { .. } => "branch_op",
             Op::Update { .. } => "update",
             Op::Sync { .. } => "sync",
+            Op::Note { .. } => "note",
+            Op::Map { .. } => "map",
             Op::Shutdown => "shutdown",
             Op::Reindex { .. } => "reindex",
         }
@@ -325,6 +349,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "search",
     "targets",
     "symbol",
+    "skeleton",
     "context",
     "impact",
     "uses",
@@ -350,6 +375,8 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "branch_op",
     "update",
     "sync",
+    "note",
+    "map",
     "flow",
 ];
 
@@ -764,6 +791,7 @@ mod tests {
             "search",
             "targets",
             "symbol",
+            "skeleton",
             "context",
             "impact",
             "uses",
@@ -789,6 +817,8 @@ mod tests {
             "branch_op",
             "update",
             "sync",
+            "note",
+            "map",
             "flow",
             "shutdown",
         ];

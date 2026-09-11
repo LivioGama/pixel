@@ -117,6 +117,8 @@ pub(crate) fn is_pixel_hook(command: &str) -> bool {
                     "prompt-submit --provider claude",
                     "post-compaction",
                     "post-compaction --provider claude",
+                    "post-tool-use",
+                    "post-tool-use --provider claude",
                 ]
                 .contains(&verb)
                 || (verb.starts_with("composed-guard --provider codex --backup ")
@@ -438,6 +440,7 @@ fn configure(
         ));
     }
     for (event, verb, matcher) in [
+        ("PostToolUse", "post-tool-use", if provider == Provider::Claude { Some("Edit") } else { None }),
         ("SessionStart", "session-start", None),
         ("UserPromptSubmit", "prompt-submit", None),
         (
@@ -459,7 +462,7 @@ fn configure(
         // explicit at the lifecycle boundary without changing Codex/Devin's
         // established hook command shape.
         let provider_arg = if provider == Provider::Claude
-            && matches!(verb, "prompt-submit" | "post-compaction")
+            && matches!(verb, "prompt-submit" | "post-compaction" | "post-tool-use")
         {
             " --provider claude"
         } else {

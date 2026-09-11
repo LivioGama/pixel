@@ -2480,6 +2480,7 @@ dependencies = [
  "pixel-facts",
  "pixel-flow",
  "pixel-git",
+ "pixel-graph",
  "pixel-index",
  "pixel-install",
  "pixel-ops",
