@@ -29,15 +29,13 @@ fn fake_pixel_exe(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 // The new install writes shell wrappers (a pixel-managed block) into the
-// user's shell profile. `shell_profile_path` and the managed markers are
-// `pub(crate)` in install.rs, so this mirrors the same logic for tests.
+// user's shell profile, whose location depends on the shell. Every test pins
+// an explicit shell instead of inheriting the runner's `$SHELL`, so a
+// developer running `cargo test` from fish gets the same result as one running
+// it from zsh — and so the fish tests below exercise fish on every machine.
+const TEST_SHELL: &str = "/bin/zsh";
 fn shell_profile_path(home: &std::path::Path) -> std::path::PathBuf {
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    if shell.contains("bash") {
-        home.join(".bashrc")
-    } else {
-        home.join(".zshrc")
-    }
+    home.join(".zshrc")
 }
 const PIXEL_MANAGED_BEGIN: &str = "# >>> pixel-managed >>>";
 
@@ -54,6 +52,7 @@ fn installed_metrics_guidance_reaches_wrapped_agents_without_rewriting_streams()
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     })
     .unwrap();
     let prompt = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
@@ -128,6 +127,7 @@ fn doctor_runs_and_returns_report() {
     let options = DoctorOptions {
         home: Some(home.to_path_buf()),
         executable_path: None, // uses current_exe
+        shell: Some(TEST_SHELL.into()),
         ..Default::default()
     };
 
@@ -161,6 +161,7 @@ fn install_creates_config_with_managed_markers() {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     let report = install(&options).expect("install");
 
@@ -200,6 +201,7 @@ fn install_is_idempotent() {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
 
     // First install.
@@ -266,6 +268,7 @@ fn install_leaves_codex_config_untouched() {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     install(&options).expect("install");
 
@@ -295,6 +298,7 @@ fn install_leaves_settings_json_valid_after_install() {
         home: Some(home.to_path_buf()),
         executable_path: None,
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     install(&options).expect("install");
 
@@ -376,6 +380,7 @@ fn dry_run_writes_nothing_on_a_clean_home() {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         dry_run: true,
+        shell: Some(TEST_SHELL.into()),
     };
     let report = install(&options).expect("dry-run install");
 
@@ -418,6 +423,7 @@ fn dry_run_leaves_pre_existing_files_byte_identical() {
         home: Some(home.to_path_buf()),
         executable_path: None,
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     install(&real_options).expect("real install");
 
@@ -432,6 +438,7 @@ fn dry_run_leaves_pre_existing_files_byte_identical() {
     // real install already exists (idempotent no-op path).
     let dry_options = InstallOptions {
         dry_run: true,
+        shell: Some(TEST_SHELL.into()),
         ..real_options
     };
     let report = install(&dry_options).expect("dry-run install over existing state");
@@ -502,6 +509,7 @@ fn reinstall_is_byte_for_byte_idempotent_on_managed_claude_md() {
         home: Some(home.to_path_buf()),
         executable_path: None,
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     install(&options).expect("install 1");
     let c1 = fs::read_to_string(home.join("CLAUDE.md")).unwrap();
@@ -522,6 +530,7 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
         home: Some(home.to_path_buf()),
         executable_path: None,
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     install(&options).expect("install on fresh home");
 
@@ -582,6 +591,7 @@ fn doctor_install_artifact_checks_red_and_green() {
     let doc_opts = DoctorOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
+        shell: Some(TEST_SHELL.into()),
         ..Default::default()
     };
 
@@ -613,6 +623,7 @@ fn doctor_install_artifact_checks_red_and_green() {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     })
     .expect("install");
 
@@ -681,6 +692,7 @@ fn uninstall_removes_managed_block_and_preserves_user_content() {
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join("pixel")),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     let report = uninstall(&uninstall_opts).expect("uninstall");
     assert!(report.ok, "uninstall should succeed");
@@ -749,6 +761,7 @@ fn uninstall_removes_claude_hooks_and_scripts() {
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join("pixel")),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     uninstall(&uninstall_opts).expect("uninstall");
 
@@ -791,6 +804,7 @@ fn uninstall_removes_binary() {
         home: Some(home.to_path_buf()),
         binary_path: Some(bin.clone()),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     uninstall(&opts).expect("uninstall");
 
@@ -807,6 +821,7 @@ fn uninstall_is_idempotent() {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     install(&install_opts).expect("install");
 
@@ -814,6 +829,7 @@ fn uninstall_is_idempotent() {
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join("pixel")),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     let r1 = uninstall(&uninstall_opts).expect("uninstall 1");
     assert!(r1.ok);
@@ -854,6 +870,7 @@ fn uninstall_dry_run_does_not_modify() {
         home: Some(home.to_path_buf()),
         binary_path: Some(bin.clone()),
         dry_run: true,
+        shell: Some(TEST_SHELL.into()),
     };
     let report = uninstall(&uninstall_opts).expect("dry-run uninstall");
     assert!(report.dry_run, "report should be dry-run");
@@ -904,6 +921,7 @@ fn uninstall_removes_codex_hooks_preserving_others() {
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join("pixel")),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     uninstall(&opts).expect("uninstall");
 
@@ -934,6 +952,7 @@ fn uninstall_removes_rule_source() {
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join("pixel")),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     uninstall(&opts).expect("uninstall");
 
@@ -955,6 +974,7 @@ fn routing_full_install_rtk_round_trip_preserves_foreign_hooks() {
         home: Some(home.into()),
         executable_path: Some(exe.clone()),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     // The new install wires NO hooks — it only scrubs deprecated MCP entries
     // and removes old guard hooks. The foreign RTK + SessionStart entries
@@ -991,6 +1011,7 @@ fn routing_full_install_rtk_round_trip_preserves_foreign_hooks() {
         home: Some(home.into()),
         binary_path: Some(exe),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     })
     .unwrap();
     let restored: serde_json::Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
@@ -1043,6 +1064,7 @@ fn routing_isolated_provider_child() {
         home: Some(home.clone()),
         executable_path: Some(exe),
         dry_run: false,
+        shell: Some(TEST_SHELL.into()),
     };
     // The new install wires NO provider hooks. The provider config must
     // pass through install untouched (still "{}"), and no hooks directory
@@ -1075,5 +1097,231 @@ fn routing_isolated_provider_child() {
     assert!(
         home.join(".local/share/pixel/agent-prompt.md").is_file(),
         "agent-prompt.md should be deployed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// fish support
+//
+// fish reads neither ~/.zshrc nor ~/.bashrc, and rejects POSIX function
+// syntax outright (`claude() { ...; }` is a parse error, `$@` does not exist).
+// Before fish was handled, a fish user's `pixel install` wrote a POSIX block
+// into ~/.zshrc: wrappers that never loaded, and a doctor that called them
+// green. These tests pin both halves — the right file, and syntax the target
+// shell actually accepts.
+// ---------------------------------------------------------------------------
+
+const FISH_SHELL: &str = "/opt/homebrew/bin/fish";
+
+fn fish_dropin(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".config/fish/conf.d/pixel.fish")
+}
+
+fn install_for_shell(home: &std::path::Path, shell: &str) {
+    install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        dry_run: false,
+        shell: Some(shell.into()),
+    })
+    .expect("install");
+}
+
+#[test]
+fn fish_wrappers_land_in_the_fish_dropin_and_not_in_a_profile_fish_never_reads() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, FISH_SHELL);
+
+    let dropin = fs::read_to_string(fish_dropin(home)).expect(
+        "fish wrappers belong in ~/.config/fish/conf.d/pixel.fish — fish sources conf.d \
+         automatically for every session",
+    );
+    assert!(
+        dropin.contains(PIXEL_MANAGED_BEGIN),
+        "the drop-in should carry the pixel-managed block"
+    );
+    assert!(
+        !home.join(".zshrc").exists() && !home.join(".bashrc").exists(),
+        "a fish install must not write wrappers into a profile fish never sources"
+    );
+}
+
+#[test]
+fn fish_wrappers_are_written_in_fish_syntax_not_posix_syntax() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, FISH_SHELL);
+    let block = fs::read_to_string(fish_dropin(home)).expect("fish drop-in");
+
+    for required in [
+        "function claude; command claude --append-system-prompt-file",
+        "function codex; command codex -c",
+        "$argv; end",
+    ] {
+        assert!(
+            block.contains(required),
+            "fish block must define functions in fish syntax, missing {required:?}:\n{block}"
+        );
+    }
+    for forbidden in ["claude()", "codex()", "\"$@\""] {
+        assert!(
+            !block.contains(forbidden),
+            "POSIX construct {forbidden:?} is a parse error in fish:\n{block}"
+        );
+    }
+    assert!(
+        block.contains("$HOME/.local/share/pixel/agent-prompt.md"),
+        "the wrappers must still point at the deployed agent prompt:\n{block}"
+    );
+}
+
+/// `<shell> -n` parses a file without executing it — the only check that
+/// proves the installed block is loadable rather than merely plausible.
+#[test]
+#[cfg(unix)]
+fn every_installed_block_parses_in_the_shell_it_was_written_for() {
+    use std::process::Command;
+
+    type ProfileOf = fn(&std::path::Path) -> std::path::PathBuf;
+    let cases: [(&str, ProfileOf); 3] = [
+        ("bash", |home| home.join(".bashrc")),
+        ("zsh", |home| home.join(".zshrc")),
+        ("fish", fish_dropin),
+    ];
+    let mut checked = 0;
+    for (shell, profile_of) in cases {
+        let dir = TempDir::new().expect("tempdir");
+        let home = dir.path();
+        install_for_shell(home, shell);
+        let profile = profile_of(home);
+        assert!(
+            profile.is_file(),
+            "{shell} install should have written {}",
+            profile.display()
+        );
+        // Absent from this machine — nothing to prove here, other cases carry.
+        let Ok(output) = Command::new(shell).arg("-n").arg(&profile).output() else {
+            continue;
+        };
+        checked += 1;
+        assert!(
+            output.status.success(),
+            "{shell} rejects the block pixel wrote for it in {}:\n{}",
+            profile.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(
+        checked > 0,
+        "no shell was available to parse-check against — the assertion above never ran"
+    );
+}
+
+#[test]
+fn doctor_reads_the_profile_of_the_shell_it_is_asked_about() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, FISH_SHELL);
+
+    let wrappers_check = |shell: &str| {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: None,
+            shell: Some(shell.into()),
+            ..Default::default()
+        })
+        .expect("doctor runs");
+        report
+            .checks
+            .iter()
+            .find(|c| c.id == "install.shell-wrappers")
+            .expect("shell-wrappers check")
+            .clone()
+    };
+
+    assert_eq!(
+        wrappers_check(FISH_SHELL).status,
+        pixel_install::doctor::CheckStatus::Green,
+        "a fish install must read back green for fish"
+    );
+    assert_eq!(
+        wrappers_check("/bin/zsh").status,
+        pixel_install::doctor::CheckStatus::Red,
+        "nothing was installed for zsh — its profile does not exist"
+    );
+}
+
+#[test]
+fn doctor_refuses_to_green_a_posix_block_sitting_in_the_fish_dropin() {
+    // Reproduces the shipped bug in its observable form: the markers are
+    // present in the file fish sources, so a marker-only check calls this
+    // installed. fish cannot parse a line of it.
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, "/bin/zsh");
+    let posix_block = fs::read_to_string(home.join(".zshrc")).expect("zsh profile");
+    fs::create_dir_all(fish_dropin(home).parent().unwrap()).unwrap();
+    fs::write(fish_dropin(home), &posix_block).unwrap();
+
+    let report = doctor(&DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: None,
+        shell: Some(FISH_SHELL.into()),
+        ..Default::default()
+    })
+    .expect("doctor runs");
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.shell-wrappers")
+        .expect("shell-wrappers check");
+    assert_eq!(
+        check.status,
+        pixel_install::doctor::CheckStatus::Red,
+        "a POSIX block in the fish drop-in is not a working install, got {:?}",
+        check.reason
+    );
+}
+
+#[test]
+fn uninstall_deletes_the_fish_dropin_it_created() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, FISH_SHELL);
+    assert!(
+        fish_dropin(home).is_file(),
+        "precondition: drop-in installed"
+    );
+
+    uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        binary_path: None,
+        dry_run: false,
+        shell: Some(FISH_SHELL.into()),
+    })
+    .expect("uninstall");
+
+    assert!(
+        !fish_dropin(home).exists(),
+        "pixel created the drop-in and owns all of it — an empty leftover file is litter"
+    );
+}
+
+#[test]
+fn a_shell_path_that_merely_contains_fish_is_not_treated_as_fish() {
+    // Substring matching on the whole path is what made `bash` detection
+    // sloppy; a user whose home is /home/fisher must still get zsh wrappers.
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, "/home/fisher/bin/zsh");
+
+    assert!(
+        home.join(".zshrc").is_file(),
+        "the shell's executable name is zsh — the block belongs in ~/.zshrc"
+    );
+    assert!(
+        !fish_dropin(home).exists(),
+        "a path containing 'fish' is not a fish shell"
     );
 }

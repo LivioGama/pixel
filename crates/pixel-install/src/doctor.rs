@@ -72,6 +72,10 @@ pub struct DoctorOptions {
     /// Repo root to check index/graph/facts freshness for. If None, only
     /// install-state checks run.
     pub repo_root: Option<PathBuf>,
+    /// Shell whose wrapper block should be checked, as a `$SHELL`-style value.
+    /// Defaults to `$SHELL`. Must match what `pixel install` was given, or the
+    /// check looks at the wrong profile.
+    pub shell: Option<String>,
     /// Dry-run parser for one `pixel …` argv (including the leading
     /// "pixel"), supplied by the CLI binary from its real clap definition.
     /// When present, the `rule.parity` check parses every pixel command
@@ -154,29 +158,40 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     ));
 
+    let shell_override = options.shell.clone();
     checks.push(check(
         "install.shell-wrappers",
         || -> std::result::Result<DoctorCheckDetail, String> {
-            let profile = install::shell_profile_path(&home);
+            let shell = install::resolve_shell(shell_override.as_deref());
+            let (kind, profile) = install::shell_profile_for(&shell, &home);
             let content = fs::read_to_string(&profile).unwrap_or_default();
-            let has_begin = content.contains(install::PIXEL_MANAGED_BEGIN);
-            let has_end = content.contains(install::PIXEL_MANAGED_END);
-            let has_claude =
-                content.contains("claude()") && content.contains("--append-system-prompt-file");
-            let has_codex =
-                content.contains("codex()") && content.contains("model_instructions_file");
-            if !has_begin || !has_end {
+            let Some(block) = install::extract_managed_block(&content) else {
                 return Err(format!(
                     "shell wrappers not found in {} — run `pixel install`",
                     profile.display()
                 ));
-            }
-            if !has_claude || !has_codex {
-                return Err("shell wrappers present but incomplete — run `pixel install`".into());
+            };
+            // Compared against the block this binary would write, not against
+            // loose substrings: a block left in a POSIX profile by an install
+            // that ran under a different $SHELL, or written by an older pixel,
+            // is stale — and reporting it green is how a fish user ends up
+            // with wrappers their shell never loads.
+            if block != install::expected_wrapper_block(kind) {
+                return Err(format!(
+                    "shell wrappers in {} are stale or written for another shell — run `pixel install`",
+                    profile.display()
+                ));
             }
             Ok(DoctorCheckDetail {
-                summary: format!("shell wrappers installed in {}", profile.display()),
-                detail: Some(serde_json::json!({ "profile": profile.display().to_string() })),
+                summary: format!(
+                    "{} shell wrappers installed in {}",
+                    kind.as_str(),
+                    profile.display()
+                ),
+                detail: Some(serde_json::json!({
+                    "profile": profile.display().to_string(),
+                    "shell": kind.as_str(),
+                })),
             })
         },
     ));
