@@ -776,6 +776,18 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     let anchor = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
 
     let idx_root = find_up(&anchor, ".pixel");
+
+    // POST-TOOL-USE blast-radius: after an Edit/Write/apply_patch, deliver
+    // the dependants of what was just edited without being asked (P0·3).
+    // This is the only one of the nine tracks that turns an *ignored doctrine rule*
+    // into a *delivered fact*: the PreToolUse doctrine says "run pixel impact
+    // before editing a symbol", butthe bench shows agents don't. Here the
+    // dependants arrive after the edit, unsolicited.
+    if event == "PostToolUse" {
+        post_tool_use_blast_radius(&anchor, idx_root.as_deref(), &tool);
+        std::process::exit(0);
+    }
+
     let manifest_root = find_up(&anchor, Path::new(".pixel").join("targets.json"));
     let (manifest, manifest_expired) = match manifest_root.as_deref().map(load_manifest_state) {
         Some(ManifestState::Active(m)) => (Some(m), false),
@@ -952,7 +964,7 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
 /// shape itself (`tool_name` + `tool_input` present, no explicit event
 /// name) as an implicit PreToolUse.
 fn is_guard_event(payload: &Value, event: &str) -> bool {
-    if event == "PreToolUse" || event == "BeforeTool" {
+    if event == "PreToolUse" || event == "BeforeTool" || event == "PostToolUse" {
         return true;
     }
     event.is_empty() && payload.get("tool_name").is_some() && payload.get("tool_input").is_some()
@@ -993,6 +1005,123 @@ fn find_up(start: &Path, rel: impl AsRef<Path>) -> Option<PathBuf> {
             _ => return None,
         }
     }
+}
+
+/// P0·3: after an Edit/Write/apply_patch, deliver (unsolicited) the blast
+/// radius of the edited file: how many symbols elsewhere call into the edited
+/// file's symbols. This is the one track that turns an *ignored doctrine rule*
+/// ('run pixel impact before editing a symbol') into a *delivered fact*.
+/// Non-blocking — the edit has already happened; the agent now KNOWS what it
+/// can break. Emits a PostToolUse advisory, or nothing when there is no
+/// indexed graph or the edited path is not a known source file.
+
+/// Entry point for the `pixel hook post-tool-use` hook: the already-written
+/// PostToolUse blast-radius hook invoked by `pixel hook post-tool-use` .
+/// Unlike [`run`] which infers the event from the payload, this *forces* the event
+/// to `PostToolUse` — PostToolUse hook files are per-event,so `hook_event_name`
+/// is often absent from their payload. Reads stdin, resolves the edited path +
+/// index, and emits a NON-BLOCKING blast-radius advisory; a graph/index miss
+/// is a silent allow (exit 0, never a denial).
+pub fn run_post_tool_use(provider: Option<Provider>) -> ! {
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
+        std::process::exit(0);
+    }
+    // No run_provider_guard call here: that path emits *PreToolUse*
+    // permission rewrites and never returns, which would make an installed
+    // `post-tool-use --provider claude` hook exit before the blast radius
+    // runs. The provider only qualifies the payload's runtime; the path
+    // keys are already normalized below (file_path/path/TargetFile/
+    // AbsolutePath/target_file/filePath) and the advisory emitted by
+    // `post_tool_use_advisory` is already the Claude hook contract.
+    let _ = provider;
+    let Ok(payload) = serde_json::from_str::<Value>(&input) else {
+        std::process::exit(0);
+    };
+    let tool = payload
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let tool_input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
+    let Some(tool_input) = tool_input.as_object() else {
+        std::process::exit(0);
+    };
+    let raw_path = tool_input
+        .get("file_path")
+        .or_else(|| tool_input.get("path"))
+        .or_else(|| tool_input.get("TargetFile"))
+        .or_else(|| tool_input.get("AbsolutePath"))
+        .or_else(|| tool_input.get("target_file"))
+        .or_else(|| tool_input.get("filePath"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let anchor = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
+    let idx_root = find_up(&anchor, ".pixel");
+    post_tool_use_blast_radius(&anchor, idx_root.as_deref(), &tool);
+    std::process::exit(0);
+}
+
+fn post_tool_use_blast_radius(abs: &Path, idx_root: Option<&Path>, tool: &str) {
+    use std::collections::BTreeSet;
+    use pixel_graph::GraphStore;
+    let is_edit = matches!(
+        tool,
+        "Edit" | "MultiEdit" | "NotebookEdit" | "Write"
+        | "edit" | "write" | "notebook_edit"
+        | "apply_patch" | "write_file"
+        | "replace_file_content" | "write_to_file" | "edit_file"
+    );
+    if !is_edit {
+        return;
+    }
+    let Some(root) = idx_root.map(PathBuf::from) else { return };
+    let db = root.join(".pixel").join("graph.db");
+    if !db.exists() {
+        return;
+    }
+    let Ok(store) = GraphStore::open(&db) else { return };
+    let rel = rel_of(abs, &root);
+    if rel.is_empty() || rel.starts_with(".pixel/") {
+        return;
+    }
+    let Ok(Some(file_row)) = store.file_by_path(&rel) else { return };
+    let file_id = file_row.id;
+    let Ok(symbols) = store.symbols_in_file(file_id) else { return };
+    let mut dependants = BTreeSet::new();
+    for sym in &symbols {
+        if let Ok(edges) = store.edges_to(sym.id, None) {
+            for e in &edges {
+                dependants.insert(e.src_id);
+            }
+        }
+    }
+    if dependants.is_empty() {
+        return;
+    }
+    let note = format!(
+        "just edited '{rel}': {n} symbols elsewhere depend on its {k} symbols — check callers before trusting the change.",
+        rel = rel,
+        n = dependants.len(),
+        k = symbols.len()
+    );
+    print!("{}", post_tool_use_advisory(&note));
+}
+
+/// PostToolUse advisory: surface the blast-radius note to the model without a
+/// permission decision (the edit already happened).
+fn post_tool_use_advisory(note: &str) -> serde_json::Value {
+    serde_json::json!({
+        "systemMessage": note,
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": note
+        }
+    })
 }
 
 /// Outcome of reading `.pixel/targets.json`: distinguishes "no usable
@@ -3007,11 +3136,12 @@ mod tests {
     }
 
     #[test]
-    fn accepts_before_tool_event() {
+    fn accepts_before_tool_event_and_post_tool_use() {
         let empty = serde_json::json!({});
         assert!(is_guard_event(&empty, "PreToolUse"));
         assert!(is_guard_event(&empty, "BeforeTool"));
-        assert!(!is_guard_event(&empty, "PostToolUse"));
+        // PostToolUse (blast-radius hook) is now a guard event too.
+        assert!(is_guard_event(&serde_json::json!({"tool_name": "Edit", "tool_input": {}}), "PostToolUse"));
     }
 
     #[test]

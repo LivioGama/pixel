@@ -294,10 +294,13 @@ fn score_crux_line(line: &str) -> (i64, Vec<&'static str>) {
         reasons.push("bail");
     }
     // (b) state mutation — assignment / return / push that writes observable state.
+    //     Mutations are one of the three crux categories (guards, mutations,
+    //     early-returns) per P2·3, so a bare mutation line clears the default
+    //     threshold (3) on its own — like a lone guard or lone early-return.
     let mut_pat = ["=", "return ", "+=", "-=", "*=", "/=", "push", "insert", "remove", "set", "append"];
     for m in mut_pat {
         if t.contains(m) {
-            score += 2;
+            score += 3;
             reasons.push("mutation");
             break;
         }
@@ -1131,6 +1134,18 @@ impl GraphStore {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Every annotation across all files, grouped by file then target (for
+    /// `note list` without a file filter).
+    pub fn all_annotations(&self, limit: u32) -> Result<Vec<AnnotationRow>> {
+        let sql = format!(
+            "SELECT {} FROM annotations ORDER BY file_path, target LIMIT ?1",
+            Self::ANNOTATION_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![limit], Self::row_to_annotation)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// Total annotation count (contributes to `index_state` health).
     pub fn annotation_count(&self) -> Result<u64> {
         Ok(self
@@ -1326,12 +1341,18 @@ mod tests {
         assert!(!texts.iter().any(|t| *t == "{" || *t == "}" || t.ends_with("comment")));
         // Fingerprint is content-stable: same text -> same hash, regardless of
         // which line number it sits at.
-        let same = CruxLine {
+        // NOTE: the body line is `total += x.val;` (Rust semicolon), so the
+        // extracted text carries the `;`; fingerprint any extracted line and
+        // confirm it equals fnv1a64 of that exact text.
+        let mut_found = crux.iter().find(|c| c.text.contains("x.val")).unwrap();
+        assert_eq!(mut_found.fingerprint, fnv1a64(&mut_found.text));
+        // Same text moved to a different line number keeps the same fingerprint.
+        let moved = CruxLine {
             line: 999,
-            text: "total += x.val".to_string(),
-            fingerprint: fnv1a64("total += x.val"),
+            text: mut_found.text.clone(),
+            fingerprint: fnv1a64(&mut_found.text),
         };
-        assert!(crux.iter().any(|c| c.text == "total += x.val" && c.fingerprint == same.fingerprint));
+        assert_eq!(moved.fingerprint, mut_found.fingerprint);
 
         // Storage round-trips through the symbol_crux table and retrieves by
         // stable fingerprint (the anchor used by retrieval).
@@ -1344,10 +1365,11 @@ mod tests {
         let back = store.symbol_crux_by_id(sid).unwrap();
         assert_eq!(back.len(), crux.len());
         // Retrieval from the stable anchor.
-        let anchor = fnv1a64("total += x.val");
+        let anchor = fnv1a64(&mut_found.text);
         let found = store.symbol_crux_by_fingerprint(sid, anchor).unwrap();
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].text, "total += x.val");
+        assert_eq!(found[0].text, mut_found.text);
+        assert_eq!(found[0].fingerprint, anchor);
         // Re-index of the file clears the symbol's crux (no stale anchors).
         let sid2 = store
             .insert_symbol(fid, "src/lib.rs#run2#function", "run2", "run2", SymbolKind::Function, 5, 6, "")

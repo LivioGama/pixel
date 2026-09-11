@@ -97,6 +97,19 @@ fn render_item(item: &ContextItem, layer: Layer, out: &mut String) {
             out.push('\n');
         }
     }
+    // P2·3: crux lines are the distilled body — at L2 they annotate the
+    // shown body with the logic-bearing lines (`crux:LINE`), and they are
+    // content-anchored so they stay right when the file moves. Neighbors
+    // rendered at L1 stay signatures-only; the distilled target fallback
+    // lives in `render_context` (daemon side), not here.
+    if layer == Layer::L2 && !item.crux.is_empty() {
+        let crux: Vec<(u32, &str)> = item
+            .crux
+            .iter()
+            .map(|(line, text)| (*line, text.as_str()))
+            .collect();
+        render_crux(out, &crux);
+    }
 }
 
 /// Render all items at the given layer. Deterministic: preserves input order.
@@ -161,7 +174,7 @@ pub fn crux_lines_from_body(body: &str, threshold: i64) -> Vec<(u32, String)> {
             }
             let mut_pats = ["=", "return ", "+=", "-=", "*=", "/=", "push", "insert", "remove", "set", "append"];
             if mut_pats.iter().any(|w| t.contains(w)) {
-                score += 2;
+                score += 3;
             }
             if score >= threshold {
                 Some(((idx + 1) as u32, t.to_string()))

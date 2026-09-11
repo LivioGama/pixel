@@ -233,6 +233,36 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Human notes on the map: durable annotations keyed by file + symbol
+    /// name (or concept norm). Survive rebuilds; merged into `resolve` and
+    /// `targets` results. `pixel note set <file> <target> <note>`,
+    /// `get`/`rm <file> <target>`, `list [file]`.
+    Note {
+        /// set | get | rm | list
+        action: String,
+        /// File the note is attached to (repo-relative or absolute).
+        file: Option<String>,
+        /// Symbol name or concept norm the note targets.
+        target: Option<String>,
+        /// Note text (required for `set`).
+        note: Option<String>,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Structural repo map: every indexed file with its symbols. `--markdown`
+    /// emits the exportable document form — the human-editable projection of
+    /// the graph that `note` annotations key onto.
+    Map {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Emit the exportable markdown document.
+        #[arg(long)]
+        markdown: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Budget-fitted context for a symbol uid.
     Context {
         uid: String,
@@ -1021,6 +1051,15 @@ enum HookCmd {
         #[arg(long, value_enum)]
         provider: Option<guard::Provider>,
     },
+    /// `pixel hook post-tool-use` — P0·3 blast-radius: after an edit, emit
+    /// the dependants of what was just changed (unsolicited). Unlike \[`run`\]
+    /// which infers the event from the payload, this *forces* `PostToolUse` —
+    /// PostToolUse hook files are per-event,so `hook_event_name` is often absent.
+    PostToolUse {
+        /// Provider whose hook-response contract to emit under.
+        #[arg(long, value_enum)]
+        provider: Option<guard::Provider>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1582,6 +1621,15 @@ fn pretty_targets(d: &Value) -> Option<String> {
                 t.get("path").and_then(Value::as_str).unwrap_or("?"),
                 t.get("score").and_then(Value::as_f64).unwrap_or(0.0),
             ));
+            if let Some(notes) = t.get("notes").and_then(Value::as_array) {
+                for n in notes {
+                    output.push_str(&format!(
+                        "      note [{}]: {}\n",
+                        n.get("target").and_then(Value::as_str).unwrap_or("?"),
+                        n.get("note").and_then(Value::as_str).unwrap_or(""),
+                    ));
+                }
+            }
             if let Some(reasons) = t.get("reasons").and_then(Value::as_array) {
                 for r in reasons {
                     output.push_str(&format!("      {}\n", r.as_str().unwrap_or("")));
@@ -2147,6 +2195,15 @@ fn print_resolve_human(data: &Value) -> Result<(), String> {
         output.push_str(&format!(
             "{path}:{start_line} ({kind}, score: {score:.2}) {raw}\n"
         ));
+        if let Some(notes) = m.get("notes").and_then(Value::as_array) {
+            for n in notes {
+                output.push_str(&format!(
+                    "  note [{}]: {}\n",
+                    n.get("target").and_then(Value::as_str).unwrap_or("?"),
+                    n.get("note").and_then(Value::as_str).unwrap_or("")
+                ));
+            }
+        }
         if let Some(ctx) = m.get("context").and_then(Value::as_str) {
             output.push_str(ctx);
             output.push('\n');
@@ -2910,6 +2967,100 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 Some(output)
             })?;
             Ok(())
+        }
+        Command::Note {
+            action,
+            file,
+            target,
+            note,
+            path,
+            json,
+        } => {
+            let data = execute(
+                &path,
+                Request::Note {
+                    action: action.clone(),
+                    file,
+                    target,
+                    note,
+                },
+                false,
+            )?;
+            finish_graph_cmd(data, json, |d| {
+                if let Some(notes) = d.get("notes").and_then(Value::as_array) {
+                    // `note list` output: grouped by file.
+                    if notes.is_empty() {
+                        return Some("no notes\n".to_string());
+                    }
+                    let mut output = String::new();
+                    for n in notes {
+                        output.push_str(&format!(
+                            "{}  {}  {}\n",
+                            n.get("file_path").and_then(Value::as_str).unwrap_or("?"),
+                            n.get("target").and_then(Value::as_str).unwrap_or("?"),
+                            n.get("note").and_then(Value::as_str).unwrap_or("?"),
+                        ));
+                    }
+                    return Some(output);
+                }
+                if let Some(n) = d.get("note") {
+                    // `note get` / `note set` echo.
+                    return Some(match n.as_str() {
+                        Some(text) => format!(
+                            "{}  {}  {}\n",
+                            d.get("file").and_then(Value::as_str).unwrap_or("?"),
+                            d.get("target").and_then(Value::as_str).unwrap_or("?"),
+                            text
+                        ),
+                        None => "no note\n".to_string(),
+                    });
+                }
+                if d.get("removed").is_some() {
+                    return Some(format!(
+                        "removed {}\n",
+                        d.get("removed").and_then(Value::as_bool).unwrap_or(false)
+                    ));
+                }
+                None
+            })?;
+            Ok(())
+        }
+        Command::Map {
+            path,
+            markdown,
+            json,
+        } => {
+            let data = execute(&path, Request::Map { markdown }, false)?;
+            if json {
+                return print_data(&data, true);
+            }
+            announce_graph_build(&data);
+            if markdown
+                && let Some(md) = data.get("markdown").and_then(Value::as_str)
+            {
+                return write_stdout(md);
+            }
+            // Compact outline: one line per file, indented symbol names.
+            let files = data.get("files").and_then(Value::as_array);
+            let Some(files) = files else {
+                return print_data(&data, false);
+            };
+            let mut output = String::new();
+            for f in files {
+                let path = f.get("path").and_then(Value::as_str).unwrap_or("?");
+                output.push_str(path);
+                output.push('\n');
+                if let Some(syms) = f.get("symbols").and_then(Value::as_array) {
+                    for s in syms {
+                        output.push_str(&format!(
+                            "  {} {}\n",
+                            s.get("kind").and_then(Value::as_str).unwrap_or("?"),
+                            s.get("name").and_then(Value::as_str).unwrap_or("?"),
+                        ));
+                    }
+                }
+            }
+            write_stdout(&output)
         }
         Command::Context {
             uid,
@@ -3779,6 +3930,12 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 // payload from stdin, finds the active targets manifest,
                 // and emits it as additionalContext. Never returns.
                 post_compaction::run(provider);
+            }
+            HookCmd::PostToolUse { provider } => {
+                // P0·3 blast-radius — reads stdin, forces the `PostToolUse`
+                // event, and emits a NON-BLOCKING advisory listing what was just
+                // changed's dependants. Never returns.
+                guard::run_post_tool_use(provider);
             }
         },
         Command::Task { cmd } => match cmd {

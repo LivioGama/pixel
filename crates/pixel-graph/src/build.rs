@@ -18,7 +18,7 @@ use crate::imports::resolve_import;
 use crate::resolve::{
     FileCalls, PendingCall, reconsider_resolved_calls, resolve_all, resolve_calls,
 };
-use crate::store::{EdgeKind, GraphStore};
+use crate::store::{EdgeKind, extract_crux, GraphStore};
 
 /// Extract concepts for a file and insert them, linking each to the smallest
 /// enclosing symbol (by line range) when one exists. `symbol_ids` are the ids
@@ -245,6 +245,22 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
             )?;
             ids.push(id);
             lines.push((s.start_line, s.end_line));
+
+            // P2·3: content-anchored crux — store the guarded logical lines of
+            // each symbol's body (guards, state mutations, early-returns) so
+            // retrieval can surface them. Fingerprints are content-stable: they survive
+            // a file that later shifts line numbers (re-anchoring by fingerprint).
+            let body_str = String::from_utf8_lossy(&e.content);
+            let all_lines: Vec<&str> = body_str.lines().collect();
+            let start = (s.start_line.saturating_sub(1) as usize).min(all_lines.len());
+            let end = (s.end_line.saturating_sub(1) as usize).min(all_lines.len());
+            let body = if end > start {
+                all_lines[start..end].join("\n")
+            } else {
+                String::new()
+            };
+            let crux = extract_crux(&body, 3);
+            store.set_symbol_crux(id, &crux)?;
         }
         sym_ids.push(ids);
         // Engine 1: concept pass alongside symbol extraction with O(1) content access.
@@ -458,6 +474,19 @@ pub fn update_files(root: &Path, db_path: &Path, files: &[(&str, bool)]) -> Resu
             )?;
             ids.push(id);
             lines.push((s.start_line, s.end_line));
+
+            // P2·3: content-anchored crux for the incremental re-index path.
+            let body_str = String::from_utf8_lossy(&content);
+            let all_lines: Vec<&str> = body_str.lines().collect();
+            let start = (s.start_line.saturating_sub(1) as usize).min(all_lines.len());
+            let end = (s.end_line.saturating_sub(1) as usize).min(all_lines.len());
+            let body = if end > start {
+                all_lines[start..end].join("\n")
+            } else {
+                String::new()
+            };
+            let crux = extract_crux(&body, 3);
+            store.set_symbol_crux(id, &crux)?;
         }
         insert_concepts(&store, file_id, rel, &content, &ids, &lines)?;
 

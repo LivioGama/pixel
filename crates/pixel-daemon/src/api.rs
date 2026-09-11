@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use pixel_facts::FactsStore;
-use pixel_graph::{EdgeKind, EdgeRow, GraphStore, SymbolKind, SymbolRow};
+use pixel_graph::{EdgeKind, EdgeRow, FileRow, GraphStore, SymbolKind, SymbolRow};
 use pixel_index::TrigramExtractor;
 use pixel_index::index::{MAX_FILE_BYTES, open_regular_bounded};
 use pixel_index::indexset::{IndexSet, IndexSetError};
@@ -667,6 +667,10 @@ impl Service {
             Request::Sync { remote, refspec } => {
                 pixel_ops::sync::sync(&self.root, &remote, refspec.as_deref())
             }
+            Request::Note { action, file, target, note } => {
+                self.op_note(&action, file.as_deref(), target.as_deref(), note.as_deref())
+            }
+            Request::Map { markdown } => self.op_map(markdown),
         }
     }
 
@@ -1060,6 +1064,27 @@ impl Service {
                 }
             }
         }
+        // P2·2: merge durable human notes per target file — a human who
+        // corrected the map sees the correction land in the closed list.
+        // Notes are human-authored and rare, so no tier gate here (unlike
+        // evidence): a note on a P2 file is still worth its few tokens.
+        if let Some(store) = self.graph.as_ref()
+            && let Some(targets) = out.get_mut("targets").and_then(Value::as_array_mut)
+        {
+            for t in targets.iter_mut() {
+                let Some(path) = t.get("path").and_then(Value::as_str) else {
+                    continue;
+                };
+                if let Ok(notes) = store.annotations_for_file(path)
+                    && !notes.is_empty()
+                {
+                    t["notes"] = json!(notes
+                        .iter()
+                        .map(|a| json!({"target": a.target, "note": a.note}))
+                        .collect::<Vec<_>>());
+                }
+            }
+        }
         if let Some(stats) = out.get_mut("stats") {
             stats["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
             stats["commit_oid"] = json!(self.index.status().commit_oid);
@@ -1181,7 +1206,7 @@ impl Service {
         let mut source_remaining = budget.saturating_mul(4).min(MAX_CONTEXT_SOURCE_BYTES);
         let mut items = Vec::new();
         let target_cap = source_remaining.min(MAX_TARGET_SNIPPET_BYTES);
-        let target = context_item(&self.root, &sym, &files, target_cap);
+        let target = context_item(&self.root, &sym, &files, target_cap, &store.symbol_crux_by_id(sym.id).map_err(|e| e.to_string())?.iter().map(|c| (c.line, c.text.clone())).collect::<Vec<_>>());
         source_remaining = source_remaining.saturating_sub(target.snippet.len());
         items.push(target);
         let mut seen_context = std::collections::HashSet::from([sym.id]);
@@ -1200,7 +1225,7 @@ impl Service {
             }
             if let Some(other) = symbol_by_id(store, symbol_id) {
                 let cap = source_remaining.min(MAX_NEIGHBOR_SNIPPET_BYTES);
-                let item = context_item(&self.root, &other, &files, cap);
+                let item = context_item(&self.root, &other, &files, cap, &store.symbol_crux_by_id(symbol_id).map_err(|e| e.to_string())?.iter().map(|c| (c.line, c.text.clone())).collect::<Vec<_>>());
                 source_remaining = source_remaining.saturating_sub(item.snippet.len());
                 items.push(item);
             }
@@ -1656,6 +1681,35 @@ impl Service {
         let outcome = pixel_graph::concept_resolve::resolve(store, phrase, &opts)
             .map_err(|e| e.to_string())?;
         let mut out = serde_json::to_value(&outcome).map_err(|e| e.to_string())?;
+        // P2·2: merge durable human notes onto matches — keyed by concept
+        // norm or owner symbol name inside the match's file, so a human
+        // correction surfaces exactly where the agent lands.
+        if let Some(matches) = out.get_mut("matches").and_then(Value::as_array_mut) {
+            for m in matches.iter_mut() {
+                let path = m.get("path").and_then(Value::as_str).unwrap_or("");
+                if path.is_empty() {
+                    continue;
+                }
+                let mut keys: Vec<&str> = Vec::new();
+                if let Some(n) = m.get("norm").and_then(Value::as_str) {
+                    keys.push(n);
+                }
+                if let Some(o) = m.get("owner").and_then(Value::as_str) {
+                    keys.push(o);
+                }
+                if keys.is_empty() {
+                    continue;
+                }
+                if let Ok(notes) = store.annotations_for_symbols(path, &keys)
+                    && !notes.is_empty()
+                {
+                    m["notes"] = json!(notes
+                        .iter()
+                        .map(|a| json!({"target": a.target, "note": a.note}))
+                        .collect::<Vec<_>>());
+                }
+            }
+        }
         merge_build_info(&mut out, build_info);
         Ok(out)
     }
@@ -1766,6 +1820,217 @@ impl Service {
             .record_event_raw(kind, data.as_ref(), None)
             .map_err(|e| e.to_string())?;
         Ok(json!({"recorded": true, "id": id, "kind": kind}))
+    }
+
+    /// P2·2: human notes — set/get/rm/list durable annotations keyed by
+    /// `file` + `target` (a symbol `name` or concept `norm`). Notes are
+    /// human-owned: they survive rebuilds and are merged into
+    /// `resolve`/`targets` results.
+    ///
+    /// Opens `graph.db` directly (schema-only when absent) — a note must be
+    /// writable before any graph build. Deliberately does NOT cache the
+    /// opened store in `self.graph`: an annotations-only store would poison
+    /// `ensure_graph`'s `is_some()` short-circuit and graph ops would read
+    /// an empty graph instead of building it.
+    fn op_note(
+        &mut self,
+        action: &str,
+        file: Option<&str>,
+        target: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<Value, String> {
+        // Normalize to the repo-relative convention used by every other op
+        // (and by the resolve/targets merge) — an absolute path from the
+        // CLI must still key the same row.
+        let norm_file = file.map(|f| {
+            let p = Path::new(f);
+            if p.is_absolute() {
+                p.strip_prefix(&self.root)
+                    .map(|r| r.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| f.to_string())
+            } else {
+                f.trim_start_matches("./").to_string()
+            }
+        });
+        // Fresh handle when the graph isn't already open; never cached (see
+        // doc comment — caching an annotations-only store would starve the
+        // graph build path).
+        let owned = match self.graph.as_ref() {
+            Some(_) => None,
+            None => Some(GraphStore::open(&self.graph_db_path()).map_err(|e| e.to_string())?),
+        };
+        let store = owned.as_ref().or(self.graph.as_ref()).unwrap();
+        match action {
+            "set" => {
+                let (file, target, note) = match (norm_file.as_deref(), target, note) {
+                    (Some(f), Some(t), Some(n)) if !f.is_empty() && !t.is_empty() && !n.is_empty() => {
+                        (f, t, n)
+                    }
+                    _ => return Err("note set requires <file> <target> <note>".to_string()),
+                };
+                store
+                    .set_annotation(file, target, note)
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({"ok": true, "file": file, "target": target, "note": note}))
+            }
+            "get" => {
+                let (file, target) = match (norm_file.as_deref(), target) {
+                    (Some(f), Some(t)) if !f.is_empty() && !t.is_empty() => (f, t),
+                    _ => return Err("note get requires <file> <target>".to_string()),
+                };
+                let note = store
+                    .get_annotation(file, target)
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({"file": file, "target": target, "note": note}))
+            }
+            "rm" | "delete" => {
+                let (file, target) = match (norm_file.as_deref(), target) {
+                    (Some(f), Some(t)) if !f.is_empty() && !t.is_empty() => (f, t),
+                    _ => return Err("note rm requires <file> <target>".to_string()),
+                };
+                let existed = store
+                    .get_annotation(file, target)
+                    .map_err(|e| e.to_string())?
+                    .is_some();
+                store
+                    .delete_annotation(file, target)
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({"ok": true, "removed": existed, "file": file, "target": target}))
+            }
+            "list" => {
+                const NOTE_LIST_CAP: u32 = 500;
+                let rows = match norm_file.as_deref() {
+                    Some(f) => store
+                        .annotations_for_file(f)
+                        .map_err(|e| e.to_string())?,
+                    None => store
+                        .all_annotations(NOTE_LIST_CAP)
+                        .map_err(|e| e.to_string())?,
+                };
+                let capped = norm_file.is_none() && rows.len() as u32 >= NOTE_LIST_CAP;
+                Ok(json!({
+                    "notes": rows,
+                    "total": rows.len(),
+                    "capped": capped,
+                }))
+            }
+            other => Err(format!(
+                "unknown note action '{other}' — expected set|get|rm|list"
+            )),
+        }
+    }
+
+    /// P2·2: structural repo map — every indexed file with its symbols,
+    /// sorted by path. `markdown` additionally emits the exportable document
+    /// (`markdown` field): directory sections, per-file headings, one bullet
+    /// per symbol. This is the human-editable projection of the graph — the
+    /// notes written via `note set` key on the same `file`/`target` pairs
+    /// the map prints, so a human can correct the map and the correction
+    /// merges back into `resolve`/`targets`.
+    fn op_map(&mut self, markdown: bool) -> Result<Value, String> {
+        let ensured = self.ensure_graph();
+        let build_info = ensured.ok().flatten();
+        let Some(store) = self.graph.as_ref() else {
+            return Err(
+                "graph unavailable — no index to map. Run `pixel graph .` first".to_string(),
+            );
+        };
+        // Hard cap so `map` on a pathological repo stays bounded; the flag
+        // surfaces in the output so a truncated map is never passed off as
+        // complete.
+        const MAP_FILE_CAP: usize = 2000;
+        let files = store.files().map_err(|e| e.to_string())?;
+        let truncated = files.len() > MAP_FILE_CAP;
+        let mut grouped: Vec<(&FileRow, Vec<SymbolRow>)> = Vec::new();
+        let mut symbol_total = 0usize;
+        for f in files.iter().take(MAP_FILE_CAP) {
+            let mut syms = store.symbols_in_file(f.id).map_err(|e| e.to_string())?;
+            syms.sort_by_key(|s| s.start_line);
+            symbol_total += syms.len();
+            grouped.push((f, syms));
+        }
+        grouped.sort_by(|a, b| a.0.path.cmp(&b.0.path));
+
+        let mut md = String::new();
+        if markdown {
+            use std::fmt::Write;
+            let root_name = self
+                .root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.root.display().to_string());
+            let _ = writeln!(
+                md,
+                "# pixel map — {root_name}\n\n{} files · {} symbols",
+                grouped.len(),
+                symbol_total
+            );
+            let mut cur_dir = String::new();
+            for (f, syms) in &grouped {
+                let dir = f
+                    .path
+                    .rsplit_once('/')
+                    .map(|(d, _)| d)
+                    .unwrap_or("")
+                    .to_string();
+                if dir != cur_dir {
+                    let _ = writeln!(md, "\n## {}", if dir.is_empty() { "." } else { &dir });
+                    cur_dir = dir;
+                }
+                let _ = writeln!(md, "\n### `{}`", f.path);
+                for s in syms {
+                    let sig = s.sig.trim();
+                    if sig.is_empty() {
+                        let _ = writeln!(
+                            md,
+                            "- `{}` **{}** (L{}–{})",
+                            s.kind.as_str(),
+                            s.name,
+                            s.start_line,
+                            s.end_line
+                        );
+                    } else {
+                        let _ = writeln!(
+                            md,
+                            "- `{}` **{}** (L{}–{}) — `{}`",
+                            s.kind.as_str(),
+                            s.name,
+                            s.start_line,
+                            s.end_line,
+                            sig
+                        );
+                    }
+                }
+            }
+            if truncated {
+                let _ = writeln!(
+                    md,
+                    "\n> truncated at {MAP_FILE_CAP} files — narrow with `pixel skeleton <file>`"
+                );
+            }
+        }
+
+        let mut out = json!({
+            "files": grouped.iter().map(|(f, syms)| json!({
+                "path": f.path,
+                "lang": f.lang,
+                "symbols": syms.iter().map(|s| json!({
+                    "name": s.name,
+                    "kind": s.kind.as_str(),
+                    "start_line": s.start_line,
+                    "end_line": s.end_line,
+                    "sig": s.sig,
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "file_count": grouped.len(),
+            "symbol_count": symbol_total,
+            "truncated": truncated,
+        });
+        if markdown {
+            out["markdown"] = json!(md);
+        }
+        merge_build_info(&mut out, build_info);
+        Ok(out)
     }
 
     /// Engine-3 rerank signals shared by `op_resolve` and `op_targets`.
@@ -2301,6 +2566,7 @@ fn context_item(
     s: &SymbolRow,
     files: &HashMap<i64, String>,
     max_snippet_bytes: usize,
+    crux: &[(u32, String)],
 ) -> bridge::Item {
     let path = files.get(&s.file_id).cloned().unwrap_or_default();
     let snippet = read_snippet(
@@ -2318,6 +2584,7 @@ fn context_item(
         end_line: s.end_line,
         sig: s.sig.clone(),
         snippet,
+        crux: crux.to_vec(),
     }
 }
 
@@ -2419,6 +2686,9 @@ mod bridge {
         pub end_line: u32,
         pub sig: String,
         pub snippet: String,
+        /// Content-anchored crux lines, each `(line_number, trimmed_text)`
+        /// (P2·3). Empty when none were extracted.
+        pub crux: Vec<(u32, String)>,
     }
 
     pub fn build_graph(root: &Path, db: &Path) -> Result<Value, String> {
@@ -2574,7 +2844,7 @@ mod bridge {
                 end_line: i.end_line,
                 sig: i.sig.clone(),
                 snippet: i.snippet.clone(),
-                crux: Vec::new(),
+                crux: i.crux.clone(),
             })
             .collect();
         if let Some((target, neighbors)) = mapped.split_first() {
@@ -2595,6 +2865,40 @@ mod bridge {
                     layer,
                     neighbors_fit.elided_items,
                 );
+            }
+            // P2·3 distilled-body fallback: when the target's L2 body exceeds
+            // the budget, its crux lines (guards, mutations, early bails —
+            // content-anchored, so still right when the file moved) carry the
+            // logic at a fraction of the span's cost. Try sig + crux before
+            // degrading to signatures-only.
+            if !target.crux.is_empty() {
+                let mut distilled = render(std::slice::from_ref(target), Layer::L1);
+                let crux: Vec<(u32, &str)> = target
+                    .crux
+                    .iter()
+                    .map(|(line, text)| (*line, text.as_str()))
+                    .collect();
+                pixel_context::render_crux(&mut distilled, &crux);
+                let distilled_tokens = pixel_context::estimate_tokens(&distilled);
+                if distilled_tokens <= budget_tokens {
+                    let neighbors_fit = fit_to_budget_detailed(
+                        neighbors,
+                        budget_tokens - distilled_tokens,
+                        Layer::L1,
+                    );
+                    let layer = if neighbors_fit.text.is_empty() {
+                        "L1+crux"
+                    } else if neighbors_fit.layer == Layer::L1 {
+                        "L1+crux+L1"
+                    } else {
+                        "L1+crux+L0"
+                    };
+                    return (
+                        format!("{distilled}{}", neighbors_fit.text),
+                        layer,
+                        neighbors_fit.elided_items,
+                    );
+                }
             }
         }
         let fitted = fit_to_budget_detailed(&mapped, budget_tokens, Layer::L2);
