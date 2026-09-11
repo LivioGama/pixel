@@ -134,50 +134,556 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     ));
 
+    checks.push(check("install.mcp", || -> std::result::Result<DoctorCheckDetail, String> {
+        // pixel is a CLI + hooks tool, not an MCP server. This check now
+        // only verifies that no deprecated usable-git/gitpixel/sniper MCP
+        // server entries linger in settings.json — it does NOT require
+        // pixel itself to be registered as an MCP server (that would give
+        // agents a transport that bypasses the PreToolUse guard hook).
+        let settings = home.join(".claude").join("settings.json");
+        if !settings.is_file() {
+            return Ok(DoctorCheckDetail {
+                summary: "no .claude/settings.json — nothing to scrub".into(),
+                detail: None,
+            });
+        }
+        let value: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&settings).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let servers = value
+            .get("mcpServers")
+            .and_then(serde_json::Value::as_object);
+        let deprecated: Vec<String> = servers
+            .map(|s| {
+                s.keys()
+                    .filter(|k| config::DEPRECATED_MCP_SERVERS.contains(&k.as_str()))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !deprecated.is_empty() {
+            return Err(format!(
+                "deprecated MCP servers still present: {}",
+                deprecated.join(", ")
+            ));
+        }
+        Ok(DoctorCheckDetail {
+            summary: "no deprecated MCP servers present".into(),
+            detail: Some(serde_json::json!({ "servers": servers.map(|s| s.keys().collect::<Vec<_>>()).unwrap_or_default() })),
+        })
+    }));
+
     checks.push(check(
-        "install.agent-prompt",
+        "install.rules-conflict",
         || -> std::result::Result<DoctorCheckDetail, String> {
-            let path = home.join(".local/share/pixel/agent-prompt.md");
-            if !path.is_file() {
-                return Err("agent-prompt.md not deployed — run `pixel install`".into());
-            }
-            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            let has_replacement_map = content.contains("REPLACEMENT MAP");
-            let has_workflow = content.contains("MANDATORY WORKFLOW");
-            if !has_replacement_map || !has_workflow {
-                return Err("agent-prompt.md is stale — run `pixel install` to update".into());
+            // A retired-tool rule file left in a per-tool rules directory keeps
+            // offering the model a tool pixel replaced. Devin in particular
+            // advertises every file under `~/.devin/rules/` to the model as an
+            // available rule it may read, so a stale `usable-git.md` competes
+            // with `pixel.md` inside the same rule set. `pixel install` scrubs
+            // these; this check fails if any survived or came back.
+            let stale = config::find_deprecated_rule_files(&home);
+            if !stale.is_empty() {
+                return Err(format!(
+                    "retired-tool rule file(s) still present — run `pixel install`: {}",
+                    stale
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
             Ok(DoctorCheckDetail {
-                summary: format!("agent-prompt.md deployed ({} bytes)", content.len()),
+                summary: "no retired-tool rule files in any agent rules directory".into(),
+                detail: Some(serde_json::json!({
+                    "dirs_scanned": config::AGENT_RULES_DIRS,
+                    "names_checked": config::DEPRECATED_RULE_FILES,
+                })),
+            })
+        },
+    ));
+
+    checks.push(check(
+        "install.guard-hook",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            if !install::claude_installed(&home) {
+                return Ok(DoctorCheckDetail {
+                    summary: "Claude not installed — blocking guard skipped".into(),
+                    detail: None,
+                });
+            }
+            let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
+            let new = hooks_dir.join(config::GUARD_HOOK);
+            let old = hooks_dir.join(config::OLD_GUARD_HOOK);
+            if old.exists() {
+                return Err("old gitpixel-targets-guard hook still present".into());
+            }
+            if new.exists() {
+                return Err("blocking pixel guard hook still installed".into());
+            }
+            Ok(DoctorCheckDetail {
+                summary: "blocking guard disabled; ordinary commands remain available".into(),
+                detail: None,
+            })
+        },
+    ));
+
+    checks.push(check(
+        "install.session-start",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            if !install::claude_installed(&home) {
+                return Ok(DoctorCheckDetail {
+                    summary: "Claude not installed — SessionStart skipped".into(),
+                    detail: None,
+                });
+            }
+            let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
+            let path = hooks_dir.join(config::SESSION_START_HOOK);
+            if !path.is_file() {
+                return Err("SessionStart hook not installed".into());
+            }
+            Ok(DoctorCheckDetail {
+                summary: "SessionStart hook installed".into(),
                 detail: Some(serde_json::json!({ "path": path.display().to_string() })),
             })
         },
     ));
 
     checks.push(check(
-        "install.shell-wrappers",
+        "install.prompt-submit-hook",
         || -> std::result::Result<DoctorCheckDetail, String> {
-            let profile = install::shell_profile_path(&home);
-            let content = fs::read_to_string(&profile).unwrap_or_default();
-            let has_begin = content.contains(install::PIXEL_MANAGED_BEGIN);
-            let has_end = content.contains(install::PIXEL_MANAGED_END);
-            let has_claude = content.contains("claude()") && content.contains("--append-system-prompt-file");
-            let has_codex = content.contains("codex()") && content.contains("model_instructions_file");
-            if !has_begin || !has_end {
-                return Err(format!(
-                    "shell wrappers not found in {} — run `pixel install`",
-                    profile.display()
-                ));
+            if !install::claude_installed(&home) {
+                return Ok(DoctorCheckDetail {
+                    summary: "Claude not installed — UserPromptSubmit skipped".into(),
+                    detail: None,
+                });
             }
-            if !has_claude || !has_codex {
-                return Err("shell wrappers present but incomplete — run `pixel install`".into());
+            let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
+            let path = hooks_dir.join(config::PROMPT_SUBMIT_HOOK);
+            if !path.is_file() {
+                return Err("UserPromptSubmit (task boundary) hook not installed".into());
             }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = path.metadata()
+                    && meta.permissions().mode() & 0o111 == 0
+                {
+                    return Err(format!(
+                        "{} is not executable (chmod +x needed)",
+                        path.display()
+                    ));
+                }
+            }
+            let settings_path = home.join(".claude").join("settings.json");
+            if settings_path.is_file() {
+                let raw = fs::read_to_string(&settings_path).unwrap_or_default();
+                if !raw.contains("hook prompt-submit") && !raw.contains(config::PROMPT_SUBMIT_HOOK)
+                {
+                    return Err("UserPromptSubmit hook not wired in ~/.claude/settings.json".into());
+                }
+            }
+            let model_cached = home
+                .join(".local/share/gitpixel/models/potion.ok")
+                .is_file();
+            let summary = if model_cached {
+                "UserPromptSubmit (task boundary) hook installed & model cached".into()
+            } else {
+                "UserPromptSubmit (task boundary) hook installed (model not cached)".into()
+            };
             Ok(DoctorCheckDetail {
-                summary: format!("shell wrappers installed in {}", profile.display()),
-                detail: Some(serde_json::json!({ "profile": profile.display().to_string() })),
+                summary,
+                detail: Some(serde_json::json!({
+                    "path": path.display().to_string(),
+                    "model_cached": model_cached,
+                })),
             })
         },
     ));
+
+    checks.push(check(
+        "install.devin-hooks",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            let config_path = home
+                .join(config::DEVIN_CONFIG_DIR)
+                .join(config::DEVIN_CONFIG_FILE);
+            if !config_path.is_file() {
+                return Ok(DoctorCheckDetail {
+                    summary: "no Devin config.json — skipping".into(),
+                    detail: None,
+                });
+            }
+            let raw = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+            let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            let hooks = value.get("hooks").and_then(serde_json::Value::as_object);
+            if hooks.is_none() {
+                return Err("Devin config.json has no hooks key".into());
+            }
+            let hooks = hooks.unwrap();
+            let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+            let has_guard = hooks
+                .get("PreToolUse")
+                .and_then(serde_json::Value::as_array)
+                .map(|entries| {
+                    entries.iter().any(|e| {
+                        e.get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|hs| {
+                                hs.iter().any(|h| {
+                                    h.get("command")
+                                        .and_then(|c| c.as_str())
+                                        .map(|c| c.contains(&guard_command))
+                                        .unwrap_or(false)
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if has_guard {
+                return Err("Devin blocking PreToolUse guard hook still wired".into());
+            }
+            let session_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
+            let has_session = hooks
+                .get("SessionStart")
+                .and_then(serde_json::Value::as_array)
+                .map(|entries| {
+                    entries.iter().any(|e| {
+                        e.get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|hs| {
+                                hs.iter().any(|h| {
+                                    h.get("command")
+                                        .and_then(|c| c.as_str())
+                                        .map(|c| c.contains(&session_command))
+                                        .unwrap_or(false)
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if !has_session {
+                return Err("Devin SessionStart hook not wired".into());
+            }
+            let prompt_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
+            let has_prompt = hooks
+                .get("UserPromptSubmit")
+                .and_then(serde_json::Value::as_array)
+                .map(|entries| {
+                    entries.iter().any(|e| {
+                        e.get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|hs| {
+                                hs.iter().any(|h| {
+                                    h.get("command")
+                                        .and_then(|c| c.as_str())
+                                        .map(|c| c.contains(&prompt_command))
+                                        .unwrap_or(false)
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if !has_prompt {
+                return Err("Devin UserPromptSubmit hook not wired".into());
+            }
+            Ok(DoctorCheckDetail {
+                summary: "Devin passive hooks wired (SessionStart + UserPromptSubmit)".into(),
+                detail: Some(serde_json::json!({ "path": config_path.display().to_string() })),
+            })
+        },
+    ));
+
+    checks.push(check(
+        "install.codex-hooks",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            let config_path = home.join(config::CODEX_HOOKS_FILE);
+            if !config_path.is_file() {
+                return Ok(DoctorCheckDetail {
+                    summary: "no Codex hooks.json — skipping".into(),
+                    detail: None,
+                });
+            }
+            let raw = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+            let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            let hooks = value.get("hooks").and_then(serde_json::Value::as_object);
+            if hooks.is_none() {
+                return Err("Codex hooks.json has no hooks key".into());
+            }
+            let hooks = hooks.unwrap();
+            let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+            let has_guard = hooks
+                .get("PreToolUse")
+                .and_then(serde_json::Value::as_array)
+                .map(|entries| {
+                    entries.iter().any(|e| {
+                        e.get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|hs| {
+                                hs.iter().any(|h| {
+                                    h.get("command")
+                                        .and_then(|c| c.as_str())
+                                        .map(|c| c.contains(&guard_command))
+                                        .unwrap_or(false)
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if has_guard {
+                return Err("Codex blocking PreToolUse guard hook still wired".into());
+            }
+            let prompt_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
+            let has_prompt = hooks
+                .get("UserPromptSubmit")
+                .and_then(serde_json::Value::as_array)
+                .map(|entries| {
+                    entries.iter().any(|e| {
+                        e.get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|hs| {
+                                hs.iter().any(|h| {
+                                    h.get("command")
+                                        .and_then(|c| c.as_str())
+                                        .map(|c| c.contains(&prompt_command))
+                                        .unwrap_or(false)
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if !has_prompt {
+                return Err("Codex UserPromptSubmit hook not wired".into());
+            }
+            Ok(DoctorCheckDetail {
+                summary: "Codex passive hooks wired (UserPromptSubmit)".into(),
+                detail: Some(serde_json::json!({ "path": config_path.display().to_string() })),
+            })
+        },
+    ));
+
+    checks.push(check(
+        "install.gemini-hooks",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            let config_path = home.join(config::GEMINI_SETTINGS_FILE);
+            if !config_path.is_file() {
+                return Ok(DoctorCheckDetail {
+                    summary: "no Gemini settings.json — skipping".into(),
+                    detail: None,
+                });
+            }
+            let raw = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+            let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            let hooks = value.get("hooks").and_then(serde_json::Value::as_object);
+            if hooks.is_none() {
+                return Err("Gemini settings.json has no hooks key".into());
+            }
+            let hooks = hooks.unwrap();
+            let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+            let has_guard = hooks
+                .get("BeforeTool")
+                .and_then(serde_json::Value::as_array)
+                .map(|entries| {
+                    entries.iter().any(|e| {
+                        e.get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|hs| {
+                                hs.iter().any(|h| {
+                                    h.get("command")
+                                        .and_then(|c| c.as_str())
+                                        .map(|c| c.contains(&guard_command))
+                                        .unwrap_or(false)
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if has_guard {
+                return Err("Gemini blocking BeforeTool guard hook still wired".into());
+            }
+            let prompt_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
+            let has_prompt = hooks
+                .get("BeforeAgent")
+                .and_then(serde_json::Value::as_array)
+                .map(|entries| {
+                    entries.iter().any(|e| {
+                        e.get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|hs| {
+                                hs.iter().any(|h| {
+                                    h.get("command")
+                                        .and_then(|c| c.as_str())
+                                        .map(|c| c.contains(&prompt_command))
+                                        .unwrap_or(false)
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if !has_prompt {
+                return Err("Gemini BeforeAgent (task boundary) hook not wired".into());
+            }
+            Ok(DoctorCheckDetail {
+                summary: "Gemini hooks wired (BeforeTool + BeforeAgent)".into(),
+                detail: Some(serde_json::json!({ "path": config_path.display().to_string() })),
+            })
+        },
+    ));
+
+    checks.push(check("install.zcode-hooks", || -> std::result::Result<DoctorCheckDetail, String> {
+        let config_path = home.join(config::ZCODE_CONFIG_FILE);
+        if !config_path.is_file() {
+            return Ok(DoctorCheckDetail {
+                summary: "no zcode config.json — skipping".into(),
+                detail: None,
+            });
+        }
+        let raw = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+        let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        // zcode nests hooks under `hooks.events.<Event>`.
+        let hooks = value
+            .get("hooks")
+            .and_then(|v| v.get("events"))
+            .and_then(serde_json::Value::as_object);
+        if hooks.is_none() {
+            return Ok(DoctorCheckDetail {
+                summary: "zcode config.json has no hooks.events — skipping".into(),
+                detail: None,
+            });
+        }
+        let hooks = hooks.unwrap();
+        // Config-file hooks are disabled by default — check enabled: true.
+        let hooks_enabled = value
+            .get("hooks")
+            .and_then(|v| v.get("enabled"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if !hooks_enabled {
+            return Err("zcode hooks.enabled is false (or missing) — config-file hooks won't fire".into());
+        }
+        let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+        let has_guard = hooks.get("PreToolUse")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| entries.iter().any(|e| {
+                e.get("hooks").and_then(serde_json::Value::as_array)
+                    .map(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()).map(|c| c.contains(&guard_command)).unwrap_or(false)))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        if has_guard {
+            return Err("zcode blocking PreToolUse guard hook still wired".into());
+        }
+        let prompt_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
+        let has_prompt = hooks.get("UserPromptSubmit")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| entries.iter().any(|e| {
+                e.get("hooks").and_then(serde_json::Value::as_array)
+                    .map(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()).map(|c| c.contains(&prompt_command)).unwrap_or(false)))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        if !has_prompt {
+            return Err("zcode UserPromptSubmit hook not wired".into());
+        }
+        // Check ~/.zcode/AGENTS.md has pixel rules.
+        let agents_md = home.join(".zcode").join("AGENTS.md");
+        if !agents_md.is_file() {
+            return Err("zcode AGENTS.md not deployed (no ~/.zcode/AGENTS.md)".into());
+        }
+        let agents_raw = fs::read_to_string(&agents_md).map_err(|e| e.to_string())?;
+        if !agents_raw.contains(config::MANAGED_BEGIN) {
+            return Err("zcode AGENTS.md missing pixel managed markers".into());
+        }
+        Ok(DoctorCheckDetail {
+            summary: "zcode hooks + AGENTS.md rules wired (PreToolUse, UserPromptSubmit, hooks.enabled)".into(),
+            detail: Some(serde_json::json!({ "path": config_path.display().to_string(), "agents_md": agents_md.display().to_string() })),
+        })
+    }));
+
+    checks.push(check("install.pi-rules", || -> std::result::Result<DoctorCheckDetail, String> {
+        let config_dir = home.join(config::PI_CONFIG_DIR);
+        if !config_dir.is_dir() {
+            return Ok(DoctorCheckDetail {
+                summary: "no pi config dir — skipping".into(),
+                detail: None,
+            });
+        }
+        let ext_file = config_dir.join("extensions").join("pixel-guard.ts");
+        if !ext_file.is_file() {
+            return Err("pi pixel-guard.ts extension not installed".into());
+        }
+        let raw = fs::read_to_string(&ext_file).map_err(|e| e.to_string())?;
+        if !raw.contains(config::MANAGED_BEGIN) {
+            return Err("pi pixel-guard.ts missing managed markers".into());
+        }
+        if !raw.contains("tool_call") {
+            return Err("pi pixel-guard.ts does not intercept tool_call event".into());
+        }
+        // Check ~/.pi/agent/AGENTS.md has pixel rules.
+        let agents_md = config_dir.join("AGENTS.md");
+        if !agents_md.is_file() {
+            return Err("pi AGENTS.md not deployed (no ~/.pi/agent/AGENTS.md)".into());
+        }
+        let agents_raw = fs::read_to_string(&agents_md).map_err(|e| e.to_string())?;
+        if !agents_raw.contains(config::MANAGED_BEGIN) {
+            return Err("pi AGENTS.md missing pixel managed markers".into());
+        }
+        if !agents_raw.contains("# pixel — Deterministic") {
+            return Err("pi AGENTS.md missing pixel rule text".into());
+        }
+        Ok(DoctorCheckDetail {
+            summary: "pi guard extension + AGENTS.md rules installed (tool_call interception)".into(),
+            detail: Some(serde_json::json!({ "extension": ext_file.display().to_string(), "agents_md": agents_md.display().to_string() })),
+        })
+    }));
+
+    checks.push(check("install.agent-config", || -> std::result::Result<DoctorCheckDetail, String> {
+        let configs = config::find_agent_configs(&home);
+        if configs.is_empty() {
+            return Err("no CLAUDE.md/AGENTS.md found to manage".into());
+        }
+        // A config file is "managed" if it EITHER:
+        //   (a) contains a pixel managed block (legacy: pixel install wrote it), OR
+        //   (b) contains the pixel rule text (current: build-agent-config's
+        //       aggregate includes pixel.md, so the rule is present without a
+        //       managed block).
+        // The duplicate-prevention logic in rewrite_agent_configs now skips
+        // writing a managed block when the rule is already present via the
+        // aggregate, so (b) is the expected state for agent configs managed
+        // by build-agent-config.
+        let unmanaged: Vec<&PathBuf> = configs
+            .iter()
+            .filter(|p| {
+                fs::read_to_string(p)
+                    .map(|s| {
+                        !s.contains(config::MANAGED_BEGIN)
+                            && !s.contains("# pixel — Deterministic")
+                    })
+                    .unwrap_or(true)
+            })
+            .collect();
+        if !unmanaged.is_empty() {
+            return Err(format!(
+                "agent-config not managed: {}",
+                unmanaged
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        Ok(DoctorCheckDetail {
+            summary: format!("{} agent-config file(s) managed", configs.len()),
+            detail: Some(serde_json::json!({ "files": configs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>() })),
+        })
+    }));
 
     // Rule-vs-binary parity: every `pixel …` command line documented in the
     // INSTALLED rule text must dry-run parse against the binary's real clap

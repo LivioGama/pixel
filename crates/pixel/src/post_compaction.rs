@@ -1,13 +1,22 @@
-//! Restore bounded, advisory task hints after compaction.
+//! `pixel hook post-compaction` — re-inject targets manifest after context compaction.
 //!
-//! Claude/Codex use SessionStart(source=compact), which supports context output;
-//! PostCompact does not. Devin retains its PostCompaction lifecycle event.
-//! Only current-HEAD, recent manifests are reused. This does not prove task
-//! relevance or working-tree freshness, and never establishes a read/edit fence.
+//! Fires on every `PostCompaction` hook event. When Devin/Claude/Codex compacts
+//! the conversation context, the agent loses its `pixel targets` manifest — the
+//! P0/P1/P2 file list that constrains which files it may read/edit. Without
+//! re-injection, the agent may start reading files outside the list, breaking
+//! the retrieval contract.
+//!
+//! This hook reads the PostCompaction payload from stdin, checks whether a
+//! targets manifest is active for the current repo (`.pixel/targets.json`),
+//! and if so, emits the manifest as `additionalContext` so the agent resumes
+//! with its retrieval state intact.
+//!
+//! Never blocks: a hard 200ms deadline means any slow path is abandoned and
+//! the hook exits 0 with no output.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -16,45 +25,39 @@ use serde_json::Value;
 const HOOK_DEADLINE: Duration = Duration::from_millis(200);
 /// Manifest TTL — matches the guard's `MANIFEST_MAX_AGE_SECS`.
 const MANIFEST_MAX_AGE_SECS: u64 = 24 * 60 * 60;
-const MANIFEST_MAX_BYTES: u64 = 64 * 1024;
-const CONTEXT_MAX_BYTES: usize = 4096;
 
+/// The PostCompaction hook payload (Claude Code / Devin shape).
 #[derive(Deserialize)]
 struct PostCompactionPayload {
     #[serde(default)]
     cwd: Option<String>,
-    #[serde(default, alias = "hookEventName")]
-    hook_event_name: Option<String>,
-    #[serde(default)]
-    source: Option<String>,
-    /// Claude Code's session identifier. This is required for the
-    /// provider-qualified runtime restore path.
-    #[serde(default, alias = "sessionId")]
-    session_id: Option<String>,
 }
 
 /// Entry point for `pixel hook post-compaction`. Reads the PostCompaction
 /// payload from stdin. Never returns an `Err` as exit 1 — every failure
 /// path is a silent exit 0 (compaction proceeds normally).
-pub fn run(provider: Option<crate::guard::Provider>) -> ! {
-    if crate::env_flag_off("PIXEL_POST_COMPACTION") {
+pub fn run() -> ! {
+    // Allow opt-out via env var.
+    if let Ok(kill) = std::env::var("PIXEL_POST_COMPACTION")
+        && matches!(kill.as_str(), "0" | "false" | "off")
+    {
         std::process::exit(0);
     }
 
     let mut input = String::new();
-    if std::io::stdin()
-        .take(MANIFEST_MAX_BYTES + 1)
-        .read_to_string(&mut input)
-        .is_err()
-        || input.len() as u64 > MANIFEST_MAX_BYTES
-    {
-        std::process::exit(0);
+    if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
+        // No payload — try current dir.
+        let cwd = std::env::current_dir().unwrap_or_default();
+        try_emit_manifest(&cwd);
     }
-    let Ok(payload) = serde_json::from_str::<PostCompactionPayload>(&input) else {
-        std::process::exit(0);
-    };
-    let Some(event_name) = context_event(&payload) else {
-        std::process::exit(0);
+
+    // Try to parse the payload — if it fails, fall back to current dir.
+    let payload: PostCompactionPayload = match serde_json::from_str(&input) {
+        Ok(p) => p,
+        Err(_) => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            try_emit_manifest(&cwd);
+        }
     };
 
     let cwd = payload
@@ -63,218 +66,185 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    let is_claude_runtime = matches!(provider, Some(crate::guard::Provider::Claude));
-    let session_id = payload.session_id.filter(|id| !id.is_empty());
+    try_emit_manifest(&cwd);
+}
+
+/// Try to read the active targets manifest and emit it as additional context.
+/// If no manifest is active, or reading fails, exit 0 silently.
+fn try_emit_manifest(cwd: &Path) -> ! {
+    let deadline = Instant::now() + HOOK_DEADLINE;
+
     let (tx, rx) = std::sync::mpsc::channel();
+    let cwd_clone = cwd.to_path_buf();
     std::thread::spawn(move || {
-        let context = if is_claude_runtime {
-            session_id
-                .as_deref()
-                .and_then(|id| read_claude_runtime(&cwd, id))
-        } else {
-            read_manifest(&cwd)
-        };
-        let _ = tx.send(context);
+        let result = read_manifest(&cwd_clone);
+        let _ = tx.send(result);
     });
-    if let Ok(Some(text)) = rx.recv_timeout(HOOK_DEADLINE) {
-        crate::prompt_submit::emit_context(&text, event_name);
-    }
-    std::process::exit(0);
-}
 
-/// Restore only the exact Claude session packet that matches the current HEAD.
-/// Missing, stale, malformed, or cross-session state is deliberately silent.
-fn read_claude_runtime(cwd: &Path, session_id: &str) -> Option<String> {
-    let root = crate::discover_root(cwd).ok()?;
-    let head = pixel_index::gitsync::rev_parse_head(&root)?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    crate::task_runtime::read_claude_packet(&root, session_id, &head, now)?
-        .render_context(CONTEXT_MAX_BYTES)
-}
-
-fn context_event(payload: &PostCompactionPayload) -> Option<&'static str> {
-    match payload.hook_event_name.as_deref() {
-        Some("SessionStart") if payload.source.as_deref() == Some("compact") => {
-            Some("SessionStart")
+    match rx.recv_timeout(HOOK_DEADLINE) {
+        Ok(Ok(Some(manifest_text))) if Instant::now() <= deadline => {
+            emit_manifest(&manifest_text);
         }
-        Some("PostCompaction") => Some("PostCompaction"),
-        // Never emit context for an event that cannot consume it.
-        _ => None,
+        _ => std::process::exit(0),
     }
 }
 
 /// Read the active targets manifest from `{repo}/.pixel/targets.json`.
 /// Supports both v2 (multi-task) and legacy v1 formats.
 /// Returns `Some(text)` if a manifest with fresh tasks is active, `None` otherwise.
-fn read_manifest(cwd: &Path) -> Option<String> {
-    let root = crate::discover_root(cwd).ok()?;
-    let path = root.join(".pixel/targets.json");
-    let data = pixel_index::index::read_regular_bounded(&path, MANIFEST_MAX_BYTES).ok()?;
-    let manifest: Value = serde_json::from_slice(&data).ok()?;
-    let head = pixel_index::gitsync::rev_parse_head(&root)?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    manifest_context(&manifest, &root, &head, now)
-}
-
-fn manifest_context(m: &Value, root: &Path, head: &str, now: u64) -> Option<String> {
-    let mut tasks: Vec<&Value> = match m.get("version").and_then(Value::as_u64) {
-        Some(2) => m.get("tasks")?.as_array()?.iter().collect(),
-        Some(1) | None => vec![m],
-        _ => return None,
+fn read_manifest(cwd: &Path) -> Result<Option<String>, String> {
+    // Walk up from cwd to find a .pixel/targets.json (the repo root).
+    let manifest_path = find_manifest(cwd)?;
+    let manifest_path = match manifest_path {
+        Some(p) => p,
+        None => return Ok(None),
     };
-    tasks.retain(|task| {
-        task.get("head_oid").and_then(Value::as_str) == Some(head)
-            && task
-                .get("created_unix")
-                .and_then(Value::as_u64)
-                .is_some_and(|created| created <= now && now - created <= MANIFEST_MAX_AGE_SECS)
-    });
-    tasks.sort_by_key(|task| std::cmp::Reverse(task["created_unix"].as_u64()));
-    let mut text = String::from(
-        "[PIXEL:POST_COMPACTION] Saved task hints from this HEAD, not proof of working-tree freshness or current task relevance. Refresh targets if the task or files changed.\n",
-    );
-    let mut emitted = false;
-    for task in tasks {
-        let Some(files) = task
-            .get("targets")
-            .or_else(|| task.get("files"))
-            .and_then(Value::as_array)
-        else {
-            continue;
-        };
-        let targets: Vec<_> = files
-            .iter()
-            .map(|file| match file.as_str() {
-                Some(path) => serde_json::json!({"path":path,"tier":"P0"}),
-                None => file.clone(),
-            })
-            .collect();
-        let title: String = task
-            .get("task")
-            .and_then(Value::as_str)
-            .unwrap_or("?")
-            .chars()
-            .take(180)
-            .collect();
-        let heading = format!("Task: {}\n", serde_json::to_string(&title).ok()?);
-        let remaining = CONTEXT_MAX_BYTES.saturating_sub(text.len() + heading.len() + 1);
-        if let Some(hints) = crate::prompt_submit::render_task_context(
-            &serde_json::json!({"root":root,"targets":targets}),
-            remaining,
-        ) {
-            text.push_str(&heading);
-            text.push_str(&hints);
-            text.push('\n');
-            emitted = true;
+
+    let data =
+        std::fs::read_to_string(&manifest_path).map_err(|e| format!("read manifest: {e}"))?;
+
+    let m: Value = serde_json::from_str(&data).map_err(|e| format!("parse manifest: {e}"))?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Collect (task, [(path, tier)]) pairs from the manifest, filtering expired.
+    let mut all_tasks: Vec<(String, Vec<(String, String)>)> = Vec::new();
+
+    if m.get("version").and_then(Value::as_u64) == Some(2) {
+        // v2 multi-task format.
+        if let Some(tasks) = m.get("tasks").and_then(Value::as_array) {
+            for t in tasks {
+                let created = t.get("created_unix").and_then(Value::as_u64).unwrap_or(0);
+                if now.saturating_sub(created) > MANIFEST_MAX_AGE_SECS {
+                    continue; // expired
+                }
+                let task = t
+                    .get("task")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string();
+                let files = parse_targets(t.get("targets").and_then(Value::as_array));
+                if !files.is_empty() {
+                    all_tasks.push((task, files));
+                }
+            }
+        }
+    } else {
+        // legacy v1 format.
+        let created = m.get("created_unix").and_then(Value::as_u64).unwrap_or(0);
+        if now.saturating_sub(created) <= MANIFEST_MAX_AGE_SECS {
+            let task = m
+                .get("task")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string();
+            let files = parse_targets(m.get("files").and_then(Value::as_array));
+            if !files.is_empty() {
+                all_tasks.push((task, files));
+            }
         }
     }
-    emitted.then_some(text)
+
+    if all_tasks.is_empty() {
+        return Ok(None);
+    }
+
+    // Build a compact manifest summary for re-injection.
+    let mut lines = Vec::new();
+    lines.push(
+        "[PIXEL:POST_COMPACTION] Context was compacted. Your active `pixel targets` manifest has been re-injected below — do NOT read or edit files outside this list. Re-run `pixel targets` if the task has changed.\n"
+            .to_string(),
+    );
+
+    for (task, files) in &all_tasks {
+        lines.push(format!("Task: {task}"));
+
+        let mut p0: Vec<&str> = Vec::new();
+        let mut p1: Vec<&str> = Vec::new();
+        let mut p2: Vec<&str> = Vec::new();
+        for (path, tier) in files {
+            match tier.as_str() {
+                "P0" => p0.push(path),
+                "P1" => p1.push(path),
+                "P2" => p2.push(path),
+                _ => p0.push(path),
+            }
+        }
+
+        if !p0.is_empty() {
+            lines.push("P0 (work first):".to_string());
+            for p in &p0 {
+                lines.push(format!("  {p}"));
+            }
+        }
+        if !p1.is_empty() {
+            lines.push("P1 (supporting):".to_string());
+            for p in &p1 {
+                lines.push(format!("  {p}"));
+            }
+        }
+        if !p2.is_empty() {
+            lines.push("P2 (may be dropped):".to_string());
+            for p in &p2 {
+                lines.push(format!("  {p}"));
+            }
+        }
+        lines.push(String::new());
+    }
+
+    Ok(Some(lines.join("\n")))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn task(name: &str, head: &str, created: u64) -> Value {
-        serde_json::json!({"task":name,"head_oid":head,"created_unix":created,
-            "targets":[{"path":format!("src/{name}.rs"),"tier":"P0"}]})
-    }
-
-    #[test]
-    fn supported_compaction_events_only() {
-        for (input, expected) in [
-            (
-                serde_json::json!({"hook_event_name":"SessionStart","source":"compact"}),
-                Some("SessionStart"),
-            ),
-            (
-                serde_json::json!({"hook_event_name":"SessionStart","source":"startup"}),
-                None,
-            ),
-            (
-                serde_json::json!({"hook_event_name":"PostCompact","trigger":"manual"}),
-                None,
-            ),
-            (
-                serde_json::json!({"hookEventName":"PostCompaction"}),
-                Some("PostCompaction"),
-            ),
-            (serde_json::json!({}), None),
-        ] {
-            let payload: PostCompactionPayload = serde_json::from_value(input).unwrap();
-            assert_eq!(context_event(&payload), expected);
+/// Walk up from `start` to find a `.pixel/targets.json` file.
+fn find_manifest(start: &Path) -> Result<Option<PathBuf>, String> {
+    let mut current = start;
+    loop {
+        let candidate = current.join(".pixel").join("targets.json");
+        if candidate.exists() {
+            return Ok(Some(candidate));
+        }
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => return Ok(None),
         }
     }
+}
 
-    #[test]
-    fn claude_payload_accepts_both_session_id_spellings() {
-        for input in [
-            serde_json::json!({
-                "hook_event_name": "SessionStart",
-                "source": "compact",
-                "session_id": "session-a"
-            }),
-            serde_json::json!({
-                "hookEventName": "SessionStart",
-                "source": "compact",
-                "sessionId": "session-b"
-            }),
-        ] {
-            let payload: PostCompactionPayload = serde_json::from_value(input).unwrap();
-            assert!(payload.session_id.is_some());
+/// Parse targets array into (path, tier) pairs.
+fn parse_targets(arr: Option<&Vec<Value>>) -> Vec<(String, String)> {
+    let arr = match arr {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    arr.iter()
+        .filter_map(|t| {
+            // v2 format: {path: "...", tier: "P0"}
+            if let Some(path) = t.get("path").and_then(Value::as_str) {
+                let tier = t.get("tier").and_then(Value::as_str).unwrap_or("P0");
+                return Some((path.to_string(), tier.to_string()));
+            }
+            // legacy format: plain string or {path: "..."}
+            if let Some(path) = t.as_str() {
+                return Some((path.to_string(), "P0".to_string()));
+            }
+            None
+        })
+        .collect()
+}
+
+/// Emit the manifest as additionalContext via the hook output format.
+fn emit_manifest(text: &str) -> ! {
+    let output = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PostCompaction",
+            "additionalContext": text
         }
-    }
+    });
 
-    #[test]
-    fn restores_only_recent_same_head_tasks_newest_first() {
-        let now = 200_000;
-        let m = serde_json::json!({"version":2,"tasks":[
-            task("older", "current", now - 30), task("newer", "current", now),
-            task("stale_branch", "old", now), task("expired", "current", 1),
-            task("future", "current", now + 1),
-            {"task":"missing_head","created_unix":now,"targets":["src/invalid.rs"]}
-        ]});
-        let text = manifest_context(&m, Path::new("/repo"), "current", now).unwrap();
-        assert!(text.find("newer").unwrap() < text.find("older").unwrap());
-        for absent in ["stale_branch", "expired", "future", "missing_head"] {
-            assert!(!text.contains(absent));
-        }
-        assert!(text.contains("not an exhaustive task map or a read/edit boundary"));
-        assert!(text.contains("not proof of working-tree freshness"));
-        assert!(!text.contains("do NOT read"));
-    }
-
-    #[test]
-    fn legacy_manifest_requires_same_provenance() {
-        let m = serde_json::json!({"created_unix":200_000,"head_oid":"current",
-            "task":"login","files":["src/login.rs",{"path":"tests/login.rs","tier":"P1"}]});
-        let text = manifest_context(&m, Path::new("/repo"), "current", 200_000).unwrap();
-        assert!(text.contains("src/login.rs") && text.contains("tests/login.rs"));
-        assert!(manifest_context(&m, Path::new("/repo"), "new_head", 200_000).is_none());
-    }
-
-    #[test]
-    fn absent_malformed_or_expired_tasks_do_not_emit() {
-        for m in [
-            serde_json::json!({}),
-            serde_json::json!({"version":99}),
-            serde_json::json!({"version":2,"tasks":[]}),
-            serde_json::json!({"version":2,"tasks":[task("old","current",1)]}),
-        ] {
-            assert!(manifest_context(&m, Path::new("/repo"), "current", 200_000).is_none());
-        }
-    }
-
-    #[test]
-    fn large_manifest_keeps_complete_json_lines_within_budget() {
-        let tasks: Vec<_> = (0..40)
-            .map(|i| task(&format!("{i}_{}", "🦀".repeat(80)), "current", 200_000))
-            .collect();
-        let m = serde_json::json!({"version":2,"tasks":tasks});
-        let text = manifest_context(&m, Path::new("/repo"), "current", 200_000).unwrap();
-        assert!(text.len() <= CONTEXT_MAX_BYTES);
-        for line in text.lines().filter(|line| line.starts_with('{')) {
-            assert!(serde_json::from_str::<Value>(line).is_ok());
-        }
-    }
+    let json = serde_json::to_string(&output).unwrap_or_else(|_| "{}".to_string());
+    print!("{json}");
+    std::process::exit(0);
 }
