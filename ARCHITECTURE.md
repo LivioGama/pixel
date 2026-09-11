@@ -12,7 +12,7 @@ read `CLAUDE.md`.
 
 ```text
  agent CLI (Claude, Codex, Cursor, pi, …)
-   │  hooks + managed rule block            (pixel-install)
+   │  agent prompt + shell wrappers         (pixel-install)
    ▼
  pixel binary (crates/pixel)  ── clap commands, prints text or --json
    │  Request = pixel_proto::Op   (NDJSON over a Unix socket)
@@ -48,9 +48,9 @@ binary, and Pixel is deliberately a CLI plus hooks, not an MCP server.
 | `pixel-git` | The single git subprocess wrapper for the workspace. Replaced three earlier ad-hoc wrappers. Any crate that shells out to git goes through here. | none |
 | `pixel-recall` | Machine-wide LLM transcript retrieval: ingests Claude Code, Codex, opencode, Devin, Cursor, zcode, and Gemini transcript stores into one SQLite corpus, then serves lexical and semantic search. Owns the embedding backends (`fastembed` ONNX and pure-Rust `model2vec`, both behind features). | index, rank |
 | `pixel-session` | One-look error capture: every error from every layer lands at throw time in one structured local SQLite sink, queryable in one call. | none |
-| `pixel-actionlog` | Append-only JSONL record of what Pixel itself did per invocation (command, outcome, error, duration) for later self-assessment (`pixel log`, `pixel savings`). | none |
+| `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel log` and `pixel savings` reporting. | none |
 | `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. | none |
-| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`: detects installed agent CLIs, wires passive hooks, writes managed rule blocks with markers, backs up touched files. | proto, daemon, index, facts |
+| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`: deploys the bundled prompt and Claude/Codex shell wrappers, backs up changed files; retains legacy hook/routing and cleanup implementations without activating them. | proto, daemon, index, facts |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index, daemon, proto, recall |
 
 Dependency rule: `pixel-proto` and `pixel-git` are leaves. `pixel-daemon` is
@@ -170,20 +170,87 @@ envelope talks to the daemon socket directly.
 
 ## Agent integration
 
-`pixel install` detects installed agent CLIs and, for each supported one,
-adds a managed rule block (between markers, backed up first) and passive
-hooks:
+`pixel install` deliberately deploys the bundled `agent-prompt.md` and managed
+shell functions for Claude Code and Codex. It preserves agent settings and rule
+files, and does not register provider hooks or activate routing. The shell functions
+pass the prompt on a subsequent launch through the loaded profile; already-running
+agents and direct executable launches do not inherit it automatically.
 
-| Hook event | Command | Effect |
+Existing hook entry points remain implemented, separately from active installation:
+
+| Hook event | Command | Effect when independently registered |
 | --- | --- | --- |
 | `SessionStart` | `pixel hook session-start` | Emits the capability block from the op registry. |
-| `UserPromptSubmit` | `pixel hook prompt-submit` | Detects task boundaries from the prompt and recent context. |
-| `PostCompaction` | `pixel hook post-compaction` | Re-injects the active `targets.json` as additional context. |
-| `PreToolUse` | `pixel hook guard` | Targets enforcement and rewire-first steering of ordinary commands toward Pixel operations. Advisory by default, not blocking. |
+| `UserPromptSubmit` | `pixel hook prompt-submit` | Task context/boundary detection and guarded task acceptance. |
+| `PostCompaction` | `pixel hook post-compaction` | Re-injects the active task evidence as additional context. |
+| `PreToolUse` | `pixel hook guard` | Bounded compatible command routing; native fallback and host permissions remain authoritative. |
 
-`pixel doctor` verifies the result, including a parity check that every
-command documented in the installed rule text parses against the real clap
-definition.
+`pixel doctor` checks current installation artifacts and distinguishes configured
+or protocol-checked hooks from observed live execution. Dormant registration code
+is not an installed feature. Legacy uninstall behavior remains available.
+
+### Invocation accounting and chat delivery
+
+`pixel-actionlog` owns local metrics, not a parallel observability engine. A
+top-level invocation correlates outcome, measured elapsed duration and rendered
+output bytes with a versioned native-workflow estimate. Existing logs remain
+readable. No additional retrieval, native comparison command, model request, or
+repository sweep is justified solely by metrics calculation.
+
+The byte approximation is roughly one token per four UTF-8 bytes and includes
+reporting overhead. Measured output covers rendered CLI stdout, CLI-owned diagnostics and top-level
+errors, not lower-level library or subprocess streams. V1's fallback volume policies are 4 KiB per assumed distinct
+returned file read and 1 KiB per native-command output. They are assumptions, not
+measured averages. Estimates consider only returned evidence/relationships and
+represented native steps. Partial results remain partial; meaningless comparisons
+are unavailable; zero and negative savings are retained. There is no external
+telemetry, hidden reasoning estimate, or monetary claim.
+
+Time accounting is separate from byte accounting. An optional `time_estimate`
+records `estimator_version: sequential-v1`, `round_trip_ms`, `native_command_ms: 0`,
+`sequential_steps`, and signed `saved_ms`. Legacy records lacking these fields
+remain unavailable for time comparisons; they are not silently recalculated.
+`pixel savings` adds `time_estimates` groups keyed by token/time estimator
+versions, effective assumptions and coverage, preserving earlier summaries.
+
+Time savings are a separate `sequential-v1` workflow estimate, not measured
+LLM latency. Let `steps = native_commands + distinct_files`; relationships do
+not add round trips. A zero-step baseline is unavailable; otherwise the estimate
+in milliseconds is:
+
+```text
+max(steps - 1, 0) * round_trip_ms - measured_pixel_duration_ms
+```
+
+One shared initial LLM/tool round trip cancels. The default policy assumes
+**2000 ms per sequential round trip** and **0 ms of native command execution**.
+`PIXEL_METRICS_ROUND_TRIP_MS` overrides the round-trip assumption with an unsigned
+integer number of milliseconds (zero is allowed); unset, invalid, non-UTF-8, or
+overflowing values use 2000. These assumptions and the estimator version are
+recorded with each new invocation, not applied retroactively to old records.
+Batching or parallel native workflows may require fewer round trips: this is
+not a measured end-to-end speedup or a guarantee. Negative time savings are
+retained; missing evidence is unavailable, and capped comparisons are partial.
+
+The authoritative `🟩 Pixel · ...` line distinguishes `tokens saved (workflow
+estimate)` from seconds `saved (sequential estimate)`. Both labels mark partial
+comparisons. Measured execution duration stays distinct from both estimates;
+no extra model call or native benchmark is run to compute the time estimate.
+
+Ordinary CLI boundaries emit an authoritative metrics line on stderr after the
+result/error without changing JSON stdout. `--metrics=off` and `PIXEL_METRICS=0`
+disable live reporting, not local accounting. Metrics failures cannot change success or safety behavior.
+Exact-output search compatibility, hooks, protocol streams and statuslines remain
+untouched; a separate host-supported channel is required for their live relay.
+Protected paths lacking output-volume capture retain unavailable volumes rather
+than fabricate counts.
+
+The active prompt instructs an agent to copy the exact line from the same tool-call
+result once, skipping an invocation already relayed by the host. A global latest
+record is unsafe under concurrency and must never be used. The installer provides
+no native automatic chat transport; mock-wrapper tests prove prompt delivery and
+stream/exit preservation, not actual model adherence or live-host duplicate
+suppression. Chat relay remains a host-supported, separately verifiable boundary.
 
 ## Testing and gates
 

@@ -20,9 +20,9 @@ can do the same task is a failure mode — it wastes tokens and misses the index
 
 ### Impact Analysis (replaces manual caller tracing)
 
-| Native workflow | Pixel replacement | Tokens saved |
+| Native workflow | Pixel replacement | Evidence returned |
 |----------------|-------------------|--------------|
-| grep callers + read each file | `pixel impact "symbol_name"` | ~80% (one call vs N reads) |
+| grep callers + read each file | `pixel impact "symbol_name"` | Returned callers in one operation |
 | grep "who calls X" | `pixel uses "X" --callers` | Direct callers in one call |
 | read function to see what it calls | `pixel uses "X" --callees` | Direct callees in one call |
 | trace call chain manually | `pixel trace "FuncA" "FuncB"` | Full path in one call |
@@ -30,9 +30,9 @@ can do the same task is a failure mode — it wastes tokens and misses the index
 
 ### Task Targeting (replaces exploratory reading)
 
-| Native workflow | Pixel replacement | Tokens saved |
+| Native workflow | Pixel replacement | Evidence returned |
 |----------------|-------------------|--------------|
-| read README + grep + guess files | `pixel targets "task description"` | ~90% (P0/P1/P2 list) |
+| read README + grep + guess files | `pixel targets "task description"` | Ranked P0/P1/P2 task evidence |
 | "what modules exist?" | `pixel clusters` | Functional-area clusters |
 | "what are the execution flows?" | `pixel processes` | Discovered flows |
 | `pixel context <uid>` | Budget-fitted symbol context | Never overflows context |
@@ -64,9 +64,9 @@ can do the same task is a failure mode — it wastes tokens and misses the index
 
 ### Browser Flow Replay (replaces re-discovering UI every session)
 
-| Native workflow | Pixel replacement | Tokens saved |
+| Native workflow | Pixel replacement | Reuse |
 |----------------|-------------------|--------------|
-| navigate to login, enter creds, click... | `pixel flow replay "login-flow"` | ~95% (deterministic path) |
+| navigate to login, enter creds, click... | `pixel flow replay "login-flow"` | Reuse a proven path |
 | re-discover a config UI flow | `pixel flow get "config-flow"` | Follow saved path exactly |
 
 ### Error Capture (replaces reading raw logs)
@@ -156,27 +156,47 @@ Or if pushing:
 pixel ship -m "type: description" -r "unique-request-id" origin HEAD
 ```
 
-## TOKEN EFFICIENCY — WHY THIS MATTERS
+## LIVE OPERATION METRICS
 
-Pixel commands produce **bounded, structured output**. Native tools do not.
+After an ordinary Pixel command, relay the authoritative `🟩 Pixel · ...` stderr
+line from the same tool-call result into chat. Copy the exact line once per
+invocation; keep the 🟩 prefix, measured duration, both token/time estimates,
+their signs, and their coverage wording.
+If the host has already relayed that invocation's line, do not repeat it.
+Correlate using the host tool-call/invocation identity, never a global latest
+operation or `pixel log` tail: concurrent calls may finish out of order.
 
-| Tool | Output size | Token cost |
-|------|------------|------------|
-| `grep -rn "pattern" .` | Unbounded — can be 10k+ chars | ~3000 tokens |
-| `pixel search "pattern"` | Capped — typically <2k chars | ~500 tokens |
-| `git log --oneline -20` | 20 lines, no cap | ~600 tokens |
-| `pixel history` | Bounded with byte caps | ~200 tokens |
-| `git diff` | Unbounded — can be 50k+ chars | ~15000 tokens |
-| `pixel review` | Structured, symbol-aware | ~500 tokens |
-| grep callers + read 5 files | 5 file reads | ~10000 tokens |
-| `pixel impact "symbol"` | One call, all callers+callees | ~500 tokens |
+Do not invent a line when it is absent, recompute its values, or promote a
+workflow estimate to measured savings. `--metrics=off` and `PIXEL_METRICS=0`
+disable live reporting. Do not run another command merely to obtain metrics.
+Never append a metrics line to JSON stdout, search-compat output, hook responses,
+protocol streams, or statuslines. Use only a separate host-supported chat channel
+for a correlated record, if available; otherwise leave exact streams unchanged.
+CLI reporting is mechanical; assistant chat relay depends on the host exposing
+that invocation's stderr and the agent following these instructions. Installation
+is not proof of live host delivery or duplicate suppression by an actual model.
 
-**Typical task without Pixel: ~14,000 tokens, 9+ tool calls**
-**Typical task with Pixel: ~3,500 tokens, 5 tool calls**
+Accounting uses approximately one token per four UTF-8 bytes, including the
+reporting overhead. Workflow v1 assumes 4 KiB per assumed distinct returned
+file read and 1 KiB per native command's output where measured volumes are not
+available. These are policy assumptions, not measured averages. Zero and negative
+savings remain valid; capped comparisons are partial, and absent meaningful
+comparisons are unavailable. Do not count unseen results, the entire repository,
+hidden reasoning, or monetary savings. Metrics are local; no external telemetry.
 
-That is a **4x token reduction** and **44% fewer tool calls**. This is not
-theoretical — it is the measured difference between exploratory grep-based
-workflows and deterministic Pixel-based workflows.
+Time savings are a separate `sequential-v1` estimate, never measured LLM latency:
+`steps = native_commands + distinct_files` (relationships add no round trips),
+zero-step baselines are unavailable; otherwise
+`saved_ms = max(steps - 1, 0) * round_trip_ms - measured_pixel_duration_ms`.
+The shared first round trip cancels; native execution is assumed to take 0 ms.
+Default `round_trip_ms` is 2000; `PIXEL_METRICS_ROUND_TRIP_MS` accepts unsigned
+integer milliseconds, including zero. Unset, invalid, non-UTF-8 and overflowing
+values fall back to 2000. The effective assumptions/version belong to the same
+invocation record; never retroactively invent time savings for older records.
+Batching/parallel workflows can need fewer round trips, so this is not a measured
+speedup or guarantee. Retain negative estimates, partial coverage, and unavailable
+comparisons. Relay both `tokens saved (workflow estimate)` and `s saved
+(sequential estimate)` exactly as emitted; never compute your own chat line.
 
 ## ANTI-PATTERNS — DO NOT DO THESE
 

@@ -1,0 +1,151 @@
+use pixel_graph::imports::resolve_import;
+
+fn paths(files: &[&str]) -> Vec<String> {
+    files.iter().map(|path| (*path).to_owned()).collect()
+}
+
+#[test]
+fn ambiguous_suffix_imports_stay_unresolved_in_every_file_order() {
+    let cases = [
+        (
+            "crate::util",
+            "crates/caller/src/main.rs",
+            ["crates/a/src/util.rs", "crates/b/src/util.rs"],
+        ),
+        (
+            "pkg.util",
+            "apps/caller/main.py",
+            ["apps/a/pkg/util.py", "apps/b/pkg/util.py"],
+        ),
+        (
+            "com.example.Util",
+            "apps/caller/Main.java",
+            [
+                "apps/a/com/example/Util.java",
+                "apps/b/com/example/Util.java",
+            ],
+        ),
+    ];
+    for (specifier, importer, candidates) in cases {
+        let mut files = paths(&candidates);
+        assert_eq!(resolve_import(specifier, importer, &files), None);
+        files.reverse();
+        assert_eq!(resolve_import(specifier, importer, &files), None);
+    }
+}
+
+#[test]
+fn unique_suffix_imports_and_missing_imports_keep_their_behavior() {
+    let cases = [
+        (
+            "crate::util",
+            "crates/caller/src/main.rs",
+            "crates/a/src/util.rs",
+        ),
+        ("pkg.util", "apps/caller/main.py", "apps/a/pkg/util.py"),
+        (
+            "com.example.Util",
+            "apps/caller/Main.java",
+            "apps/a/com/example/Util.java",
+        ),
+    ];
+    for (specifier, importer, candidate) in cases {
+        assert_eq!(
+            resolve_import(specifier, importer, &paths(&[candidate])),
+            Some(candidate.to_owned())
+        );
+        assert_eq!(resolve_import(specifier, importer, &[]), None);
+    }
+}
+
+#[test]
+fn exact_and_relative_paths_do_not_lose_resolution_to_unrelated_suffixes() {
+    let cases = [
+        (
+            "crate::util",
+            "src/main.rs",
+            "src/util.rs",
+            "other/src/util.rs",
+        ),
+        ("pkg.util", "main.py", "pkg/util.py", "other/pkg/util.py"),
+        (".util", "pkg/main.py", "pkg/util.py", "other/pkg/util.py"),
+        ("./util", "src/main.ts", "src/util.ts", "other/src/util.ts"),
+    ];
+    for (specifier, importer, expected, other) in cases {
+        assert_eq!(
+            resolve_import(specifier, importer, &paths(&[other, expected])),
+            Some(expected.to_owned())
+        );
+    }
+}
+
+#[test]
+fn graph_build_and_incremental_refresh_do_not_invent_ambiguous_import_edges() {
+    use pixel_graph::build::{build_graph, update_file};
+    use pixel_graph::{EdgeKind, GraphStore};
+    use std::fs;
+
+    let root = tempfile::tempdir().unwrap();
+    let files = [
+        ("crates/a/src/util.rs", "pub fn parse_rust() {}\n"),
+        ("crates/b/src/util.rs", "pub fn parse_rust() {}\n"),
+        (
+            "crates/caller/src/main.rs",
+            "use crate::util::parse_rust;\nfn rust_caller() { parse_rust(); }\n",
+        ),
+        ("apps/a/pkg/util.py", "def parse_python():\n    pass\n"),
+        ("apps/b/pkg/util.py", "def parse_python():\n    pass\n"),
+        (
+            "apps/caller/main.py",
+            "from pkg.util import parse_python\ndef python_caller():\n    parse_python()\n",
+        ),
+    ];
+    for (path, body) in files {
+        let path = root.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+    let db = root.path().join(".pixel/graph.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    build_graph(root.path(), &db).unwrap();
+
+    for incremental in [false, true] {
+        if incremental {
+            for file in ["crates/caller/src/main.rs", "apps/caller/main.py"] {
+                update_file(root.path(), &db, file).unwrap();
+            }
+        }
+        let store = GraphStore::open(&db).unwrap();
+        for (caller, callee, file) in [
+            ("rust_caller", "parse_rust", "crates/caller/src/main.rs"),
+            ("python_caller", "parse_python", "apps/caller/main.py"),
+        ] {
+            let caller = store.symbols_by_name(caller, 10).unwrap();
+            assert_eq!(caller.len(), 1);
+            assert!(
+                store
+                    .edges_from(caller[0].id, Some(EdgeKind::Calls))
+                    .unwrap()
+                    .is_empty()
+            );
+            let file = store.file_by_path(file).unwrap().unwrap();
+            let imports: (i64, i64) = store
+                .conn()
+                .query_row(
+                    "SELECT count(*), count(resolved_file_id) FROM imports WHERE file_id = ?1",
+                    [file.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert!(
+                imports.0 > 0,
+                "fixture must exercise real extracted imports"
+            );
+            assert_eq!(
+                imports.1, 0,
+                "ambiguous import must not target any one file"
+            );
+            assert!(store.envelope_for_name(callee).unwrap().lower_bound);
+        }
+    }
+}
