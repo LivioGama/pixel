@@ -612,7 +612,7 @@ impl GraphStore {
     pub fn concept_count(&self) -> Result<u64> {
         Ok(self
             .conn
-            .query_row("SELECT COUNT(*) FROM concepts", [], |r| r.get(0))?)
+            .query_row("SELECT COUNT(*) FROM concepts", [], |r| r.get::<_, i64>(0).map(|v| v as u64))?)
     }
 
     /// The stored concept extractor version, if any.
@@ -775,7 +775,7 @@ impl GraphStore {
         let unresolved: u64 = self.conn.query_row(
             "SELECT COUNT(*) FROM unresolved_calls WHERE name = ?1",
             params![name],
-            |r| r.get(0),
+            |r| r.get::<_, i64>(0).map(|v| v as u64),
         )?;
         Ok(Envelope {
             lower_bound: unresolved > 0,
@@ -786,16 +786,16 @@ impl GraphStore {
     pub fn counts(&self) -> Result<(u64, u64, u64, u64)> {
         let files: u64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get::<_, i64>(0).map(|v| v as u64))?;
         let symbols: u64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
+            .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get::<_, i64>(0).map(|v| v as u64))?;
         let edges: u64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))?;
+            .query_row("SELECT COUNT(*) FROM edges", [], |r| r.get::<_, i64>(0).map(|v| v as u64))?;
         let unresolved: u64 =
             self.conn
-                .query_row("SELECT COUNT(*) FROM unresolved_calls", [], |r| r.get(0))?;
+                .query_row("SELECT COUNT(*) FROM unresolved_calls", [], |r| r.get::<_, i64>(0).map(|v| v as u64))?;
         Ok((files, symbols, edges, unresolved))
     }
 
