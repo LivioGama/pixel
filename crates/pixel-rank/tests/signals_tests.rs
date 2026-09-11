@@ -208,7 +208,15 @@ fn session_score_weights_edits_2x_reads_at_equal_recency() {
         now_ms: now,
         ..SignalOptions::default()
     };
-    let bundle = score_signals(&HashMap::new(), &[], &events, &[], &HashMap::new(), &candidates, &opts);
+    let bundle = score_signals(
+        &HashMap::new(),
+        &[],
+        &events,
+        &[],
+        &HashMap::new(),
+        &candidates,
+        &opts,
+    );
 
     // Both normalized to the candidate set's max: edited.rs (2x weight) must
     // be the max (1.0), read_only.rs exactly half of it.
@@ -246,7 +254,15 @@ fn session_score_ignores_events_older_than_24h_window() {
         now_ms: now,
         ..SignalOptions::default()
     };
-    let bundle = score_signals(&HashMap::new(), &[], &events, &[], &HashMap::new(), &candidates, &opts);
+    let bundle = score_signals(
+        &HashMap::new(),
+        &[],
+        &events,
+        &[],
+        &HashMap::new(),
+        &candidates,
+        &opts,
+    );
 
     assert!(bundle.session.get("src/recent.rs").copied().unwrap_or(0.0) > 0.0);
     assert_eq!(
@@ -270,7 +286,15 @@ fn normalization_is_scoped_to_the_candidate_set_not_the_whole_map() {
         now_ms: now_ms(),
         ..SignalOptions::default()
     };
-    let bundle = score_signals(&activity_raw, &[], &[], &[], &HashMap::new(), &candidates, &opts);
+    let bundle = score_signals(
+        &activity_raw,
+        &[],
+        &[],
+        &[],
+        &HashMap::new(),
+        &candidates,
+        &opts,
+    );
 
     let candidate_score = *bundle.activity.get("src/candidate.rs").unwrap();
     assert!(
@@ -307,7 +331,15 @@ fn error_sink_join_boosts_only_the_matching_candidate() {
         now_ms: now,
         ..SignalOptions::default()
     };
-    let bundle = score_signals(&HashMap::new(), &[], &[], &errors, &HashMap::new(), &candidates, &opts);
+    let bundle = score_signals(
+        &HashMap::new(),
+        &[],
+        &[],
+        &errors,
+        &HashMap::new(),
+        &candidates,
+        &opts,
+    );
 
     let checkout = bundle
         .session

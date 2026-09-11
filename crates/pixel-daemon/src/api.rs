@@ -1078,10 +1078,12 @@ impl Service {
                 if let Ok(notes) = store.annotations_for_file(path)
                     && !notes.is_empty()
                 {
-                    t["notes"] = json!(notes
-                        .iter()
-                        .map(|a| json!({"target": a.target, "note": a.note}))
-                        .collect::<Vec<_>>());
+                    t["notes"] = json!(
+                        notes
+                            .iter()
+                            .map(|a| json!({"target": a.target, "note": a.note}))
+                            .collect::<Vec<_>>()
+                    );
                 }
             }
         }
@@ -1173,13 +1175,16 @@ impl Service {
         let mut sources = HashMap::new();
         let stale_response = |mut response: Value| -> Result<Value, String> {
             response["truncated"] = json!(true);
-            response["caps"] = json!(["context truncated: source differs from graph snapshot or is unavailable; stale excerpts and Crux omitted"]);
+            response["caps"] = json!([
+                "context truncated: source differs from graph snapshot or is unavailable; stale excerpts and Crux omitted"
+            ]);
             if value_tokens(&response) > budget {
                 return Err("context source is stale or unavailable; budget cannot fit the freshness warning".to_owned());
             }
             Ok(response)
         };
-        if validated_context_source(&self.root, store, sym.file_id, &files, &mut sources).is_none() {
+        if validated_context_source(&self.root, store, sym.file_id, &files, &mut sources).is_none()
+        {
             return stale_response(minimum_response);
         }
 
@@ -1222,7 +1227,21 @@ impl Service {
         let mut source_remaining = budget.saturating_mul(4).min(MAX_CONTEXT_SOURCE_BYTES);
         let mut items = Vec::new();
         let target_cap = source_remaining.min(MAX_TARGET_SNIPPET_BYTES);
-        let target = context_item(sources.get(&sym.file_id).and_then(Option::as_deref).unwrap(), &sym, &files, target_cap, &store.symbol_crux_by_id(sym.id).map_err(|e| e.to_string())?.iter().map(|c| (c.line, c.text.clone())).collect::<Vec<_>>());
+        let target = context_item(
+            sources
+                .get(&sym.file_id)
+                .and_then(Option::as_deref)
+                .unwrap(),
+            &sym,
+            &files,
+            target_cap,
+            &store
+                .symbol_crux_by_id(sym.id)
+                .map_err(|e| e.to_string())?
+                .iter()
+                .map(|c| (c.line, c.text.clone()))
+                .collect::<Vec<_>>(),
+        );
         source_remaining = source_remaining.saturating_sub(target.snippet.len());
         items.push(target);
         let mut seen_context = std::collections::HashSet::from([sym.id]);
@@ -1240,11 +1259,27 @@ impl Service {
                 continue;
             }
             if let Some(other) = symbol_by_id(store, symbol_id) {
-                if validated_context_source(&self.root, store, other.file_id, &files, &mut sources).is_none() {
+                if validated_context_source(&self.root, store, other.file_id, &files, &mut sources)
+                    .is_none()
+                {
                     return stale_response(minimum_response);
                 }
                 let cap = source_remaining.min(MAX_NEIGHBOR_SNIPPET_BYTES);
-                let item = context_item(sources.get(&other.file_id).and_then(Option::as_deref).unwrap(), &other, &files, cap, &store.symbol_crux_by_id(symbol_id).map_err(|e| e.to_string())?.iter().map(|c| (c.line, c.text.clone())).collect::<Vec<_>>());
+                let item = context_item(
+                    sources
+                        .get(&other.file_id)
+                        .and_then(Option::as_deref)
+                        .unwrap(),
+                    &other,
+                    &files,
+                    cap,
+                    &store
+                        .symbol_crux_by_id(symbol_id)
+                        .map_err(|e| e.to_string())?
+                        .iter()
+                        .map(|c| (c.line, c.text.clone()))
+                        .collect::<Vec<_>>(),
+                );
                 source_remaining = source_remaining.saturating_sub(item.snippet.len());
                 items.push(item);
             }
@@ -1387,9 +1422,11 @@ impl Service {
                 "site_line": e.site_line,
             }));
         }
-        let mut envelope = json!(store
-            .envelope_for_name(&sym.name)
-            .map_err(|e| e.to_string())?);
+        let mut envelope = json!(
+            store
+                .envelope_for_name(&sym.name)
+                .map_err(|e| e.to_string())?
+        );
         if role == "callees" {
             // Name-based uncertainty describes incoming calls. Outgoing queries
             // must also account for unresolved calls enclosed by this symbol.
@@ -1742,10 +1779,12 @@ impl Service {
                 if let Ok(notes) = store.annotations_for_symbols(path, &keys)
                     && !notes.is_empty()
                 {
-                    m["notes"] = json!(notes
-                        .iter()
-                        .map(|a| json!({"target": a.target, "note": a.note}))
-                        .collect::<Vec<_>>());
+                    m["notes"] = json!(
+                        notes
+                            .iter()
+                            .map(|a| json!({"target": a.target, "note": a.note}))
+                            .collect::<Vec<_>>()
+                    );
                 }
             }
         }
@@ -1762,7 +1801,8 @@ impl Service {
     fn facts_open_and_catch_up(&self) -> Result<FactsStore, String> {
         let mut facts = FactsStore::open(&self.root).map_err(|e| e.to_string())?;
         if !facts.index_state().fresh {
-            let _ = pixel_facts::ingest::lazy_ingest(&mut facts);
+            pixel_facts::ingest::lazy_ingest(&mut facts)
+                .map_err(|e| format!("facts lazy ingest failed: {e}"))?;
         }
         Ok(facts)
     }
@@ -1902,7 +1942,9 @@ impl Service {
         match action {
             "set" => {
                 let (file, target, note) = match (norm_file.as_deref(), target, note) {
-                    (Some(f), Some(t), Some(n)) if !f.is_empty() && !t.is_empty() && !n.is_empty() => {
+                    (Some(f), Some(t), Some(n))
+                        if !f.is_empty() && !t.is_empty() && !n.is_empty() =>
+                    {
                         (f, t, n)
                     }
                     _ => return Err("note set requires <file> <target> <note>".to_string()),
@@ -1939,9 +1981,7 @@ impl Service {
             "list" => {
                 const NOTE_LIST_CAP: u32 = 500;
                 let rows = match norm_file.as_deref() {
-                    Some(f) => store
-                        .annotations_for_file(f)
-                        .map_err(|e| e.to_string())?,
+                    Some(f) => store.annotations_for_file(f).map_err(|e| e.to_string())?,
                     None => store
                         .all_annotations(NOTE_LIST_CAP)
                         .map_err(|e| e.to_string())?,
@@ -2143,8 +2183,10 @@ fn fan_in_counts(
          GROUP BY f.path",
         placeholders.join(", ")
     );
-    let params: Vec<&dyn rusqlite::ToSql> =
-        candidates.iter().map(|c| c as &dyn rusqlite::ToSql).collect();
+    let params: Vec<&dyn rusqlite::ToSql> = candidates
+        .iter()
+        .map(|c| c as &dyn rusqlite::ToSql)
+        .collect();
     let Ok(mut rows) = conn.prepare(&sql) else {
         return out;
     };
@@ -2609,19 +2651,24 @@ fn validated_context_source<'a>(
     files: &HashMap<i64, String>,
     sources: &'a mut HashMap<i64, Option<String>>,
 ) -> Option<&'a str> {
-    sources.entry(file_id).or_insert_with(|| {
-        let path = files.get(&file_id)?;
-        let row = store.file_by_path(path).ok()??;
-        let file = open_regular_bounded(&root.join(path), MAX_FILE_BYTES).ok()?;
-        let mut bytes = Vec::new();
-        file.take(MAX_FILE_BYTES.saturating_add(1)).read_to_end(&mut bytes).ok()?;
-        if bytes.len() as u64 > MAX_FILE_BYTES
-            || format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&bytes)) != row.blob_oid
-        {
-            return None;
-        }
-        String::from_utf8(bytes).ok()
-    }).as_deref()
+    sources
+        .entry(file_id)
+        .or_insert_with(|| {
+            let path = files.get(&file_id)?;
+            let row = store.file_by_path(path).ok()??;
+            let file = open_regular_bounded(&root.join(path), MAX_FILE_BYTES).ok()?;
+            let mut bytes = Vec::new();
+            file.take(MAX_FILE_BYTES.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .ok()?;
+            if bytes.len() as u64 > MAX_FILE_BYTES
+                || format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&bytes)) != row.blob_oid
+            {
+                return None;
+            }
+            String::from_utf8(bytes).ok()
+        })
+        .as_deref()
 }
 
 fn context_item(
@@ -2632,13 +2679,7 @@ fn context_item(
     crux: &[(u32, String)],
 ) -> bridge::Item {
     let path = files.get(&s.file_id).cloned().unwrap_or_default();
-    let snippet = read_snippet(
-        source,
-        s.start_line,
-        s.end_line,
-        60,
-        max_snippet_bytes,
-    );
+    let snippet = read_snippet(source, s.start_line, s.end_line, 60, max_snippet_bytes);
     bridge::Item {
         name: s.name.clone(),
         kind: s.kind.as_str().to_string(),
@@ -2681,7 +2722,14 @@ mod context_crux_coordinate_tests {
 
     #[test]
     fn context_crux_coordinates_match_real_source_after_shift() {
-        let dir = std::env::temp_dir().join(format!("pixel-crux-coordinates-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-crux-coordinates-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let body = "pub fn check(flag: bool) -> i32 {\n    if flag {\n        return 1;\n    }\n    0\n}\n";
         let crux = vec![(2, "if flag {".to_owned()), (3, "return 1;".to_owned())];
@@ -2689,7 +2737,13 @@ mod context_crux_coordinate_tests {
         for padding in [10, 20] {
             let source = format!("{}{body}", "// padding\n".repeat(padding));
             std::fs::write(dir.join("sample.rs"), &source).unwrap();
-            let item = context_item(&source, &symbol(padding as u32 + 1, padding as u32 + 6), &files, 4096, &crux);
+            let item = context_item(
+                &source,
+                &symbol(padding as u32 + 1, padding as u32 + 6),
+                &files,
+                4096,
+                &crux,
+            );
             for (line, text) in &item.crux {
                 assert_eq!(source.lines().nth(*line as usize - 1).unwrap().trim(), text);
             }
@@ -2703,28 +2757,70 @@ mod context_crux_coordinate_tests {
     #[test]
     fn context_crux_rejects_zero_out_of_span_and_overflow_coordinates() {
         let files = HashMap::new();
-        let crux = vec![(0, "invalid".to_owned()), (2, "valid".to_owned()), (9, "outside".to_owned())];
+        let crux = vec![
+            (0, "invalid".to_owned()),
+            (2, "valid".to_owned()),
+            (9, "outside".to_owned()),
+        ];
         let item = context_item("", &symbol(11, 16), &files, 0, &crux);
         assert_eq!(item.crux, vec![(12, "valid".to_owned())]);
-        assert!(context_item("", &symbol(0, 6), &files, 0, &crux).crux.is_empty());
-        assert!(context_item("", &symbol(u32::MAX, u32::MAX), &files, 0, &crux).crux.is_empty());
+        assert!(
+            context_item("", &symbol(0, 6), &files, 0, &crux)
+                .crux
+                .is_empty()
+        );
+        assert!(
+            context_item("", &symbol(u32::MAX, u32::MAX), &files, 0, &crux)
+                .crux
+                .is_empty()
+        );
     }
 
     #[test]
     fn context_warm_graph_omits_stale_source_and_crux_with_truthful_warning() {
-        let root = std::env::temp_dir().join(format!("pixel-crux-freshness-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let root = std::env::temp_dir().join(format!(
+            "pixel-crux-freshness-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&root).unwrap();
-        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&root).status().unwrap().success());
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
         let body = "pub fn check(flag: bool) -> i32 {\n    if flag {\n        return 1;\n    }\n    0\n}\n";
         let original = format!("{}{body}", "// padding\n".repeat(10));
         std::fs::write(root.join("sample.rs"), &original).unwrap();
-        let request = || Request::Context { uid: "sample.rs#check#function".to_owned(), budget_tokens: Some(2000) };
+        let request = || Request::Context {
+            uid: "sample.rs#check#function".to_owned(),
+            budget_tokens: Some(2000),
+        };
         let mut service = Service::open(&root).unwrap();
         let before = service.handle(request());
         assert!(before.ok, "{before:?}");
-        assert!(before.data()["text"].as_str().unwrap().contains("crux:13 return 1;"));
+        assert!(
+            before.data()["text"]
+                .as_str()
+                .unwrap()
+                .contains("crux:13 return 1;")
+        );
 
-        std::fs::write(root.join("sample.rs"), format!("{}{}", "// shifted\n".repeat(10), original.replace("return 1;", "return 2;"))).unwrap();
+        std::fs::write(
+            root.join("sample.rs"),
+            format!(
+                "{}{}",
+                "// shifted\n".repeat(10),
+                original.replace("return 1;", "return 2;")
+            ),
+        )
+        .unwrap();
         let stale = service.handle(request());
         assert!(stale.ok, "{stale:?}");
         assert_eq!(stale.data()["text"], "");
@@ -2732,14 +2828,24 @@ mod context_crux_coordinate_tests {
         let wire = serde_json::to_value(&stale).unwrap();
         assert_eq!(wire["epistemics"]["lower_bound"], true);
         assert_eq!(wire["epistemics"]["closed_world"], false);
-        assert!(wire["warnings"].as_array().unwrap().iter().any(|warning| warning["message"].as_str().unwrap().contains("source differs")));
+        assert!(wire["warnings"].as_array().unwrap().iter().any(|warning| {
+            warning["message"]
+                .as_str()
+                .unwrap()
+                .contains("source differs")
+        }));
 
         // A fresh graph snapshot recovers normal excerpts and absolute lines.
         let mut refreshed = Service::open(&root).unwrap();
         let after = refreshed.handle(request());
         assert!(after.ok, "{after:?}");
         assert_eq!(after.data()["symbol"]["start_line"], 21);
-        assert!(after.data()["text"].as_str().unwrap().contains("crux:23 return 2;"));
+        assert!(
+            after.data()["text"]
+                .as_str()
+                .unwrap()
+                .contains("crux:23 return 2;")
+        );
         assert!(!after.data()["text"].as_str().unwrap().contains("return 1;"));
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2757,14 +2863,11 @@ fn read_snippet(
     }
     let start = start_line.saturating_sub(1) as usize;
     let mut snippet = String::new();
-    for line in source.lines()
-        .skip(start)
-        .take(
-            ((end_line as usize).saturating_sub(start))
-                .min(max_lines)
-                .max(1),
-        )
-    {
+    for line in source.lines().skip(start).take(
+        ((end_line as usize).saturating_sub(start))
+            .min(max_lines)
+            .max(1),
+    ) {
         let separator = usize::from(!snippet.is_empty());
         let remaining = max_bytes.saturating_sub(snippet.len() + separator);
         if remaining == 0 {
@@ -2774,7 +2877,7 @@ fn read_snippet(
             snippet.push('\n');
         }
         if line.len() <= remaining {
-            snippet.push_str(&line);
+            snippet.push_str(line);
             continue;
         }
         let mut end = remaining;
@@ -3521,7 +3624,9 @@ mod tests {
         // Ordered by start_line: writers appear before the trait.
         let mut prev_line: i64 = -1;
         for s in &syms {
-            let start = s["start_line"].as_i64().expect("every symbol has a start_line");
+            let start = s["start_line"]
+                .as_i64()
+                .expect("every symbol has a start_line");
             assert!(
                 start >= prev_line,
                 "skeleton symbols must be ordered by start_line: {s:?}"
@@ -3549,12 +3654,16 @@ mod tests {
             );
         }
         // Spot-check: the struct and fn are both signatures, not bodies.
-        let names: std::collections::HashSet<&str> = syms
-            .iter()
-            .filter_map(|s| s["name"].as_str())
-            .collect();
-        assert!(names.contains("bootstrap"), "skeleton must contain bootstrap: {names:?}");
-        assert!(names.contains("Config"), "skeleton must contain Config: {names:?}");
+        let names: std::collections::HashSet<&str> =
+            syms.iter().filter_map(|s| s["name"].as_str()).collect();
+        assert!(
+            names.contains("bootstrap"),
+            "skeleton must contain bootstrap: {names:?}"
+        );
+        assert!(
+            names.contains("Config"),
+            "skeleton must contain Config: {names:?}"
+        );
         let bootstrap = syms
             .iter()
             .find(|s| s["name"] == "bootstrap")
@@ -3611,7 +3720,11 @@ mod tests {
         let epistemics = outgoing.epistemics.as_ref().unwrap();
         assert!(epistemics.lower_bound);
         assert!(!epistemics.closed_world);
-        assert!(epistemics.basis.contains("2 unresolved outgoing call site(s)"));
+        assert!(
+            epistemics
+                .basis
+                .contains("2 unresolved outgoing call site(s)")
+        );
 
         for (symbol, role, count) in [
             ("entry", "callers", 0),
@@ -4797,6 +4910,26 @@ mod tests {
             epistemics.basis.contains("ident"),
             "envelope epistemics must carry the tier basis: {epistemics:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn facts_lazy_ingest_failure_is_returned() {
+        let root = tmpdir("facts-lazy-ingest-failure");
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let svc = Service::open(&root).unwrap();
+        std::fs::remove_dir_all(root.join(".git")).unwrap();
+
+        let error = match svc.facts_open_and_catch_up() {
+            Ok(_) => panic!("lazy ingest must report a missing Git repository"),
+            Err(error) => error,
+        };
+        assert!(error.contains("facts lazy ingest failed"), "{error}");
 
         let _ = std::fs::remove_dir_all(&root);
     }

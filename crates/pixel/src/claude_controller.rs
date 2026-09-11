@@ -159,9 +159,7 @@ pub(crate) fn build_worker_command_with_options(
         if prompt_file.as_os_str().is_empty() {
             return Err("Claude worker system prompt file must not be empty".to_string());
         }
-        command
-            .arg("--append-system-prompt-file")
-            .arg(prompt_file);
+        command.arg("--append-system-prompt-file").arg(prompt_file);
     }
     command.arg(worker_prompt(launch));
     Ok(command)
@@ -361,9 +359,7 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert!(
-            !args
-                .iter()
-                .any(|arg| arg == "--append-system-prompt-file"),
+            !args.iter().any(|arg| arg == "--append-system-prompt-file"),
             "flag must be absent when system_prompt_file is None"
         );
     }

@@ -297,7 +297,11 @@ fn install_shell_wrappers(home: &Path, dry_run: bool) -> Result<InstallStep> {
         status: CheckStatus::Green,
         summary: format!(
             "{} shell wrappers in {}",
-            if had_old_block { "updated" } else { "installed" },
+            if had_old_block {
+                "updated"
+            } else {
+                "installed"
+            },
             profile.display()
         ),
         detail: Some(format!("profile={}", profile.display())),

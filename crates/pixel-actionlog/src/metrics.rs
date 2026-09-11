@@ -170,7 +170,7 @@ impl ActionEvent {
         // prevents two-value oscillation at a negative-savings boundary.
         for _ in 0..8 {
             let line = format_metrics_line(self)?;
-            let bytes = line.len() as u64 + 1;
+            let bytes = line.len() as u64 + 2;
             let metrics = self.metrics.as_mut()?;
             if metrics.reporting_bytes == bytes {
                 return Some(line);
@@ -192,24 +192,32 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect::<String>();
     let duration_ms = metrics.duration_us as f64 / 1000.0;
-        // Evaluate the user-facing savings claim from the command payload only.
-        // Reporting bytes remain fully accounted for, but including them here
-        // makes whether a savings row exists depend on its own emitted size.
-        let payload_tok = metrics.output_bytes as f64 / 4.0;
+    // Evaluate the user-facing savings claim from the command payload only.
+    // Reporting bytes remain fully accounted for, but including them here
+    // makes whether a savings row exists depend on its own emitted size.
+    let payload_tok = metrics.output_bytes as f64 / 4.0;
     let id = event.invocation_id.as_deref().unwrap_or("legacy");
     let short_id: String = id
         .split('-')
         .nth(1)
-        .map(|s| s.chars().take(6).collect())
+        .map(|s| {
+            s.chars()
+                .rev()
+                .take(6)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect()
+        })
         .unwrap_or_else(|| id.to_owned());
 
     // Line 1: identity header.
-        let header = format!("🟩 pixel {command} ❀ {duration_ms:.1}ms ❀ #{short_id}");
+    let header = format!("🟩 pixel {command} ❀ {duration_ms:.1}ms ❀ #{short_id}");
 
-        // Keep the estimate readable in terminal UIs that render block characters
-        // as low-contrast progress tracks. A negative estimate is overhead, not
-        // negative savings, so never express it as a misleading percentage.
-        let time_section = metrics.saved_time_ms().and_then(|saved_ms| {
+    // Keep the estimate readable in terminal UIs that render block characters
+    // as low-contrast progress tracks. A negative estimate is overhead, not
+    // negative savings, so never express it as a misleading percentage.
+    let time_section = metrics.saved_time_ms().and_then(|saved_ms| {
             let native_time_ms = saved_ms + duration_ms;
             let partial_tag = if metrics.partial() { ", partial" } else { "" };
             if native_time_ms > 0.0 {
@@ -233,51 +241,48 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
             }
         });
 
-        let token_section = metrics.native_workflow_bytes.and_then(|native_bytes| {
-            let native_tok = native_bytes as f64 / 4.0;
-            let partial_tag = if metrics.partial() { ", partial" } else { "" };
-            if native_tok > 0.0 {
-                let saved_tok = native_tok - payload_tok;
-                if saved_tok > 0.0 {
-                    let pct = (saved_tok / native_tok * 100.0).round() as i64;
-                    Some(format!(
-                        "estimated LLM context saved: ~{saved_tok:.0} tok ({pct}%){partial_tag}"
-                    ))
-                } else {
-                    None
-                }
+    let token_section = metrics.native_workflow_bytes.and_then(|native_bytes| {
+        let native_tok = native_bytes as f64 / 4.0;
+        let partial_tag = if metrics.partial() { ", partial" } else { "" };
+        if native_tok > 0.0 {
+            let saved_tok = native_tok - payload_tok;
+            if saved_tok > 0.0 {
+                let pct = (saved_tok / native_tok * 100.0).round() as i64;
+                Some(format!(
+                    "estimated LLM context saved: ~{saved_tok:.0} tok ({pct}%){partial_tag}"
+                ))
             } else {
                 None
             }
-        });
-
-        let mut rows = Vec::new();
-        if let Some(time_section) = time_section {
-            rows.push(format!("  ├─ ⏱ {time_section}"));
-        }
-        if let Some(token_section) = token_section {
-            rows.push(format!("  ├─ § {token_section}"));
-        }
-        let stem = "  │";
-        let separator = "  └────────────────────────────────────────────────────────";
-
-        let mut line = if rows.is_empty() {
-            header
         } else {
-            format!("{header}\n{stem}\n{}\n{stem}\n{separator}", rows.join("\n"))
-        };
+            None
+        }
+    });
+
+    let mut rows = Vec::new();
+    if let Some(time_section) = time_section {
+        rows.push(format!("  ├─ ⏱ {time_section}"));
+    }
+    if let Some(token_section) = token_section {
+        rows.push(format!("  ├─ § {token_section}"));
+    }
+    let stem = "  │";
+    let separator = "  └────────────────────────────────────────────────────────";
+
+    let mut line = if rows.is_empty() {
+        header
+    } else {
+        format!("{header}\n{stem}\n{}\n{stem}\n{separator}", rows.join("\n"))
+    };
     // Padding resolves the rare digit-boundary fixed-point oscillation without
     // lying about emitted overhead. Bound it when replaying malformed records.
     let padding = metrics
         .reporting_bytes
-        .saturating_sub(line.len() as u64 + 1)
+        .saturating_sub(line.len() as u64 + 2)
         .min(64);
     line.extend(std::iter::repeat_n(' ', padding as usize));
     Some(line)
 }
-
-/// Render a horizontal gradient bar: filled `▓` for the ratio, empty `░` for
-/// the remainder. Ratio is clamped to [0, 1] by the caller.
 
 /// Summarize only finalized operation records. Duplicate invocation IDs count
 /// once (first record wins); legacy records without metrics remain separate.
@@ -508,7 +513,7 @@ mod tests {
         assert!(line.contains("against ~2500ms estimated"));
         assert_eq!(
             event.metrics.unwrap().reporting_bytes,
-            line.len() as u64 + 1
+            line.len() as u64 + 2
         );
     }
 
@@ -689,7 +694,7 @@ mod tests {
         assert!(line.contains("partial"));
         assert_eq!(
             event.metrics.as_ref().unwrap().reporting_bytes,
-            line.len() as u64 + 1
+            line.len() as u64 + 2
         );
         assert_eq!(
             event.finalize_metrics_line().as_deref(),
@@ -711,10 +716,10 @@ mod tests {
             ));
             let line = event.finalize_metrics_line().unwrap();
             let metrics = event.metrics.as_ref().unwrap();
-            assert_eq!(metrics.reporting_bytes, line.len() as u64 + 1);
+            assert_eq!(metrics.reporting_bytes, line.len() as u64 + 2);
             assert_eq!(
                 metrics.output_tokens(),
-                (output_bytes + line.len() as u64 + 1) as f64 / 4.0
+                (output_bytes + line.len() as u64 + 2) as f64 / 4.0
             );
             assert_eq!(
                 metrics.saved_tokens(),
@@ -852,10 +857,10 @@ mod tests {
         let line = event.finalize_metrics_line().unwrap();
         let summary = summarize_metrics(&[event.clone(), event]);
         let group = &summary["versions"]["workflow-v1"]["complete"];
-        assert_eq!(group["measured"]["reporting_bytes"], line.len() + 1);
+        assert_eq!(group["measured"]["reporting_bytes"], line.len() + 2);
         assert_eq!(
             group["estimated"]["output_tokens"],
-            (300 + line.len() + 1) as f64 / 4.0
+            (300 + line.len() + 2) as f64 / 4.0
         );
         let empty = summarize_metrics(&[]);
         assert_eq!(empty["record_count"], 0);

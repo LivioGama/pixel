@@ -89,17 +89,16 @@ fn discover_root_impl(start: &Path, follow: FollowSubmodules) -> Option<PathBuf>
                 // the target is a plain bare/worktree dir outside any ancestor,
                 // in which case the subproject stands alone and we still stop
                 // at its own root.
-                if let Some(target) = gitdir_target(&git_entry) {                
-                    if let Ok(abs_target) = target.canonicalize() {
-                        if is_under_ancestor_git_modules(&cur, &abs_target) {
-                            // Keep climbing: `cur` is a submodule root — the
-                            // nearest `.git`-carrying ancestor is the superproject
-                            // root.
-                            if let Some(parent) = cur.parent() {
-                                cur = parent.to_path_buf();
-                                continue;
-                            }
-                        }
+                if let Some(target) = gitdir_target(&git_entry)
+                    && let Ok(abs_target) = target.canonicalize()
+                    && is_under_ancestor_git_modules(&cur, &abs_target)
+                {
+                    // Keep climbing: `cur` is a submodule root — the
+                    // nearest `.git`-carrying ancestor is the superproject
+                    // root.
+                    if let Some(parent) = cur.parent() {
+                        cur = parent.to_path_buf();
+                        continue;
                     }
                 }
             }

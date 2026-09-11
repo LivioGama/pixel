@@ -3206,7 +3206,10 @@ mod tests {
         assert!(is_guard_event(&empty, "PreToolUse"));
         assert!(is_guard_event(&empty, "BeforeTool"));
         // PostToolUse (blast-radius hook) is now a guard event too.
-        assert!(is_guard_event(&serde_json::json!({"tool_name": "Edit", "tool_input": {}}), "PostToolUse"));
+        assert!(is_guard_event(
+            &serde_json::json!({"tool_name": "Edit", "tool_input": {}}),
+            "PostToolUse"
+        ));
     }
 
     #[test]

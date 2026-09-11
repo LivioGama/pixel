@@ -161,8 +161,10 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             let content = fs::read_to_string(&profile).unwrap_or_default();
             let has_begin = content.contains(install::PIXEL_MANAGED_BEGIN);
             let has_end = content.contains(install::PIXEL_MANAGED_END);
-            let has_claude = content.contains("claude()") && content.contains("--append-system-prompt-file");
-            let has_codex = content.contains("codex()") && content.contains("model_instructions_file");
+            let has_claude =
+                content.contains("claude()") && content.contains("--append-system-prompt-file");
+            let has_codex =
+                content.contains("codex()") && content.contains("model_instructions_file");
             if !has_begin || !has_end {
                 return Err(format!(
                     "shell wrappers not found in {} — run `pixel install`",

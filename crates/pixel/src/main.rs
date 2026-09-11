@@ -2657,9 +2657,10 @@ fn run() -> Result<(), String> {
         event = event.with_metrics(metrics);
     }
     if live && let Some(line) = event.finalize_metrics_line() {
-        // Never use println!/eprintln! here: reporting failure is not an
-        // operation failure, and overhead is already accounted exactly.
-        let _ = writeln!(std::io::stderr().lock(), "{line}");
+        // A blank record creates a distinct terminal block so transcript UIs
+        // cannot visually attach the metrics matrix to command output.
+        // Reporting bytes include this separator and the trailing newline.
+        let _ = writeln!(std::io::stderr().lock(), "\n{line}");
     }
     logger.log(event);
     logger.finish();

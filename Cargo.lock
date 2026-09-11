@@ -2450,7 +2450,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pixel-actionlog"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2459,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "pixel-daemon",
@@ -2471,7 +2471,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "libc",
@@ -2495,14 +2495,14 @@ dependencies = [
 
 [[package]]
 name = "pixel-context"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "pixel-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fs2",
  "notify",
@@ -2524,7 +2524,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-facts"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pixel-git",
  "pixel-index",
@@ -2538,7 +2538,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-flow"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2548,14 +2548,14 @@ dependencies = [
 
 [[package]]
 name = "pixel-git"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "regex",
 ]
 
 [[package]]
 name = "pixel-graph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pixel-git",
  "pixel-index",
@@ -2584,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-index"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crc32fast",
  "fs2",
@@ -2604,7 +2604,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-install"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pixel-daemon",
  "pixel-facts",
@@ -2618,7 +2618,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-ops"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "libc",
@@ -2635,7 +2635,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2643,7 +2643,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-rank"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pixel-git",
  "pixel-graph",
@@ -2657,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-recall"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fastembed",
  "memmap2",
@@ -2676,7 +2676,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rmcp",
  "rusqlite",
@@ -3188,16 +3188,6 @@ dependencies = [
  "quote",
  "serde_json",
  "syn 3.0.5",
-]
-
-[[package]]
-name = "rsqlite-vfs"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c51c9ae4df8a7fba42103df5c621fa3c37eccf3a3c650879e90fc48b11cc192c"
-dependencies = [
- "hashbrown 0.16.1",
- "thiserror",
 ]
 
 [[package]]

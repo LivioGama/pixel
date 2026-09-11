@@ -124,18 +124,19 @@ pub(crate) fn create(
         ],
     )?;
     if let Some(overlay) = &overlay
-        && let Err(error) = apply_patch_file(&sandbox_root, &overlay.patch_path) {
-            let _ = git_success(
-                &root,
-                [
-                    "worktree",
-                    "remove",
-                    "--force",
-                    sandbox_root.to_str().unwrap_or(""),
-                ],
-            );
-            return Err(error);
-        }
+        && let Err(error) = apply_patch_file(&sandbox_root, &overlay.patch_path)
+    {
+        let _ = git_success(
+            &root,
+            [
+                "worktree",
+                "remove",
+                "--force",
+                sandbox_root.to_str().unwrap_or(""),
+            ],
+        );
+        return Err(error);
+    }
     let baseline_tree_oid = match baseline_tree(&sandbox_root) {
         Ok(tree) => tree,
         Err(error) => {
