@@ -15,7 +15,7 @@ tree-sitter-rust = "0.23"
 tree-sitter-c-sharp = "0.23"
 tree-sitter-go = "0.23"
 tree-sitter-java = "0.23"
-tree-sitter-python = "0.23"
+tree-sitter-python = "0.25"
 rayon = "1"
 xxhash-rust = { workspace = true }
 serde = { version = "1", features = ["derive"] }
