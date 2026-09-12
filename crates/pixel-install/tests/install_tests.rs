@@ -4,7 +4,7 @@ use std::fs;
 
 use pixel_install::config::{MANAGED_BEGIN, MANAGED_END};
 use pixel_install::doctor::{DoctorOptions, doctor};
-use pixel_install::install::{InstallOptions, install};
+use pixel_install::install::{InstallOptions, InstallReport, install};
 use pixel_install::uninstall::{UninstallOptions, uninstall};
 use tempfile::TempDir;
 
@@ -33,6 +33,26 @@ fn fake_pixel_exe(dir: &std::path::Path) -> std::path::PathBuf {
 // an explicit shell instead of inheriting the runner's `$SHELL`, so a
 // developer running `cargo test` from fish gets the same result as one running
 // it from zsh — and so the fish tests below exercise fish on every machine.
+/// Claude Code versions on both sides of the `--append-subagent-system-prompt-file`
+/// line (its CHANGELOG entry is 2.1.261; earlier releases exit 1 on the
+/// unknown option).
+const CLAUDE_WITH_SUBAGENT_FLAG: &str = "2.1.269";
+const CLAUDE_WITHOUT_SUBAGENT_FLAG: &str = "2.1.260";
+
+/// A fake `claude` that only answers `--version` the way Claude Code prints it.
+#[cfg(unix)]
+fn fake_claude_exe(dir: &std::path::Path, version: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(format!("claude-{version}"));
+    fs::write(
+        &path,
+        format!("#!/bin/sh\nprintf '%s (Claude Code)\\n' '{version}'\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
 const TEST_SHELL: &str = "/bin/zsh";
 fn shell_profile_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".zshrc")
@@ -51,6 +71,7 @@ fn installed_metrics_guidance_reaches_wrapped_agents_without_rewriting_streams()
     install(&InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     })
@@ -128,6 +149,7 @@ fn doctor_runs_and_returns_report() {
         home: Some(home.to_path_buf()),
         executable_path: None, // uses current_exe
         shell: Some(TEST_SHELL.into()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         ..Default::default()
     };
 
@@ -160,6 +182,7 @@ fn install_creates_config_with_managed_markers() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
@@ -200,6 +223,7 @@ fn install_is_idempotent() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
@@ -267,6 +291,7 @@ fn install_leaves_codex_config_untouched() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
@@ -297,6 +322,7 @@ fn install_leaves_settings_json_valid_after_install() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
@@ -379,6 +405,7 @@ fn dry_run_writes_nothing_on_a_clean_home() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: true,
         shell: Some(TEST_SHELL.into()),
     };
@@ -422,6 +449,7 @@ fn dry_run_leaves_pre_existing_files_byte_identical() {
     let real_options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
@@ -508,6 +536,7 @@ fn reinstall_is_byte_for_byte_idempotent_on_managed_claude_md() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
@@ -529,6 +558,7 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
@@ -592,6 +622,7 @@ fn doctor_install_artifact_checks_red_and_green() {
         home: Some(home.to_path_buf()),
         executable_path: None,
         shell: Some(TEST_SHELL.into()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         ..Default::default()
     };
 
@@ -622,6 +653,7 @@ fn doctor_install_artifact_checks_red_and_green() {
     install(&InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     })
@@ -820,6 +852,7 @@ fn uninstall_is_idempotent() {
     let install_opts = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
@@ -973,6 +1006,7 @@ fn routing_full_install_rtk_round_trip_preserves_foreign_hooks() {
     let opts = InstallOptions {
         home: Some(home.into()),
         executable_path: Some(exe.clone()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
@@ -1063,6 +1097,7 @@ fn routing_isolated_provider_child() {
     let opts = InstallOptions {
         home: Some(home.clone()),
         executable_path: Some(exe),
+        claude_executable: Some(fake_claude_exe(&home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
@@ -1121,6 +1156,7 @@ fn install_for_shell(home: &std::path::Path, shell: &str) {
     install(&InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(shell.into()),
     })
@@ -1231,6 +1267,7 @@ fn doctor_reads_the_profile_of_the_shell_it_is_asked_about() {
             home: Some(home.to_path_buf()),
             executable_path: None,
             shell: Some(shell.into()),
+            claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
             ..Default::default()
         })
         .expect("doctor runs");
@@ -1270,6 +1307,7 @@ fn doctor_refuses_to_green_a_posix_block_sitting_in_the_fish_dropin() {
         home: Some(home.to_path_buf()),
         executable_path: None,
         shell: Some(FISH_SHELL.into()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         ..Default::default()
     })
     .expect("doctor runs");
@@ -1396,6 +1434,7 @@ fn dry_run_does_not_write_the_subagent_prompt() {
     let report = install(&InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: true,
         shell: Some(TEST_SHELL.into()),
     })
@@ -1577,6 +1616,7 @@ fn doctor_flags_a_missing_or_stale_subagent_prompt() {
         doctor(&DoctorOptions {
             home: Some(home.to_path_buf()),
             shell: Some(TEST_SHELL.into()),
+            claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
             ..Default::default()
         })
         .expect("doctor")
@@ -1631,5 +1671,189 @@ fn uninstall_removes_the_subagent_prompt() {
     assert!(
         !home.join(".local/share/pixel/agent-prompt.md").exists(),
         "agent-prompt.md is removed alongside"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code version gate for the sub-agent prompt flag
+//
+// Claude Code accepts `--append-subagent-system-prompt-file` from 2.1.261.
+// Older releases exit 1 with `error: unknown option`, so a wrapper that
+// always passed it would break every `claude -p` call for them. The wrapper
+// is therefore chosen at install time from `claude --version`, and doctor
+// re-derives the expected block from the Claude Code found at check time.
+// ---------------------------------------------------------------------------
+
+fn install_with_claude(
+    home: &std::path::Path,
+    claude: Option<std::path::PathBuf>,
+) -> InstallReport {
+    install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: claude,
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .expect("install")
+}
+
+fn wrappers_step(report: &InstallReport) -> &pixel_install::install::InstallStep {
+    report
+        .steps
+        .iter()
+        .find(|s| s.id == "shell-wrappers")
+        .expect("shell-wrappers step")
+}
+
+#[test]
+#[cfg(unix)]
+fn the_subagent_flag_is_written_only_for_claude_code_at_least_2_1_261() {
+    for (version, expect_flag) in [
+        ("2.1.261", true),
+        ("2.1.269", true),
+        ("2.2.0", true),
+        ("3.0.0", true),
+        ("2.1.260", false),
+        // Numeric comparison: "2.1.99" sorts after "2.1.261" as text.
+        ("2.1.99", false),
+        ("1.9.9", false),
+    ] {
+        let dir = TempDir::new().expect("tempdir");
+        let home = dir.path();
+        let report = install_with_claude(home, Some(fake_claude_exe(home, version)));
+        let profile = fs::read_to_string(shell_profile_path(home)).expect("profile");
+        assert_eq!(
+            profile.contains("--append-subagent-system-prompt-file"),
+            expect_flag,
+            "Claude Code {version}: flag expected={expect_flag}\n{profile}"
+        );
+        assert!(
+            profile.contains("--append-system-prompt-file"),
+            "Claude Code {version}: the session prompt is wired either way"
+        );
+        let step = wrappers_step(&report);
+        if expect_flag {
+            assert_eq!(step.status, pixel_install::install::CheckStatus::Green);
+        } else {
+            assert_eq!(
+                step.status,
+                pixel_install::install::CheckStatus::Yellow,
+                "an old Claude Code must be reported, not silently accommodated"
+            );
+            assert!(
+                step.summary.contains("2.1.261") && step.summary.contains(version),
+                "the summary must name the version found and the one required: {}",
+                step.summary
+            );
+        }
+        assert!(
+            subagent_prompt_path(home).is_file(),
+            "the prompt file is deployed regardless, so a later `pixel install` only rewrites the block"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn no_usable_claude_means_no_subagent_flag() {
+    // Missing binary: the safe side is the plain wrapper. Passing the flag
+    // to an unknown Claude Code could break every print-mode call.
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let report = install_with_claude(home, Some(home.join("no-such-claude")));
+    let profile = fs::read_to_string(shell_profile_path(home)).expect("profile");
+    assert!(!profile.contains("--append-subagent-system-prompt-file"));
+    assert_eq!(
+        wrappers_step(&report).status,
+        pixel_install::install::CheckStatus::Yellow
+    );
+
+    // A claude that prints something unparseable is treated the same way.
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let odd = fake_claude_exe(home, "unknown");
+    let report = install_with_claude(home, Some(odd));
+    let profile = fs::read_to_string(shell_profile_path(home)).expect("profile");
+    assert!(!profile.contains("--append-subagent-system-prompt-file"));
+    assert_eq!(
+        wrappers_step(&report).status,
+        pixel_install::install::CheckStatus::Yellow
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn the_plain_wrapper_for_old_claude_is_the_0_2_2_block() {
+    // A 0.2.2 install in front of an old Claude Code must read green after
+    // upgrading pixel, without a reinstall: the block pixel writes for that
+    // Claude Code is byte-identical to what 0.2.2 wrote.
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_with_claude(
+        home,
+        Some(fake_claude_exe(home, CLAUDE_WITHOUT_SUBAGENT_FLAG)),
+    );
+    let profile = fs::read_to_string(shell_profile_path(home)).expect("profile");
+    assert!(profile.contains(
+        "claude() { command claude --append-system-prompt-file \"$HOME/.local/share/pixel/agent-prompt.md\" \"$@\"; }"
+    ), "{profile}");
+}
+
+#[test]
+#[cfg(unix)]
+fn doctor_reds_a_block_that_disagrees_with_the_claude_code_found_now() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let new_claude = fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG);
+    let old_claude = fake_claude_exe(home, CLAUDE_WITHOUT_SUBAGENT_FLAG);
+    let check = |claude: &std::path::Path| {
+        doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            shell: Some(TEST_SHELL.into()),
+            claude_executable: Some(claude.to_path_buf()),
+            ..Default::default()
+        })
+        .expect("doctor")
+        .checks
+        .into_iter()
+        .find(|c| c.id == "install.shell-wrappers")
+        .expect("install.shell-wrappers check")
+    };
+
+    // Installed against a new Claude Code: green now, red if Claude Code is
+    // downgraded (the flag would make every `claude -p` exit 1).
+    install_with_claude(home, Some(new_claude.clone()));
+    assert_eq!(
+        check(&new_claude).status,
+        pixel_install::doctor::CheckStatus::Green
+    );
+    let downgraded = check(&old_claude);
+    assert_eq!(downgraded.status, pixel_install::doctor::CheckStatus::Red);
+    assert!(
+        downgraded
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("pass the sub-agent prompt flag"),
+        "{downgraded:?}"
+    );
+
+    // Installed against an old Claude Code: green now, red once Claude Code
+    // is updated (sub-agents would silently miss the rules).
+    install_with_claude(home, Some(old_claude.clone()));
+    assert_eq!(
+        check(&old_claude).status,
+        pixel_install::doctor::CheckStatus::Green
+    );
+    let upgraded = check(&new_claude);
+    assert_eq!(upgraded.status, pixel_install::doctor::CheckStatus::Red);
+    assert!(
+        upgraded
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("lack the sub-agent prompt flag"),
+        "{upgraded:?}"
     );
 }
