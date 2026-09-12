@@ -197,9 +197,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
 
     let shell_override = options.shell.clone();
     let claude = install::probe_claude(options.claude_executable.as_deref());
-    checks.push(check(
+    checks.push(check_status(
         "install.shell-wrappers",
-        || -> std::result::Result<DoctorCheckDetail, String> {
+        || -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
             let shell = install::resolve_shell(shell_override.as_deref());
             let (kind, profile) = install::shell_profile_for(&shell, &home);
             let content = fs::read_to_string(&profile).unwrap_or_default();
@@ -219,6 +219,42 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             // Claude Code older than 2.1.261 breaks every `claude -p`, and one
             // that lacks it in front of a newer Claude Code silently drops
             // the sub-agent rules until `pixel install` is re-run.
+            let with_flag = block == install::expected_wrapper_block(kind, true);
+            let without_flag = block == install::expected_wrapper_block(kind, false);
+            // No usable `claude`: the block can still be validated as one of
+            // ours, but the flag decision cannot be re-checked. Yellow, not
+            // red — a red here would send the user to `pixel install`, which
+            // has no better evidence and must not strip a working flag.
+            if claude.support() == install::SubagentSupport::Unknown {
+                if !with_flag && !without_flag {
+                    return Err(format!(
+                        "shell wrappers in {} are stale or written for another shell — run `pixel install`",
+                        profile.display()
+                    ));
+                }
+                return Ok((
+                    CheckStatus::Yellow,
+                    DoctorCheckDetail {
+                        summary: format!(
+                            "{} shell wrappers installed in {}{}; cannot verify the sub-agent prompt flag ({})",
+                            kind.as_str(),
+                            profile.display(),
+                            if with_flag {
+                                ""
+                            } else {
+                                " without the sub-agent prompt"
+                            },
+                            claude.explanation()
+                        ),
+                        detail: Some(serde_json::json!({
+                            "profile": profile.display().to_string(),
+                            "shell": kind.as_str(),
+                            "subagent_prompt": with_flag,
+                            "claude": claude.explanation(),
+                        })),
+                    },
+                ));
+            }
             let with_subagent_prompt = claude.supports_subagent_prompt();
             if block == install::expected_wrapper_block(kind, !with_subagent_prompt) {
                 return Err(if with_subagent_prompt {
@@ -241,24 +277,27 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     profile.display()
                 ));
             }
-            Ok(DoctorCheckDetail {
-                summary: format!(
-                    "{} shell wrappers installed in {}{}",
-                    kind.as_str(),
-                    profile.display(),
-                    if with_subagent_prompt {
-                        ""
-                    } else {
-                        " without the sub-agent prompt"
-                    }
-                ),
-                detail: Some(serde_json::json!({
-                    "profile": profile.display().to_string(),
-                    "shell": kind.as_str(),
-                    "subagent_prompt": with_subagent_prompt,
-                    "claude": claude.explanation(),
-                })),
-            })
+            Ok((
+                CheckStatus::Green,
+                DoctorCheckDetail {
+                    summary: format!(
+                        "{} shell wrappers installed in {}{}",
+                        kind.as_str(),
+                        profile.display(),
+                        if with_subagent_prompt {
+                            ""
+                        } else {
+                            " without the sub-agent prompt"
+                        }
+                    ),
+                    detail: Some(serde_json::json!({
+                        "profile": profile.display().to_string(),
+                        "shell": kind.as_str(),
+                        "subagent_prompt": with_subagent_prompt,
+                        "claude": claude.explanation(),
+                    })),
+                },
+            ))
         },
     ));
 

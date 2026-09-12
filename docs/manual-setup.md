@@ -66,14 +66,17 @@ claude -p --append-system-prompt-file ~/.local/share/pixel/agent-prompt.md \
 Or add a shell function to `~/.zshrc` (or `~/.bashrc`) so it's automatic. It
 adds the sub-agent flag only when `-p`/`--print` is among the arguments
 (`pixel install` writes this block when `claude --version` is at least
-2.1.261, and the plain one-liner from the previous section otherwise; `pixel
-doctor` tells you to re-run `pixel install` once Claude Code crosses the line):
+2.1.261, and the plain one-liner from the previous section otherwise; with no
+usable `claude` it keeps whatever an earlier install decided, or writes the
+plain one-liner on a first install; `pixel doctor` tells you to re-run `pixel
+install` once Claude Code crosses the line):
 
 ```bash
 claude() {
+  local _pixel_arg
   for _pixel_arg in "$@"; do
     case "$_pixel_arg" in
-      -p|--print) command claude --append-system-prompt-file "$HOME/.local/share/pixel/agent-prompt.md" --append-subagent-system-prompt-file "$HOME/.local/share/pixel/subagent-prompt.md" "$@"; return $?;;
+      -p*|-[!-]*p*|--print) command claude --append-system-prompt-file "$HOME/.local/share/pixel/agent-prompt.md" --append-subagent-system-prompt-file "$HOME/.local/share/pixel/subagent-prompt.md" "$@"; return $?;;
     esac
   done
   command claude --append-system-prompt-file "$HOME/.local/share/pixel/agent-prompt.md" "$@"
@@ -84,7 +87,7 @@ For fish, put the equivalent in `~/.config/fish/conf.d/pixel.fish`:
 
 ```fish
 function claude
-  if contains -- -p $argv; or contains -- --print $argv
+  if contains -- --print $argv; or string match -qr -- '^-[^-]*p' $argv
     command claude --append-system-prompt-file "$HOME/.local/share/pixel/agent-prompt.md" --append-subagent-system-prompt-file "$HOME/.local/share/pixel/subagent-prompt.md" $argv
   else
     command claude --append-system-prompt-file "$HOME/.local/share/pixel/agent-prompt.md" $argv
@@ -92,7 +95,10 @@ function claude
 end
 ```
 
-`pixel install --shell fish` writes exactly this block to `~/.config/fish/conf.d/pixel.fish`.
+`pixel install --shell fish` writes this function, plus the `codex` wrapper,
+inside a `# >>> pixel-managed >>>` block in `~/.config/fish/conf.d/pixel.fish`.
+Both variants also treat a short-flag cluster containing `p` (`-pc`, `-cp`)
+as print mode, since Claude Code splits those.
 
 #### In CI (claude-code-action)
 
