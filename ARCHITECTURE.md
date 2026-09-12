@@ -188,6 +188,12 @@ honoured in print mode only. `install` writes that variant only when `claude
 --version` reports 2.1.261 or newer (older releases exit on the unknown option),
 keeps the previous decision when `claude` cannot be probed, and `doctor`
 re-derives the expected block from the Claude Code found at check time.
+The `codex` function reads the prompt at call time and passes it inline as
+`-c developer_instructions=...`, the key Codex appends to its developer message
+while keeping its own system prompt; `model_instructions_file` would replace
+that system prompt (it becomes the base instructions). Codex has no file-backed
+variant of the key, and sub-agents spawned by Codex inherit it from the parent
+configuration.
 
 Existing hook entry points remain implemented, separately from active installation:
 

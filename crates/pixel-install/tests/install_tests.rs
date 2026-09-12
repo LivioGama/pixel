@@ -100,12 +100,11 @@ fn installed_metrics_guidance_reaches_wrapped_agents_without_rewriting_streams()
     // tool streams. No model, external service, or paid evaluation is involved.
     let mock = r#"#!/bin/sh
 case "$1" in
-  --append-system-prompt-file) prompt="$2" ;;
-  -c) prompt="${2#model_instructions_file=\"}"; prompt="${prompt%\"}" ;;
+  --append-system-prompt-file) prompt="$(cat "$2")" || exit 82 ;;
+  -c) prompt="${2#developer_instructions=}"; test "$prompt" != "$2" || exit 82 ;;
   *) exit 81 ;;
 esac
-test -r "$prompt" || exit 82
-grep -q '## LIVE OPERATION METRICS' "$prompt" || exit 83
+printf '%s\n' "$prompt" | grep -q '## LIVE OPERATION METRICS' || exit 83
 shift 2
 test "$1" = 'real task with spaces' || exit 84
 printf '%s\n' '{"result":"fixture"}'
@@ -1195,6 +1194,7 @@ fn fish_wrappers_are_written_in_fish_syntax_not_posix_syntax() {
         "command claude --append-system-prompt-file",
         "if contains -- --print $argv; or string match -qr -- '^-[^-]*p' $argv",
         "function codex; command codex -c",
+        "| string collect) $argv; end",
         "$argv; end",
     ] {
         assert!(
@@ -1584,6 +1584,152 @@ fn the_subagent_prompt_flag_is_passed_in_print_mode_only() {
             "fish is on PATH but the fish block was not exercised"
         );
     }
+}
+
+/// Codex has no file-backed `developer_instructions`, so the wrapper reads the
+/// prompt at call time and passes it inline. Every byte must survive the
+/// shell (quotes, backslashes, `$`, backticks, `#`, blank lines, ~12 KB) and
+/// arrive as ONE `-c` argument: a split or an expansion would hand Codex a
+/// truncated protocol or a spurious extra argument. Runs the installed block
+/// in every shell found on the caller's PATH; a shell that cannot be spawned
+/// is skipped.
+#[test]
+#[cfg(unix)]
+fn the_codex_wrapper_passes_the_agent_prompt_verbatim_as_developer_instructions() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    type ProfileOf = fn(&std::path::Path) -> std::path::PathBuf;
+    let cases: [(&str, ProfileOf); 3] = [
+        ("bash", |home| home.join(".bashrc")),
+        ("zsh", |home| home.join(".zshrc")),
+        ("fish", fish_dropin),
+    ];
+    // A fake `codex` that records its argv: one file per argument, so a
+    // prompt split into several arguments shows up as extra files.
+    let mock = "#!/bin/sh\nn=0\nfor a in \"$@\"; do n=$((n+1)); printf '%s' \"$a\" > \"$CODEX_ARGV_DIR/$n\"; done\n";
+    // Every character class that a shell could mangle between `cat` and
+    // the callee, plus a trailing run of newlines (command substitution
+    // strips those, and only those).
+    let tricky = "# heading with \"double\" and 'single' quotes\n\
+                  \\backslash \\\\double $HOME ${VAR} $(rm -rf /) `backtick` #hash %s\n\
+                  \n\
+                  \x20 indented; semicolon | pipe & ampersand > redirect * glob ? {a,b}\n\
+                  tab\there — unicode 🟩 Pixel ·\n\
+                  last line without a newline\n\n\n";
+    let mut checked = 0;
+    for (shell, profile_of) in cases {
+        let dir = TempDir::new().expect("tempdir");
+        let home = dir.path();
+        install_for_shell(home, shell);
+        let mock_path = home.join("codex");
+        fs::write(&mock_path, mock).unwrap();
+        fs::set_permissions(&mock_path, fs::Permissions::from_mode(0o755)).unwrap();
+        let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
+        let deployed = fs::read_to_string(&prompt_path).unwrap();
+
+        let run = |prompt: &str, args: &[&str]| -> Option<Vec<String>> {
+            fs::write(&prompt_path, prompt).unwrap();
+            let argv_dir = TempDir::new().unwrap();
+            let quoted: Vec<String> = args.iter().map(|a| format!("'{a}'")).collect();
+            let script = format!(
+                "source '{}'; codex {}",
+                profile_of(home).display(),
+                quoted.join(" ")
+            );
+            let inherited = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+            let output = Command::new(shell)
+                .arg("-c")
+                .arg(script)
+                .env("HOME", home)
+                .env("PATH", format!("{}:{inherited}", home.display()))
+                .env("CODEX_ARGV_DIR", argv_dir.path())
+                .output()
+                .ok()?;
+            assert!(
+                output.status.success(),
+                "{shell}: wrapper failed for {args:?}:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mut argv = Vec::new();
+            for n in 1.. {
+                let Ok(arg) = fs::read_to_string(argv_dir.path().join(n.to_string())) else {
+                    break;
+                };
+                argv.push(arg);
+            }
+            Some(argv)
+        };
+        // Absent from this machine — the other shells carry the assertion.
+        let Some(argv) = run(&deployed, &["exec", "real task with spaces"]) else {
+            continue;
+        };
+        checked += 1;
+        assert_eq!(
+            argv,
+            [
+                "-c",
+                &format!("developer_instructions={}", deployed.trim_end_matches('\n')),
+                "exec",
+                "real task with spaces",
+            ],
+            "{shell}: the deployed prompt must reach codex as one -c value, \
+             followed by the user's arguments in order"
+        );
+        let argv = run(tricky, &["exec"]).unwrap();
+        assert_eq!(
+            argv,
+            [
+                "-c",
+                &format!("developer_instructions={}", tricky.trim_end_matches('\n')),
+                "exec",
+            ],
+            "{shell}: quotes, backslashes, `$`, backticks, `#`, globs and blank \
+             lines must survive byte for byte"
+        );
+    }
+    assert!(
+        checked > 0,
+        "no shell was available to run the wrapper in — the assertions above never ran"
+    );
+    if Command::new("fish").arg("--version").output().is_ok() {
+        assert_eq!(
+            checked, 3,
+            "fish is on PATH but the fish block was not exercised"
+        );
+    }
+}
+
+/// The prompt travels as a single `execve` argument. Linux caps one argument
+/// at `MAX_ARG_STRLEN` = 32 pages = 128 KiB (macOS has no per-argument cap,
+/// only the 1 MiB `ARG_MAX` total); past it `codex` fails with E2BIG for
+/// every call. Codex also trims the value and strips one leading/trailing
+/// `"` or `'` when it is not valid TOML, so the asset must not start or end
+/// with either.
+#[test]
+fn the_agent_prompt_fits_in_one_codex_argument() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, TEST_SHELL);
+    let prompt = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
+    let argument = format!("developer_instructions={}", prompt.trim_end_matches('\n'));
+    const MAX_ARG_STRLEN: usize = 32 * 4096;
+    assert!(
+        argument.len() <= MAX_ARG_STRLEN / 2,
+        "the codex -c argument is {} bytes; past {} bytes (half of Linux's MAX_ARG_STRLEN) \
+         switch the codex wrapper to a file-backed mechanism",
+        argument.len(),
+        MAX_ARG_STRLEN / 2
+    );
+    let trimmed = prompt.trim();
+    assert!(
+        !trimmed.starts_with(['"', '\'']) && !trimmed.ends_with(['"', '\'']),
+        "codex -c strips a leading/trailing quote from a raw string value"
+    );
+    assert!(
+        trimmed.starts_with('#'),
+        "the prompt must not parse as a TOML value; a leading `#` guarantees the raw-string path"
+    );
 }
 
 #[test]
