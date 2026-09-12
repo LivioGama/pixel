@@ -111,13 +111,20 @@ rename, never an in-place `cp` (on macOS an in-place copy over a running
 Mach-O invalidates its signature and the next call is SIGKILLed).
 
 ```bash
-cargo build --release -p pixel-cli \
-  && cp target/release/pixel ~/.local/bin/.pixel.tmp.$$ \
+cargo build --profile dev-release -p pixel-cli \
+  && cp target/dev-release/pixel ~/.local/bin/.pixel.tmp.$$ \
   && mv -f ~/.local/bin/.pixel.tmp.$$ ~/.local/bin/pixel
 pixel index --history .   # rebuild facts/history index
 pixel install             # reinstall hooks and managed CLAUDE.md/AGENTS.md blocks
 pixel doctor .            # must be green; report any non-green check in the PR
 ```
+
+`dev-release` (in the workspace `Cargo.toml`) is `release` without thin LTO
+and with 16 codegen units: same optimisation level, but an incremental
+rebuild after touching one crate takes seconds rather than a minute. Use
+plain `--release` only when you need the exact shipped profile. `pixel
+upgrade --build "<cargo command>"` runs the same loop for you and reads the
+binary from the profile named in that command.
 
 Skip this loop for changes limited to docs, prompts, or bench scripts.
 
