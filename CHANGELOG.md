@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `pixel upgrade` no longer defaults to a fixed `~/.local/bin/pixel`. It installs over the binary running the command (a mise/asdf-managed install behind a shim, a Homebrew cellar, `~/.cargo/bin`), falls back to the first `pixel` on PATH outside `shims`/`target` directories, and only then to `~/.local/bin/pixel`. The chosen path and the reason are printed, and a warning names any other `pixel` earlier on PATH that would still shadow the upgraded one.
+
 ## [0.2.0] - 2026-09-11
 
 ### Security

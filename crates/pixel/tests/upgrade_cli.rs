@@ -30,10 +30,24 @@ impl Fixture {
     }
 
     fn upgrade(&self) -> (Output, Duration, bool) {
+        self.upgrade_with(&["--install-path"], &[self.0.join("installed/pixel")], None)
+    }
+
+    fn upgrade_with(
+        &self,
+        extra: &[&str],
+        extra_paths: &[PathBuf],
+        path_var: Option<&Path>,
+    ) -> (Output, Duration, bool) {
         let start = Instant::now();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_pixel"))
-            .args(["upgrade", "--build", "/usr/bin/true", "--install-path"])
-            .arg(self.0.join("installed/pixel"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pixel"));
+        command.args(["upgrade", "--build", "/usr/bin/true"]);
+        command.args(extra);
+        command.args(extra_paths);
+        if let Some(p) = path_var {
+            command.env("PATH", p);
+        }
+        let mut child = command
             .arg("--repo")
             .arg(&self.0)
             .current_dir(&self.0)
@@ -139,4 +153,108 @@ fn upgrade_reports_unresponsive_daemon_without_claiming_completion() {
         std::fs::read(fixture.0.join("installed/pixel")).unwrap(),
         b"candidate fixture bytes\n"
     );
+}
+
+/// Without `--install-path`, the upgrade must replace the `pixel` a shell
+/// actually runs. The test binary lives in cargo's `target/`, so the
+/// resolver falls through to PATH: a `pixel` sitting in a `shims` dir is a
+/// launcher and must be skipped, the managed install behind it is the
+/// target, and `~/.local/bin/pixel` (the old fixed default) must stay
+/// untouched.
+#[test]
+fn upgrade_without_install_path_replaces_the_pixel_on_path() {
+    let fixture = Fixture::new("onpath");
+    let shim = fixture.0.join("mise/shims/pixel");
+    let managed = fixture.0.join("mise/installs/pixel/rev-1/bin/pixel");
+    for p in [&shim, &managed] {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"old bytes\n").unwrap();
+    }
+    // System dirs stay last so `sh` (the build runner) still resolves.
+    let path_var = std::env::join_paths([
+        shim.parent().unwrap().to_path_buf(),
+        managed.parent().unwrap().to_path_buf(),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+    ])
+    .unwrap();
+    let (output, _, timed_out) = fixture.upgrade_with(&[], &[], Some(Path::new(&path_var)));
+    assert!(!timed_out);
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("(first pixel on PATH)"),
+        "must say why the path was chosen: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&managed).unwrap(),
+        b"candidate fixture bytes\n"
+    );
+    assert_eq!(
+        std::fs::read(&shim).unwrap(),
+        b"old bytes\n",
+        "shim untouched"
+    );
+    assert!(
+        !fixture.0.join("home/.local/bin/pixel").exists(),
+        "legacy default must not receive a second copy"
+    );
+}
+
+/// A stale copy earlier on PATH is exactly how an upgrade "succeeded" while
+/// `pixel --version` kept answering the old build. The upgrade must say so.
+#[test]
+fn upgrade_warns_when_another_pixel_precedes_the_target_on_path() {
+    let fixture = Fixture::new("shadow");
+    let stale = fixture.0.join("stale/bin/pixel");
+    std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    std::fs::write(&stale, b"stale\n").unwrap();
+    let path_var = std::env::join_paths([
+        stale.parent().unwrap().to_path_buf(),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+    ])
+    .unwrap();
+    let (output, _, timed_out) = fixture.upgrade_with(
+        &["--install-path"],
+        &[fixture.0.join("installed/pixel")],
+        Some(Path::new(&path_var)),
+    );
+    assert!(!timed_out);
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("warning:") && stderr.contains("precedes"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&stale.canonicalize().unwrap().display().to_string()),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&stale).unwrap(), b"stale\n");
+}
+
+/// `--dry-run` is the way to check where an upgrade WOULD land on a given
+/// machine: it must print the resolved path on stdout and touch nothing.
+#[test]
+fn upgrade_dry_run_prints_target_and_installs_nothing() {
+    let fixture = Fixture::new("dryrun");
+    let managed = fixture.0.join("cellar/bin/pixel");
+    std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    std::fs::write(&managed, b"old bytes\n").unwrap();
+    let path_var = std::env::join_paths([
+        managed.parent().unwrap().to_path_buf(),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+    ])
+    .unwrap();
+    // The fixture's build runner is `/usr/bin/true`; the target file's
+    // unchanged bytes prove the dry run never reached the install step.
+    let (output, _, _) = fixture.upgrade_with(&["--dry-run"], &[], Some(Path::new(&path_var)));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        managed.canonicalize().unwrap().display().to_string()
+    );
+    assert_eq!(std::fs::read(&managed).unwrap(), b"old bytes\n");
 }
