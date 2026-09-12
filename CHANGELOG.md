@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `pixel ready --json` and `pixel status --json` no longer embed the full dirty file list: `ready` reports index/graph/daemon plus a `dirty_count`, and `status` collapses `snapshot.dirty` to `snapshot.dirty_count`. One untracked `vendor/bundle` used to push both answers past the output cap and replace them with a `{partial: "..."}` wrapper.
+- `--json` output over the global 256 KB cap is now truncated structurally: the largest arrays are shortened, every other field survives, and the document gains `truncated: true`, `cap_bytes` and `truncated_arrays` (path, kept, total). The textual `{partial}` wrapper is only the fallback when no array can be cut.
+
+### Added
+- `PIXEL_OUTPUT_CAP_BYTES=<bytes>` overrides the global stdout cap; `0` lifts it (same convention as `PIXEL_INDEX_BUDGET_MS=0`).
+
 ## [0.2.0] - 2026-09-11
 
 ### Security

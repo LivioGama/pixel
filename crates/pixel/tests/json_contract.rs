@@ -164,3 +164,89 @@ fn failing_json_command_leaves_stdout_empty() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A repo with a big untracked tree (a `vendor/bundle`) is the everyday
+/// case that used to break the contract: `status`/`ready` embedded the full
+/// dirty list, blew the 256 KB cap, and the whole answer degraded to a
+/// `{partial: "..."}` wrapper — `jq .index` stopped working on a command
+/// whose job is only to say "index and graph are ready". The freshness
+/// answers must stay small (a count, never the list), and the commands that
+/// legitimately return the list must be cut structurally: valid JSON, every
+/// scalar field intact, the list shortened and the cut named.
+#[test]
+fn big_untracked_tree_keeps_json_answers_structured() {
+    let dir = fixture("bigdirty");
+    for i in 0..3000 {
+        let d = dir.join(format!("vendor/bundle/gems/g{}", i / 100));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(format!("f{i}.txt")), "x").unwrap();
+    }
+
+    for args in [
+        &["status", ".", "--json"][..],
+        &["ready", ".", "--json", "--no-daemon"][..],
+    ] {
+        let out = pixel(&dir, args);
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let docs = parse_stdout_lines(&out, &format!("{args:?}"));
+        assert_eq!(docs.len(), 1);
+        let doc = &docs[0];
+        assert!(
+            out.stdout.len() < 4096,
+            "{args:?}: freshness answer must not scale with the dirty tree ({} bytes)",
+            out.stdout.len()
+        );
+        assert!(doc.get("truncated").is_none(), "{args:?}: {doc}");
+        assert!(doc["index"].is_object(), "{args:?}: {doc}");
+        let dirty_count = if args[0] == "status" {
+            assert!(doc["snapshot"].get("dirty").is_none(), "{args:?}: {doc}");
+            doc["snapshot"]["dirty_count"].as_u64()
+        } else {
+            assert!(doc.get("status").is_none(), "ready must not embed status");
+            doc["dirty_count"].as_u64()
+        };
+        assert_eq!(dirty_count, Some(3000), "{args:?}: {doc}");
+    }
+
+    // `inspect` owns the list: under a small cap it is shortened, not
+    // replaced by a textual wrapper.
+    let out = Command::new(env!("CARGO_BIN_EXE_pixel"))
+        .args(["inspect", ".", "--json"])
+        .current_dir(&dir)
+        .env("PIXEL_DAEMON_AUTO_START", "0")
+        .env("PIXEL_OUTPUT_CAP_BYTES", "4096")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(out.stdout.len() <= 4097, "{}", out.stdout.len());
+    let doc = &parse_stdout_lines(&out, "inspect capped")[0];
+    assert_eq!(doc["truncated"], true);
+    assert_eq!(doc["cap_bytes"], 4096);
+    assert!(
+        doc.get("partial").is_none(),
+        "structural cut, not wrapper: {doc}"
+    );
+    assert_eq!(doc["branch"].as_str().map(|s| s.is_empty()), Some(false));
+    let cut = &doc["truncated_arrays"][0];
+    assert_eq!(cut["path"], "dirty");
+    assert_eq!(cut["total"], 3000);
+    assert_eq!(
+        cut["kept"].as_u64(),
+        doc["dirty"].as_array().map(|a| a.len() as u64)
+    );
+    assert!(cut["kept"].as_u64().unwrap() > 0);
+
+    // `0` lifts the cap: the full list comes back and nothing is flagged.
+    let out = Command::new(env!("CARGO_BIN_EXE_pixel"))
+        .args(["inspect", ".", "--json"])
+        .current_dir(&dir)
+        .env("PIXEL_DAEMON_AUTO_START", "0")
+        .env("PIXEL_OUTPUT_CAP_BYTES", "0")
+        .output()
+        .unwrap();
+    let doc = &parse_stdout_lines(&out, "inspect uncapped")[0];
+    assert!(doc.get("truncated").is_none(), "{doc}");
+    assert_eq!(doc["dirty"].as_array().map(Vec::len), Some(3000));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
