@@ -25,10 +25,6 @@ pub fn diff(
         pixel_git::validate_ref(t).map_err(|e| e.to_string())?;
     }
 
-    // Get name-status changes.
-    let to_ref = to.unwrap_or("HEAD");
-    let changes = runner.diff_name_status(from, to_ref);
-
     // Get unified diff text.
     let mut args: Vec<String> = vec!["diff".into()];
     args.push("--end-of-options".into());
@@ -39,6 +35,28 @@ pub fn diff(
     if let Some(ps) = paths {
         args.push("--".into());
         args.extend(ps.iter().cloned());
+    }
+    // Metadata must use the same optional destination and path filters as the patch.
+    // In particular, omitted `to` means working tree, not HEAD.
+    let mut name_args = args.clone();
+    name_args.splice(
+        1..1,
+        ["--name-status".into(), "--no-renames".into(), "-z".into()],
+    );
+    let name_refs: Vec<&str> = name_args.iter().map(String::as_str).collect();
+    let names = runner
+        .run(&name_refs)
+        .map_err(|e| format!("git diff names: {e}"))?;
+    let mut fields = names
+        .split(|&byte| byte == 0)
+        .filter(|field| !field.is_empty());
+    let mut changes = Vec::new();
+    while let Some(status) = fields.next() {
+        let path = fields.next().ok_or("git diff name-status missing path")?;
+        changes.push((
+            status[0] as char,
+            String::from_utf8_lossy(path).into_owned(),
+        ));
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let diff_bytes = runner
@@ -144,5 +162,51 @@ mod tests {
         assert!(files.iter().any(|f| f["path"] == "a.txt"));
         assert!(files.iter().any(|f| f["path"] == "b.txt"));
         assert!(result["diff"].as_str().unwrap().contains("v2"));
+    }
+    #[test]
+    fn diff_metadata_matches_worktree_and_path_scope() {
+        let dir = tempdir().unwrap();
+        init_repo(dir.path());
+        for revision in ["one", "two"] {
+            for name in ["a.txt", "b.txt"] {
+                std::fs::write(dir.path().join(name), revision).unwrap();
+            }
+            for args in [
+                vec!["add", "."],
+                vec![
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-qm",
+                    revision,
+                ],
+            ] {
+                assert!(
+                    std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(dir.path())
+                        .args(args)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+        }
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(dir.path().join(name), "working change").unwrap();
+        }
+        let paths = vec!["a.txt".to_string()];
+        for (from, to) in [("HEAD", None), ("HEAD~1", Some("HEAD"))] {
+            let result = diff(dir.path(), from, to, Some(&paths), None).unwrap();
+            assert_eq!(
+                result["file_count"], 1,
+                "metadata must use the same refs and path filter as diff text"
+            );
+            assert_eq!(result["files"][0]["path"], "a.txt");
+            assert!(result["diff"].as_str().unwrap().contains("a.txt"));
+            assert!(!result["diff"].as_str().unwrap().contains("b.txt"));
+        }
     }
 }

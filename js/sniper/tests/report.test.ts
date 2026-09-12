@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -74,6 +75,38 @@ const makeFakeSpawn = (log: { started: string[]; concurrent: number; maxConcurre
 };
 
 describe("SinkReporter", () => {
+  test("hung sink children are killed and the queue still drains", async () => {
+    const children: ChildProcess[] = [];
+    const warnings: string[] = [];
+    const reporter = new SinkReporter({
+      bin: "unused",
+      repo: ".",
+      timeoutMs: 25,
+      onError: (message) => warnings.push(message),
+      spawnImpl: ((_bin: string, _args: string[], options: SpawnOptions) => {
+        const child = spawn("/bin/sleep", ["60"], options);
+        children.push(child);
+        return child;
+      }) as unknown as typeof spawn,
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      reporter.report({ surface: "reported", message: "first" });
+      reporter.report({ surface: "reported", message: "second" });
+      const result = await Promise.race([
+        reporter.flush().then(() => "flushed"),
+        new Promise<string>((resolve) => { timer = setTimeout(() => resolve("blocked"), 1000); }),
+      ]);
+      expect(result).toBe("flushed");
+      expect(children).toHaveLength(2);
+      expect(children.every((child) => child.signalCode === "SIGKILL")).toBe(true);
+      expect(warnings).toHaveLength(2);
+    } finally {
+      clearTimeout(timer);
+      for (const child of children) child.kill("SIGKILL");
+    }
+  });
+
   test("serializes shell-outs: one child at a time, in order", async () => {
     const log = { started: [] as string[], concurrent: 0, maxConcurrent: 0 };
     const reporter = new SinkReporter({

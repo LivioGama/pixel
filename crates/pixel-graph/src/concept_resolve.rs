@@ -27,6 +27,13 @@ use xxhash_rust::xxh3::xxh3_64;
 use crate::concept::{ConceptKind, concept_words, normalize};
 use crate::store::{ConceptRow, GraphStore, StoreError, SymbolKind, SymbolRow};
 
+/// Maximum number of direct-index candidates made available to the reranker.
+/// The public result limit is applied only after this bounded quality pass.
+const RERANK_CANDIDATE_CAP: u32 = 20_000;
+/// Maximum number of filename-only candidates merged into a weak T2 result.
+/// This keeps the fallback bounded even in unusually large repositories.
+const FILENAME_CANDIDATE_CAP: usize = 256;
+
 // ---------------------------------------------------------------------------
 // response structs
 // ---------------------------------------------------------------------------
@@ -290,6 +297,12 @@ pub fn resolve(
     opts: &ResolveOptions,
 ) -> Result<ResolveOutcome, StoreError> {
     let limit = opts.limit.max(1);
+    // Apply the user-visible limit only after every tier has scored and
+    // reranked its candidate set. A bounded wider pool prevents database row
+    // order from hiding a stronger candidate before the reranker sees it.
+    let candidate_limit = u32::try_from(limit)
+        .unwrap_or(u32::MAX)
+        .max(RERANK_CANDIDATE_CAP);
     let norm = normalize(phrase);
     let mut tiers_attempted: Vec<Tier> = Vec::new();
     // Caps fired by bounded scans along the way — carried into the outcome
@@ -309,13 +322,14 @@ pub fn resolve(
         tiers_attempted.push(Tier::Ident);
         // Try the exact original phrase first (symbol names are
         // case-sensitive in the DB).
-        let mut syms = store.symbols_by_name(phrase, limit as u32)?;
+        let mut syms = store.symbols_by_name(phrase, candidate_limit)?;
         // If no exact-case hit, try the normalized (lowercased) form —
         // handles lowercase queries like "guard_matcher".
         if syms.is_empty() {
-            syms = store.symbols_by_name(&norm, limit as u32)?;
+            syms = store.symbols_by_name(&norm, candidate_limit)?;
         }
         if !syms.is_empty() {
+            let ident_capped = syms.len() as u32 >= candidate_limit;
             return finish_symbols(
                 store,
                 phrase,
@@ -323,7 +337,7 @@ pub fn resolve(
                 opts,
                 tiers_attempted,
                 Tier::Ident,
-                false,
+                ident_capped,
             );
         }
     }
@@ -331,8 +345,9 @@ pub fn resolve(
     // T0: exact-norm probe.
     if !norm.is_empty() {
         tiers_attempted.push(Tier::T0);
-        let exact = store.concepts_by_norm(&norm, 16)?;
+        let exact = store.concepts_by_norm(&norm, candidate_limit)?;
         if !exact.is_empty() {
+            let exact_capped = exact.len() as u32 >= candidate_limit;
             let (confidence, tier) = if exact.len() == 1 {
                 (Confidence::Resolved, Tier::T0)
             } else {
@@ -346,7 +361,7 @@ pub fn resolve(
                 tier,
                 opts,
                 tiers_attempted,
-                false,
+                exact_capped.then_some(RERANK_CANDIDATE_CAP),
             );
         }
     }
@@ -356,6 +371,7 @@ pub fn resolve(
     if !tokens.is_empty() {
         tiers_attempted.push(Tier::T1);
         let mut t1_rows: Vec<ConceptRow> = Vec::new();
+        let mut t1_capped = false;
         // "Match remaining tokens" per PLAN.md: the head noun is a
         // classifier word ("button", "endpoint", "error") that is not
         // expected to literally appear in the target concept's own text, so
@@ -381,14 +397,15 @@ pub fn resolve(
             // contains (its norm is just the bare digits), so search on the
             // code alone rather than on `remaining`.
             let word_refs = [h.as_str()];
-            t1_rows.extend(store.concepts_by_kind_words(
-                ConceptKind::Status,
-                &word_refs,
-                limit as u32,
-            )?);
+            let rows =
+                store.concepts_by_kind_words(ConceptKind::Status, &word_refs, candidate_limit)?;
+            t1_capped |= rows.len() as u32 >= candidate_limit;
+            t1_rows.extend(rows);
         } else if let Some(h) = &head {
             for kind in kind_for_head_noun(h) {
-                t1_rows.extend(store.concepts_by_kind_words(kind, &remaining, limit as u32)?);
+                let rows = store.concepts_by_kind_words(kind, &remaining, candidate_limit)?;
+                t1_capped |= rows.len() as u32 >= candidate_limit;
+                t1_rows.extend(rows);
             }
         }
         if !t1_rows.is_empty() {
@@ -400,7 +417,7 @@ pub fn resolve(
                 Tier::T1,
                 opts,
                 tiers_attempted,
-                false,
+                t1_capped.then_some(RERANK_CANDIDATE_CAP),
             );
         }
     }
@@ -409,11 +426,14 @@ pub fn resolve(
     if !tokens.is_empty() {
         tiers_attempted.push(Tier::T2);
         let word_refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-        let and = store.concepts_by_words(&word_refs, None, limit as u32)?;
-        let rows = if and.is_empty() {
-            store.concepts_by_any_word(&word_refs, None, limit as u32)?
+        let and = store.concepts_by_words(&word_refs, None, candidate_limit)?;
+        let (rows, t2_capped) = if and.is_empty() {
+            let rows = store.concepts_by_any_word(&word_refs, None, candidate_limit)?;
+            let capped = rows.len() as u32 >= candidate_limit;
+            (rows, capped)
         } else {
-            and
+            let capped = and.len() as u32 >= candidate_limit;
+            (and, capped)
         };
         if !rows.is_empty() {
             return finish(
@@ -424,7 +444,7 @@ pub fn resolve(
                 Tier::T2,
                 opts,
                 tiers_attempted,
-                false,
+                t2_capped.then_some(RERANK_CANDIDATE_CAP),
             );
         }
     }
@@ -433,7 +453,7 @@ pub fn resolve(
     // overlap, low confidence).
     if !norm.is_empty() {
         tiers_attempted.push(Tier::T3);
-        let (rows, capped) = trigram_fallback(store, &norm, limit as u32)?;
+        let (rows, capped) = trigram_fallback(store, &norm, candidate_limit)?;
         t3_capped = capped;
         if !rows.is_empty() {
             return finish(
@@ -444,7 +464,7 @@ pub fn resolve(
                 Tier::T3,
                 opts,
                 tiers_attempted,
-                capped,
+                capped.then_some(TRIGRAM_SCAN_CAP),
             );
         }
     }
@@ -457,7 +477,7 @@ pub fn resolve(
         // Match on the query's camelCase-split ident words (e.g. "handleLogin"
         // → ["handle", "login"]) so a single camelCase query can hit a symbol.
         let ident_words = symbol_words(phrase);
-        let (symbols, capped) = symbol_fallback(store, &ident_words, limit as u32)?;
+        let (symbols, capped) = symbol_fallback(store, &ident_words, candidate_limit)?;
         symbol_capped = capped;
         if !symbols.is_empty() {
             return finish_symbols(
@@ -509,12 +529,12 @@ fn finish(
     tier: Tier,
     opts: &ResolveOptions,
     tiers_attempted: Vec<Tier>,
-    scan_capped: bool,
+    scan_cap: Option<u32>,
 ) -> Result<ResolveOutcome, StoreError> {
     let limit = opts.limit.max(1);
     let mut candidates: Vec<RankedCandidate> = Vec::with_capacity(rows.len());
     let mut by_id: HashMap<u64, ConceptMatch> = HashMap::with_capacity(rows.len());
-    for (i, row) in rows.into_iter().enumerate() {
+    for row in rows {
         let id = row.id as u64;
         let path = file_path(store, row.file_id)?;
         let owner = match row.owner_symbol_id {
@@ -539,9 +559,54 @@ fn finish(
         candidates.push(RankedCandidate {
             id,
             path,
-            rrf_score: 1.0 / (i as f64 + 1.0),
+            rrf_score: score,
             tier: tier.as_str().to_string(),
         });
+    }
+
+    // T2's OR fallback can otherwise stop at a single incidental string
+    // match, even when a file's whole basename directly names a query term.
+    // Add that evidence only when every concept candidate has at most one
+    // query-word match: filename evidence is a bounded recovery for sparse
+    // lexical results, never a way to displace stronger concept content.
+    let mut filename_capped = false;
+    if tier == Tier::T2 {
+        let (filename_matches, capped) = weak_filename_matches(store, phrase, by_id.values())?;
+        filename_capped = capped;
+        let filename_by_path: HashMap<String, (u64, ConceptMatch)> = filename_matches
+            .into_iter()
+            .map(|(id, m)| (m.path.clone(), (id, m)))
+            .collect();
+        let existing_paths: std::collections::HashSet<String> = candidates
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect();
+
+        // A real concept row is preferable to synthetic filename evidence in
+        // the same file. Promote its score and make the filename provenance
+        // visible rather than returning two rows for one path.
+        for candidate in &mut candidates {
+            if let Some((_, evidence)) = filename_by_path.get(&candidate.path)
+                && evidence.score > candidate.rrf_score
+            {
+                candidate.rrf_score = evidence.score;
+                if let Some(m) = by_id.get_mut(&candidate.id) {
+                    m.score = evidence.score;
+                    m.reasons.extend(evidence.reasons.clone());
+                }
+            }
+        }
+        for (path, (id, m)) in filename_by_path {
+            if !existing_paths.contains(&path) {
+                candidates.push(RankedCandidate {
+                    id,
+                    path: m.path.clone(),
+                    rrf_score: m.score,
+                    tier: tier.as_str().to_string(),
+                });
+                by_id.insert(id, m);
+            }
+        }
     }
 
     // Rerank within the tier via the pluggable reranker.
@@ -554,17 +619,28 @@ fn finish(
     ordered.truncate(limit);
 
     let index_state = index_state(store)?;
-    let basis = if scan_capped {
-        format!(
-            "tier {} (concept index); scan capped at {TRIGRAM_SCAN_CAP} rows — unscanned rows \
+    let scan_capped = scan_cap.is_some() || filename_capped;
+    let basis = match (scan_cap, filename_capped) {
+        (Some(scan_cap), true) => format!(
+            "tier {} (concept index); candidate scan capped at {scan_cap} rows and filename fallback \
+             capped at {FILENAME_CANDIDATE_CAP} candidates — unscanned rows or filenames may contain \
+             better matches",
+            tier.as_str()
+        ),
+        (Some(scan_cap), false) => format!(
+            "tier {} (concept index); candidate scan capped at {scan_cap} rows — unscanned rows \
              may contain better matches",
             tier.as_str()
-        )
-    } else {
-        format!(
+        ),
+        (None, true) => format!(
+            "tier {} (concept index); filename fallback capped at {FILENAME_CANDIDATE_CAP} candidates \
+             — unscanned filenames may contain better matches",
+            tier.as_str()
+        ),
+        (None, false) => format!(
             "tier {} (concept index, scanned to completion)",
             tier.as_str()
-        )
+        ),
     };
     Ok(ResolveOutcome {
         confidence,
@@ -576,6 +652,85 @@ fn finish(
         scan_capped,
         basis,
     })
+}
+
+/// Return exact whole-component basename evidence only for a sparse T2
+/// candidate set. A synthetic candidate carries line `0` and an explicit
+/// reason so consumers cannot mistake filename evidence for extracted source
+/// text.
+fn weak_filename_matches<'a>(
+    store: &GraphStore,
+    phrase: &str,
+    current: impl IntoIterator<Item = &'a ConceptMatch>,
+) -> Result<(Vec<(u64, ConceptMatch)>, bool), StoreError> {
+    let qwords = concept_words(&normalize(phrase));
+    if qwords.len() < 2 {
+        return Ok((Vec::new(), false));
+    }
+
+    let current: Vec<&ConceptMatch> = current.into_iter().collect();
+    if current
+        .iter()
+        .any(|m| 2 * match_word_count(&m.norm, &qwords) > qwords.len())
+    {
+        return Ok((Vec::new(), false));
+    }
+    let mut matches = Vec::new();
+    let mut files = store.files()?;
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    for file in files {
+        let stem = file
+            .path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&file.path)
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let components = symbol_words(&stem);
+        let overlap: Vec<&str> = qwords
+            .iter()
+            .filter(|word| components.contains(word))
+            .map(String::as_str)
+            .collect();
+        if overlap.is_empty() {
+            continue;
+        }
+        let score = (SCORE_OVERLAP_BASE
+            + overlap.len() as f64 / qwords.len() as f64 * SCORE_OVERLAP_SPAN
+            + FILENAME_COMPONENT_BONUS)
+            .min(SCORE_SUBSTRING);
+        let id = u64::MAX - file.id as u64;
+        matches.push((
+            id,
+            ConceptMatch {
+                path: file.path,
+                start_line: 0,
+                end_line: 0,
+                kind: ConceptKind::String,
+                raw: format!("filename: {stem}"),
+                norm: stem,
+                owner: None,
+                symbol_kind: None,
+                score,
+                reasons: vec![format!(
+                    "filename component overlap: {}",
+                    overlap.join(", ")
+                )],
+            },
+        ));
+        if matches.len() >= FILENAME_CANDIDATE_CAP {
+            break;
+        }
+    }
+    let capped = matches.len() >= FILENAME_CANDIDATE_CAP;
+    Ok((matches, capped))
+}
+
+fn match_word_count(norm: &str, qwords: &[String]) -> usize {
+    let words = concept_words(norm);
+    qwords.iter().filter(|word| words.contains(word)).count()
 }
 
 /// Build the final outcome for the symbol fallback tier. Each `SymbolRow`
@@ -626,7 +781,7 @@ fn finish_symbols(
     } else {
         "symbol fallback"
     };
-    for (i, row) in rows.into_iter().enumerate() {
+    for row in rows {
         let id = row.id as u64;
         let path = file_path(store, row.file_id)?;
         let score = score_symbol(&row, phrase, &path);
@@ -646,7 +801,7 @@ fn finish_symbols(
         candidates.push(RankedCandidate {
             id,
             path,
-            rrf_score: 1.0 / (i as f64 + 1.0),
+            rrf_score: score,
             tier: tier.as_str().to_string(),
         });
     }
@@ -660,7 +815,12 @@ fn finish_symbols(
     ordered.truncate(limit);
 
     let index_state = index_state(store)?;
-    let tier_desc = if tier == Tier::Ident {
+    let tier_desc = if tier == Tier::Ident && scan_capped {
+        format!(
+            "tier ident (exact symbol-name index probe; candidate scan capped at {RERANK_CANDIDATE_CAP} rows — \
+             unscanned symbols may contain better matches)"
+        )
+    } else if tier == Tier::Ident {
         "tier ident (exact symbol-name index probe)".to_string()
     } else if scan_capped {
         format!(
@@ -729,14 +889,18 @@ const SCORE_OVERLAP_BASE: f64 = 0.3;
 /// keeping even a full word-overlap below `SCORE_SUBSTRING` — word-bag
 /// equality is weaker evidence than an in-order substring.
 const SCORE_OVERLAP_SPAN: f64 = 0.4;
+/// Small provenance-specific lift for an exact basename component. Used only
+/// by the weak T2 fallback, after it has proved no concept has more than one
+/// matching query word.
+const FILENAME_COMPONENT_BONUS: f64 = 0.12;
 /// Multiplier applied when the match lives in a test path: a phrase's real
 /// definition is almost always the production site, not the test that quotes
 /// it, so tests are demoted but never eliminated.
 const TEST_PATH_PENALTY: f64 = 0.7;
-/// Additive bonus when the enclosing symbol's ident words overlap the query
-/// — a concept owned by `submitButton` is better evidence for "submit
-/// button" than the same string in an unrelated function. Small enough to
-/// break ties without jumping a score band.
+/// Maximum additive bonus when every distinct query word appears in the
+/// enclosing symbol name. Partial owner overlap is scaled by its query
+/// coverage, so an owner-name hint can break lexical ties but cannot outweigh
+/// stronger concept evidence.
 const OWNER_WORD_BONUS: f64 = 0.15;
 
 /// Real per-match score for a concept row (see the named constants above for
@@ -763,8 +927,9 @@ fn score_match(row: &ConceptRow, phrase: &str, owner: Option<&str>, path: &str) 
     if let Some(owner) = owner {
         let owner_words = symbol_words(owner);
         let qwords = concept_words(&norm);
-        if owner_words.iter().any(|w| qwords.contains(w)) {
-            score += OWNER_WORD_BONUS;
+        if !qwords.is_empty() {
+            let overlap = qwords.iter().filter(|w| owner_words.contains(w)).count();
+            score += OWNER_WORD_BONUS * overlap as f64 / qwords.len() as f64;
         }
     }
     score.clamp(0.0, 1.0)
@@ -1090,6 +1255,139 @@ mod tests {
     }
 
     #[test]
+    fn lexical_rank_applies_quality_to_exact_concepts_and_symbols() {
+        let mut store = store();
+        let test_file = add_file(&mut store, "src/a.test.rs");
+        let production_file = add_file(&mut store, "src/z.rs");
+        for (file, uid) in [(test_file, "test"), (production_file, "prod")] {
+            store
+                .insert_concept(
+                    file,
+                    ConceptKind::UiText,
+                    "Submit",
+                    "submit",
+                    "",
+                    1,
+                    1,
+                    None,
+                )
+                .unwrap();
+            store
+                .insert_symbol(
+                    file,
+                    uid,
+                    "SubmitForm",
+                    "SubmitForm",
+                    SymbolKind::Function,
+                    1,
+                    3,
+                    "SubmitForm()",
+                )
+                .unwrap();
+        }
+        for query in ["submit", "SubmitForm"] {
+            let out = resolve(&store, query, &ResolveOptions::default()).unwrap();
+            assert_eq!(out.matches[0].path, "src/z.rs", "{query}");
+            assert!(out.matches[0].score > out.matches[1].score);
+        }
+    }
+
+    #[test]
+    fn exact_identifier_reranks_before_applying_result_limit() {
+        let mut store = store();
+        let test_file = add_file(&mut store, "src/a.test.rs");
+        let production_file = add_file(&mut store, "src/z.rs");
+        for (file, uid) in [(test_file, "a"), (production_file, "z")] {
+            store
+                .insert_symbol(
+                    file,
+                    uid,
+                    "SubmitForm",
+                    "SubmitForm",
+                    SymbolKind::Function,
+                    1,
+                    3,
+                    "SubmitForm()",
+                )
+                .unwrap();
+        }
+        let out = resolve(
+            &store,
+            "SubmitForm",
+            &ResolveOptions {
+                limit: 1,
+                ..ResolveOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out.matches[0].path, "src/z.rs");
+    }
+
+    #[test]
+    fn word_intersection_reranks_before_applying_result_limit() {
+        let mut store = store();
+        let test_file = add_file(&mut store, "src/a.test.rs");
+        let production_file = add_file(&mut store, "src/z.rs");
+        for file in [test_file, production_file] {
+            store
+                .insert_concept(
+                    file,
+                    ConceptKind::UiText,
+                    "alpha beta",
+                    "alpha beta",
+                    "",
+                    1,
+                    1,
+                    None,
+                )
+                .unwrap();
+        }
+        let out = resolve(
+            &store,
+            "alpha beta",
+            &ResolveOptions {
+                limit: 1,
+                ..ResolveOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out.matches[0].path, "src/z.rs");
+    }
+
+    #[test]
+    fn lexical_collector_ranks_coverage_before_limit() {
+        let mut store = store();
+        let weak = add_file(&mut store, "src/a_weak.rs");
+        let strong = add_file(&mut store, "src/z_strong.rs");
+        for (file, text) in [(weak, "alpha"), (strong, "alpha beta")] {
+            store
+                .insert_concept(file, ConceptKind::UiText, text, text, "", 1, 1, None)
+                .unwrap();
+        }
+        let opts = ResolveOptions {
+            limit: 1,
+            ..ResolveOptions::default()
+        };
+        let out = resolve(&store, "alpha beta gamma", &opts).unwrap();
+        assert_eq!(out.matches[0].path, "src/z_strong.rs");
+    }
+
+    #[test]
+    fn lexical_rank_uses_match_quality_not_insertion_order() {
+        let mut store = store();
+        let weak = add_file(&mut store, "src/a_weak.rs");
+        let strong = add_file(&mut store, "src/z_strong.rs");
+        for (file, text) in [(weak, "alpha"), (strong, "alpha beta")] {
+            store
+                .insert_concept(file, ConceptKind::UiText, text, text, "", 1, 1, None)
+                .unwrap();
+        }
+        let out = resolve(&store, "alpha beta gamma", &ResolveOptions::default()).unwrap();
+        assert_eq!(out.matches[0].path, "src/z_strong.rs");
+        assert!(out.matches[0].score > out.matches[1].score);
+    }
+
+    #[test]
     fn same_file_concepts_are_not_collapsed() {
         let mut store = store();
         let f1 = add_file(&mut store, "src/app.tsx");
@@ -1266,6 +1564,290 @@ mod tests {
             (out.matches[0].score - 0.65).abs() < 1e-9,
             "score was {}",
             out.matches[0].score
+        );
+    }
+
+    #[test]
+    fn owner_bonus_cannot_outweigh_stronger_concept_coverage() {
+        let partial = ConceptRow {
+            id: 1,
+            file_id: 1,
+            kind: ConceptKind::String,
+            raw: "concept".into(),
+            norm: "concept".into(),
+            detail: String::new(),
+            start_line: 1,
+            end_line: 1,
+            owner_symbol_id: None,
+        };
+        let stronger = ConceptRow {
+            id: 2,
+            file_id: 1,
+            kind: ConceptKind::String,
+            raw: "resolve phrase".into(),
+            norm: "resolve phrase".into(),
+            detail: String::new(),
+            start_line: 1,
+            end_line: 1,
+            owner_symbol_id: None,
+        };
+        let phrase = ["concept", "index", "resolve", "phrase", "map", "marked"].join(" ");
+
+        assert!(
+            score_match(&stronger, &phrase, None, "src/concept_resolve.rs")
+                > score_match(&partial, &phrase, Some("concept_index"), "src/store.rs"),
+            "an owner-name hint must only break equal lexical coverage"
+        );
+    }
+
+    #[test]
+    fn owner_bonus_scales_with_distinct_query_word_coverage() {
+        let row = ConceptRow {
+            id: 1,
+            file_id: 1,
+            kind: ConceptKind::String,
+            raw: "unrelated".into(),
+            norm: "unrelated".into(),
+            detail: String::new(),
+            start_line: 1,
+            end_line: 1,
+            owner_symbol_id: None,
+        };
+        let phrase = "alpha beta gamma delta";
+        let baseline = score_match(&row, phrase, None, "src/app.rs");
+
+        for (owner, expected_coverage) in [
+            ("unrelated", 0.0),
+            ("alpha", 0.25),
+            ("alphaBeta", 0.50),
+            ("alphaBetaGammaDelta", 1.0),
+        ] {
+            let bonus = score_match(&row, phrase, Some(owner), "src/app.rs") - baseline;
+            assert!(
+                (bonus - OWNER_WORD_BONUS * expected_coverage).abs() < 1e-9,
+                "{owner}: expected coverage {expected_coverage}, got bonus {bonus}"
+            );
+        }
+    }
+
+    #[test]
+    fn weak_t2_matches_are_augmented_by_exact_filename_components() {
+        let mut store = store();
+        let incidental = add_file(&mut store, "src/extract.rs");
+        let _target = add_file(&mut store, "src/impact.rs");
+        store
+            .insert_concept(
+                incidental,
+                ConceptKind::String,
+                "impact walks method-to-method",
+                "impact walks method to method",
+                "",
+                1,
+                1,
+                None,
+            )
+            .unwrap();
+
+        let out = resolve(
+            &store,
+            &["callers", "callees", "impact", "trace", "reachability"].join(" "),
+            &ResolveOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(out.tier, Some(Tier::T2));
+        assert_eq!(out.matches[0].path, "src/impact.rs", "{out:?}");
+        assert!(
+            out.matches[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("filename component")),
+            "filename evidence must be explicit: {out:?}"
+        );
+    }
+
+    #[test]
+    fn filename_fallback_cap_marks_resolve_outcome_degraded() {
+        let mut store = store();
+        for index in 0..=FILENAME_CANDIDATE_CAP {
+            add_file(&mut store, &format!("src/a{index:04}_impact.rs"));
+        }
+        let incidental = add_file(&mut store, "src/incidental.rs");
+        store
+            .insert_concept(
+                incidental,
+                ConceptKind::String,
+                "impact walks method-to-method",
+                "impact walks method to method",
+                "",
+                1,
+                1,
+                None,
+            )
+            .unwrap();
+
+        let out = resolve(
+            &store,
+            &["callers", "callees", "impact", "trace", "reachability"].join(" "),
+            &ResolveOptions::default(),
+        )
+        .unwrap();
+
+        assert!(out.scan_capped, "filename cap must be reported: {out:?}");
+        assert!(
+            out.basis.contains("filename fallback capped"),
+            "filename cap provenance must be visible: {out:?}"
+        );
+    }
+
+    #[test]
+    fn filename_evidence_outranks_sparse_two_word_concept_evidence() {
+        let mut store = store();
+        let strong = add_file(&mut store, "src/extract.rs");
+        let _filename_only = add_file(&mut store, "src/gamma.rs");
+        store
+            .insert_concept(
+                strong,
+                ConceptKind::String,
+                "alpha delta",
+                "alpha delta",
+                "",
+                1,
+                1,
+                None,
+            )
+            .unwrap();
+
+        let out = resolve(
+            &store,
+            &["alpha", "beta", "gamma", "delta", "epsilon"].join(" "),
+            &ResolveOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(out.matches[0].path, "src/gamma.rs", "{out:?}");
+        assert!(
+            out.matches[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("filename component")),
+            "sparse two-word content must admit filename evidence: {out:?}"
+        );
+    }
+
+    #[test]
+    fn filename_evidence_does_not_displace_majority_concept_evidence() {
+        let mut store = store();
+        let strong = add_file(&mut store, "src/extract.rs");
+        let _filename_only = add_file(&mut store, "src/gamma.rs");
+        store
+            .insert_concept(
+                strong,
+                ConceptKind::String,
+                "alpha beta delta",
+                "alpha beta delta",
+                "",
+                1,
+                1,
+                None,
+            )
+            .unwrap();
+
+        let out = resolve(
+            &store,
+            &["alpha", "beta", "gamma", "delta", "epsilon"].join(" "),
+            &ResolveOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(out.matches[0].path, "src/extract.rs", "{out:?}");
+        assert!(out.matches.iter().all(|m| {
+            !m.reasons
+                .iter()
+                .any(|reason| reason.contains("filename component"))
+        }));
+    }
+
+    #[test]
+    fn filename_evidence_outranks_exactly_half_coverage() {
+        let mut store = store();
+        let content = add_file(&mut store, "src/extract.rs");
+        let _filename = add_file(&mut store, "src/gamma.rs");
+        store
+            .insert_concept(
+                content,
+                ConceptKind::String,
+                "alpha beta",
+                "alpha beta",
+                "",
+                1,
+                1,
+                None,
+            )
+            .unwrap();
+
+        let out = resolve(
+            &store,
+            &["alpha", "beta", "gamma", "delta"].join(" "),
+            &ResolveOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(out.matches[0].path, "src/gamma.rs", "{out:?}");
+    }
+
+    #[test]
+    fn filename_evidence_promotes_a_real_match_in_its_own_file() {
+        let mut store = store();
+        let incidental = add_file(&mut store, "src/targets.rs");
+        let target = add_file(&mut store, "src/cluster.rs");
+        for (file, raw, norm) in [
+            (incidental, "cluster records", "cluster records"),
+            (target, "cluster members", "cluster members"),
+        ] {
+            store
+                .insert_concept(file, ConceptKind::String, raw, norm, "", 1, 1, None)
+                .unwrap();
+        }
+
+        let out = resolve(
+            &store,
+            &["cluster", "functional", "area", "detect", "co", "locate"].join(" "),
+            &ResolveOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(out.matches[0].path, "src/cluster.rs", "{out:?}");
+        assert!(
+            out.matches[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("filename component"))
+        );
+    }
+
+    #[test]
+    fn filename_evidence_ignores_compound_extension_components() {
+        let mut store = store();
+        let incidental = add_file(&mut store, "src/other.rs");
+        let _types = add_file(&mut store, "src/types.d.ts");
+        store
+            .insert_concept(
+                incidental,
+                ConceptKind::String,
+                "other",
+                "other",
+                "",
+                1,
+                1,
+                None,
+            )
+            .unwrap();
+
+        let out = resolve(&store, "d other", &ResolveOptions::default()).unwrap();
+        assert!(
+            out.matches.iter().all(|m| m.path != "src/types.d.ts"),
+            "extension components are not filename evidence: {out:?}"
         );
     }
 

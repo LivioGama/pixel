@@ -79,10 +79,25 @@ fn stored_model_id() -> Option<String> {
 /// `download` is false — callers treat that as "semantic channel
 /// unavailable", never as a crash.
 pub fn open_default_embedder(download: bool) -> Result<Box<dyn Embedder>, String> {
+    open_embedder_with_potion_repo(download, None)
+}
+
+pub(crate) fn open_embedder_with_potion_repo(
+    download: bool,
+    potion_repo: Option<&str>,
+) -> Result<Box<dyn Embedder>, String> {
     let choice = match std::env::var("PIXEL_RECALL_MODEL") {
         Ok(v) if !v.is_empty() => v,
         _ => stored_model_id().unwrap_or_else(|| POTION_MODEL_ID.to_string()),
     };
+    open_selected_embedder(&choice, download, potion_repo)
+}
+
+fn open_selected_embedder(
+    choice: &str,
+    download: bool,
+    potion_repo: Option<&str>,
+) -> Result<Box<dyn Embedder>, String> {
     if choice.contains("e5") {
         #[cfg(feature = "fastembed")]
         {
@@ -94,12 +109,15 @@ pub fn open_default_embedder(download: bool) -> Result<Box<dyn Embedder>, String
     }
     #[cfg(feature = "model2vec")]
     {
-        potion::PotionEmbedder::open(&crate::models_dir(), download)
-            .map(|e| Box::new(e) as Box<dyn Embedder>)
+        match potion_repo {
+            Some(repo) => potion::PotionEmbedder::open_repo(&crate::models_dir(), download, repo),
+            None => potion::PotionEmbedder::open(&crate::models_dir(), download),
+        }
+        .map(|e| Box::new(e) as Box<dyn Embedder>)
     }
     #[cfg(not(feature = "model2vec"))]
     {
-        let _ = download;
+        let _ = (download, potion_repo);
         Err("this build has no embedding support (model2vec feature disabled)".to_string())
     }
 }
@@ -239,11 +257,8 @@ pub mod potion {
 
     const REPO: &str = "minishlab/potion-multilingual-128M";
 
-    /// Resolve the potion repo to load. `PIXEL_RECALL_MODEL_REPO` overrides
-    /// the default so `pixel ask` can select a code-specialized static model
-    /// (e.g. `minishlab/potion-code-16M-v2`, distilled from CodeRankEmbed)
-    /// for much better code-domain recall, while the transcript path keeps
-    /// the multilingual default.
+    /// Resolve the transcript model override. Repository `ask` passes its own
+    /// model repository explicitly, without changing this process-wide choice.
     fn resolved_repo() -> String {
         match std::env::var("PIXEL_RECALL_MODEL_REPO") {
             Ok(v) if !v.is_empty() => v,
@@ -253,7 +268,15 @@ pub mod potion {
 
     impl PotionEmbedder {
         pub fn open(cache_dir: &Path, download: bool) -> Result<Self, String> {
-            let repo = resolved_repo();
+            Self::open_repo(cache_dir, download, &resolved_repo())
+        }
+
+        /// Select a repository without mutating transcript recall's process-wide model choice.
+        pub(crate) fn open_repo(
+            cache_dir: &Path,
+            download: bool,
+            repo: &str,
+        ) -> Result<Self, String> {
             let marker = cache_dir.join("potion.ok");
             if !download && !marker.exists() {
                 return Err(
@@ -267,19 +290,19 @@ pub mod potion {
             unsafe {
                 std::env::set_var("HF_HOME", cache_dir.join("hf"));
             }
-            let model = model2vec_rs::model::StaticModel::from_pretrained(&repo, None, None, None)
+            let model = model2vec_rs::model::StaticModel::from_pretrained(repo, None, None, None)
                 .map_err(|e| format!("potion model load: {e}"))?;
             let dims = model.encode_single("probe").len();
             if dims == 0 {
                 return Err("potion model produced empty embeddings".to_string());
             }
             if download {
-                let _ = std::fs::write(&marker, &repo);
+                let _ = std::fs::write(&marker, repo);
             }
             Ok(Self {
                 model,
                 dims,
-                model_id: repo,
+                model_id: repo.to_string(),
             })
         }
     }
@@ -456,5 +479,20 @@ mod tests {
             assert!(w[1].0 < w[0].1, "windows must overlap");
         }
         assert_eq!(chunk_offsets("short"), vec![(0, 5)]);
+    }
+}
+
+#[cfg(all(test, not(feature = "fastembed")))]
+mod model_selection_tests {
+    #[test]
+    fn explicit_e5_is_not_replaced_by_code_potion_override() {
+        let error = super::open_selected_embedder(
+            "multilingual-e5-small",
+            false,
+            Some("minishlab/potion-code-16M-v2"),
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("e5 requested"), "{error}");
     }
 }

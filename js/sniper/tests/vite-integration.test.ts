@@ -8,15 +8,15 @@
  *  - the run envelope landed with pid + port.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { createServer, type ViteDevServer } from "vite";
 import { sniperDevPlugin } from "../src/vite.ts";
+import { preparePixelCandidate } from "./candidate.ts";
 
-const repoRoot = resolve(import.meta.dir, "..", "..", "..");
-const binPath = join(repoRoot, "target", "debug", "pixel");
+const binPath = preparePixelCandidate();
 
 let server: ViteDevServer;
 let port = 0;
@@ -44,13 +44,6 @@ const waitFor = async (
 };
 
 beforeAll(async () => {
-  if (!existsSync(binPath)) {
-    execFileSync("cargo", ["build", "-p", "pixel-cli"], {
-      cwd: repoRoot,
-      stdio: "inherit",
-      timeout: 600_000,
-    });
-  }
   process.env.GITPIXEL_SNIPER_STATE_ROOT = mkdtempSync(join(tmpdir(), "sniper-vitest-state-"));
 
   // realpath: macOS tmpdir is a symlink (/var → /private/var) and vite

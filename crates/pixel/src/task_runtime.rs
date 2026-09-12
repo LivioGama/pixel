@@ -322,7 +322,10 @@ pub(crate) fn prepare(root: &Path, task_id: &str) -> Result<Option<TaskRecord>, 
         None => return Ok(None),
     };
     let now = now_unix();
-    record.status = "prepared".to_string();
+    // Refreshing evidence must not revoke acceptance or rewind a worker lifecycle.
+    if record.status == "begun" {
+        record.status = "prepared".to_string();
+    }
     record.updated_unix = now;
     record.snapshot.revision = record.snapshot.revision.saturating_add(1);
     record.snapshot.observed_unix = now;
@@ -842,6 +845,25 @@ mod tests {
         assert!(events(&root, &record.task_id).is_empty());
         assert!(prepare(&root, &record.task_id).unwrap().is_none());
         assert!(begin(&root, "task", "bad/provider", None).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepare_refresh_preserves_accepted_running_and_terminal_states() {
+        let root = root("prepare-state");
+        for state in ["accepted", "running", "completed", "failed", "cancelled"] {
+            let task = accept_task(&root, "run controller", "claude", Some("session-1")).unwrap();
+            let before = transition(&root, &task.task_id, state, "fixture_state")
+                .unwrap()
+                .unwrap();
+            let refreshed = prepare(&root, &task.task_id).unwrap().unwrap();
+            assert_eq!(
+                refreshed.status, state,
+                "snapshot refresh must not revoke {state}"
+            );
+            assert_eq!(refreshed.snapshot.revision, before.snapshot.revision + 1);
+            assert_eq!(status(&root, &task.task_id).unwrap().status, state);
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

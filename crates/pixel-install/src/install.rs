@@ -61,6 +61,10 @@ pub struct InstallOptions {
     pub executable_path: Option<PathBuf>,
     /// Home directory. Defaults to `$HOME`.
     pub home: Option<PathBuf>,
+    /// Shell to install the wrapper block for, as a `$SHELL`-style value
+    /// (`fish`, `/bin/bash`, …). Defaults to `$SHELL`. Set it when the
+    /// invoking process does not run under the user's login shell.
+    pub shell: Option<String>,
     /// If true, compute and report every step's outcome exactly as a real
     /// run would, but perform no filesystem writes: no settings.json edits,
     /// no hook files, no agent-config rewrites, no backups, no directory
@@ -137,7 +141,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     let dry_run = options.dry_run;
     let steps = vec![
         deploy_agent_prompt(&home, dry_run)?,
-        install_shell_wrappers(&home, dry_run)?,
+        install_shell_wrappers(&home, options.shell.as_deref(), dry_run)?,
     ];
 
     let green = steps
@@ -207,33 +211,156 @@ fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     })
 }
 
-/// Detect the user's shell profile path (~/.zshrc on macOS, ~/.bashrc on Linux).
-pub(crate) fn shell_profile_path(home: &Path) -> PathBuf {
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    if shell.contains("bash") {
-        home.join(".bashrc")
+/// Which shell dialect the managed wrapper block is written in.
+///
+/// fish is not a POSIX shell: `claude() { ...; }` is a syntax error there and
+/// `$@` does not exist, so supporting it means generating a different block —
+/// not just writing the same block somewhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellKind {
+    /// bash, zsh, and anything else that accepts POSIX function syntax.
+    Posix,
+    /// fish.
+    Fish,
+}
+
+impl ShellKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ShellKind::Posix => "posix",
+            ShellKind::Fish => "fish",
+        }
+    }
+}
+
+/// File name of the fish drop-in. pixel creates this file, owns all of it, and
+/// deletes it on uninstall.
+pub(crate) const FISH_DROPIN: &str = "pixel.fish";
+
+/// Prompt path written literally into the wrapper block, so the shell expands
+/// `$HOME` itself and the block survives a moved home directory.
+pub(crate) const PROMPT_PATH: &str = "$HOME/.local/share/pixel/agent-prompt.md";
+
+/// The shell to install wrappers for: the caller's override when given,
+/// otherwise `$SHELL`.
+///
+/// The override exists because `$SHELL` is not always the user's login shell:
+/// a coding agent's command tool, `env -i`, or cron can report a different one,
+/// and installing zsh wrappers for a fish user is silently useless.
+pub(crate) fn resolve_shell(shell_override: Option<&str>) -> String {
+    match shell_override {
+        Some(s) => s.to_string(),
+        None => std::env::var("SHELL").unwrap_or_default(),
+    }
+}
+
+/// Classify a `$SHELL` value by its executable name. Matching the file name
+/// rather than a substring of the whole path keeps a path like
+/// `/home/fisher/bin/zsh` out of the fish branch.
+pub(crate) fn shell_kind_from(shell: &str) -> ShellKind {
+    let name = shell.rsplit('/').next().unwrap_or(shell);
+    if name.eq_ignore_ascii_case("fish") {
+        ShellKind::Fish
     } else {
-        home.join(".zshrc")
+        ShellKind::Posix
+    }
+}
+
+/// fish's config root: `$XDG_CONFIG_HOME/fish` when that variable points inside
+/// the home being installed into, otherwise fish's default `~/.config/fish`.
+/// The containment test keeps an ambient `XDG_CONFIG_HOME` from redirecting an
+/// install that was explicitly aimed at another home (`--home`, tests).
+fn fish_config_dir(home: &Path) -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        let dir = PathBuf::from(&xdg);
+        if !xdg.is_empty() && dir.starts_with(home) {
+            return dir.join("fish");
+        }
+    }
+    home.join(".config").join("fish")
+}
+
+/// Where the managed block lives for `shell`, and which dialect it must be
+/// written in: `~/.bashrc` for bash, `~/.config/fish/conf.d/pixel.fish` for
+/// fish, `~/.zshrc` otherwise.
+///
+/// fish reads neither `~/.zshrc` nor `~/.bashrc`. Its `conf.d/` directory is
+/// sourced automatically for every session, so the block gets its own file
+/// there rather than being appended to the user's `config.fish`.
+pub(crate) fn shell_profile_for(shell: &str, home: &Path) -> (ShellKind, PathBuf) {
+    match shell_kind_from(shell) {
+        ShellKind::Fish => (
+            ShellKind::Fish,
+            fish_config_dir(home).join("conf.d").join(FISH_DROPIN),
+        ),
+        ShellKind::Posix
+            if shell
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case("bash")) =>
+        {
+            (ShellKind::Posix, home.join(".bashrc"))
+        }
+        ShellKind::Posix => (ShellKind::Posix, home.join(".zshrc")),
     }
 }
 
 pub(crate) const PIXEL_MANAGED_BEGIN: &str = "# >>> pixel-managed >>>";
 pub(crate) const PIXEL_MANAGED_END: &str = "# <<< pixel-managed <<<";
 
-/// Build the managed shell-wrapper block. Uses shell functions (not aliases)
-/// because functions handle subcommands correctly (`codex exec ...` works).
-fn shell_wrapper_block(prompt_path: &str) -> String {
+/// Build the managed shell-wrapper block for `kind`. Uses shell functions (not
+/// aliases) because functions handle subcommands correctly (`codex exec ...`
+/// works).
+pub(crate) fn shell_wrapper_block(kind: ShellKind, prompt_path: &str) -> String {
+    let body = match kind {
+        ShellKind::Posix => format!(
+            "claude() {{ command claude --append-system-prompt-file \"{prompt}\" \"$@\"; }}\n\
+             codex() {{ command codex -c \"model_instructions_file=\\\"{prompt}\\\"\" \"$@\"; }}",
+            prompt = prompt_path,
+        ),
+        // fish: `function name; ...; end`, arguments as `$argv`. Double quotes
+        // still expand `$HOME` and still honour `\"` escapes, so the codex
+        // argument is spelled exactly as in the POSIX block.
+        ShellKind::Fish => format!(
+            "function claude; command claude --append-system-prompt-file \"{prompt}\" $argv; end\n\
+             function codex; command codex -c \"model_instructions_file=\\\"{prompt}\\\"\" $argv; end",
+            prompt = prompt_path,
+        ),
+    };
     format!(
         "{begin}\n\
          # Pixel agent system prompt — added by `pixel install`\n\
          # Remove with `pixel uninstall`\n\
-         claude() {{ command claude --append-system-prompt-file \"{prompt}\" \"$@\"; }}\n\
-         codex() {{ command codex -c \"model_instructions_file=\\\"{prompt}\\\"\" \"$@\"; }}\n\
+         {body}\n\
          {end}",
         begin = PIXEL_MANAGED_BEGIN,
         end = PIXEL_MANAGED_END,
-        prompt = prompt_path,
     )
+}
+
+/// The block exactly as `pixel install` writes it for `kind` — what doctor
+/// compares the on-disk block against, so a block left behind by another shell
+/// or an older pixel reads as stale instead of green.
+pub(crate) fn expected_wrapper_block(kind: ShellKind) -> String {
+    shell_wrapper_block(kind, PROMPT_PATH)
+}
+
+/// Return the pixel-managed block found in `content`, markers included.
+pub(crate) fn extract_managed_block(content: &str) -> Option<String> {
+    let mut out: Vec<&str> = Vec::new();
+    let mut in_block = false;
+    for line in content.lines() {
+        if line.trim_start().starts_with(PIXEL_MANAGED_BEGIN) {
+            in_block = true;
+        }
+        if in_block {
+            out.push(line.trim_end());
+            if line.trim_start().starts_with(PIXEL_MANAGED_END) {
+                return Some(out.join("\n"));
+            }
+        }
+    }
+    None
 }
 
 /// Strip an existing pixel-managed block from a file's content.
@@ -265,17 +392,34 @@ fn strip_shell_wrappers(content: &str) -> String {
 
 /// Install shell wrappers for `claude` and `codex` in the user's shell profile
 /// so every invocation automatically includes the Pixel system prompt.
-fn install_shell_wrappers(home: &Path, dry_run: bool) -> Result<InstallStep> {
-    let profile = shell_profile_path(home);
-    let prompt_path = "$HOME/.local/share/pixel/agent-prompt.md";
-    let block = shell_wrapper_block(prompt_path);
+fn install_shell_wrappers(
+    home: &Path,
+    shell_override: Option<&str>,
+    dry_run: bool,
+) -> Result<InstallStep> {
+    let shell = resolve_shell(shell_override);
+    let (kind, profile) = shell_profile_for(&shell, home);
+    let block = shell_wrapper_block(kind, PROMPT_PATH);
+    let detail = Some(format!(
+        "profile={} shell={}",
+        profile.display(),
+        kind.as_str()
+    ));
     if dry_run {
         return Ok(InstallStep {
             id: "shell-wrappers".into(),
             status: CheckStatus::Green,
-            summary: format!("would write shell wrappers to {}", profile.display()),
-            detail: Some(format!("profile={}", profile.display())),
+            summary: format!(
+                "would write {} shell wrappers to {}",
+                kind.as_str(),
+                profile.display()
+            ),
+            detail,
         });
+    }
+    // fish's drop-in lives in a directory that may not exist yet.
+    if let Some(parent) = profile.parent() {
+        fs::create_dir_all(parent)?;
     }
     let existing = fs::read_to_string(&profile).unwrap_or_default();
     let cleaned = strip_shell_wrappers(&existing);
@@ -291,26 +435,36 @@ fn install_shell_wrappers(home: &Path, dry_run: bool) -> Result<InstallStep> {
     new_content.push('\n');
     // Always write — the block may need refreshing even if old content was clean.
     fs::write(&profile, &new_content)?;
-    let _ = had_old_block; // tracked for summary accuracy
     Ok(InstallStep {
         id: "shell-wrappers".into(),
         status: CheckStatus::Green,
         summary: format!(
-            "{} shell wrappers in {}",
+            "{} {} shell wrappers in {}",
             if had_old_block {
                 "updated"
             } else {
                 "installed"
             },
+            kind.as_str(),
             profile.display()
         ),
-        detail: Some(format!("profile={}", profile.display())),
+        detail,
     })
 }
 
 /// Remove the pixel-managed shell wrapper block from the user's shell profile.
-pub(crate) fn remove_shell_wrappers(home: &Path, dry_run: bool) -> Result<InstallStep> {
-    let profile = shell_profile_path(home);
+pub(crate) fn remove_shell_wrappers(
+    home: &Path,
+    shell_override: Option<&str>,
+    dry_run: bool,
+) -> Result<InstallStep> {
+    let shell = resolve_shell(shell_override);
+    let (kind, profile) = shell_profile_for(&shell, home);
+    let detail = Some(format!(
+        "profile={} shell={}",
+        profile.display(),
+        kind.as_str()
+    ));
     let existing = match fs::read_to_string(&profile) {
         Ok(s) => s,
         Err(_) => {
@@ -318,7 +472,7 @@ pub(crate) fn remove_shell_wrappers(home: &Path, dry_run: bool) -> Result<Instal
                 id: "shell-wrappers".into(),
                 status: CheckStatus::Green,
                 summary: dry_run_summary(dry_run, "no shell profile — skipping"),
-                detail: Some(format!("profile={}", profile.display())),
+                detail,
             });
         }
     };
@@ -328,17 +482,24 @@ pub(crate) fn remove_shell_wrappers(home: &Path, dry_run: bool) -> Result<Instal
             id: "shell-wrappers".into(),
             status: CheckStatus::Green,
             summary: dry_run_summary(dry_run, "no shell wrappers found — skipping"),
-            detail: Some(format!("profile={}", profile.display())),
+            detail,
         });
     }
     if !dry_run {
-        fs::write(&profile, &cleaned)?;
+        // The fish drop-in is a file pixel created and owns end to end: once
+        // the block is stripped there is nothing left in it worth keeping. A
+        // user's own .zshrc/.bashrc is only ever edited in place.
+        if kind == ShellKind::Fish && cleaned.trim().is_empty() {
+            fs::remove_file(&profile)?;
+        } else {
+            fs::write(&profile, &cleaned)?;
+        }
     }
     Ok(InstallStep {
         id: "shell-wrappers".into(),
         status: CheckStatus::Green,
         summary: dry_run_summary(dry_run, "removed shell wrappers"),
-        detail: Some(format!("profile={}", profile.display())),
+        detail,
     })
 }
 
@@ -397,14 +558,16 @@ pub struct MigrateReport {
     pub repo_root: String,
     /// True if a `.gitpixel/` directory was found and deleted.
     pub old_state_removed: bool,
-    /// True if `.pixel/` was rebuilt fresh.
+    /// Compatibility field: false because this command does not rebuild indexes.
     pub new_state_rebuilt: bool,
+    /// True once `.pixel/` exists; existing contents are preserved.
+    pub new_state_directory_prepared: bool,
 }
 
-/// Migrate a repo from the old `.gitpixel/` state to a fresh `.pixel/` state.
+/// Remove legacy `.gitpixel/` state and prepare the current `.pixel/` directory.
 ///
-/// Deletes `.gitpixel/` and rebuilds `.pixel/` fresh. No state migration —
-/// every index is a cache and is rebuilt on first use. (The old gain-ledger
+/// Existing `.pixel/` contents are preserved. Missing indexes are built lazily
+/// on first use, not by this command. (The old gain-ledger
 /// carry-over was removed together with the gain module: an unmeasured
 /// token-savings ledger was exactly the kind of claim-without-measurement
 /// the doctrine now forbids.)
@@ -420,16 +583,43 @@ pub fn migrate(repo_root: &Path) -> Result<MigrateReport> {
         false
     };
 
-    // Rebuild `.pixel/` fresh (the index/graph/facts are caches; the daemon
-    // and CLI rebuild them on first use).
+    // Preparing a directory is not proof that any index has been rebuilt.
     fs::create_dir_all(&new_dir)?;
-    let new_state_rebuilt = true;
 
     Ok(MigrateReport {
         version: "v1".into(),
         ok: true,
         repo_root: repo_root.display().to_string(),
         old_state_removed,
-        new_state_rebuilt,
+        new_state_rebuilt: false,
+        new_state_directory_prepared: true,
     })
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn migrate_preserves_current_state_and_reports_no_rebuild() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        fs::create_dir_all(root.join(".pixel")).unwrap();
+        fs::create_dir_all(root.join(".gitpixel")).unwrap();
+        let state = root.join(".pixel/user-state.json");
+        fs::write(&state, b"{\"preserve\":true}").unwrap();
+        let first = migrate(root).unwrap();
+        assert!(first.old_state_removed);
+        assert!(first.new_state_directory_prepared);
+        assert!(
+            !first.new_state_rebuilt,
+            "preparing a directory is not rebuilding an index"
+        );
+        assert_eq!(fs::read(&state).unwrap(), b"{\"preserve\":true}");
+        let second = migrate(root).unwrap();
+        assert!(!second.old_state_removed);
+        assert!(second.new_state_directory_prepared);
+        assert!(!second.new_state_rebuilt);
+        assert_eq!(fs::read(&state).unwrap(), b"{\"preserve\":true}");
+    }
 }

@@ -31,6 +31,9 @@ pub struct UninstallOptions {
     pub home: Option<PathBuf>,
     /// Path to the pixel binary to remove. Defaults to `~/.local/bin/pixel`.
     pub binary_path: Option<PathBuf>,
+    /// Shell whose wrapper block should be removed, as a `$SHELL`-style value.
+    /// Defaults to `$SHELL`.
+    pub shell: Option<String>,
     /// If true, compute and report every step's outcome exactly as a real
     /// run would, but perform no filesystem writes.
     pub dry_run: bool,
@@ -61,8 +64,9 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
 
     let dry_run = options.dry_run;
     let steps = vec![
-        // 1. Remove shell wrappers from ~/.zshrc (or ~/.bashrc).
-        install::remove_shell_wrappers(&home, dry_run)?,
+        // 1. Remove shell wrappers from the shell's profile (~/.zshrc,
+        //    ~/.bashrc, or fish's ~/.config/fish/conf.d/pixel.fish).
+        install::remove_shell_wrappers(&home, options.shell.as_deref(), dry_run)?,
         // 2. Strip managed blocks from all agent-config Markdown files.
         strip_agent_configs(&home, dry_run)?,
         // 3. Remove pixel hook entries from Claude settings.json + delete hook

@@ -54,6 +54,36 @@ fn init_repo(root: &Path) {
 
 const CANDIDATES: &[&str] = &["alpha.txt", "beta.txt", "gamma.txt"];
 
+#[test]
+fn publish_without_an_explicit_file_list_stages_and_commits_all_changes() {
+    let repo_dir = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+    let root = repo_dir.path();
+    init_repo(root);
+    std::fs::write(root.join("default.txt"), b"default publish").unwrap();
+
+    let opts = PublishOptions {
+        message: "default publish".to_string(),
+        files: Vec::new(),
+        expected_head: None,
+        expected_fingerprints: Default::default(),
+        push: false,
+        amend: false,
+        request_id: format!("default-{}", uuid::Uuid::new_v4()),
+    };
+
+    publish_with_state(root, &opts, None, state_dir.path())
+        .expect("the default publish scope commits working-tree changes");
+    assert_eq!(
+        git(
+            root,
+            &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+        )
+        .trim(),
+        "default.txt"
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
 

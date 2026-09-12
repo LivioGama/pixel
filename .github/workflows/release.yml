@@ -109,7 +109,6 @@ jobs:
               end
               # Intel Macs (pre-2020): no prebuilt binary. Build from source via:
               #   cargo build --release -p pixel-cli
-              # or run the ARM64 binary under Rosetta.
             end
 
             on_linux do
