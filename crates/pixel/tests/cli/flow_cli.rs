@@ -1,5 +1,4 @@
 //! Real CLI boundaries with a disposable home and a fake browser only.
-#![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

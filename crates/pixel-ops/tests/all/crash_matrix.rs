@@ -47,7 +47,8 @@ use pixel_ops::push::{PushOptions, PushProbe, push_with_state};
 // Serialization + env-var guard
 // ---------------------------------------------------------------------------
 
-static ENV_GUARD: Mutex<()> = Mutex::new(());
+// Shared with every module of this binary that touches `XDG_STATE_HOME`.
+use crate::XDG_STATE_ENV as ENV_GUARD;
 
 struct XdgEnvGuard;
 impl Drop for XdgEnvGuard {
