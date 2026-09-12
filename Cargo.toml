@@ -27,3 +27,13 @@ lto = "thin"
 codegen-units = 1
 # Keep macOS release binaries runnable with the current toolchain.
 strip = "none"
+
+# Local iteration profile for `pixel upgrade`: same optimisation level as
+# release, minus the two settings that dominate an incremental rebuild
+# (thin LTO and a single codegen unit). Measured on an 8-core M-series,
+# touching only the CLI crate: 55 s under `release`, 9 s here. Shipped
+# binaries keep using `release`.
+[profile.dev-release]
+inherits = "release"
+lto = false
+codegen-units = 16

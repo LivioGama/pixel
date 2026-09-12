@@ -716,6 +716,8 @@ enum Command {
     /// "Text file busy" error when the daemon holds the binary open.
     Upgrade {
         /// Cargo build command to run (default: `cargo build --release -p pixel-cli`).
+        /// The built binary is read from `target/<profile>/pixel`, with the
+        /// profile taken from this command's `--profile`/`--release` flags.
         #[arg(long, default_value = "cargo build --release -p pixel-cli")]
         build: String,
         /// Install path. Default: the binary running this command (unless
@@ -2866,6 +2868,47 @@ fn pixel_binaries_on_path(path_var: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     found
 }
 
+/// Cargo profile directory a build command writes to, from its own flags:
+/// `--profile <name>` / `--profile=<name>` wins, then `--release`
+/// (`release`), else cargo's default `debug`. `pixel upgrade` used to
+/// hardcode `target/release`, so a `--build` with another profile installed
+/// whatever stale binary sat there. A command that does not invoke cargo
+/// (a wrapper script, `/usr/bin/true` in tests) keeps the historical
+/// `release`: cargo's flag semantics do not apply to it.
+fn cargo_profile_dir(build: &str) -> String {
+    let mut args = build.split_whitespace().peekable();
+    let mut release = false;
+    let mut invokes_cargo = false;
+    while let Some(arg) = args.next() {
+        if arg == "cargo" || arg.ends_with("/cargo") {
+            invokes_cargo = true;
+        } else if arg == "--profile" {
+            if let Some(name) = args.next() {
+                return profile_dir_name(name);
+            }
+        } else if let Some(name) = arg.strip_prefix("--profile=") {
+            return profile_dir_name(name);
+        } else if arg == "--release" || arg == "-r" {
+            release = true;
+        }
+    }
+    if release || !invokes_cargo {
+        "release".into()
+    } else {
+        "debug".into()
+    }
+}
+
+/// Cargo maps the built-in `dev`/`test` profiles to `target/debug` and
+/// `bench` to `target/release`; custom profiles use their own name.
+fn profile_dir_name(name: &str) -> String {
+    match name {
+        "dev" | "test" => "debug".into(),
+        "bench" => "release".into(),
+        other => other.into(),
+    }
+}
+
 /// Decide where `pixel upgrade` installs.
 ///
 /// The historical fixed `~/.local/bin/pixel` was wrong on any machine whose
@@ -2929,6 +2972,47 @@ fn upgrade_shadowed_by(installed: &Path, path_var: Option<&std::ffi::OsStr>) -> 
 
 #[cfg(test)]
 mod upgrade_target_tests {
+    use super::cargo_profile_dir;
+
+    /// The install step must read the binary the build step wrote: a
+    /// `--build` on another profile (the `dev-release` iteration loop) used
+    /// to install the stale `target/release/pixel` without any error.
+    #[test]
+    fn profile_dir_follows_the_build_command() {
+        assert_eq!(
+            cargo_profile_dir("cargo build --release -p pixel-cli"),
+            "release"
+        );
+        assert_eq!(cargo_profile_dir("cargo build -r -p pixel-cli"), "release");
+        assert_eq!(cargo_profile_dir("cargo build -p pixel-cli"), "debug");
+        assert_eq!(
+            cargo_profile_dir("cargo build --profile dev-release -p pixel-cli"),
+            "dev-release"
+        );
+        assert_eq!(
+            cargo_profile_dir("cargo build --profile=dev-release"),
+            "dev-release"
+        );
+        // `--profile` beats `--release` whichever comes first, as in cargo.
+        assert_eq!(
+            cargo_profile_dir("cargo build --release --profile dev-release"),
+            "dev-release"
+        );
+        assert_eq!(cargo_profile_dir("cargo build --profile dev"), "debug");
+        assert_eq!(cargo_profile_dir("cargo build --profile bench"), "release");
+        assert_eq!(
+            cargo_profile_dir("~/.cargo/bin/cargo build -p pixel-cli"),
+            "debug"
+        );
+        // Not a cargo invocation: no flag semantics, historical `release`
+        // (the upgrade CLI tests fake the build with `/usr/bin/true`).
+        assert_eq!(cargo_profile_dir("/usr/bin/true"), "release");
+        assert_eq!(cargo_profile_dir("./scripts/build.sh"), "release");
+        assert_eq!(
+            cargo_profile_dir("./scripts/build.sh --profile fast"),
+            "fast"
+        );
+    }
     use super::*;
 
     fn sandbox(tag: &str) -> PathBuf {
@@ -4438,11 +4522,12 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             if !status.success() {
                 return Err(format!("build exited with status {status}"));
             }
-            // 2. Find the built binary (target/release/pixel relative to cwd).
+            // 2. Find the built binary (target/<profile>/pixel relative to
+            //    cwd, profile taken from the build command's own flags).
             let src = std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .join("target")
-                .join("release")
+                .join(cargo_profile_dir(&build))
                 .join("pixel");
             if !src.is_file() {
                 return Err(format!("built binary not found at {}", src.display()));
