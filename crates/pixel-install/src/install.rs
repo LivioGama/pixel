@@ -293,7 +293,14 @@ pub(crate) fn shell_profile_for(shell: &str, home: &Path) -> (ShellKind, PathBuf
             ShellKind::Fish,
             fish_config_dir(home).join("conf.d").join(FISH_DROPIN),
         ),
-        ShellKind::Posix if shell.contains("bash") => (ShellKind::Posix, home.join(".bashrc")),
+        ShellKind::Posix
+            if shell
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case("bash")) =>
+        {
+            (ShellKind::Posix, home.join(".bashrc"))
+        }
         ShellKind::Posix => (ShellKind::Posix, home.join(".zshrc")),
     }
 }

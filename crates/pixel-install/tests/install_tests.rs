@@ -1325,3 +1325,19 @@ fn a_shell_path_that_merely_contains_fish_is_not_treated_as_fish() {
         "a path containing 'fish' is not a fish shell"
     );
 }
+
+#[test]
+fn a_shell_path_that_merely_contains_bash_is_not_treated_as_bash() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, "/home/bashful/bin/zsh");
+
+    assert!(
+        home.join(".zshrc").is_file(),
+        "the shell's executable name is zsh — the block belongs in ~/.zshrc"
+    );
+    assert!(
+        !home.join(".bashrc").exists(),
+        "a path containing 'bash' is not a bash shell"
+    );
+}
