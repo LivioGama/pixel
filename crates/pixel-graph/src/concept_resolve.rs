@@ -569,8 +569,10 @@ fn finish(
     // Add that evidence only when every concept candidate has at most one
     // query-word match: filename evidence is a bounded recovery for sparse
     // lexical results, never a way to displace stronger concept content.
+    let mut filename_capped = false;
     if tier == Tier::T2 {
-        let filename_matches = weak_filename_matches(store, phrase, by_id.values())?;
+        let (filename_matches, capped) = weak_filename_matches(store, phrase, by_id.values())?;
+        filename_capped = capped;
         let filename_by_path: HashMap<String, (u64, ConceptMatch)> = filename_matches
             .into_iter()
             .map(|(id, m)| (m.path.clone(), (id, m)))
@@ -617,17 +619,28 @@ fn finish(
     ordered.truncate(limit);
 
     let index_state = index_state(store)?;
-    let basis = if let Some(scan_cap) = scan_cap {
-        format!(
+    let scan_capped = scan_cap.is_some() || filename_capped;
+    let basis = match (scan_cap, filename_capped) {
+        (Some(scan_cap), true) => format!(
+            "tier {} (concept index); candidate scan capped at {scan_cap} rows and filename fallback \
+             capped at {FILENAME_CANDIDATE_CAP} candidates — unscanned rows or filenames may contain \
+             better matches",
+            tier.as_str()
+        ),
+        (Some(scan_cap), false) => format!(
             "tier {} (concept index); candidate scan capped at {scan_cap} rows — unscanned rows \
              may contain better matches",
             tier.as_str()
-        )
-    } else {
-        format!(
+        ),
+        (None, true) => format!(
+            "tier {} (concept index); filename fallback capped at {FILENAME_CANDIDATE_CAP} candidates \
+             — unscanned filenames may contain better matches",
+            tier.as_str()
+        ),
+        (None, false) => format!(
             "tier {} (concept index, scanned to completion)",
             tier.as_str()
-        )
+        ),
     };
     Ok(ResolveOutcome {
         confidence,
@@ -636,7 +649,7 @@ fn finish(
         inputs_digest: inputs_digest(phrase, &index_state),
         index_state,
         tiers_attempted,
-        scan_capped: scan_cap.is_some(),
+        scan_capped,
         basis,
     })
 }
@@ -649,10 +662,10 @@ fn weak_filename_matches<'a>(
     store: &GraphStore,
     phrase: &str,
     current: impl IntoIterator<Item = &'a ConceptMatch>,
-) -> Result<Vec<(u64, ConceptMatch)>, StoreError> {
+) -> Result<(Vec<(u64, ConceptMatch)>, bool), StoreError> {
     let qwords = concept_words(&normalize(phrase));
     if qwords.len() < 2 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
 
     let current: Vec<&ConceptMatch> = current.into_iter().collect();
@@ -660,7 +673,7 @@ fn weak_filename_matches<'a>(
         .iter()
         .any(|m| 2 * match_word_count(&m.norm, &qwords) > qwords.len())
     {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
     let mut matches = Vec::new();
     let mut files = store.files()?;
@@ -711,7 +724,8 @@ fn weak_filename_matches<'a>(
             break;
         }
     }
-    Ok(matches)
+    let capped = matches.len() >= FILENAME_CANDIDATE_CAP;
+    Ok((matches, capped))
 }
 
 fn match_word_count(norm: &str, qwords: &[String]) -> usize {
@@ -1649,6 +1663,40 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains("filename component")),
             "filename evidence must be explicit: {out:?}"
+        );
+    }
+
+    #[test]
+    fn filename_fallback_cap_marks_resolve_outcome_degraded() {
+        let mut store = store();
+        for index in 0..=FILENAME_CANDIDATE_CAP {
+            add_file(&mut store, &format!("src/a{index:04}_impact.rs"));
+        }
+        let incidental = add_file(&mut store, "src/incidental.rs");
+        store
+            .insert_concept(
+                incidental,
+                ConceptKind::String,
+                "impact walks method-to-method",
+                "impact walks method to method",
+                "",
+                1,
+                1,
+                None,
+            )
+            .unwrap();
+
+        let out = resolve(
+            &store,
+            &["callers", "callees", "impact", "trace", "reachability"].join(" "),
+            &ResolveOptions::default(),
+        )
+        .unwrap();
+
+        assert!(out.scan_capped, "filename cap must be reported: {out:?}");
+        assert!(
+            out.basis.contains("filename fallback capped"),
+            "filename cap provenance must be visible: {out:?}"
         );
     }
 
