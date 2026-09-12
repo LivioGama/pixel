@@ -30,15 +30,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl tools (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools perl make
-
+      # Prebuilt binary instead of `cargo install cross`. cross compiles inside
+      # its own Docker image (musl toolchain included), so no host packages.
       - name: Install cross (Linux musl)
         if: runner.os == 'Linux'
-        run: cargo install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
       # fastembed (ONNX) has no musl build; model2vec is pure Rust and does,
       # so the Linux binaries keep a working semantic channel.
