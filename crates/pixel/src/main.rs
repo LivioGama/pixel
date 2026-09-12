@@ -4794,6 +4794,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     max_turns,
                     max_budget_usd,
                     system_prompt_file: None,
+                    subagent_prompt_file: None,
                 };
                 let record = task_scheduler::start(&root, &task_id, &candidate_id, &config)?;
                 print_data(
@@ -4844,6 +4845,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     max_turns,
                     max_budget_usd,
                     system_prompt_file: None,
+                    subagent_prompt_file: None,
                 };
                 let records = task_scheduler::start_race(&root, &task_id, &candidate_ids, &config)?;
                 print_data(

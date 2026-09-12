@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `pixel install` deploys a second, short (under 2 KB) prompt to `~/.local/share/pixel/subagent-prompt.md` and the `claude` shell wrapper passes it with `--append-subagent-system-prompt-file` whenever `-p`/`--print` is among the arguments (bash, zsh and fish). Claude Code sub-agents receive neither the session's `--append-system-prompt-file` nor its history, and honour the sub-agent flag in print mode only. `pixel doctor` gains an `install.subagent-prompt` check and `pixel uninstall` removes the file. Task workers accept a matching `subagent_prompt_file` option.
+
 ### Fixed
 - `pixel publish --files <path>` (and `ship`) no longer fails with `git add: pathspec '<path>' did not match any files` when `<path>` is a deletion already staged with `git rm`. Paths absent from both the worktree and the index skip the `git add` step and are committed by the pathspec-scoped `git commit`; a path git has never known is still rejected, and no commit is created.
 

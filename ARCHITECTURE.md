@@ -176,11 +176,15 @@ envelope talks to the daemon socket directly.
 
 ## Agent integration
 
-`pixel install` deliberately deploys the bundled `agent-prompt.md` and managed
-shell functions for Claude Code and Codex. It preserves agent settings and rule
-files, and does not register provider hooks or activate routing. The shell functions
-pass the prompt on a subsequent launch through the loaded profile; already-running
-agents and direct executable launches do not inherit it automatically.
+`pixel install` deliberately deploys the bundled `agent-prompt.md`, the short
+`subagent-prompt.md`, and managed shell functions for Claude Code and Codex. It
+preserves agent settings and rule files, and does not register provider hooks or
+activate routing. The shell functions pass the prompt on a subsequent launch
+through the loaded profile; already-running agents and direct executable launches
+do not inherit it automatically. The `claude` function adds
+`--append-subagent-system-prompt-file` only when `-p`/`--print` is among the
+arguments: Claude Code sub-agents do not see the session prompt, and the flag is
+honoured in print mode only.
 
 Existing hook entry points remain implemented, separately from active installation:
 
