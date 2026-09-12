@@ -5,9 +5,19 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    groups:
+      # One PR per week for all semver-compatible bumps (patch + minor).
+      # Major bumps stay individual PRs: they can carry breaking changes
+      # and deserve their own review.
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      # Action bumps are low-risk and reviewed together.
+      github-actions:
+        patterns: ["*"]
