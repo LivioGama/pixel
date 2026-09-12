@@ -1,5 +1,7 @@
 # Project Rules
 
+Build, gates, PR format and the definition of done live in [CONTRIBUTING.md](CONTRIBUTING.md). Read it before the first edit; the loop below is the per-turn addendum to it.
+
 ## Reinstall and Reconfig After Each Implementation Turn
 
 After finishing any implementation turn in this repo (code edit + verify cycle):

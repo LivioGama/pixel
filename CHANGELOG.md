@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `CONTRIBUTING.md`: build, gates, test layout, op-adding checklist, commit/PR format and a definition-of-done checklist written for humans and coding agents. Linked from README, AGENTS.md and CLAUDE.md.
+
 ## [0.2.1] - 2026-09-12
 
 ### Added
