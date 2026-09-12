@@ -75,11 +75,11 @@ jobs:
       # so the Linux binaries keep a working semantic channel.
       - name: Build (Linux musl via cross, model2vec only)
         if: runner.os == 'Linux'
-        run: cross build --release --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
+        run: cross build --release --locked --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
 
       - name: Build (macOS native)
         if: runner.os == 'macOS'
-        run: cargo build --release --target ${{ matrix.target }} -p pixel-cli
+        run: cargo build --release --locked --target ${{ matrix.target }} -p pixel-cli
 
       - name: Package
         run: |
@@ -89,8 +89,7 @@ jobs:
           STAGING="pixel-${VERSION}-${TARGET}"
           mkdir -p "$STAGING/bin"
           cp "target/${TARGET}/release/pixel" "$STAGING/bin/"
-          cp README.md "$STAGING/" 2>/dev/null || true
-          cp LICENSE "$STAGING/" 2>/dev/null || true
+          cp README.md LICENSE "$STAGING/"
           tar czf "$ARCHIVE" "$STAGING"
           shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
 
