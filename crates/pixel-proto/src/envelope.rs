@@ -459,6 +459,23 @@ mod validate_tests {
     /// A wire line from an older or foreign producer goes through serde,
     /// not the constructors, so the deserialized path must be validated
     /// the same way.
+    // `unwrap_response` in the CLI reads the payload and the error message
+    // through these accessors: a success envelope must hand back its result
+    // untouched, a failure envelope must degrade to `Null` plus the daemon's
+    // message, and a malformed failure (no error) must still print something.
+    #[test]
+    fn value_accessors_expose_result_or_error() {
+        let ok = Envelope::success("inspect", json!({"head": "abc"}));
+        assert_eq!(ok.data(), &json!({"head": "abc"}));
+        assert_eq!(ok.error_message(), "unknown error");
+        assert_eq!(ok.into_data(), json!({"head": "abc"}));
+
+        let failed = Envelope::<serde_json::Value>::failure("inspect", err("no repo"));
+        assert_eq!(failed.data(), &serde_json::Value::Null);
+        assert_eq!(failed.error_message(), "no repo");
+        assert_eq!(failed.into_data(), serde_json::Value::Null);
+    }
+
     #[test]
     fn deserialized_wire_line_is_validated() {
         let line = r#"{"ok":true,"op":"ping","protocol":1,"result":null,"error":null}"#;

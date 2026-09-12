@@ -1,0 +1,72 @@
+name: Mutants
+
+# Mutation testing on the code a pull request touches. cargo-mutants rewrites
+# each changed function (return a default, flip an operator, drop a match
+# guard) and requires the crate's tests to fail. A mutant that survives means
+# the change is not covered by a test that can fail, which is a gate in
+# CONTRIBUTING.md ("Mutation testing"). Full-tree runs are a local,
+# per-crate activity; CI only pays for the diff.
+on:
+  pull_request:
+    paths:
+      - ".cargo/mutants.toml"
+      - ".github/workflows/mutants.yml"
+      - "Cargo.*"
+      - "crates/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  in-diff:
+    name: Mutants in diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      # Full history so the merge base with the target branch is available.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y perl make
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
+      # Three-dot diff: what this branch changed since it left the target
+      # branch, so mutants are generated only in code the PR authored.
+      - name: Diff against the target branch
+        run: git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
+
+      # --in-place: mutate the checkout itself instead of copying it (CI
+      # discards the tree). Exit codes: 0 all caught, 2 missed, 3 timeout,
+      # 4 baseline tests already failing. Missed and timeouts fail the job;
+      # GitHub annotations point at each surviving mutant.
+      - name: Run mutants in the diff
+        run: cargo mutants -vV --in-place --in-diff pr.diff --locked
+
+      - name: Upload mutants.out
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-out
+          path: mutants.out
+          if-no-files-found: ignore

@@ -121,6 +121,54 @@ mod tests {
         assert_eq!(result.plan[0].recipe, "locate.v1");
     }
 
+    // Every V1 phrasing must compile to exactly its recipe: an agent that
+    // types "show impact of X" must not be answered with a locate/scope
+    // ranking, and each alternative in a two-phrase intent must resolve on
+    // its own.
+    #[test]
+    fn each_auto_phrasing_resolves_to_its_recipe() {
+        let cases = [
+            (
+                "what files implement checkout",
+                "scope.v1",
+                &["targets"][..],
+            ),
+            ("show impact of compile_query", "impact.v1", &["impact"][..]),
+            (
+                "restore the login form",
+                "history_recovery.v1",
+                &["excavate"][..],
+            ),
+            (
+                "it was working before lunch",
+                "history_recovery.v1",
+                &["excavate"][..],
+            ),
+            ("status", "status.v1", &["inspect", "review", "changes"][..]),
+            (
+                "what changed",
+                "status.v1",
+                &["inspect", "review", "changes"][..],
+            ),
+        ];
+        for (intent, recipe, operations) in cases {
+            let result = compile_query(intent, QueryKind::Auto);
+            assert_eq!(result.status, QueryStatus::Resolved, "{intent}");
+            assert_eq!(result.plan.len(), 1, "{intent}");
+            assert_eq!(result.plan[0].recipe, recipe, "{intent}");
+            assert_eq!(result.plan[0].operations, operations, "{intent}");
+        }
+    }
+
+    #[test]
+    fn ambiguous_prose_is_ranked_not_resolved() {
+        let result = compile_query("  explain the login flow ", QueryKind::Auto);
+        assert_eq!(result.status, QueryStatus::Ranked);
+        assert_eq!(result.intent, "explain the login flow");
+        let recipes: Vec<&str> = result.plan.iter().map(|p| p.recipe.as_str()).collect();
+        assert_eq!(recipes, ["locate.v1", "scope.v1"]);
+    }
+
     #[test]
     fn explicit_kind_overrides_ambiguous_text() {
         let result = compile_query("explain login", QueryKind::Impact);

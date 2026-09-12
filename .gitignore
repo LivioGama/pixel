@@ -23,3 +23,6 @@ __pycache__/
 coverage*.txt
 *.lcov
 docs/pixel-line-ascii.ppm
+
+# cargo-mutants scratch output
+/mutants.out*
