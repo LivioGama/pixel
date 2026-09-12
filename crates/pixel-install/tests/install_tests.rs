@@ -1155,7 +1155,9 @@ fn fish_wrappers_are_written_in_fish_syntax_not_posix_syntax() {
     let block = fs::read_to_string(fish_dropin(home)).expect("fish drop-in");
 
     for required in [
-        "function claude; command claude --append-system-prompt-file",
+        "function claude\n",
+        "command claude --append-system-prompt-file",
+        "if contains -- -p $argv; or contains -- --print $argv",
         "function codex; command codex -c",
         "$argv; end",
     ] {
@@ -1339,5 +1341,295 @@ fn a_shell_path_that_merely_contains_bash_is_not_treated_as_bash() {
     assert!(
         !home.join(".bashrc").exists(),
         "a path containing 'bash' is not a bash shell"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// sub-agent prompt: `--append-subagent-system-prompt-file`
+//
+// Claude Code sub-agents receive neither the session's
+// `--append-system-prompt-file` nor its history, so the `claude` wrapper's
+// agent prompt never reaches them. Claude Code honours
+// `--append-subagent-system-prompt-file` in print mode only, and the same
+// wrapper fronts interactive sessions, so the flag is added exactly when
+// `-p`/`--print` is among the arguments. These tests pin the asset, the
+// argument-dependent flag in every supported shell, and the uninstall path.
+// ---------------------------------------------------------------------------
+
+const SUBAGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-subagent-prompt.md");
+
+fn subagent_prompt_path(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".local/share/pixel/subagent-prompt.md")
+}
+
+#[test]
+fn install_deploys_the_bundled_subagent_prompt_under_two_kilobytes() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, TEST_SHELL);
+
+    let deployed = fs::read_to_string(subagent_prompt_path(home))
+        .expect("subagent-prompt.md should be deployed next to agent-prompt.md");
+    assert_eq!(
+        deployed, SUBAGENT_PROMPT_ASSET,
+        "the deployed file must be the bundled asset, byte for byte"
+    );
+    // A long sub-agent prompt loses to a long agent body; the whole point of
+    // a separate file is that it stays short enough to be obeyed.
+    assert!(
+        deployed.len() <= 2048,
+        "subagent-prompt.md must stay under 2 KB, is {} bytes",
+        deployed.len()
+    );
+    for stale in ["--callers", "--callees", "~/.local/bin/pixel", "MANDATORY"] {
+        assert!(
+            !deployed.contains(stale),
+            "sub-agent prompt must not carry syntax the CLI rejects or an install path that is often wrong: {stale}"
+        );
+    }
+}
+
+#[test]
+fn dry_run_does_not_write_the_subagent_prompt() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let report = install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        dry_run: true,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .expect("dry-run install");
+    assert!(report.dry_run);
+    assert!(
+        !subagent_prompt_path(home).exists(),
+        "dry-run must not deploy subagent-prompt.md"
+    );
+    let step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "agent-prompt")
+        .expect("agent-prompt step");
+    assert!(
+        step.summary.contains("subagent-prompt.md"),
+        "the dry-run report must announce the sub-agent prompt it would deploy: {}",
+        step.summary
+    );
+}
+
+/// Source the installed block in the shell it was written for, call the
+/// `claude` wrapper through a mock that echoes its argv, and check which
+/// prompt files it received. Runs in every shell present on the machine.
+#[test]
+#[cfg(unix)]
+fn the_subagent_prompt_flag_is_passed_in_print_mode_only() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    type ProfileOf = fn(&std::path::Path) -> std::path::PathBuf;
+    let cases: [(&str, ProfileOf); 3] = [
+        ("bash", |home| home.join(".bashrc")),
+        ("zsh", |home| home.join(".zshrc")),
+        ("fish", fish_dropin),
+    ];
+    let mock = "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n";
+    let mut checked = 0;
+    for (shell, profile_of) in cases {
+        let dir = TempDir::new().expect("tempdir");
+        let home = dir.path();
+        install_for_shell(home, shell);
+        let mock_path = home.join("claude");
+        fs::write(&mock_path, mock).unwrap();
+        fs::set_permissions(&mock_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let run = |args: &[&str]| -> Option<Vec<String>> {
+            let quoted: Vec<String> = args.iter().map(|a| format!("'{a}'")).collect();
+            let script = format!(
+                "source '{}'; claude {}",
+                profile_of(home).display(),
+                quoted.join(" ")
+            );
+            let output = Command::new(shell)
+                .arg("-c")
+                .arg(script)
+                .env("HOME", home)
+                .env("PATH", format!("{}:/usr/bin:/bin", home.display()))
+                .output()
+                .ok()?;
+            assert!(
+                output.status.success(),
+                "{shell}: wrapper failed for {args:?}:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Some(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .lines()
+                    .map(str::to_string)
+                    .collect(),
+            )
+        };
+        // Absent from this machine — the other shells carry the assertion.
+        let Some(interactive) = run(&["real task"]) else {
+            continue;
+        };
+        checked += 1;
+        let agent_prompt = home
+            .join(".local/share/pixel/agent-prompt.md")
+            .display()
+            .to_string();
+        let subagent_prompt = subagent_prompt_path(home).display().to_string();
+
+        assert!(
+            interactive
+                .windows(2)
+                .any(|w| w == ["--append-system-prompt-file", agent_prompt.as_str()]),
+            "{shell}: interactive call must still carry the agent prompt: {interactive:?}"
+        );
+        assert!(
+            !interactive
+                .iter()
+                .any(|a| a == "--append-subagent-system-prompt-file"),
+            "{shell}: Claude Code ignores --append-subagent-system-prompt-file outside print mode, \
+             so an interactive call must not carry it: {interactive:?}"
+        );
+        assert_eq!(
+            interactive.last().map(String::as_str),
+            Some("real task"),
+            "{shell}: user arguments must survive untouched: {interactive:?}"
+        );
+
+        for print_flag in ["-p", "--print"] {
+            let print = run(&["--model", "sonnet", print_flag, "real task"]).unwrap();
+            assert!(
+                print
+                    .windows(2)
+                    .any(|w| w == ["--append-system-prompt-file", agent_prompt.as_str()]),
+                "{shell}: print-mode call must carry the agent prompt: {print:?}"
+            );
+            assert!(
+                print.windows(2).any(|w| w
+                    == [
+                        "--append-subagent-system-prompt-file",
+                        subagent_prompt.as_str()
+                    ]),
+                "{shell}: `{print_flag}` anywhere in the arguments must add the sub-agent prompt: {print:?}"
+            );
+            assert_eq!(
+                print
+                    .iter()
+                    .filter(|a| *a == "--append-subagent-system-prompt-file")
+                    .count(),
+                1,
+                "{shell}: the flag must be added exactly once: {print:?}"
+            );
+            assert_eq!(
+                &print[print.len() - 4..],
+                ["--model", "sonnet", print_flag, "real task"],
+                "{shell}: user arguments must survive in order: {print:?}"
+            );
+        }
+    }
+    assert!(
+        checked > 0,
+        "no shell was available to run the wrapper in — the assertions above never ran"
+    );
+}
+
+#[test]
+fn reinstall_keeps_one_managed_block_with_one_subagent_flag() {
+    for shell in [TEST_SHELL, FISH_SHELL] {
+        let dir = TempDir::new().expect("tempdir");
+        let home = dir.path();
+        install_for_shell(home, shell);
+        install_for_shell(home, shell);
+        install_for_shell(home, shell);
+        let profile = match shell {
+            FISH_SHELL => fish_dropin(home),
+            _ => shell_profile_path(home),
+        };
+        let content = fs::read_to_string(&profile).expect("profile");
+        assert_eq!(
+            content.matches(PIXEL_MANAGED_BEGIN).count(),
+            1,
+            "{shell}: re-installs must replace the managed block, not stack it:\n{content}"
+        );
+        assert_eq!(
+            content
+                .matches("--append-subagent-system-prompt-file")
+                .count(),
+            1,
+            "{shell}: the block carries the sub-agent flag on exactly one branch:\n{content}"
+        );
+        assert!(
+            content.contains("$HOME/.local/share/pixel/subagent-prompt.md"),
+            "{shell}: the flag must point at the deployed sub-agent prompt:\n{content}"
+        );
+    }
+}
+
+#[test]
+fn doctor_flags_a_missing_or_stale_subagent_prompt() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, TEST_SHELL);
+    let check = |home: &std::path::Path| {
+        doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            shell: Some(TEST_SHELL.into()),
+            ..Default::default()
+        })
+        .expect("doctor")
+        .checks
+        .into_iter()
+        .find(|c| c.id == "install.subagent-prompt")
+        .expect("install.subagent-prompt check")
+        .status
+    };
+    assert_eq!(
+        check(home),
+        pixel_install::doctor::CheckStatus::Green,
+        "freshly installed sub-agent prompt must be green"
+    );
+    fs::write(subagent_prompt_path(home), "pixel uses X --callers\n").unwrap();
+    assert_eq!(
+        check(home),
+        pixel_install::doctor::CheckStatus::Red,
+        "a sub-agent prompt that differs from the bundled asset is stale: every print-mode \
+         sub-agent would be taught it"
+    );
+    fs::remove_file(subagent_prompt_path(home)).unwrap();
+    assert_eq!(
+        check(home),
+        pixel_install::doctor::CheckStatus::Red,
+        "the wrapper passes a path that no longer exists"
+    );
+}
+
+#[test]
+fn uninstall_removes_the_subagent_prompt() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, TEST_SHELL);
+    assert!(
+        subagent_prompt_path(home).is_file(),
+        "precondition: sub-agent prompt deployed"
+    );
+
+    uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        binary_path: None,
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .expect("uninstall");
+
+    assert!(
+        !subagent_prompt_path(home).exists(),
+        "uninstall must remove subagent-prompt.md with the wrapper that referenced it"
+    );
+    assert!(
+        !home.join(".local/share/pixel/agent-prompt.md").exists(),
+        "agent-prompt.md is removed alongside"
     );
 }

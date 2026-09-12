@@ -811,9 +811,12 @@ fn remove_rule_source(home: &Path, dry_run: bool) -> Result<InstallStep> {
 
 fn remove_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let path = home.join(".local/share/pixel/agent-prompt.md");
+    let subagent_path = home
+        .join(".local/share/pixel")
+        .join(install::SUBAGENT_PROMPT_FILE);
     let pi_path = home.join(".pi/agent/APPEND_SYSTEM.md");
     let existed = path.is_file();
-    if !existed && !pi_path.is_file() {
+    if !existed && !subagent_path.is_file() && !pi_path.is_file() {
         return Ok(InstallStep {
             id: "agent-prompt".into(),
             status: CheckStatus::Green,
@@ -823,13 +826,22 @@ fn remove_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     }
     if !dry_run {
         let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&subagent_path);
         let _ = fs::remove_file(&pi_path);
     }
     Ok(InstallStep {
         id: "agent-prompt".into(),
         status: CheckStatus::Green,
-        summary: install::dry_run_summary(dry_run, "removed agent-prompt.md"),
-        detail: Some(format!("path={} pi={}", path.display(), pi_path.display())),
+        summary: install::dry_run_summary(
+            dry_run,
+            "removed agent-prompt.md and subagent-prompt.md",
+        ),
+        detail: Some(format!(
+            "path={} subagent={} pi={}",
+            path.display(),
+            subagent_path.display(),
+            pi_path.display()
+        )),
     })
 }
 

@@ -158,6 +158,39 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     ));
 
+    checks.push(check(
+        "install.subagent-prompt",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            let path = home
+                .join(".local/share/pixel")
+                .join(install::SUBAGENT_PROMPT_FILE);
+            if !path.is_file() {
+                return Err(format!(
+                    "{} not deployed — run `pixel install`",
+                    install::SUBAGENT_PROMPT_FILE
+                ));
+            }
+            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            // Byte equality with the bundled asset: the wrapper hands this
+            // file to every print-mode sub-agent, so a stale copy silently
+            // teaches them syntax this binary may no longer accept.
+            if content != install::SUBAGENT_PROMPT_ASSET {
+                return Err(format!(
+                    "{} is stale — run `pixel install` to update",
+                    install::SUBAGENT_PROMPT_FILE
+                ));
+            }
+            Ok(DoctorCheckDetail {
+                summary: format!(
+                    "{} deployed ({} bytes)",
+                    install::SUBAGENT_PROMPT_FILE,
+                    content.len()
+                ),
+                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+            })
+        },
+    ));
+
     let shell_override = options.shell.clone();
     checks.push(check(
         "install.shell-wrappers",
