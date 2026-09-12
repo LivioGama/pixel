@@ -21,6 +21,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] New behaviour has a test that fails if the behaviour is removed.
 - [ ] `CHANGELOG.md` has an entry under `## [Unreleased]` (skip for pure refactors and CI/deps chores).
 - [ ] The commit message follows the Conventional Commits format below.
+- [ ] The branch was created from `develop` and the pull request targets `develop`, not `main`.
 - [ ] No file under `.pixel/`, `target/`, `.claude/`, `.codex/`, `.cursor/` is staged (they are gitignored; do not force-add).
 - [ ] If a command or op was added or renamed: `ARCHITECTURE.md`, `pixel --help` output, and the agent prompt in `crates/pixel-install/assets/pixel-agent-prompt.md` agree with each other.
 - [ ] If `crates/` changed: the binary was rebuilt and reinstalled, and `pixel doctor .` is green (see "Local install loop").
@@ -171,6 +172,29 @@ Pixel is dogfooded on itself. When an agent works in this repository:
 - Do not commit `.pixel/`, `.claude/`, `.codex/`, `.cursor/`, `.pi/`,
   `.devin/`. They are per-worktree cache or tool-local config.
 
+## Branches: base every change on `develop`
+
+`main` only receives releases. All feature, fix and docs work branches off
+`develop` and the pull request targets `develop`:
+
+```bash
+git fetch upstream develop            # or origin, if you are not on a fork
+git switch -c <type>/<short-name> upstream/develop
+# ... work, gates, commit ...
+gh pr create --base develop
+```
+
+| Branch | Base | Merged into |
+| --- | --- | --- |
+| `feat/*`, `fix/*`, `docs/*`, `chore/*` | `develop` | `develop` |
+| `release-*` | `develop` | `main` (maintainers, then tagged) |
+| `hotfix-*` | `main` | `main`, then back into `develop` |
+
+A pull request opened against `main` from any other branch is retargeted to
+`develop` automatically by `.github/workflows/route-prs-to-develop.yml`.
+Do not rely on it: a branch cut from `main` will lag `develop` and can
+conflict on `CHANGELOG.md`. Rebase onto `develop` before opening the PR.
+
 ## Commits and pull requests
 
 Commit subjects follow Conventional Commits, matching the existing history:
@@ -239,6 +263,7 @@ the PR title and expect a slower review.
   contract test.
 - Documentation (README, ARCHITECTURE, agent prompt, `--help`) that no
   longer matches the code.
+- A pull request based on `main` instead of `develop`, or a branch that was not rebased onto `develop`.
 - Merge commits on a feature branch. History is linear; rebase instead.
 - Personal emails, hostnames, or paths in code or fixtures. Use
   `@example.com` and temp dirs.
