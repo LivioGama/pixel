@@ -85,6 +85,11 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         remove_rule_source(&home, dry_run)?,
         // 7. Remove the pixel agent system prompt.
         remove_agent_prompt(&home, dry_run)?,
+        // 7b. Take the pixel block out of Codex's developer_instructions.
+        crate::codex_config::remove_developer_instructions(
+            &crate::codex_config::codex_home(&home, options.home.is_some()),
+            dry_run,
+        )?,
         // 8. Remove the pixel binary.
         remove_binary(&binary_path, dry_run)?,
     ];

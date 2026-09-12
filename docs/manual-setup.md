@@ -2,14 +2,16 @@
 
 Prefer to control your own setup? You don't need `pixel install`.
 
-`pixel install` does three things, and you can do all of them by hand:
+`pixel install` does four things, and you can do all of them by hand:
 
 1. **Deploy the agent system prompt** to `~/.local/share/pixel/agent-prompt.md`.
 2. **Deploy the sub-agent prompt** to `~/.local/share/pixel/subagent-prompt.md`
    (a short version for Claude Code sub-agents, which see neither the session
    prompt nor its history).
-3. **Wrap `claude` / `codex`** in your shell profile so every invocation includes
+3. **Wrap `claude`** in your shell profile so every invocation includes
    those prompts automatically.
+4. **Put the prompt into Codex's `config.toml`** as `developer_instructions`,
+   so every Codex front end (CLI, desktop app, extension, sub-agents) gets it.
 
 ## 1. Install the binary
 
@@ -95,8 +97,8 @@ function claude
 end
 ```
 
-`pixel install --shell fish` writes this function, plus the `codex` wrapper,
-inside a `# >>> pixel-managed >>>` block in `~/.config/fish/conf.d/pixel.fish`.
+`pixel install --shell fish` writes this function inside a
+`# >>> pixel-managed >>>` block in `~/.config/fish/conf.d/pixel.fish`.
 Both variants also treat a short-flag cluster containing `p` (`-pc`, `-cp`)
 as print mode, since Claude Code splits those.
 
@@ -120,35 +122,37 @@ affected by the sub-agent flag.
 
 ### Codex
 
-Codex takes the prompt through the `developer_instructions` config key, which
-is appended to its developer message and leaves its own system prompt in
-place. (`model_instructions_file` looks similar but *replaces* Codex's system
-prompt: it becomes the base instructions, and the model loses its native
-protocol and personality.) Codex has no file-backed variant of the key, so
-the file is read at call time and passed inline:
+Codex takes the prompt through the `developer_instructions` key of
+`~/.codex/config.toml` (`$CODEX_HOME/config.toml` when that variable is set).
+The key is appended to Codex's developer message and leaves its own system
+prompt in place; `model_instructions_file` looks similar but *replaces* that
+system prompt (it becomes the base instructions, and the model loses its
+native protocol and personality). A config key, unlike a shell function,
+reaches the desktop app's bundled binary, the VS Code extension, scripts
+that call the binary by path, and `spawn_agent` sub-agents (which inherit it
+unless a role overrides it).
 
-```bash
-codex -c "developer_instructions=$(cat "$HOME/.local/share/pixel/agent-prompt.md")"
+Codex has no file-backed variant of the key, so the prompt is embedded as a
+TOML literal multi-line string, between two marker lines. Text you keep
+outside the markers survives a re-install; `pixel install` refreshes only the
+block, and `pixel uninstall` removes only the block (or the key, when nothing
+else was in it):
+
+```toml
+developer_instructions = '''
+Your own instructions, if any.
+
+<!-- pixel:managed:begin -->
+# Pixel Retrieval Layer — Mandatory Agent Protocol
+... the content of ~/.local/share/pixel/agent-prompt.md ...
+<!-- pixel:managed:end -->
+'''
 ```
 
-Or as a shell function in `~/.bashrc` / `~/.zshrc`:
-
-```bash
-codex() { command codex -c "developer_instructions=$(cat "$HOME/.local/share/pixel/agent-prompt.md")" "$@"; }
-```
-
-For fish, in `~/.config/fish/conf.d/pixel.fish` (`string collect` keeps the
-multi-line file as one argument; a bare `(cat ...)` would split it per line):
-
-```fish
-function codex; command codex -c "developer_instructions="(cat "$HOME/.local/share/pixel/agent-prompt.md" | string collect) $argv; end
-```
-
-`pixel install` writes exactly these functions. The prompt travels as one
-`execve` argument: Linux caps a single argument at 128 KiB
-(`MAX_ARG_STRLEN`), and the ~12 KB asset stays well below it. Sub-agents
-started with `spawn_agent` inherit `developer_instructions` from the parent
-configuration unless a role overrides it.
+To do it by hand, paste `agent-prompt.md` between the markers. Codex reads the
+file at session start, so a running session keeps the prompt it started with.
+For a one-off session with different instructions, the CLI override wins:
+`codex -c developer_instructions="..."`.
 
 ### Pi
 
@@ -175,13 +179,15 @@ of the prompt in one command.
 
 ## Uninstall
 
-Remove the prompt file, the Pi copy, and any shell functions you added:
+Remove the prompt files, the Pi copy, the `claude` shell function and the
+Codex block:
 
 ```bash
 rm -f ~/.local/share/pixel/agent-prompt.md
 rm -f ~/.local/share/pixel/subagent-prompt.md
 rm -f ~/.pi/agent/APPEND_SYSTEM.md
-# then remove the claude()/codex() functions from your shell profile
+# then remove the claude() function from your shell profile and the
+# pixel block from developer_instructions in ~/.codex/config.toml
 ```
 
 Or just run `pixel uninstall`.

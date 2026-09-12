@@ -101,7 +101,6 @@ fn installed_metrics_guidance_reaches_wrapped_agents_without_rewriting_streams()
     let mock = r#"#!/bin/sh
 case "$1" in
   --append-system-prompt-file) prompt="$(cat "$2")" || exit 82 ;;
-  -c) prompt="${2#developer_instructions=}"; test "$prompt" != "$2" || exit 82 ;;
   *) exit 81 ;;
 esac
 printf '%s\n' "$prompt" | grep -q '## LIVE OPERATION METRICS' || exit 83
@@ -111,7 +110,15 @@ printf '%s\n' '{"result":"fixture"}'
 printf '%s\n' '🟩 Pixel · impact · 12.4 ms · ~820 output tokens · ~3100 tokens saved (workflow estimate) · ~3.99 s saved (sequential estimate) · id=fixture-invocation' >&2
 exit 7
 "#;
-    for agent in ["claude", "codex"] {
+    // Codex reads the prompt from config.toml itself: the value the file
+    // carries is what its developer message gets.
+    let codex_value = codex_developer_instructions(home).expect("developer_instructions written");
+    assert!(
+        codex_value.contains("## LIVE OPERATION METRICS"),
+        "the relay contract must reach codex through config.toml"
+    );
+    let agent = "claude";
+    {
         let executable = home.join(agent);
         fs::write(&executable, mock).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
@@ -600,8 +607,12 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
         "shell profile should define the claude() wrapper"
     );
     assert!(
-        profile_content.contains("codex()"),
-        "shell profile should define the codex() wrapper"
+        !profile_content.contains("codex"),
+        "codex is wired through config.toml, not a shell function:\n{profile_content}"
+    );
+    assert!(
+        codex_developer_instructions(home).is_some_and(|v| v.contains("MANDATORY WORKFLOW")),
+        "a fresh install must write the agent prompt into ~/.codex/config.toml"
     );
 }
 
@@ -1193,16 +1204,14 @@ fn fish_wrappers_are_written_in_fish_syntax_not_posix_syntax() {
         "function claude\n",
         "command claude --append-system-prompt-file",
         "if contains -- --print $argv; or string match -qr -- '^-[^-]*p' $argv",
-        "function codex; command codex -c",
-        "| string collect) $argv; end",
-        "$argv; end",
+        "$argv\n",
     ] {
         assert!(
             block.contains(required),
             "fish block must define functions in fish syntax, missing {required:?}:\n{block}"
         );
     }
-    for forbidden in ["claude()", "codex()", "\"$@\""] {
+    for forbidden in ["claude()", "codex()", "function codex", "\"$@\""] {
         assert!(
             !block.contains(forbidden),
             "POSIX construct {forbidden:?} is a parse error in fish:\n{block}"
@@ -1586,149 +1595,312 @@ fn the_subagent_prompt_flag_is_passed_in_print_mode_only() {
     }
 }
 
-/// Codex has no file-backed `developer_instructions`, so the wrapper reads the
-/// prompt at call time and passes it inline. Every byte must survive the
-/// shell (quotes, backslashes, `$`, backticks, `#`, blank lines, ~12 KB) and
-/// arrive as ONE `-c` argument: a split or an expansion would hand Codex a
-/// truncated protocol or a spurious extra argument. Runs the installed block
-/// in every shell found on the caller's PATH; a shell that cannot be spawned
-/// is skipped.
-#[test]
-#[cfg(unix)]
-fn the_codex_wrapper_passes_the_agent_prompt_verbatim_as_developer_instructions() {
-    use std::os::unix::fs::PermissionsExt;
-    use std::process::Command;
-
-    type ProfileOf = fn(&std::path::Path) -> std::path::PathBuf;
-    let cases: [(&str, ProfileOf); 3] = [
-        ("bash", |home| home.join(".bashrc")),
-        ("zsh", |home| home.join(".zshrc")),
-        ("fish", fish_dropin),
-    ];
-    // A fake `codex` that records its argv: one file per argument, so a
-    // prompt split into several arguments shows up as extra files.
-    let mock = "#!/bin/sh\nn=0\nfor a in \"$@\"; do n=$((n+1)); printf '%s' \"$a\" > \"$CODEX_ARGV_DIR/$n\"; done\n";
-    // Every character class that a shell could mangle between `cat` and
-    // the callee, plus a trailing run of newlines (command substitution
-    // strips those, and only those).
-    let tricky = "# heading with \"double\" and 'single' quotes\n\
-                  \\backslash \\\\double $HOME ${VAR} $(rm -rf /) `backtick` #hash %s\n\
-                  \n\
-                  \x20 indented; semicolon | pipe & ampersand > redirect * glob ? {a,b}\n\
-                  tab\there — unicode 🟩 Pixel ·\n\
-                  last line without a newline\n\n\n";
-    let mut checked = 0;
-    for (shell, profile_of) in cases {
-        let dir = TempDir::new().expect("tempdir");
-        let home = dir.path();
-        install_for_shell(home, shell);
-        let mock_path = home.join("codex");
-        fs::write(&mock_path, mock).unwrap();
-        fs::set_permissions(&mock_path, fs::Permissions::from_mode(0o755)).unwrap();
-        let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
-        let deployed = fs::read_to_string(&prompt_path).unwrap();
-
-        let run = |prompt: &str, args: &[&str]| -> Option<Vec<String>> {
-            fs::write(&prompt_path, prompt).unwrap();
-            let argv_dir = TempDir::new().unwrap();
-            let quoted: Vec<String> = args.iter().map(|a| format!("'{a}'")).collect();
-            let script = format!(
-                "source '{}'; codex {}",
-                profile_of(home).display(),
-                quoted.join(" ")
-            );
-            let inherited = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
-            let output = Command::new(shell)
-                .arg("-c")
-                .arg(script)
-                .env("HOME", home)
-                .env("PATH", format!("{}:{inherited}", home.display()))
-                .env("CODEX_ARGV_DIR", argv_dir.path())
-                .output()
-                .ok()?;
-            assert!(
-                output.status.success(),
-                "{shell}: wrapper failed for {args:?}:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let mut argv = Vec::new();
-            for n in 1.. {
-                let Ok(arg) = fs::read_to_string(argv_dir.path().join(n.to_string())) else {
-                    break;
-                };
-                argv.push(arg);
-            }
-            Some(argv)
-        };
-        // Absent from this machine — the other shells carry the assertion.
-        let Some(argv) = run(&deployed, &["exec", "real task with spaces"]) else {
-            continue;
-        };
-        checked += 1;
-        assert_eq!(
-            argv,
-            [
-                "-c",
-                &format!("developer_instructions={}", deployed.trim_end_matches('\n')),
-                "exec",
-                "real task with spaces",
-            ],
-            "{shell}: the deployed prompt must reach codex as one -c value, \
-             followed by the user's arguments in order"
-        );
-        let argv = run(tricky, &["exec"]).unwrap();
-        assert_eq!(
-            argv,
-            [
-                "-c",
-                &format!("developer_instructions={}", tricky.trim_end_matches('\n')),
-                "exec",
-            ],
-            "{shell}: quotes, backslashes, `$`, backticks, `#`, globs and blank \
-             lines must survive byte for byte"
-        );
-    }
-    assert!(
-        checked > 0,
-        "no shell was available to run the wrapper in — the assertions above never ran"
-    );
-    if Command::new("fish").arg("--version").output().is_ok() {
-        assert_eq!(
-            checked, 3,
-            "fish is on PATH but the fish block was not exercised"
-        );
-    }
+fn codex_config_path(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".codex/config.toml")
 }
 
-/// The prompt travels as a single `execve` argument. Linux caps one argument
-/// at `MAX_ARG_STRLEN` = 32 pages = 128 KiB (macOS has no per-argument cap,
-/// only the 1 MiB `ARG_MAX` total); past it `codex` fails with E2BIG for
-/// every call. Codex also trims the value and strips one leading/trailing
-/// `"` or `'` when it is not valid TOML, so the asset must not start or end
-/// with either.
+/// The `developer_instructions` string of `~/.codex/config.toml`, read the way
+/// Codex reads it (a TOML parse, not a substring search), or `None` when the
+/// file or the key is absent.
+fn codex_developer_instructions(home: &std::path::Path) -> Option<String> {
+    let text = fs::read_to_string(codex_config_path(home)).ok()?;
+    let doc: toml_edit::DocumentMut = text.parse().expect("config.toml must stay valid TOML");
+    doc.get("developer_instructions")
+        .and_then(|item| item.as_str())
+        .map(str::to_string)
+}
+
+const PIXEL_BLOCK_BEGIN: &str = "<!-- pixel:managed:begin -->";
+const PIXEL_BLOCK_END: &str = "<!-- pixel:managed:end -->";
+
+/// A config.toml the way the Codex desktop app leaves it: comments, root
+/// keys, sub-tables with dotted keys. Every line of it must survive an
+/// install byte for byte — the app rewrites this file too, and a
+/// regenerated layout would fight it.
+const USER_CODEX_CONFIG: &str = r#"# my codex settings
+personality = "pragmatic"
+model = "gpt-5.6-sol"  # trailing comment
+
+[mcp_servers.node_repl]
+args = []
+command = "/opt/node_repl"
+
+[features]
+js_repl = false
+token_budget.enabled = true
+"#;
+
+/// Codex has no file-backed `developer_instructions`, so the prompt is
+/// embedded in the file. Two things must hold: Codex reads back exactly the
+/// bundled prompt (a TOML round trip, no escaping accident), and nothing else
+/// in a file the desktop app also owns moves.
 #[test]
-fn the_agent_prompt_fits_in_one_codex_argument() {
+fn install_writes_the_agent_prompt_into_codex_config_and_leaves_the_rest_of_the_file_alone() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(codex_config_path(home), USER_CODEX_CONFIG).unwrap();
     install_for_shell(home, TEST_SHELL);
-    let prompt = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
-    let argument = format!("developer_instructions={}", prompt.trim_end_matches('\n'));
-    const MAX_ARG_STRLEN: usize = 32 * 4096;
-    assert!(
-        argument.len() <= MAX_ARG_STRLEN / 2,
-        "the codex -c argument is {} bytes; past {} bytes (half of Linux's MAX_ARG_STRLEN) \
-         switch the codex wrapper to a file-backed mechanism",
-        argument.len(),
-        MAX_ARG_STRLEN / 2
+
+    let asset = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
+    let value = codex_developer_instructions(home).expect("developer_instructions written");
+    assert_eq!(
+        value,
+        format!("{PIXEL_BLOCK_BEGIN}\n{asset}{PIXEL_BLOCK_END}\n"),
+        "codex must read back the bundled prompt between the pixel markers"
     );
-    let trimmed = prompt.trim();
+    let written = fs::read_to_string(codex_config_path(home)).unwrap();
+    for line in USER_CODEX_CONFIG.lines() {
+        assert!(
+            written.contains(line),
+            "user line {line:?} must survive the install verbatim:\n{written}"
+        );
+    }
     assert!(
-        !trimmed.starts_with(['"', '\'']) && !trimmed.ends_with(['"', '\'']),
-        "codex -c strips a leading/trailing quote from a raw string value"
+        written.contains("developer_instructions = '''\n"),
+        "the prompt must be a literal multi-line string, so the file shows it unescaped:\n{written}"
+    );
+    let doc: toml_edit::DocumentMut = written.parse().unwrap();
+    assert!(
+        doc.get("developer_instructions")
+            .is_some_and(|i| i.is_value()),
+        "the key must sit in the root table, not inside [features] at the end of the file"
+    );
+    assert_eq!(
+        doc["features"]["token_budget"]["enabled"].as_bool(),
+        Some(true),
+        "sub-tables must be untouched"
+    );
+
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(
+        fs::read_to_string(codex_config_path(home)).unwrap(),
+        written,
+        "a re-install must be byte-for-byte idempotent"
+    );
+    let block = fs::read_to_string(shell_profile_path(home)).unwrap();
+    assert!(
+        !block.contains("codex"),
+        "no codex shell function next to the config key — the CLI override would shadow it:\n{block}"
+    );
+}
+
+#[test]
+fn install_keeps_a_users_own_developer_instructions_and_refreshes_a_stale_pixel_block() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        codex_config_path(home),
+        "developer_instructions = \"Always answer in French.\"\n",
+    )
+    .unwrap();
+    install_for_shell(home, TEST_SHELL);
+    let asset = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
+    let expected =
+        format!("Always answer in French.\n\n{PIXEL_BLOCK_BEGIN}\n{asset}{PIXEL_BLOCK_END}\n");
+    assert_eq!(
+        codex_developer_instructions(home).as_deref(),
+        Some(expected.as_str()),
+        "the user's own instructions come first, the pixel block is appended"
+    );
+
+    // A block left by an older pixel (different prompt) plus text the user
+    // added after it: only the block changes.
+    fs::write(
+        codex_config_path(home),
+        format!(
+            "developer_instructions = '''\nMine first.\n\n{PIXEL_BLOCK_BEGIN}\nold prompt\n{PIXEL_BLOCK_END}\nMine last.\n'''\n"
+        ),
+    )
+    .unwrap();
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(
+        codex_developer_instructions(home).as_deref(),
+        Some(
+            format!("Mine first.\n\n{PIXEL_BLOCK_BEGIN}\n{asset}{PIXEL_BLOCK_END}\nMine last.\n")
+                .as_str()
+        ),
+        "a stale block is replaced in place, text on both sides survives"
+    );
+}
+
+#[test]
+fn install_refuses_to_rewrite_a_codex_config_it_cannot_parse() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    let broken = "model = \"gpt\"\n[features\njs_repl = false\n";
+    fs::write(codex_config_path(home), broken).unwrap();
+    let report = install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .unwrap();
+    let step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "codex-config")
+        .expect("codex-config step");
+    assert_eq!(
+        step.status,
+        pixel_install::install::CheckStatus::Red,
+        "a file codex itself cannot load is reported, not repaired: {step:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(codex_config_path(home)).unwrap(),
+        broken,
+        "an unparseable config.toml must not be rewritten — that would drop what it holds"
     );
     assert!(
-        trimmed.starts_with('#'),
-        "the prompt must not parse as a TOML value; a leading `#` guarantees the raw-string path"
+        !report.ok,
+        "the report must not read ok with the codex step red"
+    );
+}
+
+#[test]
+fn dry_run_leaves_codex_config_absent_and_untouched() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let options = InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: true,
+        shell: Some(TEST_SHELL.into()),
+    };
+    let report = install(&options).unwrap();
+    assert!(report.ok);
+    assert!(
+        !home.join(".codex").exists(),
+        "dry-run must not create ~/.codex"
+    );
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(codex_config_path(home), USER_CODEX_CONFIG).unwrap();
+    let report = install(&options).unwrap();
+    let step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "codex-config")
+        .unwrap();
+    assert!(
+        step.summary.starts_with("[dry-run]"),
+        "dry-run must say what it would do: {step:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(codex_config_path(home)).unwrap(),
+        USER_CODEX_CONFIG
+    );
+}
+
+#[test]
+fn doctor_codex_config_check_is_red_until_the_current_block_is_in_place() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let status = || {
+        doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: None,
+            shell: Some(TEST_SHELL.into()),
+            claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+            ..Default::default()
+        })
+        .unwrap()
+        .checks
+        .into_iter()
+        .find(|c| c.id == "install.codex-config")
+        .expect("codex-config check")
+    };
+    use pixel_install::doctor::CheckStatus;
+    assert_eq!(status().status, CheckStatus::Red, "nothing installed");
+
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        codex_config_path(home),
+        "developer_instructions = \"Always answer in French.\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        status().status,
+        CheckStatus::Red,
+        "a value without the pixel block does not carry the prompt"
+    );
+
+    install_for_shell(home, TEST_SHELL);
+    let check = status();
+    assert_eq!(check.status, CheckStatus::Green, "{check:?}");
+
+    let written = fs::read_to_string(codex_config_path(home)).unwrap();
+    fs::write(
+        codex_config_path(home),
+        written.replace("## MANDATORY WORKFLOW", "## OPTIONAL WORKFLOW"),
+    )
+    .unwrap();
+    let check = status();
+    assert_eq!(
+        check.status,
+        CheckStatus::Red,
+        "a block that differs from the bundled prompt is stale: {check:?}"
+    );
+    assert!(
+        check.reason.as_deref().is_some_and(|r| r.contains("stale")),
+        "{check:?}"
+    );
+}
+
+#[test]
+fn uninstall_takes_only_the_pixel_block_out_of_codex_config() {
+    use pixel_install::uninstall::{UninstallOptions, uninstall};
+
+    // Only pixel in the key: the key goes, the rest of the file stays.
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(codex_config_path(home), USER_CODEX_CONFIG).unwrap();
+    install_for_shell(home, TEST_SHELL);
+    assert!(codex_developer_instructions(home).is_some());
+    uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        codex_developer_instructions(home),
+        None,
+        "the key must be removed"
+    );
+    let after = fs::read_to_string(codex_config_path(home)).unwrap();
+    for line in USER_CODEX_CONFIG.lines() {
+        assert!(
+            after.contains(line),
+            "user line {line:?} lost by uninstall:\n{after}"
+        );
+    }
+
+    // The user's own text around the block: the block goes, the text stays.
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        codex_config_path(home),
+        "developer_instructions = \"Always answer in French.\"\n",
+    )
+    .unwrap();
+    install_for_shell(home, TEST_SHELL);
+    uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        codex_developer_instructions(home).as_deref(),
+        Some("Always answer in French.\n"),
+        "uninstall must hand the key back to the user"
     );
 }
 

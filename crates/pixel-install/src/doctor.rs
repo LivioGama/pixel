@@ -195,6 +195,18 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     ));
 
+    let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
+    checks.push(check(
+        "install.codex-config",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            let (summary, detail) = crate::codex_config::check_developer_instructions(&codex_home)?;
+            Ok(DoctorCheckDetail {
+                summary,
+                detail: Some(detail),
+            })
+        },
+    ));
+
     let shell_override = options.shell.clone();
     let claude = install::probe_claude(options.claude_executable.as_deref());
     checks.push(check_status(
