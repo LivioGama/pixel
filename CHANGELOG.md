@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `--shell <shell>` on `pixel install`, `pixel uninstall` and `pixel doctor` — act on a shell other than `$SHELL`, which is not always the login shell when pixel is run from an agent's command tool, `env -i`, or cron.
+
+### Fixed
+- `pixel install` now supports fish. The `claude`/`codex` wrapper block is written in fish syntax to `~/.config/fish/conf.d/pixel.fish`; previously a fish user got POSIX functions in `~/.zshrc` — a file fish never reads, holding syntax fish cannot parse. `pixel uninstall` removes the drop-in it created.
+- `pixel doctor`'s `install.shell-wrappers` check compares the installed block against the block pixel would write for the detected shell, instead of looking for loose substrings in the POSIX profile. Wrappers written for another shell (or by an older pixel) now read red instead of green.
+
 ## [0.2.0] - 2026-09-11
 
 ### Security

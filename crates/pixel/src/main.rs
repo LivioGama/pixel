@@ -687,6 +687,11 @@ enum Command {
     Install {
         #[arg(long)]
         json: bool,
+        /// Shell to install the `claude`/`codex` wrapper block for
+        /// (default: $SHELL). Pass e.g. `fish` when the invoking process
+        /// does not run under your login shell.
+        #[arg(long)]
+        shell: Option<String>,
     },
     /// Remove everything `pixel install` wrote: managed blocks from
     /// agent-config files, hook entries from all settings files, hook
@@ -701,6 +706,9 @@ enum Command {
         /// Path to the pixel binary to remove (default: ~/.local/bin/pixel).
         #[arg(long)]
         binary_path: Option<PathBuf>,
+        /// Shell whose wrapper block should be removed (default: $SHELL).
+        #[arg(long)]
+        shell: Option<String>,
     },
     /// Rebuild the binary, stop the daemon, copy the new binary to the
     /// install path, and optionally restart the daemon. Solves the
@@ -725,6 +733,9 @@ enum Command {
         path: PathBuf,
         #[arg(long)]
         json: bool,
+        /// Shell whose wrapper block should be checked (default: $SHELL).
+        #[arg(long)]
+        shell: Option<String>,
     },
     /// Remove legacy .gitpixel/ and prepare .pixel/; indexes rebuild lazily on use.
     Migrate {
@@ -3818,10 +3829,12 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         // -------------------------------------------------------------
         // M5/M6 — install / doctor / migrate / hook
         // -------------------------------------------------------------
-        Command::Install { json } => {
-            let report =
-                pixel_install::install::install(&pixel_install::install::InstallOptions::default())
-                    .map_err(|e| e.to_string())?;
+        Command::Install { json, shell } => {
+            let report = pixel_install::install::install(&pixel_install::install::InstallOptions {
+                shell,
+                ..Default::default()
+            })
+            .map_err(|e| e.to_string())?;
             print_data(
                 &serde_json::to_value(&report).map_err(|e| e.to_string())?,
                 json,
@@ -3831,11 +3844,13 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             json,
             dry_run,
             binary_path,
+            shell,
         } => {
             let report =
                 pixel_install::uninstall::uninstall(&pixel_install::uninstall::UninstallOptions {
                     binary_path,
                     dry_run,
+                    shell,
                     ..Default::default()
                 })
                 .map_err(|e| e.to_string())?;
@@ -3940,10 +3955,11 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             eprintln!("Upgrade complete: {}", dest.display());
             Ok(())
         }
-        Command::Doctor { path, json } => {
+        Command::Doctor { path, json, shell } => {
             let root = discover_root(&path)?;
             let report = pixel_install::doctor::doctor(&pixel_install::doctor::DoctorOptions {
                 repo_root: Some(root),
+                shell,
                 // Hand the doctor this binary's REAL clap parser so the
                 // rule-vs-binary parity check dry-runs every `pixel …` line
                 // documented in the installed rule text against the actual
