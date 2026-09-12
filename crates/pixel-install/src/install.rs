@@ -515,6 +515,18 @@ pub(crate) const PIXEL_MANAGED_END: &str = "# <<< pixel-managed <<<";
 /// aliases) because functions handle subcommands correctly (`codex exec ...`
 /// works).
 ///
+/// The `codex` wrapper passes the content of `prompt_path` inline as
+/// `-c developer_instructions=...`: Codex appends that key to its developer
+/// message and keeps its own system prompt. The former
+/// `model_instructions_file` key replaced the native prompt instead
+/// (`base_instructions` overrides the model's `instructions_template`), so
+/// Codex ran with the Pixel protocol as its only instructions. Codex 0.154
+/// has no file-backed variant of `developer_instructions`, hence the `cat`
+/// at call time; the value is read by `-c` as a raw string once it fails to
+/// parse as TOML, which a Markdown document starting with `#` always does.
+/// The asset stays far below Linux's 128 KiB single-argument limit
+/// (`MAX_ARG_STRLEN`, checked by a test).
+///
 /// The `claude` wrapper always appends `prompt_path` to the session prompt.
 /// With `Some(subagent_prompt_path)` it appends that file to sub-agents only
 /// when `--print`, `-p`, or a short-flag cluster containing `p` (`-pc`,
@@ -535,12 +547,12 @@ pub(crate) fn shell_wrapper_block(
     let body = match (kind, subagent_prompt_path) {
         (ShellKind::Posix, None) => format!(
             "claude() {{ command claude --append-system-prompt-file \"{prompt}\" \"$@\"; }}\n\
-             codex() {{ command codex -c \"model_instructions_file=\\\"{prompt}\\\"\" \"$@\"; }}",
+             codex() {{ command codex -c \"developer_instructions=$(cat \"{prompt}\")\" \"$@\"; }}",
             prompt = prompt_path,
         ),
         (ShellKind::Fish, None) => format!(
             "function claude; command claude --append-system-prompt-file \"{prompt}\" $argv; end\n\
-             function codex; command codex -c \"model_instructions_file=\\\"{prompt}\\\"\" $argv; end",
+             function codex; command codex -c \"developer_instructions=\"(cat \"{prompt}\" | string collect) $argv; end",
             prompt = prompt_path,
         ),
         (ShellKind::Posix, Some(subagent)) => format!(
@@ -553,13 +565,15 @@ pub(crate) fn shell_wrapper_block(
              \x20 done\n\
              \x20 command claude --append-system-prompt-file \"{prompt}\" \"$@\"\n\
              }}\n\
-             codex() {{ command codex -c \"model_instructions_file=\\\"{prompt}\\\"\" \"$@\"; }}",
+             codex() {{ command codex -c \"developer_instructions=$(cat \"{prompt}\")\" \"$@\"; }}",
             prompt = prompt_path,
         ),
-        // fish: `function name; ...; end`, arguments as `$argv`. Double quotes
-        // still expand `$HOME` and still honour `\"` escapes, so the codex
-        // argument is spelled exactly as in the POSIX block. `contains -- -p`
-        // needs the `--` so `-p` is looked up rather than parsed as an option.
+        // fish: `function name; ...; end`, arguments as `$argv`. A bare
+        // `(cat ...)` splits its output on newlines into one argument per
+        // line, so the codex prompt goes through `string collect` (fish 3.1+)
+        // to stay one argument; `"$(...)"` would do the same but only on fish
+        // 3.4+. `contains -- -p` needs the `--` so `-p` is looked up rather
+        // than parsed as an option.
         (ShellKind::Fish, Some(subagent)) => format!(
             "function claude\n\
              \x20 if contains -- --print $argv; or string match -qr -- '^-[^-]*p' $argv\n\
@@ -568,7 +582,7 @@ pub(crate) fn shell_wrapper_block(
              \x20   command claude --append-system-prompt-file \"{prompt}\" $argv\n\
              \x20 end\n\
              end\n\
-             function codex; command codex -c \"model_instructions_file=\\\"{prompt}\\\"\" $argv; end",
+             function codex; command codex -c \"developer_instructions=\"(cat \"{prompt}\" | string collect) $argv; end",
             prompt = prompt_path,
         ),
     };

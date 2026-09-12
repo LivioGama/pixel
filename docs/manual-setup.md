@@ -120,15 +120,35 @@ affected by the sub-agent flag.
 
 ### Codex
 
+Codex takes the prompt through the `developer_instructions` config key, which
+is appended to its developer message and leaves its own system prompt in
+place. (`model_instructions_file` looks similar but *replaces* Codex's system
+prompt: it becomes the base instructions, and the model loses its native
+protocol and personality.) Codex has no file-backed variant of the key, so
+the file is read at call time and passed inline:
+
 ```bash
-codex -c 'model_instructions_file="~/.local/share/pixel/agent-prompt.md"'
+codex -c "developer_instructions=$(cat "$HOME/.local/share/pixel/agent-prompt.md")"
 ```
 
-Or as a shell function:
+Or as a shell function in `~/.bashrc` / `~/.zshrc`:
 
 ```bash
-codex() { command codex -c "model_instructions_file=\"$HOME/.local/share/pixel/agent-prompt.md\"" "$@"; }
+codex() { command codex -c "developer_instructions=$(cat "$HOME/.local/share/pixel/agent-prompt.md")" "$@"; }
 ```
+
+For fish, in `~/.config/fish/conf.d/pixel.fish` (`string collect` keeps the
+multi-line file as one argument; a bare `(cat ...)` would split it per line):
+
+```fish
+function codex; command codex -c "developer_instructions="(cat "$HOME/.local/share/pixel/agent-prompt.md" | string collect) $argv; end
+```
+
+`pixel install` writes exactly these functions. The prompt travels as one
+`execve` argument: Linux caps a single argument at 128 KiB
+(`MAX_ARG_STRLEN`), and the ~12 KB asset stays well below it. Sub-agents
+started with `spawn_agent` inherit `developer_instructions` from the parent
+configuration unless a role overrides it.
 
 ### Pi
 

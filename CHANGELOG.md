@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The `codex` shell wrapper written by `pixel install` (bash, zsh and fish) no longer replaces Codex's native system prompt. It passed the Pixel prompt through `-c model_instructions_file=...`, which Codex loads as its base instructions in place of the model's own (tools, format and personality guidance gone; a probe on codex-cli 0.154.0 ran ~3 400 tokens lighter, the size of the lost prompt). It now reads the prompt at call time and passes it as `-c developer_instructions=...`, which Codex appends to its developer message and which `spawn_agent` sub-agents inherit. `pixel doctor` reports the previous block as stale; re-run `pixel install`.
+
 ## [0.2.3] - 2026-09-12
 
 ### Added
