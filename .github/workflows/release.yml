@@ -9,8 +9,39 @@ permissions:
   contents: write
 
 jobs:
+  # Gate: nothing is built or published unless the tag names the version that
+  # Cargo.toml declares and the test suite passes on the tagged commit. CI does
+  # not run on tag pushes, so this is the only check a release goes through.
+  verify:
+    name: Verify tag and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tag must match the crate version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          CRATE="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pixel/Cargo.toml | head -1)"
+          if [ "$TAG" != "$CRATE" ]; then
+            echo "::error::tag v${TAG} does not match crates/pixel/Cargo.toml version ${CRATE}"
+            exit 1
+          fi
+          echo "tag v${TAG} matches crates/pixel/Cargo.toml"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y perl make
+
+      - name: Test
+        run: cargo test --workspace
+
   build:
     name: Build ${{ matrix.target }}
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
