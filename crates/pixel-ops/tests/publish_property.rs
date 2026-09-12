@@ -84,6 +84,111 @@ fn publish_without_an_explicit_file_list_stages_and_commits_all_changes() {
     );
 }
 
+fn opts(message: &str, files: &[&str]) -> PublishOptions {
+    PublishOptions {
+        message: message.to_string(),
+        files: files.iter().map(|s| s.to_string()).collect(),
+        expected_head: None,
+        expected_fingerprints: Default::default(),
+        push: false,
+        amend: false,
+        request_id: format!("{message}-{}", uuid::Uuid::new_v4()),
+    }
+}
+
+fn head_changes(root: &Path) -> Vec<String> {
+    git(
+        root,
+        &["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"],
+    )
+    .lines()
+    .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+    .filter(|l| !l.is_empty())
+    .collect::<BTreeSet<_>>()
+    .into_iter()
+    .collect()
+}
+
+/// A deletion the caller already staged with `git rm` is gone from both the
+/// worktree and the index, so `git add -- <path>` rejects it ("pathspec did
+/// not match any files"). Publishing that path must still commit the
+/// deletion instead of failing before the commit — otherwise a commit that
+/// removes a file can only be made with native `git commit`.
+#[test]
+fn publish_commits_a_deletion_already_staged_with_git_rm() {
+    let repo_dir = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+    let root = repo_dir.path();
+    init_repo(root);
+    git(root, &["rm", "-q", "--", "base.txt"]);
+
+    let result = publish_with_state(
+        root,
+        &opts("rm-staged", &["base.txt"]),
+        None,
+        state_dir.path(),
+    )
+    .expect("a staged deletion is a legitimate publish target");
+    assert_eq!(result["published"], json!(true));
+    assert_eq!(head_changes(root), vec!["D base.txt".to_string()]);
+    assert_eq!(git(root, &["status", "--porcelain"]).trim(), "");
+}
+
+/// A file removed from the worktree only (no `git rm`) is staged by
+/// `git add` itself; it must be committed together with the other selected
+/// paths, and an unselected pre-staged file must still stay out of the commit.
+#[test]
+fn publish_commits_a_worktree_deletion_with_other_selected_files() {
+    let repo_dir = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+    let root = repo_dir.path();
+    init_repo(root);
+    std::fs::remove_file(root.join("base.txt")).unwrap();
+    std::fs::write(root.join("new.txt"), b"new").unwrap();
+    std::fs::write(root.join("unselected.txt"), b"staged but not selected").unwrap();
+    git(root, &["add", "--", "unselected.txt"]);
+
+    publish_with_state(
+        root,
+        &opts("rm-worktree", &["base.txt", "new.txt"]),
+        None,
+        state_dir.path(),
+    )
+    .expect("a worktree deletion is a legitimate publish target");
+    assert_eq!(
+        head_changes(root),
+        vec!["A new.txt".to_string(), "D base.txt".to_string()]
+    );
+    assert_eq!(
+        git(root, &["status", "--porcelain"]).trim(),
+        "A  unselected.txt",
+        "the unselected pre-staged file must survive, still staged and uncommitted"
+    );
+}
+
+/// Skipping `git add` for absent paths must not turn a typo into a silent
+/// empty commit: a path git has never known is still rejected.
+#[test]
+fn publish_rejects_a_path_git_has_never_known() {
+    let repo_dir = TempDir::new().unwrap();
+    let state_dir = TempDir::new().unwrap();
+    let root = repo_dir.path();
+    init_repo(root);
+    let before = git(root, &["rev-parse", "HEAD"]);
+
+    let err = publish_with_state(root, &opts("typo", &["nope.txt"]), None, state_dir.path())
+        .expect_err("an unknown path must not be published");
+    assert!(
+        err.contains("nope.txt"),
+        "error must name the offending path: {err}"
+    );
+    assert_eq!(
+        git(root, &["rev-parse", "HEAD"]),
+        before,
+        "no commit may be created"
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
 

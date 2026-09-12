@@ -173,18 +173,32 @@ fn run_body(
 
     // Stage the requested paths, or the complete working tree when the CLI
     // caller omitted `--files` (the documented default publish behavior).
-    let stage_args: Vec<String> = if opts.files.is_empty() {
-        vec!["add".into(), "-A".into()]
+    //
+    // A requested path that is gone from BOTH the worktree and the index is
+    // a deletion the caller already staged (`git rm`): `git add -- <path>`
+    // would reject it with "pathspec did not match any files" even though
+    // the deletion is exactly what they want committed. Such paths need no
+    // staging at all — the pathspec-scoped `git commit` below picks the
+    // staged deletion up, and still fails clearly on a path git has never
+    // known. A path deleted from the worktree only is still passed to
+    // `git add`, which stages the removal (git >= 2.0 semantics).
+    let stage_args: Option<Vec<String>> = if opts.files.is_empty() {
+        Some(vec!["add".into(), "-A".into()])
     } else {
-        let mut args = vec!["add".into(), "--".into()];
-        args.extend(opts.files.iter().cloned());
-        args
+        let stageable = paths_needing_stage(root, runner, &opts.files);
+        (!stageable.is_empty()).then(|| {
+            let mut args = vec!["add".into(), "--".into()];
+            args.extend(stageable);
+            args
+        })
     };
-    let stage_refs: Vec<&str> = stage_args.iter().map(String::as_str).collect();
-    runner.run(&stage_refs).map_err(|e| {
-        lock.release();
-        format!("git add: {e}")
-    })?;
+    if let Some(stage_args) = stage_args {
+        let stage_refs: Vec<&str> = stage_args.iter().map(String::as_str).collect();
+        runner.run(&stage_refs).map_err(|e| {
+            lock.release();
+            format!("git add: {e}")
+        })?;
+    }
 
     // Journal: index_staged
     journal.transition(&opts.request_id, &repo_key, JournalPhase::IndexStaged, None)?;
@@ -367,6 +381,38 @@ fn repo_key(root: &Path) -> String {
 
 fn common_dir(root: &Path) -> String {
     root.join(".git").display().to_string()
+}
+
+/// The subset of `files` that `git add -- <paths>` can act on: paths that
+/// still exist in the worktree (added, modified, or deleted-but-not-yet-
+/// staged files are all reachable through the worktree or the index) or
+/// are still tracked in the index. Paths absent from both are staged
+/// deletions, which `git add` cannot address and the commit step handles.
+fn paths_needing_stage(root: &Path, runner: &GitRunner, files: &[String]) -> Vec<String> {
+    let mut ls_args: Vec<&str> = vec!["ls-files", "-z", "--"];
+    ls_args.extend(files.iter().map(String::as_str));
+    let in_index: std::collections::BTreeSet<String> = runner
+        .run(&ls_args)
+        .map(|out| {
+            String::from_utf8_lossy(&out)
+                .split('\0')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    files
+        .iter()
+        .filter(|path| {
+            // `symlink_metadata` so a dangling symlink still counts as present.
+            root.join(path).symlink_metadata().is_ok()
+                || in_index.contains(path.as_str())
+                || in_index
+                    .iter()
+                    .any(|tracked| tracked.starts_with(&format!("{}/", path.trim_end_matches('/'))))
+        })
+        .cloned()
+        .collect()
 }
 
 fn publish_input_hash(opts: &PublishOptions) -> String {
