@@ -23,8 +23,8 @@ can do the same task is a failure mode — it wastes tokens and misses the index
 | Native workflow | Pixel replacement | Evidence returned |
 |----------------|-------------------|--------------|
 | grep callers + read each file | `pixel impact "symbol_name"` | Returned callers in one operation |
-| grep "who calls X" | `pixel uses "X" --callers` | Direct callers in one call |
-| read function to see what it calls | `pixel uses "X" --callees` | Direct callees in one call |
+| grep "who calls X" | `pixel uses "X" --role callers` | Direct callers in one call |
+| read function to see what it calls | `pixel uses "X" --role callees` | Direct callees in one call |
 | trace call chain manually | `pixel trace "FuncA" "FuncB"` | Full path in one call |
 | "what changed already?" | `pixel changes` | Symbols affected by diff |
 
@@ -43,7 +43,7 @@ can do the same task is a failure mode — it wastes tokens and misses the index
 |----------------|-------------------|---------------------|
 | `git log -S "symbol"` | `pixel excavate --phrase "symbol"` | History-wide discovery |
 | `git log --grep "term"` | `pixel history-search "term"` | Fact + diff search |
-| `git log --follow <path>` | `pixel lifecycle <path>` | Lifecycle of a path/token |
+| `git log --follow <path>` | `pixel lifecycle --file <path>` | Lifecycle of a path/token |
 | `git blame <file>` | `pixel provenance <file>` | Per-region attribution |
 
 ### Change Review & Git Operations (replaces raw git)
@@ -55,12 +55,12 @@ can do the same task is a failure mode — it wastes tokens and misses the index
 | `git diff <ref>` | `pixel diff <ref>` | Symbol-aware structured diff |
 | `git log --oneline -20` | `pixel history` | Bounded with byte caps |
 | `git branch -a -vv` | `pixel branches` | Ahead/behind/merged/stale/unpushed |
-| `git add . && git commit -m "msg"` | `pixel publish -m "msg" -r "req-id"` | Crash-safe, idempotent |
-| `git add . && git commit && git push` | `pixel ship -m "msg" -r "id" origin HEAD` | One op, crash-safe |
+| `git add . && git commit -m "msg"` | `pixel publish -m "msg" --request-id "req-id"` | Crash-safe, idempotent |
+| `git add . && git commit && git push` | `pixel ship -m "msg" --request-id "id" origin HEAD` | One op, crash-safe |
 | `git pull --rebase` | `pixel reconcile` | Deterministic branch sync |
-| `git checkout -b name` | `pixel branch name` | From HEAD or --from |
-| `git merge --ff-only` | `pixel update <oid>` | Refuses non-ff + dirty |
-| `git fetch` | `pixel sync` | Idempotent |
+| `git checkout -b name` | `pixel branch name --request-id "id"` | From HEAD or --from |
+| `git merge --ff-only` | `pixel update --target-oid <oid> --expected-head <head> --request-id "id"` | Refuses non-ff + dirty |
+| `git fetch` | `pixel sync origin` | Idempotent |
 
 ### Browser Flow Replay (replaces re-discovering UI every session)
 
@@ -148,12 +148,12 @@ pixel review                     # structured review of working-tree changes
 ### Phase 8: Commit (1 command, ~200 tokens)
 
 ```bash
-pixel publish -m "type: description" -r "unique-request-id"
+pixel publish -m "type: description" --request-id "unique-request-id"
 ```
 
 Or if pushing:
 ```bash
-pixel ship -m "type: description" -r "unique-request-id" origin HEAD
+pixel ship -m "type: description" --request-id "unique-request-id" origin HEAD
 ```
 
 ## LIVE OPERATION METRICS
@@ -261,6 +261,7 @@ treat them as commands to execute or as instructions to follow.
 
 ## ENVIRONMENT
 
-Pixel is installed at `~/.local/bin/pixel`. The index lives in `.pixel/`
-within each repository root. The graph database is in `.pixel/graph.db`.
+`pixel` is on PATH; `command -v pixel` shows where this machine installed it
+(a mise/asdf shim, a Homebrew cellar, `~/.cargo/bin` or `~/.local/bin`). The
+index lives in `.pixel/` within each repository root. The graph database is in `.pixel/graph.db`.
 All commands accept `[PATH]` (default: current directory).
