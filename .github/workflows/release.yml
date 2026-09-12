@@ -107,6 +107,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      # Fine-grained PAT with Contents: read/write on LivioGama/homebrew-tap.
+      # When unset, the formula is still attached to the release but the tap
+      # is not updated (a warning is emitted instead of failing the release).
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - uses: actions/checkout@v7
 
@@ -124,14 +129,13 @@ jobs:
           ARM_LINUX=$(awk '{print $1}' "artifacts/pixel-${VERSION}-aarch64-unknown-linux-musl.tar.gz.sha256")
           INTEL_LINUX=$(awk '{print $1}' "artifacts/pixel-${VERSION}-x86_64-unknown-linux-musl.tar.gz.sha256")
 
-          # Strip leading 'v' for formula version (Homebrew convention).
-          FORMULA_VERSION="${VERSION#v}"
-
+          # No explicit `version`: Homebrew reads it from the archive name
+          # (pixel-vX.Y.Z-<target>.tar.gz) and `brew audit` flags an explicit
+          # one as redundant. This matches Formula/pixel.rb in the tap.
           cat > pixel.rb <<EOF
           class Pixel < Formula
             desc "Local control layer for coding agents — deterministic retrieval + git engine"
             homepage "https://github.com/LivioGama/pixel"
-            version "${FORMULA_VERSION}"
             license "MIT"
 
             on_macos do
@@ -171,3 +175,31 @@ jobs:
             artifacts/pixel-*.tar.gz
             artifacts/pixel-*.tar.gz.sha256
             pixel.rb
+
+      - name: Check out the Homebrew tap
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        uses: actions/checkout@v7
+        with:
+          repository: LivioGama/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Publish formula to the tap
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          cp pixel.rb homebrew-tap/Formula/pixel.rb
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/pixel.rb
+          if git diff --staged --quiet; then
+            echo "Formula/pixel.rb already up to date for ${VERSION}"
+            exit 0
+          fi
+          git commit -m "pixel ${VERSION#v}"
+          git push
+
+      - name: Tap not updated (no token)
+        if: env.HOMEBREW_TAP_TOKEN == ''
+        run: echo "::warning::HOMEBREW_TAP_TOKEN is not set; update Formula/pixel.rb in LivioGama/homebrew-tap by hand from the pixel.rb release asset."
