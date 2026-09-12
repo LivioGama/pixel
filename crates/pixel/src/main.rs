@@ -156,7 +156,7 @@ enum Command {
         no_daemon: bool,
     },
     /// Semantic code search: embed a natural-language question ("how is
-    /// authentication handled?") and rank code chunks by cosine similarity.
+    /// authentication handled?") and rank files by semantic/lexical rank fusion.
     /// Complements `search` (regex) and `resolve` (deterministic phrase→code);
     /// the answer is a ranked list, not a resolved certainty. First use
     /// downloads the embedding model into the shared recall model cache
@@ -726,7 +726,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Clean-cut state migration: drop .gitpixel/, rebuild .pixel/ fresh.
+    /// Remove legacy .gitpixel/ and prepare .pixel/; indexes rebuild lazily on use.
     Migrate {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -980,7 +980,7 @@ enum FlowCmd {
         account: Option<String>,
         /// Actually execute the flow by running agent-browser commands.
         /// Without this flag, replay only prints the command sequence.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "dry_run")]
         execute: bool,
         /// Print commands without marking as executed (default is still
         /// print-only — pixel never runs agent-browser).
@@ -2433,12 +2433,20 @@ fn daemon_ping(root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn daemon_start(path: PathBuf, foreground: bool) -> Result<(), String> {
+fn daemon_start(path: PathBuf, foreground: bool, quiet: bool) -> Result<(), String> {
+    let report = |message: &str| {
+        if quiet {
+            eprint!("{message}");
+            Ok(())
+        } else {
+            write_stdout(message)
+        }
+    };
     if foreground {
         return daemon::run(&path).map_err(|e| e.to_string());
     }
     if daemon_ping(&path) {
-        write_stdout(&format!(
+        report(&format!(
             "daemon already running ({})\n",
             daemon::socket_path(&path).display()
         ))?;
@@ -2464,7 +2472,7 @@ fn daemon_start(path: PathBuf, foreground: bool) -> Result<(), String> {
     // Wait for the socket to come up (index build can take a moment).
     for _ in 0..100 {
         if daemon_ping(&abs) {
-            write_stdout(&format!(
+            report(&format!(
                 "daemon started ({})\n",
                 daemon::socket_path(&abs).display()
             ))?;
@@ -2472,11 +2480,10 @@ fn daemon_start(path: PathBuf, foreground: bool) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    write_stdout(&format!(
-        "daemon spawned; socket not answering yet ({})\n",
+    Err(format!(
+        "daemon spawned but did not become ready ({})",
         daemon::socket_path(&abs).display()
-    ))?;
-    Ok(())
+    ))
 }
 
 fn daemon_stop(path: PathBuf) -> Result<(), String> {
@@ -2490,6 +2497,30 @@ fn daemon_stop(path: PathBuf) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// Upgrade control messages must never inherit the retrieval client's 600s timeout.
+/// Only a missing/refused socket means absent; a stalled or malformed reply is an error.
+fn upgrade_daemon_request(root: &Path, req: &Request) -> Result<Option<Response>, String> {
+    let mut stream = match UnixStream::connect(daemon::socket_path(root)) {
+        Ok(stream) => stream,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(format!("upgrade daemon connection: {e}")),
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_millis(1500)))
+        .and_then(|_| stream.set_write_timeout(Some(Duration::from_millis(1500))))
+        .map_err(|e| format!("upgrade daemon timeout: {e}"))?;
+    roundtrip(&mut stream, req).map(Some).ok_or_else(|| {
+        "installed binary, but daemon control timed out or returned an invalid response".into()
+    })
 }
 
 fn daemon_status(path: PathBuf) -> Result<(), String> {
@@ -2510,7 +2541,7 @@ fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
     let index = execute(&root, Request::Status {}, no_daemon)?;
     let graph = execute(&root, Request::Graph {}, no_daemon)?;
     if !no_daemon {
-        daemon_start(root.clone(), false)?;
+        daemon_start(root.clone(), false, json)?;
     }
     let status = execute(&root, Request::Status {}, no_daemon)?;
     let data = serde_json::json!({
@@ -3478,7 +3509,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         }
         Command::Daemon { cmd } => match cmd {
             DaemonCmd::Start { path, foreground } => {
-                daemon_start(discover_root(&path)?, foreground)
+                daemon_start(discover_root(&path)?, foreground, false)
             }
             DaemonCmd::Stop { path } => daemon_stop(discover_root(&path)?),
             DaemonCmd::Status { path } => daemon_status(discover_root(&path)?),
@@ -3845,13 +3876,12 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             if !src.is_file() {
                 return Err(format!("built binary not found at {}", src.display()));
             }
-            // 3. Stop the daemon if running (frees the binary file).
-            eprintln!("Stopping daemon...");
-            let _ = std::process::Command::new("pkill")
-                .arg("-f")
-                .arg("pixel daemon")
-                .status();
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            // 3. Address only this repository; never signal unrelated processes.
+            // Use the non-starting client: stopping must not launch a daemon.
+            let repo_path = repo
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+                .canonicalize()
+                .map_err(|e| format!("upgrade repository path: {e}"))?;
             // 4. Atomic install: copy to temp, then rename. In-place cp
             //    overwrites a mapped Mach-O on macOS, invalidating the
             //    ad-hoc code signature and causing SIGKILL on next run.
@@ -3865,22 +3895,49 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 dest.file_name().and_then(|n| n.to_str()).unwrap_or("pixel"),
                 std::process::id()
             ));
-            std::fs::copy(&src, &tmp).map_err(|e| format!("copy failed: {e}"))?;
+            if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent).map_err(|e| format!("install directory: {e}"))?;
+            }
+            std::fs::copy(&src, &tmp).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("copy failed: {e}")
+            })?;
             std::fs::rename(&tmp, &dest).map_err(|e| {
                 let _ = std::fs::remove_file(&tmp);
                 format!("rename failed: {e}")
             })?;
-            eprintln!("Upgrade complete: {} -> {}", src.display(), dest.display());
-            // 5. Optionally restart daemon.
+            eprintln!("Installed binary: {} -> {}", src.display(), dest.display());
+            // 5. Stop only the selected repository after installation succeeds.
+            if let Some(response) = upgrade_daemon_request(&repo_path, &Request::Shutdown)? {
+                if !response.ok {
+                    return Err("installed binary, but repository daemon refused shutdown".into());
+                }
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    if upgrade_daemon_request(&repo_path, &Request::Ping)?.is_none() {
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err("installed binary, but repository daemon did not stop".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
             if restart_daemon {
-                let repo_path = repo.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
                 eprintln!("Starting daemon in {}...", repo_path.display());
-                let _ = std::process::Command::new(&dest)
+                let status = std::process::Command::new(&dest)
                     .arg("daemon")
                     .arg("start")
                     .arg(&repo_path)
-                    .spawn();
+                    .status()
+                    .map_err(|e| format!("installed binary, but restart failed: {e}"))?;
+                if !status.success() {
+                    return Err(format!(
+                        "installed binary, but restart exited with {status}"
+                    ));
+                }
             }
+            eprintln!("Upgrade complete: {}", dest.display());
             Ok(())
         }
         Command::Doctor { path, json } => {
@@ -4378,6 +4435,15 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         }
         Command::Flow { cmd } => {
             use pixel_flow::FlowAction;
+            let json = match &cmd {
+                FlowCmd::Save { json, .. }
+                | FlowCmd::Get { json, .. }
+                | FlowCmd::List { json, .. }
+                | FlowCmd::Revise { json, .. }
+                | FlowCmd::Replay { json, .. }
+                | FlowCmd::Delete { json, .. }
+                | FlowCmd::Show { json, .. } => *json,
+            };
             let action = match cmd {
                 FlowCmd::Save {
                     name,
@@ -4463,6 +4529,19 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 FlowCmd::Show { name, json: _ } => FlowAction::Show { name },
             };
             let data = pixel_flow::flow(&action)?;
+            if matches!(action, FlowAction::Execute { .. })
+                && data.get("success").and_then(|v| v.as_bool()) != Some(true)
+            {
+                return Err(format!(
+                    "flow execution failed: {}",
+                    data.get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("flow did not complete successfully")
+                ));
+            }
+            if json {
+                return print_data(&data, true);
+            }
             // For replay and show, the output field contains human-readable
             // text — print it directly to stdout. For everything else, use
             // the standard print_data path (JSON or pretty).
@@ -4804,8 +4883,9 @@ fn run_ask(
     json: bool,
 ) -> Result<(), String> {
     let root = discover_root(&path)?;
-    let hits = pixel_recall::code_search::ask(&root, &question, limit, max_files)
+    let result = pixel_recall::code_search::ask_with_metadata(&root, &question, limit, max_files)
         .map_err(|e| format!("ask: {e}"))?;
+    let hits = &result.hits;
     if json {
         let rows: Vec<serde_json::Value> = hits
             .iter()
@@ -4813,6 +4893,10 @@ fn run_ask(
                 serde_json::json!({
                     "path": h.path,
                     "score": h.score,
+                    "semantic_score": h.semantic_score,
+                    "ranking_score": h.ranking_score,
+                    "lexical_matches": h.lexical_matches,
+                    "query_terms": h.query_terms,
                     "snippet": h.snippet,
                 })
             })
@@ -4822,7 +4906,8 @@ fn run_ask(
             serde_json::json!({
                 "question": question,
                 "hits": rows,
-                "note": "semantic answer — ranked, not resolved; verify before acting",
+                "coverage": result.coverage,
+                "note": "hybrid semantic/lexical ranking — score is cosine; ranking_score determines order; verify before acting",
             })
         );
         return Ok(());
@@ -4831,12 +4916,13 @@ fn run_ask(
         println!("no matches found for \"{question}\" in {}", root.display());
         return Ok(());
     }
-    println!("semantic matches for \"{question}\":");
+    println!("hybrid matches for \"{question}\" (RRF ranking score; cosine semantic score):");
     for (i, h) in hits.iter().enumerate() {
         println!(
-            "  {}. {:>6.3}  {} : \"{}\"",
+            "  {}. RRF {:.6}  cosine {:.3}  {} : \"{}\"",
             i + 1,
-            h.score,
+            h.ranking_score,
+            h.semantic_score,
             h.path,
             h.snippet
         );

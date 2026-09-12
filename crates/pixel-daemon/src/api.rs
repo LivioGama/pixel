@@ -3201,15 +3201,25 @@ fn to_val<T: Serialize>(t: T) -> Value {
 /// non-alphanumeric boundary FIRST, then hand each run to the identifier
 /// splitter so `snake_case` and `camelCase` still separate.
 ///
-/// Used for BOTH sides (query terms and matched-line text) so the two
-/// vocabularies line up. Deliberately scoped to the BM25 channel: the
-/// filename channel's existing `words` behavior is left untouched.
+/// Used for both BM25 query terms and matched-line text.
 fn tokenize_words(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|run| !run.is_empty())
         .flat_map(pixel_graph::split_ident_words)
         .map(|w| w.to_lowercase())
         .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Split conversational words and alternatives without inventing identifier
+/// terms from regex escape letters (for example the `b` in `\bimports\b`).
+/// Complex regex syntax stays attached, as with the original identifier splitter.
+fn search_signal_words(pattern: &str) -> Vec<String> {
+    pattern
+        .split(|c: char| c.is_whitespace() || c == '|')
+        .flat_map(pixel_graph::split_ident_words)
+        .map(|word| word.to_lowercase())
+        .filter(|word| !word.is_empty())
         .collect()
 }
 
@@ -3239,10 +3249,7 @@ fn rank_search_matches(
     // (`basename.contains("gain ledger")`) matched nothing. Within a tier, a
     // shorter/more-specific basename outranks a longer one (Bug 4: previously
     // sorted by length DESCENDING, so the longest matching filename won).
-    let words: Vec<String> = pixel_graph::split_ident_words(pattern)
-        .into_iter()
-        .map(|w| w.to_lowercase())
-        .collect();
+    let words = search_signal_words(pattern);
     let mut filename_rank: Vec<(String, usize)> = files
         .iter()
         .filter_map(|f| {
@@ -3317,9 +3324,7 @@ fn rank_search_matches(
     let (graph_rank, cluster_rank): (Vec<String>, Vec<String>) = if let Some(store) = graph {
         use pixel_graph::targets as graph_targets_th;
         let matched: HashSet<&str> = files.iter().map(String::as_str).collect();
-        let kw: Vec<String> = pixel_graph::split_ident_words(pattern)
-            .into_iter()
-            .collect();
+        let kw = search_signal_words(pattern);
         let matched_sym_ids: Vec<i64> = graph_targets_th::symbol_hits(store, &kw, &[])
             .ok()
             .into_iter()
@@ -4221,6 +4226,52 @@ mod tests {
         assert_eq!(
             ranked[0].path, "beta.rs",
             "rare-term short doc must outrank common-term volume — BM25 content channel is not wired in"
+        );
+    }
+
+    #[test]
+    fn rank_search_matches_splits_filename_query_terms() {
+        use pixel_index::verify::MatchLine;
+        let matches = vec![
+            MatchLine {
+                path: "src/a_noise.rs".into(),
+                line_number: 1,
+                line: "imports edge".into(),
+            },
+            MatchLine {
+                path: "src/z_imports.rs".into(),
+                line_number: 1,
+                line: "imports edge".into(),
+            },
+        ];
+        for query in ["imports edge", "imports|edge"] {
+            let ranked = rank_search_matches(&matches, query, &None, None);
+            assert_eq!(
+                ranked[0].path, "src/z_imports.rs",
+                "filename terms must contribute for {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn rank_search_matches_does_not_promote_regex_escape_letters() {
+        use pixel_index::verify::MatchLine;
+        let matches = vec![
+            MatchLine {
+                path: "src/a_imports.rs".into(),
+                line_number: 1,
+                line: "imports".into(),
+            },
+            MatchLine {
+                path: "src/z_bogus.rs".into(),
+                line_number: 1,
+                line: "imports".into(),
+            },
+        ];
+        let ranked = rank_search_matches(&matches, r"\bimports\b", &None, None);
+        assert_eq!(
+            ranked[0].path, "src/a_imports.rs",
+            "regex boundary b must not boost bogus"
         );
     }
 

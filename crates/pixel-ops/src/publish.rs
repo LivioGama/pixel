@@ -171,16 +171,20 @@ fn run_body(
         })?;
     }
 
-    // Stage files.
-    if !opts.files.is_empty() {
-        let mut args: Vec<String> = vec!["add".into(), "--".into()];
+    // Stage the requested paths, or the complete working tree when the CLI
+    // caller omitted `--files` (the documented default publish behavior).
+    let stage_args: Vec<String> = if opts.files.is_empty() {
+        vec!["add".into(), "-A".into()]
+    } else {
+        let mut args = vec!["add".into(), "--".into()];
         args.extend(opts.files.iter().cloned());
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        runner.run(&arg_refs).map_err(|e| {
-            lock.release();
-            format!("git add: {e}")
-        })?;
-    }
+        args
+    };
+    let stage_refs: Vec<&str> = stage_args.iter().map(String::as_str).collect();
+    runner.run(&stage_refs).map_err(|e| {
+        lock.release();
+        format!("git add: {e}")
+    })?;
 
     // Journal: index_staged
     journal.transition(&opts.request_id, &repo_key, JournalPhase::IndexStaged, None)?;

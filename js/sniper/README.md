@@ -84,7 +84,14 @@ bun test        # unit + live round-trip through target/debug/pixel + real vite 
 bun run typecheck
 ```
 
-The test suite builds the Rust binary (`cargo build -p pixel-cli`) if it is
-missing and pipes golden envelopes through the real `pixel sniper report`
+The test suite builds the Rust binary (`cargo build -p pixel-cli`) once per
+test process, prints its SHA-256, and pipes golden envelopes through the real `pixel sniper report`
 ingest path — the JSON contract is verified against the actual Rust parser,
 not a mock.
+
+To reuse a binary built in the current verification session, supply both
+`PIXEL_TEST_BINARY` (absolute path) and `PIXEL_TEST_BINARY_SHA256` (its exact
+SHA-256); a missing or mismatched digest fails before integration tests.
+The sink reporter kills a stuck CLI child after 10 seconds so `flush()` and
+subsequent queued reports cannot hang forever (`SinkReporterOptions.timeoutMs` is
+configurable through its constructor options).

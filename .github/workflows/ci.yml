@@ -18,7 +18,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Install system dependencies
         run: |
@@ -30,6 +30,34 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      - name: Installer contracts (isolated release substitutes)
+        run: python3 scripts/test-install.py
+
+      - name: Warnings-denied Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Supported CLI feature lanes
+        run: |
+          cargo check -p pixel-cli --no-default-features
+          cargo check -p pixel-cli --no-default-features --features model2vec
+
+      - name: Install Bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Install TypeScript integration dependencies
+        working-directory: js/sniper
+        run: bun install --frozen-lockfile
+
+      # The test helper builds and identifies this checkout's native binary
+      # before sending real Vite and golden-envelope payloads across the CLI.
+      - name: TypeScript integration and types
+        working-directory: js/sniper
+        run: |
+          bun run test
+          bun run typecheck
 
   cross-build:
     name: Cross-build ${{ matrix.target }}

@@ -37,14 +37,17 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use pixel_bench::validate_query_score;
 use pixel_daemon::api::{Response, Service};
 use pixel_proto::Op;
 
-/// Ground truth: query -> files in `crates/pixel-graph/src/` that genuinely
-/// answer it. Labeled from the code (module responsibilities), not from
+/// Ground truth (v2): query -> files in `crates/pixel-graph/src/` that
+/// genuinely answer it. Labeled from the code (module responsibilities), not
 /// search output. Each file's relevant label is semantic — e.g. "how the
 /// concept index resolves phrases" → `concept_resolve.rs` even though the
-/// word "concept" is a substring of several files.
+/// word "concept" is a substring of several files. v2 preserves every frozen
+/// query and adds the independently audited second owner where the legacy
+/// one-file label was incomplete.
 fn qrels(crate_dir: &std::path::Path) -> Vec<(&'static str, Vec<String>)> {
     // `crate_dir` is the workspace root. Search returns paths RELATIVE to
     // the workspace root (`crates/pixel-graph/src/…`), so qrels must use the
@@ -75,7 +78,11 @@ fn qrels(crate_dir: &std::path::Path) -> Vec<(&'static str, Vec<String>)> {
         ("process execution flow detection", vec![tag("process.rs")]),
         (
             "resolution ranked candidate ambiguity disambiguation",
-            vec![tag("resolve.rs")],
+            // `resolve.rs` handles call-target ambiguity, while
+            // `concept_resolve.rs` owns `RankedCandidate` and phrase-candidate
+            // disambiguation. The frozen query describes both, so a strict
+            // one-file label was not a valid top-1 control.
+            vec![tag("resolve.rs"), tag("concept_resolve.rs")],
         ),
         ("symbol store database query index", vec![tag("store.rs")]),
         (
@@ -89,22 +96,17 @@ fn qrels(crate_dir: &std::path::Path) -> Vec<(&'static str, Vec<String>)> {
 /// Extract per-file order from a Search response: walk the ordered match
 /// rows and record the first-seen position of each distinct relative path.
 fn file_order_from_response(resp: &Response) -> Vec<String> {
-    let empty = Vec::new();
     let matches = resp
         .data()
         .get("matches")
         .and_then(|x| x.as_array())
-        .unwrap_or(&empty);
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut order: Vec<String> = Vec::new();
-    for m in matches {
-        if let Some(p) = m.get("path").and_then(|x| x.as_str())
-            && seen.insert(p.to_string())
-        {
-            order.push(p.to_string());
-        }
-    }
-    order
+        .expect("successful retrieval response must contain a matches array");
+    pixel_bench::checked_file_order(
+        matches
+            .iter()
+            .map(|m| m.get("path").and_then(|x| x.as_str())),
+    )
+    .expect("successful retrieval response must contain valid match paths")
 }
 
 /// Success-rate (correctness axis), distinct from NDCG: 1.0 if any of the
@@ -139,10 +141,13 @@ fn resolve_success_rate(svc: &mut Service, qrels: &[(&'static str, Vec<String>)]
             phrase: q.to_string(),
             limit: Some(10),
         });
-        if resp.ok {
-            let order = file_order_from_response(&resp);
-            sum += success_at_k(&order, &rel_set, 1);
-        }
+        assert!(resp.ok, "resolve query {q:?} failed: {resp:?}");
+        let order = file_order_from_response(&resp);
+        let score = success_at_k(&order, &rel_set, 1);
+        eprintln!("resolve query={q:?} success@1={score}");
+        validate_query_score(score, None)
+            .unwrap_or_else(|err| panic!("resolve query {q:?}: {err}"));
+        sum += score;
     }
     sum / qrels.len() as f64
 }
@@ -181,18 +186,50 @@ fn run_ndcg(
         } else {
             words.join("|")
         };
-        let resp = svc.handle(Op::Search {
-            pattern,
-            json: true,
-            limit: Some(50),
-            offset: None,
-            paths: Some(vec!["crates/pixel-graph/src".to_string()]),
-            scope: scope.map(str::to_string),
-        });
-        if resp.ok {
-            let order = file_order_from_response(&resp);
-            sum += ndcg_at_k(&order, &rel_set, k);
+        // Search limits matching lines, not files. A single file can fill a
+        // page: follow the advertised cursor until we actually have k files.
+        let mut order = Vec::new();
+        let mut seen = HashSet::new();
+        let mut offset = 0;
+        loop {
+            let resp = svc.handle(Op::Search {
+                pattern: pattern.clone(),
+                json: true,
+                limit: Some(50),
+                offset: Some(offset),
+                paths: Some(vec!["crates/pixel-graph/src".to_string()]),
+                scope: scope.map(str::to_string),
+            });
+            assert!(
+                resp.ok,
+                "search query {q:?} scope={scope:?} failed: {resp:?}"
+            );
+            for path in file_order_from_response(&resp) {
+                if seen.insert(path.clone()) {
+                    order.push(path);
+                }
+            }
+            if order.len() >= k || resp.data()["truncated"].as_bool() == Some(false) {
+                break;
+            }
+            let next = resp.data()["next_offset"]
+                .as_u64()
+                .expect("capped search response needs a continuation cursor")
+                as usize;
+            assert!(
+                next > offset && next < 10_000,
+                "query {q:?}: incomplete benchmark corpus or non-progressing cursor {next}"
+            );
+            offset = next;
         }
+        let score = ndcg_at_k(&order, &rel_set, k);
+        // The deliberately-unranked control may score zero (e.g. an
+        // alphabetically late filename). Candidate lanes may not.
+        if scope.is_some() {
+            validate_query_score(score, None)
+                .unwrap_or_else(|err| panic!("search query {q:?} scope={scope:?}: {err}"));
+        }
+        sum += score;
     }
     sum / qrels.len() as f64
 }
@@ -210,36 +247,79 @@ fn run_ndcg_ask(root: &std::path::Path, qrels: &[(&'static str, Vec<String>)], k
         // `ask` embeds the raw query string. The qrels queries are keyword
         // endpoints; static embeddings handle keyword-ish text fine, and
         // using the identical string keeps the A/B inputs matched.
-        let Ok(hits) = pixel_recall::code_search::ask(&subtree, q, k.max(50), 2000) else {
-            continue;
-        };
+        let hits = pixel_recall::code_search::ask(&subtree, q, k.max(50), 2000)
+            .unwrap_or_else(|err| panic!("ask query {q:?} failed: {err}"));
         let order: Vec<String> = hits
             .iter()
-            .filter_map(|h| {
-                let p = h.path.strip_prefix(&format!("{}/", root.display()))?;
-                Some(p.to_string())
+            .map(|h| {
+                h.path
+                    .strip_prefix(&format!("{}/", root.display()))
+                    .expect("ask result must be inside the benchmark corpus")
+                    .to_string()
             })
             .collect();
-        sum += ndcg_at_k(&order, &rel_set, k);
+        let score = ndcg_at_k(&order, &rel_set, k);
+        validate_query_score(score, None).unwrap_or_else(|err| panic!("ask query {q:?}: {err}"));
+        sum += score;
     }
     sum / qrels.len() as f64
 }
 
-/// Fixture pointing at this workspace's `pixel-graph/src` (a real, indexed
-/// tree). Index auto-builds on first search.
-fn graph_fixture() -> (PathBuf, Service) {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+/// Copy the real graph source into an isolated indexed corpus. The evaluator
+/// itself contains every exact query and must never be a retrieval candidate.
+fn graph_fixture() -> (tempfile::TempDir, PathBuf, Service) {
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap()
-        .to_path_buf(); // workspace root
+        .to_path_buf();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let relative = "crates/pixel-graph/src";
+    let destination = root.join(relative);
+    std::fs::create_dir_all(&destination).unwrap();
+    for entry in std::fs::read_dir(workspace.join(relative)).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().extension().is_some_and(|ext| ext == "rs") {
+            std::fs::copy(entry.path(), destination.join(entry.file_name())).unwrap();
+        }
+    }
+    // Fixture setup only; never commits or modifies the working repository.
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "crates"],
+        vec![
+            "-c",
+            "user.name=Pixel Audit",
+            "-c",
+            "user.email=audit@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "frozen graph source corpus",
+        ],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture git: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let svc = Service::open(&root).unwrap();
-    (root, svc)
+    (temporary, root, svc)
 }
 
 fn bench(c: &mut Criterion) {
-    let (root, mut svc) = graph_fixture();
+    let (_temporary, root, mut svc) = graph_fixture();
     let suite = qrels(&root);
     // Warm up index + graph.
     let _ = svc.handle(Op::Search {
@@ -253,6 +333,14 @@ fn bench(c: &mut Criterion) {
 
     let ranked = run_ndcg(&mut svc, &suite, Some("code"), 10);
     let unranked = run_ndcg(&mut svc, &suite, None, 10);
+    // Compare the same query individually before means can conceal a regression.
+    for query in &suite {
+        let single = std::slice::from_ref(query);
+        let baseline = run_ndcg(&mut svc, single, None, 10);
+        let candidate = run_ndcg(&mut svc, single, Some("code"), 10);
+        validate_query_score(candidate, Some(baseline))
+            .unwrap_or_else(|err| panic!("ranked query {:?}: {err}", query.0));
+    }
     // A/B lane: semantic `ask` over the SAME qrels + subtree.
     let semantic = run_ndcg_ask(&root, &suite, 10);
     // Precision 1 lane: hybrid search (lexical RRF + semantic channel fused).
@@ -274,16 +362,16 @@ fn bench(c: &mut Criterion) {
         "NDCG@10 ranked ({ranked:.3}) regressed below unranked ({unranked:.3})"
     );
     assert!(
-        semantic >= 0.0,
-        "NDCG@10 semantic = {semantic:.3} — negative is impossible; ask lane is broken"
+        semantic > 0.0,
+        "NDCG@10 semantic = {semantic:.3} — no relevant results; ask lane is broken"
     );
     assert!(
-        hybrid >= 0.0,
-        "NDCG@10 hybrid = {hybrid:.3} — negative is impossible; hybrid lane is broken"
+        hybrid > 0.0,
+        "NDCG@10 hybrid = {hybrid:.3} — no relevant results; hybrid lane is broken"
     );
     assert!(
-        resolve_ok >= 0.0,
-        "resolve success-rate = {resolve_ok:.3} — negative is impossible; resolve lane is broken"
+        resolve_ok > 0.0,
+        "resolve success-rate = {resolve_ok:.3} — no relevant results; resolve lane is broken"
     );
 
     eprintln!(
@@ -297,7 +385,7 @@ fn bench(c: &mut Criterion) {
     eprintln!(
         "  resolve (Engine-1 cascade) = {:.1}%  of tasks solved  ({:.2}/{})",
         resolve_ok * 100.0,
-        resolve_ok,
+        resolve_ok * suite.len() as f64,
         suite.len()
     );
     eprintln!("  NOTE: m1_latency.rs latency gates are COST-only; correctness axis is this");

@@ -168,6 +168,8 @@ export interface SinkReporterOptions {
   repo: string;
   /** Injectable for tests; defaults to node:child_process spawn. */
   spawnImpl?: typeof spawn;
+  /** Maximum time per sink child; hung sinks must not block flush forever. */
+  timeoutMs?: number;
   /** Called (rate-limited) when a shell-out fails. Defaults to console.warn. */
   onError?: (message: string) => void;
 }
@@ -230,7 +232,11 @@ export class SinkReporter {
         const child = spawnImpl(
           this.opts.bin,
           ["sniper", "report", "--json", "-", "--repo", this.opts.repo],
-          { stdio: ["pipe", "ignore", "pipe"] },
+          {
+            stdio: ["pipe", "ignore", "pipe"],
+            timeout: Math.max(1, this.opts.timeoutMs ?? 10_000),
+            killSignal: "SIGKILL",
+          },
         );
         let stderr = "";
         child.stderr?.on("data", (chunk: Buffer) => {

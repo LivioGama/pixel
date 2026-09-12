@@ -837,7 +837,7 @@ mod tests {
         fs::remove_file(root.join(".env.local")).unwrap();
         fs::create_dir_all(root.join(".pixel")).unwrap();
         fs::write(root.join(".pixel/actions.jsonl"), "pixel-owned\n").unwrap();
-        let candidate = create(&root, "task-pixel", "candidate1", ["owned.txt".to_string()])
+        create(&root, "task-pixel", "candidate1", ["owned.txt".to_string()])
             .expect("Pixel-owned action log must not poison a task sandbox");
         cleanup(&root, "task-pixel", "candidate1").unwrap();
         fs::write(root.join("scratch.txt"), "not-copied\n").unwrap();

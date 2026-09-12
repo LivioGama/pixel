@@ -4,30 +4,20 @@
  * `pixel_sniper::types::ReportEnvelope` and come back intact from
  * `pixel sniper last/env --json`.
  */
-import { beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync } from "node:fs";
+import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { ErrorEnvelope, EventEnvelope, RunEnvelope } from "../src/report.ts";
+import { preparePixelCandidate } from "./candidate.ts";
 
-const repoRoot = resolve(import.meta.dir, "..", "..", "..");
-const binPath = join(repoRoot, "target", "debug", "pixel");
-
-beforeAll(() => {
-  if (!existsSync(binPath)) {
-    execFileSync("cargo", ["build", "-p", "pixel-cli"], {
-      cwd: repoRoot,
-      stdio: "inherit",
-      timeout: 600_000,
-    });
-  }
-});
+const binPath = preparePixelCandidate();
 
 const makeSandbox = () => {
   const stateRoot = mkdtempSync(join(tmpdir(), "sniper-state-"));
   const project = mkdtempSync(join(tmpdir(), "sniper-proj-"));
-  const env = { ...process.env, GITPIXEL_SNIPER_STATE_ROOT: stateRoot };
+  const env = { ...process.env, GITPIXEL_SNIPER_STATE_ROOT: stateRoot, PIXEL_METRICS: "0" };
   const run = (args: string[], input?: string) => {
     const result = spawnSync(binPath, args, {
       input,
@@ -99,7 +89,10 @@ describe("live round-trip through the real pixel binary", () => {
   test("run, event, and error envelopes are all accepted and queryable", () => {
     const { project, run } = makeSandbox();
 
-    for (const envelope of [goldenRun, goldenEvent, goldenError]) {
+    // Keep golden payloads frozen; ingestion honors their event timestamps and
+    // retention expires historical fixtures. Live round-trips need a live clock.
+    for (const golden of [goldenRun, goldenEvent, goldenError]) {
+      const envelope = { ...golden, ts: Date.now() };
       const result = run(["sniper", "report", "--json", "-", "--repo", project], JSON.stringify(envelope));
       expect(result.status).toBe(0);
       expect(result.stderr).toBe("");
@@ -144,12 +137,23 @@ describe("live round-trip through the real pixel binary", () => {
 
   test("dedup: the same error envelope twice yields one row with count 2", () => {
     const { project, run } = makeSandbox();
-    const first = run(["sniper", "report", "--json", "-", "--repo", project], JSON.stringify(goldenError));
-    const second = run(["sniper", "report", "--json", "-", "--repo", project], JSON.stringify(goldenError));
+    const envelope = { ...goldenError, ts: Date.now() };
+    const first = run(["sniper", "report", "--json", "-", "--repo", project], JSON.stringify(envelope));
+    const second = run(["sniper", "report", "--json", "-", "--repo", project], JSON.stringify(envelope));
     expect(JSON.parse(first.stdout).deduped).toBe(false);
     const parsed = JSON.parse(second.stdout) as { deduped: boolean; count: number };
     expect(parsed.deduped).toBe(true);
     expect(parsed.count).toBe(2);
+  });
+
+  test("historical golden error is accepted then expires on the next store open", () => {
+    const { project, run } = makeSandbox();
+    const historical = { ...goldenError, ts: Math.min(goldenError.ts!, Date.now() - 8 * 86_400_000) };
+    const reported = run(["sniper", "report", "--json", "-", "--repo", project], JSON.stringify(historical));
+    expect(reported.status).toBe(0);
+    const last = run(["sniper", "last", "--json", "--repo", project]);
+    expect(last.status).toBe(0);
+    expect(JSON.parse(last.stdout).errors).toEqual([]);
   });
 
   test("unknown surface is rejected by the Rust parser (contract guard)", () => {

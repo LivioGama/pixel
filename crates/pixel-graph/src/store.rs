@@ -784,7 +784,17 @@ impl GraphStore {
             sql.push_str(" AND c.kind = ?");
             p.push(Box::new(k.as_str()));
         }
-        sql.push_str(" ORDER BY c.kind, c.id LIMIT ?");
+        // Rank the complete indexed match set before truncating. Row/kind order
+        // otherwise hides later high-coverage matches from the reranker.
+        sql.push_str(&format!(
+            " ORDER BY (SELECT COUNT(DISTINCT word) FROM concept_words \
+             WHERE concept_id = c.id AND word IN ({placeholders})) DESC, c.kind, c.id LIMIT ?"
+        ));
+        p.extend(
+            words
+                .iter()
+                .map(|w| Box::new(*w) as Box<dyn rusqlite::ToSql>),
+        );
         p.push(Box::new(limit));
         let mut stmt = self.conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();

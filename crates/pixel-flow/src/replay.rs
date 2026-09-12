@@ -22,9 +22,13 @@ pub fn replay(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, Str
         }
     }
     let mut out = String::new();
-    out.push_str(&format!("# Flow: {} ({})\n", flow.name, flow.title));
+    out.push_str(&format!(
+        "# Flow: {} ({})\n",
+        comment_text(&flow.name),
+        comment_text(&flow.title)
+    ));
     if !flow.description.is_empty() {
-        out.push_str(&format!("# {}\n", flow.description));
+        out.push_str(&format!("# {}\n", comment_text(&flow.description)));
     }
     out.push_str(&format!(
         "# Steps: {} | Revision: {} | Proven: {}\n",
@@ -38,7 +42,7 @@ pub fn replay(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, Str
     if !flow.preconditions.is_empty() {
         out.push_str("# Preconditions (verify before starting):\n");
         for pre in &flow.preconditions {
-            out.push_str(&format!("#   - {}\n", substitute(pre, vars)));
+            out.push_str(&format!("#   - {}\n", comment_text(&substitute(pre, vars))));
         }
         out.push('\n');
     }
@@ -49,7 +53,7 @@ pub fn replay(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, Str
         for pattern in &flow.stale_tab_cleanup {
             out.push_str(&format!(
                 "#   agent-browser --session comet tab list   # find tabs matching '{}'\n",
-                substitute(pattern, vars)
+                comment_text(&substitute(pattern, vars))
             ));
             out.push_str(
                 "#   agent-browser --session comet tab close <id>   # close each matching tab\n",
@@ -62,11 +66,11 @@ pub fn replay(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, Str
     if let Some(ref tab) = flow.tab {
         out.push_str(&format!(
             "# Focus the flow's tab: {}\n",
-            substitute(tab, vars)
+            comment_text(&substitute(tab, vars))
         ));
         out.push_str(&format!(
             "agent-browser --session comet tab list   # find the tab matching '{}'\n",
-            substitute(tab, vars)
+            comment_text(&substitute(tab, vars))
         ));
         out.push_str("agent-browser --session comet tab <id>   # switch to it\n\n");
     }
@@ -79,7 +83,7 @@ pub fn replay(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, Str
     if let Some(ref signal) = flow.success_signal {
         out.push_str(&format!(
             "\n# Success signal: {}\n",
-            substitute(signal, vars)
+            comment_text(&substitute(signal, vars))
         ));
     }
 
@@ -87,14 +91,14 @@ pub fn replay(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, Str
     if !flow.success_url_contains.is_empty() {
         out.push_str("# Success URL check — active tab URL should contain one of:\n");
         for u in &flow.success_url_contains {
-            out.push_str(&format!("#   - {}\n", substitute(u, vars)));
+            out.push_str(&format!("#   - {}\n", comment_text(&substitute(u, vars))));
         }
         out.push_str("agent-browser --session comet snapshot -i   # verify URL\n");
     }
     if !flow.success_url_excludes.is_empty() {
         out.push_str("# Success URL exclusion — URL should NOT contain:\n");
         for u in &flow.success_url_excludes {
-            out.push_str(&format!("#   - {}\n", substitute(u, vars)));
+            out.push_str(&format!("#   - {}\n", comment_text(&substitute(u, vars))));
         }
     }
 
@@ -103,7 +107,7 @@ pub fn replay(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, Str
         out.push_str("\n# MFA detection — if the snapshot contains any of these keywords,\n");
         out.push_str("# hand off to the user (cannot be automated):\n");
         for kw in &flow.mfa_keywords {
-            out.push_str(&format!("#   - {}\n", kw));
+            out.push_str(&format!("#   - {}\n", comment_text(kw)));
         }
     }
 
@@ -124,7 +128,7 @@ fn render_step(
             "{}# Step {}: {}\n",
             indent,
             num,
-            substitute(r, vars)
+            comment_text(&substitute(r, vars))
         ));
     } else {
         out.push_str(&format!("{}# Step {}\n", indent, num));
@@ -142,7 +146,7 @@ fn render_step(
         out.push_str(&format!(
             "{}agent-browser --session comet tab list   # switch to tab matching '{}'\n",
             indent,
-            substitute(tab, vars)
+            comment_text(&substitute(tab, vars))
         ));
         out.push_str(&format!(
             "{}agent-browser --session comet tab <id>\n",
@@ -156,7 +160,7 @@ fn render_step(
                 out.push_str(&format!(
                     "{}agent-browser --session comet open \"{}\"\n",
                     indent,
-                    substitute(url, vars)
+                    shell_content(&substitute(url, vars))
                 ));
             }
         }
@@ -167,7 +171,10 @@ fn render_step(
             ));
         }
         "click" => {
-            let target = substitute(step.ref_hint.as_deref().unwrap_or("element"), vars);
+            let target = comment_text(&substitute(
+                step.ref_hint.as_deref().unwrap_or("element"),
+                vars,
+            ));
             out.push_str(&format!(
                 "{}agent-browser --session comet snapshot -i   # find the actual @eN ref for: {}\n",
                 indent, target
@@ -178,7 +185,10 @@ fn render_step(
             ));
         }
         "fill" | "type" => {
-            let target = substitute(step.ref_hint.as_deref().unwrap_or("input"), vars);
+            let target = comment_text(&substitute(
+                step.ref_hint.as_deref().unwrap_or("input"),
+                vars,
+            ));
             let value = resolve_value(step, vars);
             out.push_str(&format!(
                 "{}agent-browser --session comet snapshot -i   # find the actual @eN ref for: {}\n",
@@ -186,11 +196,17 @@ fn render_step(
             ));
             out.push_str(&format!(
                 "{}agent-browser --session comet {} @eN \"{}\"   # @eN = {}\n",
-                indent, step.action, value, target
+                indent,
+                step.action,
+                shell_content(&value),
+                target
             ));
         }
         "select" => {
-            let target = substitute(step.ref_hint.as_deref().unwrap_or("select"), vars);
+            let target = comment_text(&substitute(
+                step.ref_hint.as_deref().unwrap_or("select"),
+                vars,
+            ));
             let value = resolve_value(step, vars);
             out.push_str(&format!(
                 "{}agent-browser --session comet snapshot -i   # find the actual @eN ref for: {}\n",
@@ -198,24 +214,30 @@ fn render_step(
             ));
             out.push_str(&format!(
                 "{}agent-browser --session comet select @eN \"{}\"   # @eN = {}\n",
-                indent, value, target
+                indent,
+                shell_content(&value),
+                target
             ));
         }
         "press" => {
             let key = step.key.as_deref().unwrap_or("Enter");
             out.push_str(&format!(
-                "{}agent-browser --session comet press {}\n",
+                "{}agent-browser --session comet press \"{}\"\n",
                 indent,
-                substitute(key, vars)
+                shell_content(&substitute(key, vars))
             ));
         }
         "wait" => {
             let wait = step.wait.as_deref().unwrap_or("load");
             let target = step.wait_target.as_deref().unwrap_or("");
             let arg = if target.is_empty() {
-                format!("--{}", wait)
+                format!("\"--{}\"", shell_content(wait))
             } else {
-                format!("--{} \"{}\"", wait, substitute(target, vars))
+                format!(
+                    "\"--{}\" \"{}\"",
+                    shell_content(wait),
+                    shell_content(&substitute(target, vars))
+                )
             };
             out.push_str(&format!(
                 "{}agent-browser --session comet wait {}\n",
@@ -223,7 +245,10 @@ fn render_step(
             ));
         }
         "conditional" => {
-            let cond = substitute(step.condition.as_deref().unwrap_or("condition"), vars);
+            let cond = comment_text(&substitute(
+                step.condition.as_deref().unwrap_or("condition"),
+                vars,
+            ));
             out.push_str(&format!("{}# CONDITIONAL: if {}\n", indent, cond));
             if !step.then.is_empty() {
                 out.push_str(&format!("{}# → THEN:\n", indent));
@@ -239,7 +264,7 @@ fn render_step(
             }
         }
         "switch_tab" => {
-            let tab = substitute(step.tab.as_deref().unwrap_or("tab"), vars);
+            let tab = comment_text(&substitute(step.tab.as_deref().unwrap_or("tab"), vars));
             out.push_str(&format!(
                 "{}agent-browser --session comet tab list   # find tab matching '{}'\n",
                 indent, tab
@@ -253,7 +278,8 @@ fn render_step(
             // Unknown action — emit as a comment for the agent to interpret.
             out.push_str(&format!(
                 "{}# action: {} (unknown — interpret manually)\n",
-                indent, step.action
+                indent,
+                comment_text(&step.action)
             ));
         }
     }
@@ -264,11 +290,25 @@ fn render_step(
             "{}# ON FAILURE (max {} retries): {}\n",
             indent,
             step.max_retries,
-            substitute(fix, vars)
+            comment_text(&substitute(fix, vars))
         ));
     }
 
     out.push('\n');
+}
+
+/// Escape data inside a double-quoted POSIX shell argument without expansion.
+fn shell_content(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`")
+}
+
+/// Keep explanatory data on its comment line, never as shell instructions.
+fn comment_text(value: &str) -> String {
+    value.replace(['\n', '\r'], " ")
 }
 
 /// Resolve a step's value: `value_var` takes precedence, then `value`,
@@ -323,6 +363,42 @@ mod tests {
             revision: 1,
             proven: true,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_shell_preserves_arguments_and_never_executes_data() {
+        let payload = "quote\" $HOME $(printf EXPANDED) `printf BACKTICK` \\ end";
+        let flow = make_flow(
+            vec![FlowStep {
+                action: "open".into(),
+                url: Some(payload.into()),
+                rationale: Some("note\nprintf COMMENT_INJECTION\n#".into()),
+                ..Default::default()
+            }],
+            vec![],
+        );
+        let rendered = replay(&flow, &HashMap::new()).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pixel-replay-shell-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stub = dir.join("agent-browser");
+        std::fs::write(&stub, "#!/bin/sh\nprintf '%s\\0' \"$@\"\n").unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(rendered)
+            .env("PATH", &dir)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected = format!("--session\0comet\0open\0{payload}\0");
+        assert_eq!(output.stdout, expected.as_bytes());
     }
 
     #[test]

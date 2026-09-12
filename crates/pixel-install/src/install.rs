@@ -397,14 +397,16 @@ pub struct MigrateReport {
     pub repo_root: String,
     /// True if a `.gitpixel/` directory was found and deleted.
     pub old_state_removed: bool,
-    /// True if `.pixel/` was rebuilt fresh.
+    /// Compatibility field: false because this command does not rebuild indexes.
     pub new_state_rebuilt: bool,
+    /// True once `.pixel/` exists; existing contents are preserved.
+    pub new_state_directory_prepared: bool,
 }
 
-/// Migrate a repo from the old `.gitpixel/` state to a fresh `.pixel/` state.
+/// Remove legacy `.gitpixel/` state and prepare the current `.pixel/` directory.
 ///
-/// Deletes `.gitpixel/` and rebuilds `.pixel/` fresh. No state migration —
-/// every index is a cache and is rebuilt on first use. (The old gain-ledger
+/// Existing `.pixel/` contents are preserved. Missing indexes are built lazily
+/// on first use, not by this command. (The old gain-ledger
 /// carry-over was removed together with the gain module: an unmeasured
 /// token-savings ledger was exactly the kind of claim-without-measurement
 /// the doctrine now forbids.)
@@ -420,16 +422,43 @@ pub fn migrate(repo_root: &Path) -> Result<MigrateReport> {
         false
     };
 
-    // Rebuild `.pixel/` fresh (the index/graph/facts are caches; the daemon
-    // and CLI rebuild them on first use).
+    // Preparing a directory is not proof that any index has been rebuilt.
     fs::create_dir_all(&new_dir)?;
-    let new_state_rebuilt = true;
 
     Ok(MigrateReport {
         version: "v1".into(),
         ok: true,
         repo_root: repo_root.display().to_string(),
         old_state_removed,
-        new_state_rebuilt,
+        new_state_rebuilt: false,
+        new_state_directory_prepared: true,
     })
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn migrate_preserves_current_state_and_reports_no_rebuild() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        fs::create_dir_all(root.join(".pixel")).unwrap();
+        fs::create_dir_all(root.join(".gitpixel")).unwrap();
+        let state = root.join(".pixel/user-state.json");
+        fs::write(&state, b"{\"preserve\":true}").unwrap();
+        let first = migrate(root).unwrap();
+        assert!(first.old_state_removed);
+        assert!(first.new_state_directory_prepared);
+        assert!(
+            !first.new_state_rebuilt,
+            "preparing a directory is not rebuilding an index"
+        );
+        assert_eq!(fs::read(&state).unwrap(), b"{\"preserve\":true}");
+        let second = migrate(root).unwrap();
+        assert!(!second.old_state_removed);
+        assert!(second.new_state_directory_prepared);
+        assert!(!second.new_state_rebuilt);
+        assert_eq!(fs::read(&state).unwrap(), b"{\"preserve\":true}");
+    }
 }

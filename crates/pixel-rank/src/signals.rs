@@ -664,7 +664,7 @@ mod tests {
             &opts,
         );
         // Only candidates survive the filter; the external hub is gone entirely.
-        assert!(bundle.fan_in.get("src/hot_lib.rs").is_none());
+        assert!(!bundle.fan_in.contains_key("src/hot_lib.rs"));
         // Normalization is within-candidate-set: max(3)=1.0, 1/3≈0.333…
         let auth = bundle.fan_in.get("src/auth.rs").copied().unwrap_or(0.0);
         let api = bundle.fan_in.get("src/api.rs").copied().unwrap_or(0.0);
@@ -726,6 +726,6 @@ mod tests {
             assert_eq!(c.tier, "P1");
         }
         // The external hub never surfaces as candidate or as a bonus.
-        assert!(signals.fan_in.get("src/hot_lib.rs").is_none());
+        assert!(!signals.fan_in.contains_key("src/hot_lib.rs"));
     }
 }
