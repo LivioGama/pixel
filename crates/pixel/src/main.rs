@@ -717,7 +717,9 @@ enum Command {
         /// Cargo build command to run (default: `cargo build --release -p pixel-cli`).
         #[arg(long, default_value = "cargo build --release -p pixel-cli")]
         build: String,
-        /// Install path (default: ~/.local/bin/pixel).
+        /// Install path. Default: the binary running this command (unless
+        /// it lives in a cargo `target/` dir), else the first `pixel` on
+        /// PATH (shim directories skipped), else ~/.local/bin/pixel.
         #[arg(long)]
         install_path: Option<PathBuf>,
         /// Restart the daemon after upgrade.
@@ -726,6 +728,10 @@ enum Command {
         /// Repo path for daemon restart.
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Resolve and print the install path, then exit without building
+        /// or installing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Health check: install state, daemon, index/graph/facts freshness.
     Doctor {
@@ -2510,6 +2516,207 @@ fn daemon_stop(path: PathBuf) -> Result<(), String> {
     }
 }
 
+/// Where `pixel upgrade` writes the new binary, and why that path won.
+struct UpgradeTarget {
+    path: PathBuf,
+    source: &'static str,
+}
+
+/// True when `path` has a `target` directory component: a cargo build
+/// output, never an install location.
+fn is_cargo_target_path(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str() == std::ffi::OsStr::new("target"))
+}
+
+/// Every `pixel` executable on `path_var`, in PATH order, symlinks
+/// resolved, deduplicated. Directories named `shims` (mise, asdf) are
+/// skipped: a shim is a launcher that `exec`s the managed install, so it is
+/// neither a place to write a binary nor a competing copy.
+fn pixel_binaries_on_path(path_var: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    let Some(path_var) = path_var else {
+        return found;
+    };
+    for dir in std::env::split_paths(path_var) {
+        if dir.file_name().and_then(|n| n.to_str()) == Some("shims") {
+            continue;
+        }
+        let candidate = dir.join("pixel");
+        if !candidate.is_file() {
+            continue;
+        }
+        let resolved = candidate.canonicalize().unwrap_or(candidate);
+        if !found.contains(&resolved) {
+            found.push(resolved);
+        }
+    }
+    found
+}
+
+/// Decide where `pixel upgrade` installs.
+///
+/// The historical fixed `~/.local/bin/pixel` was wrong on any machine whose
+/// `pixel` is managed elsewhere (a mise/asdf install dir behind a shim, a
+/// Homebrew cellar, `~/.cargo/bin`): it dropped a second copy that either
+/// shadowed the managed one or never reached PATH. Order:
+///
+/// 1. `--install-path`, verbatim.
+/// 2. The binary running this command: after a shim `exec`s the managed
+///    install, `current_exe` IS the managed install. Skipped when it sits
+///    in a cargo `target/` dir (`target/release/pixel upgrade`).
+/// 3. The first `pixel` on PATH outside a `shims` dir or a `target/` dir.
+/// 4. `~/.local/bin/pixel`, the legacy default.
+fn resolve_upgrade_target(
+    explicit: Option<PathBuf>,
+    current_exe: Option<PathBuf>,
+    path_var: Option<&std::ffi::OsStr>,
+    home: &Path,
+) -> UpgradeTarget {
+    if let Some(path) = explicit {
+        return UpgradeTarget {
+            path,
+            source: "--install-path",
+        };
+    }
+    if let Some(exe) = current_exe {
+        let exe = exe.canonicalize().unwrap_or(exe);
+        if exe.is_file() && !is_cargo_target_path(&exe) {
+            return UpgradeTarget {
+                path: exe,
+                source: "running binary",
+            };
+        }
+    }
+    if let Some(path) = pixel_binaries_on_path(path_var)
+        .into_iter()
+        .find(|p| !is_cargo_target_path(p))
+    {
+        return UpgradeTarget {
+            path,
+            source: "first pixel on PATH",
+        };
+    }
+    UpgradeTarget {
+        path: home.join(".local").join("bin").join("pixel"),
+        source: "default",
+    }
+}
+
+/// The `pixel` that a shell would run INSTEAD of `installed`, if any: the
+/// first PATH hit that is a different file. This is how a stale copy in
+/// `~/.local/bin` silently kept serving an old version after an upgrade
+/// landed in a mise install dir that came later on PATH.
+fn upgrade_shadowed_by(installed: &Path, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let installed = installed.canonicalize().ok()?;
+    pixel_binaries_on_path(path_var)
+        .into_iter()
+        .next()
+        .filter(|first| *first != installed)
+}
+
+#[cfg(test)]
+mod upgrade_target_tests {
+    use super::*;
+
+    fn sandbox(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pixel-upgrade-target-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(path: &Path) -> PathBuf {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+        path.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn explicit_flag_wins_verbatim() {
+        let t = resolve_upgrade_target(
+            Some(PathBuf::from("/opt/x/pixel")),
+            Some(PathBuf::from("/nope")),
+            None,
+            Path::new("/home/u"),
+        );
+        assert_eq!(t.path, PathBuf::from("/opt/x/pixel"));
+        assert_eq!(t.source, "--install-path");
+    }
+
+    /// The point of the change: on a machine where `pixel` is a managed
+    /// install behind a shim, the running binary is that install, and the
+    /// upgrade must land there, not in a `~/.local/bin` that shadows or
+    /// misses PATH.
+    #[test]
+    fn running_binary_is_the_install_location() {
+        let d = sandbox("running");
+        let managed = touch(&d.join("mise/installs/pixel/rev-abc/bin/pixel"));
+        let t = resolve_upgrade_target(None, Some(managed.clone()), None, &d);
+        assert_eq!(t.path, managed);
+        assert_eq!(t.source, "running binary");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `target/release/pixel upgrade` (or a test binary) must never make
+    /// the build output the install location.
+    #[test]
+    fn cargo_target_binary_falls_through_to_path_then_default() {
+        let d = sandbox("target");
+        let built = touch(&d.join("repo/target/release/pixel"));
+        let on_path = touch(&d.join("cellar/bin/pixel"));
+        let shim = touch(&d.join("mise/shims/pixel"));
+        let path_var = std::env::join_paths([
+            shim.parent().unwrap().to_path_buf(),
+            d.join("repo/target/release"),
+            on_path.parent().unwrap().to_path_buf(),
+        ])
+        .unwrap();
+        let t = resolve_upgrade_target(None, Some(built.clone()), Some(&path_var), &d);
+        assert_eq!(t.path, on_path, "shim dir and target dir skipped");
+        assert_eq!(t.source, "first pixel on PATH");
+
+        let t = resolve_upgrade_target(None, Some(built), None, &d);
+        assert_eq!(t.path, d.join(".local/bin/pixel"));
+        assert_eq!(t.source, "default");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn shadow_is_reported_only_when_a_different_pixel_comes_first() {
+        let d = sandbox("shadow");
+        let stale = touch(&d.join("local/bin/pixel"));
+        let managed = touch(&d.join("mise/installs/pixel/bin/pixel"));
+        let link_dir = d.join("linkdir");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        std::os::unix::fs::symlink(&managed, link_dir.join("pixel")).unwrap();
+
+        let stale_first = std::env::join_paths([
+            stale.parent().unwrap().to_path_buf(),
+            managed.parent().unwrap().to_path_buf(),
+        ])
+        .unwrap();
+        assert_eq!(
+            upgrade_shadowed_by(&managed, Some(&stale_first)),
+            Some(stale.clone())
+        );
+
+        let managed_first = std::env::join_paths([
+            managed.parent().unwrap().to_path_buf(),
+            stale.parent().unwrap().to_path_buf(),
+        ])
+        .unwrap();
+        assert_eq!(upgrade_shadowed_by(&managed, Some(&managed_first)), None);
+
+        // A symlink to the installed binary is the same file, not a shadow.
+        let link_first =
+            std::env::join_paths([link_dir, stale.parent().unwrap().to_path_buf()]).unwrap();
+        assert_eq!(upgrade_shadowed_by(&managed, Some(&link_first)), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
 /// Upgrade control messages must never inherit the retrieval client's 600s timeout.
 /// Only a missing/refused socket means absent; a stalled or malformed reply is an error.
 fn upgrade_daemon_request(root: &Path, req: &Request) -> Result<Option<Response>, String> {
@@ -3864,14 +4071,24 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             install_path,
             restart_daemon,
             repo,
+            dry_run,
         } => {
             let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-            let dest = install_path.unwrap_or_else(|| {
-                PathBuf::from(&home)
-                    .join(".local")
-                    .join("bin")
-                    .join("pixel")
-            });
+            let path_var = std::env::var_os("PATH");
+            let target = resolve_upgrade_target(
+                install_path,
+                std::env::current_exe().ok(),
+                path_var.as_deref(),
+                Path::new(&home),
+            );
+            let dest = target.path;
+            eprintln!("Install path: {} ({})", dest.display(), target.source);
+            if dry_run {
+                if let Some(other) = upgrade_shadowed_by(&dest, path_var.as_deref()) {
+                    eprintln!("warning: {} precedes that path on PATH", other.display());
+                }
+                return write_stdout(&format!("{}\n", dest.display()));
+            }
             // 1. Build.
             eprintln!("Building: {build}");
             let status = std::process::Command::new("sh")
@@ -3922,6 +4139,13 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 format!("rename failed: {e}")
             })?;
             eprintln!("Installed binary: {} -> {}", src.display(), dest.display());
+            if let Some(other) = upgrade_shadowed_by(&dest, path_var.as_deref()) {
+                eprintln!(
+                    "warning: {} precedes the upgraded binary on PATH; `pixel` will keep \
+                     running that copy until it is removed or PATH is reordered",
+                    other.display()
+                );
+            }
             // 5. Stop only the selected repository after installation succeeds.
             if let Some(response) = upgrade_daemon_request(&repo_path, &Request::Shutdown)? {
                 if !response.ok {
