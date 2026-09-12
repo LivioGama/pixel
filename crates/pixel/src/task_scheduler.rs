@@ -22,6 +22,9 @@ pub(crate) struct WorkerConfig {
     pub(crate) max_turns: Option<u32>,
     pub(crate) max_budget_usd: Option<String>,
     pub(crate) system_prompt_file: Option<PathBuf>,
+    /// Appended to every sub-agent the worker spawns
+    /// (`--append-subagent-system-prompt-file`).
+    pub(crate) subagent_prompt_file: Option<PathBuf>,
 }
 
 impl Default for WorkerConfig {
@@ -32,6 +35,7 @@ impl Default for WorkerConfig {
             max_turns: None,
             max_budget_usd: None,
             system_prompt_file: None,
+            subagent_prompt_file: None,
         }
     }
 }
@@ -276,6 +280,7 @@ fn spawn_candidate(
         max_turns: config.max_turns,
         max_budget_usd: config.max_budget_usd.as_deref(),
         system_prompt_file: config.system_prompt_file.as_deref(),
+        subagent_prompt_file: config.subagent_prompt_file.as_deref(),
     };
     let mut command =
         crate::claude_controller::build_worker_command_with_options(&launch, &options)?;
@@ -490,6 +495,7 @@ mod tests {
             max_turns: Some(3),
             max_budget_usd: Some("1.25".to_string()),
             system_prompt_file: None,
+            subagent_prompt_file: None,
         };
 
         let started = start(&root, &accepted.task_id, &candidate.candidate_id, &config).unwrap();

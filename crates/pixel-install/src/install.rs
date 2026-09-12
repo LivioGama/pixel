@@ -169,32 +169,43 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     })
 }
 
+/// File name, under `~/.local/share/pixel/`, of the short prompt appended to
+/// Claude Code sub-agents (`--append-subagent-system-prompt-file`, print mode
+/// only). Kept apart from `agent-prompt.md` because a sub-agent gets neither
+/// the session's `--append-system-prompt-file` nor its history, and because a
+/// long prompt loses to a long agent body: this one stays under 2 KB.
+pub(crate) const SUBAGENT_PROMPT_FILE: &str = "subagent-prompt.md";
+
+/// The sub-agent prompt as bundled in the binary.
+pub(crate) const SUBAGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-subagent-prompt.md");
+
 /// Copy the bundled Pixel agent system prompt to `~/.local/share/pixel/agent-prompt.md`
-/// and to `~/.pi/agent/APPEND_SYSTEM.md` (Pi reads this automatically, no flag needed).
+/// and to `~/.pi/agent/APPEND_SYSTEM.md` (Pi reads this automatically, no flag needed),
+/// and the sub-agent prompt to `~/.local/share/pixel/subagent-prompt.md`.
 /// The prompt instructs agents to use `pixel search`/`pixel resolve`/`pixel impact`
 /// instead of `grep`/`rg` for code discovery in indexed repositories.
 fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let dest_dir = home.join(".local/share/pixel");
     let dest = dest_dir.join("agent-prompt.md");
+    let subagent_dest = dest_dir.join(SUBAGENT_PROMPT_FILE);
     let pi_dest = home.join(".pi/agent/APPEND_SYSTEM.md");
     if dry_run {
         return Ok(InstallStep {
             id: "agent-prompt".into(),
             status: CheckStatus::Green,
-            summary: "would deploy agent-prompt.md".into(),
-            detail: Some(format!("dest={}", dest.display())),
+            summary: format!("would deploy agent-prompt.md and {SUBAGENT_PROMPT_FILE}"),
+            detail: Some(format!(
+                "dest={} subagent={}",
+                dest.display(),
+                subagent_dest.display()
+            )),
         });
     }
     fs::create_dir_all(&dest_dir)?;
     // The asset is embedded at compile time so the installed binary is self-contained.
     const ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
-    let needs_write = match fs::read_to_string(&dest) {
-        Ok(existing) => existing != ASSET,
-        Err(_) => true,
-    };
-    if needs_write {
-        fs::write(&dest, ASSET)?;
-    }
+    let needs_write = write_if_changed(&dest, ASSET)?;
+    let subagent_written = write_if_changed(&subagent_dest, SUBAGENT_PROMPT_ASSET)?;
     // Deploy to Pi's APPEND_SYSTEM.md so pi reads it automatically.
     if let Some(pi_parent) = pi_dest.parent() {
         let _ = fs::create_dir_all(pi_parent);
@@ -204,11 +215,34 @@ fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
         id: "agent-prompt".into(),
         status: CheckStatus::Green,
         summary: format!(
-            "{} agent-prompt.md",
-            if needs_write { "deployed" } else { "verified" }
+            "{} agent-prompt.md, {} {SUBAGENT_PROMPT_FILE}",
+            if needs_write { "deployed" } else { "verified" },
+            if subagent_written {
+                "deployed"
+            } else {
+                "verified"
+            }
         ),
-        detail: Some(format!("path={} pi={}", dest.display(), pi_dest.display())),
+        detail: Some(format!(
+            "path={} subagent={} pi={}",
+            dest.display(),
+            subagent_dest.display(),
+            pi_dest.display()
+        )),
     })
+}
+
+/// Write `content` to `path` unless the file already holds exactly it.
+/// Returns whether a write happened.
+fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
+    let needs_write = match fs::read_to_string(path) {
+        Ok(existing) => existing != content,
+        Err(_) => true,
+    };
+    if needs_write {
+        fs::write(path, content)?;
+    }
+    Ok(needs_write)
 }
 
 /// Which shell dialect the managed wrapper block is written in.
@@ -240,6 +274,10 @@ pub(crate) const FISH_DROPIN: &str = "pixel.fish";
 /// Prompt path written literally into the wrapper block, so the shell expands
 /// `$HOME` itself and the block survives a moved home directory.
 pub(crate) const PROMPT_PATH: &str = "$HOME/.local/share/pixel/agent-prompt.md";
+
+/// Sub-agent prompt path, written literally into the wrapper block for the
+/// same reason as [`PROMPT_PATH`].
+pub(crate) const SUBAGENT_PROMPT_PATH: &str = "$HOME/.local/share/pixel/subagent-prompt.md";
 
 /// The shell to install wrappers for: the caller's override when given,
 /// otherwise `$SHELL`.
@@ -311,20 +349,46 @@ pub(crate) const PIXEL_MANAGED_END: &str = "# <<< pixel-managed <<<";
 /// Build the managed shell-wrapper block for `kind`. Uses shell functions (not
 /// aliases) because functions handle subcommands correctly (`codex exec ...`
 /// works).
-pub(crate) fn shell_wrapper_block(kind: ShellKind, prompt_path: &str) -> String {
+///
+/// The `claude` wrapper always appends `prompt_path` to the session prompt.
+/// It appends `subagent_prompt_path` to sub-agents only when `-p`/`--print`
+/// is among the arguments: Claude Code honours
+/// `--append-subagent-system-prompt-file` in print mode only, and the same
+/// wrapper also fronts interactive sessions.
+pub(crate) fn shell_wrapper_block(
+    kind: ShellKind,
+    prompt_path: &str,
+    subagent_prompt_path: &str,
+) -> String {
     let body = match kind {
         ShellKind::Posix => format!(
-            "claude() {{ command claude --append-system-prompt-file \"{prompt}\" \"$@\"; }}\n\
+            "claude() {{\n\
+             \x20 for _pixel_arg in \"$@\"; do\n\
+             \x20   case \"$_pixel_arg\" in\n\
+             \x20     -p|--print) command claude --append-system-prompt-file \"{prompt}\" --append-subagent-system-prompt-file \"{subagent}\" \"$@\"; return $?;;\n\
+             \x20   esac\n\
+             \x20 done\n\
+             \x20 command claude --append-system-prompt-file \"{prompt}\" \"$@\"\n\
+             }}\n\
              codex() {{ command codex -c \"model_instructions_file=\\\"{prompt}\\\"\" \"$@\"; }}",
             prompt = prompt_path,
+            subagent = subagent_prompt_path,
         ),
         // fish: `function name; ...; end`, arguments as `$argv`. Double quotes
         // still expand `$HOME` and still honour `\"` escapes, so the codex
-        // argument is spelled exactly as in the POSIX block.
+        // argument is spelled exactly as in the POSIX block. `contains -- -p`
+        // needs the `--` so `-p` is looked up rather than parsed as an option.
         ShellKind::Fish => format!(
-            "function claude; command claude --append-system-prompt-file \"{prompt}\" $argv; end\n\
+            "function claude\n\
+             \x20 if contains -- -p $argv; or contains -- --print $argv\n\
+             \x20   command claude --append-system-prompt-file \"{prompt}\" --append-subagent-system-prompt-file \"{subagent}\" $argv\n\
+             \x20 else\n\
+             \x20   command claude --append-system-prompt-file \"{prompt}\" $argv\n\
+             \x20 end\n\
+             end\n\
              function codex; command codex -c \"model_instructions_file=\\\"{prompt}\\\"\" $argv; end",
             prompt = prompt_path,
+            subagent = subagent_prompt_path,
         ),
     };
     format!(
@@ -342,7 +406,7 @@ pub(crate) fn shell_wrapper_block(kind: ShellKind, prompt_path: &str) -> String 
 /// compares the on-disk block against, so a block left behind by another shell
 /// or an older pixel reads as stale instead of green.
 pub(crate) fn expected_wrapper_block(kind: ShellKind) -> String {
-    shell_wrapper_block(kind, PROMPT_PATH)
+    shell_wrapper_block(kind, PROMPT_PATH, SUBAGENT_PROMPT_PATH)
 }
 
 /// Return the pixel-managed block found in `content`, markers included.
@@ -399,7 +463,7 @@ fn install_shell_wrappers(
 ) -> Result<InstallStep> {
     let shell = resolve_shell(shell_override);
     let (kind, profile) = shell_profile_for(&shell, home);
-    let block = shell_wrapper_block(kind, PROMPT_PATH);
+    let block = expected_wrapper_block(kind);
     let detail = Some(format!(
         "profile={} shell={}",
         profile.display(),

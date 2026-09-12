@@ -106,6 +106,12 @@ pub(crate) struct ClaudeWorkerOptions<'a> {
     /// Pixel retrieval rules so workers are Pixel-aware without relying on
     /// CLAUDE.md discovery.
     pub(crate) system_prompt_file: Option<&'a Path>,
+    /// Path to a file appended to the system prompt of every sub-agent the
+    /// worker spawns, via `--append-subagent-system-prompt-file`. Sub-agents
+    /// do not inherit `system_prompt_file`, so without this they only see the
+    /// repository's CLAUDE.md and their own agent body. The worker always runs
+    /// in print mode, which is the only mode Claude Code honours the flag in.
+    pub(crate) subagent_prompt_file: Option<&'a Path>,
 }
 
 /// Construct a worker command with explicit scheduler-provided limits. This
@@ -160,6 +166,14 @@ pub(crate) fn build_worker_command_with_options(
             return Err("Claude worker system prompt file must not be empty".to_string());
         }
         command.arg("--append-system-prompt-file").arg(prompt_file);
+    }
+    if let Some(prompt_file) = options.subagent_prompt_file {
+        if prompt_file.as_os_str().is_empty() {
+            return Err("Claude worker subagent prompt file must not be empty".to_string());
+        }
+        command
+            .arg("--append-subagent-system-prompt-file")
+            .arg(prompt_file);
     }
     command.arg(worker_prompt(launch));
     Ok(command)
@@ -258,6 +272,7 @@ mod tests {
                 max_turns: None,
                 max_budget_usd: None,
                 system_prompt_file: None,
+                subagent_prompt_file: None,
             },
         )
         .unwrap();
@@ -322,6 +337,7 @@ mod tests {
                 max_turns: None,
                 max_budget_usd: None,
                 system_prompt_file: Some(prompt_file),
+                subagent_prompt_file: None,
             },
         )
         .unwrap();
@@ -351,6 +367,7 @@ mod tests {
                 max_turns: None,
                 max_budget_usd: None,
                 system_prompt_file: None,
+                subagent_prompt_file: None,
             },
         )
         .unwrap();
@@ -361,6 +378,99 @@ mod tests {
         assert!(
             !args.iter().any(|arg| arg == "--append-system-prompt-file"),
             "flag must be absent when system_prompt_file is None"
+        );
+    }
+
+    #[test]
+    fn subagent_prompt_file_injects_append_subagent_flag() {
+        let prompt_file = Path::new("/tmp/pixel-subagent-rules.md");
+        let command = build_worker_command_with_options(
+            &ClaudeWorkerLaunch {
+                task_id: "task-42",
+                worktree_id: "worktree-7",
+                worktree: Path::new("/tmp/pixel-task-42"),
+                objective: "Change greeting behavior",
+            },
+            &ClaudeWorkerOptions {
+                executable: Path::new("claude"),
+                model: None,
+                max_turns: None,
+                max_budget_usd: None,
+                system_prompt_file: None,
+                subagent_prompt_file: Some(prompt_file),
+            },
+        )
+        .unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.windows(2).any(|pair| pair
+                == [
+                    "--append-subagent-system-prompt-file",
+                    "/tmp/pixel-subagent-rules.md"
+                ]),
+            "expected --append-subagent-system-prompt-file flag, args were: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg == "--append-system-prompt-file"),
+            "the sub-agent file must not leak into the worker's own system prompt: {args:?}"
+        );
+    }
+
+    #[test]
+    fn no_subagent_prompt_file_omits_append_subagent_flag() {
+        let command = build_worker_command_with_options(
+            &ClaudeWorkerLaunch {
+                task_id: "task-42",
+                worktree_id: "worktree-7",
+                worktree: Path::new("/tmp/pixel-task-42"),
+                objective: "Change greeting behavior",
+            },
+            &ClaudeWorkerOptions {
+                executable: Path::new("claude"),
+                model: None,
+                max_turns: None,
+                max_budget_usd: None,
+                system_prompt_file: Some(Path::new("/tmp/pixel-worker-rules.md")),
+                subagent_prompt_file: None,
+            },
+        )
+        .unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--append-subagent-system-prompt-file"),
+            "flag must be absent when subagent_prompt_file is None: {args:?}"
+        );
+    }
+
+    #[test]
+    fn empty_subagent_prompt_file_path_is_rejected() {
+        let result = build_worker_command_with_options(
+            &ClaudeWorkerLaunch {
+                task_id: "task-42",
+                worktree_id: "worktree-7",
+                worktree: Path::new("/tmp/pixel-task-42"),
+                objective: "Change greeting behavior",
+            },
+            &ClaudeWorkerOptions {
+                executable: Path::new("claude"),
+                model: None,
+                max_turns: None,
+                max_budget_usd: None,
+                system_prompt_file: None,
+                subagent_prompt_file: Some(Path::new("")),
+            },
+        );
+        assert!(
+            result.is_err(),
+            "empty subagent_prompt_file must be rejected"
         );
     }
 
@@ -379,6 +489,7 @@ mod tests {
                 max_turns: None,
                 max_budget_usd: None,
                 system_prompt_file: Some(Path::new("")),
+                subagent_prompt_file: None,
             },
         );
         assert!(result.is_err(), "empty system_prompt_file must be rejected");
@@ -392,6 +503,7 @@ mod tests {
             max_turns: None,
             max_budget_usd: None,
             system_prompt_file: None,
+            subagent_prompt_file: None,
         };
         let relative = ClaudeWorkerLaunch {
             task_id: "task-42",
