@@ -132,9 +132,26 @@ jobs:
           end
           EOF
 
+      # The release body is the tag's section of CHANGELOG.md (Keep a
+      # Changelog: from "## [X.Y.Z]" to the next "## " heading).
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          awk -v v="$VERSION" '
+            /^## \[/ { inside = index($0, "## [" v "]") == 1 }
+            inside && index($0, "## [" v "]") != 1 { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::warning::no '## [${VERSION}]' section in CHANGELOG.md; the release body falls back to a link"
+            echo "See [CHANGELOG.md](https://github.com/LivioGama/pixel/blob/v${VERSION}/CHANGELOG.md)." > release-notes.md
+          fi
+          echo "--- release-notes.md ---"
+          cat release-notes.md
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v3
         with:
+          body_path: release-notes.md
           files: |
             artifacts/pixel-*.tar.gz
             artifacts/pixel-*.tar.gz.sha256
