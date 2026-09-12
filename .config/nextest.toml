@@ -1,0 +1,26 @@
+# cargo-nextest configuration (https://nexte.st/docs/configuration/).
+# CI runs `cargo nextest run --workspace --locked --profile ci`; local runs
+# use the default profile below. Doctests are not nextest's job: CI keeps a
+# separate `cargo test --workspace --doc`.
+nextest-version = { required = "0.9.100" }
+
+[profile.default]
+# One process per test: process-wide state (env vars, cwd) needs no lock.
+# A test binary that is red must not hide the ones after it.
+fail-fast = false
+# A test taking longer than a minute is a hang, not a slow test (the longest
+# CLI contract test here runs in seconds). Warn at 60 s, kill at 180 s.
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+[profile.ci]
+inherits = "default"
+# One retry surfaces a timing-dependent test as FLAKY in the summary instead
+# of a red run for a wobble, and a flaky result still fails the run: a
+# retry is telemetry, never a mask.
+retries = 1
+flaky-result = "fail"
+status-level = "retry"
+final-status-level = "flaky"
+
+[profile.ci.junit]
+path = "junit.xml"
