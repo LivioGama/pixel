@@ -2872,12 +2872,17 @@ fn pixel_binaries_on_path(path_var: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
 /// `--profile <name>` / `--profile=<name>` wins, then `--release`
 /// (`release`), else cargo's default `debug`. `pixel upgrade` used to
 /// hardcode `target/release`, so a `--build` with another profile installed
-/// whatever stale binary sat there.
+/// whatever stale binary sat there. A command that does not invoke cargo
+/// (a wrapper script, `/usr/bin/true` in tests) keeps the historical
+/// `release`: cargo's flag semantics do not apply to it.
 fn cargo_profile_dir(build: &str) -> String {
     let mut args = build.split_whitespace().peekable();
     let mut release = false;
+    let mut invokes_cargo = false;
     while let Some(arg) = args.next() {
-        if arg == "--profile" {
+        if arg == "cargo" || arg.ends_with("/cargo") {
+            invokes_cargo = true;
+        } else if arg == "--profile" {
             if let Some(name) = args.next() {
                 return profile_dir_name(name);
             }
@@ -2887,7 +2892,7 @@ fn cargo_profile_dir(build: &str) -> String {
             release = true;
         }
     }
-    if release {
+    if release || !invokes_cargo {
         "release".into()
     } else {
         "debug".into()
@@ -2995,6 +3000,18 @@ mod upgrade_target_tests {
         );
         assert_eq!(cargo_profile_dir("cargo build --profile dev"), "debug");
         assert_eq!(cargo_profile_dir("cargo build --profile bench"), "release");
+        assert_eq!(
+            cargo_profile_dir("~/.cargo/bin/cargo build -p pixel-cli"),
+            "debug"
+        );
+        // Not a cargo invocation: no flag semantics, historical `release`
+        // (the upgrade CLI tests fake the build with `/usr/bin/true`).
+        assert_eq!(cargo_profile_dir("/usr/bin/true"), "release");
+        assert_eq!(cargo_profile_dir("./scripts/build.sh"), "release");
+        assert_eq!(
+            cargo_profile_dir("./scripts/build.sh --profile fast"),
+            "fast"
+        );
     }
     use super::*;
 
