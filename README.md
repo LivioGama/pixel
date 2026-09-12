@@ -58,6 +58,17 @@ pixel install       # let your agent use Pixel
 
 Pixel is local-first. Its index, graph, and optional history data live under `.pixel/`; it reports boundaries when results are capped, stale, or incomplete. Tests and code review remain necessary.
 
+### Manual setup
+
+Don't want to run `pixel install`? That's fine. You can deploy the agent
+system prompt and wire it into your agent by hand — see
+[Manual Setup](docs/manual-setup.md). The prompt itself lives at
+[`crates/pixel-install/assets/pixel-agent-prompt.md`](crates/pixel-install/assets/pixel-agent-prompt.md)
+(~266 lines / ~3 000 tokens). It's large because Pixel replaces a wide
+range of native commands (`grep`, `rg`, `git log -S`, `git blame`, manual
+caller tracing) with a single indexed workflow — and the token cost is
+recovered in as little as one `pixel impact` call.
+
 For architecture and the full command surface, see [ARCHITECTURE.md](ARCHITECTURE.md) and `pixel --help`.
 
 ## 📝 License
