@@ -108,7 +108,7 @@ The envelope:
   "op": "search",
   "protocol": 1,
   "requestId": "…",          // optional
-  "snapshot":   { "head": "…", "branch": "…", "dirty": [] },
+  "snapshot":   { "head": "…", "branch": "…", "dirty_count": 0 },   // `dirty: [paths]` on inspect/review only
   "epistemics": { "closed_world": false, "lower_bound": true, "staleness_ms": 0, "basis": "…" },
   "budget":     { "byteCap": 262144 },
   "result":     { … },        // present when ok
@@ -127,7 +127,10 @@ Invariants enforced by `Service::handle`:
   default instead of an implied claim of completeness.
 - Retrieval ops and git-state ops (`inspect`, `review`, `diff`, `status`,
   `changes`) get a `snapshot` so the caller can correlate the answer with the
-  working tree it was computed against.
+  working tree it was computed against. Only `inspect` and `review` carry the
+  `dirty` path list; every other op ships `dirty_count` instead
+  (`SnapshotInfo::compact`), so an untracked `vendor/bundle` of 15 000 paths
+  does not inflate a `symbol` answer to 240 KB.
 
 Adding an op is one variant on `pixel_proto::Op` plus one arm in
 `Service::dispatch`. `Op::op_name` must match the serde tag, and a unit test

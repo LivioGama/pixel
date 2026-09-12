@@ -3154,7 +3154,10 @@ fn daemon_status(path: PathBuf) -> Result<(), String> {
 /// Freshness/readiness answers (`status`, `ready`) only need to say HOW
 /// dirty the tree is: the list itself belongs to `inspect`/`review`, and
 /// carrying it here let one untracked `vendor/bundle` push a 200-byte
-/// answer past the global output cap.
+/// answer past the global output cap. The daemon now ships the compact
+/// form itself for every op but `inspect`/`review`
+/// (`SnapshotInfo::compact`); this stays as the client-side guard when
+/// talking to an older daemon that still sends the list.
 fn compact_snapshot(data: &mut Value) {
     if let Some(snap) = data.get_mut("snapshot").and_then(Value::as_object_mut)
         && let Some(dirty) = snap.remove("dirty")
@@ -3177,11 +3180,17 @@ fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
     if !no_daemon {
         daemon_start(root.clone(), false, json)?;
     }
-    let dirty_count = status
-        .get("snapshot")
-        .and_then(|s| s.get("dirty"))
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
+    let snapshot = status.get("snapshot");
+    let dirty_count = snapshot
+        .and_then(|s| s.get("dirty_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            // Older daemon: the status snapshot still carries the list.
+            snapshot
+                .and_then(|s| s.get("dirty"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len) as u64
+        });
     let data = serde_json::json!({
         "root": root,
         "index": status.get("index").cloned().unwrap_or(Value::Null),

@@ -478,11 +478,21 @@ impl Service {
             op_name,
             "inspect" | "review" | "diff" | "status" | "changes"
         ) || is_retrieval_op(op_name);
+        // Only the ops whose job is to report the working tree carry the
+        // dirty path list. Everything else gets `dirty_count`: a retrieval
+        // answer needs to say WHICH tree state it was computed against, not
+        // enumerate 15 000 untracked `vendor/bundle` paths on every call.
+        let full_dirty_list = matches!(op_name, "inspect" | "review");
         match self.dispatch(req) {
             Ok(v) => {
                 let mut env = Envelope::success(op_name, v);
                 if attach_snapshot {
-                    env = env.with_snapshot(self.repo_snapshot());
+                    let snapshot = self.repo_snapshot();
+                    env = env.with_snapshot(if full_dirty_list {
+                        snapshot
+                    } else {
+                        snapshot.compact()
+                    });
                 }
                 // Epistemics choke point: EVERY successful retrieval-class
                 // response carries an `epistemics` object — this is the ONLY
@@ -521,6 +531,7 @@ impl Service {
             head,
             branch,
             dirty,
+            dirty_count: None,
         }
     }
 
@@ -4809,10 +4820,20 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name}: retrieval response shipped WITHOUT snapshot"));
             assert!(snapshot.head.is_some(), "{name}: snapshot must carry HEAD");
+            // Retrieval answers carry the compact form: the dirty tree is
+            // counted, never enumerated (one untracked vendor tree used to
+            // turn every `symbol` answer into 240 KB).
             assert!(
-                snapshot.dirty.iter().any(|p| p == "a.ts"),
-                "{name}: snapshot must list the dirty file, got {:?}",
+                snapshot.dirty.is_empty(),
+                "{name}: retrieval snapshot must not enumerate dirty paths, got {:?}",
                 snapshot.dirty
+            );
+            let expected = pixel_index::gitsync::status_porcelain(&root).len() as u64;
+            assert!(expected >= 1, "fixture must have a dirty file");
+            assert_eq!(
+                snapshot.dirty_count,
+                Some(expected),
+                "{name}: snapshot must count every dirty path"
             );
         }
 

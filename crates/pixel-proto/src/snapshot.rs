@@ -82,13 +82,19 @@ pub struct Snapshot {
     pub dirty: bool,
 }
 
-/// Envelope v2 `snapshot` field: `{token, head, branch, dirty}`.
+/// Envelope v2 `snapshot` field: `{token, head, branch, dirty | dirty_count}`.
 ///
 /// Unlike the v1 [`Snapshot`], `token` is a plain `Option<String>` (the
 /// daemon may populate it with a raw hex digest before a `SnapshotToken` is
 /// validated), and `dirty` is `Vec<String>` — the list of repo-relative paths
 /// with uncommitted changes — so callers can show *which* files are dirty,
 /// not merely *whether* any are.
+///
+/// The list is only carried by the ops whose job is to report it
+/// (`inspect`, `review`). Every other op (retrieval, `status`, `changes`,
+/// `diff`) ships the [`compact`](Self::compact) form: `dirty_count` instead
+/// of `dirty`, so one untracked `vendor/bundle` of 15 000 paths cannot turn
+/// a 2 KB `symbol` answer into a 240 KB one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SnapshotInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,6 +105,23 @@ pub struct SnapshotInfo {
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dirty: Vec<String>,
+    /// Number of dirty paths when the list itself was collapsed away.
+    /// `None` whenever `dirty` is the authoritative list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_count: Option<u64>,
+}
+
+impl SnapshotInfo {
+    /// Collapse the dirty path list into `dirty_count`, keeping `head`,
+    /// `branch` and `token`. Idempotent: an already compact snapshot keeps
+    /// its count.
+    pub fn compact(mut self) -> Self {
+        if self.dirty_count.is_none() {
+            self.dirty_count = Some(self.dirty.len() as u64);
+        }
+        self.dirty.clear();
+        self
+    }
 }
 
 #[cfg(test)]
@@ -151,9 +174,33 @@ mod tests {
             head: Some("abc123".into()),
             branch: None,
             dirty: vec![],
+            dirty_count: None,
         };
         let value = serde_json::to_value(&info).unwrap();
         assert_eq!(value, serde_json::json!({"head": "abc123"}));
+    }
+
+    /// Retrieval answers must not scale with the dirty tree: the compact
+    /// form carries the count only, and never both fields at once.
+    #[test]
+    fn compact_replaces_dirty_list_with_a_count() {
+        let info = SnapshotInfo {
+            token: None,
+            head: Some("deadbeef".into()),
+            branch: Some("main".into()),
+            dirty: (0..500).map(|i| format!("vendor/bundle/g{i}.rb")).collect(),
+            dirty_count: None,
+        }
+        .compact();
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"head": "deadbeef", "branch": "main", "dirty_count": 500})
+        );
+        // Idempotent: compacting again keeps the count, does not zero it.
+        let again = serde_json::to_value(info.compact()).unwrap();
+        assert_eq!(again["dirty_count"], 500);
+        assert!(again.get("dirty").is_none());
     }
 
     #[test]
@@ -163,6 +210,7 @@ mod tests {
             head: Some("deadbeef".into()),
             branch: Some("main".into()),
             dirty: vec!["src/a.rs".into(), "README.md".into()],
+            dirty_count: None,
         };
         let value = serde_json::to_value(&info).unwrap();
         assert_eq!(
