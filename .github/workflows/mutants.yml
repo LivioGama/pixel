@@ -61,7 +61,7 @@ jobs:
       # 4 baseline tests already failing. Missed and timeouts fail the job;
       # GitHub annotations point at each surviving mutant.
       - name: Run mutants in the diff
-        run: cargo mutants -vV --in-place --in-diff pr.diff --locked
+        run: cargo mutants -vV -C --locked --in-place --in-diff pr.diff
 
       - name: Upload mutants.out
         if: always()
