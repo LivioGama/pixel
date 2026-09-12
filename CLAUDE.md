@@ -2,6 +2,17 @@
 
 Build, gates, PR format and the definition of done live in [CONTRIBUTING.md](CONTRIBUTING.md). Read it before the first edit; the loop below is the per-turn addendum to it.
 
+## Mutation Testing Loop
+
+Mutation tests are run with `cargo mutants --in-diff <(git diff develop...HEAD)` after the gates (`cargo fmt`, `cargo test`, `cargo clippy`) pass. They must pass: the CI workflow `Mutants` fails a pull request on any surviving mutant.
+
+For each `MISSED` line either:
+
+- add a test that fails under that exact mutation (an assertion on the observable contract, not a weaker one), or
+- when the mutation cannot matter (a diagnostic formatter, a `main`, dead-by-design code), annotate the function with `#[cfg_attr(test, mutants::skip)]` plus a one-line reason, adding `mutants = { workspace = true }` to that crate's `[dependencies]` if it is the crate's first skip.
+
+Re-run until the summary reports `0 missed`. Skipping a business rule because the test is hard is not an option; see CONTRIBUTING.md "Mutation testing" for the outcome table and exit codes.
+
 ## Reinstall and Reconfig After Each Implementation Turn
 
 After finishing any implementation turn in this repo (code edit + verify cycle):

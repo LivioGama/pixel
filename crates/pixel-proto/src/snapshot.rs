@@ -155,6 +155,16 @@ mod tests {
         assert!(SnapshotToken::parse("abcdef-12345").is_err());
     }
 
+    // pixel-ops writes the token into journals and error messages through
+    // Display/AsRef; both must yield the validated text, not an empty or
+    // placeholder string, or a stale-state check would never match.
+    #[test]
+    fn display_and_as_ref_yield_the_parsed_token() {
+        let token = SnapshotToken::parse("0123456789ab").unwrap();
+        assert_eq!(token.to_string(), "0123456789ab");
+        assert_eq!(token.as_ref(), "0123456789ab");
+    }
+
     #[test]
     fn serializes_as_bare_string() {
         let token = SnapshotToken::parse("abcdef012345").unwrap();

@@ -19,6 +19,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] `cargo test --workspace` exits 0.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` exits 0.
 - [ ] New behaviour has a test that fails if the behaviour is removed.
+- [ ] `cargo mutants --in-diff <(git diff develop...HEAD)` reports no `MISSED` mutant (see "Mutation testing").
 - [ ] `CHANGELOG.md` has an entry under `## [Unreleased]` (skip for pure refactors and CI/deps chores).
 - [ ] The commit message follows the Conventional Commits format below.
 - [ ] The branch was created from `develop` and the pull request targets `develop`, not `main`.
@@ -72,6 +73,14 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+The `Mutants` workflow (`.github/workflows/mutants.yml`) runs on every pull
+request that touches `crates/` and fails on a surviving mutant. Reproduce it
+locally before pushing:
+
+```bash
+cargo mutants --in-diff <(git diff develop...HEAD)
+```
+
 Optional but recommended when the change touches the CLI surface, hooks, or
 the install flow:
 
@@ -112,6 +121,49 @@ A test must encode *why* the behaviour matters. A test that still passes
 when the business rule is deleted is not a test. Prefer asserting on the
 observable contract (JSON fields, exit codes, epistemics markers) over
 implementation details.
+
+## Mutation testing
+
+Line coverage says where the tests went; mutation testing says whether they
+assert on what they touched. [cargo-mutants](https://mutants.rs/) rewrites
+one function at a time (return `Default::default()`, flip `||` to `&&`,
+drop a match guard, ...) and runs the crate's tests. A mutant that survives
+is a behaviour no test can see. Configuration lives in
+`.cargo/mutants.toml`; output goes to the gitignored `mutants.out/`.
+
+```bash
+cargo install --locked cargo-mutants        # or: cargo binstall cargo-mutants
+
+cargo mutants --in-diff <(git diff develop...HEAD)   # what your branch changed (the CI gate)
+cargo mutants -p pixel-proto                         # one crate, full sweep (about a minute)
+cargo mutants -p pixel-ops -j 4                      # bigger crates: cap the parallel jobs
+```
+
+Read the summary line and `mutants.out/missed.txt`:
+
+| Outcome | Meaning | Action |
+| --- | --- | --- |
+| `caught` | a test failed under the mutation | none |
+| `MISSED` | tests still pass with the function broken | add a test that fails on that mutation, or skip it (below) |
+| `unviable` | the mutant does not compile | none, it is not counted |
+| `TIMEOUT` | tests hung under the mutation | usually a loop-bound mutant; treat as missed |
+
+Exit codes: `0` all caught, `2` missed, `3` timeout, `4` baseline tests
+already fail (fix the tests first; the mutant results are meaningless).
+
+Skip a mutant only when the mutation cannot matter: a `main`, a
+diagnostic-only formatter, a function whose only caller is the test that
+would catch it. To skip, add the attribute crate to the crate's
+`[dependencies]` as `mutants = { workspace = true }` and annotate:
+
+```rust
+#[cfg_attr(test, mutants::skip)]   // reason, in one line
+fn render_banner() { ... }
+```
+
+Repo-wide exclusions (`impl Debug`, the bench crate) are listed in
+`.cargo/mutants.toml`. Do not skip a business rule because the test is hard
+to write: the missed mutant is the bug report.
 
 ## Local install loop (when `crates/` changed)
 
@@ -176,6 +228,11 @@ Pixel is dogfooded on itself. When an agent works in this repository:
 - Run `pixel impact "<symbol>"` before editing any function, struct, or
   method. Say so in the PR if it reported HIGH or CRITICAL risk.
 - Run `pixel changes` before editing to avoid duplicating in-progress work.
+- After the gates pass, run `cargo mutants --in-diff <(git diff develop...HEAD)`.
+  For each `MISSED` mutant either add a test that fails on that mutation or,
+  when the mutation cannot matter, annotate the function with
+  `#[cfg_attr(test, mutants::skip)]` and a one-line reason. Iterate until
+  the run reports no missed mutant; do not weaken an assertion to get there.
 - Use `pixel review` to inspect the working tree and `pixel publish` to
   commit. The guard hook (`crates/pixel/src/guard.rs`) names a pixel
   alternative for destructive or substitutable git commands (`reset --hard`,
