@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # develop is the integration branch (feature PRs are routed there);
+    # main only receives release/hotfix merges. Both must stay green.
+    branches: [main, develop]
   pull_request:
 
 # A new push to a pull request cancels the run still in flight for its
