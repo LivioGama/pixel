@@ -65,6 +65,11 @@ pub struct InstallOptions {
     /// (`fish`, `/bin/bash`, …). Defaults to `$SHELL`. Set it when the
     /// invoking process does not run under the user's login shell.
     pub shell: Option<String>,
+    /// The `claude` executable whose version decides whether the wrapper
+    /// passes `--append-subagent-system-prompt-file`. Defaults to the first
+    /// `claude` on PATH. Claude Code rejects the flag before 2.1.261 with
+    /// `error: unknown option`, which would break every `claude -p` call.
+    pub claude_executable: Option<PathBuf>,
     /// If true, compute and report every step's outcome exactly as a real
     /// run would, but perform no filesystem writes: no settings.json edits,
     /// no hook files, no agent-config rewrites, no backups, no directory
@@ -78,29 +83,115 @@ struct InstalledAgents {
     claude: bool,
 }
 
-#[allow(dead_code)]
-fn command_available(name: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| {
+/// First executable file named `name` on PATH.
+pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
         let candidate = dir.join(name);
         if !candidate.is_file() {
-            return false;
+            return None;
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            candidate
+            let executable = candidate
                 .metadata()
                 .map(|meta| meta.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false)
+                .unwrap_or(false);
+            executable.then_some(candidate)
         }
         #[cfg(not(unix))]
         {
-            true
+            Some(candidate)
         }
     })
+}
+
+#[allow(dead_code)]
+fn command_available(name: &str) -> bool {
+    find_on_path(name).is_some()
+}
+
+/// A Claude Code version as printed by `claude --version` (`2.1.269 (Claude Code)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ClaudeVersion(pub u64, pub u64, pub u64);
+
+impl std::fmt::Display for ClaudeVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.0, self.1, self.2)
+    }
+}
+
+/// First Claude Code release that accepts `--append-subagent-system-prompt-file`
+/// (its CHANGELOG entry for 2.1.261). Earlier releases exit 1 on the unknown
+/// option, so the wrapper must not pass it to them.
+pub const MIN_CLAUDE_FOR_SUBAGENT_PROMPT: ClaudeVersion = ClaudeVersion(2, 1, 261);
+
+/// Parse the first `major.minor.patch` token of `claude --version` output.
+pub(crate) fn parse_claude_version(output: &str) -> Option<ClaudeVersion> {
+    let token = output.split_whitespace().next()?;
+    let mut parts = token.trim_start_matches('v').split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    Some(ClaudeVersion(major, minor, patch))
+}
+
+/// What `pixel install` and `pixel doctor` learned about the user's Claude Code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeProbe {
+    /// Where `claude` was found, if anywhere.
+    pub executable: Option<PathBuf>,
+    /// Its version, if `claude --version` ran and parsed.
+    pub version: Option<ClaudeVersion>,
+}
+
+impl ClaudeProbe {
+    /// True only when a Claude Code at or above
+    /// [`MIN_CLAUDE_FOR_SUBAGENT_PROMPT`] was observed. Unknown is treated as
+    /// unsupported: omitting the flag silently loses sub-agent rules, passing
+    /// it to an old Claude Code breaks every print-mode call.
+    pub fn supports_subagent_prompt(&self) -> bool {
+        self.version
+            .is_some_and(|version| version >= MIN_CLAUDE_FOR_SUBAGENT_PROMPT)
+    }
+
+    /// One phrase for install/doctor summaries explaining the decision.
+    pub fn explanation(&self) -> String {
+        match (&self.executable, self.version) {
+            (None, _) => "claude not found on PATH".to_string(),
+            (Some(exe), None) => format!("{} --version did not report a version", exe.display()),
+            (Some(_), Some(version)) if version >= MIN_CLAUDE_FOR_SUBAGENT_PROMPT => {
+                format!("Claude Code {version} accepts --append-subagent-system-prompt-file")
+            }
+            (Some(_), Some(version)) => format!(
+                "Claude Code {version} < {MIN_CLAUDE_FOR_SUBAGENT_PROMPT} rejects --append-subagent-system-prompt-file"
+            ),
+        }
+    }
+}
+
+/// Run `claude --version` on `claude_override`, or on the first `claude` on
+/// PATH. Never fails: a missing or broken `claude` is a probe with no version.
+pub fn probe_claude(claude_override: Option<&Path>) -> ClaudeProbe {
+    let executable = match claude_override {
+        Some(path) => Some(path.to_path_buf()),
+        None => find_on_path("claude"),
+    };
+    let version = executable.as_ref().and_then(|exe| {
+        let output = std::process::Command::new(exe)
+            .arg("--version")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        parse_claude_version(&String::from_utf8_lossy(&output.stdout))
+    });
+    ClaudeProbe {
+        executable,
+        version,
+    }
 }
 
 #[allow(dead_code)]
@@ -139,9 +230,10 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         .unwrap_or_else(|_| executable_path.clone());
 
     let dry_run = options.dry_run;
+    let claude = probe_claude(options.claude_executable.as_deref());
     let steps = vec![
         deploy_agent_prompt(&home, dry_run)?,
-        install_shell_wrappers(&home, options.shell.as_deref(), dry_run)?,
+        install_shell_wrappers(&home, options.shell.as_deref(), &claude, dry_run)?,
     ];
 
     let green = steps
@@ -351,17 +443,29 @@ pub(crate) const PIXEL_MANAGED_END: &str = "# <<< pixel-managed <<<";
 /// works).
 ///
 /// The `claude` wrapper always appends `prompt_path` to the session prompt.
-/// It appends `subagent_prompt_path` to sub-agents only when `-p`/`--print`
-/// is among the arguments: Claude Code honours
+/// With `Some(subagent_prompt_path)` it appends that file to sub-agents only
+/// when `-p`/`--print` is among the arguments: Claude Code honours
 /// `--append-subagent-system-prompt-file` in print mode only, and the same
-/// wrapper also fronts interactive sessions.
+/// wrapper also fronts interactive sessions. With `None` (Claude Code older
+/// than [`MIN_CLAUDE_FOR_SUBAGENT_PROMPT`], or not found) the wrapper is the
+/// plain one-liner, because those releases exit on the unknown option.
 pub(crate) fn shell_wrapper_block(
     kind: ShellKind,
     prompt_path: &str,
-    subagent_prompt_path: &str,
+    subagent_prompt_path: Option<&str>,
 ) -> String {
-    let body = match kind {
-        ShellKind::Posix => format!(
+    let body = match (kind, subagent_prompt_path) {
+        (ShellKind::Posix, None) => format!(
+            "claude() {{ command claude --append-system-prompt-file \"{prompt}\" \"$@\"; }}\n\
+             codex() {{ command codex -c \"model_instructions_file=\\\"{prompt}\\\"\" \"$@\"; }}",
+            prompt = prompt_path,
+        ),
+        (ShellKind::Fish, None) => format!(
+            "function claude; command claude --append-system-prompt-file \"{prompt}\" $argv; end\n\
+             function codex; command codex -c \"model_instructions_file=\\\"{prompt}\\\"\" $argv; end",
+            prompt = prompt_path,
+        ),
+        (ShellKind::Posix, Some(subagent)) => format!(
             "claude() {{\n\
              \x20 for _pixel_arg in \"$@\"; do\n\
              \x20   case \"$_pixel_arg\" in\n\
@@ -372,13 +476,12 @@ pub(crate) fn shell_wrapper_block(
              }}\n\
              codex() {{ command codex -c \"model_instructions_file=\\\"{prompt}\\\"\" \"$@\"; }}",
             prompt = prompt_path,
-            subagent = subagent_prompt_path,
         ),
         // fish: `function name; ...; end`, arguments as `$argv`. Double quotes
         // still expand `$HOME` and still honour `\"` escapes, so the codex
         // argument is spelled exactly as in the POSIX block. `contains -- -p`
         // needs the `--` so `-p` is looked up rather than parsed as an option.
-        ShellKind::Fish => format!(
+        (ShellKind::Fish, Some(subagent)) => format!(
             "function claude\n\
              \x20 if contains -- -p $argv; or contains -- --print $argv\n\
              \x20   command claude --append-system-prompt-file \"{prompt}\" --append-subagent-system-prompt-file \"{subagent}\" $argv\n\
@@ -388,7 +491,6 @@ pub(crate) fn shell_wrapper_block(
              end\n\
              function codex; command codex -c \"model_instructions_file=\\\"{prompt}\\\"\" $argv; end",
             prompt = prompt_path,
-            subagent = subagent_prompt_path,
         ),
     };
     format!(
@@ -402,11 +504,16 @@ pub(crate) fn shell_wrapper_block(
     )
 }
 
-/// The block exactly as `pixel install` writes it for `kind` — what doctor
-/// compares the on-disk block against, so a block left behind by another shell
-/// or an older pixel reads as stale instead of green.
-pub(crate) fn expected_wrapper_block(kind: ShellKind) -> String {
-    shell_wrapper_block(kind, PROMPT_PATH, SUBAGENT_PROMPT_PATH)
+/// The block exactly as `pixel install` writes it for `kind` and this Claude
+/// Code — what doctor compares the on-disk block against, so a block left
+/// behind by another shell, an older pixel, or a Claude Code that has since
+/// crossed the 2.1.261 line reads as stale instead of green.
+pub(crate) fn expected_wrapper_block(kind: ShellKind, with_subagent_prompt: bool) -> String {
+    shell_wrapper_block(
+        kind,
+        PROMPT_PATH,
+        with_subagent_prompt.then_some(SUBAGENT_PROMPT_PATH),
+    )
 }
 
 /// Return the pixel-managed block found in `content`, markers included.
@@ -459,22 +566,39 @@ fn strip_shell_wrappers(content: &str) -> String {
 fn install_shell_wrappers(
     home: &Path,
     shell_override: Option<&str>,
+    claude: &ClaudeProbe,
     dry_run: bool,
 ) -> Result<InstallStep> {
     let shell = resolve_shell(shell_override);
     let (kind, profile) = shell_profile_for(&shell, home);
-    let block = expected_wrapper_block(kind);
+    let with_subagent_prompt = claude.supports_subagent_prompt();
+    let block = expected_wrapper_block(kind, with_subagent_prompt);
+    // Yellow, not red: the session prompt is wired either way. Yellow says
+    // the sub-agent half is missing and why, so the user knows to re-run
+    // `pixel install` once Claude Code is updated (doctor repeats it).
+    let status = if with_subagent_prompt {
+        CheckStatus::Green
+    } else {
+        CheckStatus::Yellow
+    };
+    let subagent_note = if with_subagent_prompt {
+        String::new()
+    } else {
+        format!(" without the sub-agent prompt ({})", claude.explanation())
+    };
     let detail = Some(format!(
-        "profile={} shell={}",
+        "profile={} shell={} subagent_prompt={} claude={}",
         profile.display(),
-        kind.as_str()
+        kind.as_str(),
+        with_subagent_prompt,
+        claude.explanation()
     ));
     if dry_run {
         return Ok(InstallStep {
             id: "shell-wrappers".into(),
-            status: CheckStatus::Green,
+            status,
             summary: format!(
-                "would write {} shell wrappers to {}",
+                "would write {} shell wrappers to {}{subagent_note}",
                 kind.as_str(),
                 profile.display()
             ),
@@ -501,9 +625,9 @@ fn install_shell_wrappers(
     fs::write(&profile, &new_content)?;
     Ok(InstallStep {
         id: "shell-wrappers".into(),
-        status: CheckStatus::Green,
+        status,
         summary: format!(
-            "{} {} shell wrappers in {}",
+            "{} {} shell wrappers in {}{subagent_note}",
             if had_old_block {
                 "updated"
             } else {
@@ -658,6 +782,76 @@ pub fn migrate(repo_root: &Path) -> Result<MigrateReport> {
         new_state_rebuilt: false,
         new_state_directory_prepared: true,
     })
+}
+
+#[cfg(test)]
+mod claude_version_tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_version_claude_prints() {
+        assert_eq!(
+            parse_claude_version("2.1.269 (Claude Code)\n"),
+            Some(ClaudeVersion(2, 1, 269))
+        );
+        assert_eq!(
+            parse_claude_version("v2.1.261"),
+            Some(ClaudeVersion(2, 1, 261))
+        );
+        assert_eq!(parse_claude_version(""), None);
+        assert_eq!(parse_claude_version("Claude Code 2.1.269"), None);
+        assert_eq!(parse_claude_version("2.1"), None);
+    }
+
+    #[test]
+    fn the_threshold_is_the_first_release_that_accepts_the_flag() {
+        let probe = |version| ClaudeProbe {
+            executable: Some(PathBuf::from("claude")),
+            version,
+        };
+        // Numeric, not lexicographic: 2.1.261 > 2.1.99 and 2.2.0 > 2.1.261.
+        for supported in [
+            ClaudeVersion(2, 1, 261),
+            ClaudeVersion(2, 1, 269),
+            ClaudeVersion(2, 2, 0),
+            ClaudeVersion(3, 0, 0),
+        ] {
+            assert!(
+                probe(Some(supported)).supports_subagent_prompt(),
+                "{supported} accepts the flag"
+            );
+        }
+        for rejected in [
+            ClaudeVersion(2, 1, 260),
+            ClaudeVersion(2, 1, 99),
+            ClaudeVersion(2, 0, 999),
+            ClaudeVersion(1, 9, 9),
+        ] {
+            assert!(
+                !probe(Some(rejected)).supports_subagent_prompt(),
+                "{rejected} exits on the unknown option"
+            );
+        }
+        assert!(
+            !probe(None).supports_subagent_prompt(),
+            "no version means no proof: omitting the flag loses sub-agent rules, \
+             passing it to an old Claude Code breaks every print-mode call"
+        );
+        assert!(
+            !ClaudeProbe {
+                executable: None,
+                version: None
+            }
+            .supports_subagent_prompt()
+        );
+    }
+
+    #[test]
+    fn probe_survives_a_missing_or_silent_claude() {
+        let missing = probe_claude(Some(Path::new("/nonexistent/claude")));
+        assert_eq!(missing.version, None);
+        assert!(!missing.supports_subagent_prompt());
+    }
 }
 
 #[cfg(test)]

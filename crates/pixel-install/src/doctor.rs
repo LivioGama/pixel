@@ -76,6 +76,10 @@ pub struct DoctorOptions {
     /// Defaults to `$SHELL`. Must match what `pixel install` was given, or the
     /// check looks at the wrong profile.
     pub shell: Option<String>,
+    /// The `claude` executable whose version decides which wrapper block is
+    /// expected (see `InstallOptions::claude_executable`). Defaults to the
+    /// first `claude` on PATH.
+    pub claude_executable: Option<PathBuf>,
     /// Dry-run parser for one `pixel …` argv (including the leading
     /// "pixel"), supplied by the CLI binary from its real clap definition.
     /// When present, the `rule.parity` check parses every pixel command
@@ -192,6 +196,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     ));
 
     let shell_override = options.shell.clone();
+    let claude = install::probe_claude(options.claude_executable.as_deref());
     checks.push(check(
         "install.shell-wrappers",
         || -> std::result::Result<DoctorCheckDetail, String> {
@@ -204,12 +209,33 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     profile.display()
                 ));
             };
-            // Compared against the block this binary would write, not against
-            // loose substrings: a block left in a POSIX profile by an install
-            // that ran under a different $SHELL, or written by an older pixel,
-            // is stale — and reporting it green is how a fish user ends up
-            // with wrappers their shell never loads.
-            if block != install::expected_wrapper_block(kind) {
+            // Compared against the block this binary would write for the
+            // Claude Code found now, not against loose substrings: a block
+            // left in a POSIX profile by an install that ran under a
+            // different $SHELL, or written by an older pixel, is stale — and
+            // reporting it green is how a fish user ends up with wrappers
+            // their shell never loads. The sub-agent flag is checked the same
+            // way in both directions: a block that carries it in front of a
+            // Claude Code older than 2.1.261 breaks every `claude -p`, and one
+            // that lacks it in front of a newer Claude Code silently drops
+            // the sub-agent rules until `pixel install` is re-run.
+            let with_subagent_prompt = claude.supports_subagent_prompt();
+            if block == install::expected_wrapper_block(kind, !with_subagent_prompt) {
+                return Err(if with_subagent_prompt {
+                    format!(
+                        "shell wrappers in {} lack the sub-agent prompt flag but {} — run `pixel install`",
+                        profile.display(),
+                        claude.explanation()
+                    )
+                } else {
+                    format!(
+                        "shell wrappers in {} pass the sub-agent prompt flag but {} — run `pixel install`",
+                        profile.display(),
+                        claude.explanation()
+                    )
+                });
+            }
+            if block != install::expected_wrapper_block(kind, with_subagent_prompt) {
                 return Err(format!(
                     "shell wrappers in {} are stale or written for another shell — run `pixel install`",
                     profile.display()
@@ -217,13 +243,20 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             }
             Ok(DoctorCheckDetail {
                 summary: format!(
-                    "{} shell wrappers installed in {}",
+                    "{} shell wrappers installed in {}{}",
                     kind.as_str(),
-                    profile.display()
+                    profile.display(),
+                    if with_subagent_prompt {
+                        ""
+                    } else {
+                        " without the sub-agent prompt"
+                    }
                 ),
                 detail: Some(serde_json::json!({
                     "profile": profile.display().to_string(),
                     "shell": kind.as_str(),
+                    "subagent_prompt": with_subagent_prompt,
+                    "claude": claude.explanation(),
                 })),
             })
         },
