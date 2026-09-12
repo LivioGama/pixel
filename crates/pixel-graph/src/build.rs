@@ -510,17 +510,21 @@ fn update_files_unsigned(
     }
     let mut store = GraphStore::open(db_path)?;
     let mut all_changed_names: HashSet<String> = HashSet::new();
-    let mut pending_calls: Vec<FileCalls> = Vec::new();
+    let known_before: HashSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
 
-    let all_paths: Vec<String> = store.files()?.into_iter().map(|f| f.path).collect();
-    let mut path_to_id: HashMap<String, i64> = {
-        let mut m = HashMap::new();
-        for f in store.files()? {
-            m.insert(f.path, f.id);
-        }
-        m
-    };
+    /// A changed file after pass 1: its row and symbols are in the store,
+    /// its imports and calls wait for every file of the batch to exist.
+    struct Staged {
+        rel: String,
+        file_id: i64,
+        fx: FileExtraction,
+        symbol_ids: Vec<i64>,
+    }
+    let mut staged: Vec<Staged> = Vec::with_capacity(files.len());
 
+    // Pass 1: files + symbols + concepts. Same split as `build_graph`: an
+    // import from file A to file B added in the same batch can only
+    // resolve once B has a row, so nothing here touches imports or calls.
     for &(rel, removed) in files {
         let abs = root.join(rel);
 
@@ -567,19 +571,16 @@ fn update_files_unsigned(
 
         if removed {
             store.remove_file(rel)?;
-            path_to_id.remove(rel);
             continue;
         }
 
         let Some(content) = read_source_file(&abs) else {
             store.remove_file(rel)?;
-            path_to_id.remove(rel);
             continue;
         };
 
         let Some(fx) = extract_file(rel, &content) else {
             store.remove_file(rel)?;
-            path_to_id.remove(rel);
             continue;
         };
 
@@ -589,7 +590,6 @@ fn update_files_unsigned(
 
         let blob_oid = format!("{:016x}", xxh3_64(&content));
         let file_id = store.replace_file(rel, &blob_oid, fx.lang)?;
-        path_to_id.insert(rel.to_string(), file_id);
 
         let mut ids = Vec::with_capacity(fx.symbols.len());
         let mut lines = Vec::with_capacity(fx.symbols.len());
@@ -622,24 +622,70 @@ fn update_files_unsigned(
             store.set_symbol_crux(id, &crux)?;
         }
         insert_concepts(&store, file_id, rel, &content, &ids, &lines)?;
+        staged.push(Staged {
+            rel: rel.to_string(),
+            file_id,
+            fx,
+            symbol_ids: ids,
+        });
+    }
 
-        for imp in &fx.imports {
-            let resolved = resolve_import(&imp.spec, rel, &all_paths)
+    // The file list as it stands AFTER pass 1: added files included,
+    // removed ones gone.
+    let files_now = store.files()?;
+    let all_paths: Vec<String> = files_now.iter().map(|f| f.path.clone()).collect();
+    let path_to_id: HashMap<String, i64> = files_now.into_iter().map(|f| (f.path, f.id)).collect();
+
+    // Pass 2: imports + pending calls of the changed files.
+    let mut pending_calls: Vec<FileCalls> = Vec::with_capacity(staged.len());
+    for st in &staged {
+        for imp in &st.fx.imports {
+            let resolved = resolve_import(&imp.spec, &st.rel, &all_paths)
                 .and_then(|p| path_to_id.get(&p).copied());
-            store.insert_import(file_id, &imp.spec, resolved, &imp.bindings)?;
+            store.insert_import(st.file_id, &imp.spec, resolved, &imp.bindings)?;
         }
-
-        let calls = fx
+        let calls = st
+            .fx
             .calls
             .iter()
             .map(|c| PendingCall {
                 callee_name: c.callee_name.clone(),
-                enclosing_symbol_id: c.enclosing_index.map(|ix| ids[ix]),
+                enclosing_symbol_id: c.enclosing_index.map(|ix| st.symbol_ids[ix]),
                 site_line: c.site_line,
                 receiver: c.receiver.clone(),
             })
             .collect();
-        pending_calls.push(FileCalls { file_id, calls });
+        pending_calls.push(FileCalls {
+            file_id: st.file_id,
+            calls,
+        });
+    }
+
+    // A file that appeared in this batch may be the target of imports that
+    // UNCHANGED files could never resolve before (`import x from "./new"`
+    // written ahead of the file). Re-resolve every dangling import against
+    // the new file list so the resolver's import tier sees them.
+    let added_any = staged.iter().any(|st| !known_before.contains(&st.rel));
+    if added_any {
+        let dangling: Vec<(i64, String, String)> = {
+            let mut stmt = store.conn().prepare(
+                "SELECT i.id, i.spec, f.path FROM imports i
+                   JOIN files f ON f.id = i.file_id
+                  WHERE i.resolved_file_id IS NULL",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for (import_id, spec, importer) in dangling {
+            if let Some(target) = resolve_import(&spec, &importer, &all_paths)
+                .and_then(|p| path_to_id.get(&p).copied())
+            {
+                store.conn().execute(
+                    "UPDATE imports SET resolved_file_id = ?2 WHERE id = ?1",
+                    rusqlite::params![import_id, target],
+                )?;
+            }
+        }
     }
 
     if !pending_calls.is_empty() {
@@ -650,6 +696,16 @@ fn update_files_unsigned(
     reconsider_resolved_calls(&mut store, &all_changed_names)?;
     // Retry everything unresolved against the complete new candidate set.
     resolve_all(&mut store)?;
+
+    // Persisted analyses (`processes`, `clusters`) are keyed by symbol id,
+    // and `replace_file` hands re-extracted symbols NEW ids: the cached
+    // rows would point at deleted symbols. A full rebuild starts from an
+    // empty db, so they were recomputed on demand; give the incremental
+    // path the same guarantee.
+    store.conn().execute_batch(
+        "DELETE FROM process_steps; DELETE FROM processes;
+         DELETE FROM cluster_members; DELETE FROM clusters;",
+    )?;
     Ok(())
 }
 
@@ -824,6 +880,114 @@ mod tests {
         assert_eq!(store.symbols_by_name("delta", 5).unwrap().len(), 1);
         drop(store);
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Parity with a full rebuild, part 1: imports between files of the
+    /// same batch, and imports of UNCHANGED files that pointed at a file
+    /// which did not exist yet, resolve once the batch lands. Without this
+    /// the resolver's import tier never saw the new file and the caller
+    /// edge came out `Probable` or unresolved, unlike after `pixel graph`.
+    #[test]
+    fn incremental_update_resolves_imports_to_files_added_in_the_batch() {
+        let root = tmpdir("delta-imports");
+        // a.ts imports a file that does not exist yet.
+        std::fs::write(
+            root.join("a.ts"),
+            "import { helper } from \"./b\";\nexport function work() { return helper() }\n",
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let a_id = store.file_by_path("a.ts").unwrap().unwrap().id;
+        let unresolved: i64 = store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM imports WHERE file_id = ?1 AND resolved_file_id IS NULL",
+                rusqlite::params![a_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unresolved, 1, "b.ts does not exist: import dangles");
+        drop(store);
+
+        // b.ts appears, together with c.ts which imports it in the same batch.
+        std::fs::write(root.join("b.ts"), "export function helper() { return 1 }\n").unwrap();
+        std::fs::write(
+            root.join("c.ts"),
+            "import { helper } from \"./b\";\nexport function other() { return helper() }\n",
+        )
+        .unwrap();
+        let delta = tree_delta(&root, &db).unwrap().unwrap();
+        apply_tree_delta(&root, &db, &delta).unwrap();
+
+        let store = GraphStore::open(&db).unwrap();
+        let b_id = store.file_by_path("b.ts").unwrap().unwrap().id;
+        for importer in ["a.ts", "c.ts"] {
+            let f = store.file_by_path(importer).unwrap().unwrap().id;
+            let resolved: Option<i64> = store
+                .conn()
+                .query_row(
+                    "SELECT resolved_file_id FROM imports WHERE file_id = ?1",
+                    rusqlite::params![f],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                resolved,
+                Some(b_id),
+                "{importer}: import must resolve to b.ts"
+            );
+        }
+        let helper = &store.symbols_by_name("helper", 5).unwrap()[0];
+        let callers = store.edges_to(helper.id, Some(EdgeKind::Calls)).unwrap();
+        assert_eq!(callers.len(), 2, "work() and other() both call helper()");
+        assert!(
+            callers.iter().all(|e| e.tier == Tier::Exact),
+            "imported unique target: Exact, as after a full rebuild ({callers:?})"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Parity with a full rebuild, part 2: persisted `processes`/`clusters`
+    /// are keyed by symbol id and a re-extracted file gets new ids; after an
+    /// incremental update they must be gone (recomputed on demand), not
+    /// left pointing at deleted symbols.
+    #[test]
+    fn incremental_update_drops_cached_processes_and_clusters() {
+        let root = tmpdir("delta-analyses");
+        std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let alpha = &store.symbols_by_name("alpha", 5).unwrap()[0];
+        store
+            .conn()
+            .execute_batch(&format!(
+                "INSERT INTO processes (id, label, entry_symbol_id, step_count) VALUES (1, 'p', {0}, 1);
+                 INSERT INTO process_steps (process_id, step, symbol_id) VALUES (1, 0, {0});
+                 INSERT INTO clusters (id, label) VALUES (1, 'c');
+                 INSERT INTO cluster_members (cluster_id, symbol_id) VALUES (1, {0});",
+                alpha.id
+            ))
+            .unwrap();
+        drop(store);
+
+        std::fs::write(root.join("a.ts"), "export function alpha() { return 2 }\n").unwrap();
+        let delta = tree_delta(&root, &db).unwrap().unwrap();
+        apply_tree_delta(&root, &db, &delta).unwrap();
+
+        let store = GraphStore::open(&db).unwrap();
+        for table in ["processes", "process_steps", "clusters", "cluster_members"] {
+            let n: i64 = store
+                .conn()
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table} must be cleared by the incremental update");
+        }
+        drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
 
