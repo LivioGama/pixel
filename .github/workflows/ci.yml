@@ -20,6 +20,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -76,13 +79,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools perl make
+      # Keyed by target so the two musl caches do not overwrite each other.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
+      # Prebuilt binary instead of `cargo install cross` (~40 s per run).
+      # cross compiles inside its own Docker image, which carries the musl
+      # toolchain, so no host musl-tools/perl/make are needed.
       - name: Install cross
-        run: cargo install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
       # Must match release.yml exactly: fastembed (ONNX) has no musl build,
       # but model2vec is pure Rust and ships in the Linux release. Building
