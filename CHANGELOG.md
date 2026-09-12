@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-12
+
 ### Added
 - `CONTRIBUTING.md`: build, gates, test layout, op-adding checklist, commit/PR format and a definition-of-done checklist written for humans and coding agents. Linked from README, AGENTS.md and CLAUDE.md.
 - `PIXEL_OUTPUT_CAP_BYTES=<bytes>` overrides the global stdout cap; `0` lifts it (same convention as `PIXEL_INDEX_BUDGET_MS=0`).
@@ -15,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pixel upgrade` no longer defaults to a fixed `~/.local/bin/pixel`. It installs over the binary running the command (a mise/asdf-managed install behind a shim, a Homebrew cellar, `~/.cargo/bin`), falls back to the first `pixel` on PATH outside `shims`/`target` directories, and only then to `~/.local/bin/pixel`. The chosen path and the reason are printed, and a warning names any other `pixel` earlier on PATH that would still shadow the upgraded one.
 - `pixel ready --json` and `pixel status --json` no longer embed the full dirty file list: `ready` reports index/graph/daemon plus a `dirty_count`, and `status` collapses `snapshot.dirty` to `snapshot.dirty_count`. One untracked `vendor/bundle` used to push both answers past the output cap and replace them with a `{partial: "..."}` wrapper.
 - `--json` output over the global 256 KB cap is now truncated structurally: the largest arrays are shortened, every other field survives, and the document gains `truncated: true`, `cap_bytes` and `truncated_arrays` (path, kept, total). The textual `{partial}` wrapper is only the fallback when no array can be cut.
+
+### Changed
+- CI: cache Rust builds (`Swatinem/rust-cache@v2`), install `cross` prebuilt (`taiki-e/install-action@v2`), cancel superseded PR runs, scope the workflow token to least privilege, run on pushes to `develop`, build with `--locked`, and fail packaging on a missing README or LICENSE.
+- Release workflow: verify tag/version match and run tests before building, publish the generated Homebrew formula to the tap, and use the tag's CHANGELOG section as the release body.
+- Dependabot: group cargo minor/patch bumps and all GitHub Actions updates into single PRs.
 
 ## [0.2.1] - 2026-09-12
 
