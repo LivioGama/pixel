@@ -281,8 +281,8 @@ pub(crate) fn claude_installed(home: &Path) -> bool {
 /// Run `pixel install`. Idempotent: safe to re-run.
 ///
 /// The install is deliberately minimal: it deploys the agent system prompt
-/// and sets up shell wrappers so every `claude`/`codex` invocation includes
-/// the Pixel retrieval protocol. No hooks, no managed blocks in CLAUDE.md/
+/// and sets up a `claude` shell wrapper plus the Codex `developer_instructions`
+/// config key so every invocation includes the Pixel retrieval protocol. No hooks, no managed blocks in CLAUDE.md/
 /// AGENTS.md, no provider-specific routing — the system prompt is the single
 /// enforcement mechanism.
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {
@@ -301,9 +301,11 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
 
     let dry_run = options.dry_run;
     let claude = probe_claude(options.claude_executable.as_deref());
+    let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
     let steps = vec![
         deploy_agent_prompt(&home, dry_run)?,
         install_shell_wrappers(&home, options.shell.as_deref(), &claude, dry_run)?,
+        crate::codex_config::install_developer_instructions(&codex_home, dry_run)?,
     ];
 
     let green = steps
@@ -511,21 +513,13 @@ pub(crate) fn shell_profile_for(shell: &str, home: &Path) -> (ShellKind, PathBuf
 pub(crate) const PIXEL_MANAGED_BEGIN: &str = "# >>> pixel-managed >>>";
 pub(crate) const PIXEL_MANAGED_END: &str = "# <<< pixel-managed <<<";
 
-/// Build the managed shell-wrapper block for `kind`. Uses shell functions (not
-/// aliases) because functions handle subcommands correctly (`codex exec ...`
-/// works).
+/// Build the managed shell-wrapper block for `kind`. Uses a shell function
+/// (not an alias) because functions pass subcommands and options through
+/// untouched.
 ///
-/// The `codex` wrapper passes the content of `prompt_path` inline as
-/// `-c developer_instructions=...`: Codex appends that key to its developer
-/// message and keeps its own system prompt. The former
-/// `model_instructions_file` key replaced the native prompt instead
-/// (`base_instructions` overrides the model's `instructions_template`), so
-/// Codex ran with the Pixel protocol as its only instructions. Codex 0.154
-/// has no file-backed variant of `developer_instructions`, hence the `cat`
-/// at call time; the value is read by `-c` as a raw string once it fails to
-/// parse as TOML, which a Markdown document starting with `#` always does.
-/// The asset stays far below Linux's 128 KiB single-argument limit
-/// (`MAX_ARG_STRLEN`, checked by a test).
+/// Codex gets the prompt through `developer_instructions` in its
+/// `config.toml` (see [`crate::codex_config`]), which reaches every Codex
+/// front end; there is no `codex` function any more.
 ///
 /// The `claude` wrapper always appends `prompt_path` to the session prompt.
 /// With `Some(subagent_prompt_path)` it appends that file to sub-agents only
@@ -546,13 +540,11 @@ pub(crate) fn shell_wrapper_block(
 ) -> String {
     let body = match (kind, subagent_prompt_path) {
         (ShellKind::Posix, None) => format!(
-            "claude() {{ command claude --append-system-prompt-file \"{prompt}\" \"$@\"; }}\n\
-             codex() {{ command codex -c \"developer_instructions=$(cat \"{prompt}\")\" \"$@\"; }}",
+            "claude() {{ command claude --append-system-prompt-file \"{prompt}\" \"$@\"; }}",
             prompt = prompt_path,
         ),
         (ShellKind::Fish, None) => format!(
-            "function claude; command claude --append-system-prompt-file \"{prompt}\" $argv; end\n\
-             function codex; command codex -c \"developer_instructions=\"(cat \"{prompt}\" | string collect) $argv; end",
+            "function claude; command claude --append-system-prompt-file \"{prompt}\" $argv; end",
             prompt = prompt_path,
         ),
         (ShellKind::Posix, Some(subagent)) => format!(
@@ -564,16 +556,12 @@ pub(crate) fn shell_wrapper_block(
              \x20   esac\n\
              \x20 done\n\
              \x20 command claude --append-system-prompt-file \"{prompt}\" \"$@\"\n\
-             }}\n\
-             codex() {{ command codex -c \"developer_instructions=$(cat \"{prompt}\")\" \"$@\"; }}",
+             }}",
             prompt = prompt_path,
         ),
-        // fish: `function name; ...; end`, arguments as `$argv`. A bare
-        // `(cat ...)` splits its output on newlines into one argument per
-        // line, so the codex prompt goes through `string collect` (fish 3.1+)
-        // to stay one argument; `"$(...)"` would do the same but only on fish
-        // 3.4+. `contains -- -p` needs the `--` so `-p` is looked up rather
-        // than parsed as an option.
+        // fish: `function name; ...; end`, arguments as `$argv`. `contains
+        // -- -p` needs the `--` so `-p` is looked up rather than parsed as an
+        // option.
         (ShellKind::Fish, Some(subagent)) => format!(
             "function claude\n\
              \x20 if contains -- --print $argv; or string match -qr -- '^-[^-]*p' $argv\n\
@@ -581,8 +569,7 @@ pub(crate) fn shell_wrapper_block(
              \x20 else\n\
              \x20   command claude --append-system-prompt-file \"{prompt}\" $argv\n\
              \x20 end\n\
-             end\n\
-             function codex; command codex -c \"developer_instructions=\"(cat \"{prompt}\" | string collect) $argv; end",
+             end",
             prompt = prompt_path,
         ),
     };
@@ -654,8 +641,8 @@ fn strip_shell_wrappers(content: &str) -> String {
     out
 }
 
-/// Install shell wrappers for `claude` and `codex` in the user's shell profile
-/// so every invocation automatically includes the Pixel system prompt.
+/// Install the `claude` shell wrapper in the user's shell profile so every
+/// invocation automatically includes the Pixel system prompt.
 fn install_shell_wrappers(
     home: &Path,
     shell_override: Option<&str>,

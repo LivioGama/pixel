@@ -50,7 +50,7 @@ binary, and Pixel is deliberately a CLI plus hooks, not an MCP server.
 | `pixel-session` | One-look error capture: every error from every layer lands at throw time in one structured local SQLite sink, queryable in one call. | none |
 | `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel log` and `pixel savings` reporting. | none |
 | `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. | none |
-| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`: deploys the bundled prompt and Claude/Codex shell wrappers, backs up changed files; retains legacy hook/routing and cleanup implementations without activating them. | proto, daemon, index, facts |
+| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`: deploys the bundled prompt, the Claude shell wrapper and the Codex `developer_instructions` config key, backs up changed files; retains legacy hook/routing and cleanup implementations without activating them. | proto, daemon, index, facts |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index, daemon, proto, recall |
 
 Dependency rule: `pixel-proto` and `pixel-git` are leaves. `pixel-daemon` is
@@ -177,7 +177,8 @@ envelope talks to the daemon socket directly.
 ## Agent integration
 
 `pixel install` deliberately deploys the bundled `agent-prompt.md`, the short
-`subagent-prompt.md`, and managed shell functions for Claude Code and Codex. It
+`subagent-prompt.md`, a managed shell function for Claude Code and a managed
+`developer_instructions` block for Codex. It
 preserves agent settings and rule files, and does not register provider hooks or
 activate routing. The shell functions pass the prompt on a subsequent launch
 through the loaded profile; already-running agents and direct executable launches
@@ -188,12 +189,19 @@ honoured in print mode only. `install` writes that variant only when `claude
 --version` reports 2.1.261 or newer (older releases exit on the unknown option),
 keeps the previous decision when `claude` cannot be probed, and `doctor`
 re-derives the expected block from the Claude Code found at check time.
-The `codex` function reads the prompt at call time and passes it inline as
-`-c developer_instructions=...`, the key Codex appends to its developer message
-while keeping its own system prompt; `model_instructions_file` would replace
-that system prompt (it becomes the base instructions). Codex has no file-backed
-variant of the key, and sub-agents spawned by Codex inherit it from the parent
-configuration.
+Codex gets the prompt through `developer_instructions` in `~/.codex/config.toml`
+(`$CODEX_HOME` honoured), the key it appends to its developer message while
+keeping its own system prompt; `model_instructions_file` would replace that
+system prompt (it becomes the base instructions). A config key reaches every
+Codex front end (CLI, desktop app, extension, `spawn_agent` sub-agents) where
+a shell function only fronts interactive shells, so there is no `codex`
+function. Codex has no file-backed variant of the key: `install` embeds the
+prompt as a TOML literal multi-line string between `<!-- pixel:managed:begin
+-->`/`end` marker lines, rewriting only that key with `toml_edit` so the rest
+of a file the desktop app also owns keeps its layout, refusing to touch a file
+that does not parse, and keeping text outside the markers. `doctor`
+(`install.codex-config`) compares the block with the bundled prompt; `uninstall`
+removes the block, or the key when nothing else was in it.
 
 Existing hook entry points remain implemented, separately from active installation:
 

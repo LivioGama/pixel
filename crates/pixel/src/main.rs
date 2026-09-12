@@ -683,11 +683,12 @@ enum Command {
     // -----------------------------------------------------------------
     // M5/M6 — install / doctor / migrate / hook
     // -----------------------------------------------------------------
-    /// Idempotently deploy the agent prompt and Claude/Codex shell wrappers.
+    /// Idempotently deploy the agent prompt, the Claude shell wrapper and the
+    /// Codex developer_instructions config key.
     Install {
         #[arg(long)]
         json: bool,
-        /// Shell to install the `claude`/`codex` wrapper block for
+        /// Shell to install the `claude` wrapper block for
         /// (default: $SHELL). Pass e.g. `fish` when the invoking process
         /// does not run under your login shell.
         #[arg(long)]
@@ -6094,7 +6095,7 @@ mod tests {
 /// Every `pixel …` line in the fenced blocks of the two bundled prompt
 /// assets must parse against this binary's clap definition. `pixel doctor`'s
 /// `rule.parity` only covers the rule text installed on a machine; the
-/// assets themselves are what every wrapped `claude`/`codex` and every
+/// assets themselves are what every wrapped `claude`, every Codex session and every
 /// print-mode sub-agent reads, so their drift has to fail the build.
 #[cfg(test)]
 mod prompt_asset_parity {
