@@ -316,15 +316,12 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
     })
 }
 
-/// Content-aware signature of every supported source file under `root`.
-/// The signature includes a fast xxh3 content hash per file, so it detects
-/// equal-size edits even when mtime is restored (e.g. `touch -t`). This is
-/// more expensive than a stat-only signature but is necessary for trust:
-/// a stale graph would serve obsolete symbols. The cost is bounded by
-/// `MAX_FILE_BYTES` per file and parallelized via rayon. Symlinks are
-/// excluded (their target's content would be unstable and they are never
-/// indexed).
-pub fn freshness_signature(root: &Path) -> String {
+/// `(repo-relative path, xxh3 content hash)` of every supported source file
+/// under `root`, sorted by path. This is the exact input set of
+/// `build_graph`, and the per-file hash is the `blob_oid` the store keeps
+/// for each file, so a stored row whose `blob_oid` differs from the entry
+/// here is a file that changed since the graph was built.
+fn tree_hashes(root: &Path) -> Vec<(String, u64)> {
     // Must mirror `collect_files`'s walk policy exactly — both go through
     // `pixel_index::index::policy_walk` — or the freshness signature would
     // disagree with the set of files the graph was actually built from.
@@ -347,12 +344,130 @@ pub fn freshness_signature(root: &Path) -> String {
         })
         .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+}
+
+fn signature_of(entries: &[(String, u64)]) -> String {
     let mut hasher_buf: Vec<u8> = Vec::with_capacity(entries.len() * 24);
-    for (rel, hash) in &entries {
+    for (rel, hash) in entries {
         hasher_buf.extend_from_slice(rel.as_bytes());
         hasher_buf.extend_from_slice(&hash.to_le_bytes());
     }
     format!("{:016x}", xxh3_64(&hasher_buf))
+}
+
+/// Content-aware signature of every supported source file under `root`.
+/// The signature includes a fast xxh3 content hash per file, so it detects
+/// equal-size edits even when mtime is restored (e.g. `touch -t`). This is
+/// more expensive than a stat-only signature but is necessary for trust:
+/// a stale graph would serve obsolete symbols. The cost is bounded by
+/// `MAX_FILE_BYTES` per file and parallelized via rayon. Symlinks are
+/// excluded (their target's content would be unstable and they are never
+/// indexed).
+pub fn freshness_signature(root: &Path) -> String {
+    signature_of(&tree_hashes(root))
+}
+
+/// What separates the working tree from the graph at `db_path`.
+#[derive(Debug, Clone)]
+pub struct TreeDelta {
+    /// The stored signature equals the tree's: nothing to do.
+    pub fresh: bool,
+    /// Files added or edited since the build (present in the tree, absent
+    /// from the store or stored under another content hash), with the hash
+    /// the tree had when the delta was taken.
+    pub changed: Vec<(String, u64)>,
+    /// Files the store knows that are no longer in the tree.
+    pub removed: Vec<String>,
+    /// Number of files the store currently holds.
+    pub indexed_files: usize,
+    /// Signature of the tree as walked for this delta.
+    pub signature: String,
+}
+
+impl TreeDelta {
+    pub fn changed_count(&self) -> usize {
+        self.changed.len() + self.removed.len()
+    }
+}
+
+/// Compare `root`'s working tree with the graph at `db_path`. One walk
+/// (the same one `freshness_signature` makes) answers both "is it fresh"
+/// and "which files drifted". `Ok(None)` when the db carries no freshness
+/// signature (built before signatures existed, or interrupted): the caller
+/// cannot trust its rows and must rebuild.
+pub fn tree_delta(root: &Path, db_path: &Path) -> Result<Option<TreeDelta>, BoxErr> {
+    let store = GraphStore::open(db_path)?;
+    let Some(stored) = store.meta_get(FRESHNESS_KEY)? else {
+        return Ok(None);
+    };
+    let current = tree_hashes(root);
+    let signature = signature_of(&current);
+    let known: HashMap<String, String> = store
+        .files()?
+        .into_iter()
+        .map(|f| (f.path, f.blob_oid))
+        .collect();
+    if stored == signature {
+        return Ok(Some(TreeDelta {
+            fresh: true,
+            changed: Vec::new(),
+            removed: Vec::new(),
+            indexed_files: known.len(),
+            signature,
+        }));
+    }
+    let present: HashSet<&str> = current.iter().map(|(rel, _)| rel.as_str()).collect();
+    let changed: Vec<(String, u64)> = current
+        .iter()
+        .filter(|(rel, hash)| known.get(rel) != Some(&format!("{hash:016x}")))
+        .cloned()
+        .collect();
+    let mut removed: Vec<String> = known
+        .keys()
+        .filter(|path| !present.contains(path.as_str()))
+        .cloned()
+        .collect();
+    removed.sort();
+    Ok(Some(TreeDelta {
+        fresh: false,
+        changed,
+        removed,
+        indexed_files: known.len(),
+        signature,
+    }))
+}
+
+/// Bring the graph up to date with a [`TreeDelta`]: re-extract the changed
+/// files, drop the removed ones, re-resolve the calls that targeted them
+/// (see `update_files`), then publish `delta.signature` as the freshness
+/// signature. The signature is only published when every changed file was
+/// stored under the hash the delta saw — a file edited while the update
+/// ran is left unsigned, so the next open detects the drift again instead
+/// of binding stale symbols to a fresh-looking signature.
+pub fn apply_tree_delta(root: &Path, db_path: &Path, delta: &TreeDelta) -> Result<(), BoxErr> {
+    let files: Vec<(&str, bool)> = delta
+        .changed
+        .iter()
+        .map(|(rel, _)| (rel.as_str(), false))
+        .chain(delta.removed.iter().map(|rel| (rel.as_str(), true)))
+        .collect();
+    update_files_unsigned(root, db_path, &files)?;
+    let store = GraphStore::open(db_path)?;
+    for (rel, hash) in &delta.changed {
+        let stored = store.file_by_path(rel)?.map(|f| f.blob_oid);
+        // A changed file that extraction dropped (unparseable, vanished)
+        // has no row; that is its stable state, not a race.
+        if stored.is_some_and(|oid| oid != format!("{hash:016x}")) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                format!("{rel} changed during incremental graph update; graph was not published as fresh"),
+            )
+            .into());
+        }
+    }
+    store.meta_set(FRESHNESS_KEY, &delta.signature)?;
+    Ok(())
 }
 
 /// True iff the on-disk graph at `db_path` is fresh relative to `root`'s
@@ -372,6 +487,24 @@ pub fn is_fresh(root: &Path, db_path: &Path) -> bool {
 /// Incrementally re-index a batch of files: preserve incoming call knowledge,
 /// replace files, re-extract symbols and concepts, and resolve all calls once.
 pub fn update_files(root: &Path, db_path: &Path, files: &[(&str, bool)]) -> Result<(), BoxErr> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    update_files_unsigned(root, db_path, files)?;
+    // Keep the freshness signature in sync so a later cold open does not
+    // needlessly rebuild after this incremental update.
+    let store = GraphStore::open(db_path)?;
+    store.meta_set(FRESHNESS_KEY, &freshness_signature(root))?;
+    Ok(())
+}
+
+/// `update_files` without the closing signature write: the caller decides
+/// which signature (if any) describes the tree it just synchronised to.
+fn update_files_unsigned(
+    root: &Path,
+    db_path: &Path,
+    files: &[(&str, bool)],
+) -> Result<(), BoxErr> {
     if files.is_empty() {
         return Ok(());
     }
@@ -517,9 +650,6 @@ pub fn update_files(root: &Path, db_path: &Path, files: &[(&str, bool)]) -> Resu
     reconsider_resolved_calls(&mut store, &all_changed_names)?;
     // Retry everything unresolved against the complete new candidate set.
     resolve_all(&mut store)?;
-    // Keep the freshness signature in sync so a later cold open does not
-    // needlessly rebuild after this incremental update.
-    store.meta_set(FRESHNESS_KEY, &freshness_signature(root))?;
     Ok(())
 }
 
@@ -645,6 +775,101 @@ mod tests {
         );
         assert_eq!(callers[0].tier, Tier::Exact);
         drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `tree_delta` is the one walk behind both the freshness verdict and
+    /// the incremental update: it must name exactly the files that drifted
+    /// (added, edited, removed) and nothing else, or the daemon would either
+    /// re-extract the whole tree (defeating the point) or miss an edit
+    /// (serving stale symbols).
+    #[test]
+    fn tree_delta_names_added_edited_and_removed_files_only() {
+        let root = tmpdir("delta");
+        std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
+        std::fs::write(root.join("b.ts"), "export function beta() { return 1 }\n").unwrap();
+        std::fs::write(root.join("c.ts"), "export function gamma() { return 1 }\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+
+        let fresh = tree_delta(&root, &db).unwrap().expect("signed db");
+        assert!(fresh.fresh);
+        assert_eq!(fresh.changed_count(), 0);
+        assert_eq!(fresh.indexed_files, 3);
+        assert_eq!(fresh.signature, freshness_signature(&root));
+
+        // Same size, different content (the `touch -t` shape), one new
+        // file, one deleted file; `b.ts` untouched.
+        std::fs::write(root.join("a.ts"), "export function alpha() { return 2 }\n").unwrap();
+        std::fs::write(root.join("d.ts"), "export function delta() { return 1 }\n").unwrap();
+        std::fs::remove_file(root.join("c.ts")).unwrap();
+
+        let delta = tree_delta(&root, &db).unwrap().expect("signed db");
+        assert!(!delta.fresh);
+        let changed: Vec<&str> = delta.changed.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(changed, ["a.ts", "d.ts"], "sorted, b.ts untouched");
+        assert_eq!(delta.removed, ["c.ts"]);
+        assert_eq!(delta.indexed_files, 3, "counts the graph as built");
+        assert_eq!(delta.signature, freshness_signature(&root));
+
+        // Applying it makes the graph fresh again with exactly the
+        // surviving files, and the deleted file's symbol is gone.
+        apply_tree_delta(&root, &db, &delta).unwrap();
+        assert!(is_fresh(&root, &db));
+        let store = GraphStore::open(&db).unwrap();
+        let mut paths: Vec<String> = store.files().unwrap().into_iter().map(|f| f.path).collect();
+        paths.sort();
+        assert_eq!(paths, ["a.ts", "b.ts", "d.ts"]);
+        assert!(store.symbols_by_name("gamma", 5).unwrap().is_empty());
+        assert_eq!(store.symbols_by_name("delta", 5).unwrap().len(), 1);
+        drop(store);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A db without a freshness signature cannot say what it was built
+    /// from: `tree_delta` refuses to guess (None) so the caller rebuilds.
+    #[test]
+    fn tree_delta_is_none_without_a_signature() {
+        let root = tmpdir("delta-unsigned");
+        std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        GraphStore::open(&db)
+            .unwrap()
+            .conn()
+            .execute(
+                "DELETE FROM meta WHERE key = ?1",
+                rusqlite::params![FRESHNESS_KEY],
+            )
+            .unwrap();
+        assert!(tree_delta(&root, &db).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file edited between the delta walk and its application must not be
+    /// signed as fresh: the delta's signature describes bytes the store never
+    /// saw. The update itself still lands (the graph is no worse than before),
+    /// only the signature is withheld so the next open detects the drift.
+    #[test]
+    fn apply_tree_delta_withholds_signature_when_a_file_changed_underneath() {
+        let root = tmpdir("delta-race");
+        std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        std::fs::write(root.join("a.ts"), "export function alpha() { return 2 }\n").unwrap();
+        let delta = tree_delta(&root, &db).unwrap().unwrap();
+        // The "concurrent" edit: the tree moves on after the walk.
+        std::fs::write(root.join("a.ts"), "export function alpha() { return 3 }\n").unwrap();
+        let err = apply_tree_delta(&root, &db, &delta).unwrap_err();
+        assert!(
+            err.to_string().contains("changed during incremental"),
+            "{err}"
+        );
+        assert!(
+            !is_fresh(&root, &db),
+            "signature must not have been published"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

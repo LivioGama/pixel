@@ -171,8 +171,19 @@ envelope talks to the daemon socket directly.
   shards to changes since, and an overlay covers the dirty working tree.
   `pixel status` reports whether each layer is fresh.
 - The graph is built lazily on the first graph command and updated per file
-  by the daemon watcher. Call edges carry a resolution tier, and analyses
-  report a lower bound when same-name call sites stay unresolved.
+  by the daemon watcher. Without a daemon (CI, `PIXEL_DAEMON_AUTO_START=0`,
+  a copied `.pixel/`), the first graph command after an edit compares the
+  tree's per-file content hashes with the stored ones in one walk and
+  re-extracts only the added/edited files, drops the removed ones and
+  re-resolves the calls that targeted them (`pixel_graph::build::tree_delta`
+  / `apply_tree_delta`). A full rebuild remains the fallback when the db has
+  no freshness signature or when the drift exceeds
+  `PIXEL_GRAPH_INCREMENTAL_MAX_PCT` percent of the indexed files (default
+  `20`; `0` always rebuilds). The answer's `graph_build` says which path ran
+  (`incremental`, `changed_files`, `removed_files`, or `reason`), and the
+  stderr notice reads `updated graph.db for N changed file(s)` versus
+  `built graph.db on first use`. Call edges carry a resolution tier, and
+  analyses report a lower bound when same-name call sites stay unresolved.
 - History facts are ingested by a dedicated low-priority thread. Queries
   never wait on ingest; they answer from what is already in `history.db` and
   say so through epistemics.
