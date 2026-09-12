@@ -717,7 +717,9 @@ enum Command {
         /// Cargo build command to run (default: `cargo build --release -p pixel-cli`).
         #[arg(long, default_value = "cargo build --release -p pixel-cli")]
         build: String,
-        /// Install path (default: ~/.local/bin/pixel).
+        /// Install path. Default: the binary running this command (unless
+        /// it lives in a cargo `target/` dir), else the first `pixel` on
+        /// PATH (shim directories skipped), else ~/.local/bin/pixel.
         #[arg(long)]
         install_path: Option<PathBuf>,
         /// Restart the daemon after upgrade.
@@ -726,6 +728,10 @@ enum Command {
         /// Repo path for daemon restart.
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Resolve and print the install path, then exit without building
+        /// or installing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Health check: install state, daemon, index/graph/facts freshness.
     Doctor {
@@ -1475,17 +1481,185 @@ fn write_stdout(text: &str) -> Result<(), String> {
 /// `print_data` without its own cap would dump unlimited bytes to stdout.
 /// At ~4 chars/token, 256KB ≈ 64K tokens ≈ $0.20 on Claude Sonnet. The
 /// agent sees a `truncated` flag in the output and can page or narrow.
+/// `PIXEL_OUTPUT_CAP_BYTES` overrides it (see [`stdout_byte_cap`]).
 const STDOUT_BYTE_CAP: usize = 256 * 1024;
 
+/// Effective stdout cap: `PIXEL_OUTPUT_CAP_BYTES=<bytes>` overrides the
+/// default and `0` lifts the cap entirely (the same convention as
+/// `PIXEL_INDEX_BUDGET_MS=0`). Unset, empty or unparsable values keep the
+/// default so a typo can never silently disable the safety net.
+fn stdout_byte_cap() -> usize {
+    parse_output_cap(std::env::var("PIXEL_OUTPUT_CAP_BYTES").ok().as_deref())
+}
+
+fn parse_output_cap(raw: Option<&str>) -> usize {
+    match raw.map(|v| v.trim().parse::<usize>()) {
+        Some(Ok(0)) => usize::MAX,
+        Some(Ok(n)) => n,
+        _ => STDOUT_BYTE_CAP,
+    }
+}
+
 fn print_data(data: &Value, raw_json: bool) -> Result<(), String> {
-    let rendered = render_data(data, raw_json, STDOUT_BYTE_CAP);
-    if rendered.contains("OUTPUT TRUNCATED AT") {
+    let rendered = render_data(data, raw_json, stdout_byte_cap());
+    if rendered.truncated {
         // Never count evidence hidden behind the final rendering cap.
         operation_metrics::unavailable();
     } else {
         operation_metrics::observe(data);
     }
-    write_stdout(&rendered)
+    write_stdout(&rendered.text)
+}
+
+/// Output of [`render_data`]: the bytes for stdout plus whether the cap
+/// fired (so metrics can refuse to count evidence the caller never saw).
+struct Rendered {
+    text: String,
+    truncated: bool,
+}
+
+/// One array shortened by [`truncate_structurally`]: dotted path from the
+/// document root (`snapshot.dirty`, `matches[3].lines`), elements kept, and
+/// the original length.
+#[derive(Debug)]
+struct TruncatedArray {
+    path: String,
+    kept: usize,
+    total: usize,
+}
+
+/// Bytes reserved for the metadata [`truncate_structurally`] splices into the
+/// top-level object (`truncated`, `cap_bytes`, `truncated_arrays`).
+const TRUNCATION_META_RESERVE: usize = 256;
+
+/// Most structural-truncation rounds before giving up: each round shortens
+/// the (then) largest array, so a handful of rounds covers every realistic
+/// response shape without letting a pathological document spin.
+const TRUNCATION_MAX_ROUNDS: usize = 8;
+
+fn serialized_len(v: &Value) -> usize {
+    serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0)
+}
+
+/// Locate the non-empty array under `v` whose tail is worth cutting most:
+/// ranked by REMOVABLE bytes, `bytes - bytes / len` (everything past a
+/// mean-sized first element), not raw size. Raw size would always pick an
+/// enclosing array over the long list nested inside it (the parent is never
+/// smaller than its child) and drop whole sibling records instead of
+/// trimming the list. Returns `(path, len, bytes)`.
+fn largest_array(v: &Value, path: &str) -> Option<(String, usize, usize)> {
+    let mut best: Option<(String, usize, usize)> = None;
+    let removable = |c: &(String, usize, usize)| c.2 - c.2 / c.1;
+    let mut consider = |cand: Option<(String, usize, usize)>| {
+        if let Some(c) = cand
+            && best.as_ref().is_none_or(|b| removable(&c) > removable(b))
+        {
+            best = Some(c);
+        }
+    };
+    match v {
+        Value::Array(items) => {
+            if !items.is_empty() {
+                consider(Some((path.to_string(), items.len(), serialized_len(v))));
+            }
+            for (i, item) in items.iter().enumerate() {
+                consider(largest_array(item, &format!("{path}[{i}]")));
+            }
+        }
+        Value::Object(map) => {
+            for (k, item) in map {
+                let child = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
+                consider(largest_array(item, &child));
+            }
+        }
+        _ => {}
+    }
+    best
+}
+
+/// Walk `v` to the array at the dotted `path` produced by [`largest_array`].
+fn array_at_mut<'a>(v: &'a mut Value, path: &str) -> Option<&'a mut Vec<Value>> {
+    let mut cur = v;
+    if !path.is_empty() {
+        for seg in path.split('.') {
+            let (key, indexes) = match seg.find('[') {
+                Some(i) => (&seg[..i], &seg[i..]),
+                None => (seg, ""),
+            };
+            if !key.is_empty() {
+                cur = cur.get_mut(key)?;
+            }
+            for idx in indexes
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split("][")
+                .filter(|s| !s.is_empty())
+            {
+                cur = cur.get_mut(idx.parse::<usize>().ok()?)?;
+            }
+        }
+    }
+    cur.as_array_mut()
+}
+
+/// Shorten the largest arrays in `data` until its compact serialization fits
+/// `cap`, keeping every other field and the document structure intact, then
+/// stamp the top-level object with `truncated: true`, `cap_bytes` and a
+/// `truncated_arrays` list naming each cut (path, kept, total).
+///
+/// Returns `None` when `data` is not an object or no amount of array
+/// trimming gets it under the cap (for example when the bulk is one huge
+/// string), in which case the caller falls back to the textual wrapper.
+fn truncate_structurally(data: &Value, cap: usize) -> Option<Value> {
+    if !data.is_object() {
+        return None;
+    }
+    let mut doc = data.clone();
+    let mut cuts: Vec<TruncatedArray> = Vec::new();
+    let budget = cap.saturating_sub(TRUNCATION_META_RESERVE);
+    for _ in 0..TRUNCATION_MAX_ROUNDS {
+        let size = serialized_len(&doc);
+        if size <= budget {
+            break;
+        }
+        let (path, len, bytes) = largest_array(&doc, "")?;
+        // Elements that fit: the budget left after everything outside this
+        // array, divided by the mean element size — always strictly fewer
+        // than `len` so every round makes progress.
+        let outside = size.saturating_sub(bytes);
+        let per_elem = (bytes / len).max(1);
+        let keep = budget
+            .saturating_sub(outside)
+            .checked_div(per_elem)
+            .unwrap_or(0)
+            .min(len - 1);
+        let arr = array_at_mut(&mut doc, &path)?;
+        arr.truncate(keep);
+        match cuts.iter_mut().find(|c| c.path == path) {
+            Some(c) => c.kept = keep,
+            None => cuts.push(TruncatedArray {
+                path,
+                kept: keep,
+                total: len,
+            }),
+        }
+    }
+    if serialized_len(&doc) > budget {
+        return None;
+    }
+    let meta: Vec<Value> = cuts
+        .iter()
+        .map(|c| json!({"path": c.path, "kept": c.kept, "total": c.total}))
+        .collect();
+    let obj = doc.as_object_mut()?;
+    obj.insert("truncated".into(), json!(true));
+    obj.insert("cap_bytes".into(), json!(cap));
+    obj.insert("truncated_arrays".into(), Value::Array(meta));
+    (serialized_len(&doc) <= cap).then_some(doc)
 }
 
 /// Serialize `data` for stdout under a byte cap.
@@ -1496,18 +1670,29 @@ fn print_data(data: &Value, raw_json: bool) -> Result<(), String> {
 /// JSON mode (`raw_json == true`) must never emit anything that is not one
 /// JSON document: a caller doing `serde_json::from_slice(stdout)` cannot
 /// recover from a cut-off object followed by prose. When the compact
-/// serialization exceeds the cap, the output becomes a small wrapper
-/// object `{truncated: true, cap_bytes, note, partial}` where `partial` is
-/// the leading bytes of the original serialization as a string. The wrapper
+/// serialization exceeds the cap, the document is first truncated
+/// STRUCTURALLY ([`truncate_structurally`]): the largest arrays are
+/// shortened, every other field survives, and the object gains
+/// `truncated: true`, `cap_bytes` and `truncated_arrays`, so `jq '.index'`
+/// keeps working on a capped response. Only when no array trimming can fit
+/// the cap does the output fall back to the small wrapper object
+/// `{truncated: true, cap_bytes, note, partial}` where `partial` is the
+/// leading bytes of the original serialization as a string. The wrapper
 /// itself can exceed the cap by the size of the note and JSON escaping;
 /// that is bounded and preferable to invalid output.
-fn render_data(data: &Value, raw_json: bool, cap: usize) -> String {
+fn render_data(data: &Value, raw_json: bool, cap: usize) -> Rendered {
     let mut output = if raw_json {
         serde_json::to_string(data).unwrap_or_default()
     } else {
         serde_json::to_string_pretty(data).unwrap_or_default()
     };
-    if output.len() > cap {
+    let truncated = output.len() > cap;
+    if truncated
+        && raw_json
+        && let Some(doc) = truncate_structurally(data, cap)
+    {
+        output = serde_json::to_string(&doc).unwrap_or_default();
+    } else if truncated {
         let mut end = cap;
         while end > 0 && !output.is_char_boundary(end) {
             end -= 1;
@@ -1533,7 +1718,10 @@ fn render_data(data: &Value, raw_json: bool, cap: usize) -> String {
         }
     }
     output.push('\n');
-    output
+    Rendered {
+        text: output,
+        truncated,
+    }
 }
 
 #[cfg(test)]
@@ -1547,35 +1735,118 @@ mod render_data_tests {
     #[test]
     fn under_cap_is_untouched() {
         let d = json!({"a": 1});
-        assert_eq!(render_data(&d, true, 1024), "{\"a\":1}\n");
+        let r = render_data(&d, true, 1024);
+        assert_eq!(r.text, "{\"a\":1}\n");
+        assert!(!r.truncated);
         assert_eq!(
-            serde_json::from_str::<Value>(&render_data(&d, false, 1024)).unwrap(),
+            serde_json::from_str::<Value>(&render_data(&d, false, 1024).text).unwrap(),
             d
         );
     }
 
     /// The reason this matters: agents call `pixel … --json` and parse
-    /// stdout. A truncated document with prose appended is a parse error
-    /// they cannot tell apart from a crash. The JSON path must stay one
-    /// valid document and say it was cut.
+    /// stdout, then `jq '.index'` / `.graph` on the result. A response that
+    /// is over the cap only because ONE list is long (a `snapshot.dirty`
+    /// full of untracked `vendor/bundle` paths) must keep its shape: the
+    /// scalar fields stay addressable, only the list is shortened, and the
+    /// document says which list was cut and how much survived.
     #[test]
-    fn json_mode_truncation_stays_valid_json_and_flags_it() {
-        let out = render_data(&big(), true, 500);
-        let v: Value = serde_json::from_str(&out).expect("stdout must remain one JSON document");
+    fn json_mode_truncation_shortens_the_largest_array_and_keeps_structure() {
+        let d = json!({
+            "index": {"base_files": 238, "commit_oid": "abc"},
+            "snapshot": {"head": "abc", "branch": "main",
+                          "dirty": (0..500).map(|i| format!("vendor/bundle/gems/g{i}/lib/x.rb")).collect::<Vec<_>>()},
+        });
+        let full = serde_json::to_string(&d).unwrap().len();
+        let cap = full / 3;
+        let r = render_data(&d, true, cap);
+        assert!(r.truncated);
+        assert!(r.text.len() <= cap + 1, "{} > cap {cap}", r.text.len());
+        let v: Value = serde_json::from_str(&r.text).expect("stdout must remain one JSON document");
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["cap_bytes"], cap);
+        assert_eq!(
+            v["index"]["base_files"], 238,
+            "untouched fields must survive"
+        );
+        assert_eq!(v["snapshot"]["branch"], "main");
+        let dirty = v["snapshot"]["dirty"].as_array().unwrap();
+        assert!(
+            !dirty.is_empty() && dirty.len() < 500,
+            "kept {}",
+            dirty.len()
+        );
+        assert_eq!(
+            dirty[0], "vendor/bundle/gems/g0/lib/x.rb",
+            "prefix, not a sample"
+        );
+        let cuts = v["truncated_arrays"].as_array().unwrap();
+        assert_eq!(cuts.len(), 1);
+        assert_eq!(cuts[0]["path"], "snapshot.dirty");
+        assert_eq!(cuts[0]["total"], 500);
+        assert_eq!(cuts[0]["kept"], dirty.len());
+        assert!(
+            v.get("partial").is_none(),
+            "no textual wrapper when structure fits"
+        );
+        assert_eq!(r.text.matches('\n').count(), 1, "single NDJSON-safe line");
+    }
+
+    /// Nested arrays: the cut lands on the array that actually carries the
+    /// bytes, not blindly on the top-level one, and the path names it.
+    #[test]
+    fn structural_truncation_targets_nested_array_by_size() {
+        let d = json!({"groups": [
+            {"name": "small", "items": ["a", "b"]},
+            {"name": "huge", "items": (0..2000).map(|i| format!("item-{i:05}")).collect::<Vec<_>>()},
+        ]});
+        let r = render_data(&d, true, 2000);
+        let v: Value = serde_json::from_str(&r.text).unwrap();
+        assert_eq!(
+            v["groups"].as_array().unwrap().len(),
+            2,
+            "outer array intact"
+        );
+        assert_eq!(v["groups"][0]["items"].as_array().unwrap().len(), 2);
+        assert!(v["groups"][1]["items"].as_array().unwrap().len() < 2000);
+        assert_eq!(v["truncated_arrays"][0]["path"], "groups[1].items");
+        assert!(r.text.len() <= 2001);
+    }
+
+    /// When the bulk is not an array (one huge string) structural trimming
+    /// cannot help; the textual wrapper must still be one valid document
+    /// that says it was cut.
+    #[test]
+    fn json_mode_falls_back_to_wrapper_when_no_array_can_be_cut() {
+        let d = json!({"blob": "x".repeat(5000)});
+        let r = render_data(&d, true, 500);
+        assert!(r.truncated);
+        let v: Value = serde_json::from_str(&r.text).expect("stdout must remain one JSON document");
         assert_eq!(v["truncated"], true);
         assert_eq!(v["cap_bytes"], 500);
         let partial = v["partial"].as_str().unwrap();
         assert!(partial.len() <= 500);
-        assert!(partial.starts_with("{\"matches\":["));
+        assert!(partial.starts_with("{\"blob\":\""));
         assert!(v["note"].as_str().unwrap().contains("TRUNCATED"));
-        assert_eq!(out.matches('\n').count(), 1, "single NDJSON-safe line");
+        assert_eq!(r.text.matches('\n').count(), 1, "single NDJSON-safe line");
+    }
+
+    #[test]
+    fn json_mode_array_of_objects_is_cut_structurally() {
+        let r = render_data(&big(), true, 500);
+        let v: Value = serde_json::from_str(&r.text).unwrap();
+        assert_eq!(v["truncated"], true);
+        assert!(v["matches"].is_array());
+        assert_eq!(v["truncated_arrays"][0]["path"], "matches");
+        assert_eq!(v["truncated_arrays"][0]["total"], 200);
     }
 
     #[test]
     fn human_mode_truncation_keeps_visible_note() {
-        let out = render_data(&big(), false, 500);
-        assert!(out.contains("⚠ OUTPUT TRUNCATED AT 500 BYTES"));
-        assert!(serde_json::from_str::<Value>(&out).is_err());
+        let r = render_data(&big(), false, 500);
+        assert!(r.truncated);
+        assert!(r.text.contains("⚠ OUTPUT TRUNCATED AT 500 BYTES"));
+        assert!(serde_json::from_str::<Value>(&r.text).is_err());
     }
 
     /// Multi-byte text near the cap: the cut must land on a char boundary
@@ -1584,10 +1855,56 @@ mod render_data_tests {
     fn truncation_respects_char_boundaries() {
         let d = json!({"t": "é".repeat(1000)});
         for cap in 100..140 {
-            let out = render_data(&d, true, cap);
+            let out = render_data(&d, true, cap).text;
             let v: Value = serde_json::from_str(&out).unwrap();
             assert!(v["partial"].as_str().unwrap().len() <= cap);
         }
+    }
+
+    /// `array_at_mut` must round-trip every path shape `largest_array`
+    /// emits, otherwise a cut silently targets nothing.
+    #[test]
+    fn array_path_round_trip() {
+        let mut d = json!({"a": {"b": [[1, 2, 3], {"c": [4, 5]}]}, "d": [6]});
+        let (path, len, _) = largest_array(&d, "").unwrap();
+        assert_eq!(
+            path, "a.b",
+            "21 bytes / 2 elems: 11 removable, beats a.b[0]'s 5"
+        );
+        assert_eq!(len, 2);
+        assert_eq!(array_at_mut(&mut d, "a.b[0]").unwrap().len(), 3);
+        assert_eq!(array_at_mut(&mut d, "a.b[1].c").unwrap().len(), 2);
+        assert_eq!(array_at_mut(&mut d, "d").unwrap().len(), 1);
+        assert!(array_at_mut(&mut d, "a.b[5]").is_none());
+    }
+
+    /// `PIXEL_OUTPUT_CAP_BYTES=0` is the documented escape hatch for a
+    /// consumer that wants the whole document; anything unparsable must
+    /// keep the safety net rather than silently disabling it.
+    #[test]
+    fn output_cap_env_parsing() {
+        assert_eq!(parse_output_cap(None), STDOUT_BYTE_CAP);
+        assert_eq!(parse_output_cap(Some("0")), usize::MAX);
+        assert_eq!(parse_output_cap(Some(" 4096 ")), 4096);
+        assert_eq!(parse_output_cap(Some("lots")), STDOUT_BYTE_CAP);
+        assert_eq!(parse_output_cap(Some("")), STDOUT_BYTE_CAP);
+    }
+
+    /// `status`/`ready` are freshness answers: the dirty LIST is what let an
+    /// untracked vendor tree blow the cap, the COUNT is all they need.
+    #[test]
+    fn compact_snapshot_replaces_dirty_list_with_count() {
+        let mut d = json!({"index": {"base_files": 1},
+            "snapshot": {"head": "abc", "branch": "main", "dirty": ["a", "b", "c"]}});
+        compact_snapshot(&mut d);
+        assert_eq!(d["snapshot"]["dirty_count"], 3);
+        assert!(d["snapshot"].get("dirty").is_none());
+        assert_eq!(d["snapshot"]["head"], "abc");
+        assert_eq!(d["index"]["base_files"], 1);
+        // No snapshot (older daemon / in-process service without one): no-op.
+        let mut bare = json!({"index": {}});
+        compact_snapshot(&mut bare);
+        assert_eq!(bare, json!({"index": {}}));
     }
 }
 
@@ -2510,6 +2827,207 @@ fn daemon_stop(path: PathBuf) -> Result<(), String> {
     }
 }
 
+/// Where `pixel upgrade` writes the new binary, and why that path won.
+struct UpgradeTarget {
+    path: PathBuf,
+    source: &'static str,
+}
+
+/// True when `path` has a `target` directory component: a cargo build
+/// output, never an install location.
+fn is_cargo_target_path(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str() == std::ffi::OsStr::new("target"))
+}
+
+/// Every `pixel` executable on `path_var`, in PATH order, symlinks
+/// resolved, deduplicated. Directories named `shims` (mise, asdf) are
+/// skipped: a shim is a launcher that `exec`s the managed install, so it is
+/// neither a place to write a binary nor a competing copy.
+fn pixel_binaries_on_path(path_var: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    let Some(path_var) = path_var else {
+        return found;
+    };
+    for dir in std::env::split_paths(path_var) {
+        if dir.file_name().and_then(|n| n.to_str()) == Some("shims") {
+            continue;
+        }
+        let candidate = dir.join("pixel");
+        if !candidate.is_file() {
+            continue;
+        }
+        let resolved = candidate.canonicalize().unwrap_or(candidate);
+        if !found.contains(&resolved) {
+            found.push(resolved);
+        }
+    }
+    found
+}
+
+/// Decide where `pixel upgrade` installs.
+///
+/// The historical fixed `~/.local/bin/pixel` was wrong on any machine whose
+/// `pixel` is managed elsewhere (a mise/asdf install dir behind a shim, a
+/// Homebrew cellar, `~/.cargo/bin`): it dropped a second copy that either
+/// shadowed the managed one or never reached PATH. Order:
+///
+/// 1. `--install-path`, verbatim.
+/// 2. The binary running this command: after a shim `exec`s the managed
+///    install, `current_exe` IS the managed install. Skipped when it sits
+///    in a cargo `target/` dir (`target/release/pixel upgrade`).
+/// 3. The first `pixel` on PATH outside a `shims` dir or a `target/` dir.
+/// 4. `~/.local/bin/pixel`, the legacy default.
+fn resolve_upgrade_target(
+    explicit: Option<PathBuf>,
+    current_exe: Option<PathBuf>,
+    path_var: Option<&std::ffi::OsStr>,
+    home: &Path,
+) -> UpgradeTarget {
+    if let Some(path) = explicit {
+        return UpgradeTarget {
+            path,
+            source: "--install-path",
+        };
+    }
+    if let Some(exe) = current_exe {
+        let exe = exe.canonicalize().unwrap_or(exe);
+        if exe.is_file() && !is_cargo_target_path(&exe) {
+            return UpgradeTarget {
+                path: exe,
+                source: "running binary",
+            };
+        }
+    }
+    if let Some(path) = pixel_binaries_on_path(path_var)
+        .into_iter()
+        .find(|p| !is_cargo_target_path(p))
+    {
+        return UpgradeTarget {
+            path,
+            source: "first pixel on PATH",
+        };
+    }
+    UpgradeTarget {
+        path: home.join(".local").join("bin").join("pixel"),
+        source: "default",
+    }
+}
+
+/// The `pixel` that a shell would run INSTEAD of `installed`, if any: the
+/// first PATH hit that is a different file. This is how a stale copy in
+/// `~/.local/bin` silently kept serving an old version after an upgrade
+/// landed in a mise install dir that came later on PATH.
+fn upgrade_shadowed_by(installed: &Path, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let installed = installed.canonicalize().ok()?;
+    pixel_binaries_on_path(path_var)
+        .into_iter()
+        .next()
+        .filter(|first| *first != installed)
+}
+
+#[cfg(test)]
+mod upgrade_target_tests {
+    use super::*;
+
+    fn sandbox(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pixel-upgrade-target-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(path: &Path) -> PathBuf {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+        path.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn explicit_flag_wins_verbatim() {
+        let t = resolve_upgrade_target(
+            Some(PathBuf::from("/opt/x/pixel")),
+            Some(PathBuf::from("/nope")),
+            None,
+            Path::new("/home/u"),
+        );
+        assert_eq!(t.path, PathBuf::from("/opt/x/pixel"));
+        assert_eq!(t.source, "--install-path");
+    }
+
+    /// The point of the change: on a machine where `pixel` is a managed
+    /// install behind a shim, the running binary is that install, and the
+    /// upgrade must land there, not in a `~/.local/bin` that shadows or
+    /// misses PATH.
+    #[test]
+    fn running_binary_is_the_install_location() {
+        let d = sandbox("running");
+        let managed = touch(&d.join("mise/installs/pixel/rev-abc/bin/pixel"));
+        let t = resolve_upgrade_target(None, Some(managed.clone()), None, &d);
+        assert_eq!(t.path, managed);
+        assert_eq!(t.source, "running binary");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `target/release/pixel upgrade` (or a test binary) must never make
+    /// the build output the install location.
+    #[test]
+    fn cargo_target_binary_falls_through_to_path_then_default() {
+        let d = sandbox("target");
+        let built = touch(&d.join("repo/target/release/pixel"));
+        let on_path = touch(&d.join("cellar/bin/pixel"));
+        let shim = touch(&d.join("mise/shims/pixel"));
+        let path_var = std::env::join_paths([
+            shim.parent().unwrap().to_path_buf(),
+            d.join("repo/target/release"),
+            on_path.parent().unwrap().to_path_buf(),
+        ])
+        .unwrap();
+        let t = resolve_upgrade_target(None, Some(built.clone()), Some(&path_var), &d);
+        assert_eq!(t.path, on_path, "shim dir and target dir skipped");
+        assert_eq!(t.source, "first pixel on PATH");
+
+        let t = resolve_upgrade_target(None, Some(built), None, &d);
+        assert_eq!(t.path, d.join(".local/bin/pixel"));
+        assert_eq!(t.source, "default");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn shadow_is_reported_only_when_a_different_pixel_comes_first() {
+        let d = sandbox("shadow");
+        let stale = touch(&d.join("local/bin/pixel"));
+        let managed = touch(&d.join("mise/installs/pixel/bin/pixel"));
+        let link_dir = d.join("linkdir");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        std::os::unix::fs::symlink(&managed, link_dir.join("pixel")).unwrap();
+
+        let stale_first = std::env::join_paths([
+            stale.parent().unwrap().to_path_buf(),
+            managed.parent().unwrap().to_path_buf(),
+        ])
+        .unwrap();
+        assert_eq!(
+            upgrade_shadowed_by(&managed, Some(&stale_first)),
+            Some(stale.clone())
+        );
+
+        let managed_first = std::env::join_paths([
+            managed.parent().unwrap().to_path_buf(),
+            stale.parent().unwrap().to_path_buf(),
+        ])
+        .unwrap();
+        assert_eq!(upgrade_shadowed_by(&managed, Some(&managed_first)), None);
+
+        // A symlink to the installed binary is the same file, not a shadow.
+        let link_first =
+            std::env::join_paths([link_dir, stale.parent().unwrap().to_path_buf()]).unwrap();
+        assert_eq!(upgrade_shadowed_by(&managed, Some(&link_first)), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
 /// Upgrade control messages must never inherit the retrieval client's 600s timeout.
 /// Only a missing/refused socket means absent; a stalled or malformed reply is an error.
 fn upgrade_daemon_request(root: &Path, req: &Request) -> Result<Option<Response>, String> {
@@ -2546,21 +3064,45 @@ fn daemon_status(path: PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+/// Replace `snapshot.dirty` (the full dirty path list) with `dirty_count`.
+///
+/// Freshness/readiness answers (`status`, `ready`) only need to say HOW
+/// dirty the tree is: the list itself belongs to `inspect`/`review`, and
+/// carrying it here let one untracked `vendor/bundle` push a 200-byte
+/// answer past the global output cap.
+fn compact_snapshot(data: &mut Value) {
+    if let Some(snap) = data.get_mut("snapshot").and_then(Value::as_object_mut)
+        && let Some(dirty) = snap.remove("dirty")
+    {
+        let n = dirty.as_array().map_or(0, Vec::len);
+        snap.insert("dirty_count".into(), json!(n));
+    }
+}
+
 /// Prepare every local GitPixel prerequisite in one deterministic operation.
+///
+/// The JSON answer is deliberately compact — index counters, graph counters,
+/// daemon state, `dirty_count` — and never embeds the status snapshot: the
+/// dirty file list is irrelevant to "is the index ready" and is what blew
+/// past the output cap on repos with untracked vendor trees.
 fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
     let root = discover_root(&path)?;
-    let index = execute(&root, Request::Status {}, no_daemon)?;
+    let status = execute(&root, Request::Status {}, no_daemon)?;
     let graph = execute(&root, Request::Graph {}, no_daemon)?;
     if !no_daemon {
         daemon_start(root.clone(), false, json)?;
     }
-    let status = execute(&root, Request::Status {}, no_daemon)?;
+    let dirty_count = status
+        .get("snapshot")
+        .and_then(|s| s.get("dirty"))
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
     let data = serde_json::json!({
         "root": root,
-        "index": index.get("index").cloned().unwrap_or(Value::Null),
+        "index": status.get("index").cloned().unwrap_or(Value::Null),
         "graph": graph,
         "daemon": if no_daemon { "skipped" } else { "running" },
-        "status": status,
+        "dirty_count": dirty_count,
     });
     if json {
         print_data(&data, true)
@@ -3362,6 +3904,9 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             statusline,
         } => {
             let mut data = execute(&path, Request::Status {}, false)?;
+            // `status` is the compact freshness answer: keep the snapshot's
+            // head/branch but collapse the dirty list to a count.
+            compact_snapshot(&mut data);
             // The daemon/service now attaches a rich `facts` block itself
             // (schema version, phase-A state, hunk/gram counts). Only fill in
             // the client-side fallback when talking to an older daemon that
@@ -3864,14 +4409,24 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             install_path,
             restart_daemon,
             repo,
+            dry_run,
         } => {
             let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-            let dest = install_path.unwrap_or_else(|| {
-                PathBuf::from(&home)
-                    .join(".local")
-                    .join("bin")
-                    .join("pixel")
-            });
+            let path_var = std::env::var_os("PATH");
+            let target = resolve_upgrade_target(
+                install_path,
+                std::env::current_exe().ok(),
+                path_var.as_deref(),
+                Path::new(&home),
+            );
+            let dest = target.path;
+            eprintln!("Install path: {} ({})", dest.display(), target.source);
+            if dry_run {
+                if let Some(other) = upgrade_shadowed_by(&dest, path_var.as_deref()) {
+                    eprintln!("warning: {} precedes that path on PATH", other.display());
+                }
+                return write_stdout(&format!("{}\n", dest.display()));
+            }
             // 1. Build.
             eprintln!("Building: {build}");
             let status = std::process::Command::new("sh")
@@ -3922,6 +4477,13 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 format!("rename failed: {e}")
             })?;
             eprintln!("Installed binary: {} -> {}", src.display(), dest.display());
+            if let Some(other) = upgrade_shadowed_by(&dest, path_var.as_deref()) {
+                eprintln!(
+                    "warning: {} precedes the upgraded binary on PATH; `pixel` will keep \
+                     running that copy until it is removed or PATH is reordered",
+                    other.display()
+                );
+            }
             // 5. Stop only the selected repository after installation succeeds.
             if let Some(response) = upgrade_daemon_request(&repo_path, &Request::Shutdown)? {
                 if !response.ok {

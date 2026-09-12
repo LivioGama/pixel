@@ -70,6 +70,7 @@ caller tracing) with a single indexed workflow — and the token cost is
 recovered in as little as one `pixel impact` call.
 
 For architecture and the full command surface, see [ARCHITECTURE.md](ARCHITECTURE.md) and `pixel --help`.
+To build from source, run the gates, or open a pull request (with or without an AI agent), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 📝 License
 

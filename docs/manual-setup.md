@@ -21,6 +21,12 @@ cargo build --release -p pixel-cli
 cp target/release/pixel ~/.local/bin/pixel
 ```
 
+To update an existing install later, prefer `pixel upgrade` over a manual
+copy: it rebuilds, installs over the binary that is actually running (a
+mise/asdf-managed install behind a shim, a Homebrew cellar, or
+`~/.local/bin/pixel`), uses an atomic rename, stops the repo's daemon, and
+warns when another `pixel` earlier on PATH would still shadow it.
+
 ## 2. Copy the system prompt
 
 The prompt is bundled in the repo at

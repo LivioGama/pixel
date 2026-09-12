@@ -149,8 +149,14 @@ in `pixel-proto` checks it.
    without clobbering same-named keys the op emitted.
 5. `print_data` serializes the result. With `--json` it is compact on one
    line, otherwise pretty. A global 256 KB cap protects the agent's context
-   window. Human notes such as graph-build announcements and lower-bound
-   caveats go to stderr, never stdout.
+   window (`PIXEL_OUTPUT_CAP_BYTES=<bytes>` overrides it, `0` lifts it). A
+   `--json` answer over the cap is cut structurally: the largest arrays are
+   shortened, every other field survives, and the object gains
+   `truncated: true`, `cap_bytes` and `truncated_arrays` (path, kept,
+   total). Only when no array trimming can fit the cap does the output fall
+   back to a `{truncated, cap_bytes, note, partial}` wrapper. Human notes
+   such as graph-build announcements and lower-bound caveats go to stderr,
+   never stdout.
 
 So the CLI's `--json` output is the envelope's `result` with the honesty
 fields merged in, not the raw envelope. Anything that needs the full
