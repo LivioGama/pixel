@@ -63,8 +63,8 @@ or anything feature-gated, also build with that exact flag set.
 
 ## Gates (run before every PR)
 
-These are the commands CI runs on every push and pull request
-(`.github/workflows/ci.yml`), plus clippy which is required for review.
+These are exactly the commands CI runs on every push and pull request
+(`.github/workflows/ci.yml`). A red step there blocks review.
 
 ```bash
 cargo fmt --all -- --check
