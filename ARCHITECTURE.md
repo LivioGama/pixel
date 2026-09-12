@@ -108,7 +108,7 @@ The envelope:
   "op": "search",
   "protocol": 1,
   "requestId": "…",          // optional
-  "snapshot":   { "head": "…", "branch": "…", "dirty": [] },
+  "snapshot":   { "head": "…", "branch": "…", "dirty_count": 0 },   // `dirty: [paths]` on inspect/review only
   "epistemics": { "closed_world": false, "lower_bound": true, "staleness_ms": 0, "basis": "…" },
   "budget":     { "byteCap": 262144 },
   "result":     { … },        // present when ok
@@ -127,7 +127,10 @@ Invariants enforced by `Service::handle`:
   default instead of an implied claim of completeness.
 - Retrieval ops and git-state ops (`inspect`, `review`, `diff`, `status`,
   `changes`) get a `snapshot` so the caller can correlate the answer with the
-  working tree it was computed against.
+  working tree it was computed against. Only `inspect` and `review` carry the
+  `dirty` path list; every other op ships `dirty_count` instead
+  (`SnapshotInfo::compact`), so an untracked `vendor/bundle` of 15 000 paths
+  does not inflate a `symbol` answer to 240 KB.
 
 Adding an op is one variant on `pixel_proto::Op` plus one arm in
 `Service::dispatch`. `Op::op_name` must match the serde tag, and a unit test
@@ -168,8 +171,19 @@ envelope talks to the daemon socket directly.
   shards to changes since, and an overlay covers the dirty working tree.
   `pixel status` reports whether each layer is fresh.
 - The graph is built lazily on the first graph command and updated per file
-  by the daemon watcher. Call edges carry a resolution tier, and analyses
-  report a lower bound when same-name call sites stay unresolved.
+  by the daemon watcher. Without a daemon (CI, `PIXEL_DAEMON_AUTO_START=0`,
+  a copied `.pixel/`), the first graph command after an edit compares the
+  tree's per-file content hashes with the stored ones in one walk and
+  re-extracts only the added/edited files, drops the removed ones and
+  re-resolves the calls that targeted them (`pixel_graph::build::tree_delta`
+  / `apply_tree_delta`). A full rebuild remains the fallback when the db has
+  no freshness signature or when the drift exceeds
+  `PIXEL_GRAPH_INCREMENTAL_MAX_PCT` percent of the indexed files (default
+  `20`; `0` always rebuilds). The answer's `graph_build` says which path ran
+  (`incremental`, `changed_files`, `removed_files`, or `reason`), and the
+  stderr notice reads `updated graph.db for N changed file(s)` versus
+  `built graph.db on first use`. Call edges carry a resolution tier, and
+  analyses report a lower bound when same-name call sites stay unresolved.
 - History facts are ingested by a dedicated low-priority thread. Queries
   never wait on ingest; they answer from what is already in `history.db` and
   say so through epistemics.

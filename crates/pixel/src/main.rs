@@ -1465,8 +1465,45 @@ fn unwrap_response(resp: Response) -> Result<Value, String> {
 
 fn announce_graph_build(data: &Value) {
     if let Some(info) = data.get("graph_build") {
-        let ms = info.get("build_ms").and_then(Value::as_u64).unwrap_or(0);
-        eprintln!("pixel: built graph.db on first use ({ms} ms)");
+        eprintln!("pixel: {}", graph_build_notice(info));
+    }
+}
+
+/// One stderr line per graph build/update, naming which path ran: an agent
+/// that edits then checks `impact` must be able to tell a 1-second
+/// incremental update from a 100-second rebuild of the whole tree.
+fn graph_build_notice(info: &Value) -> String {
+    let ms = info.get("build_ms").and_then(Value::as_u64).unwrap_or(0);
+    if info.get("incremental").and_then(Value::as_bool) == Some(true) {
+        let changed = info
+            .get("changed_files")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let removed = info
+            .get("removed_files")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let removed = if removed > 0 {
+            format!(", {removed} removed")
+        } else {
+            String::new()
+        };
+        return format!("updated graph.db for {changed} changed file(s){removed} ({ms} ms)");
+    }
+    match info.get("reason").and_then(Value::as_str) {
+        Some("threshold") => {
+            format!("rebuilt graph.db: drift above PIXEL_GRAPH_INCREMENTAL_MAX_PCT ({ms} ms)")
+        }
+        Some("incremental_failed") => format!(
+            "rebuilt graph.db: incremental update failed ({}) ({ms} ms)",
+            info.get("incremental_error")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error")
+        ),
+        Some("no_signature") | Some("unreadable") => {
+            format!("rebuilt graph.db: no trusted freshness signature ({ms} ms)")
+        }
+        _ => format!("built graph.db on first use ({ms} ms)"),
     }
 }
 
@@ -1895,6 +1932,36 @@ mod render_data_tests {
 
     /// `status`/`ready` are freshness answers: the dirty LIST is what let an
     /// untracked vendor tree blow the cap, the COUNT is all they need.
+    /// The stderr line is how an agent tells a 1 s incremental update from
+    /// a 100 s rebuild of the whole tree; the two must not read the same.
+    #[test]
+    fn graph_build_notice_distinguishes_incremental_from_full() {
+        let incremental =
+            json!({"incremental": true, "changed_files": 2, "removed_files": 0, "build_ms": 1200});
+        assert_eq!(
+            graph_build_notice(&incremental),
+            "updated graph.db for 2 changed file(s) (1200 ms)"
+        );
+        let with_removed =
+            json!({"incremental": true, "changed_files": 1, "removed_files": 1, "build_ms": 40});
+        assert_eq!(
+            graph_build_notice(&with_removed),
+            "updated graph.db for 1 changed file(s), 1 removed (40 ms)"
+        );
+        let first = json!({"incremental": false, "reason": "missing", "build_ms": 36000});
+        assert_eq!(
+            graph_build_notice(&first),
+            "built graph.db on first use (36000 ms)"
+        );
+        let threshold = json!({"incremental": false, "reason": "threshold", "build_ms": 5});
+        assert!(graph_build_notice(&threshold).contains("PIXEL_GRAPH_INCREMENTAL_MAX_PCT"));
+        // Older daemon without the field: still the first-use wording.
+        assert_eq!(
+            graph_build_notice(&json!({"build_ms": 7})),
+            "built graph.db on first use (7 ms)"
+        );
+    }
+
     #[test]
     fn compact_snapshot_replaces_dirty_list_with_count() {
         let mut d = json!({"index": {"base_files": 1},
@@ -3154,7 +3221,10 @@ fn daemon_status(path: PathBuf) -> Result<(), String> {
 /// Freshness/readiness answers (`status`, `ready`) only need to say HOW
 /// dirty the tree is: the list itself belongs to `inspect`/`review`, and
 /// carrying it here let one untracked `vendor/bundle` push a 200-byte
-/// answer past the global output cap.
+/// answer past the global output cap. The daemon now ships the compact
+/// form itself for every op but `inspect`/`review`
+/// (`SnapshotInfo::compact`); this stays as the client-side guard when
+/// talking to an older daemon that still sends the list.
 fn compact_snapshot(data: &mut Value) {
     if let Some(snap) = data.get_mut("snapshot").and_then(Value::as_object_mut)
         && let Some(dirty) = snap.remove("dirty")
@@ -3177,11 +3247,17 @@ fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
     if !no_daemon {
         daemon_start(root.clone(), false, json)?;
     }
-    let dirty_count = status
-        .get("snapshot")
-        .and_then(|s| s.get("dirty"))
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
+    let snapshot = status.get("snapshot");
+    let dirty_count = snapshot
+        .and_then(|s| s.get("dirty_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            // Older daemon: the status snapshot still carries the list.
+            snapshot
+                .and_then(|s| s.get("dirty"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len) as u64
+        });
     let data = serde_json::json!({
         "root": root,
         "index": status.get("index").cloned().unwrap_or(Value::Null),

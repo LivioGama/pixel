@@ -213,6 +213,7 @@ mod tests {
                     head: Some("deadbeefcafefeed0000000000000000deadbee".into()),
                     branch: Some("main".into()),
                     dirty: vec!["src/a.rs".into()],
+                    dirty_count: None,
                 })
                 .with_epistemics(Epistemics {
                     closed_world: true,
@@ -319,6 +320,7 @@ mod tests {
                     head: Some("abc123".into()),
                     branch: Some("feature/x".into()),
                     dirty: vec!["src/main.rs".into(), "README.md".into()],
+                    dirty_count: None,
                 })
                 .with_epistemics(Epistemics {
                     closed_world: false,
@@ -336,8 +338,11 @@ mod tests {
 
         let value = serde_json::to_value(&envelope).unwrap();
 
-        // snapshot: token omitted (None), dirty is a file list
+        // snapshot: token omitted (None), dirty is a file list — the
+        // `inspect`/`review` shape; retrieval ops ship `dirty_count` instead
+        // (see `SnapshotInfo::compact`).
         assert_eq!(value["snapshot"]["head"], "abc123");
+        assert!(value["snapshot"].get("dirty_count").is_none());
         assert_eq!(value["snapshot"]["branch"], "feature/x");
         assert!(value["snapshot"].get("token").is_none());
         assert_eq!(
@@ -368,6 +373,7 @@ mod tests {
                     head: Some("abc".into()),
                     branch: None,
                     dirty: vec![],
+                    dirty_count: None,
                 }),
                 Some(Epistemics::default()),
                 Some(BudgetInfo {

@@ -208,6 +208,43 @@ fn big_untracked_tree_keeps_json_answers_structured() {
         assert_eq!(dirty_count, Some(3000), "{args:?}: {doc}");
     }
 
+    // Graph/retrieval answers are computed AGAINST a tree state, they do
+    // not report it: the snapshot names HEAD/branch and counts the dirty
+    // paths. Before this, `symbol`/`resolve` on a CI checkout with an
+    // untracked `vendor/bundle` weighed 238 KB each, all of it path list.
+    for args in [
+        &["symbol", "login_user", ".", "--json"][..],
+        &["resolve", "login user", ".", "--json"][..],
+        &["impact", "login_user", ".", "--json"][..],
+        &["uses", "login_user", ".", "--role", "callers", "--json"][..],
+        &["changes", ".", "--json"][..],
+    ] {
+        let out = pixel(&dir, args);
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let docs = parse_stdout_lines(&out, &format!("{args:?}"));
+        assert_eq!(docs.len(), 1, "{args:?}");
+        let doc = &docs[0];
+        assert!(
+            out.stdout.len() < 4096,
+            "{args:?}: graph answer must not scale with the dirty tree ({} bytes)",
+            out.stdout.len()
+        );
+        // `truncated` here would be the output-cap wrapper (`uses` carries
+        // its own pagination `truncated: false`, which is fine).
+        assert_ne!(doc["truncated"], true, "{args:?}: {doc}");
+        assert!(doc.get("cap_bytes").is_none(), "{args:?}: {doc}");
+        assert!(
+            doc["snapshot"].get("dirty").is_none(),
+            "{args:?}: snapshot must not enumerate dirty paths: {doc}"
+        );
+        assert_eq!(
+            doc["snapshot"]["dirty_count"].as_u64(),
+            Some(3000),
+            "{args:?}: {doc}"
+        );
+        assert!(doc["snapshot"]["head"].is_string(), "{args:?}: {doc}");
+    }
+
     // `inspect` owns the list: under a small cap it is shortened, not
     // replaced by a textual wrapper.
     let out = Command::new(env!("CARGO_BIN_EXE_pixel"))

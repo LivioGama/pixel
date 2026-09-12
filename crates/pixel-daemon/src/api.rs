@@ -214,59 +214,102 @@ impl Service {
         }
     }
 
-    /// Make sure `self.graph` is populated; builds graph.db on first useand
-    /// rebuilds it when the working tree has drifted from the indexed state
-    /// (detected via the build-time freshness signature). Returns build info
-    /// (stats + timing) when a build/rebuild happened.
+    /// Make sure `self.graph` is populated. Builds graph.db on first use;
+    /// when the working tree has drifted from the built state (detected via
+    /// the build-time freshness signature) it re-extracts only the files
+    /// whose content hash changed and drops the removed ones, falling back
+    /// to a full rebuild when the db carries no signature or the drift
+    /// exceeds `PIXEL_GRAPH_INCREMENTAL_MAX_PCT` (default 20 %) of the
+    /// indexed files. Returns build info (stats, timing, `incremental`)
+    /// when a build/update happened.
+    ///
+    /// Without a git anchor (no `.git`) the same path applies: the walk
+    /// (`policy_walk`, which respects .gitignore in gitless trees) is capped
+    /// by `PIXEL_GRAPH_MAX_FILES` (default 50000) and the signature is
+    /// file-hash-based, so drift detection works without git.
     fn ensure_graph(&mut self) -> Result<Option<Value>, String> {
         if self.graph.is_some() {
             return Ok(None);
         }
         let db = self.graph_db_path();
-
-        // No git anchor (no `.git`): the graph build walks the tree via
-        // `policy_walk` (which respects .gitignore even in gitless trees) with
-        // a file-count cap (PIXEL_GRAPH_MAX_FILES, default 50000) to prevent
-        // pathological walks on huge or mis-rooted directories. The freshness
-        // signature is file-hash-based (not commit-OID-based), so incremental
-        // freshness checks work without git. An existing graph.db is reused if
-        // fresh; otherwise it is rebuilt from the filesystem walk.
-        if pixel_index::gitsync::rev_parse_head(&self.root).is_none() {
-            if db.exists() && bridge::is_fresh(&self.root, &db) {
-                self.graph = Some(GraphStore::open(&db).map_err(|e| e.to_string())?);
-                return Ok(None);
-            }
-            // Build from filesystem walk (capped). If the build fails (e.g.
-            // file-count cap hit on a huge directory), return an error that
-            // callers can degrade from — same pattern as op_targets.
-            let (stats, build_ms) = self.rebuild_graph()?;
-            self.graph = Some(GraphStore::open(&db).map_err(|e| e.to_string())?);
-            return Ok(Some(json!({
-                "graph_built": true,
-                "build_ms": build_ms,
-                "stats": stats,
-                "gitless": true,
-            })));
-        }
-
-        // An existing db is only reused if its freshness signature matches the
-        // current working tree; otherwise it is stale (files added/removed/
-        // edited since it was built)and is rebuilt from scratch.
-        let stale = db.exists() && !bridge::is_fresh(&self.root, &db);
-        let built = if !db.exists() || stale {
-            let (stats, build_ms) = self.rebuild_graph()?;
-            Some(json!({
-                "graph_built": true,
-                "build_ms": build_ms,
-                "stats": stats,
-            }))
+        let gitless = pixel_index::gitsync::rev_parse_head(&self.root).is_none();
+        let mut built = None;
+        if !db.exists() {
+            built = Some(self.full_rebuild_info("missing")?);
         } else {
-            None
-        };
+            // One walk answers both "fresh?" and "which files drifted?".
+            match bridge::tree_delta(&self.root, &db) {
+                Ok(Some(delta)) if delta.fresh => {}
+                Ok(Some(delta)) => {
+                    let pct = incremental_max_pct();
+                    if incremental_allowed(delta.changed_count(), delta.indexed_files, pct) {
+                        built = Some(self.incremental_update_info(&delta)?);
+                    } else {
+                        built = Some(self.full_rebuild_info("threshold")?);
+                    }
+                }
+                Ok(None) => built = Some(self.full_rebuild_info("no_signature")?),
+                Err(_) => built = Some(self.full_rebuild_info("unreadable")?),
+            }
+        }
         if self.graph.is_none() {
             self.graph = Some(GraphStore::open(&db).map_err(|e| e.to_string())?);
         }
+        if gitless && let Some(obj) = built.as_mut().and_then(Value::as_object_mut) {
+            obj.insert("gitless".into(), json!(true));
+        }
         Ok(built)
+    }
+
+    /// Full rebuild plus its `graph_build` record. If the build fails (e.g.
+    /// file-count cap hit on a huge gitless directory), the error is
+    /// returned so callers can degrade from it — same pattern as
+    /// `op_targets`.
+    fn full_rebuild_info(&mut self, reason: &str) -> Result<Value, String> {
+        let (stats, build_ms) = self.rebuild_graph()?;
+        Ok(json!({
+            "graph_built": true,
+            "incremental": false,
+            "reason": reason,
+            "build_ms": build_ms,
+            "stats": stats,
+        }))
+    }
+
+    /// Apply a tree delta in place. An incremental update that fails
+    /// (concurrent edit, unreadable row, sqlite busy) degrades to a full
+    /// rebuild rather than surfacing an error: the full path is always
+    /// available and the caller only asked for a fresh graph.
+    fn incremental_update_info(
+        &mut self,
+        delta: &pixel_graph::build::TreeDelta,
+    ) -> Result<Value, String> {
+        let db = self.graph_db_path();
+        self.graph.take();
+        let started = Instant::now();
+        if let Err(error) = bridge::apply_tree_delta(&self.root, &db, delta) {
+            let mut info = self.full_rebuild_info("incremental_failed")?;
+            info["incremental_error"] = json!(error);
+            return Ok(info);
+        }
+        let build_ms = started.elapsed().as_millis() as u64;
+        let store = GraphStore::open(&db).map_err(|e| e.to_string())?;
+        let (files, symbols, edges, unresolved) = store.counts().map_err(|e| e.to_string())?;
+        self.graph = Some(store);
+        Ok(json!({
+            "graph_built": true,
+            "incremental": true,
+            "changed_files": delta.changed.len(),
+            "removed_files": delta.removed.len(),
+            "build_ms": build_ms,
+            "stats": {
+                "files": files,
+                "symbols": symbols,
+                "edges": edges,
+                "unresolved": unresolved,
+                "elapsed_ms": build_ms,
+            },
+        }))
     }
 
     fn rebuild_graph(&mut self) -> Result<(Value, u64), String> {
@@ -478,11 +521,21 @@ impl Service {
             op_name,
             "inspect" | "review" | "diff" | "status" | "changes"
         ) || is_retrieval_op(op_name);
+        // Only the ops whose job is to report the working tree carry the
+        // dirty path list. Everything else gets `dirty_count`: a retrieval
+        // answer needs to say WHICH tree state it was computed against, not
+        // enumerate 15 000 untracked `vendor/bundle` paths on every call.
+        let full_dirty_list = matches!(op_name, "inspect" | "review");
         match self.dispatch(req) {
             Ok(v) => {
                 let mut env = Envelope::success(op_name, v);
                 if attach_snapshot {
-                    env = env.with_snapshot(self.repo_snapshot());
+                    let snapshot = self.repo_snapshot();
+                    env = env.with_snapshot(if full_dirty_list {
+                        snapshot
+                    } else {
+                        snapshot.compact()
+                    });
                 }
                 // Epistemics choke point: EVERY successful retrieval-class
                 // response carries an `epistemics` object — this is the ONLY
@@ -521,6 +574,7 @@ impl Service {
             head,
             branch,
             dirty,
+            dirty_count: None,
         }
     }
 
@@ -2890,6 +2944,34 @@ fn read_snippet(
     snippet
 }
 
+/// Default share of indexed files above which a drifted graph is rebuilt
+/// from scratch instead of updated file by file. Re-extracting one file is
+/// cheap; re-resolving calls after a large drift is not much cheaper than a
+/// fresh parallel build, and a rebuild is the path with no state to trust.
+pub const DEFAULT_GRAPH_INCREMENTAL_MAX_PCT: u64 = 20;
+
+/// `PIXEL_GRAPH_INCREMENTAL_MAX_PCT`: percentage of indexed files (0-100)
+/// up to which drift is applied incrementally. `0` disables the incremental
+/// path (always rebuild); `100` never rebuilds for drift alone. Unset,
+/// empty, non-numeric or out-of-range values fall back to the default.
+fn incremental_max_pct() -> u64 {
+    std::env::var("PIXEL_GRAPH_INCREMENTAL_MAX_PCT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|pct| *pct <= 100)
+        .unwrap_or(DEFAULT_GRAPH_INCREMENTAL_MAX_PCT)
+}
+
+/// Whether `changed` drifted files out of `indexed` may be applied
+/// incrementally under a `pct` threshold. A graph that indexed nothing has
+/// no incremental state to reuse; a threshold of 0 means "never".
+fn incremental_allowed(changed: usize, indexed: usize, pct: u64) -> bool {
+    if pct == 0 || indexed == 0 {
+        return false;
+    }
+    (changed as u128) * 100 <= (indexed as u128) * (pct as u128)
+}
+
 fn merge_build_info(out: &mut Value, built: Option<Value>) {
     if let (Some(info), Some(obj)) = (built, out.as_object_mut()) {
         obj.insert("graph_build".into(), info);
@@ -2957,9 +3039,22 @@ mod bridge {
         }))
     }
 
-    /// True iff the on-disk graph is fresh relative to `root`'s working tree.
-    pub fn is_fresh(root: &Path, db: &Path) -> bool {
-        pixel_graph::build::is_fresh(root, db)
+    /// One walk of `root`: freshness verdict plus the files that drifted
+    /// from the on-disk graph. `None` when the db has no signature to trust.
+    pub fn tree_delta(
+        root: &Path,
+        db: &Path,
+    ) -> Result<Option<pixel_graph::build::TreeDelta>, String> {
+        pixel_graph::build::tree_delta(root, db).map_err(es)
+    }
+
+    /// Re-extract the drifted files only and publish the delta's signature.
+    pub fn apply_tree_delta(
+        root: &Path,
+        db: &Path,
+        delta: &pixel_graph::build::TreeDelta,
+    ) -> Result<(), String> {
+        pixel_graph::build::apply_tree_delta(root, db, delta).map_err(es)
     }
 
     pub fn update_file(root: &Path, db: &Path, rel: &str) {
@@ -4809,14 +4904,57 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name}: retrieval response shipped WITHOUT snapshot"));
             assert!(snapshot.head.is_some(), "{name}: snapshot must carry HEAD");
+            // Retrieval answers carry the compact form: the dirty tree is
+            // counted, never enumerated (one untracked vendor tree used to
+            // turn every `symbol` answer into 240 KB).
             assert!(
-                snapshot.dirty.iter().any(|p| p == "a.ts"),
-                "{name}: snapshot must list the dirty file, got {:?}",
+                snapshot.dirty.is_empty(),
+                "{name}: retrieval snapshot must not enumerate dirty paths, got {:?}",
                 snapshot.dirty
+            );
+            let expected = pixel_index::gitsync::status_porcelain(&root).len() as u64;
+            assert!(expected >= 1, "fixture must have a dirty file");
+            assert_eq!(
+                snapshot.dirty_count,
+                Some(expected),
+                "{name}: snapshot must count every dirty path"
             );
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The incremental/full decision is what keeps an agent's
+    /// edit-then-`impact` loop at seconds instead of a full rebuild per
+    /// cycle; the threshold is the documented `PIXEL_GRAPH_INCREMENTAL_MAX_PCT`
+    /// contract (percentage of indexed files, `0` = always rebuild).
+    #[test]
+    fn incremental_allowed_follows_the_percentage_threshold() {
+        // 2 of 10 files = 20 %: at the default threshold, incremental.
+        assert!(incremental_allowed(
+            2,
+            10,
+            DEFAULT_GRAPH_INCREMENTAL_MAX_PCT
+        ));
+        // 3 of 10 = 30 %: rebuild.
+        assert!(!incremental_allowed(
+            3,
+            10,
+            DEFAULT_GRAPH_INCREMENTAL_MAX_PCT
+        ));
+        // 1 of 5 = 20 % still incremental; 3 of 5 (the test fixture) is not.
+        assert!(incremental_allowed(1, 5, 20));
+        assert!(!incremental_allowed(3, 5, 20));
+        // `0` disables the incremental path even for a single file.
+        assert!(!incremental_allowed(1, 10_000, 0));
+        // `100` never rebuilds for drift alone.
+        assert!(incremental_allowed(10_000, 10_000, 100));
+        // An empty graph has nothing to update incrementally.
+        assert!(!incremental_allowed(1, 0, 20));
+        // Removals count as drift too: 2 000 of 10 000 is the last
+        // incremental size at 20 %, 2 001 is not.
+        assert!(incremental_allowed(2_000, 10_000, 20));
+        assert!(!incremental_allowed(2_001, 10_000, 20));
     }
 
     /// Phase 3 item 2 — targets honesty: when the 500-match content probe
