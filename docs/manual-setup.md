@@ -53,7 +53,9 @@ claude --append-system-prompt-file ~/.local/share/pixel/agent-prompt.md
 Sub-agents (the `Agent` tool: built-in agents, `.claude/agents/*.md`, agents
 from a `--plugin-dir`) do not receive `--append-system-prompt-file`. In print
 mode (`-p`/`--print`) Claude Code accepts a second flag for them; it is not
-listed in `claude --help` and is ignored in interactive sessions:
+listed in `claude --help` and is ignored in interactive sessions. **It needs
+Claude Code 2.1.261 or newer**: older releases exit with `error: unknown
+option`, so check `claude --version` before adding it.
 
 ```bash
 claude -p --append-system-prompt-file ~/.local/share/pixel/agent-prompt.md \
@@ -62,7 +64,10 @@ claude -p --append-system-prompt-file ~/.local/share/pixel/agent-prompt.md \
 ```
 
 Or add a shell function to `~/.zshrc` (or `~/.bashrc`) so it's automatic. It
-adds the sub-agent flag only when `-p`/`--print` is among the arguments:
+adds the sub-agent flag only when `-p`/`--print` is among the arguments
+(`pixel install` writes this block when `claude --version` is at least
+2.1.261, and the plain one-liner from the previous section otherwise; `pixel
+doctor` tells you to re-run `pixel install` once Claude Code crosses the line):
 
 ```bash
 claude() {
