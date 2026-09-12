@@ -127,15 +127,29 @@ impl std::fmt::Display for ClaudeVersion {
 /// option, so the wrapper must not pass it to them.
 pub const MIN_CLAUDE_FOR_SUBAGENT_PROMPT: ClaudeVersion = ClaudeVersion(2, 1, 261);
 
-/// Parse the first `major.minor.patch` token of `claude --version` output.
+/// Parse the first `major.minor.patch` token found anywhere in `claude
+/// --version` output. Scanning every token, not just the first, survives a
+/// preamble printed by an npm/corepack/version-manager shim; a pre-release
+/// suffix (`2.1.270-rc1`) is dropped from the patch component.
 pub(crate) fn parse_claude_version(output: &str) -> Option<ClaudeVersion> {
-    let token = output.split_whitespace().next()?;
-    let mut parts = token.trim_start_matches('v').split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
-    Some(ClaudeVersion(major, minor, patch))
+    output.split_whitespace().find_map(|token| {
+        let mut parts = token.trim_start_matches('v').split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        let patch = parts
+            .next()?
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()?;
+        Some(ClaudeVersion(major, minor, patch))
+    })
 }
+
+/// How long `claude --version` may take before the probe gives up. A shim
+/// that installs on first use, or a stalled proxy, must not hang `pixel
+/// install`; an expired probe is a [`SubagentSupport::Unknown`].
+const CLAUDE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// What `pixel install` and `pixel doctor` learned about the user's Claude Code.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,27 +160,90 @@ pub struct ClaudeProbe {
     pub version: Option<ClaudeVersion>,
 }
 
+/// Whether the observed Claude Code takes `--append-subagent-system-prompt-file`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentSupport {
+    /// A Claude Code at or above [`MIN_CLAUDE_FOR_SUBAGENT_PROMPT`] was seen.
+    Supported(ClaudeVersion),
+    /// An older Claude Code was seen: it exits 1 on the flag.
+    TooOld(ClaudeVersion),
+    /// No usable `claude`: not on PATH, not answering, or an unparseable
+    /// version. Not evidence either way — callers must not downgrade a
+    /// working install on it.
+    Unknown,
+}
+
 impl ClaudeProbe {
+    pub fn support(&self) -> SubagentSupport {
+        match self.version {
+            Some(version) if version >= MIN_CLAUDE_FOR_SUBAGENT_PROMPT => {
+                SubagentSupport::Supported(version)
+            }
+            Some(version) => SubagentSupport::TooOld(version),
+            None => SubagentSupport::Unknown,
+        }
+    }
+
     /// True only when a Claude Code at or above
-    /// [`MIN_CLAUDE_FOR_SUBAGENT_PROMPT`] was observed. Unknown is treated as
-    /// unsupported: omitting the flag silently loses sub-agent rules, passing
-    /// it to an old Claude Code breaks every print-mode call.
+    /// [`MIN_CLAUDE_FOR_SUBAGENT_PROMPT`] was observed.
     pub fn supports_subagent_prompt(&self) -> bool {
-        self.version
-            .is_some_and(|version| version >= MIN_CLAUDE_FOR_SUBAGENT_PROMPT)
+        matches!(self.support(), SubagentSupport::Supported(_))
     }
 
     /// One phrase for install/doctor summaries explaining the decision.
     pub fn explanation(&self) -> String {
-        match (&self.executable, self.version) {
+        match (&self.executable, self.support()) {
             (None, _) => "claude not found on PATH".to_string(),
-            (Some(exe), None) => format!("{} --version did not report a version", exe.display()),
-            (Some(_), Some(version)) if version >= MIN_CLAUDE_FOR_SUBAGENT_PROMPT => {
+            (Some(exe), SubagentSupport::Unknown) => format!(
+                "{} --version did not report a version within {}s",
+                exe.display(),
+                CLAUDE_PROBE_TIMEOUT.as_secs()
+            ),
+            (Some(_), SubagentSupport::Supported(version)) => {
                 format!("Claude Code {version} accepts --append-subagent-system-prompt-file")
             }
-            (Some(_), Some(version)) => format!(
+            (Some(_), SubagentSupport::TooOld(version)) => format!(
                 "Claude Code {version} < {MIN_CLAUDE_FOR_SUBAGENT_PROMPT} rejects --append-subagent-system-prompt-file"
             ),
+        }
+    }
+}
+
+/// Run `exe --version` with stdin closed and a deadline; `None` on any
+/// failure, non-zero exit, or timeout (the child is killed).
+fn claude_version_output(exe: &Path) -> Option<String> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(exe)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    // Read on a helper thread so a child that never exits cannot block the
+    // probe on a full pipe; the deadline below is what actually bounds it.
+    let reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let _ = std::io::BufReader::new(stdout).read_to_string(&mut buf);
+        buf
+    });
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = reader.join().ok()?;
+                return status.success().then_some(output);
+            }
+            Ok(None) if started.elapsed() < CLAUDE_PROBE_TIMEOUT => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
         }
     }
 }
@@ -178,16 +255,9 @@ pub fn probe_claude(claude_override: Option<&Path>) -> ClaudeProbe {
         Some(path) => Some(path.to_path_buf()),
         None => find_on_path("claude"),
     };
-    let version = executable.as_ref().and_then(|exe| {
-        let output = std::process::Command::new(exe)
-            .arg("--version")
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        parse_claude_version(&String::from_utf8_lossy(&output.stdout))
-    });
+    let version = executable
+        .as_ref()
+        .and_then(|exe| parse_claude_version(&claude_version_output(exe)?));
     ClaudeProbe {
         executable,
         version,
@@ -371,6 +441,9 @@ pub(crate) const PROMPT_PATH: &str = "$HOME/.local/share/pixel/agent-prompt.md";
 /// same reason as [`PROMPT_PATH`].
 pub(crate) const SUBAGENT_PROMPT_PATH: &str = "$HOME/.local/share/pixel/subagent-prompt.md";
 
+/// The Claude Code flag the wrapper adds in print mode (2.1.261+).
+pub(crate) const SUBAGENT_PROMPT_FLAG: &str = "--append-subagent-system-prompt-file";
+
 /// The shell to install wrappers for: the caller's override when given,
 /// otherwise `$SHELL`.
 ///
@@ -444,9 +517,14 @@ pub(crate) const PIXEL_MANAGED_END: &str = "# <<< pixel-managed <<<";
 ///
 /// The `claude` wrapper always appends `prompt_path` to the session prompt.
 /// With `Some(subagent_prompt_path)` it appends that file to sub-agents only
-/// when `-p`/`--print` is among the arguments: Claude Code honours
-/// `--append-subagent-system-prompt-file` in print mode only, and the same
-/// wrapper also fronts interactive sessions. With `None` (Claude Code older
+/// when `--print`, `-p`, or a short-flag cluster containing `p` (`-pc`,
+/// `-cp`: Claude Code splits those) is among the arguments: Claude Code
+/// honours `--append-subagent-system-prompt-file` in print mode only
+/// (checked by experiment on 2.1.269: the same sub-agent probe applies the
+/// file's rule under `-p` and ignores it in an interactive session), and the
+/// same wrapper also fronts interactive sessions. A false positive costs
+/// nothing — the flag parses in interactive mode too — while an unconditional
+/// flag would make a missing prompt file fatal for every `claude` call. With `None` (Claude Code older
 /// than [`MIN_CLAUDE_FOR_SUBAGENT_PROMPT`], or not found) the wrapper is the
 /// plain one-liner, because those releases exit on the unknown option.
 pub(crate) fn shell_wrapper_block(
@@ -467,9 +545,10 @@ pub(crate) fn shell_wrapper_block(
         ),
         (ShellKind::Posix, Some(subagent)) => format!(
             "claude() {{\n\
+             \x20 local _pixel_arg\n\
              \x20 for _pixel_arg in \"$@\"; do\n\
              \x20   case \"$_pixel_arg\" in\n\
-             \x20     -p|--print) command claude --append-system-prompt-file \"{prompt}\" --append-subagent-system-prompt-file \"{subagent}\" \"$@\"; return $?;;\n\
+             \x20     -p*|-[!-]*p*|--print) command claude --append-system-prompt-file \"{prompt}\" --append-subagent-system-prompt-file \"{subagent}\" \"$@\"; return $?;;\n\
              \x20   esac\n\
              \x20 done\n\
              \x20 command claude --append-system-prompt-file \"{prompt}\" \"$@\"\n\
@@ -483,7 +562,7 @@ pub(crate) fn shell_wrapper_block(
         // needs the `--` so `-p` is looked up rather than parsed as an option.
         (ShellKind::Fish, Some(subagent)) => format!(
             "function claude\n\
-             \x20 if contains -- -p $argv; or contains -- --print $argv\n\
+             \x20 if contains -- --print $argv; or string match -qr -- '^-[^-]*p' $argv\n\
              \x20   command claude --append-system-prompt-file \"{prompt}\" --append-subagent-system-prompt-file \"{subagent}\" $argv\n\
              \x20 else\n\
              \x20   command claude --append-system-prompt-file \"{prompt}\" $argv\n\
@@ -571,21 +650,39 @@ fn install_shell_wrappers(
 ) -> Result<InstallStep> {
     let shell = resolve_shell(shell_override);
     let (kind, profile) = shell_profile_for(&shell, home);
-    let with_subagent_prompt = claude.supports_subagent_prompt();
+    let existing = fs::read_to_string(&profile).unwrap_or_default();
+    // Yellow, not red, whenever the flag is not written: the session prompt
+    // is wired either way, and yellow says why the sub-agent half is
+    // missing. Without a usable `claude` there is no evidence either way, so
+    // the decision an earlier install made with evidence is kept: a
+    // re-install from a shell where `claude` is not on PATH (cron, an
+    // agent's command tool) must not strip the flag from a working block,
+    // and a first install without `claude` takes the safe plain block.
+    let (with_subagent_prompt, status, subagent_note) = match claude.support() {
+        SubagentSupport::Supported(_) => (true, CheckStatus::Green, String::new()),
+        SubagentSupport::TooOld(_) => (
+            false,
+            CheckStatus::Yellow,
+            format!(" without the sub-agent prompt ({})", claude.explanation()),
+        ),
+        SubagentSupport::Unknown => {
+            let kept = extract_managed_block(&existing)
+                .is_some_and(|block| block.contains(SUBAGENT_PROMPT_FLAG));
+            let note = if kept {
+                format!(
+                    ", keeping the sub-agent prompt flag of the existing block ({}, could not re-check)",
+                    claude.explanation()
+                )
+            } else {
+                format!(
+                    " without the sub-agent prompt ({}; run `pixel install` again with Claude Code on PATH)",
+                    claude.explanation()
+                )
+            };
+            (kept, CheckStatus::Yellow, note)
+        }
+    };
     let block = expected_wrapper_block(kind, with_subagent_prompt);
-    // Yellow, not red: the session prompt is wired either way. Yellow says
-    // the sub-agent half is missing and why, so the user knows to re-run
-    // `pixel install` once Claude Code is updated (doctor repeats it).
-    let status = if with_subagent_prompt {
-        CheckStatus::Green
-    } else {
-        CheckStatus::Yellow
-    };
-    let subagent_note = if with_subagent_prompt {
-        String::new()
-    } else {
-        format!(" without the sub-agent prompt ({})", claude.explanation())
-    };
     let detail = Some(format!(
         "profile={} shell={} subagent_prompt={} claude={}",
         profile.display(),
@@ -609,7 +706,6 @@ fn install_shell_wrappers(
     if let Some(parent) = profile.parent() {
         fs::create_dir_all(parent)?;
     }
-    let existing = fs::read_to_string(&profile).unwrap_or_default();
     let cleaned = strip_shell_wrappers(&existing);
     let had_old_block = cleaned != existing;
     let mut new_content = cleaned;
@@ -798,8 +894,18 @@ mod claude_version_tests {
             parse_claude_version("v2.1.261"),
             Some(ClaudeVersion(2, 1, 261))
         );
+        // A shim's preamble or a pre-release suffix must not turn a known
+        // version into "unknown" (which would withhold the flag silently).
+        assert_eq!(
+            parse_claude_version("npm notice: update available\n2.1.269 (Claude Code)"),
+            Some(ClaudeVersion(2, 1, 269))
+        );
+        assert_eq!(
+            parse_claude_version("2.1.270-rc1"),
+            Some(ClaudeVersion(2, 1, 270))
+        );
         assert_eq!(parse_claude_version(""), None);
-        assert_eq!(parse_claude_version("Claude Code 2.1.269"), None);
+        assert_eq!(parse_claude_version("Claude Code"), None);
         assert_eq!(parse_claude_version("2.1"), None);
     }
 
@@ -850,7 +956,25 @@ mod claude_version_tests {
     fn probe_survives_a_missing_or_silent_claude() {
         let missing = probe_claude(Some(Path::new("/nonexistent/claude")));
         assert_eq!(missing.version, None);
-        assert!(!missing.supports_subagent_prompt());
+        assert_eq!(missing.support(), SubagentSupport::Unknown);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn probe_gives_up_on_a_claude_that_never_answers() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let stuck = dir.path().join("claude");
+        fs::write(&stuck, "#!/bin/sh\nsleep 60\n").unwrap();
+        fs::set_permissions(&stuck, fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        let probe = probe_claude(Some(&stuck));
+        assert_eq!(probe.support(), SubagentSupport::Unknown);
+        assert!(
+            started.elapsed() < CLAUDE_PROBE_TIMEOUT + std::time::Duration::from_secs(2),
+            "a hung claude must not hang pixel install: took {:?}",
+            started.elapsed()
+        );
     }
 }
 

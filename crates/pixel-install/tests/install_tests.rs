@@ -1193,7 +1193,7 @@ fn fish_wrappers_are_written_in_fish_syntax_not_posix_syntax() {
     for required in [
         "function claude\n",
         "command claude --append-system-prompt-file",
-        "if contains -- -p $argv; or contains -- --print $argv",
+        "if contains -- --print $argv; or string match -qr -- '^-[^-]*p' $argv",
         "function codex; command codex -c",
         "$argv; end",
     ] {
@@ -1458,7 +1458,9 @@ fn dry_run_does_not_write_the_subagent_prompt() {
 
 /// Source the installed block in the shell it was written for, call the
 /// `claude` wrapper through a mock that echoes its argv, and check which
-/// prompt files it received. Runs in every shell present on the machine.
+/// prompt files it received. Runs in every shell found on the caller's PATH
+/// (the mock's directory is prepended, the rest of PATH is kept so that a
+/// Homebrew fish is found); a shell that cannot be spawned is skipped.
 #[test]
 #[cfg(unix)]
 fn the_subagent_prompt_flag_is_passed_in_print_mode_only() {
@@ -1488,11 +1490,12 @@ fn the_subagent_prompt_flag_is_passed_in_print_mode_only() {
                 profile_of(home).display(),
                 quoted.join(" ")
             );
+            let inherited = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
             let output = Command::new(shell)
                 .arg("-c")
                 .arg(script)
                 .env("HOME", home)
-                .env("PATH", format!("{}:/usr/bin:/bin", home.display()))
+                .env("PATH", format!("{}:{inherited}", home.display()))
                 .output()
                 .ok()?;
             assert!(
@@ -1538,7 +1541,9 @@ fn the_subagent_prompt_flag_is_passed_in_print_mode_only() {
             "{shell}: user arguments must survive untouched: {interactive:?}"
         );
 
-        for print_flag in ["-p", "--print"] {
+        // Claude Code splits short-flag clusters, so `-pc` and `-cp` are
+        // print mode too (verified: `claude -pv` prints the version).
+        for print_flag in ["-p", "--print", "-pc", "-cp"] {
             let print = run(&["--model", "sonnet", print_flag, "real task"]).unwrap();
             assert!(
                 print
@@ -1573,6 +1578,12 @@ fn the_subagent_prompt_flag_is_passed_in_print_mode_only() {
         checked > 0,
         "no shell was available to run the wrapper in — the assertions above never ran"
     );
+    if Command::new("fish").arg("--version").output().is_ok() {
+        assert_eq!(
+            checked, 3,
+            "fish is on PATH but the fish block was not exercised"
+        );
+    }
 }
 
 #[test]
@@ -1780,6 +1791,93 @@ fn no_usable_claude_means_no_subagent_flag() {
         wrappers_step(&report).status,
         pixel_install::install::CheckStatus::Yellow
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_reinstall_without_claude_keeps_the_flag_an_earlier_install_proved() {
+    // No `claude` on the PATH of the re-installing process (cron, an agent's
+    // command tool) is no evidence that Claude Code got older: stripping the
+    // flag there would silently drop sub-agent rules from a working setup.
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_with_claude(home, Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)));
+    let before = fs::read_to_string(shell_profile_path(home)).expect("profile");
+    assert!(before.contains("--append-subagent-system-prompt-file"));
+
+    let report = install_with_claude(home, Some(home.join("no-such-claude")));
+    let after = fs::read_to_string(shell_profile_path(home)).expect("profile");
+    assert_eq!(
+        after, before,
+        "the block must survive a blind re-install unchanged"
+    );
+    let step = wrappers_step(&report);
+    assert_eq!(step.status, pixel_install::install::CheckStatus::Yellow);
+    assert!(
+        step.summary.contains("keeping the sub-agent prompt flag"),
+        "the report must say the flag was kept on trust: {}",
+        step.summary
+    );
+
+    // The reverse is not preserved by accident: a block proven old by a real
+    // old Claude Code stays plain on a blind re-install.
+    install_with_claude(
+        home,
+        Some(fake_claude_exe(home, CLAUDE_WITHOUT_SUBAGENT_FLAG)),
+    );
+    install_with_claude(home, Some(home.join("no-such-claude")));
+    assert!(
+        !fs::read_to_string(shell_profile_path(home))
+            .unwrap()
+            .contains("--append-subagent-system-prompt-file")
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn doctor_without_claude_is_yellow_not_red() {
+    // A red would send the user to `pixel install`, which has no better
+    // evidence — and used to strip the flag.
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_with_claude(home, Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)));
+    let check = doctor(&DoctorOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        claude_executable: Some(home.join("no-such-claude")),
+        ..Default::default()
+    })
+    .expect("doctor")
+    .checks
+    .into_iter()
+    .find(|c| c.id == "install.shell-wrappers")
+    .expect("install.shell-wrappers check");
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Yellow);
+    assert!(
+        check
+            .summary
+            .contains("cannot verify the sub-agent prompt flag"),
+        "{check:?}"
+    );
+
+    // A foreign block is still red even when claude is unknown.
+    fs::write(
+        shell_profile_path(home),
+        "# >>> pixel-managed >>>\nclaude() { command claude \"$@\"; }\n# <<< pixel-managed <<<\n",
+    )
+    .unwrap();
+    let check = doctor(&DoctorOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        claude_executable: Some(home.join("no-such-claude")),
+        ..Default::default()
+    })
+    .expect("doctor")
+    .checks
+    .into_iter()
+    .find(|c| c.id == "install.shell-wrappers")
+    .expect("install.shell-wrappers check");
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
 }
 
 #[test]

@@ -6090,3 +6090,52 @@ mod tests {
         assert!(data["matches"][0].get("context").is_none());
     }
 }
+
+/// Every `pixel …` line in the fenced blocks of the two bundled prompt
+/// assets must parse against this binary's clap definition. `pixel doctor`'s
+/// `rule.parity` only covers the rule text installed on a machine; the
+/// assets themselves are what every wrapped `claude`/`codex` and every
+/// print-mode sub-agent reads, so their drift has to fail the build.
+#[cfg(test)]
+mod prompt_asset_parity {
+    use pixel_install::doctor::{extract_rule_commands, normalize_rule_command};
+
+    const ASSETS: [(&str, &str); 2] = [
+        (
+            "pixel-agent-prompt.md",
+            include_str!("../../pixel-install/assets/pixel-agent-prompt.md"),
+        ),
+        (
+            "pixel-subagent-prompt.md",
+            include_str!("../../pixel-install/assets/pixel-subagent-prompt.md"),
+        ),
+    ];
+
+    #[test]
+    fn every_documented_command_line_parses_against_the_cli() {
+        let mut checked = 0;
+        let mut failures = Vec::new();
+        for (name, text) in ASSETS {
+            let commands = extract_rule_commands(text);
+            assert!(
+                !commands.is_empty(),
+                "{name}: no fenced `pixel …` line found — the extractor or the asset changed shape"
+            );
+            for line in commands {
+                let Some(argv) = normalize_rule_command(&line) else {
+                    continue;
+                };
+                checked += 1;
+                if let Err(error) = super::validate_cli_syntax(&argv) {
+                    failures.push(format!("{name}: `{line}` → {error}"));
+                }
+            }
+        }
+        assert!(checked > 0, "nothing was checked");
+        assert!(
+            failures.is_empty(),
+            "documented command lines the CLI rejects:\n{}",
+            failures.join("\n")
+        );
+    }
+}

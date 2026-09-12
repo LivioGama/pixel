@@ -184,7 +184,10 @@ through the loaded profile; already-running agents and direct executable launche
 do not inherit it automatically. The `claude` function adds
 `--append-subagent-system-prompt-file` only when `-p`/`--print` is among the
 arguments: Claude Code sub-agents do not see the session prompt, and the flag is
-honoured in print mode only.
+honoured in print mode only. `install` writes that variant only when `claude
+--version` reports 2.1.261 or newer (older releases exit on the unknown option),
+keeps the previous decision when `claude` cannot be probed, and `doctor`
+re-derives the expected block from the Claude Code found at check time.
 
 Existing hook entry points remain implemented, separately from active installation:
 
