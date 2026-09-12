@@ -11,7 +11,7 @@
 //! 3. Writes via temp → fsync → rename (`durable::write_durably`).
 //! 4. NEVER includes a value in any output, error message, or journal
 //!    record. Key NAMES only. This is a hard invariant with a sentinel
-//!    test in `tests/envfile.rs`.
+//!    test in `tests/all/envfile.rs`.
 
 use std::fs;
 use std::path::{Path, PathBuf};

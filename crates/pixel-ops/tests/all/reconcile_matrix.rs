@@ -11,13 +11,13 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::Mutex;
 
 use tempfile::TempDir;
 
 use pixel_ops::reconcile::{ReconcileOptions, reconcile, reconcile_with_hooks};
 
-static ENV_GUARD: Mutex<()> = Mutex::new(());
+// Shared with every module of this binary that touches `XDG_STATE_HOME`.
+use crate::XDG_STATE_ENV as ENV_GUARD;
 
 struct XdgEnvGuard;
 impl Drop for XdgEnvGuard {

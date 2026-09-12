@@ -283,7 +283,7 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 
 - Unit tests live next to the code in each crate. `pixel-daemon` tests build
   small git fixtures in a temp dir and call `Service::handle` directly.
-- CLI integration tests in `crates/pixel/tests/` invoke the built binary
+- CLI integration tests in `crates/pixel/tests/cli/` (one binary, one module per file) invoke the built binary
   through `CARGO_BIN_EXE_pixel` against a temp fixture repo.
 - CI runs `cargo fmt --check`, `cargo clippy --all-targets` with warnings
   denied, and `cargo test` for the workspace, with the same feature set as

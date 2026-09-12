@@ -91,9 +91,19 @@ cross build --release --no-default-features --features model2vec \
 - **Unit tests** sit next to the code in each crate (`#[cfg(test)] mod tests`).
 - **Daemon tests** (`crates/pixel-daemon`) build small git fixtures in a temp
   dir and call `Service::handle` directly.
-- **CLI integration tests** (`crates/pixel/tests/*.rs`) run the built binary
-  via `env!("CARGO_BIN_EXE_pixel")` against a temp fixture repo. Add one
-  here when you add or change a command's stdout/stderr/JSON contract.
+- **CLI integration tests** (`crates/pixel/tests/cli/<name>.rs`) run the
+  built binary via `env!("CARGO_BIN_EXE_pixel")` against a temp fixture
+  repo. Add one here when you add or change a command's stdout/stderr/JSON
+  contract, and declare it as `mod <name>;` in `tests/cli/main.rs`.
+- **One integration-test binary per crate.** Crates with several test files
+  keep them as modules of a single `tests/<dir>/main.rs` (`cli/` for the
+  CLI, `all/` elsewhere) instead of one `tests/<name>.rs` target each:
+  cargo links one executable, which cut an incremental
+  `cargo test --workspace --no-run` from 65 s to 10 s. The trade-off is
+  that all modules share one process, so anything process-wide (an env
+  var such as `XDG_STATE_HOME`, the working directory) must be
+  serialised through a lock declared in that `main.rs`, never a
+  module-local one. Filter as `cargo test -p <crate> --test all <module>::`.
 - **Proto invariants** (`crates/pixel-proto`) include a test that every
   `Op::op_name` matches its serde tag. Adding an op without updating it
   fails the build.
