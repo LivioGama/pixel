@@ -5,8 +5,10 @@ on:
     tags:
       - 'v*'
 
+# Build jobs only need to read the checkout. Write access is granted to
+# the release job alone (see below), which creates the GitHub release.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -73,6 +75,8 @@ jobs:
     name: Publish release + formula
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
