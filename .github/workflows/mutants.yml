@@ -31,15 +31,27 @@ jobs:
     timeout-minutes: 90
     steps:
       # Full history so the merge base with the target branch is available.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          # The SHA pin no longer names the toolchain through the ref, so
+          # it is passed explicitly (same channel as before).
+          toolchain: stable
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # PRs read the cache but never write it: only develop/main
+          # merges refresh the shared entries, so one PR cannot thrash
+          # or poison them. A failed build still saves what it compiled.
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - name: Install system dependencies
         run: |
@@ -47,7 +59,7 @@ jobs:
           sudo apt-get install -y perl make
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
           tool: cargo-mutants
 
@@ -65,7 +77,7 @@ jobs:
 
       - name: Upload mutants.out
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: mutants-out
           path: mutants.out

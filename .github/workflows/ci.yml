@@ -26,15 +26,27 @@ jobs:
     name: Test + Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          # The SHA pin no longer names the toolchain through the ref, so
+          # it is passed explicitly (same channel as before).
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # PRs read the cache but never write it: only develop/main
+          # merges refresh the shared entries, so one PR cannot thrash
+          # or poison them. A failed build still saves what it compiled.
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - name: Install system dependencies
         run: |
@@ -87,24 +99,35 @@ jobs:
           - target: x86_64-unknown-linux-musl
           - target: aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          # The SHA pin no longer names the toolchain through the ref, so
+          # it is passed explicitly (same channel as before).
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       # Keyed by target so the two musl caches do not overwrite each other.
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          # PRs read the cache but never write it: only develop/main
+          # merges refresh the shared entries, so one PR cannot thrash
+          # or poison them. A failed build still saves what it compiled.
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
           key: ${{ matrix.target }}
 
       # Prebuilt binary instead of `cargo install cross` (~40 s per run).
       # cross compiles inside its own Docker image, which carries the musl
       # toolchain, so no host musl-tools/perl/make are needed.
       - name: Install cross
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
           tool: cross
 
