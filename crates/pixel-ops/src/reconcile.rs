@@ -1280,6 +1280,7 @@ fn attempt_lease_push_or_reclassify(
 /// merge" mode this op depends on for in-memory conflict prediction). Older
 /// git either lacks `--write-tree` entirely or predates its stabilized
 /// output format, so callers must not attempt to interpret its output.
+#[cfg_attr(test, mutants::skip)] // one-line adapter over the real git; `-> true` is what a modern git answers, the parsing is tested below
 fn git_supports_merge_tree_write_tree(root: &Path) -> bool {
     GitRunner::new(root)
         .run(&["--version"])
@@ -2163,5 +2164,59 @@ mod tests {
             String::from_utf8(runner.run(&["log", "-1", "--format=%s", "HEAD~1"]).unwrap())
                 .unwrap();
         assert_eq!(parent.trim(), "main", "feature is replayed on top of main");
+    }
+
+    #[test]
+    fn reconcile_into_auto_resolves_an_additive_conflict_and_continues_the_rebase() {
+        // Both sides append a different line to `a.txt`: the rebase stops on
+        // the conflict, the union merge keeps both lines, and the rebase is
+        // continued through the runner. The answer must say what happened
+        // (`rebased` with the resolved path) and HEAD must be the feature
+        // commit replayed on top of main. (The local target is not moved on
+        // this path today, unlike the clean `integrated` path; that gap is
+        // tracked separately and not asserted here.)
+        let dir = tempdir().unwrap();
+        let remote = tempdir().unwrap();
+        let root = dir.path();
+        init_repo_with_remote(root, remote.path());
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(root.join("a.txt"), "a\nfeature\n").unwrap();
+        git(&["commit", "-qam", "feature line"]);
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(root.join("a.txt"), "a\nmain\n").unwrap();
+        git(&["commit", "-qam", "main line"]);
+        git(&["push", "-q", "origin", "main"]);
+        git(&["checkout", "-q", "feature"]);
+
+        let opts = ReconcileOptions {
+            strategy: "report".to_string(),
+            push: "none".to_string(),
+            request_id: format!("rec-{}", uuid::Uuid::new_v4()),
+            into_target: Some("main".to_string()),
+        };
+        let result = reconcile(root, &opts).unwrap();
+        assert_eq!(result["state"], json!("rebased"), "{result}");
+        assert_eq!(result["auto_resolved"], json!(["a.txt"]), "{result}");
+        assert!(!rebase_in_progress(root));
+        let content = std::fs::read_to_string(root.join("a.txt")).unwrap();
+        assert!(
+            content.contains("main\n") && content.contains("feature\n"),
+            "union merge keeps both sides: {content:?}"
+        );
+        assert!(!content.contains("<<<<<<<"), "{content:?}");
+        let head = git(&["rev-parse", "HEAD"]);
+        assert_eq!(result["to"], json!(head));
+        assert_eq!(git(&["log", "-1", "--format=%s"]), "feature line");
+        assert_eq!(git(&["log", "-1", "--format=%s", "HEAD~1"]), "main line");
     }
 }
