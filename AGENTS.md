@@ -60,8 +60,10 @@ After finishing any implementation turn in this repo (code edit + verify cycle):
    `dev-release` is the release profile without thin LTO and with 16 codegen units: an incremental rebuild takes seconds instead of a minute, and the binary is optimised the same way. Drop `--build` only when you need the exact shipped `release` profile. It runs that build, installs over the binary that is actually running (`pixel` resolved through any mise/asdf shim to its managed install dir; `~/.local/bin/pixel` only as a last resort — never copy there by hand, a second copy shadows the managed one), stops this repo's daemon, and warns if another `pixel` earlier on PATH would still be picked up. The install is an atomic rename: in-place `cp` over a mapped Mach-O invalidates the ad-hoc signature on macOS and SIGKILLs the next invocation.
 2. **In parallel** (both only need the new binary, not each other):
    - **Track A:** `pixel index --history .` — rebuild the facts/history index.
-   - **Track B:** `build-agent-config && pixel install` — propagate rule edits to tool directories, then reinstall hooks and managed blocks.
-3. **Run `pixel doctor`** and confirm green (or explicitly report any non-green check).
+   - **Track B:** `build-agent-config && pixel install --shell <login shell>` — propagate rule edits to tool directories, then reinstall hooks and managed blocks.
+3. **Run `pixel doctor --shell <login shell> .`** and confirm green (or explicitly report any non-green check).
+
+`--shell` names the shell whose profile holds the wrappers (`fish`, `zsh`, `bash`). Both commands default to `$SHELL`, and an agent's command tool often runs under a different shell than the login shell (a `/bin/zsh` tool shell on a fish machine): without the flag `pixel install` writes the wrappers into a profile the login shell never loads and `pixel doctor` reports `install.shell-wrappers` red for the same reason. Pass the login shell explicitly, every time.
 
 ### When to skip
 
