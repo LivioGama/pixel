@@ -42,6 +42,12 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          # One key for every job that builds the debug profile on Linux
+          # (this one and mutants.yml), instead of the default per-job key.
+          # The Mutants workflow only runs on pull_request, so it can never
+          # save under the develop/main rule below: without a shared key it
+          # started from an empty cache on every PR.
+          shared-key: linux-debug
           # PRs read the cache but never write it: only develop/main
           # merges refresh the shared entries, so one PR cannot thrash
           # or poison them. A failed build still saves what it compiled.

@@ -47,11 +47,12 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          # PRs read the cache but never write it: only develop/main
-          # merges refresh the shared entries, so one PR cannot thrash
-          # or poison them. A failed build still saves what it compiled.
-          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
+          # Same key as the CI test job: both build the Linux debug profile,
+          # and only that job (on develop/main pushes) writes the entry. This
+          # workflow runs on pull_request only, so `github.ref` is never a
+          # branch and it can never save; read-only by construction.
+          shared-key: linux-debug
+          save-if: false
 
       - name: Install system dependencies
         run: |
@@ -69,11 +70,39 @@ jobs:
         run: git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
 
       # --in-place: mutate the checkout itself instead of copying it (CI
-      # discards the tree). Exit codes: 0 all caught, 2 missed, 3 timeout,
-      # 4 baseline tests already failing. Missed and timeouts fail the job;
-      # GitHub annotations point at each surviving mutant.
+      # discards the tree). --no-shuffle: mutants run in source order, so
+      # two runs of the same diff produce the same log and annotations.
+      # `-- --all-targets`: the per-mutant `cargo test` skips doctests (one
+      # rustdoc pass per crate for a single doctest in the workspace); the
+      # CI workflow still runs them unmutated. Exit codes: 0 all caught,
+      # 2 missed, 3 timeout, 4 baseline tests already failing. Missed and
+      # timeouts fail the job; GitHub annotations point at each surviving
+      # mutant, and the job summary repeats the outcome list.
+      # rust-cache exports CARGO_INCREMENTAL=0 for the job (smaller cache
+      # entries). That is the wrong trade here: every mutant rebuilds the
+      # mutated crate after a one-function change, which is exactly what
+      # incremental compilation is for (pixel-cli: ~8 s -> ~3 s per mutant,
+      # and the build is where a 60-mutant run spends most of its time).
+      # Dependencies are never built incrementally, so the restored cache
+      # stays valid.
       - name: Run mutants in the diff
-        run: cargo mutants -vV -C --locked --in-place --in-diff pr.diff
+        # The explicit shell adds pipefail: `tee` must not mask the exit code.
+        shell: bash
+        env:
+          CARGO_INCREMENTAL: 1
+        run: >
+          cargo mutants -vV -C --locked --no-shuffle --in-place --in-diff pr.diff
+          -- --all-targets 2>&1 | tee results.txt
+
+      - name: Post job summary
+        if: always()
+        run: |
+          {
+            echo "### Mutants in the PR diff"
+            echo '```'
+            sed 's/\x1b\[[0-9;]*[mGKHF]//g' results.txt 2>/dev/null || echo "no output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload mutants.out
         if: always()
