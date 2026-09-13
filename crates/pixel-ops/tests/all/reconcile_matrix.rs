@@ -744,7 +744,7 @@ fn into_integration_ignores_untracked_sidecar_dirt() {
 }
 
 #[test]
-fn into_auto_resolves_conflict_and_rebases() {
+fn into_auto_resolves_conflict_and_integrates() {
     with_isolated_state(|| {
         let (remote, local) = new_remote_and_local();
 
@@ -770,47 +770,55 @@ fn into_auto_resolves_conflict_and_rebases() {
         );
         commit_all(other.path(), "remote develop conflicting");
         git(other.path(), &["push", "-q"]);
+        let remote_dev = git(other.path(), &["rev-parse", "HEAD"]);
 
         let result = reconcile(local.path(), &opts_into("develop", "auto")).unwrap();
-        let state = result["state"].as_str().expect("state");
+        // Both sides changed line 1 of the same file: merge-tree predicts
+        // the conflict, the rebase stops on it, the union merge resolves
+        // it. From there `--into` must keep its whole promise, exactly as
+        // when nothing conflicted: the feature is rebased, the local target
+        // is fast-forwarded to the rebased head, and both are pushed.
+        assert_eq!(result["state"], "integrated", "result={result}");
         assert_eq!(
             result["into_target"], "develop",
             "report must name the target: {result}"
         );
-
-        if state == "rebased" {
-            // Auto-resolve succeeded — HEAD moved, no sequencer state.
-            assert_ne!(
-                git(local.path(), &["rev-parse", "HEAD"]),
-                head_before,
-                "rebase should have moved HEAD"
-            );
-            assert!(
-                !local.path().join(".git/rebase-merge").exists()
-                    && !local.path().join(".git/rebase-apply").exists(),
-                "no rebase sequencer state must remain"
-            );
-        } else {
-            // Auto-resolve failed — diverged report with conflict detail.
-            assert_eq!(state, "diverged", "result={result}");
-            assert_eq!(result["clean_rebase_possible"], false, "result={result}");
-            let conflicts = result["conflicts"].as_array().expect("conflicts array");
-            assert!(
-                !conflicts.is_empty(),
-                "conflicts must be reported: {result}"
-            );
-            let paths: Vec<&str> = conflicts
-                .iter()
-                .map(|c| c["path"].as_str().unwrap())
-                .collect();
-            assert!(paths.contains(&"conflict.txt"), "paths={paths:?}");
-            // No mutation: feature HEAD unmoved, local develop unmoved.
-            assert_eq!(git(local.path(), &["rev-parse", "HEAD"]), head_before);
-            assert_eq!(
-                git(local.path(), &["rev-parse", "refs/heads/develop"]),
-                dev_before
-            );
-        }
+        assert_eq!(result["auto_resolved"], serde_json::json!(["conflict.txt"]));
+        let head_after = git(local.path(), &["rev-parse", "HEAD"]);
+        assert_ne!(head_after, head_before, "rebase should have moved HEAD");
+        assert!(
+            !local.path().join(".git/rebase-merge").exists()
+                && !local.path().join(".git/rebase-apply").exists(),
+            "no rebase sequencer state must remain"
+        );
+        let content = std::fs::read_to_string(local.path().join("conflict.txt")).unwrap();
+        assert!(
+            content.contains("feature version") && content.contains("remote version"),
+            "union merge keeps both sides: {content:?}"
+        );
+        assert_eq!(
+            git(local.path(), &["rev-parse", "HEAD~1"]),
+            remote_dev,
+            "feature is replayed on top of origin/develop"
+        );
+        assert_eq!(
+            git(local.path(), &["rev-parse", "refs/heads/develop"]),
+            head_after,
+            "local develop is fast-forwarded to the rebased head"
+        );
+        assert_ne!(dev_before, head_after);
+        assert_eq!(result["into"]["target_old_oid"], dev_before);
+        assert_eq!(result["into"]["target_new_oid"], head_after);
+        assert_eq!(result["pushed"], true, "result={result}");
+        assert_eq!(result["into"]["target_pushed"], true, "result={result}");
+        assert_eq!(
+            git(other.path(), &["ls-remote", "--heads", "origin", "develop"])
+                .split_whitespace()
+                .next()
+                .unwrap_or_default(),
+            head_after,
+            "remote develop follows the integrated head"
+        );
     });
 }
 

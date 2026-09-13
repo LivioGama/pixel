@@ -1049,22 +1049,20 @@ fn reconcile_into(
         })?;
 
     let probe = probe_merge_tree(root, head, &remote_target);
+    // Paths whose conflict markers were union-merged during the rebase;
+    // reported on the `integrated` answer so the caller knows which files
+    // to look at.
+    let mut auto_resolved: Vec<String> = Vec::new();
     if !probe.clean {
         // merge-tree predicts conflicts. Attempt the rebase anyway — if it
         // conflicts, auto-resolve conflict markers by union-merging both
         // sides, then continue. Same approach as the plain diverged path.
+        // Either way a rebase that completes falls through to the same
+        // target fast-forward and push as the clean prediction below: a
+        // predicted conflict changes how the rebase is driven, never what
+        // `--into` promises once it succeeds.
         match runner.run(&["rebase", &remote_target]) {
-            Ok(_) => {
-                let new_head = runner.rev_parse_head().unwrap_or_default();
-                clear_conflict_state(root);
-                return Ok(json!({
-                    "state": "rebased",
-                    "into_target": target,
-                    "from": head,
-                    "to": new_head,
-                    "backup_ref": backup_ref,
-                }));
-            }
+            Ok(_) => {}
             Err(_) => {
                 let unmerged = runner
                     .run_opt(&["diff", "--name-only", "--diff-filter=U"])
@@ -1090,44 +1088,34 @@ fn reconcile_into(
                     && !rebase_resolved.is_empty()
                     && continue_rebase(runner)
                 {
-                    let new_head = runner.rev_parse_head().unwrap_or_default();
-                    clear_conflict_state(root);
+                    auto_resolved = rebase_resolved;
+                } else {
+                    // Fall back to manual.
+                    safe_rebase_abort(runner);
+                    let report =
+                        build_conflict_report(runner, &merge_base, head, &remote_target, &probe);
+                    let conflict_count = report["conflict_count"].as_u64().unwrap_or(0) as usize;
+                    write_conflict_state(root, conflict_count);
                     return Ok(json!({
-                        "state": "rebased",
+                        "state": "diverged",
                         "into_target": target,
-                        "from": head,
-                        "to": new_head,
+                        "merge_base": merge_base,
+                        "clean_rebase_possible": false,
+                        "conflicts": report["conflicts"],
+                        "conflict_count": report["conflict_count"],
+                        "report_truncated": report["report_truncated"],
+                        "non_conflicting": non_conflicting_paths(root, &merge_base, head, &remote_target),
                         "backup_ref": backup_ref,
                         "auto_resolved": rebase_resolved,
+                        "auto_unresolved": rebase_unresolved,
+                        "next": format!("manual resolution required before integrating into {target:?}"),
                     }));
                 }
-                // Fall back to manual.
-                safe_rebase_abort(runner);
-                let report =
-                    build_conflict_report(runner, &merge_base, head, &remote_target, &probe);
-                let conflict_count = report["conflict_count"].as_u64().unwrap_or(0) as usize;
-                write_conflict_state(root, conflict_count);
-                return Ok(json!({
-                    "state": "diverged",
-                    "into_target": target,
-                    "merge_base": merge_base,
-                    "clean_rebase_possible": false,
-                    "conflicts": report["conflicts"],
-                    "conflict_count": report["conflict_count"],
-                    "report_truncated": report["report_truncated"],
-                    "non_conflicting": non_conflicting_paths(root, &merge_base, head, &remote_target),
-                    "backup_ref": backup_ref,
-                    "auto_resolved": rebase_resolved,
-                    "auto_unresolved": rebase_unresolved,
-                    "next": format!("manual resolution required before integrating into {target:?}"),
-                }));
             }
         }
-    }
-
-    // Non-interactive linear rebase onto the remote-tracking target. Plain
-    // `git rebase` never fabricates a merge commit.
-    if let Err(e) = runner.run(&["rebase", &remote_target]) {
+    } else if let Err(e) = runner.run(&["rebase", &remote_target]) {
+        // Non-interactive linear rebase onto the remote-tracking target. Plain
+        // `git rebase` never fabricates a merge commit.
         // Surprise conflict despite a clean merge-tree prediction — capture
         // the unmerged paths from the mid-rebase index BEFORE aborting (the
         // only window they're observable in), then abort. Target untouched.
@@ -1152,6 +1140,7 @@ fn reconcile_into(
         }));
     }
     let new_head = runner.rev_parse_head().unwrap_or_default();
+    clear_conflict_state(root);
 
     // Fast-forward the LOCAL target ref to the rebased head. CAS update-ref
     // (<new> <old>) is safe while the target is not checked out (guaranteed:
@@ -1187,12 +1176,14 @@ fn reconcile_into(
 
     Ok(json!({
         "state": "integrated",
+        "into_target": target,
         "branch": branch,
         "from": head,
         "to": new_head,
         "backup_ref": backup_ref,
         "pushed": feature_pushed,
         "push_error": feature_push_error,
+        "auto_resolved": auto_resolved,
         "into": {
             "target": target,
             "target_old_oid": target_old_oid,
@@ -2170,11 +2161,10 @@ mod tests {
     fn reconcile_into_auto_resolves_an_additive_conflict_and_continues_the_rebase() {
         // Both sides append a different line to `a.txt`: the rebase stops on
         // the conflict, the union merge keeps both lines, and the rebase is
-        // continued through the runner. The answer must say what happened
-        // (`rebased` with the resolved path) and HEAD must be the feature
-        // commit replayed on top of main. (The local target is not moved on
-        // this path today, unlike the clean `integrated` path; that gap is
-        // tracked separately and not asserted here.)
+        // continued through the runner. The answer must be the same
+        // `integrated` contract as a conflict-free run (with the resolved
+        // path named): HEAD is the feature commit replayed on top of main
+        // and the local target is fast-forwarded to it.
         let dir = tempdir().unwrap();
         let remote = tempdir().unwrap();
         let root = dir.path();
@@ -2196,6 +2186,7 @@ mod tests {
         std::fs::write(root.join("a.txt"), "a\nmain\n").unwrap();
         git(&["commit", "-qam", "main line"]);
         git(&["push", "-q", "origin", "main"]);
+        let main_before = git(&["rev-parse", "main"]);
         git(&["checkout", "-q", "feature"]);
 
         let opts = ReconcileOptions {
@@ -2205,7 +2196,7 @@ mod tests {
             into_target: Some("main".to_string()),
         };
         let result = reconcile(root, &opts).unwrap();
-        assert_eq!(result["state"], json!("rebased"), "{result}");
+        assert_eq!(result["state"], json!("integrated"), "{result}");
         assert_eq!(result["auto_resolved"], json!(["a.txt"]), "{result}");
         assert!(!rebase_in_progress(root));
         let content = std::fs::read_to_string(root.join("a.txt")).unwrap();
@@ -2218,5 +2209,60 @@ mod tests {
         assert_eq!(result["to"], json!(head));
         assert_eq!(git(&["log", "-1", "--format=%s"]), "feature line");
         assert_eq!(git(&["log", "-1", "--format=%s", "HEAD~1"]), "main line");
+        assert_eq!(
+            git(&["rev-parse", "main"]),
+            head,
+            "local main is fast-forwarded to the rebased head"
+        );
+        assert_eq!(result["into"]["target_old_oid"], json!(main_before));
+        assert_eq!(result["into"]["target_new_oid"], json!(head));
+        assert_eq!(result["pushed"], json!(false));
+        assert!(!root.join(".pixel/reconcile-conflict.json").exists());
+    }
+
+    #[test]
+    fn reconcile_into_without_conflicts_integrates_and_moves_the_target() {
+        // The conflict-free path: same `integrated` answer, no resolved
+        // paths, and the same target fast-forward.
+        let dir = tempdir().unwrap();
+        let remote = tempdir().unwrap();
+        let root = dir.path();
+        init_repo_with_remote(root, remote.path());
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(root.join("feature.txt"), "feature\n").unwrap();
+        git(&["add", "feature.txt"]);
+        git(&["commit", "-qm", "feature file"]);
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(root.join("main.txt"), "main\n").unwrap();
+        git(&["add", "main.txt"]);
+        git(&["commit", "-qm", "main file"]);
+        git(&["push", "-q", "origin", "main"]);
+        let main_before = git(&["rev-parse", "main"]);
+        git(&["checkout", "-q", "feature"]);
+
+        let opts = ReconcileOptions {
+            strategy: "report".to_string(),
+            push: "none".to_string(),
+            request_id: format!("rec-{}", uuid::Uuid::new_v4()),
+            into_target: Some("main".to_string()),
+        };
+        let result = reconcile(root, &opts).unwrap();
+        assert_eq!(result["state"], json!("integrated"), "{result}");
+        assert_eq!(result["auto_resolved"], json!([]), "{result}");
+        let head = git(&["rev-parse", "HEAD"]);
+        assert_eq!(git(&["log", "-1", "--format=%s", "HEAD~1"]), "main file");
+        assert_eq!(git(&["rev-parse", "main"]), head);
+        assert_ne!(main_before, head);
+        assert_eq!(result["into"]["target_old_oid"], json!(main_before));
     }
 }
