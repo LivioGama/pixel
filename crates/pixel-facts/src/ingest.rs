@@ -1332,10 +1332,27 @@ pub(crate) mod tests {
     }
 
     /// Full ingest with a short cap: a two-commit repo is fresh well under a
-    /// second, and a broken phase errors out instead of spinning.
+    /// second, and a broken phase errors out instead of spinning. The cap
+    /// stays under cargo-mutants' automatic timeout (5× the baseline, at
+    /// least 20 s) so a hung mutant is reported as caught, not as a timeout.
+    pub(crate) const TEST_WALL_CLOCK: Duration = Duration::from_secs(5);
+
     pub(crate) fn ingest_within(store: &mut FactsStore) -> TickReport {
-        ingest_until_fresh_within(store, &IngestOptions::default(), Duration::from_secs(30))
+        ingest_until_fresh_within(store, &IngestOptions::default(), TEST_WALL_CLOCK)
             .expect("ingest until fresh")
+    }
+
+    /// A tick budget of zero still lands one batch per phase per tick, so
+    /// the loop needs several ticks: the wall-clock cap must let them run
+    /// and only fire once it is really exceeded.
+    #[test]
+    fn ingest_until_fresh_within_keeps_ticking_until_fresh_under_a_tiny_tick_budget() {
+        let (dir, _, _) = two_commit_repo();
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        let options = IngestOptions { tick_budget_ms: 0 };
+        let report = ingest_until_fresh_within(&mut store, &options, TEST_WALL_CLOCK).unwrap();
+        assert!(report.fresh, "{report:?}");
+        assert_eq!(report.commits_indexed, 2);
     }
 
     fn commit_id(store: &FactsStore, oid: &str) -> i64 {

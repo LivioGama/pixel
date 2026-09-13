@@ -11,8 +11,12 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use pixel_facts::ingest::{IngestOptions, ingest_until_fresh};
+use pixel_facts::ingest::{IngestOptions, ingest_until_fresh_within};
 use pixel_facts::store::FactsStore;
+
+/// Cap on the ingest loop in tests: under cargo-mutants' automatic timeout
+/// (at least 20 s), so a phase broken by a mutant fails instead of hanging.
+const TEST_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(5);
 use tempfile::TempDir;
 
 const PHRASE: &str = "legacy widget renderer";
@@ -130,7 +134,8 @@ fn make_dropped_svelte_repo() -> TempDir {
 
 fn ingest(root: &Path) -> FactsStore {
     let mut store = FactsStore::open(root).expect("open store");
-    ingest_until_fresh(&mut store, &IngestOptions::default()).expect("ingest until fresh");
+    ingest_until_fresh_within(&mut store, &IngestOptions::default(), TEST_WALL_CLOCK)
+        .expect("ingest until fresh");
     store
 }
 
