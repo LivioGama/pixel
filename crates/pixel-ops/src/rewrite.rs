@@ -517,7 +517,12 @@ fn resume_rewrite(
                 .and_then(|r| r.result)
                 .ok_or("journal record lost".to_string())
         }
-        other => Err(format!("unexpected phase for rewrite: {other}")),
+        // The index is never staged by a rewrite; a journal in this phase
+        // belongs to another op.
+        JournalPhase::IndexStaged => Err(format!(
+            "unexpected phase for rewrite: {}",
+            JournalPhase::IndexStaged
+        )),
     }
 }
 

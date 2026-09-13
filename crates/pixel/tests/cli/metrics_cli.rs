@@ -196,7 +196,7 @@ fn dual_savings_use_recorded_round_trip_policy_without_changing_search_json() {
         assert_eq!(time["sequential_steps"], steps);
         let expected_saved_ms = steps.saturating_sub(1) as f64 * expected_ms as f64
             - metrics["duration_us"].as_u64().unwrap() as f64 / 1000.0;
-        assert!((time["saved_ms"].as_f64().unwrap() - expected_saved_ms).abs() < 0.000001);
+        assert!((time["saved_ms"].as_f64().unwrap() - expected_saved_ms).abs() < 0.000_001);
         if expected_ms == 0 {
             assert!(time["saved_ms"].as_f64().unwrap() < 0.0);
         }

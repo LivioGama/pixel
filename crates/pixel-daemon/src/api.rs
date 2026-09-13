@@ -389,6 +389,9 @@ impl Service {
     /// confirmed load failure on a cached model. This means `pixel ask`
     /// (which uses `download=true`) can cache the model at any time, and
     /// the next `--scope hybrid` search will pick it up without a restart.
+    // Loads or downloads the potion model: unit tests never have it, so no
+    // test can observe the difference (`pixel ask` covers it end to end).
+    #[cfg_attr(test, mutants::skip)]
     fn ensure_embedder(&mut self) {
         if self.embedder.is_some() || self.embedder_unavailable {
             return;
@@ -404,6 +407,9 @@ impl Service {
 
         if is_cached {
             // Cached — load now (fast, no network).
+            // SAFETY: set_var is process-global. This runs on the request thread
+            // before the embedder is opened, and nothing else reads
+            // PIXEL_RECALL_MODEL_REPO concurrently.
             unsafe {
                 std::env::set_var("PIXEL_RECALL_MODEL_REPO", V2_REPO);
             }
@@ -429,6 +435,8 @@ impl Service {
                  `--scope hybrid`. Degrading to `code` ranking for this call."
             );
             std::thread::spawn(move || {
+                // SAFETY: same variable and value as the cached path above; the only
+                // reader is the embedder opened on this thread right after.
                 unsafe {
                     std::env::set_var("PIXEL_RECALL_MODEL_REPO", V2_REPO);
                 }

@@ -284,9 +284,9 @@ pub mod potion {
                 );
             }
             let _ = std::fs::create_dir_all(cache_dir);
-            // Route the HF hub cache under pixel's model dir. set_var is
-            // process-global; both CLI and daemon call this before any
-            // threads that read the environment.
+            // Route the HF hub cache under pixel's model dir.
+            // SAFETY: set_var is process-global; both CLI and daemon call this
+            // before any thread that reads the environment exists.
             unsafe {
                 std::env::set_var("HF_HOME", cache_dir.join("hf"));
             }

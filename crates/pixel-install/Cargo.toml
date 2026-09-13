@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 pixel-proto = { path = "../pixel-proto" }
 pixel-daemon = { path = "../pixel-daemon" }

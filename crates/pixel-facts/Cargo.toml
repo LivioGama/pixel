@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 pixel-git = { path = "../pixel-git" }
 pixel-index = { path = "../pixel-index" }

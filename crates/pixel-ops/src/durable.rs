@@ -103,10 +103,14 @@ pub fn ensure_dir(path: &Path) -> std::io::Result<()> {
 }
 
 /// fsync a directory on Unix.
+// Durability only: skipping the fsync changes nothing a test can observe.
 #[cfg(unix)]
+#[cfg_attr(test, mutants::skip)]
 fn fsync_dir(path: &Path) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
     let f = fs::File::open(path)?;
+    // SAFETY: plain FFI call on a descriptor `f` keeps open for the call;
+    // no pointer crosses the boundary.
     let _ = unsafe { libc::fsync(f.as_raw_fd()) };
     Ok(())
 }

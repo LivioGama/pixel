@@ -4,6 +4,9 @@ version = "0.2.3"
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "pixel"
 path = "src/main.rs"

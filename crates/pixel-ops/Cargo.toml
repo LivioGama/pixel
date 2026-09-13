@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
+mutants = { workspace = true }
 pixel-git = { path = "../pixel-git" }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -55,6 +55,8 @@ impl Drop for XdgEnvGuard {
     fn drop(&mut self) {
         // SAFETY: `XDG_STATE_HOME` is a process-local env var; removing it is
         // not memory-unsafe. The `ENV_GUARD` mutex serializes access.
+        // SAFETY: env mutation in this binary goes through `lock_env`, which
+        // serialises it behind `ENV_GUARD`; the guard is returned with the lock.
         unsafe {
             std::env::remove_var("XDG_STATE_HOME");
         }
@@ -62,9 +64,9 @@ impl Drop for XdgEnvGuard {
 }
 
 fn lock_env(state_dir: &Path) -> (std::sync::MutexGuard<'static, ()>, XdgEnvGuard) {
+    let guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: `ENV_GUARD` serializes all callers, so the env-var write is not
     // racy with other tests in this binary.
-    let guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
         std::env::set_var("XDG_STATE_HOME", state_dir);
     }
@@ -117,16 +119,15 @@ fn git(root: &Path, args: &[&str]) -> String {
         .args(args)
         .output()
         .unwrap_or_else(|e| panic!("git {:?}: {e}", args));
-    if !output.status.success() {
-        panic!(
-            "git -C {} {:?} failed (exit {:?})\nstdout: {}\nstderr: {}",
-            root.display(),
-            args,
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-    }
+    assert!(
+        output.status.success(),
+        "git -C {} {:?} failed (exit {:?})\nstdout: {}\nstderr: {}",
+        root.display(),
+        args,
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 

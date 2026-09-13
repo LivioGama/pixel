@@ -74,7 +74,7 @@ impl<W: Weigher> SparseGramExtractor<W> {
     pub fn with_lengths(weigher: W, min_len: usize, max_len: usize) -> Self {
         assert!(min_len >= 3, "min gram length must be >= 3");
         assert!(max_len >= min_len);
-        assert!(max_len <= u16::MAX as usize);
+        assert!(u16::try_from(max_len).is_ok());
         Self {
             weigher,
             min_len,

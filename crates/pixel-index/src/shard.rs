@@ -257,6 +257,10 @@ pub struct Shard {
 impl Shard {
     pub fn open(path: &Path) -> Result<Self, ShardError> {
         let file = File::open(path)?;
+        // SAFETY: Mmap::map is unsafe because the file could change under the
+        // mapping. Shards are written to a temp path and renamed into place
+        // (`Shard::write`), so a mapped file is never modified; every offset
+        // read below is checked against the mapping length first.
         let mmap = unsafe { Mmap::map(&file)? };
         let mmap_len = mmap.len();
         if mmap_len < HEADER_LEN {
