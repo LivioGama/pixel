@@ -485,9 +485,17 @@ enum Command {
     },
     /// Stage files, commit, and optionally push (crash-safe, idempotent).
     Publish {
-        /// Commit message.
-        #[arg(short = 'm', long = "message")]
-        message: String,
+        /// Commit message. Use `--message-file` for a multi-paragraph body.
+        #[arg(
+            short = 'm',
+            long = "message",
+            required_unless_present = "message_file"
+        )]
+        message: Option<String>,
+        /// Read the commit message from this file (`-` for stdin), verbatim
+        /// except for trailing whitespace. Mutually exclusive with `-m`.
+        #[arg(short = 'F', long = "message-file", conflicts_with = "message")]
+        message_file: Option<PathBuf>,
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Files to stage (repo-relative). Repeat the flag once per file
@@ -527,9 +535,17 @@ enum Command {
     },
     /// Publish + push in one op (commit then leased push).
     Ship {
-        /// Commit message.
-        #[arg(short = 'm', long = "message")]
-        message: String,
+        /// Commit message. Use `--message-file` for a multi-paragraph body.
+        #[arg(
+            short = 'm',
+            long = "message",
+            required_unless_present = "message_file"
+        )]
+        message: Option<String>,
+        /// Read the commit message from this file (`-` for stdin), verbatim
+        /// except for trailing whitespace. Mutually exclusive with `-m`.
+        #[arg(short = 'F', long = "message-file", conflicts_with = "message")]
+        message_file: Option<PathBuf>,
         // Positional order matches Push: required remote + refspec first,
         // then the defaulted path. (A defaulted positional BEFORE required
         // ones trips clap's debug assertions — every debug-build parse
@@ -4342,6 +4358,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         }
         Command::Publish {
             message,
+            message_file,
             path,
             files,
             push,
@@ -4351,6 +4368,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             json,
         } => {
             let root = discover_root(&path)?;
+            let message = commit_message(message, message_file.as_deref())?;
             let opts = pixel_ops::publish::PublishOptions {
                 message,
                 files,
@@ -4383,6 +4401,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         }
         Command::Ship {
             message,
+            message_file,
             path,
             files,
             remote,
@@ -4392,6 +4411,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             json,
         } => {
             let root = discover_root(&path)?;
+            let message = commit_message(message, message_file.as_deref())?;
             let data = pixel_ops::ship::ship_with_lease(
                 &root,
                 &message,
@@ -5746,6 +5766,90 @@ fn main() -> ExitCode {
 /// this binary's real clap definition — nothing is executed. Used by
 /// `pixel doctor`'s rule-vs-binary parity check so the installed rule text
 /// can never document syntax the parser would reject.
+/// The commit message of `publish`/`ship`: `-m <text>`, or the content of
+/// `--message-file <path>` (`-` reads stdin). Clap guarantees exactly one
+/// of the two is present.
+fn commit_message(inline: Option<String>, file: Option<&Path>) -> Result<String, String> {
+    let raw = match (inline, file) {
+        (Some(text), _) => text,
+        (None, Some(path)) if path == Path::new("-") => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                .map_err(|e| format!("cannot read commit message from stdin: {e}"))?;
+            text
+        }
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read commit message file {}: {e}", path.display()))?,
+        (None, None) => return Err("a commit message is required (-m or --message-file)".into()),
+    };
+    normalize_commit_message(&raw)
+}
+
+/// Trailing whitespace goes (an editor's final newline would otherwise
+/// become a blank trailer line); a blank message is refused before git
+/// sees it, so no journal entry is written for a commit git would reject.
+fn normalize_commit_message(raw: &str) -> Result<String, String> {
+    let text = raw.trim_end();
+    if text.trim().is_empty() {
+        return Err("commit message is empty".into());
+    }
+    Ok(text.to_string())
+}
+
+#[cfg(test)]
+mod commit_message_tests {
+    use super::{commit_message, normalize_commit_message};
+    use std::path::Path;
+
+    #[test]
+    fn normalize_should_keep_paragraphs_and_drop_trailing_whitespace() {
+        let raw = "subject\n\nbody line one\n\n- bullet\n\n";
+        assert_eq!(
+            normalize_commit_message(raw).unwrap(),
+            "subject\n\nbody line one\n\n- bullet"
+        );
+    }
+
+    #[test]
+    fn normalize_should_refuse_a_blank_message() {
+        assert_eq!(
+            normalize_commit_message(" \n\t\n").unwrap_err(),
+            "commit message is empty"
+        );
+    }
+
+    #[test]
+    fn commit_message_should_prefer_inline_text_and_name_a_missing_file() {
+        assert_eq!(
+            commit_message(Some("fix: x".into()), None).unwrap(),
+            "fix: x"
+        );
+        let missing = Path::new("/nonexistent/pixel-msg.txt");
+        let err = commit_message(None, Some(missing)).unwrap_err();
+        assert!(
+            err.starts_with("cannot read commit message file /nonexistent/pixel-msg.txt:"),
+            "{err}"
+        );
+        assert_eq!(
+            commit_message(None, None).unwrap_err(),
+            "a commit message is required (-m or --message-file)"
+        );
+    }
+
+    #[test]
+    fn commit_message_should_read_the_file_verbatim() {
+        let dir = std::env::temp_dir().join(format!("pixel-msg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("msg.txt");
+        std::fs::write(&file, "feat: a\n\nSecond paragraph.\n").unwrap();
+        assert_eq!(
+            commit_message(None, Some(&file)).unwrap(),
+            "feat: a\n\nSecond paragraph."
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 fn validate_cli_syntax(args: &[String]) -> Result<(), String> {
     let args = args.to_vec();
     std::thread::Builder::new()
