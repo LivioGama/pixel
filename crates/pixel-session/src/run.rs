@@ -32,8 +32,7 @@ pub fn classify(argv: &[String]) -> CommandClass {
         argv.iter().any(|a| {
             Path::new(a)
                 .file_name()
-                .map(|f| f.to_string_lossy() == needle)
-                .unwrap_or(false)
+                .is_some_and(|f| f.to_string_lossy() == needle)
                 || a == needle
         })
     };
