@@ -300,8 +300,10 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 - CLI integration tests in `crates/pixel/tests/cli/` (one binary, one module per file) invoke the built binary
   through `CARGO_BIN_EXE_pixel` against a temp fixture repo.
 - CI runs `cargo fmt --check`, `cargo clippy --all-targets` with warnings
-  denied, and `cargo test` for the workspace, with the same feature set as
-  the release build.
+  denied, `cargo nextest run --profile ci` (`.config/nextest.toml`: one
+  process per test, retry once but fail on flaky, kill after 180 s) plus
+  `cargo test --doc` for the workspace, with the same feature set as the
+  release build.
 - After any change to `crates/` the project rule in `CLAUDE.md` applies:
   rebuild, reinstall the binary atomically, re-index, reinstall hooks, and
   run `pixel doctor`.

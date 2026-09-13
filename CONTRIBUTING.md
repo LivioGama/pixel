@@ -69,11 +69,21 @@ These are exactly the commands CI runs on every push and pull request
 
 ```bash
 cargo fmt --all -- --check
-cargo test --workspace
+cargo nextest run --workspace --profile ci   # or: cargo test --workspace
+cargo test --workspace --doc                 # nextest does not run doctests
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-`scripts/gates.sh` runs the same three commands (plus `--mutants` for the
+CI runs the tests through [cargo-nextest](https://nexte.st) (`cargo install
+--locked cargo-nextest`, or `cargo binstall`/Homebrew), configured in
+`.config/nextest.toml`: one process per test, no fail-fast, a test past
+60 s is reported slow and killed at 180 s, and the `ci` profile retries a
+failure once but still fails the run when the retry passes (a flaky test
+shows up as `FLAKY`, it is never masked). `cargo test --workspace` remains
+a valid local gate; it runs the same tests in-process.
+
+`scripts/gates.sh` runs the same commands (nextest when installed, `cargo
+test` otherwise) (plus `--mutants` for the
 mutation gate below) with two additions for a laptop: it exits 0 without
 compiling when neither the diff against `develop` nor the working tree
 touches a Rust-affecting path (`*.rs`, `Cargo.*`, `build.rs`, `.cargo/`,
@@ -119,10 +129,11 @@ cross build --release --no-default-features --features model2vec \
   CLI, `all/` elsewhere) instead of one `tests/<name>.rs` target each:
   cargo links one executable, which cut an incremental
   `cargo test --workspace --no-run` from 65 s to 10 s. The trade-off is
-  that all modules share one process, so anything process-wide (an env
-  var such as `XDG_STATE_HOME`, the working directory) must be
-  serialised through a lock declared in that `main.rs`, never a
-  module-local one. Filter as `cargo test -p <crate> --test all <module>::`.
+  that all modules share one process under `cargo test`, so anything
+  process-wide (an env var such as `XDG_STATE_HOME`, the working
+  directory) must be serialised through a lock declared in that
+  `main.rs`, never a module-local one. (nextest runs each test in its own
+  process, which makes the lock moot there but not under `cargo test`.) Filter as `cargo test -p <crate> --test all <module>::`.
 - **Proto invariants** (`crates/pixel-proto`) include a test that every
   `Op::op_name` matches its serde tag. Adding an op without updating it
   fails the build.

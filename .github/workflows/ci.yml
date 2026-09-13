@@ -56,10 +56,22 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # Prebuilt binary; the profile lives in .config/nextest.toml.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: cargo-nextest
+
       # --locked: fail if Cargo.lock is out of date instead of silently
       # resolving newer dependency versions than the ones committed.
+      # nextest runs one process per test, retries once and still fails the
+      # run on a flaky result, and kills a test that hangs past 3 minutes.
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo nextest run --workspace --locked --profile ci
+
+      # nextest does not run doctests.
+      - name: Doctests
+        run: cargo test --workspace --locked --doc
 
       - name: Installer contracts (isolated release substitutes)
         run: python3 scripts/test-install.py

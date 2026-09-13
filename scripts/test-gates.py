@@ -33,8 +33,11 @@ class GatesContract(unittest.TestCase):
         fake = self.root / "fake"
         fake.mkdir()
         self.log = self.root / "cargo.log"
+        # `cargo nextest --version` answers only when HAVE_NEXTEST=1, so both
+        # test-runner branches of the script are exercised.
         (fake / "cargo").write_text(
             "#!/bin/sh\n"
+            'if [ "$1" = nextest ] && [ "$2" = --version ]; then [ "${HAVE_NEXTEST:-0}" = 1 ]; exit $?; fi\n'
             'echo "cargo $1 jobs=${CARGO_BUILD_JOBS:-unset} threads=${RUST_TEST_THREADS:-unset}" >> "$GATES_LOG"\n'
             'case "$1" in clippy) exit "${FAIL_CLIPPY:-0}";; esac\n'
         )
@@ -90,6 +93,16 @@ class GatesContract(unittest.TestCase):
              f"cargo test jobs=-2 threads={threads}"],
         )
         self.assertIn("all gates passed", result.stdout)
+
+    def test_nextest_when_installed_then_doctests_which_nextest_skips(self):
+        (self.repo / "src/lib.rs").write_text("pub fn b() {}\n")
+        result = self.gates(HAVE_NEXTEST="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            [line.split()[1] for line in self.invocations()],
+            ["fmt", "clippy", "nextest", "test"],
+        )
+        self.assertIn("cargo test --doc ok", result.stdout)
 
     def test_dirty_cargo_manifest_counts_as_rust_affecting(self):
         (self.repo / "Cargo.toml").write_text("[package]\n")

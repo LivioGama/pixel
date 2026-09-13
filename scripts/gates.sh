@@ -85,8 +85,14 @@ step() {
 
 step "cargo fmt --check" cargo fmt --all -- --check
 step "cargo clippy" cargo clippy --workspace --all-targets -- -D warnings
-# --no-fail-fast: a red test binary must not hide the binaries after it.
-step "cargo test" cargo test --workspace --locked --no-fail-fast
+# nextest (what CI runs, .config/nextest.toml) when installed, else cargo
+# test. --no-fail-fast: a red test binary must not hide the ones after it.
+if cargo nextest --version >/dev/null 2>&1; then
+    step "cargo nextest" cargo nextest run --workspace --locked --no-fail-fast
+    step "cargo test --doc" cargo test --workspace --locked --doc
+else
+    step "cargo test" cargo test --workspace --locked --no-fail-fast
+fi
 
 if [ "$MUTANTS" -eq 1 ]; then
     diff_file="$(mktemp)"
