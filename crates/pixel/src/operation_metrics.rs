@@ -198,7 +198,7 @@ mod tests {
         };
         collect(
             &json!({"matches":[{"path":"src/a.rs"},{"path":"src/a.rs"}],
-            "match_count": 800000, "truncated":true,
+            "match_count": 800_000, "truncated":true,
             "callees":[{"path":"src/b.rs","uid":"b"}]}),
             &mut e,
             0,

@@ -218,6 +218,8 @@ mod tests {
     fn save_load_round_trip() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
         }
@@ -227,6 +229,8 @@ mod tests {
         let loaded = load("round-trip-test").unwrap();
         assert_eq!(loaded.name, "round-trip-test");
         assert_eq!(loaded.title, "Test");
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::remove_var("PIXEL_FLOW_DIR");
         }
@@ -236,6 +240,8 @@ mod tests {
     fn list_returns_saved_flows() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
         }
@@ -246,6 +252,8 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["name"].as_str(), Some("alpha"));
         assert_eq!(arr[1]["name"].as_str(), Some("beta"));
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::remove_var("PIXEL_FLOW_DIR");
         }
@@ -255,6 +263,8 @@ mod tests {
     fn delete_removes_flow() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
         }
@@ -263,6 +273,8 @@ mod tests {
         assert!(delete("to-delete").unwrap());
         assert!(!exists("to-delete"));
         assert!(!delete("to-delete").unwrap()); // already gone
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::remove_var("PIXEL_FLOW_DIR");
         }
@@ -272,10 +284,14 @@ mod tests {
     fn load_missing_errors() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
         }
         assert!(load("nonexistent").is_err());
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::remove_var("PIXEL_FLOW_DIR");
         }

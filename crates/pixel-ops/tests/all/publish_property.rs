@@ -27,14 +27,13 @@ fn git(root: &Path, args: &[&str]) -> String {
         .args(args)
         .output()
         .unwrap_or_else(|e| panic!("git {:?}: {e}", args));
-    if !output.status.success() {
-        panic!(
-            "git -C {} {:?} failed: {}",
-            root.display(),
-            args,
-            String::from_utf8_lossy(&output.stderr),
-        );
-    }
+    assert!(
+        output.status.success(),
+        "git -C {} {:?} failed: {}",
+        root.display(),
+        args,
+        String::from_utf8_lossy(&output.stderr),
+    );
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 

@@ -82,6 +82,17 @@ failure once but still fails the run when the retry passes (a flaky test
 shows up as `FLAKY`, it is never masked). `cargo test --workspace` remains
 a valid local gate; it runs the same tests in-process.
 
+The lint policy is the `[workspace.lints]` table in the root `Cargo.toml`
+(every crate opts in with `[lints] workspace = true`), so a local
+`cargo clippy` sees exactly what CI denies. Lints are named one by one, never
+through the `pedantic`/`nursery` groups: CI floats on stable and a group would
+turn a Rust release into a red CI. Two rules the table adds beyond clippy's
+defaults: every `unsafe` block carries a `// SAFETY:` comment on the line
+above it, and `dbg!`/`todo!` do not ship. To enable another lint, bring the
+workspace to zero on it in the same PR and add it to the table with its
+one-line reason; the comment at the end of the table lists the pedantic lints
+evaluated and left out, with their site counts.
+
 `scripts/gates.sh` runs the same commands (nextest when installed, `cargo
 test` otherwise) (plus `--mutants` for the
 mutation gate below) with two additions for a laptop: it exits 0 without

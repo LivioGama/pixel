@@ -27,13 +27,12 @@ fn git(root: &Path, args: &[&str]) -> String {
         .env("GIT_COMMITTER_EMAIL", "test@example.com")
         .output()
         .expect("git command");
-    if !out.status.success() {
-        panic!(
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 

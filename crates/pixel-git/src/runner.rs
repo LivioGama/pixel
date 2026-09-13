@@ -149,7 +149,9 @@ impl GitRunner {
 /// soon as the byte count exceeds `cap` — never buffers past the cap.
 fn read_capped<R: Read>(mut r: R, cap: Option<usize>) -> Result<Vec<u8>, ()> {
     let mut buf = Vec::new();
-    let mut chunk = [0u8; 64 * 1024];
+    // Heap, not stack: 64 KiB is past the stack-array lint's limit and this
+    // runs on the daemon's request threads.
+    let mut chunk = vec![0u8; 64 * 1024];
     loop {
         match r.read(&mut chunk) {
             Ok(0) => return Ok(buf),

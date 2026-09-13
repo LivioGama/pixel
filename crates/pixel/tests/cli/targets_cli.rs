@@ -73,7 +73,7 @@ fn targets_round_trip_manifest_and_clear() {
     assert_eq!(tasks.len(), 1);
     let t = &tasks[0];
     assert_eq!(t["task"], "fix `login_user` login flow");
-    assert!(t["id"].as_str().unwrap().len() == 12);
+    assert_eq!(t["id"].as_str().unwrap().len(), 12);
     assert!(t["created_unix"].as_u64().unwrap() > 0);
     let manifest_paths: Vec<&str> = t["targets"]
         .as_array()

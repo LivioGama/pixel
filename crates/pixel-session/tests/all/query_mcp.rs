@@ -286,7 +286,7 @@ fn mcp_tool_errors_are_soft() {
     let (store, _) = seeded_store(&state);
     // The rmcp tool methods turn these Errs into CallToolResult::error
     // (isError: true) rather than protocol failures.
-    assert!(mcp::call_tool(&store, "error_show", &json!({"id": 424242})).is_err());
+    assert!(mcp::call_tool(&store, "error_show", &json!({"id": 424_242})).is_err());
     assert!(mcp::call_tool(&store, "nope", &json!({})).is_err());
     assert!(mcp::call_tool(&store, "errors_since", &json!({})).is_err());
 }

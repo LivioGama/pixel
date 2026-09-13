@@ -4,6 +4,9 @@ version = "0.2.2"
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }
 pixel-git = { path = "../pixel-git" }

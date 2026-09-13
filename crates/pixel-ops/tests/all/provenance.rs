@@ -78,7 +78,7 @@ fn multi_author_repo_attribution() {
     assert_eq!(regions[1]["start_line"], 4);
     assert_eq!(regions[1]["end_line"], 5);
     // Region metadata is populated.
-    assert!(regions[0]["oid"].as_str().unwrap().len() == 40);
+    assert_eq!(regions[0]["oid"].as_str().unwrap().len(), 40);
     assert_eq!(regions[1]["author_mail"], "bob@example.com");
     assert_eq!(regions[1]["summary"], "bob appends two lines");
     assert!(regions[0]["author_time"].as_str().unwrap().contains('T'));

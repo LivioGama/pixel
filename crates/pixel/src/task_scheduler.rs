@@ -399,6 +399,8 @@ fn worker_path(root: &Path, task_id: &str, candidate_id: &str) -> PathBuf {
 }
 
 fn configure_process_group(command: &mut Command) -> Result<(), String> {
+    // SAFETY: the closure runs in the forked child before exec and only
+    // calls setpgid, which is async-signal-safe and allocates nothing.
     unsafe {
         command.pre_exec(|| {
             if libc::setpgid(0, 0) == 0 {
@@ -412,6 +414,8 @@ fn configure_process_group(command: &mut Command) -> Result<(), String> {
 }
 
 fn process_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 only probes the pid for existence and permission;
+    // no memory is passed.
     unsafe {
         if libc::kill(pid as i32, 0) == 0 {
             true
@@ -422,10 +426,12 @@ fn process_alive(pid: u32) -> bool {
 }
 
 fn terminate_group(process_group: i32, pid: u32) -> Result<(), String> {
+    // SAFETY: kill sends a signal; no memory crosses the FFI boundary.
     let result = unsafe { libc::kill(-process_group, libc::SIGTERM) };
     if result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
         return Ok(());
     }
+    // SAFETY: kill sends a signal; no memory crosses the FFI boundary.
     let fallback = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
     if fallback == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
         Ok(())
@@ -468,6 +474,37 @@ mod tests {
         run(&["add", "."]);
         run(&["commit", "-m", "fixture"]);
         root
+    }
+
+    /// `terminate_group` is what `stop` relies on to end a worker that
+    /// ignores nothing else: after the call the process must be gone.
+    #[test]
+    fn terminate_group_ends_a_process_placed_in_its_own_group() {
+        let mut command = Command::new("sleep");
+        command.arg("30").stdin(Stdio::null()).stdout(Stdio::null());
+        configure_process_group(&mut command).unwrap();
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        assert!(process_alive(pid));
+
+        // setpgid(0, 0) in the child made its pid the group id.
+        terminate_group(i32::try_from(pid).unwrap(), pid).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(
+                    !status.success(),
+                    "ended by SIGTERM, not by finishing: {status}"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "sleep still running 5 s after terminate_group"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     #[test]

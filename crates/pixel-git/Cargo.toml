@@ -4,5 +4,8 @@ version = "0.2.2"
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 regex = "1.13"

@@ -132,8 +132,10 @@ impl VectorStore {
                     .map_err(|e| e.to_string())?;
                 w.write_all(&0u32.to_le_bytes())
                     .map_err(|e| e.to_string())?;
+                // SAFETY: `quantized` is a Vec<i8> of exactly `dim` elements; i8 and u8
+                // share size and alignment, and the slice does not outlive `quantized`.
                 let bytes: &[u8] =
-                    unsafe { std::slice::from_raw_parts(quantized.as_ptr() as *const u8, dim) };
+                    unsafe { std::slice::from_raw_parts(quantized.as_ptr().cast::<u8>(), dim) };
                 w.write_all(bytes).map_err(|e| e.to_string())?;
                 self.meta.last_chunk_id = self.meta.last_chunk_id.max(*chunk_id);
             }
@@ -203,6 +205,9 @@ impl VectorStore {
 impl OpenSegment {
     pub fn open(path: &Path) -> Result<Self, String> {
         let file = File::open(path).map_err(|e| e.to_string())?;
+        // SAFETY: segments are written to a temp path and renamed into place
+        // (`append` above) and never modified afterwards, so the mapping cannot
+        // change under us; the header and every offset are validated below.
         let mmap = unsafe { Mmap::map(&file).map_err(|e| e.to_string())? };
         if mmap.len() < HEADER_LEN || &mmap[0..8] != MAGIC {
             return Err("bad vector segment header".to_string());

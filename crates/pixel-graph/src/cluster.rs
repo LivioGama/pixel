@@ -166,7 +166,7 @@ pub fn compute(store: &mut GraphStore) -> Result<Vec<ClusterSummary>, StoreError
     let mut real: Vec<Vec<usize>> = Vec::new();
     let mut misc: Vec<usize> = Vec::new();
     let mut keys: Vec<usize> = groups.keys().copied().collect();
-    keys.sort();
+    keys.sort_unstable();
     for k in keys {
         let members = groups.remove(&k).unwrap();
         if members.len() >= 3 {
@@ -282,4 +282,60 @@ pub fn list(
         },
     )?;
     Ok((rows.collect::<std::result::Result<_, _>>()?, total))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build::build_graph;
+
+    /// `compute` must find the group of mutually calling functions and
+    /// persist it: an empty answer on a connected graph is the bug the
+    /// daemon's `clusters` op would silently pass on as "no clusters".
+    #[test]
+    fn compute_persists_a_cluster_for_a_connected_call_group() {
+        let root = std::env::temp_dir().join(format!(
+            "pixel-cluster-compute-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("ring.ts"),
+            "export function alpha() { return beta() + delta() }\n\
+             export function beta() { return gamma() }\n\
+             export function gamma() { return alpha() }\n\
+             export function delta() { return beta() }\n",
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let mut store = GraphStore::open(&db).unwrap();
+
+        let summaries = compute(&mut store).unwrap();
+        assert!(
+            !summaries.is_empty(),
+            "four mutually calling functions form a cluster"
+        );
+        let members: u64 = summaries.iter().map(|s| s.symbol_count).sum();
+        assert!(
+            members >= 3,
+            "cluster must hold the ring, got {summaries:?}"
+        );
+        let persisted: i64 = store
+            .conn()
+            .query_row("SELECT count(*) FROM cluster_members", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            persisted,
+            i64::try_from(members).unwrap(),
+            "summaries and table agree"
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

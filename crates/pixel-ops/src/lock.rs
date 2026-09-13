@@ -195,7 +195,7 @@ mod tests {
         // Simulate a stale lock with a dead PID.
         fs::DirBuilder::new().mode(0o700).create(&lock_dir).unwrap();
         let owner = LockOwner {
-            pid: 999999, // almost certainly dead
+            pid: 999_999, // almost certainly dead
             token: "stale".to_string(),
             acquired_at: "0".to_string(),
             common_directory: common.to_string(),

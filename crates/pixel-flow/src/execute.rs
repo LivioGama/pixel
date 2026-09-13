@@ -561,7 +561,7 @@ fn extract_char_number(hint: &str) -> Option<usize> {
 }
 
 /// Extract single-quoted strings from a hint string.
-/// e.g. "button containing 'Continue'" → ["Continue"]
+/// e.g. `button containing 'Continue'` → `["Continue"]`
 fn extract_quoted_strings(s: &str) -> Vec<&str> {
     let mut result = Vec::new();
     let mut in_quote = false;
