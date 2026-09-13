@@ -10,6 +10,7 @@ mod guard_deny;
 mod json_contract;
 mod metrics_cli;
 mod post_edit_cli;
+mod publish_cli;
 mod recall_cli;
 mod release_check_cli;
 mod rescue_cli;

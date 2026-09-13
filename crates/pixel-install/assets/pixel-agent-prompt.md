@@ -57,6 +57,7 @@ can do the same task is a failure mode — it wastes tokens and misses the index
 | `git log --oneline -20` | `pixel history` | Bounded with byte caps |
 | `git branch -a -vv` | `pixel branches` | Ahead/behind/merged/stale/unpushed |
 | `git add . && git commit -m "msg"` | `pixel publish -m "msg" --request-id "req-id"` | Crash-safe, idempotent |
+| `git commit -F msg.txt` | `pixel publish -F msg.txt --request-id "req-id"` | Multi-paragraph message from a file (`-` = stdin) |
 | `git add . && git commit && git push` | `pixel ship -m "msg" --request-id "id" origin HEAD` | One op, crash-safe |
 | `git pull --rebase` | `pixel reconcile` | Deterministic branch sync |
 | `git checkout -b name` | `pixel branch name --request-id "id"` | From HEAD or --from |
