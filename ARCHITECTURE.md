@@ -36,15 +36,15 @@ binary, and Pixel is deliberately a CLI plus hooks, not an MCP server.
 
 | Crate | Role | Depends on (pixel crates) |
 | --- | --- | --- |
-| `pixel` (bin `pixel-cli`) | Command-line surface. Parses argv with clap, talks to the daemon or runs the service in-process, prints text or JSON. Also hosts the hook entry points (`hook guard`, `hook session-start`, `hook prompt-submit`, `hook post-compaction`), `rescue`, `recall`, and `sniper` sub-commands. | every library crate |
+| `pixel-cli` (bin `pixel`, in `crates/pixel`) | Command-line surface. Parses argv with clap, talks to the daemon or runs the service in-process, prints text or JSON. Also hosts the hook entry points (`hook guard`, `hook session-start`, `hook prompt-submit`, `hook post-compaction`, `hook post-tool-use`), `rescue`, `recall`, and `sniper` sub-commands. | every library crate except `pixel-context` (reached through the daemon) and `pixel-bench` |
 | `pixel-proto` | The shared contract crate: `Envelope`, `PixelError` and `ErrorCode`, `Epistemics`, `SnapshotInfo`, `Budget`, `Warning`, and the `Op` request enum. No I/O, no business logic. Every other crate that speaks the wire format depends on it, and it depends on nothing internal. | none |
 | `pixel-daemon` | Transport-agnostic `Service` (`api.rs`) and the Unix-socket NDJSON daemon with filesystem watching (`daemon.rs`). Dispatches each `Op` to the right library, attaches snapshot and epistemics metadata, and is the one place a retrieval envelope is built. Also hosts the recall daemon service. | index, graph, context, rank, proto, ops, facts, session, recall, git |
 | `pixel-index` | Sparse n-gram (trigram) text index: gram extraction, window weighting, posting-list algebra, git-anchored base and delta shards, working-tree overlay, query planner, verification, and the `gitsync` helpers that read HEAD, branch, and porcelain status. | git |
 | `pixel-graph` | Code graph: tree-sitter extraction of symbols, imports, and call sites per file; import resolution; tiered call resolution with an epistemic envelope; and the analyses `impact`, `trace`, `process`, `cluster`, `changes`, `targets`. `store` owns the SQLite schema. | git, index |
-| `pixel-facts` | History-wide fact and diff ingest, search, lifecycle, and rescue discovery. Owns `history.db` plus trigram history segments, with a low-priority ingest thread that never blocks queries. Backs `excavate`, `lifecycle`, `history-search`, `resolve`. | git, index, proto |
+| `pixel-facts` | History-wide fact and diff ingest, search, lifecycle, and rescue discovery. Owns `history.db` plus trigram history segments, with a low-priority ingest thread that never blocks queries. Backs `excavate`, `lifecycle`, `history-search` and `rescue` discovery (`resolve` is the graph's concept index). | git, index |
 | `pixel-rank` | Pure fusion core for `targets` and ranked `search`: task text and signal inputs in, closed prioritized P0/P1/P2 file list out. | graph, git, session |
 | `pixel-context` | Semantic compression of code-context items: layered renderings that fit a token budget instead of raw source dumps. | none |
-| `pixel-ops` | Safe git mutation infrastructure ported from usable-git: snapshot store, repository lock, operation journal, recovery keys. Implements `inspect`, `review`, `history`, `diff`, `publish`, `push`, `ship`, `branch`, `update`, `sync`, `reconcile`, `rewrite`, `provenance`, `branches`, `env`. | git, proto |
+| `pixel-ops` | Safe git mutation infrastructure ported from usable-git: snapshot store, repository lock, operation journal, recovery keys. Implements `inspect`, `review`, `history`, `diff`, `publish`, `push`, `ship`, `branch`, `update`, `sync`, `reconcile`, `rewrite`, `provenance`, `branches`, `env`. | git |
 | `pixel-git` | The single git subprocess wrapper for the workspace. Replaced three earlier ad-hoc wrappers. Any crate that shells out to git goes through here. | none |
 | `pixel-recall` | Machine-wide LLM transcript retrieval: ingests Claude Code, Codex, opencode, Devin, Cursor, zcode, and Gemini transcript stores into one SQLite corpus, then serves lexical and semantic search. Owns the embedding backends (`fastembed` ONNX and pure-Rust `model2vec`, both behind features). | index, rank |
 | `pixel-session` | One-look error capture: every error from every layer lands at throw time in one structured local SQLite sink, queryable in one call. | none |
@@ -52,20 +52,21 @@ binary, and Pixel is deliberately a CLI plus hooks, not an MCP server.
 | `pixel-release` | `pixel release-check`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
 | `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. | none |
 | `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`: deploys the bundled prompt, the Claude shell wrapper and the Codex `developer_instructions` config key, backs up changed files; retains legacy hook/routing and cleanup implementations without activating them. | proto, daemon, index, facts |
-| `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index, daemon, proto, recall |
+| `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, proto, recall) |
 
-Dependency rule: `pixel-proto` and `pixel-git` are leaves. `pixel-daemon` is
+Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context`, `pixel-session`, `pixel-actionlog`, `pixel-flow` and `pixel-release`). `pixel-daemon` is
 the integration point and is the only library crate allowed to depend on
 almost everything. The CLI depends on the daemon plus whatever it needs for
-commands that never touch the daemon (install, flow, actionlog, rescue).
+commands that never touch the daemon (install, flow, actionlog, release-check).
 
 ## Command surface
 
 Every subcommand of the built binary, one line each, in `pixel --help`
 order. `crates/pixel/tests/cli/docs_drift.rs` fails when a command listed
 by `--help` is missing here, or when any `` `pixel <name>` `` in README,
-ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md` or the bundled agent
-prompts names a command the binary does not have.
+ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md` or the bundled agent prompts
+(`crates/pixel-install/assets/pixel-agent-prompt.md`,
+`pixel-subagent-prompt.md`) names a command the binary does not have.
 
 | Command | Does |
 | --- | --- |
@@ -133,12 +134,13 @@ Per repository, under `.pixel/` (git-ignored):
 
 | Path | Owner | Contents |
 | --- | --- | --- |
-| trigram shards, `build.lock`, `.index.lock`, `meta.json`, `state.json` | `pixel-index` | Base and delta shards anchored to a git commit, plus a working-tree overlay. `state.json` is the delta-layer sidecar. First process to hold `build.lock` builds; others wait. |
+| `base.shard`, `delta.shard`, `state.json`, `build.lock` | `pixel-index` | Base shard for all tracked files at a pinned commit, delta shard for files changed between that commit and HEAD, and `state.json` as the delta-layer sidecar (tombstones for superseded base paths). The dirty working-tree overlay is in memory only. First process to hold `build.lock` builds; others wait. |
 | `graph.db` | `pixel-graph` | SQLite: files, symbols, edges with resolution tier. Built lazily on first graph command. |
-| `history.db` | `pixel-facts` | SQLite: commit facts, diff text, lifecycle. Populated by `pixel index --history` or the daemon ingest thread. |
+| `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle. Populated by `pixel index --history` or the daemon ingest thread. |
 | `targets.json` | CLI `targets` | Active task map (version 2): tasks with ids, timestamps, and P0/P1/P2 paths. Read by the guard hook and re-injected after compaction. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation. |
-| `journal.jsonl`, snapshots, `reconcile-conflict.json`, `owner.json` | `pixel-ops` | Operation journal and crash-safety state for guarded git mutations. |
+| `reconcile-conflict.json`, `env-snapshots/` | `pixel-ops` | Conflict marker left by `reconcile` for the guard, and the pre-mutation copies `env` takes. |
+| `user-state.json` | `pixel-install` | Per-repository install state. |
 | `calls.json` | CLI | Circuit breaker counters for repeated identical calls. |
 
 The prompt-submit hook writes task boundary events to
@@ -146,11 +148,18 @@ The prompt-submit hook writes task boundary events to
 
 Machine-wide:
 
-- `~/.local/share/pixel/flows/`: saved flows (`pixel-flow`).
-- Recall corpus and embedding models: `pixel-recall`, downloaded once from
-  Hugging Face on `pixel recall setup`.
-- Daemon socket and pid: `$TMPDIR` on macOS or the runtime dir on Linux, named
-  `pixel-<xxh3 of canonical repo path>.sock` and `.pid`.
+- `~/.local/share/pixel/flows/`: saved flows (`pixel-flow`, `$PIXEL_FLOW_DIR`
+  overrides).
+- `~/.local/share/pixel/recall/` and `~/.local/share/pixel/models/`: the
+  recall corpus (`$PIXEL_RECALL_DIR` overrides) and the embedding models,
+  downloaded once from Hugging Face on `pixel recall setup`.
+- `~/.local/state/pixel/` (`$XDG_STATE_HOME/pixel`): `pixel-ops` crash-safety
+  state, keyed by a hash of the repository: `journals/`, `snapshots/` and
+  `locks/<hash>.lock/owner.json`. Guarded git mutations write nothing under
+  `.pixel/` except the two entries above.
+- Daemon socket and pid: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` on Linux
+  (else `~/.cache/pixel/sockets/`), named
+  `pixel-<xxh3 of canonical repo path>.sock`, `.pid` and `.lock`.
 
 ## Daemon and wire contract
 
@@ -164,7 +173,7 @@ daemon exits after thirty minutes idle.
 Two version numbers exist and must not be conflated:
 
 - `pixel_proto::ENVELOPE_PROTOCOL_VERSION`: the envelope schema (`protocol`
-  field).
+  field), currently 1.
 - `pixel_daemon::api::PROTOCOL_VERSION`: the socket request/response format.
   Bump it when an older daemon process could not safely serve a newer CLI.
   The CLI pings first and compares.
@@ -212,7 +221,8 @@ in `pixel-proto` checks it.
 2. `execute` discovers the repo root, then tries the daemon: connect to the
    socket, ping with a short timeout, and send the op. If the socket is
    absent it spawns `pixel daemon start --foreground` in the background and
-   retries once. `PIXEL_DAEMON_AUTO_START=0` disables that.
+   polls the socket for up to five seconds. `PIXEL_DAEMON_AUTO_START=0`
+   disables that.
 3. If the daemon path fails, the CLI opens `Service` in-process and calls
    `handle` directly. Both paths return the same `Envelope`.
 4. `unwrap_response` turns a failure envelope into an `Err(message)` that
@@ -259,8 +269,8 @@ envelope talks to the daemon socket directly.
 
 ## Agent integration
 
-`pixel install` deliberately deploys the bundled `agent-prompt.md`, the short
-`subagent-prompt.md`, a managed shell function for Claude Code and a managed
+`pixel install` deliberately deploys the bundled `pixel-agent-prompt.md`, the
+short `pixel-subagent-prompt.md`, a managed shell function for Claude Code and a managed
 `developer_instructions` block for Codex. It
 preserves agent settings and rule files, and does not register provider hooks or
 activate routing. The shell functions pass the prompt on a subsequent launch
@@ -294,6 +304,8 @@ Existing hook entry points remain implemented, separately from active installati
 | `UserPromptSubmit` | `pixel hook prompt-submit` | Task context/boundary detection and guarded task acceptance. |
 | `PostCompaction` | `pixel hook post-compaction` | Re-injects the active task evidence as additional context. |
 | `PreToolUse` | `pixel hook guard` | Bounded compatible command routing; native fallback and host permissions remain authoritative. |
+| `PostToolUse` | `pixel hook post-tool-use` | After an edit, emits the dependants of what was just changed. |
+| (Codex install step) | `pixel hook composed-guard` | Runs a sealed install-time snapshot of a foreign hook before Pixel's Codex rewrite. |
 
 `pixel doctor` checks current installation artifacts and distinguishes configured
 or protocol-checked hooks from observed live execution. Dormant registration code
@@ -371,8 +383,10 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 - CI runs `cargo fmt --check`, `cargo clippy --all-targets` with warnings
   denied, `cargo nextest run --profile ci` (`.config/nextest.toml`: one
   process per test, retry once but fail on flaky, kill after 180 s) plus
-  `cargo test --doc` for the workspace, with the same feature set as the
-  release build.
+  `cargo test --doc` for the workspace, then `cargo check` of the two
+  reduced feature lanes (`--no-default-features`, `model2vec` only), the
+  installer and gate-runner contract scripts, and separate MSRV and
+  `cargo deny` jobs.
 - After any change to `crates/` the project rule in `CLAUDE.md` applies:
   rebuild, reinstall the binary atomically, re-index, reinstall hooks, and
   run `pixel doctor`.
