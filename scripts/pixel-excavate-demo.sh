@@ -10,18 +10,39 @@
 # Usage:
 #   scripts/pixel-excavate-demo.sh                 # uses ~/Documents/ship-fast
 #   scripts/pixel-excavate-demo.sh /path/to/repo   # custom repo
+#   PHRASE=stripe scripts/pixel-excavate-demo.sh /path/to/repo
+#
+# Prerequisites: pixel installed (or PIXEL_BIN), and the target repo's
+# history indexed once: `pixel index --history /path/to/repo`.
 
 set -euo pipefail
 
 REPO="${1:-$HOME/Documents/ship-fast}"
-PIXEL_BIN="${PIXEL_BIN:-$(command -v pixel || echo "$(cd "$(dirname "$0")/.." && pwd)/target/release/pixel")}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Binary: $PIXEL_BIN, else the installed pixel (`command -v pixel`: mise shim,
+# Homebrew, ~/.cargo/bin, ~/.local/bin), else a local build (dev-release is the
+# reinstall-loop profile, see CONTRIBUTING.md; release is the shipped one).
+PIXEL_BIN="${PIXEL_BIN:-$(command -v pixel 2>/dev/null || true)}"
+if [ -z "$PIXEL_BIN" ]; then
+  for p in "$ROOT/target/dev-release/pixel" "$ROOT/target/release/pixel"; do
+    [ -x "$p" ] && PIXEL_BIN="$p" && break
+  done
+fi
 PHRASE="${PHRASE:-kimi}"
 FEATURE="${FEATURE:-Kimi model plugged into homepage engine}"
 
+if [ ! -d "$REPO/.git" ]; then
+  echo "ERROR: $REPO is not a git repository (pass the repo path as the first argument)" >&2
+  exit 1
+fi
 cd "$REPO"
 
-if [ ! -x "$PIXEL_BIN" ]; then
-  echo "ERROR: pixel binary not found at $PIXEL_BIN" >&2
+if [ -z "$PIXEL_BIN" ] || [ ! -x "$PIXEL_BIN" ]; then
+  echo "ERROR: pixel binary not found (set PIXEL_BIN, install pixel, or build it)" >&2
+  exit 1
+fi
+if [ ! -f "$REPO/.pixel/history.db" ]; then
+  echo "ERROR: $REPO has no history index; run: pixel index --history \"$REPO\"" >&2
   exit 1
 fi
 

@@ -134,7 +134,7 @@ Optional but recommended when the change touches the CLI surface, hooks, or
 the install flow:
 
 ```bash
-scripts/pixel-smoke-test.sh     # exercises ~/.local/bin/pixel end to end
+scripts/pixel-smoke-test.sh     # exercises the installed pixel (command -v pixel) end to end
 ```
 
 The `Cross-build` workflow (`.github/workflows/cross-build.yml`) builds the
@@ -221,19 +221,27 @@ to write: the missed mutant is the bug report.
 
 ## Local install loop (when `crates/` changed)
 
-The installed `~/.local/bin/pixel` is what your agent hooks and the smoke
-test use, so it must match the working tree. Replace it with an atomic
-rename, never an in-place `cp` (on macOS an in-place copy over a running
-Mach-O invalidates its signature and the next call is SIGKILLed).
+The installed `pixel` (`command -v pixel`: a mise/asdf-managed install
+behind a shim, a Homebrew cellar, `~/.cargo/bin`, `~/.local/bin` as a last
+resort) is what your agent wrapper and the smoke test use, so it must match
+the working tree. `pixel upgrade` replaces the binary that is actually
+running with an atomic rename (on macOS an in-place `cp` over a running
+Mach-O invalidates its signature and the next call is SIGKILLed), stops
+this repo's daemon, and warns when another `pixel` earlier on PATH would
+still shadow it. Never copy into `~/.local/bin` by hand: a second copy
+shadows the managed one.
 
 ```bash
-cargo build --profile dev-release -p pixel-cli \
-  && cp target/dev-release/pixel ~/.local/bin/.pixel.tmp.$$ \
-  && mv -f ~/.local/bin/.pixel.tmp.$$ ~/.local/bin/pixel
+pixel upgrade --repo . --build "cargo build --profile dev-release -p pixel-cli"
 pixel index --history .   # rebuild facts/history index
-pixel install             # reinstall hooks and the agent prompt
+pixel install             # redeploy the agent prompt, shell wrapper, Codex config
 pixel doctor .            # must be green; report any non-green check in the PR
+scripts/pixel-smoke-test.sh   # the installed binary end to end (read-only)
 ```
+
+`dev-release` is `release` without thin LTO and with 16 codegen units: an
+incremental rebuild takes seconds and the binary is optimised the same way.
+Drop `--build` for the exact shipped `release` profile.
 
 Both commands write and check the wrappers for the account's login shell,
 read from the user database rather than `$SHELL`: a coding agent's command
