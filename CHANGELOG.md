@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `pixel --version` now reports where the binary came from: after the `pixel x.y.z` line it prints `commit: <sha>` (`-dirty` appended when the tree had uncommitted tracked changes), `target:`, `rustc:` and `built:` (UTC date; `SOURCE_DATE_EPOCH` honoured). `pixel -V` keeps the one-line form. Values a build cannot determine (a tarball without `.git`, no `git` on PATH) read `unknown` instead of failing the build. This answers "which build is this?" from a bug report or a CI artifact, and lets a rebuild loop see that the installed binary lags the tree.
 - `pixel release-check <version|tag> [--repo <path>] [--json]`: the release consistency gate. It checks that `crates/pixel/Cargo.toml` carries the tagged version, that `Cargo.lock` holds every workspace member at its manifest version (a stale lock used to fail `cargo build --locked` on the release runner, after the tests had passed), and that `CHANGELOG.md` has the `## [x.y.z]` heading with nothing left under `## [Unreleased]`. One `[ok  ]`/`[FAIL]` line per check with the fix in the failure text, exit 1 on any failure. The release workflow runs it before the tests; `v1.2.3` and `refs/tags/v1.2.3` are accepted.
 
 ### Changed

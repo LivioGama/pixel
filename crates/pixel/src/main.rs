@@ -46,10 +46,27 @@ use pixel_index::{Crc32Weigher, GramExtractor, SparseGramExtractor, TrigramExtra
 use pixel_proto::{QueryKind, QueryStatus, compile_query};
 use serde_json::{Value, json};
 
+/// `pixel --version` (long form): the crate version plus where the binary
+/// came from, all captured by `build.rs` at compile time (`unknown` when a
+/// value could not be determined, e.g. a tarball build without `.git`).
+/// `pixel -V` keeps the one-line `pixel x.y.z`.
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\ncommit: ",
+    env!("PIXEL_BUILD_COMMIT"),
+    "\ntarget: ",
+    env!("PIXEL_BUILD_TARGET"),
+    "\nrustc: ",
+    env!("PIXEL_RUSTC_VERSION"),
+    "\nbuilt: ",
+    env!("PIXEL_BUILD_DATE"),
+);
+
 #[derive(Parser)]
 #[command(
     name = "pixel",
     version,
+    long_version = LONG_VERSION,
     about = "Fast, fresh code retrieval for agents"
 )]
 struct Cli {
