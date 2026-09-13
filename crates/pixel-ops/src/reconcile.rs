@@ -1942,20 +1942,38 @@ mod tests {
         init_repo_with_remote(dir.path(), remote.path());
 
         // Commit a tracked sidecar file, then modify it without committing.
+        // `add -f`: a developer's global excludes file (`~/.config/git/ignore`)
+        // commonly lists `.pixel/`, and git honours it whatever
+        // `GIT_CONFIG_GLOBAL` says. Without `-f` the add is refused, the
+        // commit never happens, the file is untracked (so filtered as
+        // sidecar noise), and the reconcile fast-forwards — the test then
+        // fails on its own premise, not on the gate it checks.
         std::fs::create_dir_all(dir.path().join(".pixel")).unwrap();
         std::fs::write(dir.path().join(".pixel/targets.json"), b"{\"v\":1}").unwrap();
-        std::process::Command::new("git")
+        let added = std::process::Command::new("git")
             .arg("-C")
             .arg(dir.path())
-            .args(["add", ".pixel/targets.json"])
+            .args(["add", "-f", ".pixel/targets.json"])
             .status()
             .unwrap();
-        std::process::Command::new("git")
+        assert!(
+            added.success(),
+            "git add -f of the sidecar file must succeed"
+        );
+        let committed = std::process::Command::new("git")
             .arg("-C")
             .arg(dir.path())
             .args(["commit", "-qm", "track sidecar file"])
             .status()
             .unwrap();
+        assert!(committed.success(), "the sidecar file must be committed");
+        let tracked = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["ls-files", "--error-unmatch", ".pixel/targets.json"])
+            .status()
+            .unwrap();
+        assert!(tracked.success(), "the sidecar file must be tracked");
         std::fs::write(dir.path().join(".pixel/targets.json"), b"{\"v\":2}").unwrap();
 
         // Diverge: remote gains a commit the local branch doesn't have.
