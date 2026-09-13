@@ -36,8 +36,7 @@ const MAX_ERROR_LEN: usize = 2000;
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,6 +347,25 @@ pub fn tail(path: &Path, limit: usize) -> std::io::Result<Vec<ActionEvent>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `ActionEvent::new` stamps `ts_ms` from here and readers of
+    /// `actions.jsonl` compare it with wall-clock time; a placeholder
+    /// (0, -1, a constant) would date every event to 1970.
+    #[test]
+    fn now_ms_is_the_current_unix_epoch_in_milliseconds() {
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after 1970")
+            .as_millis() as i64;
+        let ts = now_ms();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after 1970")
+            .as_millis() as i64;
+        assert!(ts >= before && ts <= after, "{before} <= {ts} <= {after}");
+        // 2020-01-01T00:00:00Z: a real clock is past it, a placeholder is not.
+        assert!(ts > 1_577_836_800_000, "{ts}");
+    }
     use std::time::Duration;
     use tempfile::tempdir;
 

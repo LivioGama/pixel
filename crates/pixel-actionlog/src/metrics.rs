@@ -197,10 +197,9 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
     // makes whether a savings row exists depend on its own emitted size.
     let payload_tok = metrics.output_bytes as f64 / 4.0;
     let id = event.invocation_id.as_deref().unwrap_or("legacy");
-    let short_id: String = id
-        .split('-')
-        .nth(1)
-        .map(|s| {
+    let short_id: String = id.split('-').nth(1).map_or_else(
+        || id.to_owned(),
+        |s| {
             s.chars()
                 .rev()
                 .take(6)
@@ -208,8 +207,8 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
                 .chars()
                 .rev()
                 .collect()
-        })
-        .unwrap_or_else(|| id.to_owned());
+        },
+    );
 
     // Line 1: identity header.
     let header = format!("🟩 pixel {command} ❀ {duration_ms:.1}ms ❀ #{short_id}");
