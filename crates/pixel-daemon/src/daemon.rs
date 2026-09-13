@@ -146,6 +146,16 @@ pub trait Corpus {
     fn watch_paths(&self) -> Vec<PathBuf> {
         vec![self.root().to_path_buf()]
     }
+    /// How often the loop calls `sweep` regardless of watcher events
+    /// (default: never). A corpus whose writers hold files open for
+    /// minutes (streamed transcripts) sets this, because FSEvents on macOS
+    /// defers the modify event until the writer closes the file.
+    fn sweep_interval(&self) -> Option<Duration> {
+        None
+    }
+    /// Periodic maintenance, called every `sweep_interval` from the loop
+    /// thread (default: nothing).
+    fn sweep(&mut self) {}
 }
 
 impl Corpus for Service {
@@ -317,6 +327,8 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
     let mut flush_at: Option<Instant> = None;
     let mut last_activity = Instant::now();
     let mut shutdown = false;
+    let sweep_every = service.sweep_interval();
+    let mut next_sweep = sweep_every.map(|every| Instant::now() + every);
 
     while !shutdown {
         let now = Instant::now();
@@ -328,6 +340,10 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
             None => idle_left,
         }
         .min(ROOT_POLL);
+        let timeout = match next_sweep {
+            Some(at) => at.saturating_duration_since(now).min(timeout),
+            None => timeout,
+        };
 
         match rx.recv_timeout(timeout.max(Duration::from_millis(10))) {
             Ok(Msg::Conn(stream)) => {
@@ -350,6 +366,13 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
             let batch: Vec<(PathBuf, bool)> = std::mem::take(&mut pending).into_iter().collect();
             service.apply_changes(&batch);
             flush_at = None;
+        }
+
+        if let (Some(at), Some(every)) = (next_sweep, sweep_every)
+            && Instant::now() >= at
+        {
+            service.sweep();
+            next_sweep = Some(Instant::now() + every);
         }
 
         if last_activity.elapsed() >= IDLE_TIMEOUT {
@@ -524,6 +547,9 @@ fn read_capped_line(
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     /// A corpus with no index behind it: enough to drive `run_corpus`'s
     /// transport loop from a test.
     struct StubCorpus(PathBuf);
@@ -536,6 +562,125 @@ mod tests {
             failure_response("stub", "stub corpus")
         }
         fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+    }
+
+    /// A corpus that asks for a periodic sweep and counts the calls.
+    struct SweptCorpus {
+        root: PathBuf,
+        every: Option<Duration>,
+        sweeps: Arc<AtomicUsize>,
+    }
+
+    impl Corpus for SweptCorpus {
+        fn root(&self) -> &Path {
+            &self.root
+        }
+        fn handle(&mut self, _req: Request) -> Response {
+            failure_response("stub", "stub corpus")
+        }
+        fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+        fn sweep_interval(&self) -> Option<Duration> {
+            self.every
+        }
+        fn sweep(&mut self) {
+            self.sweeps.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn scratch_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("pixel-daemon-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    fn shutdown(sock: &Path) {
+        let Ok(mut stream) = UnixStream::connect(sock) else {
+            return;
+        };
+        let mut line = serde_json::to_string(&Request::Shutdown).unwrap();
+        line.push('\n');
+        let _ = stream.write_all(line.as_bytes());
+        let mut reader = BufReader::new(stream);
+        let mut reply = String::new();
+        let _ = std::io::BufRead::read_line(&mut reader, &mut reply);
+    }
+
+    /// The watcher alone misses the transcript an agent is streaming (macOS
+    /// FSEvents defers the modify event while the file stays open), so a
+    /// corpus that asks for a sweep must get it on its interval with no
+    /// filesystem event and no request in between.
+    #[test]
+    fn corpus_sweep_runs_on_its_interval_without_events() {
+        let root = scratch_root("sweep");
+        let sock = socket_path(&root);
+        let sweeps = Arc::new(AtomicUsize::new(0));
+        let corpus = SweptCorpus {
+            root: root.clone(),
+            every: Some(Duration::from_millis(100)),
+            sweeps: Arc::clone(&sweeps),
+        };
+        let started = Instant::now();
+        let daemon = std::thread::spawn(move || run_corpus(corpus));
+        wait_until("socket to answer", Duration::from_secs(10), || ping(&sock));
+
+        wait_until("three sweeps", Duration::from_secs(10), || {
+            sweeps.load(Ordering::SeqCst) >= 3
+        });
+        // The first sweep waits one full interval (nothing to sweep at
+        // start-up) and each later one is rescheduled from the interval, so
+        // three sweeps at 100 ms cannot land before 300 ms.
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "sweeps ran early or back to back instead of on the interval"
+        );
+        // The count keeps rising: sweeps are periodic, not a one-off after
+        // the first request.
+        let seen = sweeps.load(Ordering::SeqCst);
+        wait_until("a further sweep", Duration::from_secs(10), || {
+            sweeps.load(Ordering::SeqCst) > seen
+        });
+
+        shutdown(&sock);
+        wait_until("daemon to exit", Duration::from_secs(10), || {
+            daemon.is_finished()
+        });
+        daemon.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The trait default is "no sweep": the repo corpus relies on it, and a
+    /// default interval would make every repo daemon run periodic work.
+    #[test]
+    fn default_corpus_has_no_sweep_interval() {
+        let stub = StubCorpus(PathBuf::from("/nonexistent"));
+        assert_eq!(stub.sweep_interval(), None);
+    }
+
+    /// A corpus without an interval is never swept, so a corpus without
+    /// periodic work pays nothing.
+    #[test]
+    fn corpus_without_interval_is_never_swept() {
+        let root = scratch_root("nosweep");
+        let sock = socket_path(&root);
+        let sweeps = Arc::new(AtomicUsize::new(0));
+        let corpus = SweptCorpus {
+            root: root.clone(),
+            every: None,
+            sweeps: Arc::clone(&sweeps),
+        };
+        let daemon = std::thread::spawn(move || run_corpus(corpus));
+        wait_until("socket to answer", Duration::from_secs(10), || ping(&sock));
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(ping(&sock));
+        assert_eq!(sweeps.load(Ordering::SeqCst), 0);
+
+        shutdown(&sock);
+        wait_until("daemon to exit", Duration::from_secs(10), || {
+            daemon.is_finished()
+        });
+        daemon.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn wait_until(what: &str, limit: Duration, mut done: impl FnMut() -> bool) {
