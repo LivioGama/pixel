@@ -109,7 +109,7 @@ impl GitRunner {
     pub fn run(&self, args: &[&str]) -> Result<Vec<u8>, GitError> {
         let mut cmd = Command::new("git");
         cmd.arg("-C").arg(&self.root).args(args);
-        let arg_strings: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let arg_strings: Vec<String> = args.iter().map(ToString::to_string).collect();
         execute(cmd, arg_strings, &self.options)
     }
 

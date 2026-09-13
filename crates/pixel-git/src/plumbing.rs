@@ -574,11 +574,11 @@ mod tests {
 
     #[test]
     fn ls_files_survives_enumeration_output_past_the_old_1mib_cap() {
+        const N: usize = 5300; // ~5300 * ~250 bytes ≈ 1.3 MiB of `ls-files -z` output
         let root = tmpdir("plumbing-lsfiles-big");
         init_repo(&root);
         let dir = long_component("tracked");
         std::fs::create_dir_all(root.join(&dir)).unwrap();
-        const N: usize = 5300; // ~5300 * ~250 bytes ≈ 1.3 MiB of `ls-files -z` output
         for i in 0..N {
             std::fs::write(root.join(&dir).join(format!("f{i:05}.txt")), b"x").unwrap();
         }
@@ -597,6 +597,7 @@ mod tests {
 
     #[test]
     fn status_porcelain_survives_enumeration_output_past_the_old_1mib_cap() {
+        const N: usize = 5300; // pushes `status --porcelain -z` past the old 1 MiB cap
         let root = tmpdir("plumbing-status-big");
         init_repo(&root);
         std::fs::write(root.join("tracked.txt"), b"hello").unwrap();
@@ -605,7 +606,6 @@ mod tests {
 
         let dir = long_component("untracked");
         std::fs::create_dir_all(root.join(&dir)).unwrap();
-        const N: usize = 5300; // pushes `status --porcelain -z` past the old 1 MiB cap
         for i in 0..N {
             std::fs::write(root.join(&dir).join(format!("g{i:05}.txt")), b"y").unwrap();
         }
@@ -646,6 +646,7 @@ mod tests {
 
     #[test]
     fn diff_name_status_survives_enumeration_output_past_the_old_1mib_cap() {
+        const N: usize = 5300;
         let root = tmpdir("plumbing-diffns-big");
         init_repo(&root);
         std::fs::write(root.join("seed.txt"), b"seed").unwrap();
@@ -655,7 +656,6 @@ mod tests {
 
         let dir = long_component("added");
         std::fs::create_dir_all(root.join(&dir)).unwrap();
-        const N: usize = 5300;
         for i in 0..N {
             std::fs::write(root.join(&dir).join(format!("h{i:05}.txt")), b"z").unwrap();
         }
