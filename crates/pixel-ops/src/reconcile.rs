@@ -39,6 +39,17 @@ fn rebase_in_progress(root: &Path) -> bool {
     git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir()
 }
 
+/// `git rebase --continue` after every conflicted path was staged. Goes
+/// through the runner so a hook or an editor that hangs hits the runner's
+/// timeout instead of parking the daemon's request thread; `GIT_EDITOR=true`
+/// keeps git from opening one for the commit message. True only on exit 0
+/// (a rebase with nothing to continue exits 128).
+fn continue_rebase(runner: &GitRunner) -> bool {
+    runner
+        .run_output(&["rebase", "--continue"], &[("GIT_EDITOR", "true")])
+        .is_ok_and(|out| out.success())
+}
+
 /// Resolve the real git directory for `root`.
 ///
 /// Worktree support: `.git` may be a file containing `gitdir: <path>`
@@ -647,18 +658,7 @@ pub fn reconcile_with_hooks(
 
                                 if rebase_unresolved.is_empty() && !rebase_resolved.is_empty() {
                                     // All rebase conflicts auto-resolved.
-                                    // Use GIT_EDITOR=true to avoid opening an
-                                    // editor for the rebase commit message.
-                                    let cont = std::process::Command::new("git")
-                                        .arg("-C")
-                                        .arg(root)
-                                        .arg("rebase")
-                                        .arg("--continue")
-                                        .env("GIT_EDITOR", "true")
-                                        .output()
-                                        .ok()
-                                        .filter(|o| o.status.success());
-                                    if cont.is_some() {
+                                    if continue_rebase(&runner) {
                                         let new_head = runner.rev_parse_head().unwrap_or_default();
                                         clear_conflict_state(root);
                                         if push_mode == "auto" {
@@ -1086,28 +1086,20 @@ fn reconcile_into(
                     }
                 }
 
-                if rebase_unresolved.is_empty() && !rebase_resolved.is_empty() {
-                    let cont = std::process::Command::new("git")
-                        .arg("-C")
-                        .arg(root)
-                        .arg("rebase")
-                        .arg("--continue")
-                        .env("GIT_EDITOR", "true")
-                        .output()
-                        .ok()
-                        .filter(|o| o.status.success());
-                    if cont.is_some() {
-                        let new_head = runner.rev_parse_head().unwrap_or_default();
-                        clear_conflict_state(root);
-                        return Ok(json!({
-                            "state": "rebased",
-                            "into_target": target,
-                            "from": head,
-                            "to": new_head,
-                            "backup_ref": backup_ref,
-                            "auto_resolved": rebase_resolved,
-                        }));
-                    }
+                if rebase_unresolved.is_empty()
+                    && !rebase_resolved.is_empty()
+                    && continue_rebase(runner)
+                {
+                    let new_head = runner.rev_parse_head().unwrap_or_default();
+                    clear_conflict_state(root);
+                    return Ok(json!({
+                        "state": "rebased",
+                        "into_target": target,
+                        "from": head,
+                        "to": new_head,
+                        "backup_ref": backup_ref,
+                        "auto_resolved": rebase_resolved,
+                    }));
                 }
                 // Fall back to manual.
                 safe_rebase_abort(runner);
@@ -1289,18 +1281,16 @@ fn attempt_lease_push_or_reclassify(
 /// git either lacks `--write-tree` entirely or predates its stabilized
 /// output format, so callers must not attempt to interpret its output.
 fn git_supports_merge_tree_write_tree(root: &Path) -> bool {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("--version")
-        .output();
-    let Ok(out) = out else { return false };
-    if !out.status.success() {
-        return false;
-    }
-    let s = String::from_utf8_lossy(&out.stdout);
-    // "git version 2.55.0" (possibly with a vendor/build suffix).
-    let Some(ver_field) = s.split_whitespace().nth(2) else {
+    GitRunner::new(root)
+        .run(&["--version"])
+        .is_ok_and(|out| version_supports_merge_tree_write_tree(&String::from_utf8_lossy(&out)))
+}
+
+/// The pure half of [`git_supports_merge_tree_write_tree`]: `git --version`
+/// output ("git version 2.55.0", possibly with a vendor/build suffix) is
+/// at least 2.38.
+fn version_supports_merge_tree_write_tree(version_line: &str) -> bool {
+    let Some(ver_field) = version_line.split_whitespace().nth(2) else {
         return false;
     };
     let mut parts = ver_field.split('.');
@@ -1314,6 +1304,7 @@ fn git_supports_merge_tree_write_tree(root: &Path) -> bool {
     (major, minor) >= (2, 38)
 }
 
+#[derive(Debug)]
 struct MergeTreeProbe {
     /// True iff `merge-tree --write-tree` exited 0 (no textual conflicts).
     clean: bool,
@@ -1327,32 +1318,27 @@ struct MergeTreeProbe {
     messages: String,
 }
 
-/// Runs `git merge-tree --write-tree` directly via `std::process::Command`
-/// rather than through `GitRunner`. This is deliberate: `merge-tree` exits 1
-/// (not 0) precisely when there ARE conflicts, and `GitRunner::run`/`run_opt`
-/// both discard stdout whenever the subprocess exits non-zero (`run_opt`
-/// maps a non-zero exit straight to `None` — see `pixel-git::runner::execute`).
-/// That meant the previous implementation of this probe always observed
-/// `None` on the exact inputs it most needed to inspect, so the resulting
-/// conflict report was unconditionally empty on every real conflict — the
-/// exact defect class PLAN.md calls out (`review`'s `!conflicted` filtering)
-/// that this op must not repeat. Capturing stdout unconditionally, keyed off
-/// the real exit status instead of `Result::ok()`, is what actually fixes it.
+/// Runs `git merge-tree --write-tree` through `GitRunner::run_output`, never
+/// `run`/`run_opt`: `merge-tree` exits 1 (not 0) precisely when there ARE
+/// conflicts, and those two discard stdout on any non-zero exit. An earlier
+/// version of this probe went through `run_opt` and so observed `None` on
+/// the exact inputs it most needed to inspect, reporting every real
+/// conflict as an empty list — the defect class PLAN.md calls out (`review`'s
+/// `!conflicted` filtering). Stdout is kept whatever the status and the
+/// verdict is keyed off the real exit code; the runner adds the timeout and
+/// the enumeration-sized output cap a bare `std::process::Command` lacked.
 fn probe_merge_tree(root: &Path, ours: &str, theirs: &str) -> MergeTreeProbe {
+    let runner =
+        GitRunner::new(root).with_max_output_bytes(Some(pixel_git::ENUMERATION_MAX_OUTPUT_BYTES));
     let run = |extra: &[&str]| -> (bool, String) {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .arg("merge-tree")
-            .arg("--write-tree")
-            .args(extra)
-            .arg(ours)
-            .arg(theirs)
-            .output();
-        match out {
-            Ok(o) => (
-                o.status.success(),
-                String::from_utf8_lossy(&o.stdout).into_owned(),
+        let mut args = vec!["merge-tree", "--write-tree"];
+        args.extend_from_slice(extra);
+        args.push(ours);
+        args.push(theirs);
+        match runner.run_output(&args, &[]) {
+            Ok(out) => (
+                out.success(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
             ),
             Err(_) => (false, String::new()),
         }
@@ -2050,5 +2036,132 @@ mod tests {
         clear_conflict_state(root);
         assert!(!path.exists());
         clear_conflict_state(root); // idempotent
+    }
+
+    /// Bare repo fixture for the merge-tree and rebase helpers: `main` with
+    /// `a.txt` = "base", then a `feature` branch and a diverged `main`.
+    /// `conflicting` makes both sides edit the same line; otherwise they
+    /// touch different files.
+    fn diverged_repo(conflicting: bool) -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        // The rebase under test commits through the runner, which sets no
+        // identity: give the repo one so a `/dev/null` global config works.
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
+        std::fs::write(root.join("a.txt"), "base\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(root.join("a.txt"), "feature\n").unwrap();
+        git(&["commit", "-q", "-am", "feature"]);
+        git(&["checkout", "-q", "main"]);
+        if conflicting {
+            std::fs::write(root.join("a.txt"), "main\n").unwrap();
+        } else {
+            std::fs::write(root.join("b.txt"), "main\n").unwrap();
+            git(&["add", "."]);
+        }
+        git(&["commit", "-q", "-am", "main"]);
+        git(&["checkout", "-q", "feature"]);
+        dir
+    }
+
+    #[test]
+    fn version_gate_requires_git_2_38() {
+        assert!(version_supports_merge_tree_write_tree("git version 2.38.0"));
+        assert!(version_supports_merge_tree_write_tree(
+            "git version 2.55.0 (Apple Git-200)"
+        ));
+        assert!(version_supports_merge_tree_write_tree("git version 3.0.0"));
+        assert!(!version_supports_merge_tree_write_tree(
+            "git version 2.37.9"
+        ));
+        assert!(!version_supports_merge_tree_write_tree("git version 1.99"));
+        assert!(!version_supports_merge_tree_write_tree("git version"));
+        assert!(!version_supports_merge_tree_write_tree(""));
+        assert!(!version_supports_merge_tree_write_tree("git version x.y"));
+    }
+
+    #[test]
+    fn probe_merge_tree_reports_conflicts_with_their_stages_and_messages() {
+        let dir = diverged_repo(true);
+        let root = dir.path();
+        assert!(
+            git_supports_merge_tree_write_tree(root),
+            "git too old for the probe"
+        );
+        let probe = probe_merge_tree(root, "feature", "main");
+        assert!(!probe.clean, "both sides edited a.txt: {probe:?}");
+        let stages = parse_stage_lines(&probe.stage_lines);
+        let a = stages.get("a.txt").expect("a.txt is the conflicted path");
+        assert!(
+            a.contains_key(&1) && a.contains_key(&2) && a.contains_key(&3),
+            "{stages:?}"
+        );
+        assert!(
+            probe.messages.contains("CONFLICT"),
+            "messages must keep git's CONFLICT lines: {:?}",
+            probe.messages
+        );
+    }
+
+    #[test]
+    fn probe_merge_tree_is_clean_when_the_sides_touch_different_files() {
+        let dir = diverged_repo(false);
+        let root = dir.path();
+        let probe = probe_merge_tree(root, "feature", "main");
+        assert!(probe.clean, "{probe:?}");
+        let tree = probe.stage_lines.lines().next().unwrap_or_default();
+        assert_eq!(
+            tree.len(),
+            40,
+            "first line is the merged tree oid: {tree:?}"
+        );
+        assert!(parse_stage_lines(&probe.stage_lines).is_empty());
+        assert!(!probe.messages.contains("CONFLICT"));
+
+        let missing = probe_merge_tree(root, "feature", "no-such-ref");
+        assert!(!missing.clean);
+        assert!(parse_stage_lines(&missing.stage_lines).is_empty());
+    }
+
+    #[test]
+    fn continue_rebase_finishes_a_rebase_whose_conflict_was_staged() {
+        let dir = diverged_repo(true);
+        let root = dir.path();
+        let runner = GitRunner::new(root);
+        // No rebase in progress: nothing to continue, must report false.
+        assert!(!continue_rebase(&runner));
+
+        let started = runner.run_output(&["rebase", "main"], &[]).unwrap();
+        assert!(!started.success(), "the rebase must stop on the conflict");
+        assert!(rebase_in_progress(root));
+        std::fs::write(root.join("a.txt"), "resolved\n").unwrap();
+        runner.run(&["add", "a.txt"]).unwrap();
+
+        assert!(continue_rebase(&runner));
+        assert!(!rebase_in_progress(root));
+        let head = String::from_utf8(runner.run(&["log", "-1", "--format=%s"]).unwrap()).unwrap();
+        assert_eq!(head.trim(), "feature");
+        let parent =
+            String::from_utf8(runner.run(&["log", "-1", "--format=%s", "HEAD~1"]).unwrap())
+                .unwrap();
+        assert_eq!(parent.trim(), "main", "feature is replayed on top of main");
     }
 }
