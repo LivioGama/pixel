@@ -101,8 +101,7 @@ pub fn branches(root: &Path, opts: &BranchesOptions) -> Result<Value, String> {
 
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs() as i64);
     let stale_cutoff = now_unix - (opts.stale_days as i64) * 86_400;
 
     let mut branch_values: Vec<Value> = Vec::new();
@@ -156,7 +155,7 @@ pub fn branches(root: &Path, opts: &BranchesOptions) -> Result<Value, String> {
             None => Value::Null,
         };
 
-        let stale = r.committer_unix.map(|t| t < stale_cutoff).unwrap_or(false);
+        let stale = is_stale(r.committer_unix, stale_cutoff);
 
         // Summary bookkeeping.
         let has_live_upstream = r.upstream.is_some() && !r.upstream_gone;
@@ -287,4 +286,23 @@ fn parse_left_right(s: &str) -> Option<(u64, u64)> {
     let ahead = it.next()?.parse::<u64>().ok()?;
     let behind = it.next()?.parse::<u64>().ok()?;
     Some((ahead, behind))
+}
+
+/// A branch is stale when its last commit is strictly older than the
+/// cutoff; an unknown commit time is never reported stale.
+fn is_stale(committer_unix: Option<i64>, cutoff: i64) -> bool {
+    committer_unix.is_some_and(|t| t < cutoff)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_stale;
+
+    #[test]
+    fn stale_means_strictly_older_than_the_cutoff() {
+        assert!(is_stale(Some(99), 100));
+        assert!(!is_stale(Some(100), 100), "at the cutoff is not stale");
+        assert!(!is_stale(Some(101), 100));
+        assert!(!is_stale(None, 100));
+    }
 }

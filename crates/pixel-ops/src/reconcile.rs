@@ -192,8 +192,7 @@ fn write_conflict_state(root: &Path, conflict_count: usize) {
         "conflict_count": conflict_count,
         "written_unix": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_secs()),
     });
     let _ = std::fs::write(
         pixel_dir.join("reconcile-conflict.json"),
@@ -1503,8 +1502,7 @@ fn build_conflict_report(
         let conflict_kind = kinds
             .iter()
             .find(|(_, msg)| msg.contains(path.as_str()))
-            .map(|(k, _)| k.clone())
-            .unwrap_or_else(|| "content".to_string());
+            .map_or_else(|| "content".to_string(), |(k, _)| k.clone());
 
         let entry = json!({
             "path": path,
@@ -1928,8 +1926,7 @@ mod tests {
         assert!(
             result
                 .get("clean_rebase_possible")
-                .map(|v| v == true)
-                .unwrap_or(true),
+                .is_none_or(|v| v == true),
             "sidecar dirtiness must not prevent clean rebase: {result}"
         );
     }
@@ -2014,5 +2011,26 @@ mod tests {
             err.contains("dirty"),
             "refusal must cite dirty files, got: {err}"
         );
+    }
+
+    /// The guard reads this file to allow a raw `git rebase` after a
+    /// reported conflict; a state that is never written keeps the guard
+    /// closed, one that is never cleared keeps it open.
+    #[test]
+    fn conflict_state_is_written_with_the_count_and_cleared_afterwards() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let path = root.join(".pixel").join("reconcile-conflict.json");
+        write_conflict_state(root, 3);
+        let state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(state["conflict_count"], 3);
+        assert!(
+            state["written_unix"].as_u64().unwrap() > 1_577_836_800,
+            "{state}"
+        );
+        clear_conflict_state(root);
+        assert!(!path.exists());
+        clear_conflict_state(root); // idempotent
     }
 }

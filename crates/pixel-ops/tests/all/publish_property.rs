@@ -26,7 +26,7 @@ fn git(root: &Path, args: &[&str]) -> String {
         .arg(root)
         .args(args)
         .output()
-        .unwrap_or_else(|e| panic!("git {:?}: {e}", args));
+        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
     assert!(
         output.status.success(),
         "git -C {} {:?} failed: {}",
@@ -86,7 +86,7 @@ fn publish_without_an_explicit_file_list_stages_and_commits_all_changes() {
 fn opts(message: &str, files: &[&str]) -> PublishOptions {
     PublishOptions {
         message: message.to_string(),
-        files: files.iter().map(|s| s.to_string()).collect(),
+        files: files.iter().map(ToString::to_string).collect(),
         expected_head: None,
         expected_fingerprints: Default::default(),
         push: false,

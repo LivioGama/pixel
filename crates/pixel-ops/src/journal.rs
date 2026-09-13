@@ -285,8 +285,7 @@ impl Default for OperationJournal {
 fn now_iso() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis());
     format!("{secs}")
 }
 
@@ -297,8 +296,7 @@ fn parse_iso_ms(s: &str) -> Option<u64> {
 fn current_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 #[cfg(test)]
@@ -408,5 +406,25 @@ mod tests {
             j.begin("good-id.123", JournalOperation::Publish, "k", "h")
                 .is_ok()
         );
+    }
+
+    /// Timestamps written here are compared with wall-clock time by their
+    /// readers; a placeholder (0, 1) would date every entry to 1970.
+    #[test]
+    fn current_unix_ms_is_the_current_unix_epoch_in_milliseconds() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let now = current_unix_ms();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!(
+            now >= before && now <= after,
+            "{before} <= {now} <= {after}"
+        );
+        assert!(now > 1_577_836_800_000, "{now}"); // 2020-01-01T00:00:00Z
     }
 }

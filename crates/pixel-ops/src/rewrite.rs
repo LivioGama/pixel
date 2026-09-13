@@ -262,7 +262,7 @@ fn run_body(
         .map(|o| {
             String::from_utf8_lossy(&o)
                 .lines()
-                .map(|l| l.to_string())
+                .map(ToString::to_string)
                 .collect()
         })
         .unwrap_or_default();
@@ -471,7 +471,7 @@ fn resume_rewrite(
                 .and_then(|r| r.result.as_ref())
                 .and_then(|v| v.get("old_head"))
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+                .map(ToString::to_string)
                 .or_else(|| {
                     // Belt and braces: the backup ref carries the same OID.
                     let branch = runner.current_branch()?;

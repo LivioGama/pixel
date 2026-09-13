@@ -158,8 +158,7 @@ pub fn provenance(root: &Path, opts: &ProvenanceOptions) -> Result<Value, String
     let verdict = opts.author.as_deref().map(|query| {
         let q = query.to_lowercase();
         let matches = |name: &str, mail: Option<&str>| {
-            name.to_lowercase().contains(&q)
-                || mail.map(|m| m.to_lowercase().contains(&q)).unwrap_or(false)
+            name.to_lowercase().contains(&q) || mail.is_some_and(|m| m.to_lowercase().contains(&q))
         };
         let mut lines_owned = 0u64;
         let mut regions_owned = 0u64;
@@ -170,21 +169,18 @@ pub fn provenance(root: &Path, opts: &ProvenanceOptions) -> Result<Value, String
                 regions_owned += 1;
                 if let (Some(epoch), Some(iso)) =
                     (region.author_time_epoch, region.author_time_iso.as_ref())
-                    && last_touch.as_ref().map(|(e, _)| epoch > *e).unwrap_or(true)
+                    && is_newer_touch(last_touch.as_ref(), epoch)
                 {
                     last_touch = Some((epoch, iso.clone()));
                 }
             }
         }
-        let introduced_file = introduced_by
-            .as_ref()
-            .map(|c| {
-                matches(
-                    c["author"].as_str().unwrap_or(""),
-                    c["author_mail"].as_str(),
-                )
-            })
-            .unwrap_or(false);
+        let introduced_file = introduced_by.as_ref().is_some_and(|c| {
+            matches(
+                c["author"].as_str().unwrap_or(""),
+                c["author_mail"].as_str(),
+            )
+        });
         json!({
             "author_query": query,
             "lines_owned": lines_owned,
@@ -272,16 +268,13 @@ fn parse_porcelain_regions(text: &str) -> Vec<Region> {
     // Group contiguous runs: same commit AND consecutive line numbers.
     let mut regions: Vec<Region> = Vec::new();
     for (final_line, oid) in line_oids {
-        let extend = regions
-            .last()
-            .map(|r| {
-                r.end_line + 1 == final_line
-                    && match (&r.oid, oid.as_str()) {
-                        (Some(prev), o) => prev == o,
-                        (None, o) => o == ZERO_OID,
-                    }
-            })
-            .unwrap_or(false);
+        let extend = regions.last().is_some_and(|r| {
+            r.end_line + 1 == final_line
+                && match (&r.oid, oid.as_str()) {
+                    (Some(prev), o) => prev == o,
+                    (None, o) => o == ZERO_OID,
+                }
+        });
         if extend {
             regions.last_mut().expect("just checked").end_line = final_line;
             continue;
@@ -428,9 +421,81 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
 }
 
+/// True when `epoch` should replace the recorded last touch: nothing
+/// recorded yet, or strictly newer (a tie keeps the first region seen).
+fn is_newer_touch(last: Option<&(i64, String)>, epoch: i64) -> bool {
+    last.is_none_or(|(e, _)| epoch > *e)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_touch_moves_only_to_a_strictly_newer_epoch() {
+        let at = |e: i64| (e, format!("iso-{e}"));
+        assert!(is_newer_touch(None, 5));
+        assert!(is_newer_touch(Some(&at(10)), 20));
+        assert!(
+            !is_newer_touch(Some(&at(10)), 10),
+            "a tie keeps the first region"
+        );
+        assert!(!is_newer_touch(Some(&at(10)), 5));
+    }
+
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// Consecutive lines of one commit fold into one region; a gap or a
+    /// different commit starts a new one.
+    #[test]
+    fn porcelain_regions_group_contiguous_lines_of_the_same_commit() {
+        let lines = [
+            format!("{A} 1 1 2"),
+            "author Ann".to_string(),
+            "author-mail <ann@example.com>".to_string(),
+            "author-time 1000".to_string(),
+            "author-tz +0000".to_string(),
+            "summary first".to_string(),
+            "\tline one".to_string(),
+            format!("{A} 2 2"),
+            "\tline two".to_string(),
+            format!("{B} 3 3 1"),
+            "author Bob".to_string(),
+            "author-mail <bob@example.com>".to_string(),
+            "author-time 2000".to_string(),
+            "author-tz +0000".to_string(),
+            "summary second".to_string(),
+            "\tline three".to_string(),
+            format!("{A} 4 5 1"),
+            "\tline five".to_string(),
+            format!("{ZERO_OID} 6 6 2"),
+            "author Not Committed Yet".to_string(),
+            "\tline six".to_string(),
+            format!("{ZERO_OID} 7 7"),
+            "\tline seven".to_string(),
+        ];
+        let text = lines.join("\n");
+        let regions = parse_porcelain_regions(&text);
+        let spans: Vec<(u32, u32, Option<&str>)> = regions
+            .iter()
+            .map(|r| (r.start_line, r.end_line, r.oid.as_deref()))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![
+                (1, 2, Some(A)),
+                (3, 3, Some(B)),
+                (5, 5, Some(A)),
+                (6, 7, None)
+            ]
+        );
+        assert_eq!(regions[3].author, "uncommitted");
+        assert_eq!(regions[0].author, "Ann");
+        assert_eq!(regions[0].author_mail.as_deref(), Some("ann@example.com"));
+        assert_eq!(regions[0].author_time_epoch, Some(1000));
+        assert_eq!(regions[1].summary.as_deref(), Some("second"));
+    }
 
     #[test]
     fn epoch_to_iso_utc() {

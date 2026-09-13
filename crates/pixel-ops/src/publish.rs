@@ -122,8 +122,7 @@ fn run_body(
     {
         lock.release();
         return Err(format!(
-            "STALE_STATE: expected head {}, got {:?}",
-            expected, current_head
+            "STALE_STATE: expected head {expected}, got {current_head:?}"
         ));
     }
 
@@ -476,7 +475,7 @@ mod tests {
     fn make_opts(msg: &str, files: &[&str]) -> PublishOptions {
         PublishOptions {
             message: msg.to_string(),
-            files: files.iter().map(|s| s.to_string()).collect(),
+            files: files.iter().map(ToString::to_string).collect(),
             expected_head: None,
             expected_fingerprints: std::collections::BTreeMap::new(),
             push: false,
