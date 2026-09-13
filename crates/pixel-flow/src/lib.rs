@@ -94,8 +94,7 @@ pub fn flow(action: &FlowAction) -> Result<Value, String> {
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 fn save_flow(
@@ -222,8 +221,7 @@ fn list_flows(tag: &Option<String>) -> Result<Value, String> {
             .filter(|v| {
                 v["tags"]
                     .as_array()
-                    .map(|tags| tags.iter().any(|tag| tag.as_str() == Some(t.as_str())))
-                    .unwrap_or(false)
+                    .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some(t.as_str())))
             })
             .collect();
         return Ok(Value::Array(filtered));
@@ -344,4 +342,91 @@ fn show_flow(name: &str) -> Result<Value, String> {
         "name": flow.name,
         "output": pretty,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::FlowStep;
+
+    /// `created_unix`/`revised_unix` on a saved flow come from here; a
+    /// placeholder would date every flow to 1970 (or to the future).
+    #[test]
+    fn now_unix_is_the_current_unix_epoch_in_seconds() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after 1970")
+            .as_secs() as i64;
+        let ts = now_unix();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after 1970")
+            .as_secs() as i64;
+        assert!(ts >= before && ts <= after, "{before} <= {ts} <= {after}");
+        assert!(ts > 1_577_836_800, "{ts}"); // 2020-01-01T00:00:00Z
+    }
+
+    fn tagged(name: &str, tags: &[&str]) -> Flow {
+        Flow {
+            name: name.into(),
+            title: name.into(),
+            description: String::new(),
+            tags: tags.iter().map(|t| (*t).to_string()).collect(),
+            url: None,
+            tab: None,
+            success_url_contains: vec![],
+            success_url_excludes: vec![],
+            mfa_keywords: vec![],
+            stale_tab_cleanup: vec![],
+            preconditions: vec![],
+            vars: vec![],
+            steps: vec![FlowStep {
+                action: "snapshot".into(),
+                ..Default::default()
+            }],
+            success_signal: None,
+            created_unix: 1,
+            revised_unix: 1,
+            revision: 1,
+            proven: false,
+        }
+    }
+
+    #[test]
+    fn list_flows_returns_every_flow_or_only_those_carrying_the_tag() {
+        let _guard = store::ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
+        }
+        store::save(&tagged("alpha", &["auth", "github"])).unwrap();
+        store::save(&tagged("beta", &["auth"])).unwrap();
+        store::save(&tagged("gamma", &[])).unwrap();
+        let names = |v: Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|f| f["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            names(list_flows(&None).unwrap()),
+            ["alpha", "beta", "gamma"]
+        );
+        assert_eq!(
+            names(list_flows(&Some("auth".into())).unwrap()),
+            ["alpha", "beta"]
+        );
+        assert_eq!(
+            names(list_flows(&Some("github".into())).unwrap()),
+            ["alpha"]
+        );
+        assert!(names(list_flows(&Some("none".into())).unwrap()).is_empty());
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+    }
 }

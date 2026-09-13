@@ -157,8 +157,7 @@ fn check_var_refs(step: &FlowStep, var_names: &[&str]) -> Result<(), String> {
         && !var_names.contains(&v.as_str())
     {
         return Err(format!(
-            "step references value_var '{}' which is not declared in vars",
-            v
+            "step references value_var '{v}' which is not declared in vars"
         ));
     }
     for sub in &step.then {
