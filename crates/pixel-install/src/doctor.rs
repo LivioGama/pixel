@@ -309,7 +309,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     .iter()
                     .map(|(shell, path)| {
                         format!(
-                            "{} ({shell}, not loaded by {}; run `pixel uninstall --shell {shell}`, or pass `--shell {shell}` if that is the shell you launch `claude` from)",
+                            "{} ({shell}, not loaded by {}; run `pixel uninstall --wrappers-only --shell {shell}`, or pass `--shell {shell}` if that is the shell you launch `claude` from)",
                             path.display(),
                             kind.as_str()
                         )

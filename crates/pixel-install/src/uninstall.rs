@@ -37,6 +37,11 @@ pub struct UninstallOptions {
     /// If true, compute and report every step's outcome exactly as a real
     /// run would, but perform no filesystem writes.
     pub dry_run: bool,
+    /// Remove only the shell wrapper block of `shell` and leave every other
+    /// artifact in place: the way out of a block written for a shell that
+    /// never loads it (`pixel doctor` names the file) without losing the
+    /// install that works.
+    pub wrappers_only: bool,
 }
 
 /// Markers that identify pixel-authored hook entries in any settings file.
@@ -63,6 +68,24 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         .unwrap_or_else(|| home.join(".local").join("bin").join("pixel"));
 
     let dry_run = options.dry_run;
+    if options.wrappers_only {
+        let step = install::remove_shell_wrappers(&home, options.shell.as_deref(), dry_run)?;
+        let ok = step.status != CheckStatus::Red;
+        let summary = InstallSummary {
+            green: usize::from(step.status == CheckStatus::Green),
+            yellow: usize::from(step.status == CheckStatus::Yellow),
+            red: usize::from(!ok),
+        };
+        return Ok(InstallReport {
+            version: "v1".into(),
+            ok,
+            executable_path: binary_path.display().to_string(),
+            home: home.display().to_string(),
+            dry_run,
+            steps: vec![step],
+            summary,
+        });
+    }
     let steps = vec![
         // 1. Remove shell wrappers from the shell's profile (~/.zshrc,
         //    ~/.bashrc, or fish's ~/.config/fish/conf.d/pixel.fish).

@@ -891,6 +891,7 @@ fn uninstall_removes_managed_block_and_preserves_user_content() {
         binary_path: Some(home.join("pixel")),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     };
     let report = uninstall(&uninstall_opts).expect("uninstall");
     assert!(report.ok, "uninstall should succeed");
@@ -960,6 +961,7 @@ fn uninstall_removes_claude_hooks_and_scripts() {
         binary_path: Some(home.join("pixel")),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     };
     uninstall(&uninstall_opts).expect("uninstall");
 
@@ -1003,6 +1005,7 @@ fn uninstall_removes_binary() {
         binary_path: Some(bin.clone()),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     };
     uninstall(&opts).expect("uninstall");
 
@@ -1029,6 +1032,7 @@ fn uninstall_is_idempotent() {
         binary_path: Some(home.join("pixel")),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     };
     let r1 = uninstall(&uninstall_opts).expect("uninstall 1");
     assert!(r1.ok);
@@ -1066,6 +1070,7 @@ fn uninstall_dry_run_does_not_modify() {
         binary_path: Some(bin.clone()),
         dry_run: true,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     };
     let report = uninstall(&uninstall_opts).expect("dry-run uninstall");
     assert!(report.dry_run, "report should be dry-run");
@@ -1117,6 +1122,7 @@ fn uninstall_removes_codex_hooks_preserving_others() {
         binary_path: Some(home.join("pixel")),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     };
     uninstall(&opts).expect("uninstall");
 
@@ -1148,6 +1154,7 @@ fn uninstall_removes_rule_source() {
         binary_path: Some(home.join("pixel")),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     };
     uninstall(&opts).expect("uninstall");
 
@@ -1208,6 +1215,7 @@ fn routing_full_install_rtk_round_trip_preserves_foreign_hooks() {
         binary_path: Some(exe),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     })
     .unwrap();
     let restored: serde_json::Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
@@ -1506,7 +1514,9 @@ fn doctor_flags_a_pixel_block_in_another_shells_profile_as_yellow() {
         stray.summary
     );
     assert!(
-        stray.summary.contains("`pixel uninstall --shell zsh`")
+        stray
+            .summary
+            .contains("`pixel uninstall --wrappers-only --shell zsh`")
             && stray.summary.contains("`--shell zsh`"),
         "{}",
         stray.summary
@@ -1534,6 +1544,67 @@ fn doctor_flags_a_pixel_block_in_another_shells_profile_as_yellow() {
         from_zsh.detail.as_ref().unwrap()["stray_profiles"][0]["shell"],
         "fish"
     );
+}
+
+/// The way out doctor names: only the named shell's block goes, the
+/// working install (the other shell's block, the prompt files) stays.
+#[test]
+fn uninstall_wrappers_only_removes_one_shells_block_and_nothing_else() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, FISH_SHELL);
+    install_for_shell(home, "/bin/zsh");
+    let prompt = home.join(".local/share/pixel/agent-prompt.md");
+    assert!(prompt.is_file(), "fixture: the prompt is installed");
+    assert!(
+        fs::read_to_string(home.join(".zshrc"))
+            .unwrap()
+            .contains("pixel-managed")
+    );
+
+    let report = uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some("/bin/zsh".into()),
+        wrappers_only: true,
+        ..Default::default()
+    })
+    .expect("uninstall runs");
+    assert!(report.ok, "{report:?}");
+    assert_eq!(
+        report.steps.len(),
+        1,
+        "only the wrapper step ran: {report:?}"
+    );
+    assert_eq!(report.steps[0].id, "shell-wrappers");
+
+    assert!(
+        !fs::read_to_string(home.join(".zshrc"))
+            .unwrap()
+            .contains("pixel-managed"),
+        "the zsh block is gone"
+    );
+    assert!(
+        fs::read_to_string(fish_dropin(home))
+            .unwrap()
+            .contains("pixel-managed"),
+        "the fish block stays"
+    );
+    assert!(prompt.is_file(), "the prompt files stay");
+
+    // Doctor now reads the fish install back green with no stray.
+    let check = doctor(&DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: None,
+        shell: Some(FISH_SHELL.into()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        ..Default::default()
+    })
+    .expect("doctor runs")
+    .checks
+    .into_iter()
+    .find(|c| c.id == "install.shell-wrappers")
+    .unwrap();
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
 }
 
 #[test]
@@ -1584,6 +1655,7 @@ fn uninstall_deletes_the_fish_dropin_it_created() {
         binary_path: None,
         dry_run: false,
         shell: Some(FISH_SHELL.into()),
+        ..Default::default()
     })
     .expect("uninstall");
 
@@ -2225,6 +2297,7 @@ fn uninstall_removes_the_subagent_prompt() {
         binary_path: None,
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     })
     .expect("uninstall");
 

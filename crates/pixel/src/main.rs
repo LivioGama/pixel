@@ -724,9 +724,15 @@ enum Command {
         /// Path to the pixel binary to remove (default: ~/.local/bin/pixel).
         #[arg(long)]
         binary_path: Option<PathBuf>,
-        /// Shell whose wrapper block should be removed (default: $SHELL).
+        /// Shell whose wrapper block should be removed (default: the
+        /// account's login shell, then $SHELL).
         #[arg(long)]
         shell: Option<String>,
+        /// Remove only that shell's wrapper block and keep everything else
+        /// installed: the fix for a block `pixel doctor` reports in a
+        /// profile the login shell never loads.
+        #[arg(long)]
+        wrappers_only: bool,
     },
     /// Check that a release tag is consistent with the tree before anything
     /// is built or published: crates/pixel/Cargo.toml carries the version,
@@ -4572,12 +4578,14 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             dry_run,
             binary_path,
             shell,
+            wrappers_only,
         } => {
             let report =
                 pixel_install::uninstall::uninstall(&pixel_install::uninstall::UninstallOptions {
                     binary_path,
                     dry_run,
                     shell,
+                    wrappers_only,
                     ..Default::default()
                 })
                 .map_err(|e| e.to_string())?;
