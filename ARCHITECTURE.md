@@ -49,6 +49,7 @@ binary, and Pixel is deliberately a CLI plus hooks, not an MCP server.
 | `pixel-recall` | Machine-wide LLM transcript retrieval: ingests Claude Code, Codex, opencode, Devin, Cursor, zcode, and Gemini transcript stores into one SQLite corpus, then serves lexical and semantic search. Owns the embedding backends (`fastembed` ONNX and pure-Rust `model2vec`, both behind features). | index, rank |
 | `pixel-session` | One-look error capture: every error from every layer lands at throw time in one structured local SQLite sink, queryable in one call. | none |
 | `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel log` and `pixel savings` reporting. | none |
+| `pixel-release` | `pixel release-check`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
 | `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. | none |
 | `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`: deploys the bundled prompt, the Claude shell wrapper and the Codex `developer_instructions` config key, backs up changed files; retains legacy hook/routing and cleanup implementations without activating them. | proto, daemon, index, facts |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index, daemon, proto, recall |
@@ -379,7 +380,7 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 ## Release gate
 
 `pixel release-check <version|tag> [--repo <path>] [--json]`
-(`crates/pixel/src/release_check.rs`) is the first job of
+(the `pixel-release` crate) is the first job of
 `.github/workflows/release.yml` and a maintainer's last local step: it
 reads `Cargo.toml`, every member's manifest, `Cargo.lock` and
 `CHANGELOG.md` and reports three checks (`cli-version`, `cargo-lock`,
