@@ -87,6 +87,10 @@ fn machine_sources() -> Vec<RecallSource> {
             root: h(".local/share/devin/cli"),
             adapter: Box::new(devin::Adapter::new()),
         },
+        RecallSource {
+            root: h(".pi/agent/sessions"),
+            adapter: Box::new(pi::Adapter::new()),
+        },
     ]
 }
 
@@ -563,7 +567,7 @@ mod tests {
         assert_eq!(fx.turns(), 1);
     }
 
-    /// The machine's sources are the seven stores under `HOME`, one adapter
+    /// The machine's sources are the eight stores under `HOME`, one adapter
     /// each; an empty list would make the daemon watch and sweep nothing.
     #[test]
     fn machine_sources_cover_every_agent_store_under_home() {
@@ -573,7 +577,7 @@ mod tests {
         assert_eq!(
             agents,
             vec![
-                "claude", "codex", "cursor", "devin", "gemini", "opencode", "zcode"
+                "claude", "codex", "cursor", "devin", "gemini", "opencode", "pi", "zcode"
             ]
         );
         let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
