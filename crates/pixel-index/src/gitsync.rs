@@ -124,12 +124,12 @@ mod tests {
     /// subprocess-per-file cost, so it stays fast and deterministic.)
     #[test]
     fn ls_files_sees_every_tracked_file_past_the_old_1mib_cap_for_index_building() {
+        const N: usize = 5300; // ~5300 * ~250 bytes ≈ 1.3 MiB of `ls-files -z` output
         let root = tmpdir("indexset-large-tree");
         init_repo(&root);
 
         let dir = format!("tracked-{}", "x".repeat(240));
         std::fs::create_dir_all(root.join(&dir)).unwrap();
-        const N: usize = 5300; // ~5300 * ~250 bytes ≈ 1.3 MiB of `ls-files -z` output
         for i in 0..N {
             std::fs::write(root.join(&dir).join(format!("f{i:05}.txt")), b"filler").unwrap();
         }
@@ -162,6 +162,7 @@ mod tests {
     /// dirty").
     #[test]
     fn status_porcelain_sees_a_large_untracked_tree_past_the_old_1mib_cap() {
+        const N: usize = 5300;
         let root = tmpdir("gitsync-status-large");
         init_repo(&root);
         std::fs::write(root.join("tracked.txt"), b"hello").unwrap();
@@ -170,7 +171,6 @@ mod tests {
 
         let dir = format!("untracked-{}", "x".repeat(240));
         std::fs::create_dir_all(root.join(&dir)).unwrap();
-        const N: usize = 5300;
         for i in 0..N {
             std::fs::write(root.join(&dir).join(format!("g{i:05}.txt")), b"y").unwrap();
         }

@@ -151,8 +151,7 @@ fn save_plain_sig(gpx_dir: &Path, sig: &str) {
 /// can never expose content outside the repository through the verifier.
 fn is_regular_file(p: &Path) -> bool {
     std::fs::symlink_metadata(p)
-        .map(|metadata| metadata.file_type().is_file() && metadata.len() <= MAX_FILE_BYTES)
-        .unwrap_or(false)
+        .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() <= MAX_FILE_BYTES)
 }
 
 /// Read + extract one blob straight from the git object store at `commit_oid`.
@@ -616,6 +615,35 @@ mod tests {
     use crate::weights::Crc32Weigher;
     use std::process::Command;
 
+    /// The verifier reads only what `is_regular_file` admits: a symlink
+    /// (content outside the repository), a directory or an oversized file
+    /// must all be refused, and a plain file under the cap accepted.
+    #[test]
+    fn is_regular_file_admits_only_plain_files_under_the_size_cap() {
+        let dir = std::env::temp_dir().join(format!("gpx-regular-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("plain.txt");
+        std::fs::write(&plain, b"hello").unwrap();
+        assert!(is_regular_file(&plain));
+        assert!(!is_regular_file(&dir));
+        assert!(!is_regular_file(&dir.join("missing.txt")));
+        // A sparse file just past the cap: no 4 MiB write needed.
+        let big = dir.join("big.bin");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        assert!(!is_regular_file(&big));
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.txt");
+            std::os::unix::fs::symlink(&plain, &link).unwrap();
+            assert!(!is_regular_file(&link));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn git(dir: &Path, args: &[&str]) {
         let out = Command::new("git")
             .arg("-C")
@@ -627,7 +655,7 @@ mod tests {
             .env("GIT_COMMITTER_EMAIL", "t@t")
             .output()
             .unwrap();
-        assert!(out.status.success(), "git {args:?}: {:?}", out);
+        assert!(out.status.success(), "git {args:?}: {out:?}");
     }
 
     fn ex() -> Box<dyn GramExtractor> {
