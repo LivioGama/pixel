@@ -1576,6 +1576,15 @@ fn uninstall_wrappers_only_removes_one_shells_block_and_nothing_else() {
         "only the wrapper step ran: {report:?}"
     );
     assert_eq!(report.steps[0].id, "shell-wrappers");
+    assert_eq!(
+        (
+            report.summary.green,
+            report.summary.yellow,
+            report.summary.red
+        ),
+        (1, 0, 0),
+        "{report:?}"
+    );
 
     assert!(
         !fs::read_to_string(home.join(".zshrc"))

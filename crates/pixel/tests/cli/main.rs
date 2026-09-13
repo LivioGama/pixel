@@ -16,6 +16,7 @@ mod rescue_cli;
 mod search_compat_cli;
 mod support;
 mod targets_cli;
+mod uninstall_cli;
 #[cfg(unix)]
 mod upgrade_cli;
 mod version_cli;

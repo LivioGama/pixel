@@ -70,12 +70,12 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
     let dry_run = options.dry_run;
     if options.wrappers_only {
         let step = install::remove_shell_wrappers(&home, options.shell.as_deref(), dry_run)?;
-        let ok = step.status != CheckStatus::Red;
         let summary = InstallSummary {
             green: usize::from(step.status == CheckStatus::Green),
             yellow: usize::from(step.status == CheckStatus::Yellow),
-            red: usize::from(!ok),
+            red: usize::from(step.status == CheckStatus::Red),
         };
+        let ok = summary.red == 0;
         return Ok(InstallReport {
             version: "v1".into(),
             ok,
