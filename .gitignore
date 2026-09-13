@@ -5,7 +5,9 @@
 .devin/
 
 # tool-local agent config dirs
-.claude/
+# Tool-local config stays out, the committed rules symlink stays in.
+.claude/*
+!.claude/rules
 .codex/
 .cursor/
 .gemini/
