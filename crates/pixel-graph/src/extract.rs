@@ -143,7 +143,7 @@ fn assign_enclosing(fx: &mut FileExtraction) {
         for (i, s) in fx.symbols.iter().enumerate() {
             if s.start_line <= call.site_line && call.site_line <= s.end_line {
                 let span = s.end_line - s.start_line;
-                if best.map(|(_, b)| span < b).unwrap_or(true) {
+                if best.is_none_or(|(_, b)| span < b) {
                     best = Some((i, span));
                 }
             }
@@ -288,15 +288,12 @@ fn walk_ts(w: &mut Walker, node: Node, depth: usize) {
             }
         }
         "variable_declarator" => {
-            let is_fn = node
-                .child_by_field_name("value")
-                .map(|v| {
-                    matches!(
-                        v.kind(),
-                        "arrow_function" | "function_expression" | "function"
-                    )
-                })
-                .unwrap_or(false);
+            let is_fn = node.child_by_field_name("value").is_some_and(|v| {
+                matches!(
+                    v.kind(),
+                    "arrow_function" | "function_expression" | "function"
+                )
+            });
             if is_fn
                 && let Some(name) = field_text(w, node, "name")
                 && !name.contains(['{', '['])
@@ -963,7 +960,9 @@ fn walk_ruby(w: &mut Walker, node: Node, depth: usize) {
 /// when the first argument is missing, non-literal, or interpolated.
 fn ruby_first_string_argument(w: &Walker, call: Node) -> Option<String> {
     let args = call.child_by_field_name("arguments")?;
-    let first = each_child(args).into_iter().find(|c| c.is_named())?;
+    let first = each_child(args)
+        .into_iter()
+        .find(tree_sitter::Node::is_named)?;
     if first.kind() != "string" {
         return None;
     }
@@ -1213,8 +1212,63 @@ fn generic_import(w: &mut Walker, node: Node) {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_file;
+    use super::{FileExtraction, RawCall, RawSymbol, assign_enclosing, extract_file};
     use crate::store::SymbolKind;
+
+    fn sym(name: &str, start_line: u32, end_line: u32) -> RawSymbol {
+        RawSymbol {
+            name: name.to_string(),
+            qualified: name.to_string(),
+            kind: SymbolKind::Function,
+            start_line,
+            end_line,
+            sig: String::new(),
+        }
+    }
+
+    fn call(site_line: u32) -> RawCall {
+        RawCall {
+            callee_name: "f".to_string(),
+            receiver: None,
+            site_line,
+            enclosing_index: None,
+        }
+    }
+
+    /// A call site belongs to the smallest symbol whose line range holds it;
+    /// among equal spans the first declared wins; outside every symbol it
+    /// has no owner.
+    #[test]
+    fn assign_enclosing_picks_the_smallest_containing_symbol() {
+        let mut fx = FileExtraction {
+            lang: "rs",
+            symbols: vec![
+                sym("outer", 90, 100),
+                sym("inner", 95, 96),
+                sym("a", 1, 10),
+                sym("b", 5, 14),
+            ],
+            calls: vec![call(95), call(98), call(7), call(50)],
+            imports: vec![],
+        };
+        assign_enclosing(&mut fx);
+        let owners: Vec<Option<usize>> = fx.calls.iter().map(|c| c.enclosing_index).collect();
+        assert_eq!(owners, vec![Some(1), Some(0), Some(2), None]);
+    }
+
+    #[test]
+    fn typescript_arrow_and_function_expression_declarators_are_symbols() {
+        let source =
+            b"const arrow = () => 1;\nconst expr = function () { return 2; };\nconst value = 3;\n";
+        let extraction = extract_file("src/a.ts", source).unwrap();
+        let names: Vec<&str> = extraction.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"arrow"), "{names:?}");
+        assert!(names.contains(&"expr"), "{names:?}");
+        assert!(
+            !names.contains(&"value"),
+            "a plain value is not a symbol: {names:?}"
+        );
+    }
 
     #[test]
     fn rust_test_containers_do_not_enter_runtime_graph() {

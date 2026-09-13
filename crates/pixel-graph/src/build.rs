@@ -144,7 +144,7 @@ fn collect_files(root: &Path) -> Vec<(String, Vec<u8>)> {
         {
             break;
         }
-        let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+        let is_file = entry.file_type().is_some_and(|t| t.is_file());
         if !is_file {
             continue;
         }
@@ -212,7 +212,7 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
     let mut store = GraphStore::open(db_path)?;
 
     // Drop files that vanished since the last build.
-    let known: std::collections::HashSet<&str> = all_paths.iter().map(|s| s.as_str()).collect();
+    let known: std::collections::HashSet<&str> = all_paths.iter().map(String::as_str).collect();
     let stale: Vec<String> = store
         .files()?
         .into_iter()
@@ -329,7 +329,7 @@ fn tree_hashes(root: &Path) -> Vec<(String, u64)> {
     let mut entries: Vec<(String, u64)> = walker
         .flatten()
         .filter_map(|entry| {
-            let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+            let is_file = entry.file_type().is_some_and(|t| t.is_file());
             if !is_file {
                 return None;
             }
@@ -505,13 +505,6 @@ fn update_files_unsigned(
     db_path: &Path,
     files: &[(&str, bool)],
 ) -> Result<(), BoxErr> {
-    if files.is_empty() {
-        return Ok(());
-    }
-    let mut store = GraphStore::open(db_path)?;
-    let mut all_changed_names: HashSet<String> = HashSet::new();
-    let known_before: HashSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
-
     /// A changed file after pass 1: its row and symbols are in the store,
     /// its imports and calls wait for every file of the batch to exist.
     struct Staged {
@@ -520,6 +513,14 @@ fn update_files_unsigned(
         fx: FileExtraction,
         symbol_ids: Vec<i64>,
     }
+
+    if files.is_empty() {
+        return Ok(());
+    }
+    let mut store = GraphStore::open(db_path)?;
+    let mut all_changed_names: HashSet<String> = HashSet::new();
+    let known_before: HashSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
+
     let mut staged: Vec<Staged> = Vec::with_capacity(files.len());
 
     // Pass 1: files + symbols + concepts. Same split as `build_graph`: an
@@ -737,6 +738,7 @@ pub fn update_concepts(root: &Path, db_path: &Path, rel: &str) -> Result<(), Box
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resolve::{Decision, ResolveIndex};
     use crate::store::Tier;
 
     fn tmpdir(tag: &str) -> std::path::PathBuf {
@@ -1127,7 +1129,6 @@ mod tests {
         }
         // Stronger direct check via the resolver: a receiver call to a unique
         // name is downgraded to Probable.
-        use crate::resolve::{Decision, ResolveIndex};
         let idx = ResolveIndex::build(&store).unwrap();
         let b_id = store.file_by_path("b.ts").unwrap().unwrap().id;
         match idx.decide(b_id, "parse", Some("n")) {
@@ -1204,7 +1205,6 @@ mod tests {
         build_graph(&root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
-        use crate::resolve::{Decision, ResolveIndex};
         let idx = ResolveIndex::build(&store).unwrap();
         let b_id = store.file_by_path("b.ts").unwrap().unwrap().id;
 
@@ -1241,7 +1241,6 @@ mod tests {
         build_graph(&root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
-        use crate::resolve::{Decision, ResolveIndex};
         let idx = ResolveIndex::build(&store).unwrap();
         let b_id = store.file_by_path("b.ts").unwrap().unwrap().id;
         assert!(
