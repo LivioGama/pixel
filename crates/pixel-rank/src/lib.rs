@@ -563,10 +563,10 @@ fn filename_rank(all_paths: &[String], keywords: &[String]) -> Vec<(String, Vec<
 /// values in a bounded, stable range so RRF fusion inputs stay comparable.
 /// Purely deterministic — same candidate pool, same scores.
 fn idf_weight(kw: &str, content_hits: &BTreeMap<String, Vec<(String, u32)>>) -> f64 {
-    let df = content_hits.get(kw).map(|v| v.len()).unwrap_or(1).max(1);
+    let df = content_hits.get(kw).map_or(1, Vec::len).max(1);
     let n = content_hits
         .values()
-        .map(|v| v.len())
+        .map(Vec::len)
         .max()
         .unwrap_or(1)
         .max(1) as f64;
@@ -585,6 +585,7 @@ fn idf_weight(kw: &str, content_hits: &BTreeMap<String, Vec<(String, u32)>>) -> 
 fn content_rank(
     content_hits: &BTreeMap<String, Vec<(String, u32)>>,
 ) -> Vec<(String, Vec<(String, u32)>)> {
+    type ScoredRow = (i64, u64, String, Vec<(String, u32)>);
     struct Acc {
         per_kw: Vec<(String, u32)>,
         idf_sum: f64,
@@ -605,7 +606,6 @@ fn content_rank(
             acc.total += capped as u64;
         }
     }
-    type ScoredRow = (i64, u64, String, Vec<(String, u32)>);
     let mut scored: Vec<ScoredRow> = by_path
         .into_iter()
         .map(|(p, acc)| {
@@ -704,6 +704,33 @@ pub fn compute_targets(
     inputs: SignalInputs,
     opts: &TargetsOptions,
 ) -> TargetsReport {
+    /// Signal families (bitmask): S1 filename, S2 symbol, S3 content, S4
+    /// graph, S5 cluster. Lexical evidence is S1|S2|S3.
+    const LEXICAL_MASK: u8 = 0b111;
+    const S1S2_MASK: u8 = 0b011;
+    /// One fused candidate: RRF score, the signal families that hit it
+    /// (bitmask S1..S5) and the evidence shown to the caller.
+    #[derive(Default)]
+    struct Entry {
+        score: f64,
+        families: u8,
+        reasons: Vec<String>,
+        symbols: Vec<Value>,
+        exact_name_hit: bool,
+    }
+    fn bump<'m>(
+        fused: &'m mut HashMap<String, Entry>,
+        path: &str,
+        rank: usize,
+        weight: f64,
+        family: u8,
+    ) -> &'m mut Entry {
+        let e = fused.entry(path.to_string()).or_default();
+        e.score += weight / (RRF_K + rank as f64 + 1.0);
+        e.families |= family;
+        e
+    }
+
     let limit = opts.limit.clamp(1, MAX_LIMIT);
 
     // Broaden filename matching with semantically related terms without
@@ -723,27 +750,7 @@ pub fn compute_targets(
     let s5 = &inputs.cluster_neighbors;
 
     // Fuse.
-    #[derive(Default)]
-    struct Entry {
-        score: f64,
-        families: u8, // bitmask S1..S5
-        reasons: Vec<String>,
-        symbols: Vec<Value>,
-        exact_name_hit: bool,
-    }
     let mut fused: HashMap<String, Entry> = HashMap::new();
-    fn bump<'m>(
-        fused: &'m mut HashMap<String, Entry>,
-        path: &str,
-        rank: usize,
-        weight: f64,
-        family: u8,
-    ) -> &'m mut Entry {
-        let e = fused.entry(path.to_string()).or_default();
-        e.score += weight / (RRF_K + rank as f64 + 1.0);
-        e.families |= family;
-        e
-    }
 
     for (rank, (path, matched)) in s1.iter().enumerate() {
         let e = bump(&mut fused, path, rank, W_FILENAME, 1);
@@ -794,8 +801,6 @@ pub fn compute_targets(
     ordered.sort_by(|a, b| b.1.score.total_cmp(&a.1.score).then(a.0.cmp(&b.0)));
 
     // Tier assignment. fams = number of signal families; lexical = S1|S2|S3.
-    const LEXICAL_MASK: u8 = 1 | 2 | 4;
-    const S1S2_MASK: u8 = 1 | 2;
     let p2_cap = limit.div_ceil(4);
     let mut targets: Vec<TargetFile> = Vec::new();
     let mut p0 = 0usize;
@@ -1110,6 +1115,53 @@ mod tests {
         assert_eq!(report.targets[0].tier, "P0"); // filename + content = 2 families
         assert_eq!(report.targets[1].path, "src/b.rs");
         assert_eq!(report.targets[1].tier, "P1"); // content only
+    }
+
+    /// Reciprocal rank fusion: each family adds `weight / (k + rank + 1)`,
+    /// so rank 0 of a family scores `w / 61`, rank 1 `w / 62`, and a file
+    /// hit by two families sums both. The tiers, the P0 score gap and the
+    /// cross-family ordering all sit on this formula.
+    #[test]
+    fn fused_score_is_the_sum_of_reciprocal_ranks_per_family() {
+        let inputs = SignalInputs {
+            all_paths: vec!["src/a.rs".into(), "src/b.rs".into(), "src/zz.rs".into()],
+            cluster_neighbors: vec![
+                ("src/zz.rs".into(), "same cluster".into()),
+                ("src/b.rs".into(), "same cluster".into()),
+            ],
+            graph_neighbors: vec![("src/b.rs".into(), "calls".into())],
+            graph_available: true,
+            ..Default::default()
+        };
+        let q = TaskQuery {
+            keywords_truncated: false,
+            exact_tokens: vec![],
+            keywords: vec!["nothing".into()],
+        };
+        let report = compute_targets("t", &q, inputs, &TargetsOptions::default());
+        let score = |path: &str| {
+            report
+                .targets
+                .iter()
+                .find(|t| t.path == path)
+                .unwrap_or_else(|| panic!("{path} missing from {:?}", report.targets))
+                .score
+        };
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        assert!(
+            close(score("src/zz.rs"), W_CLUSTER / (RRF_K + 1.0)),
+            "{}",
+            score("src/zz.rs")
+        );
+        assert!(
+            close(
+                score("src/b.rs"),
+                W_GRAPH / (RRF_K + 1.0) + W_CLUSTER / (RRF_K + 2.0)
+            ),
+            "{}",
+            score("src/b.rs")
+        );
+        assert_eq!(report.targets[0].path, "src/b.rs");
     }
 
     #[test]
