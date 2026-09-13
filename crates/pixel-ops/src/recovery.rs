@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use pixel_git::GitRunner;
 
@@ -101,9 +102,7 @@ impl PublishRecoveryStore {
         if !dir.exists() {
             return false;
         }
-        std::fs::read_dir(&dir)
-            .map(|mut it| it.next().is_some())
-            .unwrap_or(false)
+        std::fs::read_dir(&dir).is_ok_and(|mut it| it.next().is_some())
     }
 }
 
@@ -116,7 +115,6 @@ impl Default for PublishRecoveryStore {
 /// Capture the git index checksum (sha256 of `.git/index`).
 pub fn index_checksum(repo_root: &Path) -> Option<String> {
     let bytes = std::fs::read(index_path(repo_root)).ok()?;
-    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     Some(hex::encode(hasher.finalize()))
@@ -288,5 +286,41 @@ mod tests {
             restored_index, expected_index,
             "index bytes must be byte-identical"
         );
+    }
+
+    /// The index checksum is what tells a recovery pass whether the index it
+    /// left behind is still the one it wrote.
+    #[test]
+    fn index_checksum_hashes_the_git_index_and_changes_when_it_does() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        assert_eq!(index_checksum(root), None, "no repository yet");
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join("a.txt"), b"a\n").unwrap();
+        git(&["add", "a.txt"]);
+        let first = index_checksum(root).expect("index exists after add");
+        assert_eq!(first.len(), 64);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()), "{first}");
+        assert_eq!(
+            index_checksum(root).as_deref(),
+            Some(first.as_str()),
+            "stable"
+        );
+        std::fs::write(root.join("b.txt"), b"b\n").unwrap();
+        git(&["add", "b.txt"]);
+        assert_ne!(index_checksum(root).unwrap(), first);
     }
 }

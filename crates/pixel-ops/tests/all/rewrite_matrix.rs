@@ -89,7 +89,7 @@ fn fixture(push_feat: bool) -> Fixture {
 
 fn opts(onto: Option<&str>, push: bool) -> RewriteOptions {
     RewriteOptions {
-        onto: onto.map(|s| s.to_string()),
+        onto: onto.map(ToString::to_string),
         message: None,
         push,
         remote: "origin".to_string(),

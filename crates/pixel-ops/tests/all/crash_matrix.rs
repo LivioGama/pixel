@@ -64,7 +64,9 @@ impl Drop for XdgEnvGuard {
 }
 
 fn lock_env(state_dir: &Path) -> (std::sync::MutexGuard<'static, ()>, XdgEnvGuard) {
-    let guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // SAFETY: `ENV_GUARD` serializes all callers, so the env-var write is not
     // racy with other tests in this binary.
     unsafe {
@@ -118,7 +120,7 @@ fn git(root: &Path, args: &[&str]) -> String {
         .arg(root)
         .args(args)
         .output()
-        .unwrap_or_else(|e| panic!("git {:?}: {e}", args));
+        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
     assert!(
         output.status.success(),
         "git -C {} {:?} failed (exit {:?})\nstdout: {}\nstderr: {}",
@@ -278,8 +280,6 @@ fn expect_unrelated_state(root: &Path) {
 }
 
 fn assert_no_leftover_recovery(state_root: &Path) {
-    let dir = state_root.join("publish-recovery");
-    let mut leftover: Vec<PathBuf> = Vec::new();
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -292,6 +292,8 @@ fn assert_no_leftover_recovery(state_root: &Path) {
             }
         }
     }
+    let dir = state_root.join("publish-recovery");
+    let mut leftover: Vec<PathBuf> = Vec::new();
     if dir.exists() {
         walk(&dir, &mut leftover);
     }

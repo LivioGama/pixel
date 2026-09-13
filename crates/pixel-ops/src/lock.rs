@@ -150,8 +150,7 @@ fn is_pid_alive(pid: u32) -> bool {
 fn iso_now() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     format!("{secs}")
 }
 
@@ -209,5 +208,11 @@ mod tests {
         // Should recover and acquire.
         let mut lock = RepositoryLock::acquire_with_state_root(common, dir.path()).unwrap();
         lock.release();
+    }
+
+    #[test]
+    fn iso_now_is_the_current_unix_epoch_in_seconds() {
+        let ts: u64 = iso_now().parse().expect("digits");
+        assert!(ts > 1_577_836_800, "{ts}"); // 2020-01-01T00:00:00Z
     }
 }

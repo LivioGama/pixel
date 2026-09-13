@@ -33,7 +33,9 @@ fn with_isolated_state<T>(f: impl FnOnce() -> T) -> T {
     // Recover from poison: one test's assertion failure must not cascade
     // into every other test in this file failing with an unrelated
     // PoisonError, which would hide their real (possibly passing) results.
-    let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let state_dir = TempDir::new().unwrap();
     // SAFETY: process-local env var, guarded by ENV_GUARD's mutex.
     unsafe {

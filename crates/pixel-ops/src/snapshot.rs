@@ -168,8 +168,7 @@ fn parse_iso_ms(s: &str) -> Option<u64> {
 fn current_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 #[cfg(test)]
@@ -184,8 +183,7 @@ mod tests {
         }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis().to_string())
-            .unwrap_or_else(|_| "0".to_string());
+            .map_or_else(|_| "0".to_string(), |d| d.as_millis().to_string());
         SnapshotRecord {
             schema_version: 1,
             root: root.to_string(),
@@ -238,5 +236,25 @@ mod tests {
         let store = SnapshotStore::with_state_root(dir.path().to_path_buf());
         assert!(store.read("/repo", "badtoken").is_none());
         assert!(store.read("/repo", "ZZZZZZZZZZZZ").is_none());
+    }
+
+    /// Timestamps written here are compared with wall-clock time by their
+    /// readers; a placeholder (0, 1) would date every entry to 1970.
+    #[test]
+    fn current_unix_ms_is_the_current_unix_epoch_in_milliseconds() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let now = current_unix_ms();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!(
+            now >= before && now <= after,
+            "{before} <= {now} <= {after}"
+        );
+        assert!(now > 1_577_836_800_000, "{now}"); // 2020-01-01T00:00:00Z
     }
 }

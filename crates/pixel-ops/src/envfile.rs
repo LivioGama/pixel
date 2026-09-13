@@ -79,8 +79,7 @@ fn resolve_file(root: &Path, file: &Path) -> PathBuf {
 fn sanitize_rel(root: &Path, file: &Path) -> String {
     let rel = file
         .strip_prefix(root)
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|_| file.to_path_buf());
+        .map_or_else(|_| file.to_path_buf(), std::path::Path::to_path_buf);
     rel.to_string_lossy()
         .trim_start_matches(['/', '.'])
         .replace(['/', '\\'], "__")
@@ -271,13 +270,11 @@ fn inventory(root: &Path) -> Result<Value, String> {
         let keys = key_names(&content);
         let line_count = split_lines(&content).len();
         let snap_dir = snapshot_dir_for(root, &path);
-        let snapshot_count = fs::read_dir(&snap_dir)
-            .map(|it| it.filter_map(|e| e.ok()).count())
-            .unwrap_or(0);
+        let snapshot_count =
+            fs::read_dir(&snap_dir).map_or(0, |it| it.filter_map(std::result::Result::ok).count());
         let rel = path
             .strip_prefix(root)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| path.display().to_string());
+            .map_or_else(|_| path.display().to_string(), |p| p.display().to_string());
         files.push(json!({
             "path": rel,
             "keys": keys,
@@ -299,11 +296,11 @@ fn walk_env_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.filter_map(|e| e.ok()) {
+    for entry in entries.filter_map(std::result::Result::ok) {
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
         if is_dir {
             if matches!(name.as_ref(), "node_modules" | ".git" | "target" | ".pixel") {
                 continue;
@@ -434,7 +431,7 @@ fn restore(root: &Path, file: &Path, snapshot: Option<&str>) -> Result<Value, St
                         dir.display()
                     )
                 })?
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
                 .map(|e| e.file_name().to_string_lossy().to_string())
                 .collect();
             ids.sort();
@@ -474,7 +471,7 @@ fn snapshots(root: &Path, file: &Path) -> Result<Value, String> {
     let dir = snapshot_dir_for(root, &path);
     let mut ids: Vec<String> = match fs::read_dir(&dir) {
         Ok(it) => it
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect(),
         Err(_) => Vec::new(),
@@ -483,12 +480,11 @@ fn snapshots(root: &Path, file: &Path) -> Result<Value, String> {
     let mut list = Vec::new();
     for id in ids {
         let snap_path = dir.join(&id);
-        let bytes = fs::metadata(&snap_path).map(|m| m.len()).unwrap_or(0);
+        let bytes = fs::metadata(&snap_path).map_or(0, |m| m.len());
         let keys = fs::read(&snap_path)
             .ok()
             .and_then(|b| String::from_utf8(b).ok())
-            .map(|s| key_names(&s).len())
-            .unwrap_or(0);
+            .map_or(0, |s| key_names(&s).len());
         list.push(json!({ "id": id, "keys": keys, "bytes": bytes }));
     }
     Ok(json!({
@@ -505,7 +501,7 @@ fn check(root: &Path, file: &Path, require: &[String]) -> Result<Value, String> 
     } else {
         (false, Vec::new())
     };
-    let key_set: std::collections::HashSet<&str> = keys.iter().map(|s| s.as_str()).collect();
+    let key_set: std::collections::HashSet<&str> = keys.iter().map(String::as_str).collect();
     let mut present = Vec::new();
     let mut missing = Vec::new();
     for req in require {
@@ -571,5 +567,28 @@ mod tests {
         assert!(ts.ends_with('Z'));
         assert_eq!(ts.len(), "20260831T120000.123456789Z".len());
         assert!(ts.starts_with("20"));
+    }
+
+    #[test]
+    fn sanitize_rel_flattens_the_repo_relative_path_into_one_component() {
+        let root = Path::new("/repo");
+        assert_eq!(
+            sanitize_rel(root, Path::new("/repo/apps/web/.env.local")),
+            "apps__web__.env.local"
+        );
+        assert_eq!(
+            sanitize_rel(root, Path::new("apps/web/.env")),
+            "apps__web__.env"
+        );
+        assert_eq!(sanitize_rel(root, Path::new("/repo/.env")), "env");
+        assert_eq!(
+            sanitize_rel(root, Path::new("/elsewhere/.env")),
+            "elsewhere__.env"
+        );
+        assert_eq!(
+            sanitize_rel(root, Path::new("a/../b/.env")),
+            "a_____b__.env"
+        );
+        assert!(!sanitize_rel(root, Path::new("/repo/x/y")).contains('/'));
     }
 }
