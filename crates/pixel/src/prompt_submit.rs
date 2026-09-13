@@ -15,6 +15,7 @@
 //! share a 750ms deadline; one slow worker does not discard useful context from
 //! the other.
 
+use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -235,18 +236,33 @@ fn tracked_paths(root: &Path) -> Result<Vec<String>, String> {
     Ok(paths)
 }
 
+/// The worker configuration from the process environment.
+#[cfg_attr(test, mutants::skip)] // three `var_os` reads over `worker_config_from`, which is tested
 fn worker_config() -> crate::task_scheduler::WorkerConfig {
-    let executable = std::env::var_os("PIXEL_CLAUDE_EXECUTABLE")
+    worker_config_from(
+        std::env::var_os("PIXEL_CLAUDE_EXECUTABLE"),
+        std::env::var_os("PIXEL_WORKER_SYSTEM_PROMPT_FILE"),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// Build the worker configuration from the three variables that shape it.
+/// An empty variable counts as unset. Without an explicit prompt file the
+/// worker uses the one `pixel install` deploys under `home`, when present,
+/// so workers are Pixel-aware without any env-var configuration.
+fn worker_config_from(
+    executable: Option<OsString>,
+    prompt_file: Option<OsString>,
+    home: Option<OsString>,
+) -> crate::task_scheduler::WorkerConfig {
+    let executable = executable
         .filter(|value| !value.is_empty())
         .map_or_else(|| PathBuf::from("claude"), PathBuf::from);
-    let system_prompt_file = std::env::var_os("PIXEL_WORKER_SYSTEM_PROMPT_FILE")
+    let system_prompt_file = prompt_file
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
-            // Fall back to the file deployed by `pixel install` so workers are
-            // Pixel-aware without any env-var configuration.
-            let home = std::env::var_os("HOME")?;
-            let default = PathBuf::from(home).join(".local/share/pixel/agent-prompt.md");
+            let default = PathBuf::from(home?).join(".local/share/pixel/agent-prompt.md");
             default.is_file().then_some(default)
         });
     crate::task_scheduler::WorkerConfig {
@@ -598,6 +614,10 @@ fn recent_completion_signal(cwd: &Path) -> bool {
     false
 }
 
+/// Only the tail of `actions.jsonl` is read for a completion signal, so a
+/// large log costs one seek and one bounded read per prompt.
+const ACTION_LOG_TAIL_BYTES: u64 = 65_536; // 64 KiB
+
 /// Parse action log entries from the tail of the file to stay bounded in memory and CPU.
 #[allow(clippy::lines_filter_map_ok)]
 fn check_action_log_file(mut file: std::fs::File, cwd: &Path, cutoff: i64) -> bool {
@@ -609,8 +629,7 @@ fn check_action_log_file(mut file: std::fs::File, cwd: &Path, cutoff: i64) -> bo
     if len == 0 {
         return false;
     }
-    // Seek to the last 64KB for speed instead of reading entire large log files
-    let seek_start = len.saturating_sub(64 * 1024);
+    let seek_start = len.saturating_sub(ACTION_LOG_TAIL_BYTES);
     if file.seek(SeekFrom::Start(seek_start)).is_err() {
         return false;
     }
@@ -1161,5 +1180,167 @@ mod tests {
         let _ = crate::task_scheduler::stop(&root, &handoff.task_id, "initial");
         let _ = crate::task_sandbox::cleanup(&root, &handoff.task_id, "initial");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-prompt-submit-{tag}-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn os(s: &str) -> Option<OsString> {
+        Some(OsString::from(s))
+    }
+
+    /// The executable falls back to `claude` on PATH only when the variable
+    /// is unset or empty; the prompt file falls back to the installed one
+    /// only when it exists, so a worker never gets a dangling path.
+    #[test]
+    fn worker_config_reads_the_variables_and_falls_back_to_the_installed_prompt() {
+        let home = scratch("worker-config");
+        let installed = home.join(".local/share/pixel/agent-prompt.md");
+
+        let cfg = worker_config_from(None, None, Some(home.clone().into()));
+        assert_eq!(cfg.executable, PathBuf::from("claude"));
+        assert_eq!(cfg.system_prompt_file, None, "no installed prompt yet");
+
+        let cfg = worker_config_from(os(""), os(""), None);
+        assert_eq!(cfg.executable, PathBuf::from("claude"), "empty is unset");
+        assert_eq!(cfg.system_prompt_file, None, "no HOME, no fallback");
+
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, "# prompt\n").unwrap();
+        let cfg = worker_config_from(None, None, Some(home.clone().into()));
+        assert_eq!(cfg.system_prompt_file, Some(installed.clone()));
+
+        let cfg = worker_config_from(
+            os("/opt/claude/bin/claude"),
+            os("/etc/pixel/worker.md"),
+            Some(home.clone().into()),
+        );
+        assert_eq!(cfg.executable, PathBuf::from("/opt/claude/bin/claude"));
+        assert_eq!(
+            cfg.system_prompt_file,
+            Some(PathBuf::from("/etc/pixel/worker.md")),
+            "an explicit file wins over the installed one"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    fn action_log(dir: &Path, lines: &[String]) -> std::fs::File {
+        let path = dir.join("actions.jsonl");
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+        std::fs::File::open(&path).unwrap()
+    }
+
+    fn entry(ts_ms: i64, command: &str, cwd: &str, outcome: &str) -> String {
+        serde_json::json!({"ts_ms": ts_ms, "command": command, "cwd": cwd, "outcome": outcome})
+            .to_string()
+    }
+
+    /// A completion signal is a successful publish/ship/push/commit in this
+    /// project inside the lookback window; anything else must not suppress
+    /// the handoff.
+    #[test]
+    fn action_log_signals_only_a_recent_successful_completion_in_this_project() {
+        let dir = scratch("action-log");
+        let cwd = Path::new("/work/pixel");
+        let cutoff = 1_000_000;
+        let cases: &[(&str, Vec<String>, bool)] = &[
+            (
+                "recent publish here",
+                vec![entry(cutoff + 1, "publish", "/work/pixel", "ok")],
+                true,
+            ),
+            (
+                "exactly at the cutoff",
+                vec![entry(cutoff, "ship", "/work/pixel", "ok")],
+                true,
+            ),
+            (
+                "too old",
+                vec![entry(cutoff - 1, "publish", "/work/pixel", "ok")],
+                false,
+            ),
+            (
+                "failed",
+                vec![entry(cutoff + 1, "publish", "/work/pixel", "error")],
+                false,
+            ),
+            (
+                "another project",
+                vec![entry(cutoff + 1, "publish", "/elsewhere", "ok")],
+                false,
+            ),
+            (
+                "subdirectory of the project",
+                vec![entry(cutoff + 1, "commit", "/work/pixel/crates", "ok")],
+                true,
+            ),
+            (
+                "not a completion",
+                vec![entry(cutoff + 1, "search", "/work/pixel", "ok")],
+                false,
+            ),
+            (
+                "old signal after a recent non-signal is not reached",
+                vec![
+                    entry(cutoff - 1, "publish", "/work/pixel", "ok"),
+                    entry(cutoff + 1, "search", "/work/pixel", "ok"),
+                ],
+                false,
+            ),
+            (
+                "garbage lines are skipped, not fatal",
+                vec![
+                    "not json".to_string(),
+                    entry(cutoff + 1, "push", "/work/pixel", "ok"),
+                ],
+                true,
+            ),
+        ];
+        for (name, lines, expected) in cases {
+            let file = action_log(&dir, lines);
+            assert_eq!(
+                check_action_log_file(file, cwd, cutoff),
+                *expected,
+                "{name}"
+            );
+        }
+        let empty = action_log(&dir, &[]);
+        assert!(!check_action_log_file(empty, cwd, cutoff), "empty log");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only the tail is read: a signal past the tail window is invisible, one
+    /// inside it is found even in a log far larger than the window.
+    #[test]
+    fn action_log_reads_only_its_tail() {
+        let dir = scratch("action-log-tail");
+        let cwd = Path::new("/work/pixel");
+        let cutoff = 1_000_000;
+        let filler = entry(cutoff + 1, "search", "/work/pixel", "ok");
+        let per_line = filler.len() as u64 + 1;
+        let lines_past_tail = (ACTION_LOG_TAIL_BYTES / per_line) + 2;
+        let mut lines = vec![entry(cutoff + 1, "publish", "/work/pixel", "ok")];
+        lines.extend(std::iter::repeat_n(
+            filler.clone(),
+            lines_past_tail as usize,
+        ));
+        assert!(
+            !check_action_log_file(action_log(&dir, &lines), cwd, cutoff),
+            "a signal older than the tail window must not be read"
+        );
+        lines.push(entry(cutoff + 1, "publish", "/work/pixel", "ok"));
+        assert!(
+            check_action_log_file(action_log(&dir, &lines), cwd, cutoff),
+            "a signal in the tail is found in a large log"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

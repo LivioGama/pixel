@@ -2740,23 +2740,25 @@ fn strip_cd_prefix<'a>(cmd: &'a str, cwd: &Path) -> (PathBuf, &'a str) {
     (new_cwd, body_ref)
 }
 
-/// Find the byte index of the first unquoted `&&` in the string.
+/// Find the byte index of the first `&&` outside single or double quotes.
 fn find_unquoted_double_amp(s: &str) -> Option<usize> {
     let mut quote: Option<char> = None;
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    while i + 1 < chars.len() {
-        let c = chars[i];
+    let mut prev_amp_at: Option<usize> = None;
+    for (idx, c) in s.char_indices() {
         match quote {
             Some(q) if c == q => quote = None,
             Some(_) => {}
             None if c == '\'' || c == '"' => quote = Some(c),
-            None if c == '&' && chars[i + 1] == '&' => {
-                return Some(s.char_indices().nth(i).map_or(0, |(idx, _)| idx));
+            None if c == '&' => {
+                if let Some(first) = prev_amp_at {
+                    return Some(first);
+                }
+                prev_amp_at = Some(idx);
+                continue;
             }
             None => {}
         }
-        i += 1;
+        prev_amp_at = None;
     }
     None
 }
@@ -3894,5 +3896,48 @@ mod tests {
         .unwrap();
         assert_eq!(current_branch(&root), None, "detached HEAD");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The `cd <dir> && <body>` splitter must find the `&&` that separates
+    /// the directory from the body, and only that one: an `&&` inside quotes
+    /// belongs to the argument, a lone `&` is a background job.
+    #[test]
+    fn find_unquoted_double_amp_reports_the_first_separator_outside_quotes() {
+        assert_eq!(find_unquoted_double_amp(""), None);
+        assert_eq!(find_unquoted_double_amp("cargo test"), None);
+        assert_eq!(
+            find_unquoted_double_amp("a & b"),
+            None,
+            "a lone `&` is not a separator"
+        );
+        assert_eq!(find_unquoted_double_amp("&& b"), Some(0));
+        assert_eq!(find_unquoted_double_amp("a && b"), Some(2));
+        assert_eq!(
+            find_unquoted_double_amp("a && b && c"),
+            Some(2),
+            "first, not last"
+        );
+        assert_eq!(find_unquoted_double_amp("'a && b' && c"), Some(9));
+        assert_eq!(find_unquoted_double_amp("\"x&&y\" && z"), Some(7));
+        assert_eq!(find_unquoted_double_amp("'unterminated && quote"), None);
+        assert_eq!(
+            find_unquoted_double_amp("a &x& b"),
+            None,
+            "the ampersands must be adjacent"
+        );
+        // Byte index, not char index: `é` is two bytes.
+        assert_eq!(find_unquoted_double_amp("é && x"), Some(3));
+        assert_eq!(&"é && x"[3..5], "&&");
+    }
+
+    #[test]
+    fn strip_cd_prefix_uses_the_unquoted_separator() {
+        let cwd = Path::new("/repo");
+        let (dir, body) = strip_cd_prefix("cd /tmp/x && cargo test", cwd);
+        assert_eq!((dir.as_path(), body), (Path::new("/tmp/x"), "cargo test"));
+        let (dir, body) = strip_cd_prefix("cd 'a && b' && ls", cwd);
+        assert_eq!((dir.as_path(), body), (Path::new("/repo/a && b"), "ls"));
+        let (dir, body) = strip_cd_prefix("cd sub", cwd);
+        assert_eq!((dir.as_path(), body), (Path::new("/repo"), "cd sub"));
     }
 }

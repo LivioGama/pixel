@@ -1187,3 +1187,68 @@ fn run_status(json: bool) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pixel_recall::model::TsSource;
+
+    /// The clock helper returns the wall clock in milliseconds: bracketed
+    /// by two reads and above 2020-01-01, which rules out a constant.
+    #[test]
+    fn now_ms_is_the_wall_clock_in_milliseconds() {
+        let read = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64
+        };
+        let before = read();
+        let now = now_ms();
+        let after = read();
+        assert!(
+            before <= now && now <= after,
+            "{before} <= {now} <= {after}"
+        );
+        assert!(now > 1_577_836_800_000, "after 2020-01-01");
+    }
+
+    fn row() -> SessionRow {
+        SessionRow {
+            id: 42,
+            agent: "claude".to_string(),
+            source_session_id: "0123abcd-0000-4000-8000-000000000001".to_string(),
+            source_path: "/x.jsonl".to_string(),
+            cwd: Some("/work/pixel".to_string()),
+            git_branch: None,
+            title: Some("fix the engine".to_string()),
+            first_user_prompt: None,
+            ts_first: None,
+            ts_last: Some(1_760_000_000_000),
+            ts_source: TsSource::Iso,
+            turn_count: 7,
+            is_subagent: false,
+            parent_session_id: None,
+        }
+    }
+
+    /// The one-line session summary is what `sessions` and `show` print;
+    /// every field an agent uses to pick or cite a session is on it.
+    #[test]
+    fn session_line_carries_ref_time_cwd_count_and_title() {
+        assert_eq!(
+            session_line(&row()),
+            "claude:0123abcd #42 2025-10-09 08:53 /work/pixel (7 turns) \"fix the engine\""
+        );
+        let mut r = row();
+        r.ts_last = None;
+        r.ts_source = TsSource::Mtime;
+        r.cwd = None;
+        r.title = None;
+        r.is_subagent = true;
+        assert_eq!(
+            session_line(&r),
+            "claude:0123abcd #42 ? [ts:mtime] - (7 turns) [subagent] \"(untitled)\""
+        );
+    }
+}
