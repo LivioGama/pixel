@@ -319,7 +319,6 @@ pub fn resolve_calls(
 /// updates so callers into a rebuilt file re-link. The stored `receiver` is
 /// replayed so the receiver downgrade stays consistent across re-resolutions.
 pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
-    let idx = ResolveIndex::build(store)?;
     struct Row {
         id: i64,
         file_id: i64,
@@ -328,6 +327,8 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
         site_line: u32,
         receiver: Option<String>,
     }
+
+    let idx = ResolveIndex::build(store)?;
     let rows: Vec<Row> = {
         let mut stmt = store.conn().prepare(
             "SELECT u.id, u.file_id, u.name, u.enclosing_symbol_id, u.site_line, u.receiver

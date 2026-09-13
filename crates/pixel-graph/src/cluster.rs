@@ -123,8 +123,7 @@ fn dominant_dir(paths: &[String]) -> String {
     }
     freq.into_iter()
         .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0)))
-        .map(|(d, _)| d.to_string())
-        .unwrap_or_else(|| "root".to_string())
+        .map_or_else(|| "root".to_string(), |(d, _)| d.to_string())
 }
 
 fn top_keywords(names: &[String], k: usize) -> String {
@@ -337,5 +336,20 @@ mod tests {
 
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dominant_dir_is_the_most_common_parent_directory() {
+        let paths = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            dominant_dir(&paths(&["src/a.rs", "src/b.rs", "lib/c.rs", "top.rs"])),
+            "src"
+        );
+        assert_eq!(
+            dominant_dir(&paths(&["a/b/c.rs", "a/b/d.rs", "a/e.rs"])),
+            "a/b"
+        );
+        assert_eq!(dominant_dir(&paths(&["top.rs"])), "root");
+        assert_eq!(dominant_dir(&[]), "root");
     }
 }

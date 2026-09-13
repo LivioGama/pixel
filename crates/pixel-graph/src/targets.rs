@@ -34,6 +34,13 @@ pub fn symbol_hits(
     keywords: &[String],
     exact_tokens: &[String],
 ) -> Result<Vec<SymbolHit>, StoreError> {
+    struct Acc {
+        symbols: Vec<(SymbolRow, String)>,
+        matched_words: BTreeSet<String>,
+        symbol_count: usize,
+        exact_name_hit: bool,
+    }
+
     let kw: HashSet<&str> = keywords.iter().map(String::as_str).collect();
     let exact: HashSet<&str> = exact_tokens.iter().map(String::as_str).collect();
     if kw.is_empty() && exact.is_empty() {
@@ -62,12 +69,6 @@ pub fn symbol_hits(
         ))
     })?;
 
-    struct Acc {
-        symbols: Vec<(SymbolRow, String)>,
-        matched_words: BTreeSet<String>,
-        symbol_count: usize,
-        exact_name_hit: bool,
-    }
     let mut by_path: BTreeMap<String, Acc> = BTreeMap::new();
 
     for row in rows {
@@ -268,8 +269,7 @@ pub fn cluster_co_files(
             for p in paths {
                 let in_seed = store
                     .file_by_path(&p)?
-                    .map(|f| seed_files.contains(&f.id))
-                    .unwrap_or(false);
+                    .is_some_and(|f| seed_files.contains(&f.id));
                 if in_seed || !seen.insert(p.clone()) {
                     continue;
                 }

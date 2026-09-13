@@ -585,24 +585,32 @@ fn extract_svelte_vue(path: &str, content: &[u8]) -> Vec<RawConcept> {
     while let Some(rel) = text[pos..].find("<script") {
         let start = pos + rel;
         markup.push_str(&text[markup_start..start]);
-        let open_end = text[start..]
-            .find('>')
-            .map(|i| start + i + 1)
-            .unwrap_or(text.len());
-        let close = text[open_end..]
-            .find("</script>")
-            .map(|i| open_end + i)
-            .unwrap_or(text.len());
+        let (open_end, close) = script_block_bounds(&text, start);
         let script_content = &text[open_end..close];
         let line_offset = line_of(&text, open_end).saturating_sub(1);
         out.extend(extract_ts_script(script_content, line_offset, test_path));
-        pos = close + "</script>".len();
+        // Always past this tag, whatever the bounds say: the scan must
+        // terminate on any input.
+        pos = close.max(start) + "</script>".len();
         markup_start = pos;
     }
     markup.push_str(&text[markup_start..]);
     let markup_line = line_of(&text, markup_start).saturating_sub(1);
     scan_markup(&markup, markup_line, &mut out);
     out
+}
+
+/// Byte range of the code inside a `<script …>` block whose tag starts at
+/// `start`: just past the opening tag's `>` up to `</script>` (or the end
+/// of the text when either is missing).
+fn script_block_bounds(text: &str, start: usize) -> (usize, usize) {
+    let open_end = text[start..]
+        .find('>')
+        .map_or(text.len(), |i| start + i + 1);
+    let close = text[open_end..]
+        .find("</script>")
+        .map_or(text.len(), |i| open_end + i);
+    (open_end, close)
 }
 
 fn extract_html(content: &[u8]) -> Vec<RawConcept> {
@@ -693,12 +701,7 @@ fn handle_tag(tag: &str, line: u32, out: &mut Vec<RawConcept>) {
             end_line: line,
             owner_symbol_id: None,
         });
-    } else if name
-        .chars()
-        .next()
-        .map(|c| c.is_uppercase())
-        .unwrap_or(false)
-    {
+    } else if name.chars().next().is_some_and(char::is_uppercase) {
         out.push(RawConcept {
             kind: ConceptKind::Component,
             raw: name.clone(),
@@ -879,7 +882,7 @@ fn derive_route_path(path: &str, anchor: &str) -> String {
         .map(|(_, rest)| rest)
         .or_else(|| path.strip_prefix(&format!("{anchor}/")))
         .unwrap_or(path);
-    let dir = after.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let dir = after.rsplit_once('/').map_or("", |(d, _)| d);
     if dir.is_empty() {
         "/".to_string()
     } else {
@@ -951,10 +954,7 @@ fn line_of(text: &str, byte_offset: usize) -> u32 {
 }
 
 fn is_uppercase_component(name: &str) -> bool {
-    name.chars()
-        .next()
-        .map(|c| c.is_uppercase())
-        .unwrap_or(false)
+    name.chars().next().is_some_and(char::is_uppercase)
 }
 
 fn parse_int(s: &str) -> Option<i64> {
@@ -973,4 +973,82 @@ fn each_child<'t>(n: Node<'t>) -> Vec<Node<'t>> {
 
 fn field_text(w: &TsWalker, n: Node, field: &str) -> Option<String> {
     n.child_by_field_name(field).map(|c| w.text(c))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handle_tag_records_forms_and_components_and_skips_closing_or_html_tags() {
+        let mut out = Vec::new();
+        handle_tag("<form method=\"post\">", 3, &mut out);
+        handle_tag("<Button primary>", 4, &mut out);
+        handle_tag("</Button>", 5, &mut out);
+        handle_tag("<!-- note -->", 6, &mut out);
+        handle_tag("<div>", 7, &mut out);
+        handle_tag("<>", 8, &mut out);
+        let seen: Vec<(ConceptKind, &str, u32)> = out
+            .iter()
+            .map(|c| (c.kind, c.raw.as_str(), c.start_line))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (ConceptKind::Form, "form", 3),
+                (ConceptKind::Component, "Button", 4)
+            ]
+        );
+        assert_eq!(out[1].norm, normalize("Button"));
+    }
+
+    #[test]
+    fn script_block_bounds_starts_after_the_opening_tag_and_stops_at_the_close() {
+        let text = "<p/>\n<script lang=\"ts\">let a = 1;</script>\n<b/>";
+        let start = text.find("<script").unwrap();
+        let (open_end, close) = script_block_bounds(text, start);
+        assert_eq!(&text[open_end..close], "let a = 1;");
+        // No `>` at all: nothing to parse; no `</script>`: runs to the end.
+        assert_eq!(script_block_bounds("<script", 0), (7, 7));
+        let open = "<script>x = 1";
+        assert_eq!(script_block_bounds(open, 0), (8, open.len()));
+    }
+
+    #[test]
+    fn is_uppercase_component_checks_the_first_character() {
+        assert!(is_uppercase_component("Button"));
+        assert!(!is_uppercase_component("button"));
+        assert!(!is_uppercase_component(""));
+    }
+
+    /// The `<script>` block goes through the TypeScript walker with the
+    /// block's line offset, the rest through the markup scanner: a route
+    /// called from the script and a component in the markup both carry
+    /// their line in the .svelte file.
+    #[test]
+    fn extract_svelte_vue_offsets_script_concepts_and_scans_the_markup() {
+        let content = b"<div class=\"page\">\n<script lang=\"ts\">\n  async function submit() {\n    await fetch(\"/api/contact\", { method: \"POST\" });\n  }\n  // tail-marker\n</script>\n<Button label=\"Press me\" />\n</div>\n";
+        let concepts = extract_svelte_vue("src/Page.svelte", content);
+        // Nothing from inside the script block may reach the markup scanner.
+        assert!(
+            concepts.iter().all(|c| c.kind != ConceptKind::UiText),
+            "{concepts:?}"
+        );
+        let route = concepts
+            .iter()
+            .find(|c| c.kind == ConceptKind::Route && c.raw.contains("/api/contact"))
+            .unwrap_or_else(|| panic!("route from the script block: {concepts:?}"));
+        assert_eq!(route.start_line, 4, "{route:?}");
+        let component = concepts
+            .iter()
+            .find(|c| c.kind == ConceptKind::Component && c.raw == "Button")
+            .unwrap_or_else(|| panic!("component from the markup: {concepts:?}"));
+        assert_eq!(component.start_line, 8, "{component:?}");
+        let attr = concepts
+            .iter()
+            .find(|c| c.kind == ConceptKind::AttrText && c.raw == "Press me")
+            .unwrap_or_else(|| panic!("attr text from the markup: {concepts:?}"));
+        assert_eq!(attr.start_line, 8);
+        assert!(extract_svelte_vue("src/Empty.svelte", b"").is_empty());
+    }
 }
