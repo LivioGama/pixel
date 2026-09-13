@@ -305,8 +305,10 @@ fn extract_record(
                                 .get("name")
                                 .and_then(Value::as_str)
                                 .unwrap_or("unknown");
-                            let input =
-                                part.get("input").map(|v| v.to_string()).unwrap_or_default();
+                            let input = part
+                                .get("input")
+                                .map(ToString::to_string)
+                                .unwrap_or_default();
                             let (capped, truncated) = cap_text(&input, TOOL_INPUT_CAP);
                             any_truncated |= truncated;
                             if !text.is_empty() {
@@ -338,5 +340,74 @@ fn tool_result_text(part: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn session() -> UnifiedSession {
+        UnifiedSession {
+            agent: "claude",
+            source_session_id: "s1".to_string(),
+            source_path: "/fake/s1.jsonl".to_string(),
+            cwd: None,
+            git_branch: None,
+            title: None,
+            ts_source: TsSource::Iso,
+            is_subagent: false,
+            parent_source_session_id: None,
+        }
+    }
+
+    #[test]
+    fn extract_record_turns_user_and_assistant_records_into_turns() {
+        let mut session = session();
+        let mut turns = Vec::new();
+        let user = json!({
+            "type": "user", "cwd": "/work/pixel", "gitBranch": "develop",
+            "timestamp": "2025-10-09T08:53:20.000Z",
+            "message": {"content": [
+                {"type": "text", "text": "please fix the engine"},
+                {"type": "tool_result", "content": "exit 0"}
+            ]}
+        });
+        extract_record(&user, 10, 200, &mut session, &mut turns);
+        let assistant = json!({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "text", "text": "on it"},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "cargo test"}},
+                {"type": "thinking", "thinking": "hidden"}
+            ]}
+        });
+        extract_record(&assistant, 210, 300, &mut session, &mut turns);
+        extract_record(
+            &json!({"type": "summary", "summary": "x"}),
+            0,
+            1,
+            &mut session,
+            &mut turns,
+        );
+
+        assert_eq!(session.cwd.as_deref(), Some("/work/pixel"));
+        assert_eq!(session.git_branch.as_deref(), Some("develop"));
+        let roles: Vec<Role> = turns.iter().map(|t| t.role).collect();
+        assert_eq!(roles, vec![Role::User, Role::Tool, Role::Assistant]);
+        assert_eq!(turns[0].text, "please fix the engine");
+        assert_eq!(turns[0].intent_source, Some(IntentSource::Human));
+        assert_eq!(turns[0].ts, Some(1_760_000_000_000));
+        assert_eq!(
+            (turns[0].source_byte_start, turns[0].source_byte_len),
+            (Some(10), Some(200))
+        );
+        assert_eq!(turns[1].text, "exit 0");
+        assert_eq!(
+            turns[2].text,
+            "on it\n\u{22ee}tool Bash {\"command\":\"cargo test\"}"
+        );
+        assert!(!turns[2].truncated);
     }
 }
