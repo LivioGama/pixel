@@ -21,13 +21,24 @@
 #
 # Prerequisites:
 #   - claude CLI installed and authenticated
-#   - pixel built and installed (cargo build --release -p pixel-cli)
-#   - repo indexed (pixel index .)
+#   - pixel installed (`pixel install` run once: the pixel arm is given the
+#     deployed agent prompt the way the `claude` shell wrapper does); PIXEL_BIN
+#     and AGENT_PROMPT override
+#   - repo indexed (done here on first run)
 
 set -euo pipefail
 
 REPO="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
-PIXEL_BIN="${PIXEL_BIN:-$(command -v pixel || echo "$(cd "$(dirname "$0")/.." && pwd)/target/release/pixel")}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Binary: $PIXEL_BIN, else the installed pixel (`command -v pixel`: mise shim,
+# Homebrew, ~/.cargo/bin, ~/.local/bin), else a local build (dev-release is the
+# reinstall-loop profile, see CONTRIBUTING.md; release is the shipped one).
+PIXEL_BIN="${PIXEL_BIN:-$(command -v pixel 2>/dev/null || true)}"
+if [ -z "$PIXEL_BIN" ]; then
+  for p in "$ROOT/target/dev-release/pixel" "$ROOT/target/release/pixel"; do
+    [ -x "$p" ] && PIXEL_BIN="$p" && break
+  done
+fi
 SCENARIO="${SCENARIO:-scope}"
 OUTDIR="/tmp/pixel-demo"
 mkdir -p "$OUTDIR"
@@ -43,8 +54,20 @@ if ! command -v claude &>/dev/null; then
   echo -e "${RED}ERROR:${R} claude CLI not found. Install Claude Code first." >&2
   exit 1
 fi
-if [ ! -x "$PIXEL_BIN" ]; then
-  echo -e "${RED}ERROR:${R} pixel binary not found at $PIXEL_BIN" >&2
+if [ -z "$PIXEL_BIN" ] || [ ! -x "$PIXEL_BIN" ]; then
+  echo -e "${RED}ERROR:${R} pixel binary not found (set PIXEL_BIN, install pixel, or build it)" >&2
+  exit 1
+fi
+# The pixel arm must receive what the `claude` shell wrapper written by
+# `pixel install` injects (this script runs `claude` by path, so a fish/zsh
+# function never applies): the deployed agent prompt, or the bundled asset
+# when nothing is installed.
+AGENT_PROMPT="${AGENT_PROMPT:-$HOME/.local/share/pixel/agent-prompt.md}"
+[ -s "$AGENT_PROMPT" ] || AGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-agent-prompt.md"
+SUBAGENT_PROMPT="${SUBAGENT_PROMPT:-$HOME/.local/share/pixel/subagent-prompt.md}"
+[ -s "$SUBAGENT_PROMPT" ] || SUBAGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-subagent-prompt.md"
+if [ ! -s "$AGENT_PROMPT" ]; then
+  echo "ERROR: agent prompt not found (run \`pixel install\`, or set AGENT_PROMPT)" >&2
   exit 1
 fi
 
@@ -127,15 +150,17 @@ PROMPT_FILE="$OUTDIR/prompt.txt"
 write_prompt "$SCENARIO" "$PROMPT_FILE"
 
 # ── Run one arm ─────────────────────────────────────────────────────────
+# run_arm <arm> <settings> <PATH> [extra claude flags...]
 run_arm() {
-  local arm="$1" settings="$2" path_env="$3" extra_flag="${4:-}"
+  local arm="$1" settings="$2" path_env="$3"
+  shift 3
   local outfile="$OUTDIR/${arm}.json"
   local start end ms
 
   echo -e "  ${DIM}Running ${arm}...${R}" >&2
   start=$(python3 -c 'import time; print(int(time.time()*1000))')
   PATH="$path_env" claude -p --dangerously-skip-permissions --verbose \
-    $extra_flag \
+    "$@" \
     --settings "$settings" --output-format stream-json \
     < "$PROMPT_FILE" > "$outfile" 2>&1 || true
   end=$(python3 -c 'import time; print(int(time.time()*1000))')
@@ -232,7 +257,9 @@ BASELINE_TOOLS=$(cat "$OUTDIR/baseline-tools.txt")
 echo ""
 
 echo -e "${B}${GRN}━━━ ARM 2: WITH PIXEL ━━━${R}"
-PIXEL_RESULT=$(run_arm "pixel" "$CLAUDE_SETTINGS" "$PIXEL_PATH" 2>"$OUTDIR/pixel-tools.txt")
+PIXEL_RESULT=$(run_arm "pixel" "$CLAUDE_SETTINGS" "$PIXEL_PATH" \
+  --append-system-prompt-file "$AGENT_PROMPT" \
+  --append-subagent-system-prompt-file "$SUBAGENT_PROMPT" 2>"$OUTDIR/pixel-tools.txt")
 PIXEL_TOOLS=$(cat "$OUTDIR/pixel-tools.txt")
 echo ""
 

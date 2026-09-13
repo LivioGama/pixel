@@ -28,17 +28,30 @@
 #
 # Prerequisites:
 #   - claude (Claude Code CLI) installed and authenticated
-#   - pixel built (cargo build --release -p pixel-cli)
-#   - The target repo indexed (pixel index .) and pixel rules in ~/.claude/CLAUDE.md
+#   - pixel installed (`pixel install` run once). The pixel arm is given the
+#     deployed agent prompt (~/.local/share/pixel/agent-prompt.md) exactly as
+#     the `claude` shell wrapper does — this script calls `claude` by path, so
+#     the fish/zsh wrapper function never applies. PIXEL_BIN and AGENT_PROMPT
+#     override; the bundled asset under crates/ is the fallback.
+#   - The target repo is indexed here before the first pixel run.
 
 set -euo pipefail
 
 REPO="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
-PIXEL_BIN="${PIXEL_BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/release/pixel}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Binary: $PIXEL_BIN, else the installed pixel (`command -v pixel`: mise shim,
+# Homebrew, ~/.cargo/bin, ~/.local/bin), else a local build (dev-release is the
+# reinstall-loop profile, see CONTRIBUTING.md; release is the shipped one).
+PIXEL_BIN="${PIXEL_BIN:-$(command -v pixel 2>/dev/null || true)}"
+if [ -z "$PIXEL_BIN" ]; then
+  for p in "$ROOT/target/dev-release/pixel" "$ROOT/target/release/pixel"; do
+    [ -x "$p" ] && PIXEL_BIN="$p" && break
+  done
+fi
 N="${N:-3}"
 OUTDIR="/tmp/pixel-bench-outputs"
 TMPDIR_M="/tmp/pixel-bench-tmp"
-RESULTS="${RESULTS:-$(pwd)/docs/bench/pixel-bench-results.txt}"
+RESULTS="${RESULTS:-$ROOT/docs/bench/pixel-bench-results.txt}"
 mkdir -p "$OUTDIR" "$TMPDIR_M"
 rm -f "$TMPDIR_M"/*.json "$TMPDIR_M"/*.ms "$TMPDIR_M"/*.counts
 
@@ -49,8 +62,20 @@ if ! command -v claude &>/dev/null; then
   echo "ERROR: claude CLI not found. Install Claude Code first." >&2
   exit 1
 fi
-if [ ! -x "$PIXEL_BIN" ]; then
-  echo "ERROR: pixel binary not found at $PIXEL_BIN. Run: cargo build --release -p pixel-cli" >&2
+if [ -z "$PIXEL_BIN" ] || [ ! -x "$PIXEL_BIN" ]; then
+  echo "ERROR: pixel binary not found. Install it (pixel upgrade --repo . --build \"cargo build --profile dev-release -p pixel-cli\") or set PIXEL_BIN." >&2
+  exit 1
+fi
+# The pixel arm must receive what the `claude` shell wrapper written by
+# `pixel install` injects (this script runs `claude` by path, so a fish/zsh
+# function never applies): the deployed agent prompt, or the bundled asset
+# when nothing is installed.
+AGENT_PROMPT="${AGENT_PROMPT:-$HOME/.local/share/pixel/agent-prompt.md}"
+[ -s "$AGENT_PROMPT" ] || AGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-agent-prompt.md"
+SUBAGENT_PROMPT="${SUBAGENT_PROMPT:-$HOME/.local/share/pixel/subagent-prompt.md}"
+[ -s "$SUBAGENT_PROMPT" ] || SUBAGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-subagent-prompt.md"
+if [ ! -s "$AGENT_PROMPT" ]; then
+  echo "ERROR: agent prompt not found (run \`pixel install\`, or set AGENT_PROMPT)" >&2
   exit 1
 fi
 
@@ -178,17 +203,18 @@ echo "NOTE: full matrix = 4 scenarios x 2 arms x $N reps; expect 10-40+ minutes.
      "Do not run under a short shell timeout."
 
 # Run one cell: wall-clock ms + tool-call/turn counts from stream-json output.
-# Optional 5th arg: extra claude flags (e.g. --safe-mode for the baseline arm).
+# Arguments after the 4th are extra claude flags (--safe-mode for the baseline
+# arm, the --append-*-prompt-file pair for the pixel arm).
 run_scenario() {
   local label="$1"
   local prompt_file="$2"
   local settings="$3"
   local path_env="$4"
-  local extra_flag="${5:-}"
+  shift 4
   local start end ms
   start=$(python3 -c 'import time; print(int(time.time()*1000))')
   PATH="$path_env" claude -p --dangerously-skip-permissions --verbose \
-    $extra_flag \
+    "$@" \
     --settings "$settings" --output-format stream-json \
     < "$prompt_file" > "$OUTDIR/${label}.json" 2>&1 || true
   end=$(python3 -c 'import time; print(int(time.time()*1000))')
@@ -262,7 +288,8 @@ SCENARIOS="${SCENARIOS:-s1-locate s2-scope s3-sync s4-recover}"
 echo "=== pixel-bench: claude -p agent workflows ===" > "$RESULTS"
 echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$RESULTS"
 echo "Repo: $(git rev-parse --short HEAD) ($REPO)" >> "$RESULTS"
-echo "Pixel: $($PIXEL_BIN --version 2>/dev/null || echo 'not built')" >> "$RESULTS"
+echo "Pixel: $($PIXEL_BIN -V 2>/dev/null || echo 'not built') ($PIXEL_BIN)" >> "$RESULTS"
+echo "Agent prompt (pixel arm): $AGENT_PROMPT ($(wc -c < "$AGENT_PROMPT" | tr -d ' ') bytes)" >> "$RESULTS"
 echo "Reps per cell: $N" >> "$RESULTS"
 echo "Baseline settings (pixel hooks stripped): $BASELINE_SETTINGS" >> "$RESULTS"
 echo "" >> "$RESULTS"
@@ -291,7 +318,9 @@ for s in $SCENARIOS; do
         # docs/bench/agent-ab-2026-08-30-rerun-contaminated.txt).
         run_scenario "$label" "$PROMPT_DIR/$s.txt" "$BASELINE_SETTINGS" "$BASELINE_PATH" --safe-mode
       else
-        run_scenario "$label" "$PROMPT_DIR/$s.txt" "$CLAUDE_SETTINGS" "$PIXEL_PATH"
+        run_scenario "$label" "$PROMPT_DIR/$s.txt" "$CLAUDE_SETTINGS" "$PIXEL_PATH" \
+          --append-system-prompt-file "$AGENT_PROMPT" \
+          --append-subagent-system-prompt-file "$SUBAGENT_PROMPT"
       fi
       ms=$(cat "$TMPDIR_M/$label.ms")
       read -r tool_calls turns valid api_ms < "$TMPDIR_M/$label.counts"
