@@ -18,6 +18,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] `cargo fmt --all -- --check` exits 0.
 - [ ] `cargo test --workspace` exits 0.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` exits 0.
+- [ ] `cargo deny check` exits 0 (skip when `Cargo.lock` did not change); a new exception in `deny.toml` carries its reason.
 - [ ] New behaviour has a test that fails if the behaviour is removed.
 - [ ] `cargo mutants --in-diff <(git diff develop...HEAD)` reports no `MISSED` mutant (see "Mutation testing").
 - [ ] `CHANGELOG.md` has an entry under `## [Unreleased]` (skip for pure refactors and CI/deps chores).
@@ -72,6 +73,7 @@ cargo fmt --all -- --check
 cargo nextest run --workspace --profile ci   # or: cargo test --workspace
 cargo test --workspace --doc                 # nextest does not run doctests
 cargo clippy --workspace --all-targets -- -D warnings
+cargo deny check                             # dependency policy, see below
 ```
 
 CI runs the tests through [cargo-nextest](https://nexte.st) (`cargo install
@@ -92,6 +94,16 @@ above it, and `dbg!`/`todo!` do not ship. To enable another lint, bring the
 workspace to zero on it in the same PR and add it to the table with its
 one-line reason; the comment at the end of the table lists the pedantic lints
 evaluated and left out, with their site counts.
+
+The dependency policy is `deny.toml`, checked by
+[cargo-deny](https://embarkstudios.github.io/cargo-deny/) (`cargo install
+--locked cargo-deny`): RustSec advisories including unmaintained crates,
+an allow-list of permissive licences, no two majors of one crate (the two
+embedding stacks excepted), crates.io as the only source. A finding is fixed
+by changing the dependency, or documented in `deny.toml` next to the
+exception with its reason; the CI job fails on anything else. `cargo deny
+check` needs the network for the advisory database and is not part of
+`scripts/gates.sh`.
 
 `scripts/gates.sh` runs the same commands (nextest when installed, `cargo
 test` otherwise) (plus `--mutants` for the
