@@ -45,5 +45,10 @@ This project bundles or depends on the following notable components:
   vendored verbatim as `.agents/skills/rust-guidelines/guidelines.txt` for
   coding agents working on this repository; it is not part of the binary.
   Source: https://github.com/microsoft/rust-guidelines
+- **Apollo GraphQL `rust-best-practices` skill** (MIT, Copyright (c)
+  Apollo Graph, Inc.) — the borrowing, type-state, TODO, test-naming and
+  snapshot-testing points in `.agents/skills/rust-guidelines/SKILL.md` are
+  restated from it in this repository's own words; no text is vendored.
+  Source: https://github.com/apollographql/skills/tree/main/skills/rust-best-practices
 
 No GPL or AGPL licensed components are used anywhere in this project.

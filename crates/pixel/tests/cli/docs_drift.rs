@@ -125,3 +125,70 @@ fn referenced_commands_reads_only_backticked_command_names() {
     let got: Vec<String> = referenced_commands(text).into_iter().collect();
     assert_eq!(got, ["impact", "search"]);
 }
+
+/// Rule ids (`M-…`) named in `text`, wildcards such as `M-FFI-*` excluded:
+/// those name a family, not one heading.
+fn referenced_rule_ids(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (i, _) in text.match_indices("M-") {
+        if i > 0 && text.as_bytes()[i - 1].is_ascii_alphanumeric() {
+            continue; // `SOM-…`, `M-` inside a word
+        }
+        let id: String = text[i..]
+            .chars()
+            .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '-' || *c == '*')
+            .collect();
+        let id = id.trim_end_matches('-');
+        if id.len() > 2 && !id.ends_with('*') {
+            out.insert(id.to_string());
+        }
+    }
+    out
+}
+
+/// Rule ids that head a `## <title> (M-ID)` section of `guidelines.txt`.
+fn guideline_rule_ids(text: &str) -> BTreeSet<String> {
+    text.lines()
+        .filter(|l| l.starts_with("## "))
+        .filter_map(|l| {
+            let open = l.rfind("(M-")?;
+            let close = l[open..].find(')')?;
+            Some(l[open + 1..open + close].to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn every_rule_id_in_the_skill_should_head_a_guideline_when_upstream_is_refreshed() {
+    let root = repo_root().join(".agents/skills/rust-guidelines");
+    let skill = std::fs::read_to_string(root.join("SKILL.md")).unwrap();
+    let guidelines = std::fs::read_to_string(root.join("guidelines.txt")).unwrap();
+    let known = guideline_rule_ids(&guidelines);
+    assert!(
+        known.len() >= 80,
+        "guidelines.txt heading parsing broke: {}",
+        known.len()
+    );
+    let named = referenced_rule_ids(&skill);
+    assert!(named.len() >= 40, "SKILL.md id parsing broke: {named:?}");
+    let unknown: Vec<&String> = named.iter().filter(|id| !known.contains(*id)).collect();
+    assert!(
+        unknown.is_empty(),
+        "SKILL.md names rule ids that are not headings of guidelines.txt (renamed or removed upstream? run scripts/refresh-guidelines.sh and update SKILL.md): {unknown:?}"
+    );
+}
+
+#[test]
+fn referenced_rule_ids_should_skip_wildcards_and_embedded_matches() {
+    let text =
+        "Apply M-PANIC-ON-BUG and (M-FROM-ERROR). Not M-FFI-*, not SOM-THING, `M-DI-HIERARCHY`.";
+    let got: Vec<String> = referenced_rule_ids(text).into_iter().collect();
+    assert_eq!(got, ["M-DI-HIERARCHY", "M-FROM-ERROR", "M-PANIC-ON-BUG"]);
+}
+
+#[test]
+fn guideline_rule_ids_should_read_only_heading_ids() {
+    let text = "## Panic on bug (M-PANIC-ON-BUG) { #M-PANIC-ON-BUG }\nSee M-FROM-ERROR in prose.\n### Sub (M-NOT-A-RULE)\n";
+    let got: Vec<String> = guideline_rule_ids(text).into_iter().collect();
+    assert_eq!(got, ["M-PANIC-ON-BUG"]);
+}
