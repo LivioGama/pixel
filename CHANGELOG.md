@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-09-14
+
 ### Added
 - `pixel publish` and `pixel ship` accept `-F`/`--message-file <path>` (`-` for stdin) as an alternative to `-m`: a multi-paragraph commit message comes from a file verbatim, trailing whitespace stripped, instead of being squeezed through a shell-quoted `-m "$(cat msg)"`. The two flags are mutually exclusive (clap usage error, exit 2, nothing touched), and a blank file is refused before git runs.
 - `.agents/skills/rust-guidelines/`: Microsoft's Pragmatic Rust Guidelines as a project skill (`SKILL.md` checklist keyed by `M-*` id, full MIT text in `guidelines.txt` to grep on demand), symlinked as `.claude/skills` so Claude Code loads it next to `.claude/rules`; AGENTS.md and CONTRIBUTING.md list it.
