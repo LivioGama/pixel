@@ -773,10 +773,10 @@ fn measure_blob_sizes(
     let cmd_runner = pixel_git::GitRunner::with_options(store.root(), opts);
     let mut out = Vec::new();
     for path in paths {
-        let obj = format!("{oid}:{path}");
-        let size_new = cat_file_size(&cmd_runner, &obj);
+        let size_new = blob_size(&cmd_runner, oid, path);
+        // The old name of a rename only exists in the parent tree.
         let size_old = if let Some(old) = old_path_for(store, path) {
-            cat_file_size(&cmd_runner, &format!("{oid}:{old}"))
+            blob_size(&cmd_runner, &format!("{oid}^"), &old)
         } else {
             0
         };
@@ -785,19 +785,30 @@ fn measure_blob_sizes(
     Ok(out)
 }
 
-fn cat_file_size(runner: &pixel_git::GitRunner, obj: &str) -> u64 {
-    match runner.run(&["cat-file", "--batch-check", "--end-of-options", obj]) {
-        Ok(bytes) => {
-            let line = String::from_utf8_lossy(&bytes);
-            let parts: Vec<&str> = line.split(' ').collect();
-            if parts.len() >= 3 && parts[1] == "blob" {
-                parts[2].trim().parse().unwrap_or(0)
-            } else {
-                0
-            }
-        }
+/// Size of the blob at `path` in `rev`'s tree; 0 when the entry is missing
+/// or is not a blob (a directory, a submodule). One `ls-tree -l` per path:
+/// `cat-file --batch-check` only reads objects from stdin and rejected the
+/// argument, so every size read as 0 and no blob was ever learned as poison.
+fn blob_size(runner: &pixel_git::GitRunner, rev: &str, path: &str) -> u64 {
+    match runner.run(&["ls-tree", "-l", "--end-of-options", rev, "--", path]) {
+        Ok(bytes) => parse_ls_tree_size(&String::from_utf8_lossy(&bytes)),
         Err(_) => 0,
     }
+}
+
+/// `<mode> <type> <oid> <size>\t<path>` from `ls-tree -l`; the size column
+/// is `-` for anything but a blob.
+fn parse_ls_tree_size(line: &str) -> u64 {
+    let mut fields = line.split_whitespace();
+    let (Some(_mode), Some(kind), Some(_oid), Some(size)) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return 0;
+    };
+    if kind != "blob" {
+        return 0;
+    }
+    size.parse().unwrap_or(0)
 }
 
 fn old_path_for(store: &FactsStore, path: &str) -> Option<String> {
@@ -1296,4 +1307,150 @@ pub fn evict_to_budget(store: &mut FactsStore, budget_bytes: u64) -> Result<u64>
         }
     }
     Ok(evicted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::{commit, git, init_repo};
+
+    fn far() -> Instant {
+        Instant::now() + Duration::from_secs(600)
+    }
+
+    fn commit_id(store: &FactsStore, oid: &str) -> i64 {
+        store
+            .conn()
+            .query_row("SELECT id FROM commits WHERE oid = ?1", [oid], |r| r.get(0))
+            .expect("commit row")
+    }
+
+    #[test]
+    fn parse_ls_tree_size_reads_the_blob_size_and_ignores_other_entries() {
+        assert_eq!(
+            parse_ls_tree_size(
+                "100644 blob 71f83363ae56390921b5f7cdc6c6bf89561bfefb    4241\tCargo.toml\n"
+            ),
+            4241
+        );
+        assert_eq!(
+            parse_ls_tree_size(
+                "040000 tree 3d9efb2fd665a069e066cf78245c2423a0c23eff       -\tcrates\n"
+            ),
+            0
+        );
+        assert_eq!(parse_ls_tree_size(""), 0);
+        assert_eq!(parse_ls_tree_size("100644 blob abc"), 0);
+    }
+
+    #[test]
+    fn blob_size_reads_the_tree_of_the_requested_revision() {
+        let dir = init_repo();
+        let root = dir.path();
+        let first = commit(root, &[("a.txt", b"hello\n")], "five bytes plus newline");
+        let second = commit(
+            root,
+            &[("a.txt", b"hello world\n"), ("dir/b.txt", b"x")],
+            "grown",
+        );
+        let runner = pixel_git::GitRunner::with_options(root, GitOptions::default());
+        assert_eq!(blob_size(&runner, &first, "a.txt"), 6);
+        assert_eq!(blob_size(&runner, &second, "a.txt"), 12);
+        assert_eq!(blob_size(&runner, &second, "dir/b.txt"), 1);
+        assert_eq!(
+            blob_size(&runner, &second, "dir"),
+            0,
+            "a tree is not a blob"
+        );
+        assert_eq!(blob_size(&runner, &first, "missing.txt"), 0);
+        assert_eq!(blob_size(&runner, "not-a-rev", "a.txt"), 0);
+    }
+
+    #[test]
+    fn measure_commit_blobs_poisons_only_paths_strictly_over_the_cap() {
+        let dir = init_repo();
+        let root = dir.path();
+        let small = commit(root, &[("a.txt", b"hello\n")], "small");
+        let edge = commit(
+            root,
+            &[("edge.bin", &vec![b'x'; BLOB_CAP_BYTES])],
+            "at the cap",
+        );
+        let big = commit(
+            root,
+            &[("big.bin", &vec![b'x'; BLOB_CAP_BYTES + 1])],
+            "over the cap",
+        );
+        let mut store = FactsStore::open(root).unwrap();
+        assert!(phase_a(&mut store, &far()).unwrap());
+        let (small, edge, big) = (
+            commit_id(&store, &small),
+            commit_id(&store, &edge),
+            commit_id(&store, &big),
+        );
+        assert_eq!(measure_commit_blobs(&mut store, small).unwrap(), 0);
+        assert_eq!(measure_commit_blobs(&mut store, edge).unwrap(), 0);
+        assert_eq!(measure_commit_blobs(&mut store, big).unwrap(), 1);
+        assert_eq!(store.poison_paths().unwrap(), vec!["big.bin".to_string()]);
+    }
+
+    /// A rename whose old blob was over the cap carries that blob's removal
+    /// in its diff, so the path is poison even when the new blob fits.
+    #[test]
+    fn measure_commit_blobs_poisons_a_rename_whose_old_blob_was_over_the_cap() {
+        let dir = init_repo();
+        let root = dir.path();
+        commit(
+            root,
+            &[("big.bin", &vec![b'x'; BLOB_CAP_BYTES + 1])],
+            "over the cap",
+        );
+        git(root, &["mv", "big.bin", "moved.bin"]);
+        let renamed = commit(
+            root,
+            &[("moved.bin", &vec![b'x'; BLOB_CAP_BYTES])],
+            "rename and trim",
+        );
+        let mut store = FactsStore::open(root).unwrap();
+        assert!(phase_a(&mut store, &far()).unwrap());
+        assert_eq!(
+            old_path_for(&store, "moved.bin").as_deref(),
+            Some("big.bin"),
+            "git must report the rename"
+        );
+        let cid = commit_id(&store, &renamed);
+        assert_eq!(measure_commit_blobs(&mut store, cid).unwrap(), 1);
+        assert!(
+            store
+                .poison_paths()
+                .unwrap()
+                .contains(&"moved.bin".to_string())
+        );
+    }
+
+    /// End to end: the over-cap blob's diff never reaches the index, the
+    /// small file's does.
+    #[test]
+    fn ingest_skips_the_diff_of_an_over_cap_blob() {
+        let dir = init_repo();
+        let root = dir.path();
+        commit(
+            root,
+            &[
+                ("big.bin", &vec![b'x'; BLOB_CAP_BYTES + 1]),
+                ("a.txt", b"needle_in_small\n"),
+            ],
+            "one big one small",
+        );
+        let mut store = FactsStore::open(root).unwrap();
+        let report = ingest_until_fresh(&mut store, &IngestOptions::default()).unwrap();
+        assert!(report.fresh, "{report:?}");
+        assert_eq!(store.poison_paths().unwrap(), vec!["big.bin".to_string()]);
+        let paths: Vec<String> = {
+            let mut stmt = store.conn().prepare("SELECT path FROM hunks").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(paths, vec!["a.txt".to_string()]);
+    }
 }
