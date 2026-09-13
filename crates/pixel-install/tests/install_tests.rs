@@ -3,7 +3,7 @@
 use std::fs;
 
 use pixel_install::config::{MANAGED_BEGIN, MANAGED_END};
-use pixel_install::doctor::{DoctorOptions, doctor};
+use pixel_install::doctor::{CheckStatus, DoctorOptions, doctor};
 use pixel_install::install::{InstallOptions, InstallReport, install};
 use pixel_install::uninstall::{UninstallOptions, uninstall};
 use tempfile::TempDir;
@@ -179,9 +179,7 @@ fn install_creates_config_with_managed_markers() {
     // Pre-create a CLAUDE.md with some existing content AND a stale pixel
     // managed block from a previous (hook-based) install.
     let original = format!(
-        "# My Project\n\nSome notes.\n\n{begin}\n# old pixel rules\n{end}\n",
-        begin = MANAGED_BEGIN,
-        end = MANAGED_END
+        "# My Project\n\nSome notes.\n\n{MANAGED_BEGIN}\n# old pixel rules\n{MANAGED_END}\n"
     );
     fs::write(home.join("CLAUDE.md"), original.clone()).unwrap();
 
@@ -497,7 +495,7 @@ fn dry_run_leaves_pre_existing_files_byte_identical() {
     // And it must not have written any backup files either.
     let home_entries: Vec<String> = fs::read_dir(home)
         .unwrap()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     assert!(
@@ -877,9 +875,7 @@ fn uninstall_removes_managed_block_and_preserves_user_content() {
     // Manually create a CLAUDE.md with user content AND a stale pixel
     // managed block (install() no longer writes these).
     let original = format!(
-        "# My Project\n\nSome notes.\n\n{begin}\n# old pixel rules\n{end}\n",
-        begin = MANAGED_BEGIN,
-        end = MANAGED_END
+        "# My Project\n\nSome notes.\n\n{MANAGED_BEGIN}\n# old pixel rules\n{MANAGED_END}\n"
     );
     fs::write(home.join("CLAUDE.md"), original).unwrap();
 
@@ -1056,11 +1052,7 @@ fn uninstall_dry_run_does_not_modify() {
     let claude_path = home.join("CLAUDE.md");
     fs::write(
         &claude_path,
-        format!(
-            "# Project\n\n{begin}\n# old pixel rules\n{end}\n",
-            begin = MANAGED_BEGIN,
-            end = MANAGED_END
-        ),
+        format!("# Project\n\n{MANAGED_BEGIN}\n# old pixel rules\n{MANAGED_END}\n"),
     )
     .unwrap();
     let bin = home.join("pixel");
@@ -1823,7 +1815,7 @@ fn install_writes_the_agent_prompt_into_codex_config_and_leaves_the_rest_of_the_
     let doc: toml_edit::DocumentMut = written.parse().unwrap();
     assert!(
         doc.get("developer_instructions")
-            .is_some_and(|i| i.is_value()),
+            .is_some_and(toml_edit::Item::is_value),
         "the key must sit in the root table, not inside [features] at the end of the file"
     );
     assert_eq!(
@@ -1974,7 +1966,6 @@ fn doctor_codex_config_check_is_red_until_the_current_block_is_in_place() {
         .find(|c| c.id == "install.codex-config")
         .expect("codex-config check")
     };
-    use pixel_install::doctor::CheckStatus;
     assert_eq!(status().status, CheckStatus::Red, "nothing installed");
 
     fs::create_dir_all(home.join(".codex")).unwrap();
