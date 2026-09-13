@@ -62,6 +62,29 @@ impl Default for GitOptions {
     }
 }
 
+/// What a git call produced when its exit status is data rather than
+/// failure (`merge-tree --write-tree` exits 1 on conflicts and still prints
+/// the conflicted entries; `rebase --continue` reports "nothing to continue"
+/// through its status). The timeout and the stdout cap still apply and are
+/// still errors: only the exit code is handed back instead of being turned
+/// into [`GitError::NonZeroExit`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitOutput {
+    /// `status.code()`: `None` when the process died from a signal.
+    pub code: Option<i32>,
+    /// Raw stdout, complete (the cap would have been an error).
+    pub stdout: Vec<u8>,
+    /// stderr, trimmed and redacted like the text of a `NonZeroExit`.
+    pub stderr: String,
+}
+
+impl GitOutput {
+    /// Exit code 0.
+    pub fn success(&self) -> bool {
+        self.code == Some(0)
+    }
+}
+
 pub struct GitRunner {
     root: PathBuf,
     options: GitOptions,
@@ -120,6 +143,24 @@ impl GitRunner {
         self.run(args).ok()
     }
 
+    /// Runs `git -C <root> <args>` with `env` added to the child's
+    /// environment and hands back stdout plus the exit code whatever the
+    /// status was. For the calls where a non-zero exit is an answer, not a
+    /// failure: `merge-tree --write-tree` (1 = conflicts, with the entries
+    /// on stdout) and `rebase --continue` (`GIT_EDITOR=true` so no editor
+    /// opens). The timeout and the output cap of this runner still apply:
+    /// they are the only `Err`s, so a caller never blocks on a hung
+    /// subprocess the way a bare `std::process::Command` would.
+    pub fn run_output(&self, args: &[&str], env: &[(&str, &str)]) -> Result<GitOutput, GitError> {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(&self.root).args(args);
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let arg_strings: Vec<String> = args.iter().map(ToString::to_string).collect();
+        execute_output(cmd, arg_strings, &self.options)
+    }
+
     /// Runs `git merge-file <current> <base> <other>` (same positional
     /// semantics as `pixel-cli::rescue_cmd`'s invocation, minus the
     /// rescue-specific `-L` diff3 conflict-marker labels, which are cosmetic
@@ -175,10 +216,30 @@ fn read_capped<R: Read>(mut r: R, cap: Option<usize>) -> Result<Vec<u8>, ()> {
 /// proving the exact poll/kill logic `run()` uses, without depending on a
 /// git hook or a slow git operation to create a deterministic hang.
 fn execute(
-    mut cmd: Command,
+    cmd: Command,
     args_for_err: Vec<String>,
     options: &GitOptions,
 ) -> Result<Vec<u8>, GitError> {
+    let out = execute_output(cmd, args_for_err.clone(), options)?;
+    if !out.success() {
+        return Err(GitError::NonZeroExit {
+            args: args_for_err,
+            code: out.code,
+            stderr: out.stderr,
+        });
+    }
+    Ok(out.stdout)
+}
+
+/// The primitive under `execute` and `GitRunner::run_output`: spawn, read
+/// stdout and stderr under the byte cap, poll for the timeout, and return
+/// the exit code as data. Only a timeout, an overflow or an I/O failure is
+/// an `Err` here; `execute` is the layer that makes a non-zero exit one.
+fn execute_output(
+    mut cmd: Command,
+    args_for_err: Vec<String>,
+    options: &GitOptions,
+) -> Result<GitOutput, GitError> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
@@ -247,16 +308,11 @@ fn execute(
         .join()
         .map_err(|_| GitError::Io(std::io::Error::other("stderr reader thread panicked")))?;
 
-    if !status.success() {
-        let stderr_text = redact(String::from_utf8_lossy(&stderr_bytes).trim());
-        return Err(GitError::NonZeroExit {
-            args: args_for_err,
-            code: status.code(),
-            stderr: stderr_text,
-        });
-    }
-
-    Ok(stdout_bytes)
+    Ok(GitOutput {
+        code: status.code(),
+        stdout: stdout_bytes,
+        stderr: redact(String::from_utf8_lossy(&stderr_bytes).trim()),
+    })
 }
 
 #[cfg(test)]
@@ -308,6 +364,85 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "output cap enforcement took too long: {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn execute_output_keeps_stdout_and_the_exit_code_on_a_nonzero_exit() {
+        // The whole point of the primitive: `merge-tree` prints its answer
+        // and exits 1, so a non-zero exit must not discard stdout.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo kept; echo warned >&2; exit 3"]);
+        let out = execute_output(cmd, vec!["sh".into()], &GitOptions::default()).unwrap();
+        assert_eq!(out.code, Some(3));
+        assert!(!out.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "kept\n");
+        assert_eq!(out.stderr, "warned");
+
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo fine"]);
+        let out = execute_output(cmd, vec!["sh".into()], &GitOptions::default()).unwrap();
+        assert_eq!(out.code, Some(0));
+        assert!(out.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "fine\n");
+    }
+
+    #[test]
+    fn execute_output_still_times_out() {
+        // A caller that wants the exit code as data still must never hang
+        // the daemon's request thread on a stuck subprocess.
+        let mut cmd = Command::new("sleep");
+        cmd.arg("5");
+        let options = GitOptions {
+            timeout: Some(Duration::from_millis(100)),
+            max_output_bytes: None,
+        };
+        let start = Instant::now();
+        let result = execute_output(cmd, vec!["sleep".into(), "5".into()], &options);
+        assert!(
+            matches!(result, Err(GitError::Timeout { .. })),
+            "expected Timeout, got {result:?}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn run_output_passes_env_to_git_and_reports_the_status() {
+        // `git var GIT_EDITOR` echoes the variable the child was given:
+        // proves the env pairs reach git (what `rebase --continue` relies
+        // on to not open an editor) and that a real git non-zero exit
+        // (`rev-parse` of an unknown ref) comes back as a code, not an Err.
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-git-runoutput-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .arg(&dir)
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let runner = GitRunner::new(&dir);
+
+        let out = runner
+            .run_output(
+                &["var", "GIT_EDITOR"],
+                &[("GIT_EDITOR", "pixel-test-editor")],
+            )
+            .unwrap();
+        assert_eq!(out.code, Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "pixel-test-editor"
+        );
+
+        let out = runner
+            .run_output(&["rev-parse", "--verify", "-q", "no-such-ref"], &[])
+            .unwrap();
+        assert_eq!(out.code, Some(1), "{out:?}");
+        assert!(!out.success());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
