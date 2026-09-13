@@ -70,9 +70,14 @@ jobs:
         run: git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
 
       # --in-place: mutate the checkout itself instead of copying it (CI
-      # discards the tree). Exit codes: 0 all caught, 2 missed, 3 timeout,
-      # 4 baseline tests already failing. Missed and timeouts fail the job;
-      # GitHub annotations point at each surviving mutant.
+      # discards the tree). --no-shuffle: mutants run in source order, so
+      # two runs of the same diff produce the same log and annotations.
+      # `-- --all-targets`: the per-mutant `cargo test` skips doctests (one
+      # rustdoc pass per crate for a single doctest in the workspace); the
+      # CI workflow still runs them unmutated. Exit codes: 0 all caught,
+      # 2 missed, 3 timeout, 4 baseline tests already failing. Missed and
+      # timeouts fail the job; GitHub annotations point at each surviving
+      # mutant, and the job summary repeats the outcome list.
       # rust-cache exports CARGO_INCREMENTAL=0 for the job (smaller cache
       # entries). That is the wrong trade here: every mutant rebuilds the
       # mutated crate after a one-function change, which is exactly what
@@ -81,9 +86,23 @@ jobs:
       # Dependencies are never built incrementally, so the restored cache
       # stays valid.
       - name: Run mutants in the diff
+        # The explicit shell adds pipefail: `tee` must not mask the exit code.
+        shell: bash
         env:
           CARGO_INCREMENTAL: 1
-        run: cargo mutants -vV -C --locked --in-place --in-diff pr.diff
+        run: >
+          cargo mutants -vV -C --locked --no-shuffle --in-place --in-diff pr.diff
+          -- --all-targets 2>&1 | tee results.txt
+
+      - name: Post job summary
+        if: always()
+        run: |
+          {
+            echo "### Mutants in the PR diff"
+            echo '```'
+            sed 's/\x1b\[[0-9;]*[mGKHF]//g' results.txt 2>/dev/null || echo "no output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload mutants.out
         if: always()
