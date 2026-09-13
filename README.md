@@ -67,7 +67,7 @@ Pixel is local-first. Its index, graph, and optional history data live under `.p
 
 ### Plugin install (per-tool native)
 
-This repo carries native plugin manifests, so each agent CLI can install Pixel through its own plugin mechanism — no `pixel install` step. The skill bootstraps the binary on first use (`command -v pixel || curl … install.sh | sh`); no hooks are registered.
+This repo carries native plugin manifests, so each agent CLI can install Pixel through its own plugin mechanism — no `pixel install` step. Always-on delivery is a SessionStart/SubagentStart hook (`hooks/pixel-context.sh`) that injects the protocol as `additionalContext` — context only, it never blocks a tool call. The skill bootstraps the binary on first use (`command -v pixel || curl … install.sh | sh`).
 
 | Tool | Install |
 | --- | --- |

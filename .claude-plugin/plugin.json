@@ -10,5 +10,6 @@
   "repository": "https://github.com/LivioGama/pixel",
   "license": "MIT",
   "keywords": ["code-graph", "impact-analysis", "retrieval", "tree-sitter", "productivity"],
-  "skills": "./skills/"
+  "skills": "./skills/",
+  "hooks": "./hooks/plugin-hooks.json"
 }

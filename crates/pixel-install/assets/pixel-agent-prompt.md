@@ -84,8 +84,8 @@ can do the same task is a failure mode — it wastes tokens and misses the index
 
 | Native workflow | Pixel replacement |
 |----------------|-------------------|
-| grep through ~/.claude/projects/ | `pixel recall search "pattern"` |
-| list past sessions | `pixel recall sessions` |
+| grep through ~/.claude/projects/, ~/.codex/sessions/, ~/.pi/agent/sessions/, or any agent transcript store | `pixel recall search "pattern"` |
+| list past sessions (claude, codex, devin, cursor, pi, …) | `pixel recall sessions` |
 | "what did we decide about X?" | `pixel recall ask "what did we decide about X"` |
 | read one past session | `pixel recall show <ref> --turn 1..20` |
 | context pack for a question | `pixel recall context "question" --budget 4000` |

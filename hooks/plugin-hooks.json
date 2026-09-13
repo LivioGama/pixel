@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-.}}/hooks/pixel-context.sh\" SessionStart",
+            "timeout": 5,
+            "statusMessage": "Loading pixel retrieval protocol..."
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-.}}/hooks/pixel-context.sh\" SubagentStart",
+            "timeout": 5,
+            "statusMessage": "Loading pixel retrieval protocol..."
+          }
+        ]
+      }
+    ]
+  }
+}
