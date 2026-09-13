@@ -10,6 +10,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use fs2::FileExt;
 use notify::{RecursiveMode, Watcher};
 
 use crate::api::{Request, Response, ServeError, Service, failure_response};
@@ -251,7 +252,6 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
         .write(true)
         .truncate(false)
         .open(&lock_path)?;
-    use fs2::FileExt;
     if lock_file.try_lock_exclusive().is_err() {
         return Err(ServeError::Msg(format!(
             "daemon lock already held by another process for {}",

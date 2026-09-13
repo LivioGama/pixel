@@ -14,6 +14,11 @@ use pixel_recall::store::RecallStore;
 use pixel_recall::vector::VectorStore;
 use serde_json::{Value, json};
 
+/// The embed backlog the daemon drains inline. The daemon loop is
+/// single-threaded, and a bulk backfill would block the socket for minutes
+/// (that is `pixel recall embed`'s job).
+const MAX_INLINE_BACKLOG: i64 = 5_000;
+
 use crate::api::{PROTOCOL_VERSION, Request, Response, ServeError, failure_response};
 use crate::daemon::Corpus;
 use pixel_proto::Envelope;
@@ -224,6 +229,10 @@ impl RecallService {
     /// lexical segments, and drain the embed backlog while the model is
     /// warm. Best-effort: watcher-driven maintenance must never kill the
     /// daemon.
+    // Watcher-driven glue over this machine's real agent stores (HOME);
+    // `ingest_source`, the adapters, segments and backfill are unit-tested
+    // in pixel-recall.
+    #[cfg_attr(test, mutants::skip)]
     fn refresh_agents(&mut self, agents: &std::collections::BTreeSet<&'static str>) {
         for adapter in all_adapters() {
             if !agents.contains(adapter.agent()) {
@@ -249,10 +258,8 @@ impl RecallService {
             }
             Err(e) => eprintln!("recall daemon: segments: {e}"),
         }
-        // Drain the embed backlog only when it is small: the daemon loop is
-        // single-threaded, and a bulk backfill here would block the socket
-        // for minutes (that is `pixel recall embed`'s job).
-        const MAX_INLINE_BACKLOG: i64 = 5_000;
+        // Drain the embed backlog only when it is small (see
+        // `MAX_INLINE_BACKLOG`).
         match self.store.embed_backlog() {
             Ok(backlog) if backlog > 0 && backlog <= MAX_INLINE_BACKLOG => {
                 self.ensure_embedder();
