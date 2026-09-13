@@ -64,8 +64,7 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 // ---------------------------------------------------------------------------
@@ -100,8 +99,7 @@ pub fn project_key(project_root: &Path) -> String {
     }
     let base = project_root
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "root".into());
+        .map_or_else(|| "root".into(), |n| n.to_string_lossy().into_owned());
     format!("{base}-{hex}")
 }
 
