@@ -378,7 +378,7 @@ impl FactsStore {
         let head = self.runner.run(&["rev-parse", "HEAD"])?;
         buf.extend_from_slice(&head);
         let h = xxhash_rust::xxh3::xxh3_64(&buf);
-        Ok(format!("{:016x}", h))
+        Ok(format!("{h:016x}"))
     }
 
     fn phase_b_done(&self) -> bool {
@@ -549,4 +549,27 @@ pub fn short_oid(oid: &str) -> String {
 /// Extract the subject line (first line) of a commit message.
 pub fn subject_of(message: &str) -> &str {
     message.lines().next().unwrap_or("").trim()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::{commit, git, two_commit_repo};
+
+    /// The refs hash is what tells phase A that history moved; it must be
+    /// stable while refs stand still and change on any new commit or ref.
+    #[test]
+    fn current_refs_hash_is_stable_until_a_ref_or_head_moves() {
+        let (dir, _, _) = two_commit_repo();
+        let store = FactsStore::open(dir.path()).unwrap();
+        let before = store.current_refs_hash().unwrap();
+        assert_eq!(before.len(), 16);
+        assert!(before.chars().all(|c| c.is_ascii_hexdigit()), "{before}");
+        assert_eq!(store.current_refs_hash().unwrap(), before);
+        commit(dir.path(), &[("b.txt", b"b\n")], "third");
+        let after_commit = store.current_refs_hash().unwrap();
+        assert_ne!(after_commit, before);
+        git(dir.path(), &["tag", "v1"]);
+        assert_ne!(store.current_refs_hash().unwrap(), after_commit);
+    }
 }

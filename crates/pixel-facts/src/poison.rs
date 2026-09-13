@@ -130,7 +130,7 @@ pub fn classify_content(probe: &[u8], path: &str) -> ContentKind {
 /// The exclude pathspec magic emitted for a path. Uses the `:(exclude)` form so
 /// git never even emits the matching blob during phase C.
 pub fn exclude_pathspec(path: &str) -> String {
-    format!(":(exclude){}", path)
+    format!(":(exclude){path}")
 }
 
 /// A learned poison path (one that tripped the blob cap in phase B).
@@ -208,6 +208,24 @@ pub fn decide_skips(store: &FactsStore, touched: &[String]) -> SkipPlan {
 fn now_iso() -> String {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_else(|_| "0".to_string())
+        .map_or_else(|_| "0".to_string(), |d| d.as_secs().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exclude_pathspec_is_the_negative_pathspec_magic_for_the_path() {
+        assert_eq!(
+            exclude_pathspec("vendor/big.bin"),
+            ":(exclude)vendor/big.bin"
+        );
+    }
+
+    #[test]
+    fn now_iso_is_the_current_unix_epoch_in_seconds() {
+        let ts: i64 = now_iso().parse().expect("digits");
+        assert!(ts > 1_577_836_800, "{ts}"); // 2020-01-01T00:00:00Z
+    }
 }

@@ -394,8 +394,7 @@ fn excavate_flags_the_deleting_commit_suspect_via_diff_overlap_not_subject() {
     assert!(
         delete_commit.suspect,
         "the deleting commit must be flagged suspect via diff-content overlap \
-         even though its subject says nothing about the feature: {:#?}",
-        delete_commit
+         even though its subject says nothing about the feature: {delete_commit:#?}"
     );
     assert!(
         !delete_commit.phrase_present,
@@ -424,8 +423,7 @@ fn excavate_does_not_flag_a_same_commit_reformat_as_suspect() {
     assert!(
         !modify_commit.suspect,
         "a commit that removes-then-re-adds the phrase on the same line must \
-         not be flagged suspect: {:#?}",
-        modify_commit
+         not be flagged suspect: {modify_commit:#?}"
     );
     assert!(
         modify_commit.phrase_present,

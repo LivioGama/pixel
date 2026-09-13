@@ -2145,6 +2145,7 @@ dependencies = [
 name = "pixel-facts"
 version = "0.2.2"
 dependencies = [
+ "mutants",
  "pixel-git",
  "pixel-index",
  "rusqlite",
