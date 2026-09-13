@@ -163,6 +163,11 @@ fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Serialises every test in the crate that sets `PIXEL_FLOW_DIR`: env vars
+/// are process-global and `cargo test` runs tests on parallel threads.
+#[cfg(test)]
+pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,8 +177,7 @@ mod tests {
     fn now_unix() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0)
+            .map_or(0, |d| d.as_secs() as i64)
     }
 
     fn make_flow(name: &str) -> Flow {
@@ -202,9 +206,6 @@ mod tests {
             proven: false,
         }
     }
-
-    /// Serialize tests that mutate PIXEL_FLOW_DIR — env vars are process-global.
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn slugify_basic() {

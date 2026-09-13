@@ -2159,6 +2159,7 @@ dependencies = [
 name = "pixel-flow"
 version = "0.2.2"
 dependencies = [
+ "mutants",
  "serde",
  "serde_json",
  "tempfile",
