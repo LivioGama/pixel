@@ -125,6 +125,46 @@ jobs:
           bun run test
           bun run typecheck
 
+  msrv:
+    name: MSRV (rust-version in Cargo.toml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
+
+      # The toolchain here must equal `rust-version` in the root Cargo.toml:
+      # cargo only enforces that field on dependency resolution, never on
+      # the workspace's own code, so without this job the number drifts
+      # (it read 1.85 while the tree needed 1.91). Bump both together.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.91
+        with:
+          toolchain: "1.91"
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: linux-msrv
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y perl make
+
+      - name: Toolchain matches Cargo.toml
+        run: |
+          declared=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          test "$declared" = "1.91" || { echo "Cargo.toml says rust-version $declared, this job installs 1.91"; exit 1; }
+
+      # A check, not clippy: lint names are added by newer toolchains and
+      # the lint gate runs on stable in the Test job.
+      - name: cargo check on the minimum toolchain
+        run: cargo check --workspace --all-targets --locked
+
   deny:
     name: Dependency policy (cargo-deny)
     runs-on: ubuntu-latest

@@ -36,7 +36,7 @@ A change is ready for a pull request when every line below is true.
 
 | Requirement | Version / note |
 | --- | --- |
-| Rust toolchain | stable, `rust-version = "1.85"` minimum (see `Cargo.toml`), edition 2024 |
+| Rust toolchain | stable, `rust-version = "1.91"` minimum (see `Cargo.toml`, checked by the `MSRV` CI job), edition 2024 |
 | `rustfmt`, `clippy` | `rustup component add rustfmt clippy` |
 | `git` | any recent version; tests build git fixtures in temp dirs |
 | `perl`, `make` (Linux) | needed by vendored OpenSSL |
