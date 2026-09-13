@@ -6,6 +6,21 @@ on:
     # main only receives release/hotfix merges. Both must stay green.
     branches: [main, develop]
   pull_request:
+    # A pull request that only touches Markdown, docs/ or the licence files
+    # cannot change a test result, so it skips the two-and-a-half-minute
+    # run. Later patterns win: the negations drop the docs, then the last
+    # line puts the bundled agent prompts (crates/**/*.md, checked by the
+    # install tests) back in. Branch pushes stay unfiltered so every merge
+    # commit on develop/main keeps a complete run. No branch rule requires
+    # this check today; if one is added, the excluded paths need a twin
+    # workflow that reports success.
+    paths:
+      - "**"
+      - "!**.md"
+      - "!docs/**"
+      - "!LICENSE"
+      - "!NOTICE"
+      - "crates/**"
 
 # A new push to a pull request cancels the run still in flight for its
 # previous commit. Branch pushes (main, develop) are never cancelled so every
