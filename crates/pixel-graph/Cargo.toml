@@ -1,8 +1,11 @@
 [package]
 name = "pixel-graph"
-version = "0.2.2"
+version = "0.2.4"
 edition.workspace = true
 license.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }

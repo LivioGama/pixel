@@ -55,8 +55,7 @@ impl SourceAdapter for Adapter {
             .modified()
             .ok()
             .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_millis() as i64);
         Ok(vec![SourceUnit {
             unit_key: self.history_path.to_string_lossy().to_string(),
             path: self.history_path.clone(),
@@ -175,5 +174,27 @@ impl SourceAdapter for Adapter {
             return true;
         };
         file_tail_hash(&unit.path, state.bytes_ingested as u64).as_deref() == Some(expected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_lists_the_history_file_when_it_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("history.jsonl");
+        let adapter = Adapter {
+            history_path: path.clone(),
+        };
+        assert!(adapter.discover().unwrap().is_empty());
+        std::fs::write(&path, b"{\"a\":1}\n").unwrap();
+        let units = adapter.discover().unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].path, path);
+        assert_eq!(units[0].unit_key, path.to_string_lossy());
+        assert_eq!(units[0].size, 8);
+        assert!(units[0].mtime_ms > 0);
     }
 }

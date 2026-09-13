@@ -3,7 +3,7 @@
 use std::fs;
 
 use pixel_install::config::{MANAGED_BEGIN, MANAGED_END};
-use pixel_install::doctor::{DoctorOptions, doctor};
+use pixel_install::doctor::{CheckStatus, DoctorOptions, doctor};
 use pixel_install::install::{InstallOptions, InstallReport, install};
 use pixel_install::uninstall::{UninstallOptions, uninstall};
 use tempfile::TempDir;
@@ -100,19 +100,25 @@ fn installed_metrics_guidance_reaches_wrapped_agents_without_rewriting_streams()
     // tool streams. No model, external service, or paid evaluation is involved.
     let mock = r#"#!/bin/sh
 case "$1" in
-  --append-system-prompt-file) prompt="$2" ;;
-  -c) prompt="${2#model_instructions_file=\"}"; prompt="${prompt%\"}" ;;
+  --append-system-prompt-file) prompt="$(cat "$2")" || exit 82 ;;
   *) exit 81 ;;
 esac
-test -r "$prompt" || exit 82
-grep -q '## LIVE OPERATION METRICS' "$prompt" || exit 83
+printf '%s\n' "$prompt" | grep -q '## LIVE OPERATION METRICS' || exit 83
 shift 2
 test "$1" = 'real task with spaces' || exit 84
 printf '%s\n' '{"result":"fixture"}'
 printf '%s\n' '🟩 Pixel · impact · 12.4 ms · ~820 output tokens · ~3100 tokens saved (workflow estimate) · ~3.99 s saved (sequential estimate) · id=fixture-invocation' >&2
 exit 7
 "#;
-    for agent in ["claude", "codex"] {
+    // Codex reads the prompt from config.toml itself: the value the file
+    // carries is what its developer message gets.
+    let codex_value = codex_developer_instructions(home).expect("developer_instructions written");
+    assert!(
+        codex_value.contains("## LIVE OPERATION METRICS"),
+        "the relay contract must reach codex through config.toml"
+    );
+    let agent = "claude";
+    {
         let executable = home.join(agent);
         fs::write(&executable, mock).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
@@ -173,9 +179,7 @@ fn install_creates_config_with_managed_markers() {
     // Pre-create a CLAUDE.md with some existing content AND a stale pixel
     // managed block from a previous (hook-based) install.
     let original = format!(
-        "# My Project\n\nSome notes.\n\n{begin}\n# old pixel rules\n{end}\n",
-        begin = MANAGED_BEGIN,
-        end = MANAGED_END
+        "# My Project\n\nSome notes.\n\n{MANAGED_BEGIN}\n# old pixel rules\n{MANAGED_END}\n"
     );
     fs::write(home.join("CLAUDE.md"), original.clone()).unwrap();
 
@@ -491,7 +495,7 @@ fn dry_run_leaves_pre_existing_files_byte_identical() {
     // And it must not have written any backup files either.
     let home_entries: Vec<String> = fs::read_dir(home)
         .unwrap()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     assert!(
@@ -601,8 +605,12 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
         "shell profile should define the claude() wrapper"
     );
     assert!(
-        profile_content.contains("codex()"),
-        "shell profile should define the codex() wrapper"
+        !profile_content.contains("codex"),
+        "codex is wired through config.toml, not a shell function:\n{profile_content}"
+    );
+    assert!(
+        codex_developer_instructions(home).is_some_and(|v| v.contains("MANDATORY WORKFLOW")),
+        "a fresh install must write the agent prompt into ~/.codex/config.toml"
     );
 }
 
@@ -691,6 +699,166 @@ fn doctor_install_artifact_checks_red_and_green() {
     );
 }
 
+/// Dry-run "parser" standing in for the CLI's clap definition: rejects the
+/// one subcommand the tests plant, accepts everything else.
+fn stub_validator(argv: &[String]) -> Result<(), String> {
+    if argv.iter().any(|a| a == "bogus-subcommand") {
+        Err("unrecognized subcommand 'bogus-subcommand'".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn check<'a>(
+    report: &'a pixel_install::doctor::DoctorReport,
+    id: &str,
+) -> &'a pixel_install::doctor::DoctorCheck {
+    report
+        .checks
+        .iter()
+        .find(|c| c.id == id)
+        .unwrap_or_else(|| panic!("doctor has no {id} check"))
+}
+
+/// 0.2.x installs write no managed block: the rule text agents receive is
+/// the deployed `agent-prompt.md`, so that is what `rule.parity` and
+/// `rule.scenarios` must validate. Before this, both reported yellow "no
+/// installed rule text" on every current install, and a prompt documenting
+/// a command line the binary rejects went unnoticed.
+#[test]
+fn doctor_rule_checks_validate_the_deployed_agent_prompt() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let doc_opts = DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: None,
+        shell: Some(TEST_SHELL.into()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        syntax_validator: Some(stub_validator),
+        ..Default::default()
+    };
+
+    // 1. Nothing installed: no rule text anywhere → yellow, pointing at install.
+    let report = doctor(&doc_opts).expect("doctor runs");
+    for id in ["rule.parity", "rule.scenarios"] {
+        let c = check(&report, id);
+        assert_eq!(
+            c.status,
+            pixel_install::doctor::CheckStatus::Yellow,
+            "{id}: {c:?}"
+        );
+        assert!(
+            c.summary.contains("agent-prompt.md") && c.summary.contains("pixel install"),
+            "{id} names the missing artifact and the fix: {}",
+            c.summary
+        );
+    }
+
+    // 2. A plain install (no CLAUDE.md, no managed block): both checks read
+    //    the deployed prompt and go green.
+    install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .expect("install");
+    let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
+    let report = doctor(&doc_opts).expect("doctor runs");
+    for id in ["rule.parity", "rule.scenarios"] {
+        let c = check(&report, id);
+        assert_eq!(
+            c.status,
+            pixel_install::doctor::CheckStatus::Green,
+            "{id} after install: {:?} {:?}",
+            c.summary,
+            c.reason
+        );
+        assert_eq!(
+            c.detail.as_ref().and_then(|d| d["source"].as_str()),
+            Some(prompt_path.to_str().unwrap()),
+            "{id} validated the deployed prompt"
+        );
+    }
+    let parity = check(&report, "rule.parity");
+    let parsed = parity.detail.as_ref().unwrap()["parsed_ok"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        parsed > 0,
+        "the deployed prompt documents pixel command lines: {parity:?}"
+    );
+
+    // 3. A deployed prompt documenting a command the binary rejects is red,
+    //    even with a legacy managed block that would pass: the deployed
+    //    prompt is what agents read, so it wins over the older text.
+    let prompt = fs::read_to_string(&prompt_path).unwrap();
+    fs::write(
+        &prompt_path,
+        format!(
+            "{prompt}
+```bash
+pixel bogus-subcommand .
+```
+"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        home.join("CLAUDE.md"),
+        format!(
+            "# mine
+{MANAGED_BEGIN}
+```bash
+pixel targets task
+pixel resolve x
+pixel rescue
+pixel reconcile
+pixel impact x
+```
+{MANAGED_END}
+"
+        ),
+    )
+    .unwrap();
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let parity = check(&report, "rule.parity");
+    assert_eq!(
+        parity.status,
+        pixel_install::doctor::CheckStatus::Red,
+        "{parity:?}"
+    );
+    assert!(
+        parity
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("bogus-subcommand"),
+        "the rejected line is named: {:?}",
+        parity.reason
+    );
+    // Red at all proves the precedence: the managed block alone parses
+    // green, so the rejected line can only have come from the deployed
+    // prompt (a red check carries no detail to name its source).
+
+    // 4. With the deployed prompt gone, the legacy managed block is the
+    //    fallback for installs that predate agent-prompt.md.
+    fs::remove_file(&prompt_path).unwrap();
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let parity = check(&report, "rule.parity");
+    assert_eq!(
+        parity.status,
+        pixel_install::doctor::CheckStatus::Green,
+        "{parity:?}"
+    );
+    assert_eq!(
+        parity.detail.as_ref().and_then(|d| d["source"].as_str()),
+        Some(home.join("CLAUDE.md").to_str().unwrap()),
+        "legacy managed block is read when no prompt is deployed"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // uninstall tests
 // ---------------------------------------------------------------------------
@@ -707,9 +875,7 @@ fn uninstall_removes_managed_block_and_preserves_user_content() {
     // Manually create a CLAUDE.md with user content AND a stale pixel
     // managed block (install() no longer writes these).
     let original = format!(
-        "# My Project\n\nSome notes.\n\n{begin}\n# old pixel rules\n{end}\n",
-        begin = MANAGED_BEGIN,
-        end = MANAGED_END
+        "# My Project\n\nSome notes.\n\n{MANAGED_BEGIN}\n# old pixel rules\n{MANAGED_END}\n"
     );
     fs::write(home.join("CLAUDE.md"), original).unwrap();
 
@@ -725,6 +891,7 @@ fn uninstall_removes_managed_block_and_preserves_user_content() {
         binary_path: Some(home.join("pixel")),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     };
     let report = uninstall(&uninstall_opts).expect("uninstall");
     assert!(report.ok, "uninstall should succeed");
@@ -794,6 +961,7 @@ fn uninstall_removes_claude_hooks_and_scripts() {
         binary_path: Some(home.join("pixel")),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     };
     uninstall(&uninstall_opts).expect("uninstall");
 
@@ -837,6 +1005,7 @@ fn uninstall_removes_binary() {
         binary_path: Some(bin.clone()),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     };
     uninstall(&opts).expect("uninstall");
 
@@ -863,6 +1032,7 @@ fn uninstall_is_idempotent() {
         binary_path: Some(home.join("pixel")),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     };
     let r1 = uninstall(&uninstall_opts).expect("uninstall 1");
     assert!(r1.ok);
@@ -886,11 +1056,7 @@ fn uninstall_dry_run_does_not_modify() {
     let claude_path = home.join("CLAUDE.md");
     fs::write(
         &claude_path,
-        format!(
-            "# Project\n\n{begin}\n# old pixel rules\n{end}\n",
-            begin = MANAGED_BEGIN,
-            end = MANAGED_END
-        ),
+        format!("# Project\n\n{MANAGED_BEGIN}\n# old pixel rules\n{MANAGED_END}\n"),
     )
     .unwrap();
     let bin = home.join("pixel");
@@ -904,6 +1070,7 @@ fn uninstall_dry_run_does_not_modify() {
         binary_path: Some(bin.clone()),
         dry_run: true,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     };
     let report = uninstall(&uninstall_opts).expect("dry-run uninstall");
     assert!(report.dry_run, "report should be dry-run");
@@ -955,6 +1122,7 @@ fn uninstall_removes_codex_hooks_preserving_others() {
         binary_path: Some(home.join("pixel")),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     };
     uninstall(&opts).expect("uninstall");
 
@@ -986,6 +1154,7 @@ fn uninstall_removes_rule_source() {
         binary_path: Some(home.join("pixel")),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     };
     uninstall(&opts).expect("uninstall");
 
@@ -1046,6 +1215,7 @@ fn routing_full_install_rtk_round_trip_preserves_foreign_hooks() {
         binary_path: Some(exe),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     })
     .unwrap();
     let restored: serde_json::Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
@@ -1194,15 +1364,14 @@ fn fish_wrappers_are_written_in_fish_syntax_not_posix_syntax() {
         "function claude\n",
         "command claude --append-system-prompt-file",
         "if contains -- --print $argv; or string match -qr -- '^-[^-]*p' $argv",
-        "function codex; command codex -c",
-        "$argv; end",
+        "$argv\n",
     ] {
         assert!(
             block.contains(required),
             "fish block must define functions in fish syntax, missing {required:?}:\n{block}"
         );
     }
-    for forbidden in ["claude()", "codex()", "\"$@\""] {
+    for forbidden in ["claude()", "codex()", "function codex", "\"$@\""] {
         assert!(
             !block.contains(forbidden),
             "POSIX construct {forbidden:?} is a parse error in fish:\n{block}"
@@ -1291,6 +1460,162 @@ fn doctor_reads_the_profile_of_the_shell_it_is_asked_about() {
     );
 }
 
+/// The residue of an install that ran under an agent's `$SHELL`: a valid
+/// fish install plus a pixel block in `~/.zshrc`, which fish never loads.
+/// Doctor names the stray file, its shell and the two ways out, as yellow:
+/// a machine that launches `claude` from a second shell on purpose keeps a
+/// working install and must not be sent to `pixel install`.
+#[test]
+fn doctor_flags_a_pixel_block_in_another_shells_profile_as_yellow() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, FISH_SHELL);
+    let check = || {
+        doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: None,
+            shell: Some(FISH_SHELL.into()),
+            claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+            ..Default::default()
+        })
+        .expect("doctor runs")
+        .checks
+        .into_iter()
+        .find(|c| c.id == "install.shell-wrappers")
+        .expect("shell-wrappers check")
+    };
+
+    let clean = check();
+    assert_eq!(clean.status, pixel_install::doctor::CheckStatus::Green);
+    assert_eq!(
+        clean.detail.as_ref().unwrap()["stray_profiles"],
+        serde_json::json!([])
+    );
+
+    // A `.zshrc` without a block is not a stray: every macOS account has one.
+    fs::write(home.join(".zshrc"), "export EDITOR=vim\n").unwrap();
+    assert_eq!(check().status, pixel_install::doctor::CheckStatus::Green);
+
+    install_for_shell(home, "/bin/zsh");
+    let stray = check();
+    assert_eq!(stray.status, pixel_install::doctor::CheckStatus::Yellow);
+    let zshrc = home.join(".zshrc").display().to_string();
+    assert!(
+        stray
+            .summary
+            .starts_with("fish shell wrappers installed in "),
+        "{}",
+        stray.summary
+    );
+    assert!(stray.summary.contains(&zshrc), "{}", stray.summary);
+    assert!(
+        stray.summary.contains("not loaded by fish"),
+        "{}",
+        stray.summary
+    );
+    assert!(
+        stray
+            .summary
+            .contains("`pixel uninstall --wrappers-only --shell zsh`")
+            && stray.summary.contains("`--shell zsh`"),
+        "{}",
+        stray.summary
+    );
+    assert_eq!(
+        stray.detail.as_ref().unwrap()["stray_profiles"],
+        serde_json::json!([{"shell": "zsh", "profile": zshrc}])
+    );
+
+    // The same install seen from zsh: green for zsh, with fish as the stray.
+    let from_zsh = doctor(&DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: None,
+        shell: Some("/bin/zsh".into()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        ..Default::default()
+    })
+    .expect("doctor runs")
+    .checks
+    .into_iter()
+    .find(|c| c.id == "install.shell-wrappers")
+    .unwrap();
+    assert_eq!(from_zsh.status, pixel_install::doctor::CheckStatus::Yellow);
+    assert_eq!(
+        from_zsh.detail.as_ref().unwrap()["stray_profiles"][0]["shell"],
+        "fish"
+    );
+}
+
+/// The way out doctor names: only the named shell's block goes, the
+/// working install (the other shell's block, the prompt files) stays.
+#[test]
+fn uninstall_wrappers_only_removes_one_shells_block_and_nothing_else() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, FISH_SHELL);
+    install_for_shell(home, "/bin/zsh");
+    let prompt = home.join(".local/share/pixel/agent-prompt.md");
+    assert!(prompt.is_file(), "fixture: the prompt is installed");
+    assert!(
+        fs::read_to_string(home.join(".zshrc"))
+            .unwrap()
+            .contains("pixel-managed")
+    );
+
+    let report = uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some("/bin/zsh".into()),
+        wrappers_only: true,
+        ..Default::default()
+    })
+    .expect("uninstall runs");
+    assert!(report.ok, "{report:?}");
+    assert_eq!(
+        report.steps.len(),
+        1,
+        "only the wrapper step ran: {report:?}"
+    );
+    assert_eq!(report.steps[0].id, "shell-wrappers");
+    assert_eq!(
+        (
+            report.summary.green,
+            report.summary.yellow,
+            report.summary.red
+        ),
+        (1, 0, 0),
+        "{report:?}"
+    );
+
+    assert!(
+        !fs::read_to_string(home.join(".zshrc"))
+            .unwrap()
+            .contains("pixel-managed"),
+        "the zsh block is gone"
+    );
+    assert!(
+        fs::read_to_string(fish_dropin(home))
+            .unwrap()
+            .contains("pixel-managed"),
+        "the fish block stays"
+    );
+    assert!(prompt.is_file(), "the prompt files stay");
+
+    // Doctor now reads the fish install back green with no stray.
+    let check = doctor(&DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: None,
+        shell: Some(FISH_SHELL.into()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        ..Default::default()
+    })
+    .expect("doctor runs")
+    .checks
+    .into_iter()
+    .find(|c| c.id == "install.shell-wrappers")
+    .unwrap();
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
+}
+
 #[test]
 fn doctor_refuses_to_green_a_posix_block_sitting_in_the_fish_dropin() {
     // Reproduces the shipped bug in its observable form: the markers are
@@ -1339,6 +1664,7 @@ fn uninstall_deletes_the_fish_dropin_it_created() {
         binary_path: None,
         dry_run: false,
         shell: Some(FISH_SHELL.into()),
+        ..Default::default()
     })
     .expect("uninstall");
 
@@ -1586,6 +1912,314 @@ fn the_subagent_prompt_flag_is_passed_in_print_mode_only() {
     }
 }
 
+fn codex_config_path(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".codex/config.toml")
+}
+
+/// The `developer_instructions` string of `~/.codex/config.toml`, read the way
+/// Codex reads it (a TOML parse, not a substring search), or `None` when the
+/// file or the key is absent.
+fn codex_developer_instructions(home: &std::path::Path) -> Option<String> {
+    let text = fs::read_to_string(codex_config_path(home)).ok()?;
+    let doc: toml_edit::DocumentMut = text.parse().expect("config.toml must stay valid TOML");
+    doc.get("developer_instructions")
+        .and_then(|item| item.as_str())
+        .map(str::to_string)
+}
+
+const PIXEL_BLOCK_BEGIN: &str = "<!-- pixel:managed:begin -->";
+const PIXEL_BLOCK_END: &str = "<!-- pixel:managed:end -->";
+
+/// A config.toml the way the Codex desktop app leaves it: comments, root
+/// keys, sub-tables with dotted keys. Every line of it must survive an
+/// install byte for byte — the app rewrites this file too, and a
+/// regenerated layout would fight it.
+const USER_CODEX_CONFIG: &str = r#"# my codex settings
+personality = "pragmatic"
+model = "gpt-5.6-sol"  # trailing comment
+
+[mcp_servers.node_repl]
+args = []
+command = "/opt/node_repl"
+
+[features]
+js_repl = false
+token_budget.enabled = true
+"#;
+
+/// Codex has no file-backed `developer_instructions`, so the prompt is
+/// embedded in the file. Two things must hold: Codex reads back exactly the
+/// bundled prompt (a TOML round trip, no escaping accident), and nothing else
+/// in a file the desktop app also owns moves.
+#[test]
+fn install_writes_the_agent_prompt_into_codex_config_and_leaves_the_rest_of_the_file_alone() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(codex_config_path(home), USER_CODEX_CONFIG).unwrap();
+    install_for_shell(home, TEST_SHELL);
+
+    let asset = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
+    let value = codex_developer_instructions(home).expect("developer_instructions written");
+    assert_eq!(
+        value,
+        format!("{PIXEL_BLOCK_BEGIN}\n{asset}{PIXEL_BLOCK_END}\n"),
+        "codex must read back the bundled prompt between the pixel markers"
+    );
+    let written = fs::read_to_string(codex_config_path(home)).unwrap();
+    for line in USER_CODEX_CONFIG.lines() {
+        assert!(
+            written.contains(line),
+            "user line {line:?} must survive the install verbatim:\n{written}"
+        );
+    }
+    assert!(
+        written.contains("developer_instructions = '''\n"),
+        "the prompt must be a literal multi-line string, so the file shows it unescaped:\n{written}"
+    );
+    let doc: toml_edit::DocumentMut = written.parse().unwrap();
+    assert!(
+        doc.get("developer_instructions")
+            .is_some_and(toml_edit::Item::is_value),
+        "the key must sit in the root table, not inside [features] at the end of the file"
+    );
+    assert_eq!(
+        doc["features"]["token_budget"]["enabled"].as_bool(),
+        Some(true),
+        "sub-tables must be untouched"
+    );
+
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(
+        fs::read_to_string(codex_config_path(home)).unwrap(),
+        written,
+        "a re-install must be byte-for-byte idempotent"
+    );
+    let block = fs::read_to_string(shell_profile_path(home)).unwrap();
+    assert!(
+        !block.contains("codex"),
+        "no codex shell function next to the config key — the CLI override would shadow it:\n{block}"
+    );
+}
+
+#[test]
+fn install_keeps_a_users_own_developer_instructions_and_refreshes_a_stale_pixel_block() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        codex_config_path(home),
+        "developer_instructions = \"Always answer in French.\"\n",
+    )
+    .unwrap();
+    install_for_shell(home, TEST_SHELL);
+    let asset = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
+    let expected =
+        format!("Always answer in French.\n\n{PIXEL_BLOCK_BEGIN}\n{asset}{PIXEL_BLOCK_END}\n");
+    assert_eq!(
+        codex_developer_instructions(home).as_deref(),
+        Some(expected.as_str()),
+        "the user's own instructions come first, the pixel block is appended"
+    );
+
+    // A block left by an older pixel (different prompt) plus text the user
+    // added after it: only the block changes.
+    fs::write(
+        codex_config_path(home),
+        format!(
+            "developer_instructions = '''\nMine first.\n\n{PIXEL_BLOCK_BEGIN}\nold prompt\n{PIXEL_BLOCK_END}\nMine last.\n'''\n"
+        ),
+    )
+    .unwrap();
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(
+        codex_developer_instructions(home).as_deref(),
+        Some(
+            format!("Mine first.\n\n{PIXEL_BLOCK_BEGIN}\n{asset}{PIXEL_BLOCK_END}\nMine last.\n")
+                .as_str()
+        ),
+        "a stale block is replaced in place, text on both sides survives"
+    );
+}
+
+#[test]
+fn install_refuses_to_rewrite_a_codex_config_it_cannot_parse() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    let broken = "model = \"gpt\"\n[features\njs_repl = false\n";
+    fs::write(codex_config_path(home), broken).unwrap();
+    let report = install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .unwrap();
+    let step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "codex-config")
+        .expect("codex-config step");
+    assert_eq!(
+        step.status,
+        pixel_install::install::CheckStatus::Red,
+        "a file codex itself cannot load is reported, not repaired: {step:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(codex_config_path(home)).unwrap(),
+        broken,
+        "an unparseable config.toml must not be rewritten — that would drop what it holds"
+    );
+    assert!(
+        !report.ok,
+        "the report must not read ok with the codex step red"
+    );
+}
+
+#[test]
+fn dry_run_leaves_codex_config_absent_and_untouched() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let options = InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: true,
+        shell: Some(TEST_SHELL.into()),
+    };
+    let report = install(&options).unwrap();
+    assert!(report.ok);
+    assert!(
+        !home.join(".codex").exists(),
+        "dry-run must not create ~/.codex"
+    );
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(codex_config_path(home), USER_CODEX_CONFIG).unwrap();
+    let report = install(&options).unwrap();
+    let step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "codex-config")
+        .unwrap();
+    assert!(
+        step.summary.starts_with("[dry-run]"),
+        "dry-run must say what it would do: {step:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(codex_config_path(home)).unwrap(),
+        USER_CODEX_CONFIG
+    );
+}
+
+#[test]
+fn doctor_codex_config_check_is_red_until_the_current_block_is_in_place() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let status = || {
+        doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: None,
+            shell: Some(TEST_SHELL.into()),
+            claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+            ..Default::default()
+        })
+        .unwrap()
+        .checks
+        .into_iter()
+        .find(|c| c.id == "install.codex-config")
+        .expect("codex-config check")
+    };
+    assert_eq!(status().status, CheckStatus::Red, "nothing installed");
+
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        codex_config_path(home),
+        "developer_instructions = \"Always answer in French.\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        status().status,
+        CheckStatus::Red,
+        "a value without the pixel block does not carry the prompt"
+    );
+
+    install_for_shell(home, TEST_SHELL);
+    let check = status();
+    assert_eq!(check.status, CheckStatus::Green, "{check:?}");
+
+    let written = fs::read_to_string(codex_config_path(home)).unwrap();
+    fs::write(
+        codex_config_path(home),
+        written.replace("## MANDATORY WORKFLOW", "## OPTIONAL WORKFLOW"),
+    )
+    .unwrap();
+    let check = status();
+    assert_eq!(
+        check.status,
+        CheckStatus::Red,
+        "a block that differs from the bundled prompt is stale: {check:?}"
+    );
+    assert!(
+        check.reason.as_deref().is_some_and(|r| r.contains("stale")),
+        "{check:?}"
+    );
+}
+
+#[test]
+fn uninstall_takes_only_the_pixel_block_out_of_codex_config() {
+    use pixel_install::uninstall::{UninstallOptions, uninstall};
+
+    // Only pixel in the key: the key goes, the rest of the file stays.
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(codex_config_path(home), USER_CODEX_CONFIG).unwrap();
+    install_for_shell(home, TEST_SHELL);
+    assert!(codex_developer_instructions(home).is_some());
+    uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        codex_developer_instructions(home),
+        None,
+        "the key must be removed"
+    );
+    let after = fs::read_to_string(codex_config_path(home)).unwrap();
+    for line in USER_CODEX_CONFIG.lines() {
+        assert!(
+            after.contains(line),
+            "user line {line:?} lost by uninstall:\n{after}"
+        );
+    }
+
+    // The user's own text around the block: the block goes, the text stays.
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        codex_config_path(home),
+        "developer_instructions = \"Always answer in French.\"\n",
+    )
+    .unwrap();
+    install_for_shell(home, TEST_SHELL);
+    uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        codex_developer_instructions(home).as_deref(),
+        Some("Always answer in French.\n"),
+        "uninstall must hand the key back to the user"
+    );
+}
+
 #[test]
 fn reinstall_keeps_one_managed_block_with_one_subagent_flag() {
     for shell in [TEST_SHELL, FISH_SHELL] {
@@ -1672,6 +2306,7 @@ fn uninstall_removes_the_subagent_prompt() {
         binary_path: None,
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
+        ..Default::default()
     })
     .expect("uninstall");
 

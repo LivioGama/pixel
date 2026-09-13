@@ -9,13 +9,23 @@
 #   scripts/pixel-vs-manual.sh /path/to/repo   # custom repo
 #
 # Prerequisites:
-#   - pixel built and installed
-#   - repo indexed (pixel index . && pixel graph .)
+#   - pixel installed (`command -v pixel`), or built under target/ (see
+#     CONTRIBUTING.md "Local install loop"); PIXEL_BIN overrides
+#   - the repo is indexed on first run (pixel index + pixel graph, below)
 
 set -euo pipefail
 
 REPO="${1:-$(pwd)}"
-PIXEL_BIN="${PIXEL_BIN:-$(command -v pixel || echo "$(cd "$(dirname "$0")/.." && pwd)/target/release/pixel")}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Binary: $PIXEL_BIN, else the installed pixel (`command -v pixel`: mise shim,
+# Homebrew, ~/.cargo/bin, ~/.local/bin), else a local build (dev-release is the
+# reinstall-loop profile, see CONTRIBUTING.md; release is the shipped one).
+PIXEL_BIN="${PIXEL_BIN:-$(command -v pixel 2>/dev/null || true)}"
+if [ -z "$PIXEL_BIN" ]; then
+  for p in "$ROOT/target/dev-release/pixel" "$ROOT/target/release/pixel"; do
+    [ -x "$p" ] && PIXEL_BIN="$p" && break
+  done
+fi
 
 cd "$REPO"
 
@@ -77,6 +87,11 @@ echo -e "${DIM}Indexing repo...${R}"
 "$PIXEL_BIN" graph "$REPO" 2>/dev/null || true
 echo ""
 
+# `install` is ambiguous by bare name (a function, a module, a test method):
+# impact/context take the uid, which `pixel symbol` prints in its last column.
+INSTALL_UID=$("$PIXEL_BIN" symbol install "$REPO" 2>/dev/null | awk '$1=="function"{print $NF; exit}')
+INSTALL_UID="${INSTALL_UID:-crates/pixel-install/src/install.rs#install#function}"
+
 OUTDIR="/tmp/pixel-vs-manual"
 mkdir -p "$OUTDIR"
 
@@ -124,9 +139,9 @@ head -10 "$OUTDIR/manual-2.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/manual-2.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${M2}ms${R}"
 
-echo -e "\n  ${GRN}${B}── PIXEL: pixel impact install ──${R}"
+echo -e "\n  ${GRN}${B}── PIXEL: pixel impact $INSTALL_UID ──${R}"
 P2=$(run_cmd "pixel-2" "$OUTDIR/pixel-2.txt" \
-  "$PIXEL_BIN" impact "install" "$REPO" 2>/dev/null || true)
+  "$PIXEL_BIN" impact "$INSTALL_UID" "$REPO" 2>/dev/null || true)
 head -20 "$OUTDIR/pixel-2.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/pixel-2.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${P2}ms${R}"
@@ -148,9 +163,9 @@ head -15 "$OUTDIR/manual-3.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/manual-3.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${M3}ms${R}"
 
-echo -e "\n  ${GRN}${B}── PIXEL: pixel excavate register_mcp_server ──${R}"
+echo -e "\n  ${GRN}${B}── PIXEL: pixel excavate --phrase register_mcp_server ──${R}"
 P3=$(run_cmd "pixel-3" "$OUTDIR/pixel-3.txt" \
-  "$PIXEL_BIN" excavate "$DELETED_FN" "$REPO" 2>/dev/null || true)
+  "$PIXEL_BIN" excavate --phrase "$DELETED_FN" "$REPO" 2>/dev/null || true)
 head -15 "$OUTDIR/pixel-3.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/pixel-3.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${P3}ms${R}"
@@ -183,13 +198,8 @@ row "Resolve concept to code" "$M4" "$P4"
 # ════════════════════════════════════════════════════════════════════════
 header "TASK 5: Get context for a symbol"
 
-# Find a real symbol uid from the graph
-SYMBOL_UID=$("$PIXEL_BIN" search "fn install" "$REPO" 2>/dev/null | head -1 | grep -oE '[a-f0-9]{16}' | head -1 || echo "")
-
-if [ -z "$SYMBOL_UID" ]; then
-  # Fallback: use a known pattern
-  SYMBOL_UID="install"
-fi
+# A symbol uid is `<path>#<name>#<kind>` (resolved above).
+SYMBOL_UID="$INSTALL_UID"
 
 echo -e "\n  ${YLW}${B}── MANUAL: find + read the file ──${R}"
 M5=$(run_cmd "manual-5" "$OUTDIR/manual-5.txt" \
@@ -198,7 +208,7 @@ head -15 "$OUTDIR/manual-5.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/manual-5.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${M5}ms${R}"
 
-echo -e "\n  ${GRN}${B}── PIXEL: pixel context <uid> ──${R}"
+echo -e "\n  ${GRN}${B}── PIXEL: pixel context $SYMBOL_UID ──${R}"
 P5=$(run_cmd "pixel-5" "$OUTDIR/pixel-5.txt" \
   "$PIXEL_BIN" context "$SYMBOL_UID" "$REPO" 2>/dev/null || true)
 head -15 "$OUTDIR/pixel-5.txt" | sed 's/^/  /'

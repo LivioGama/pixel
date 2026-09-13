@@ -1,11 +1,15 @@
 [package]
 name = "pixel-flow"
-version = "0.2.2"
+version = "0.2.4"
 edition.workspace = true
 license.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
+mutants = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

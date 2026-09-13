@@ -1,152 +1,167 @@
 #!/bin/sh
-# pixel smoke test — exercises guard hook with both Claude + Devin tool names,
-# core CLI commands, and the four mandatory workflows.
-PIXEL=~/.local/bin/pixel
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# pixel smoke test — exercises the INSTALLED pixel end to end: CLI surface,
+# the guard hook's advisory contract across agent tool names, session-start,
+# doctor, the install surface, and the help of the mandatory workflows.
+#
+#   scripts/pixel-smoke-test.sh                 # binary from `command -v pixel`
+#   PIXEL_BIN=target/dev-release/pixel scripts/pixel-smoke-test.sh
+#   PIXEL_SHELL=fish scripts/pixel-smoke-test.sh # doctor --shell when the
+#                                               # login shell is not the one
+#                                               # `claude` is launched from
+#
+# Read-only: nothing under $HOME is written. Run `pixel install` first; the
+# doctor section reports what it left non-green. Exit 1 on any failure.
+#
+# The guard hook never blocks (see crates/pixel/src/guard.rs): destructive or
+# substitutable git commands get an ADVISORY (exit 0, JSON note with a pixel
+# alternative), a grep/rg on one file gets a transparent REWRITE (exit 0,
+# `updatedInput` pointing at `pixel search-compat`), and everything else
+# passes through silently. Those three shapes are what this test asserts.
+set -u
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PIXEL="${PIXEL_BIN:-$(command -v pixel 2>/dev/null || true)}"
+if [ -z "$PIXEL" ]; then
+    for p in "$ROOT/target/dev-release/pixel" "$ROOT/target/release/pixel"; do
+        [ -x "$p" ] && PIXEL="$p" && break
+    done
+fi
+if [ -z "$PIXEL" ] || [ ! -x "$PIXEL" ]; then
+    echo "pixel-smoke-test: no pixel binary (PIXEL_BIN unset, none on PATH, none under target/)." >&2
+    echo "  build + install one: pixel upgrade --repo . --build \"cargo build --profile dev-release -p pixel-cli\"" >&2
+    exit 2
+fi
+REPO="$ROOT"
+DOCTOR_SHELL=""
+[ -n "${PIXEL_SHELL:-}" ] && DOCTOR_SHELL="--shell $PIXEL_SHELL"
+
 PASS=0; FAIL=0
 ok() { echo "PASS: $1"; PASS=$((PASS+1)); }
 no() { echo "FAIL: $1 — $2"; FAIL=$((FAIL+1)); }
 
+# payload <tool_name> <input_key> <input_value> [event]
+payload() {
+    printf '{"hook_event_name":"%s","tool_name":"%s","cwd":"%s","tool_input":{"%s":"%s"}}' \
+        "${4:-PreToolUse}" "$1" "$REPO" "$2" "$3"
+}
+# guard <payload> -> sets OUT and CODE
+guard() {
+    OUT=$(printf '%s' "$1" | "$PIXEL" hook guard 2>/dev/null); CODE=$?
+}
+# json_field <json> <python expression over d> -> prints the value or ""
+json_field() {
+    printf '%s' "$1" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    print(''); sys.exit(0)
+try:
+    print($2)
+except Exception:
+    print('')"
+}
+expect_advisory() { # label needle
+    ctx=$(json_field "$OUT" "d['hookSpecificOutput']['additionalContext']")
+    if [ "$CODE" -eq 0 ] && printf '%s' "$ctx" | grep -q -- "$2"; then ok "$1: advisory names \`$2\`"
+    else no "$1" "expected exit 0 + advisory containing \`$2\`, got exit $CODE: $(printf '%s' "$OUT" | head -c 200)"; fi
+}
+expect_rewrite() { # label
+    cmd=$(json_field "$OUT" "d['hookSpecificOutput']['updatedInput']['command']")
+    case "$cmd" in
+        "pixel search-compat "*) [ "$CODE" -eq 0 ] && ok "$1: rewritten to \`pixel search-compat\`" || no "$1" "exit $CODE" ;;
+        *) no "$1" "expected updatedInput.command = pixel search-compat …, got exit $CODE: $(printf '%s' "$OUT" | head -c 200)" ;;
+    esac
+}
+expect_silent() { # label
+    if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then ok "$1: passthrough (exit 0, no output)"
+    else no "$1" "expected exit 0 + empty output, got exit $CODE: $(printf '%s' "$OUT" | head -c 200)"; fi
+}
+expect_proceeds() { # label — exit 0, and if anything was printed it is JSON
+    if [ "$CODE" -ne 0 ]; then no "$1" "exit $CODE"; return; fi
+    if [ -z "$OUT" ] || [ -n "$(json_field "$OUT" "'json'")" ]; then ok "$1: proceeds (exit 0)"
+    else no "$1" "non-JSON output: $(printf '%s' "$OUT" | head -c 200)"; fi
+}
+
+SRC="$REPO/crates/pixel/src/main.rs"
+RESET="git reset --hard HEAD~1"
+GREP="grep -n login_user README.md"
+
+echo "=== 0. Binary ==="
+echo "  $PIXEL"
+"$PIXEL" --version 2>/dev/null | sed 's/^/  /'
+
 echo "=== 1. CLI surface ==="
-$PIXEL --version >/dev/null 2>&1 && ok "--version" || no "--version" "exit $?"
-$PIXEL --help 2>&1 | grep -q "pixel" && ok "--help" || no "--help" "no output"
+"$PIXEL" --version 2>/dev/null | grep -q '^commit: ' && ok "--version reports commit/target/rustc/built" || no "--version" "no \`commit:\` line"
+[ "$("$PIXEL" -V 2>/dev/null | wc -l | tr -d ' ')" = 1 ] && ok "-V is one line" || no "-V" "expected one line"
+"$PIXEL" --help 2>&1 | grep -q "pixel" && ok "--help" || no "--help" "no output"
 
 echo "=== 2. Guard hook — Claude tool names ==="
-# Bash with git reset --hard in an indexed repo → should block (exit 2)
-echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"'"$REPO"'","tool_input":{"command":"git reset --hard HEAD~1"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 2 ] && ok "Claude Bash: git reset --hard blocked" || no "Claude Bash" "expected exit 2"
-
-# Read on a file in indexed repo with no manifest → exit 0 (reads are not mandated)
-echo '{"hook_event_name":"PreToolUse","tool_name":"Read","cwd":"'"$REPO"'","tool_input":{"file_path":"'"$REPO"'/crates/pixel/src/main.rs"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 0 ] && ok "Claude Read: no block (reads not mandated without manifest)" || no "Claude Read" "expected exit 0"
-
-# Edit on a non-exempt file in indexed repo with no manifest → should mandate (exit 2)
-echo '{"hook_event_name":"PreToolUse","tool_name":"Edit","cwd":"'"$REPO"'","tool_input":{"file_path":"'"$REPO"'/crates/pixel/src/main.rs"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 2 ] && ok "Claude Edit: mandate block (no manifest)" || no "Claude Edit" "expected exit 2"
+guard "$(payload Bash command "$RESET")";           expect_advisory "Claude Bash reset --hard" "pixel rescue"
+guard "$(payload Bash command "git commit -m x")";  expect_advisory "Claude Bash git commit" "pixel publish"
+guard "$(payload Bash command "$GREP")";            expect_rewrite  "Claude Bash grep on one file"
+guard "$(payload Read file_path "$SRC")";           expect_proceeds "Claude Read"
+guard "$(payload Edit file_path "$SRC")";           expect_proceeds "Claude Edit"
 
 echo "=== 3. Guard hook — Devin tool names ==="
-# exec with git reset --hard → should block (exit 2)
-echo '{"hook_event_name":"PreToolUse","tool_name":"exec","cwd":"'"$REPO"'","tool_input":{"command":"git reset --hard HEAD~1"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 2 ] && ok "Devin exec: git reset --hard blocked" || no "Devin exec" "expected exit 2"
-
-# read on a file in indexed repo with no manifest → exit 0 (reads not mandated)
-echo '{"hook_event_name":"PreToolUse","tool_name":"read","cwd":"'"$REPO"'","tool_input":{"file_path":"'"$REPO"'/crates/pixel/src/main.rs"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 0 ] && ok "Devin read: no block (reads not mandated without manifest)" || no "Devin read" "expected exit 0"
-
-# edit on a non-exempt file in indexed repo with no manifest → should mandate (exit 2)
-echo '{"hook_event_name":"PreToolUse","tool_name":"edit","cwd":"'"$REPO"'","tool_input":{"file_path":"'"$REPO"'/crates/pixel/src/main.rs"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 2 ] && ok "Devin edit: mandate block (no manifest)" || no "Devin edit" "expected exit 2"
-
-# grep tool name → should not crash (exit 0, no manifest check for read-only without manifest)
-echo '{"hook_event_name":"PreToolUse","tool_name":"grep","cwd":"'"$REPO"'","tool_input":{"pattern":"test"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 0 ] && ok "Devin grep: no crash (no manifest)" || no "Devin grep" "expected exit 0"
-
-# find_file_by_name → should not crash
-echo '{"hook_event_name":"PreToolUse","tool_name":"find_file_by_name","cwd":"'"$REPO"'","tool_input":{"pattern":"*.rs"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 0 ] && ok "Devin find_file_by_name: no crash" || no "Devin find_file_by_name" "expected exit 0"
+guard "$(payload exec command "$RESET")";           expect_advisory "Devin exec reset --hard" "pixel rescue"
+guard "$(payload exec command "$GREP")";            expect_rewrite  "Devin exec grep on one file"
+guard "$(payload read file_path "$SRC")";           expect_proceeds "Devin read"
+guard "$(payload edit file_path "$SRC")";           expect_proceeds "Devin edit"
+guard "$(payload find_file_by_name pattern "*.rs")"; expect_proceeds "Devin find_file_by_name"
 
 echo "=== 3b. Guard hook — Codex tool names ==="
-# bash with git reset --hard → should block (exit 2)
-echo '{"hook_event_name":"PreToolUse","tool_name":"bash","cwd":"'"$REPO"'","tool_input":{"command":"git reset --hard HEAD~1"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 2 ] && ok "Codex bash: git reset --hard blocked" || no "Codex bash" "expected exit 2"
-
-# apply_patch on a non-exempt file → should mandate (exit 2)
-echo '{"hook_event_name":"PreToolUse","tool_name":"apply_patch","cwd":"'"$REPO"'","tool_input":{"file_path":"'"$REPO"'/crates/pixel/src/main.rs"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 2 ] && ok "Codex apply_patch: mandate block (no manifest)" || no "Codex apply_patch" "expected exit 2"
-
-# glob → should not crash
-echo '{"hook_event_name":"PreToolUse","tool_name":"glob","cwd":"'"$REPO"'","tool_input":{"pattern":"*.rs"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 0 ] && ok "Codex glob: no crash" || no "Codex glob" "expected exit 0"
+guard "$(payload bash command "$RESET")";           expect_advisory "Codex bash reset --hard" "pixel rescue"
+guard "$(payload apply_patch file_path "$SRC")";    expect_proceeds "Codex apply_patch"
+guard "$(payload glob pattern "*.rs")";             expect_proceeds "Codex glob"
+OUT=$(payload shell command "$GREP" | "$PIXEL" hook guard --provider codex 2>/dev/null); CODE=$?
+expect_rewrite "Codex --provider codex shell grep on one file"
 
 echo "=== 3c. Guard hook — Gemini tool names ==="
-# run_shell_command with git reset --hard → should block (exit 2)
-echo '{"hook_event_name":"PreToolUse","tool_name":"run_shell_command","cwd":"'"$REPO"'","tool_input":{"command":"git reset --hard HEAD~1"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 2 ] && ok "Gemini run_shell_command: git reset --hard blocked" || no "Gemini run_shell_command" "expected exit 2"
+guard "$(payload run_shell_command command "$RESET")"; expect_advisory "Gemini run_shell_command reset --hard" "pixel rescue"
+guard "$(payload read_file file_path "$SRC")";      expect_proceeds "Gemini read_file"
+guard "$(payload write_file file_path "$SRC")";     expect_proceeds "Gemini write_file"
+guard "$(payload search pattern "test")";           expect_proceeds "Gemini search"
 
-# read_file on a non-exempt file → should mandate (exit 2) since read_file is in edit path? No — read_file is read-only
-echo '{"hook_event_name":"PreToolUse","tool_name":"read_file","cwd":"'"$REPO"'","tool_input":{"file_path":"'"$REPO"'/crates/pixel/src/main.rs"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 0 ] && ok "Gemini read_file: no block (reads not mandated)" || no "Gemini read_file" "expected exit 0"
+echo "=== 4. Guard hook — unknown tool name ==="
+guard "$(payload webfetch url "https://example.invalid")"; expect_silent "unknown tool"
 
-# write_file on a non-exempt existing file → should mandate (exit 2)
-echo '{"hook_event_name":"PreToolUse","tool_name":"write_file","cwd":"'"$REPO"'","tool_input":{"file_path":"'"$REPO"'/crates/pixel/src/main.rs"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 2 ] && ok "Gemini write_file: mandate block (no manifest)" || no "Gemini write_file" "expected exit 2"
-
-# search → should not crash
-echo '{"hook_event_name":"PreToolUse","tool_name":"search","cwd":"'"$REPO"'","tool_input":{"pattern":"test"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 0 ] && ok "Gemini search: no crash" || no "Gemini search" "expected exit 0"
-
-echo "=== 4. Guard hook — unknown tool name (should pass through) ==="
-echo '{"hook_event_name":"PreToolUse","tool_name":"webfetch","cwd":"'"$REPO"'","tool_input":{}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 0 ] && ok "unknown tool: passthrough" || no "unknown tool" "expected exit 0"
-
-echo "=== 5. Guard hook — non-PreToolUse event (should pass through) ==="
-echo '{"hook_event_name":"PostToolUse","tool_name":"exec","cwd":"'"$REPO"'","tool_input":{"command":"git reset --hard"}}' | $PIXEL hook guard 2>/dev/null
-[ $? -eq 0 ] && ok "PostToolUse: passthrough" || no "PostToolUse" "expected exit 0"
+echo "=== 5. Guard hook — non-PreToolUse event ==="
+guard "$(payload exec command "$RESET" PostToolUse)"; expect_silent "PostToolUse"
 
 echo "=== 6. Guard hook — PIXEL_TARGETS_GUARD=0 override ==="
-echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"'"$REPO"'","tool_input":{"command":"git reset --hard"}}' | PIXEL_TARGETS_GUARD=0 $PIXEL hook guard 2>/dev/null
-[ $? -eq 0 ] && ok "PIXEL_TARGETS_GUARD=0: override" || no "override" "expected exit 0"
+OUT=$(payload Bash command "$RESET" | PIXEL_TARGETS_GUARD=0 "$PIXEL" hook guard 2>/dev/null); CODE=$?
+expect_silent "PIXEL_TARGETS_GUARD=0"
 
-echo "=== 7. Doctor ==="
-$PIXEL doctor 2>&1 | python3 -c "import json,sys; d=json.load(sys.stdin); print('  doctor ok:', d['ok'], '| green:', d['summary']['green'], 'red:', d['summary']['red'])"
-$PIXEL doctor 2>&1 | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['ok'], 'doctor not ok'; print('  all checks green')" && ok "doctor: all green" || no "doctor" "not all green"
+echo "=== 7. Session-start hook ==="
+OUT=$(printf '{}' | "$PIXEL" hook session-start 2>/dev/null); CODE=$?
+[ "$CODE" -eq 0 ] && printf '%s' "$OUT" | grep -q capabilities && ok "session-start emits the capability block" || no "session-start" "exit $CODE"
 
-echo "=== 8. Four mandatory workflows — help surface ==="
-$PIXEL targets --help 2>&1 | grep -q "targets" && ok "targets --help" || no "targets --help" "no output"
-$PIXEL resolve --help 2>&1 | grep -q "resolve" && ok "resolve --help" || no "resolve --help" "no output"
-$PIXEL rescue --help 2>&1 | grep -q "rescue" && ok "rescue --help" || no "rescue --help" "no output"
-$PIXEL reconcile --help 2>&1 | grep -q "reconcile" && ok "reconcile --help" || no "reconcile --help" "no output"
+echo "=== 8. Doctor ==="
+# shellcheck disable=SC2086
+DOC=$("$PIXEL" doctor "$REPO" --json $DOCTOR_SHELL 2>/dev/null)
+printf '%s' "$DOC" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+s=d["summary"]; print("  green:",s["green"],"yellow:",s["yellow"],"red:",s["red"])
+for c in d["checks"]:
+    if c["status"]!="green": print("  ", c["status"].upper(), c["id"], "—", c["summary"])
+sys.exit(0 if d["ok"] else 1)' && ok "doctor: ok" || no "doctor" "not ok (non-green checks listed above; PIXEL_SHELL=<shell> if only install.shell-wrappers is red)"
 
-echo "=== 9. Devin config wired ==="
-python3 -c "
-import json
-with open('$HOME/.config/devin/config.json') as f:
-    d = json.load(f)
-hooks = d.get('hooks',{})
-ptu = hooks.get('PreToolUse',[])
-ss = hooks.get('SessionStart',[])
-guard = any('pixel-targets-guard' in h.get('command','') for entry in ptu for h in entry.get('hooks',[]))
-session = any('pixel-session-start' in h.get('command','') for entry in ss for h in entry.get('hooks',[]))
-assert guard, 'PreToolUse guard not wired in Devin config'
-assert session, 'SessionStart not wired in Devin config'
-print('  PreToolUse guard:', guard)
-print('  SessionStart:', session)
-" && ok "Devin config: hooks wired" || no "Devin config" "hooks not wired"
+echo "=== 9. Install surface (what \`pixel install\` deploys, read through doctor) ==="
+for id in install.agent-prompt install.subagent-prompt install.shell-wrappers install.codex-config rule.parity rule.scenarios; do
+    st=$(json_field "$DOC" "next(c['status'] for c in d['checks'] if c['id']=='$id')")
+    [ "$st" = green ] && ok "doctor $id green" || no "doctor $id" "status '${st:-missing}'"
+done
+[ -s "$HOME/.local/share/pixel/agent-prompt.md" ] && ok "agent-prompt.md deployed" || no "agent-prompt.md" "missing at ~/.local/share/pixel (run: pixel install)"
 
-echo "=== 10. Claude settings.json — PreToolUse entry ==="
-python3 -c "
-import json
-with open('$HOME/.claude/settings.json') as f:
-    d = json.load(f)
-ptu = d.get('hooks',{}).get('PreToolUse',[])
-guard = any('pixel-targets-guard' in h.get('command','') for entry in ptu for h in entry.get('hooks',[]))
-assert guard, 'PreToolUse guard not wired in Claude settings'
-print('  PreToolUse guard wired:', guard)
-" && ok "Claude settings: PreToolUse wired" || no "Claude settings" "PreToolUse not wired"
-
-echo "=== 11. Codex hooks.json — PreToolUse entry ==="
-python3 -c "
-import json
-with open('$HOME/.codex/hooks.json') as f:
-    d = json.load(f)
-ptu = d.get('hooks',{}).get('PreToolUse',[])
-guard = any('pixel-targets-guard' in h.get('command','') for entry in ptu for h in entry.get('hooks',[]))
-assert guard, 'PreToolUse guard not wired in Codex hooks'
-print('  PreToolUse guard wired:', guard)
-" && ok "Codex hooks: PreToolUse wired" || no "Codex hooks" "PreToolUse not wired"
-
-echo "=== 12. Gemini settings.json — BeforeTool entry ==="
-python3 -c "
-import json
-with open('$HOME/.gemini/settings.json') as f:
-    d = json.load(f)
-bt = d.get('hooks',{}).get('BeforeTool',[])
-guard = any('pixel-targets-guard' in h.get('command','') for entry in bt for h in entry.get('hooks',[]))
-assert guard, 'BeforeTool guard not wired in Gemini settings'
-print('  BeforeTool guard wired:', guard)
-" && ok "Gemini settings: BeforeTool wired" || no "Gemini settings" "BeforeTool not wired"
+echo "=== 10. Mandatory workflows + release gate — help surface ==="
+for cmd in targets resolve rescue reconcile release-check upgrade; do
+    "$PIXEL" "$cmd" --help 2>&1 | grep -q "$cmd" && ok "$cmd --help" || no "$cmd --help" "no output"
+done
+"$PIXEL" uninstall --help 2>&1 | grep -q -- "--wrappers-only" && ok "uninstall --wrappers-only documented" || no "uninstall --help" "no --wrappers-only"
 
 echo ""
 echo "=== RESULTS ==="
 echo "PASS: $PASS  FAIL: $FAIL"
-[ $FAIL -eq 0 ] && echo "ALL GREEN" || echo "HAS FAILURES"
+if [ "$FAIL" -eq 0 ]; then echo "ALL GREEN"; exit 0; else echo "HAS FAILURES"; exit 1; fi

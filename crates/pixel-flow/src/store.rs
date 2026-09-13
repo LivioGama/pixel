@@ -163,6 +163,11 @@ fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Serialises every test in the crate that sets `PIXEL_FLOW_DIR`: env vars
+/// are process-global and `cargo test` runs tests on parallel threads.
+#[cfg(test)]
+pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,8 +177,7 @@ mod tests {
     fn now_unix() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0)
+            .map_or(0, |d| d.as_secs() as i64)
     }
 
     fn make_flow(name: &str) -> Flow {
@@ -203,9 +207,6 @@ mod tests {
         }
     }
 
-    /// Serialize tests that mutate PIXEL_FLOW_DIR — env vars are process-global.
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn slugify_basic() {
         assert_eq!(slugify("github-auth"), "github-auth");
@@ -218,6 +219,8 @@ mod tests {
     fn save_load_round_trip() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
         }
@@ -227,6 +230,8 @@ mod tests {
         let loaded = load("round-trip-test").unwrap();
         assert_eq!(loaded.name, "round-trip-test");
         assert_eq!(loaded.title, "Test");
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::remove_var("PIXEL_FLOW_DIR");
         }
@@ -236,6 +241,8 @@ mod tests {
     fn list_returns_saved_flows() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
         }
@@ -246,6 +253,8 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["name"].as_str(), Some("alpha"));
         assert_eq!(arr[1]["name"].as_str(), Some("beta"));
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::remove_var("PIXEL_FLOW_DIR");
         }
@@ -255,6 +264,8 @@ mod tests {
     fn delete_removes_flow() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
         }
@@ -263,6 +274,8 @@ mod tests {
         assert!(delete("to-delete").unwrap());
         assert!(!exists("to-delete"));
         assert!(!delete("to-delete").unwrap()); // already gone
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::remove_var("PIXEL_FLOW_DIR");
         }
@@ -272,10 +285,14 @@ mod tests {
     fn load_missing_errors() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
         }
         assert!(load("nonexistent").is_err());
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
         unsafe {
             std::env::remove_var("PIXEL_FLOW_DIR");
         }

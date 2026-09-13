@@ -1,10 +1,14 @@
 [package]
 name = "pixel-daemon"
-version = "0.2.2"
+version = "0.2.4"
 edition.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
+mutants = { workspace = true }
 pixel-index = { path = "../pixel-index" }
 pixel-graph = { path = "../pixel-graph" }
 pixel-context = { path = "../pixel-context" }

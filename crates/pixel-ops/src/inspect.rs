@@ -31,6 +31,12 @@ pub struct InspectResult {
 }
 
 /// Run `inspect` on a repo root. Returns the current state.
+/// Cap on the clean-file list `inspect` returns. A monorepo with 50K
+/// tracked files would dump ~2MB of path strings into the agent's context;
+/// the count stays exact, the list is truncated for display. `pixel search`
+/// or `pixel targets` is the tool for enumerating files by content.
+const CLEAN_LIST_CAP: usize = 200;
+
 pub fn inspect(root: &Path) -> Result<Value, String> {
     let runner = GitRunner::new(root);
     let head = runner.rev_parse_head();
@@ -43,14 +49,15 @@ pub fn inspect(root: &Path) -> Result<Value, String> {
     for (status, path) in &dirty {
         dirty_paths.push(path.clone());
         // Fingerprint = sha256 of current file content (or "deleted" if gone).
-        let fp = std::fs::read(root.join(path))
-            .map(|bytes| {
+        let fp = std::fs::read(root.join(path)).map_or_else(
+            |_| "deleted".to_string(),
+            |bytes| {
                 use sha2::{Digest, Sha256};
                 let mut h = Sha256::new();
                 h.update(&bytes);
                 hex::encode(h.finalize())
-            })
-            .unwrap_or_else(|_| "deleted".to_string());
+            },
+        );
         dirty_files.push(FileFingerprint {
             path: path.clone(),
             fingerprint: fp,
@@ -58,12 +65,7 @@ pub fn inspect(root: &Path) -> Result<Value, String> {
         });
     }
 
-    // Clean tracked files. Cap the list — a monorepo with 50K tracked
-    // files would dump ~2MB of path strings into the agent's context.
-    // The count is always exact; the list is truncated for display.
-    // `pixel search` or `pixel targets` is the right tool for enumerating
-    // files by content, not `inspect`.
-    const CLEAN_LIST_CAP: usize = 200;
+    // Clean tracked files: exact count, list capped (see `CLEAN_LIST_CAP`).
     let all_tracked = runner.ls_files();
     let dirty_set: std::collections::HashSet<&String> = dirty.iter().map(|(_, p)| p).collect();
     let clean_total = all_tracked

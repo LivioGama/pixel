@@ -264,10 +264,7 @@ fn is_status_code(word: &str) -> bool {
         return false;
     }
     word.chars().all(|c| c.is_ascii_digit())
-        && word
-            .parse::<i64>()
-            .map(|n| (100..=599).contains(&n))
-            .unwrap_or(false)
+        && word.parse::<i64>().is_ok_and(|n| (100..=599).contains(&n))
 }
 
 /// Split a phrase into significant tokens (lowercased, len ≥ 2, articles
@@ -277,7 +274,7 @@ fn phrase_tokens(phrase: &str) -> (Vec<String>, Option<String>) {
     let mut tokens: Vec<String> = norm
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() >= 2)
-        .map(|w| w.to_lowercase())
+        .map(str::to_lowercase)
         .filter(|w| !ARTICLES.contains(&w.as_str()))
         .collect();
     tokens.dedup();
@@ -855,7 +852,7 @@ fn match_reasons(row: &ConceptRow, phrase: &str) -> Vec<String> {
         let overlap: Vec<&str> = qwords
             .iter()
             .filter(|w| words.contains(w))
-            .map(|w| w.as_str())
+            .map(String::as_str)
             .collect();
         if !overlap.is_empty() {
             reasons.push(format!("word overlap: {}", overlap.join(", ")));
@@ -977,11 +974,7 @@ fn symbol_words(name: &str) -> Vec<String> {
         if c.is_alphanumeric() {
             let boundary = !cur.is_empty()
                 && c.is_ascii_uppercase()
-                && cur
-                    .chars()
-                    .last()
-                    .map(|x| x.is_ascii_lowercase())
-                    .unwrap_or(false);
+                && cur.chars().last().is_some_and(|x| x.is_ascii_lowercase());
             if boundary {
                 out.push(cur.to_lowercase());
                 cur.clear();
@@ -1192,7 +1185,7 @@ fn symbol_fallback(
             let overlap: Vec<&str> = words
                 .iter()
                 .filter(|t| name_words.contains(t))
-                .map(|t| t.as_str())
+                .map(String::as_str)
                 .collect();
             if overlap.is_empty() {
                 None
@@ -1856,5 +1849,48 @@ mod tests {
         assert_eq!(symbol_words("ContactForm"), vec!["contact", "form"]);
         assert_eq!(symbol_words("WELCOME_MESSAGE"), vec!["welcome", "message"]);
         assert_eq!(symbol_words("onSubmit"), vec!["on", "submit"]);
+    }
+
+    #[test]
+    fn is_status_code_accepts_three_digits_in_the_http_range_only() {
+        assert!(is_status_code("404"));
+        assert!(is_status_code("100"));
+        assert!(is_status_code("599"));
+        assert!(!is_status_code("999"), "three digits but not a status");
+        assert!(!is_status_code("042"));
+        assert!(!is_status_code("99"));
+        assert!(!is_status_code("4o4"));
+    }
+
+    fn row(kind: ConceptKind, norm: &str) -> ConceptRow {
+        ConceptRow {
+            id: 1,
+            file_id: 1,
+            kind,
+            raw: norm.to_string(),
+            norm: norm.to_string(),
+            detail: String::new(),
+            start_line: 1,
+            end_line: 1,
+            owner_symbol_id: None,
+        }
+    }
+
+    #[test]
+    fn match_reasons_name_the_lexical_relation_or_fall_back_to_the_kind() {
+        let exact = row(ConceptKind::UiText, &normalize("Sign in"));
+        assert_eq!(match_reasons(&exact, "Sign in"), vec!["exact norm match"]);
+        let longer = row(ConceptKind::UiText, &normalize("Sign in with Google"));
+        assert_eq!(
+            match_reasons(&longer, "sign in"),
+            vec!["word overlap: sign, in", "substring match"]
+        );
+        let partial = row(ConceptKind::UiText, &normalize("google login"));
+        assert_eq!(
+            match_reasons(&partial, "login page"),
+            vec!["word overlap: login"]
+        );
+        let unrelated = row(ConceptKind::Route, &normalize("/api/users"));
+        assert_eq!(match_reasons(&unrelated, "checkout"), vec!["kind route"]);
     }
 }

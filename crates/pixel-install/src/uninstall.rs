@@ -37,6 +37,11 @@ pub struct UninstallOptions {
     /// If true, compute and report every step's outcome exactly as a real
     /// run would, but perform no filesystem writes.
     pub dry_run: bool,
+    /// Remove only the shell wrapper block of `shell` and leave every other
+    /// artifact in place: the way out of a block written for a shell that
+    /// never loads it (`pixel doctor` names the file) without losing the
+    /// install that works.
+    pub wrappers_only: bool,
 }
 
 /// Markers that identify pixel-authored hook entries in any settings file.
@@ -63,6 +68,24 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         .unwrap_or_else(|| home.join(".local").join("bin").join("pixel"));
 
     let dry_run = options.dry_run;
+    if options.wrappers_only {
+        let step = install::remove_shell_wrappers(&home, options.shell.as_deref(), dry_run)?;
+        let summary = InstallSummary {
+            green: usize::from(step.status == CheckStatus::Green),
+            yellow: usize::from(step.status == CheckStatus::Yellow),
+            red: usize::from(step.status == CheckStatus::Red),
+        };
+        let ok = summary.red == 0;
+        return Ok(InstallReport {
+            version: "v1".into(),
+            ok,
+            executable_path: binary_path.display().to_string(),
+            home: home.display().to_string(),
+            dry_run,
+            steps: vec![step],
+            summary,
+        });
+    }
     let steps = vec![
         // 1. Remove shell wrappers from the shell's profile (~/.zshrc,
         //    ~/.bashrc, or fish's ~/.config/fish/conf.d/pixel.fish).
@@ -85,6 +108,11 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         remove_rule_source(&home, dry_run)?,
         // 7. Remove the pixel agent system prompt.
         remove_agent_prompt(&home, dry_run)?,
+        // 7b. Take the pixel block out of Codex's developer_instructions.
+        crate::codex_config::remove_developer_instructions(
+            &crate::codex_config::codex_home(&home, options.home.is_some()),
+            dry_run,
+        )?,
         // 8. Remove the pixel binary.
         remove_binary(&binary_path, dry_run)?,
     ];
@@ -222,7 +250,7 @@ fn remove_claude_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
                     for marker in PIXEL_HOOK_MARKERS {
                         filtered = config::remove_flat_hook_entries(&filtered, marker);
                     }
-                    if filtered.as_array().is_some_and(|a| a.is_empty()) {
+                    if filtered.as_array().is_some_and(std::vec::Vec::is_empty) {
                         hooks.remove(&event);
                         removed_entries += 1;
                     } else if filtered != *existing {
@@ -381,7 +409,7 @@ fn remove_zcode_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
                     for marker in PIXEL_HOOK_MARKERS {
                         filtered = config::remove_hook_entries(&filtered, marker);
                     }
-                    if filtered.as_array().is_some_and(|a| a.is_empty()) {
+                    if filtered.as_array().is_some_and(std::vec::Vec::is_empty) {
                         events.remove(&event);
                         removed += 1;
                     } else if filtered != *events.get(&event).unwrap() {
@@ -467,7 +495,7 @@ fn remove_cursor_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
                 for marker in PIXEL_HOOK_MARKERS {
                     filtered = config::remove_flat_hook_entries(&filtered, marker);
                 }
-                if filtered.as_array().is_some_and(|a| a.is_empty()) {
+                if filtered.as_array().is_some_and(std::vec::Vec::is_empty) {
                     hooks.remove(&event);
                     removed += 1;
                 } else if filtered != *hooks.get(&event).unwrap() {
@@ -902,7 +930,7 @@ fn remove_pixel_hooks_from_settings(
                     filtered = config::remove_flat_hook_entries(&filtered, marker);
                 }
                 let changed = filtered != *hooks.get(&event).unwrap();
-                if filtered.as_array().is_some_and(|a| a.is_empty()) {
+                if filtered.as_array().is_some_and(std::vec::Vec::is_empty) {
                     hooks.remove(&event);
                     removed += 1;
                 } else if changed {
@@ -976,6 +1004,43 @@ mod routing_tests {
             assert!(remove_pixel_hooks_from_settings(&path, false).unwrap().0 > 0);
             assert_eq!(install::read_settings(&path).unwrap(), json!({}));
         }
+    }
+
+    /// A mixed event keeps its foreign entries after the pixel ones go, an
+    /// event holding only pixel entries disappears, an untouched event is
+    /// neither rewritten nor counted.
+    #[test]
+    fn remove_pixel_hooks_from_settings_rewrites_only_the_events_that_changed() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        let lint = json!({"matcher":"Bash","hooks":[{"type":"command","command":"lint"}]});
+        let guard = json!({"matcher":"Bash","hooks":[{"type":"command","command":format!("sh {}", config::GUARD_HOOK)}]});
+        let start = json!({"hooks":[{"type":"command","command":format!("pixel hook {}", config::SESSION_START_HOOK)}]});
+        let stop = json!({"hooks":[{"type":"command","command":"say done"}]});
+        install::write_settings(
+            &path,
+            &json!({"hooks":{
+                "PreToolUse":[guard, lint.clone()],
+                "SessionStart":[start],
+                "Stop":[stop.clone()],
+            }, "theme":"dark"}),
+            false,
+        )
+        .unwrap();
+        let (removed, backup) = remove_pixel_hooks_from_settings(&path, false).unwrap();
+        assert_eq!(removed, 2, "PreToolUse rewritten, SessionStart dropped");
+        assert!(backup.is_some());
+        let after = install::read_settings(&path).unwrap();
+        assert_eq!(after["hooks"]["PreToolUse"], json!([lint]));
+        assert!(after["hooks"].get("SessionStart").is_none(), "{after}");
+        assert_eq!(after["hooks"]["Stop"], json!([stop]));
+        assert_eq!(after["theme"], "dark");
+        let (again, _) = remove_pixel_hooks_from_settings(&path, false).unwrap();
+        assert_eq!(again, 0, "nothing left to remove");
+        assert_eq!(
+            remove_pixel_hooks_from_settings(&home.path().join("absent.json"), false).unwrap(),
+            (0, None)
+        );
     }
 
     #[test]

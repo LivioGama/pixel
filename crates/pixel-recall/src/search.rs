@@ -272,7 +272,7 @@ fn fetch_rows_by_ids(
             .prepare(&sql)
             .map_err(|e| e.to_string())?;
         let mapped = stmt
-            .query_map(params_from_iter(args.iter().map(|b| b.as_ref())), row_from)
+            .query_map(params_from_iter(args.iter().map(AsRef::as_ref)), row_from)
             .map_err(|e| e.to_string())?;
         for r in mapped {
             rows.push(r.map_err(|e| e.to_string())?);
@@ -299,7 +299,7 @@ fn scan_ordered(
         .prepare(&sql)
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(params_from_iter(args.iter().map(|b| b.as_ref())), row_from)
+        .query_map(params_from_iter(args.iter().map(AsRef::as_ref)), row_from)
         .map_err(|e| e.to_string())?;
     for r in rows {
         let row = r.map_err(|e| e.to_string())?;
@@ -335,8 +335,7 @@ pub fn candidate_count(segments: &SegmentSet, pattern: &str) -> Option<usize> {
 /// Compact one-line rendering of a hit, shared by CLI and daemon.
 pub fn format_hit(h: &SearchHit) -> String {
     let ts =
-        h.ts.map(crate::model::format_ms)
-            .unwrap_or_else(|| "?".to_string());
+        h.ts.map_or_else(|| "?".to_string(), crate::model::format_ms);
     let cwd = h.cwd.as_deref().unwrap_or("-");
     format!(
         "{}:{} #{} t{} {} {} {} \"{}\"",
@@ -392,4 +391,149 @@ pub(crate) fn snippet_around(text: &str, m_start: usize, m_end: usize) -> (Strin
         snippet.push('…');
     }
     (snippet, truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Role;
+    use crate::testutil::{TS, add_session};
+
+    /// Three turns mentioning `needle` across two sessions, indexed.
+    fn corpus() -> (tempfile::TempDir, RecallStore, SegmentSet) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+        add_session(
+            &mut store,
+            "claude",
+            "aaaa1111",
+            &[
+                (Role::User, "where is the needle kept"),
+                (Role::Assistant, "the needle lives in the haystack module"),
+            ],
+        );
+        add_session(
+            &mut store,
+            "codex",
+            "bbbb2222",
+            &[
+                (Role::User, "unrelated question"),
+                (Role::Assistant, "needle again, third mention"),
+            ],
+        );
+        let mut segments = SegmentSet::open(&tmp.path().join("segments")).unwrap();
+        segments.index_new(&store).unwrap();
+        assert_eq!(segments.manifest.last_turn_id, 4);
+        (tmp, store, segments)
+    }
+
+    /// A pattern with literals resolves candidates through the trigram
+    /// segments and fetches those rows by id: every match comes back,
+    /// newest first, and the page limit marks the result truncated.
+    #[test]
+    fn search_with_literals_fetches_the_candidate_rows_by_id() {
+        let (_tmp, store, segments) = corpus();
+        let all = search(
+            &store,
+            &segments,
+            "needle",
+            false,
+            &SearchFilters::default(),
+            0,
+            10,
+        )
+        .unwrap();
+        assert_eq!(all.hits.len(), 3, "{all:?}");
+        assert!(!all.truncated);
+        let ts: Vec<i64> = all.hits.iter().map(|h| h.ts.unwrap()).collect();
+        assert_eq!(ts, vec![TS + 60_000, TS + 60_000, TS]);
+        assert!(all.hits.iter().all(|h| h.snippet.contains("needle")));
+        let page = search(
+            &store,
+            &segments,
+            "needle",
+            false,
+            &SearchFilters::default(),
+            0,
+            2,
+        )
+        .unwrap();
+        assert_eq!(page.hits.len(), 2);
+        assert!(page.truncated);
+        let agent = SearchFilters {
+            agent: Some("codex".to_string()),
+            ..SearchFilters::default()
+        };
+        let codex = search(&store, &segments, "needle", false, &agent, 0, 10).unwrap();
+        assert_eq!(codex.hits.len(), 1);
+        assert_eq!(codex.hits[0].source_session_id, "bbbb2222");
+    }
+
+    /// A pattern without required literals scans the corpus in ts order and
+    /// stops early only when the page fills up.
+    #[test]
+    fn search_without_literals_scans_in_order_and_reports_early_stop() {
+        let (_tmp, store, segments) = corpus();
+        let all = search(
+            &store,
+            &segments,
+            ".",
+            false,
+            &SearchFilters::default(),
+            0,
+            10,
+        )
+        .unwrap();
+        assert_eq!(all.hits.len(), 4);
+        assert!(!all.truncated);
+        let ts: Vec<i64> = all.hits.iter().map(|h| h.ts.unwrap()).collect();
+        assert_eq!(ts, vec![TS + 60_000, TS + 60_000, TS, TS]);
+        let page = search(
+            &store,
+            &segments,
+            ".",
+            false,
+            &SearchFilters::default(),
+            0,
+            3,
+        )
+        .unwrap();
+        assert_eq!(page.hits.len(), 3);
+        assert!(page.truncated);
+    }
+
+    #[test]
+    fn format_hit_is_one_line_with_agent_session_seq_time_cwd_role_and_snippet() {
+        let hit = SearchHit {
+            turn_id: 9,
+            session_id: 3,
+            seq: 2,
+            agent: "claude".to_string(),
+            source_session_id: "abcdef0123456789".to_string(),
+            cwd: Some("/work/pixel".to_string()),
+            role: "assistant".to_string(),
+            ts: Some(TS),
+            ts_source: "iso".to_string(),
+            snippet: "the needle".to_string(),
+            snippet_truncated: false,
+            turn_truncated: false,
+        };
+        assert_eq!(
+            format_hit(&hit),
+            format!(
+                "claude:abcdef01 #3 t2 {} /work/pixel assistant \"the needle\"",
+                crate::model::format_ms(TS)
+            )
+        );
+        let bare = SearchHit {
+            ts: None,
+            cwd: None,
+            source_session_id: "ab".to_string(),
+            ..hit
+        };
+        assert_eq!(
+            format_hit(&bare),
+            "claude:ab #3 t2 ? - assistant \"the needle\""
+        );
+    }
 }

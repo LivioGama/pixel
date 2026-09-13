@@ -195,6 +195,18 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     ));
 
+    let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
+    checks.push(check(
+        "install.codex-config",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            let (summary, detail) = crate::codex_config::check_developer_instructions(&codex_home)?;
+            Ok(DoctorCheckDetail {
+                summary,
+                detail: Some(detail),
+            })
+        },
+    ));
+
     let shell_override = options.shell.clone();
     let claude = install::probe_claude(options.claude_executable.as_deref());
     checks.push(check_status(
@@ -277,24 +289,65 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     profile.display()
                 ));
             }
+            let installed = format!(
+                "{} shell wrappers installed in {}{}",
+                kind.as_str(),
+                profile.display(),
+                if with_subagent_prompt {
+                    ""
+                } else {
+                    " without the sub-agent prompt"
+                }
+            );
+            // A block in another shell's profile is the residue of an install
+            // that targeted the wrong shell; the resolved shell never loads
+            // it. Yellow, not red: a machine that deliberately runs `claude`
+            // from a second shell keeps a valid install here.
+            let strays = install::stray_wrapper_profiles(&home, &profile);
+            if !strays.is_empty() {
+                let fixes: Vec<String> = strays
+                    .iter()
+                    .map(|(shell, path)| {
+                        format!(
+                            "{} ({shell}, not loaded by {}; run `pixel uninstall --wrappers-only --shell {shell}`, or pass `--shell {shell}` if that is the shell you launch `claude` from)",
+                            path.display(),
+                            kind.as_str()
+                        )
+                    })
+                    .collect();
+                return Ok((
+                    CheckStatus::Yellow,
+                    DoctorCheckDetail {
+                        summary: format!(
+                            "{installed}; a pixel block also sits in {}",
+                            fixes.join(" and ")
+                        ),
+                        detail: Some(serde_json::json!({
+                            "profile": profile.display().to_string(),
+                            "shell": kind.as_str(),
+                            "subagent_prompt": with_subagent_prompt,
+                            "claude": claude.explanation(),
+                            "stray_profiles": strays
+                                .iter()
+                                .map(|(shell, path)| serde_json::json!({
+                                    "shell": shell,
+                                    "profile": path.display().to_string(),
+                                }))
+                                .collect::<Vec<_>>(),
+                        })),
+                    },
+                ));
+            }
             Ok((
                 CheckStatus::Green,
                 DoctorCheckDetail {
-                    summary: format!(
-                        "{} shell wrappers installed in {}{}",
-                        kind.as_str(),
-                        profile.display(),
-                        if with_subagent_prompt {
-                            ""
-                        } else {
-                            " without the sub-agent prompt"
-                        }
-                    ),
+                    summary: installed,
                     detail: Some(serde_json::json!({
                         "profile": profile.display().to_string(),
                         "shell": kind.as_str(),
                         "subagent_prompt": with_subagent_prompt,
                         "claude": claude.explanation(),
+                        "stray_profiles": [],
                     })),
                 },
             ))
@@ -311,7 +364,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         checks.push(check_status("rule.parity", move || {
             let Some((source, rule_text)) = installed_rule_text(&home_for_rule) else {
                 return Ok((CheckStatus::Yellow, DoctorCheckDetail {
-                    summary: "no installed rule text found (managed block or rule file) — parity not checked".into(),
+                    summary: "no installed rule text found (agent-prompt.md not deployed, no managed block or rule file) — run `pixel install`; parity not checked".into(),
                     detail: None,
                 }));
             };
@@ -374,7 +427,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 return Ok((
                     CheckStatus::Yellow,
                     DoctorCheckDetail {
-                        summary: "no installed rule text found — scenario consistency not checked"
+                        summary: "no installed rule text found (agent-prompt.md not deployed, no managed block or rule file) — run `pixel install`; scenario consistency not checked"
                             .into(),
                         detail: None,
                     },
@@ -463,7 +516,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     .map_err(|e| e.to_string())?;
                 let age = age_secs(mtime);
                 Ok(DoctorCheckDetail {
-                    summary: format!("index present ({}s old)", age),
+                    summary: format!("index present ({age}s old)"),
                     detail: Some(serde_json::json!({ "age_secs": age })),
                 })
             },
@@ -482,7 +535,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     .map_err(|e| e.to_string())?;
                 let age = age_secs(mtime);
                 Ok(DoctorCheckDetail {
-                    summary: format!("graph present ({}s old)", age),
+                    summary: format!("graph present ({age}s old)"),
                     detail: Some(serde_json::json!({ "age_secs": age })),
                 })
             },
@@ -677,19 +730,27 @@ pub fn facts_dead_reason(
 fn age_secs(mtime: SystemTime) -> u64 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let m = mtime
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
+    let m = mtime.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     now.saturating_sub(m)
 }
 
-/// Locate the installed pixel rule text: the managed block inside the first
-/// CLAUDE.md/AGENTS.md that carries one, else the canonical rule source at
-/// `~/.agent-config/rules/pixel.md`. Returns the source path and the text.
+/// Path of the prompt `pixel install` deploys and the shell wrappers inject
+/// (`--append-system-prompt-file`): the rule text agents actually read.
+fn deployed_agent_prompt(home: &Path) -> PathBuf {
+    home.join(".local/share/pixel/agent-prompt.md")
+}
+
+/// Locate the installed pixel rule text, in the order agents receive it:
+/// the deployed `~/.local/share/pixel/agent-prompt.md` (0.2.x installs write
+/// nothing else), else the managed block inside the first CLAUDE.md/AGENTS.md
+/// that carries one (installs before 0.2.0), else the canonical rule source
+/// at `~/.agent-config/rules/pixel.md`. Returns the source path and the text.
 fn installed_rule_text(home: &Path) -> Option<(PathBuf, String)> {
+    let prompt = deployed_agent_prompt(home);
+    if let Ok(text) = fs::read_to_string(&prompt) {
+        return Some((prompt, text));
+    }
     for path in config::find_agent_configs(home) {
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
@@ -870,8 +931,7 @@ fn probe_daemon_epistemics(sock: &Path) -> std::result::Result<bool, String> {
     let has = resp.get("epistemics").is_some()
         || resp
             .get("data")
-            .map(|d| d.get("epistemics").is_some())
-            .unwrap_or(false);
+            .is_some_and(|d| d.get("epistemics").is_some());
     Ok(has)
 }
 
@@ -881,7 +941,80 @@ pub use pixel_daemon::daemon::socket_path as daemon_socket_path;
 #[cfg(test)]
 mod tests {
     use super::facts_dead_reason;
-    use super::{extract_rule_commands, normalize_rule_command, scenario_mismatches};
+    use super::{
+        age_secs, extract_rule_commands, normalize_rule_command, probe_daemon_epistemics,
+        scenario_mismatches,
+    };
+
+    #[test]
+    fn age_secs_is_the_seconds_since_the_mtime() {
+        let ninety_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(90);
+        let age = age_secs(ninety_ago);
+        assert!((90..=91).contains(&age), "{age}");
+        assert_eq!(
+            age_secs(std::time::SystemTime::now() + std::time::Duration::from_secs(60)),
+            0
+        );
+    }
+
+    /// The daemon health probe reads one NDJSON answer and looks for the
+    /// epistemics object at either level; a daemon that answers without one
+    /// is reported unhealthy, not as an error.
+    #[test]
+    fn probe_daemon_epistemics_reads_one_answer_from_the_socket() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("pixel-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (answer, expected) in [
+            (
+                r#"{"ok":true,"op":"search","epistemics":{"basis":"x"}}"#,
+                true,
+            ),
+            (
+                r#"{"ok":true,"op":"search","data":{"epistemics":{}}}"#,
+                true,
+            ),
+            (r#"{"ok":true,"op":"search","data":{}}"#, false),
+        ] {
+            let sock = dir.join("daemon.sock");
+            let _ = std::fs::remove_file(&sock);
+            let listener = UnixListener::bind(&sock).unwrap();
+            // Poll instead of blocking: a probe that never connects must
+            // leave a failed assertion, not a hung test.
+            listener.set_nonblocking(true).unwrap();
+            let sent = answer.to_string();
+            let server = std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            if std::time::Instant::now() > deadline {
+                                return;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(e) => panic!("accept: {e}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let req: serde_json::Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(req["op"], "search");
+                let mut stream = stream;
+                writeln!(stream, "{sent}").unwrap();
+            });
+            assert_eq!(probe_daemon_epistemics(&sock), Ok(expected), "{answer}");
+            server.join().unwrap();
+        }
+        let err = probe_daemon_epistemics(&dir.join("absent.sock")).unwrap_err();
+        assert!(err.starts_with("connect: "), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // -- rule-vs-binary parity: extraction + normalization ------------------
 

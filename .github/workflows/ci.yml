@@ -6,6 +6,21 @@ on:
     # main only receives release/hotfix merges. Both must stay green.
     branches: [main, develop]
   pull_request:
+    # A pull request that only touches Markdown, docs/ or the licence files
+    # cannot change a test result, so it skips the two-and-a-half-minute
+    # run. Later patterns win: the negations drop the docs, then the last
+    # line puts the bundled agent prompts (crates/**/*.md, checked by the
+    # install tests) back in. Branch pushes stay unfiltered so every merge
+    # commit on develop/main keeps a complete run. No branch rule requires
+    # this check today; if one is added, the excluded paths need a twin
+    # workflow that reports success.
+    paths:
+      - "**"
+      - "!**.md"
+      - "!docs/**"
+      - "!LICENSE"
+      - "!NOTICE"
+      - "crates/**"
 
 # A new push to a pull request cancels the run still in flight for its
 # previous commit. Branch pushes (main, develop) are never cancelled so every
@@ -26,15 +41,33 @@ jobs:
     name: Test + Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          # The SHA pin no longer names the toolchain through the ref, so
+          # it is passed explicitly (same channel as before).
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # One key for every job that builds the debug profile on Linux
+          # (this one and mutants.yml), instead of the default per-job key.
+          # The Mutants workflow only runs on pull_request, so it can never
+          # save under the develop/main rule below: without a shared key it
+          # started from an empty cache on every PR.
+          shared-key: linux-debug
+          # PRs read the cache but never write it: only develop/main
+          # merges refresh the shared entries, so one PR cannot thrash
+          # or poison them. A failed build still saves what it compiled.
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - name: Install system dependencies
         run: |
@@ -44,13 +77,28 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # Prebuilt binary; the profile lives in .config/nextest.toml.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: cargo-nextest
+
       # --locked: fail if Cargo.lock is out of date instead of silently
       # resolving newer dependency versions than the ones committed.
+      # nextest runs one process per test, retries once and still fails the
+      # run on a flaky result, and kills a test that hangs past 3 minutes.
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo nextest run --workspace --locked --profile ci
+
+      # nextest does not run doctests.
+      - name: Doctests
+        run: cargo test --workspace --locked --doc
 
       - name: Installer contracts (isolated release substitutes)
         run: python3 scripts/test-install.py
+
+      - name: Local gate runner contract (stub cargo, disposable repo)
+        run: python3 scripts/test-gates.py
 
       - name: Warnings-denied Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -77,39 +125,72 @@ jobs:
           bun run test
           bun run typecheck
 
-  cross-build:
-    name: Cross-build ${{ matrix.target }}
+  msrv:
+    name: MSRV (rust-version in Cargo.toml)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-musl
-          - target: aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
 
+      # The toolchain here must equal `rust-version` in the root Cargo.toml:
+      # cargo only enforces that field on dependency resolution, never on
+      # the workspace's own code, so without this job the number drifts
+      # (it read 1.85 while the tree needed 1.91). Bump both together.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.91
         with:
-          targets: ${{ matrix.target }}
+          toolchain: "1.91"
 
-      # Keyed by target so the two musl caches do not overwrite each other.
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          key: ${{ matrix.target }}
+          shared-key: linux-msrv
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
-      # Prebuilt binary instead of `cargo install cross` (~40 s per run).
-      # cross compiles inside its own Docker image, which carries the musl
-      # toolchain, so no host musl-tools/perl/make are needed.
-      - name: Install cross
-        uses: taiki-e/install-action@v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y perl make
+
+      - name: Toolchain matches Cargo.toml
+        run: |
+          declared=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          test "$declared" = "1.91" || { echo "Cargo.toml says rust-version $declared, this job installs 1.91"; exit 1; }
+
+      # A check, not clippy: lint names are added by newer toolchains and
+      # the lint gate runs on stable in the Test job.
+      - name: cargo check on the minimum toolchain
+        run: cargo check --workspace --all-targets --locked
+
+  deny:
+    name: Dependency policy (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          tool: cross
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
 
-      # Must match release.yml exactly: fastembed (ONNX) has no musl build,
-      # but model2vec is pure Rust and ships in the Linux release. Building
-      # without it here would leave the released feature set untested.
-      - name: Cross-build (model2vec only — ort-sys has no musl prebuilts)
-        run: cross build --release --locked --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
+      # cargo-deny resolves the graph through `cargo metadata`; no build.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      # Prebuilt binary, same pinned installer as nextest above and cross in
+      # cross-build.yml.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: cargo-deny
+
+      # Policy in deny.toml: RustSec advisories (vulnerable, yanked and
+      # unmaintained crates), an allow-list of permissive licences, no two
+      # majors of one crate outside the two embedding stacks, crates.io as
+      # the only source. Every exception is documented in the file. The
+      # advisory database is fetched by cargo-deny itself.
+      - name: cargo deny check
+        run: cargo deny check

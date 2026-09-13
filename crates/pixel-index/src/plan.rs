@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn repetition_min_one_keeps_requirement() {
         let q = plan("(handleClick)+");
-        assert!(q != GramQuery::All);
+        assert_ne!(q, GramQuery::All);
     }
 
     #[test]

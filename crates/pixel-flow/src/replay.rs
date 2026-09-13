@@ -131,7 +131,7 @@ fn render_step(
             comment_text(&substitute(r, vars))
         ));
     } else {
-        out.push_str(&format!("{}# Step {}\n", indent, num));
+        out.push_str(&format!("{indent}# Step {num}\n"));
     }
 
     // Per-step tab switching — if this step has a `tab` field, emit a
@@ -148,10 +148,7 @@ fn render_step(
             indent,
             comment_text(&substitute(tab, vars))
         ));
-        out.push_str(&format!(
-            "{}agent-browser --session comet tab <id>\n",
-            indent
-        ));
+        out.push_str(&format!("{indent}agent-browser --session comet tab <id>\n"));
     }
 
     match step.action.as_str() {
@@ -166,8 +163,7 @@ fn render_step(
         }
         "snapshot" => {
             out.push_str(&format!(
-                "{}agent-browser --session comet snapshot -i\n",
-                indent
+                "{indent}agent-browser --session comet snapshot -i\n"
             ));
         }
         "click" => {
@@ -176,12 +172,10 @@ fn render_step(
                 vars,
             ));
             out.push_str(&format!(
-                "{}agent-browser --session comet snapshot -i   # find the actual @eN ref for: {}\n",
-                indent, target
+                "{indent}agent-browser --session comet snapshot -i   # find the actual @eN ref for: {target}\n"
             ));
             out.push_str(&format!(
-                "{}agent-browser --session comet click @eN      # @eN = {}\n",
-                indent, target
+                "{indent}agent-browser --session comet click @eN      # @eN = {target}\n"
             ));
         }
         "fill" | "type" => {
@@ -191,8 +185,7 @@ fn render_step(
             ));
             let value = resolve_value(step, vars);
             out.push_str(&format!(
-                "{}agent-browser --session comet snapshot -i   # find the actual @eN ref for: {}\n",
-                indent, target
+                "{indent}agent-browser --session comet snapshot -i   # find the actual @eN ref for: {target}\n"
             ));
             out.push_str(&format!(
                 "{}agent-browser --session comet {} @eN \"{}\"   # @eN = {}\n",
@@ -209,8 +202,7 @@ fn render_step(
             ));
             let value = resolve_value(step, vars);
             out.push_str(&format!(
-                "{}agent-browser --session comet snapshot -i   # find the actual @eN ref for: {}\n",
-                indent, target
+                "{indent}agent-browser --session comet snapshot -i   # find the actual @eN ref for: {target}\n"
             ));
             out.push_str(&format!(
                 "{}agent-browser --session comet select @eN \"{}\"   # @eN = {}\n",
@@ -240,8 +232,7 @@ fn render_step(
                 )
             };
             out.push_str(&format!(
-                "{}agent-browser --session comet wait {}\n",
-                indent, arg
+                "{indent}agent-browser --session comet wait {arg}\n"
             ));
         }
         "conditional" => {
@@ -249,15 +240,15 @@ fn render_step(
                 step.condition.as_deref().unwrap_or("condition"),
                 vars,
             ));
-            out.push_str(&format!("{}# CONDITIONAL: if {}\n", indent, cond));
+            out.push_str(&format!("{indent}# CONDITIONAL: if {cond}\n"));
             if !step.then.is_empty() {
-                out.push_str(&format!("{}# → THEN:\n", indent));
+                out.push_str(&format!("{indent}# → THEN:\n"));
                 for (i, sub) in step.then.iter().enumerate() {
                     render_step(out, sub, i + 1, vars, flow_tab, depth + 1);
                 }
             }
             if !step.otherwise.is_empty() {
-                out.push_str(&format!("{}# → ELSE:\n", indent));
+                out.push_str(&format!("{indent}# → ELSE:\n"));
                 for (i, sub) in step.otherwise.iter().enumerate() {
                     render_step(out, sub, i + 1, vars, flow_tab, depth + 1);
                 }
@@ -266,12 +257,10 @@ fn render_step(
         "switch_tab" => {
             let tab = comment_text(&substitute(step.tab.as_deref().unwrap_or("tab"), vars));
             out.push_str(&format!(
-                "{}agent-browser --session comet tab list   # find tab matching '{}'\n",
-                indent, tab
+                "{indent}agent-browser --session comet tab list   # find tab matching '{tab}'\n"
             ));
             out.push_str(&format!(
-                "{}agent-browser --session comet tab <id>   # switch to it\n",
-                indent
+                "{indent}agent-browser --session comet tab <id>   # switch to it\n"
             ));
         }
         _ => {
@@ -319,7 +308,7 @@ fn resolve_value(step: &FlowStep, vars: &HashMap<String, String>) -> String {
             return v.clone();
         }
         // Fall back to default or placeholder.
-        return format!("{{{{{}}}}}", var_name);
+        return format!("{{{{{var_name}}}}}");
     }
     if let Some(ref v) = step.value {
         return substitute(v, vars);
@@ -331,7 +320,7 @@ fn resolve_value(step: &FlowStep, vars: &HashMap<String, String>) -> String {
 fn substitute(s: &str, vars: &HashMap<String, String>) -> String {
     let mut result = s.to_string();
     for (k, v) in vars {
-        let placeholder = format!("{{{{{}}}}}", k);
+        let placeholder = format!("{{{{{k}}}}}");
         result = result.replace(&placeholder, v);
     }
     result
@@ -368,6 +357,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn replay_shell_preserves_arguments_and_never_executes_data() {
+        use std::os::unix::fs::PermissionsExt;
         let payload = "quote\" $HOME $(printf EXPANDED) `printf BACKTICK` \\ end";
         let flow = make_flow(
             vec![FlowStep {
@@ -379,7 +369,6 @@ mod tests {
             vec![],
         );
         let rendered = replay(&flow, &HashMap::new()).unwrap();
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("pixel-replay-shell-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let stub = dir.join("agent-browser");
@@ -540,5 +529,89 @@ mod tests {
         flow.success_signal = Some("page contains 'authorized'".into());
         let out = replay(&flow, &HashMap::new()).unwrap();
         assert!(out.contains("Success signal: page contains 'authorized'"));
+    }
+
+    #[test]
+    fn replay_select_wait_and_switch_tab_render_their_commands() {
+        let flow = make_flow(
+            vec![
+                FlowStep {
+                    action: "select".into(),
+                    ref_hint: Some("combobox matching 'Country'".into()),
+                    value: Some("FR".into()),
+                    ..Default::default()
+                },
+                FlowStep {
+                    action: "wait".into(),
+                    wait: Some("10s".into()),
+                    ..Default::default()
+                },
+                FlowStep {
+                    action: "wait".into(),
+                    wait: Some("text".into()),
+                    wait_target: Some("Welcome {{who}}".into()),
+                    ..Default::default()
+                },
+                FlowStep {
+                    action: "switch_tab".into(),
+                    tab: Some("claude".into()),
+                    ..Default::default()
+                },
+            ],
+            vec![],
+        );
+        let vars = HashMap::from([("who".to_string(), "alice".to_string())]);
+        let out = replay(&flow, &vars).unwrap();
+        assert!(
+            out.contains("agent-browser --session comet select @eN \"FR\"   # @eN = combobox matching 'Country'"),
+            "{out}"
+        );
+        assert!(
+            out.contains("agent-browser --session comet wait \"--10s\"\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("agent-browser --session comet wait \"--text\" \"Welcome alice\"\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("agent-browser --session comet tab list   # find tab matching 'claude'"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn replay_conditional_prints_only_the_branches_that_exist() {
+        let then_only = make_flow(
+            vec![FlowStep {
+                action: "conditional".into(),
+                condition: Some("page shows 'A'".into()),
+                then: vec![FlowStep {
+                    action: "snapshot".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            vec![],
+        );
+        let out = replay(&then_only, &HashMap::new()).unwrap();
+        assert!(out.contains("# → THEN:"), "{out}");
+        assert!(!out.contains("# → ELSE:"), "{out}");
+
+        let else_only = make_flow(
+            vec![FlowStep {
+                action: "conditional".into(),
+                condition: Some("page shows 'A'".into()),
+                otherwise: vec![FlowStep {
+                    action: "snapshot".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            vec![],
+        );
+        let out = replay(&else_only, &HashMap::new()).unwrap();
+        assert!(!out.contains("# → THEN:"), "{out}");
+        assert!(out.contains("# → ELSE:"), "{out}");
     }
 }

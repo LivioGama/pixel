@@ -168,7 +168,7 @@ pub fn run_backfill(
             }
             continue;
         }
-        after_id = batch.last().map(|t| t.turn_id).unwrap_or(after_id);
+        after_id = batch.last().map_or(after_id, |t| t.turn_id);
         let mut texts: Vec<String> = Vec::new();
         let mut chunk_ids: Vec<i64> = Vec::new();
         for turn in &batch {
@@ -284,9 +284,9 @@ pub mod potion {
                 );
             }
             let _ = std::fs::create_dir_all(cache_dir);
-            // Route the HF hub cache under pixel's model dir. set_var is
-            // process-global; both CLI and daemon call this before any
-            // threads that read the environment.
+            // Route the HF hub cache under pixel's model dir.
+            // SAFETY: set_var is process-global; both CLI and daemon call this
+            // before any thread that reads the environment exists.
             unsafe {
                 std::env::set_var("HF_HOME", cache_dir.join("hf"));
             }
@@ -316,12 +316,15 @@ pub mod potion {
             self.dims
         }
 
+        // Runs the real model (downloaded or cached on disk); the
+        // `Embedder` trait is what the pipeline and its tests drive.
+        #[cfg_attr(test, mutants::skip)]
         fn embed_batch(
             &mut self,
             texts: &[&str],
             _kind: EmbedKind, // static embeddings have no query/passage split
         ) -> Result<Vec<Vec<f32>>, String> {
-            let owned: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
+            let owned: Vec<String> = texts.iter().map(ToString::to_string).collect();
             Ok(self.model.encode_with_args(&owned, Some(512), 1024))
         }
     }

@@ -1,8 +1,11 @@
 [package]
 name = "pixel-recall"
-version = "0.2.2"
+version = "0.2.4"
 edition.workspace = true
 license.workspace = true
+
+[lints]
+workspace = true
 
 [features]
 default = ["fastembed", "model2vec"]
@@ -10,15 +13,15 @@ fastembed = ["dep:fastembed", "dep:openssl"]
 model2vec = ["dep:model2vec-rs"]
 
 [dependencies]
-fastembed = { version = "6", optional = true }
+mutants = { workspace = true }
+# Default features minus `image-models`: pixel never embeds images, and
+# that feature alone pulls the `image` crate with every codec (rav1e, exr,
+# tiff, png…), 64 crates in the CLI's dependency graph.
+fastembed = { version = "6", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
 pixel-index = { path = "../pixel-index" }
 pixel-rank = { path = "../pixel-rank" }
 memmap2 = "0.9.11"
 model2vec-rs = { version = "0.2", optional = true }
-# Vendored openssl needed by fastembed → hf-hub → native-tls → openssl.
-# Optional: only compiled when fastembed is enabled, so musl builds
-# (--no-default-features) don't need OpenSSL at all.
-openssl = { workspace = true, optional = true }
 regex = "1.13"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -28,3 +31,12 @@ xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+# Vendored openssl needed by fastembed → hf-hub → native-tls → openssl, but
+# native-tls only depends on openssl outside Apple and Windows (Security
+# framework and SChannel there), so mirror its target gate: on macOS the
+# vendored build compiled OpenSSL from source for ~90 s and never linked it.
+# Optional: only compiled when fastembed is enabled, so musl builds
+# (--no-default-features) don't need OpenSSL at all.
+[target.'cfg(not(any(target_os = "windows", target_vendor = "apple")))'.dependencies]
+openssl = { workspace = true, optional = true }

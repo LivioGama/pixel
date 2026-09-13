@@ -32,4 +32,7 @@ pub use discover::{discover_root, discover_root_follow_submodules};
 pub use error::GitError;
 pub use redact::redact;
 pub use ref_guard::{end_of_options, validate_ref};
-pub use runner::{DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT, GitOptions, GitRunner};
+pub use runner::{
+    DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT, ENUMERATION_MAX_OUTPUT_BYTES, GitOptions, GitOutput,
+    GitRunner,
+};

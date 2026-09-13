@@ -1,0 +1,18 @@
+# cargo-mutants configuration (https://mutants.rs/). How and when to run it
+# is documented in CONTRIBUTING.md, "Mutation testing".
+
+# Benches are not shipped and carry no tests: every mutant there would be a
+# false "missed".
+# Build scripts run at compile time; a mutated one changes what the binary
+# reports, not what a test asserts.
+exclude_globs = ["crates/pixel-bench/**", "**/benches/**", "**/build.rs"]
+
+# Debug output is diagnostic, never part of the wire contract. Display is
+# deliberately kept: tokens, error codes and op names reach JSON and the
+# journal through it.
+exclude_re = ["impl Debug"]
+
+# Only the mutated crate's own tests run for each mutant (the default). The
+# CLI contract tests in crates/pixel exercise the built binary, so a mutant
+# in a library crate is judged by that crate's unit and `tests/all` suite.
+test_workspace = false

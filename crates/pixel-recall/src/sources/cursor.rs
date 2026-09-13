@@ -278,8 +278,10 @@ fn extract_record(
                                 .get("name")
                                 .and_then(Value::as_str)
                                 .unwrap_or("unknown");
-                            let input =
-                                part.get("input").map(|v| v.to_string()).unwrap_or_default();
+                            let input = part
+                                .get("input")
+                                .map(ToString::to_string)
+                                .unwrap_or_default();
                             let (capped, truncated) = cap_text(&input, TOOL_INPUT_CAP);
                             any_truncated |= truncated;
                             if !text.is_empty() {
@@ -319,4 +321,52 @@ fn classify_cursor_user(text: &str) -> IntentSource {
         }
     }
     classify_user_text(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extract_record_reads_the_user_query_and_folds_assistant_tool_calls() {
+        let mut turns = Vec::new();
+        let user = json!({
+            "role": "user",
+            "message": {"content": [
+                {"type": "text", "text": "<user_query>\nrename the flag\n</user_query>"}
+            ]}
+        });
+        extract_record(&user, 0, 50, Some(1_760_000_000_000), &mut turns);
+        let assistant = json!({
+            "role": "assistant",
+            "message": {"content": [
+                {"type": "text", "text": "renaming"},
+                {"type": "tool_use", "name": "edit_file", "input": {"path": "a.rs"}}
+            ]}
+        });
+        extract_record(&assistant, 50, 80, None, &mut turns);
+        extract_record(
+            &json!({"role": "system", "message": {"content": "x"}}),
+            0,
+            1,
+            None,
+            &mut turns,
+        );
+
+        let roles: Vec<Role> = turns.iter().map(|t| t.role).collect();
+        assert_eq!(roles, vec![Role::User, Role::Assistant]);
+        assert_eq!(turns[0].text, "rename the flag");
+        assert_eq!(turns[0].intent_source, Some(IntentSource::Human));
+        assert_eq!(turns[0].ts, Some(1_760_000_000_000));
+        assert_eq!(
+            (turns[0].source_byte_start, turns[0].source_byte_len),
+            (Some(0), Some(50))
+        );
+        assert_eq!(
+            turns[1].text,
+            "renaming\n\u{22ee}tool edit_file {\"path\":\"a.rs\"}"
+        );
+        assert_eq!(turns[1].ts, None);
+    }
 }

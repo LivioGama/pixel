@@ -358,8 +358,7 @@ impl GraphStore {
                 let _ = std::fs::create_dir_all(parent);
                 parent
                     .canonicalize()
-                    .map(|p| p.join(name))
-                    .unwrap_or_else(|_| path.to_path_buf())
+                    .map_or_else(|_| path.to_path_buf(), |p| p.join(name))
             }
             _ => path.to_path_buf(),
         };
@@ -753,7 +752,7 @@ impl GraphStore {
         sql.push_str(" ORDER BY c.kind, c.id LIMIT ?");
         p.push(Box::new(limit));
         let mut stmt = self.conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(AsRef::as_ref).collect();
         let rows = stmt.query_map(param_refs.as_slice(), Self::row_to_concept)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -797,7 +796,7 @@ impl GraphStore {
         );
         p.push(Box::new(limit));
         let mut stmt = self.conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(AsRef::as_ref).collect();
         let rows = stmt.query_map(param_refs.as_slice(), Self::row_to_concept)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -1061,8 +1060,7 @@ impl GraphStore {
     pub fn set_annotation(&self, file_path: &str, target: &str, note: &str) -> Result<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs() as i64);
         self.conn.execute(
             "INSERT INTO annotations (file_path, target, note, updated_at)
              VALUES (?1, ?2, ?3, ?4)
@@ -1141,7 +1139,7 @@ impl GraphStore {
                 .map(|n| Box::new(n.to_string()) as Box<dyn rusqlite::ToSql>),
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(AsRef::as_ref).collect();
         let rows = stmt.query_map(param_refs.as_slice(), Self::row_to_annotation)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }

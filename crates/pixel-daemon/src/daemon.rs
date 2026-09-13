@@ -10,12 +10,19 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use fs2::FileExt;
 use notify::{RecursiveMode, Watcher};
 
 use crate::api::{Request, Response, ServeError, Service, failure_response};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const DEBOUNCE: Duration = Duration::from_millis(500);
+/// Longest the main loop sleeps before re-checking that the served root
+/// still exists. A daemon whose root was deleted (a removed worktree, a
+/// test fixture) has nothing left to serve and must not sit on the machine
+/// for the rest of `IDLE_TIMEOUT`: auto-started daemons are detached from
+/// their parent, so nothing else would ever reap them.
+const ROOT_POLL: Duration = Duration::from_secs(5);
 /// Idle poll interval for the facts ingest thread once fresh. A ref move
 /// re-triggers ingest on the next poll without blocking queries.
 const INGEST_IDLE_POLL: Duration = Duration::from_secs(5);
@@ -139,6 +146,16 @@ pub trait Corpus {
     fn watch_paths(&self) -> Vec<PathBuf> {
         vec![self.root().to_path_buf()]
     }
+    /// How often the loop calls `sweep` regardless of watcher events
+    /// (default: never). A corpus whose writers hold files open for
+    /// minutes (streamed transcripts) sets this, because FSEvents on macOS
+    /// defers the modify event until the writer closes the file.
+    fn sweep_interval(&self) -> Option<Duration> {
+        None
+    }
+    /// Periodic maintenance, called every `sweep_interval` from the loop
+    /// thread (default: nothing).
+    fn sweep(&mut self) {}
 }
 
 impl Corpus for Service {
@@ -245,7 +262,6 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
         .write(true)
         .truncate(false)
         .open(&lock_path)?;
-    use fs2::FileExt;
     if lock_file.try_lock_exclusive().is_err() {
         return Err(ServeError::Msg(format!(
             "daemon lock already held by another process for {}",
@@ -311,6 +327,8 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
     let mut flush_at: Option<Instant> = None;
     let mut last_activity = Instant::now();
     let mut shutdown = false;
+    let sweep_every = service.sweep_interval();
+    let mut next_sweep = sweep_every.map(|every| Instant::now() + every);
 
     while !shutdown {
         let now = Instant::now();
@@ -320,6 +338,11 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
         let timeout = match flush_at {
             Some(at) => at.saturating_duration_since(now).min(idle_left),
             None => idle_left,
+        }
+        .min(ROOT_POLL);
+        let timeout = match next_sweep {
+            Some(at) => at.saturating_duration_since(now).min(timeout),
+            None => timeout,
         };
 
         match rx.recv_timeout(timeout.max(Duration::from_millis(10))) {
@@ -345,8 +368,22 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
             flush_at = None;
         }
 
+        if let (Some(at), Some(every)) = (next_sweep, sweep_every)
+            && Instant::now() >= at
+        {
+            service.sweep();
+            next_sweep = Some(Instant::now() + every);
+        }
+
         if last_activity.elapsed() >= IDLE_TIMEOUT {
             eprintln!("pixel daemon: idle timeout, exiting");
+            break;
+        }
+        if root_removed(&root) {
+            eprintln!(
+                "pixel daemon: root {} no longer exists, exiting",
+                root.display()
+            );
             break;
         }
     }
@@ -355,6 +392,13 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
     let _ = std::fs::remove_file(pid_path(&root));
     let _ = std::fs::remove_file(&lock_path);
     Ok(())
+}
+
+/// The served root has been deleted (or replaced by a non-directory): every
+/// answer the daemon could give from here on would describe a tree that no
+/// longer exists, so the loop exits and releases the socket, pid and lock.
+fn root_removed(root: &Path) -> bool {
+    !root.is_dir()
 }
 
 fn record_event(ev: &notify::Event, pending: &mut BTreeMap<PathBuf, bool>) {
@@ -502,6 +546,210 @@ fn read_capped_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A corpus with no index behind it: enough to drive `run_corpus`'s
+    /// transport loop from a test.
+    struct StubCorpus(PathBuf);
+
+    impl Corpus for StubCorpus {
+        fn root(&self) -> &Path {
+            &self.0
+        }
+        fn handle(&mut self, _req: Request) -> Response {
+            failure_response("stub", "stub corpus")
+        }
+        fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+    }
+
+    /// A corpus that asks for a periodic sweep and counts the calls.
+    struct SweptCorpus {
+        root: PathBuf,
+        every: Option<Duration>,
+        sweeps: Arc<AtomicUsize>,
+    }
+
+    impl Corpus for SweptCorpus {
+        fn root(&self) -> &Path {
+            &self.root
+        }
+        fn handle(&mut self, _req: Request) -> Response {
+            failure_response("stub", "stub corpus")
+        }
+        fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+        fn sweep_interval(&self) -> Option<Duration> {
+            self.every
+        }
+        fn sweep(&mut self) {
+            self.sweeps.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn scratch_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("pixel-daemon-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    fn shutdown(sock: &Path) {
+        let Ok(mut stream) = UnixStream::connect(sock) else {
+            return;
+        };
+        let mut line = serde_json::to_string(&Request::Shutdown).unwrap();
+        line.push('\n');
+        let _ = stream.write_all(line.as_bytes());
+        let mut reader = BufReader::new(stream);
+        let mut reply = String::new();
+        let _ = std::io::BufRead::read_line(&mut reader, &mut reply);
+    }
+
+    /// The watcher alone misses the transcript an agent is streaming (macOS
+    /// FSEvents defers the modify event while the file stays open), so a
+    /// corpus that asks for a sweep must get it on its interval with no
+    /// filesystem event and no request in between.
+    #[test]
+    fn corpus_sweep_runs_on_its_interval_without_events() {
+        let root = scratch_root("sweep");
+        let sock = socket_path(&root);
+        let sweeps = Arc::new(AtomicUsize::new(0));
+        let corpus = SweptCorpus {
+            root: root.clone(),
+            every: Some(Duration::from_millis(100)),
+            sweeps: Arc::clone(&sweeps),
+        };
+        let started = Instant::now();
+        let daemon = std::thread::spawn(move || run_corpus(corpus));
+        wait_until("socket to answer", Duration::from_secs(10), || ping(&sock));
+
+        wait_until("three sweeps", Duration::from_secs(10), || {
+            sweeps.load(Ordering::SeqCst) >= 3
+        });
+        // The first sweep waits one full interval (nothing to sweep at
+        // start-up) and each later one is rescheduled from the interval, so
+        // three sweeps at 100 ms cannot land before 300 ms.
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "sweeps ran early or back to back instead of on the interval"
+        );
+        // The count keeps rising: sweeps are periodic, not a one-off after
+        // the first request.
+        let seen = sweeps.load(Ordering::SeqCst);
+        wait_until("a further sweep", Duration::from_secs(10), || {
+            sweeps.load(Ordering::SeqCst) > seen
+        });
+
+        shutdown(&sock);
+        wait_until("daemon to exit", Duration::from_secs(10), || {
+            daemon.is_finished()
+        });
+        daemon.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The trait default is "no sweep": the repo corpus relies on it, and a
+    /// default interval would make every repo daemon run periodic work.
+    #[test]
+    fn default_corpus_has_no_sweep_interval() {
+        let stub = StubCorpus(PathBuf::from("/nonexistent"));
+        assert_eq!(stub.sweep_interval(), None);
+    }
+
+    /// A corpus without an interval is never swept, so a corpus without
+    /// periodic work pays nothing.
+    #[test]
+    fn corpus_without_interval_is_never_swept() {
+        let root = scratch_root("nosweep");
+        let sock = socket_path(&root);
+        let sweeps = Arc::new(AtomicUsize::new(0));
+        let corpus = SweptCorpus {
+            root: root.clone(),
+            every: None,
+            sweeps: Arc::clone(&sweeps),
+        };
+        let daemon = std::thread::spawn(move || run_corpus(corpus));
+        wait_until("socket to answer", Duration::from_secs(10), || ping(&sock));
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(ping(&sock));
+        assert_eq!(sweeps.load(Ordering::SeqCst), 0);
+
+        shutdown(&sock);
+        wait_until("daemon to exit", Duration::from_secs(10), || {
+            daemon.is_finished()
+        });
+        daemon.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn wait_until(what: &str, limit: Duration, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + limit;
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// One round trip on the daemon socket: forces a loop iteration and
+    /// proves the daemon is serving.
+    fn ping(sock: &Path) -> bool {
+        let Ok(mut stream) = UnixStream::connect(sock) else {
+            return false;
+        };
+        let mut line = serde_json::to_string(&Request::Ping).unwrap();
+        line.push('\n');
+        if stream.write_all(line.as_bytes()).is_err() {
+            return false;
+        }
+        let mut reader = BufReader::new(stream);
+        let mut reply = String::new();
+        std::io::BufRead::read_line(&mut reader, &mut reply).is_ok() && !reply.is_empty()
+    }
+
+    /// An auto-started daemon is detached from its parent and would otherwise
+    /// live the full idle timeout after its root is deleted: a test suite
+    /// that runs the CLI against throwaway fixtures left one daemon per
+    /// fixture behind (18 per run, load average past 70 after a few runs).
+    #[test]
+    fn daemon_exits_once_its_root_is_deleted() {
+        let root = std::env::temp_dir().join(format!(
+            "pixel-daemon-root-gone-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let sock = socket_path(&root);
+        let served = root.clone();
+        let daemon = std::thread::spawn(move || run_corpus(StubCorpus(served)));
+
+        wait_until("socket to answer", Duration::from_secs(10), || ping(&sock));
+        // The first request ran one loop iteration with the root present; a
+        // daemon that exits on that iteration has released its socket by the
+        // time of the second request. The exit below is therefore tied to
+        // the removal, not to the check firing unconditionally.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(ping(&sock), "daemon stopped serving while its root existed");
+        assert!(
+            !daemon.is_finished(),
+            "daemon exited while its root existed"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+        wait_until(
+            "daemon to exit after root removal",
+            ROOT_POLL + Duration::from_secs(10),
+            || daemon.is_finished(),
+        );
+        daemon.join().unwrap().unwrap();
+        assert!(!sock.exists(), "socket must be released on exit");
+        assert!(
+            !pid_path(&root).exists(),
+            "pid file must be released on exit"
+        );
+    }
 
     #[test]
     fn capped_line_preserves_utf8() {

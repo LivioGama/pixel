@@ -5,7 +5,10 @@
 .devin/
 
 # tool-local agent config dirs
-.claude/
+# Tool-local config stays out, the committed rules symlink stays in.
+.claude/*
+!.claude/rules
+!.claude/skills
 .codex/
 .cursor/
 .gemini/
@@ -23,3 +26,6 @@ __pycache__/
 coverage*.txt
 *.lcov
 docs/pixel-line-ascii.ppm
+
+# cargo-mutants scratch output
+/mutants.out*

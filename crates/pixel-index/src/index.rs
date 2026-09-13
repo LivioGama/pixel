@@ -244,6 +244,13 @@ pub fn build_with_budget(
     extractor: &dyn GramExtractor,
     budget: Option<std::time::Duration>,
 ) -> Result<BuildStats, IndexError> {
+    /// One extracted file, as the rayon workers hand it back to the writer.
+    struct FileGrams {
+        rel: String,
+        bytes: u64,
+        hashes: Vec<u64>,
+    }
+
     use std::sync::atomic::Ordering;
     let started = std::time::Instant::now();
     let max_total_bytes = build_max_bytes_from_env();
@@ -252,12 +259,6 @@ pub fn build_with_budget(
     // channel while rayon workers pull and extract grams concurrently. This
     // overlaps directory I/O with CPU work instead of waiting for the full
     // walk to finish before starting extraction.
-    struct FileGrams {
-        rel: String,
-        bytes: u64,
-        hashes: Vec<u64>,
-    }
-
     let total_bytes = std::sync::atomic::AtomicU64::new(0);
     let budget_exceeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let file_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));

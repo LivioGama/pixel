@@ -45,6 +45,7 @@ can do the same task is a failure mode — it wastes tokens and misses the index
 | `git log --grep "term"` | `pixel history-search "term"` | Fact + diff search |
 | `git log --follow <path>` | `pixel lifecycle --file <path>` | Lifecycle of a path/token |
 | `git blame <file>` | `pixel provenance <file>` | Per-region attribution |
+| "it worked before": `git log` + `git checkout <sha> -- <file>` | `pixel rescue "<problem>"` | Revert plan: breaking commit flagged, last-known-good candidate; nothing written without `--apply` |
 
 ### Change Review & Git Operations (replaces raw git)
 
@@ -56,6 +57,7 @@ can do the same task is a failure mode — it wastes tokens and misses the index
 | `git log --oneline -20` | `pixel history` | Bounded with byte caps |
 | `git branch -a -vv` | `pixel branches` | Ahead/behind/merged/stale/unpushed |
 | `git add . && git commit -m "msg"` | `pixel publish -m "msg" --request-id "req-id"` | Crash-safe, idempotent |
+| `git commit -F msg.txt` | `pixel publish -F msg.txt --request-id "req-id"` | Multi-paragraph message from a file (`-` = stdin) |
 | `git add . && git commit && git push` | `pixel ship -m "msg" --request-id "id" origin HEAD` | One op, crash-safe |
 | `git pull --rebase` | `pixel reconcile` | Deterministic branch sync |
 | `git checkout -b name` | `pixel branch name --request-id "id"` | From HEAD or --from |
@@ -83,6 +85,44 @@ can do the same task is a failure mode — it wastes tokens and misses the index
 |----------------|-------------------|
 | grep through ~/.claude/projects/ | `pixel recall search "pattern"` |
 | list past sessions | `pixel recall sessions` |
+| "what did we decide about X?" | `pixel recall ask "what did we decide about X"` |
+| read one past session | `pixel recall show <ref> --turn 1..20` |
+| context pack for a question | `pixel recall context "question" --budget 4000` |
+
+#### Recall method: pick the mode from the question, then stop on evidence
+
+Recall answers questions about past sessions; it does not replace reading
+the code. Choose the command from the shape of the question:
+
+| Question shape | Command | Sufficient when |
+|----------------|---------|-----------------|
+| an exact token you remember (an error string, a flag, a file name) | `pixel recall search "token" --since 30d` | the hit shows the token in a turn of the right session |
+| a topic in your own words, no exact token | `pixel recall ask "topic"` | a session group's snippet answers the question, or `--turn` reading of it does |
+| "did we already try X?" / "why was X chosen?" | `pixel recall ask "X"` then `pixel recall show <ref> --turn N..M` around the hit | the answer appears in an assistant or tool turn, not only in the question |
+| "was X fixed?" | `pixel recall search "X" --role tool` | a tool turn shows the passing run, the commit, or the diff; an assistant turn saying "fixed" is a claim, not evidence |
+| the session that ran here recently | `pixel recall sessions --repo "$PWD" --since 7d` | the session list names it; read it with `pixel recall show <ref>` |
+
+Rules that keep recall honest:
+
+- **Two reformulations, then stop.** One query, at most two rewordings
+  (add the exact token you found, or drop the words that were yours). A third
+  miss is a result: say nothing was found and move on with the code.
+- **A miss is not proof of absence.** The corpus indexes what the daemon has
+  seen; a session may be older than the filter, or from an agent that is not
+  indexed. Report "no indexed session mentions X", never "X never happened".
+- **Query terms are probes, not evidence.** A hit on a word you typed proves
+  the word occurs; read the turn before citing it. Cite the session and turn
+  (`agent:id #turn`) so the claim can be re-opened.
+- **A fix described in prose is not a fix.** Only a tool turn (a test run, a
+  diff, a commit) counts as evidence that a change landed; treat assistant
+  narration as a plan until a tool turn confirms it.
+- **Narrow before you widen.** Start with `--repo "$PWD"` (a path prefix, not a shorthand) and `--since`; widen the
+  window or drop the repo filter only after a miss, and say which filter you
+  dropped.
+- **Read at the turn, not the session.** `pixel recall show <ref> --turn N..M`
+  around the hit costs a few hundred tokens; the whole session costs the
+  budget. `pixel recall context` when several sessions matter and the answer
+  must fit a token budget.
 
 ## MANDATORY WORKFLOW
 

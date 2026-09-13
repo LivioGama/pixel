@@ -79,3 +79,60 @@ pub fn models_dir() -> PathBuf {
     }
     new_path
 }
+
+/// Store fixtures shared by the unit tests: sessions inserted straight
+/// through `RecallStore::replace_session`, no source adapter involved.
+#[cfg(test)]
+pub(crate) mod testutil {
+    use crate::model::{IntentSource, Role, TsSource, UnifiedSession, UnifiedTurn};
+    use crate::store::{IngestState, RecallStore};
+
+    pub(crate) const TS: i64 = 1_760_000_000_000; // 2025-10-09
+
+    pub(crate) fn state() -> IngestState {
+        IngestState {
+            file_size: 1,
+            mtime_ms: 1,
+            bytes_ingested: 1,
+            cursor: None,
+        }
+    }
+
+    /// One session of `agent` with the given turns (role, text); every turn
+    /// gets `TS` plus one minute per position, user turns count as human
+    /// intent. Returns the session id.
+    pub(crate) fn add_session(
+        store: &mut RecallStore,
+        agent: &'static str,
+        source_session_id: &str,
+        turns: &[(Role, &str)],
+    ) -> i64 {
+        let session = UnifiedSession {
+            agent,
+            source_session_id: source_session_id.to_string(),
+            source_path: format!("/fake/{agent}/{source_session_id}.jsonl"),
+            cwd: Some("/work/pixel".to_string()),
+            git_branch: None,
+            title: None,
+            ts_source: TsSource::Iso,
+            is_subagent: false,
+            parent_source_session_id: None,
+        };
+        let turns: Vec<UnifiedTurn> = turns
+            .iter()
+            .enumerate()
+            .map(|(i, (role, text))| UnifiedTurn {
+                role: *role,
+                intent_source: (*role == Role::User).then_some(IntentSource::Human),
+                ts: Some(TS + i as i64 * 60_000),
+                text: (*text).to_string(),
+                truncated: false,
+                source_byte_start: None,
+                source_byte_len: None,
+            })
+            .collect();
+        store
+            .replace_session(&session, &turns, source_session_id, &state())
+            .expect("replace_session")
+    }
+}

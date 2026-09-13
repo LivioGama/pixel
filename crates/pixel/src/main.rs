@@ -45,10 +45,27 @@ use pixel_index::{Crc32Weigher, GramExtractor, SparseGramExtractor, TrigramExtra
 use pixel_proto::{QueryKind, QueryStatus, compile_query};
 use serde_json::{Value, json};
 
+/// `pixel --version` (long form): the crate version plus where the binary
+/// came from, all captured by `build.rs` at compile time (`unknown` when a
+/// value could not be determined, e.g. a tarball build without `.git`).
+/// `pixel -V` keeps the one-line `pixel x.y.z`.
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\ncommit: ",
+    env!("PIXEL_BUILD_COMMIT"),
+    "\ntarget: ",
+    env!("PIXEL_BUILD_TARGET"),
+    "\nrustc: ",
+    env!("PIXEL_RUSTC_VERSION"),
+    "\nbuilt: ",
+    env!("PIXEL_BUILD_DATE"),
+);
+
 #[derive(Parser)]
 #[command(
     name = "pixel",
     version,
+    long_version = LONG_VERSION,
     about = "Fast, fresh code retrieval for agents"
 )]
 struct Cli {
@@ -468,9 +485,17 @@ enum Command {
     },
     /// Stage files, commit, and optionally push (crash-safe, idempotent).
     Publish {
-        /// Commit message.
-        #[arg(short = 'm', long = "message")]
-        message: String,
+        /// Commit message. Use `--message-file` for a multi-paragraph body.
+        #[arg(
+            short = 'm',
+            long = "message",
+            required_unless_present = "message_file"
+        )]
+        message: Option<String>,
+        /// Read the commit message from this file (`-` for stdin), verbatim
+        /// except for trailing whitespace. Mutually exclusive with `-m`.
+        #[arg(short = 'F', long = "message-file", conflicts_with = "message")]
+        message_file: Option<PathBuf>,
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Files to stage (repo-relative). Repeat the flag once per file
@@ -510,9 +535,17 @@ enum Command {
     },
     /// Publish + push in one op (commit then leased push).
     Ship {
-        /// Commit message.
-        #[arg(short = 'm', long = "message")]
-        message: String,
+        /// Commit message. Use `--message-file` for a multi-paragraph body.
+        #[arg(
+            short = 'm',
+            long = "message",
+            required_unless_present = "message_file"
+        )]
+        message: Option<String>,
+        /// Read the commit message from this file (`-` for stdin), verbatim
+        /// except for trailing whitespace. Mutually exclusive with `-m`.
+        #[arg(short = 'F', long = "message-file", conflicts_with = "message")]
+        message_file: Option<PathBuf>,
         // Positional order matches Push: required remote + refspec first,
         // then the defaulted path. (A defaulted positional BEFORE required
         // ones trips clap's debug assertions — every debug-build parse
@@ -683,11 +716,12 @@ enum Command {
     // -----------------------------------------------------------------
     // M5/M6 — install / doctor / migrate / hook
     // -----------------------------------------------------------------
-    /// Idempotently deploy the agent prompt and Claude/Codex shell wrappers.
+    /// Idempotently deploy the agent prompt, the Claude shell wrapper and the
+    /// Codex developer_instructions config key.
     Install {
         #[arg(long)]
         json: bool,
-        /// Shell to install the `claude`/`codex` wrapper block for
+        /// Shell to install the `claude` wrapper block for
         /// (default: $SHELL). Pass e.g. `fish` when the invoking process
         /// does not run under your login shell.
         #[arg(long)]
@@ -706,15 +740,38 @@ enum Command {
         /// Path to the pixel binary to remove (default: ~/.local/bin/pixel).
         #[arg(long)]
         binary_path: Option<PathBuf>,
-        /// Shell whose wrapper block should be removed (default: $SHELL).
+        /// Shell whose wrapper block should be removed (default: the
+        /// account's login shell, then $SHELL).
         #[arg(long)]
         shell: Option<String>,
+        /// Remove only that shell's wrapper block and keep everything else
+        /// installed: the fix for a block `pixel doctor` reports in a
+        /// profile the login shell never loads.
+        #[arg(long)]
+        wrappers_only: bool,
+    },
+    /// Check that a release tag is consistent with the tree before anything
+    /// is built or published: crates/pixel/Cargo.toml carries the version,
+    /// Cargo.lock is fresh for every workspace member, CHANGELOG.md has the
+    /// `## [x.y.z]` heading and an empty Unreleased section. Exit 1 on any
+    /// failed check.
+    ReleaseCheck {
+        /// The version or tag: `1.2.3`, `v1.2.3` or `refs/tags/v1.2.3`.
+        version: String,
+        /// Repository root (default: current directory).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Emit the report as one JSON document.
+        #[arg(long)]
+        json: bool,
     },
     /// Rebuild the binary, stop the daemon, copy the new binary to the
     /// install path, and optionally restart the daemon. Solves the
     /// "Text file busy" error when the daemon holds the binary open.
     Upgrade {
         /// Cargo build command to run (default: `cargo build --release -p pixel-cli`).
+        /// The built binary is read from `target/<profile>/pixel`, with the
+        /// profile taken from this command's `--profile`/`--release` flags.
         #[arg(long, default_value = "cargo build --release -p pixel-cli")]
         build: String,
         /// Install path. Default: the binary running this command (unless
@@ -1398,9 +1455,7 @@ fn try_daemon_inner(root: &Path, req: &Request) -> Option<Response> {
 
 /// Check if an env var is explicitly set to "0"/"false"/"off".
 fn env_flag_off(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| matches!(v.as_str(), "0" | "false" | "off"))
-        .unwrap_or(false)
+    std::env::var(name).is_ok_and(|v| matches!(v.as_str(), "0" | "false" | "off"))
 }
 
 /// Prefer the daemon; fall back to an in-process Service. The given path may
@@ -1462,8 +1517,45 @@ fn unwrap_response(resp: Response) -> Result<Value, String> {
 
 fn announce_graph_build(data: &Value) {
     if let Some(info) = data.get("graph_build") {
-        let ms = info.get("build_ms").and_then(Value::as_u64).unwrap_or(0);
-        eprintln!("pixel: built graph.db on first use ({ms} ms)");
+        eprintln!("pixel: {}", graph_build_notice(info));
+    }
+}
+
+/// One stderr line per graph build/update, naming which path ran: an agent
+/// that edits then checks `impact` must be able to tell a 1-second
+/// incremental update from a 100-second rebuild of the whole tree.
+fn graph_build_notice(info: &Value) -> String {
+    let ms = info.get("build_ms").and_then(Value::as_u64).unwrap_or(0);
+    if info.get("incremental").and_then(Value::as_bool) == Some(true) {
+        let changed = info
+            .get("changed_files")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let removed = info
+            .get("removed_files")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let removed = if removed > 0 {
+            format!(", {removed} removed")
+        } else {
+            String::new()
+        };
+        return format!("updated graph.db for {changed} changed file(s){removed} ({ms} ms)");
+    }
+    match info.get("reason").and_then(Value::as_str) {
+        Some("threshold") => {
+            format!("rebuilt graph.db: drift above PIXEL_GRAPH_INCREMENTAL_MAX_PCT ({ms} ms)")
+        }
+        Some("incremental_failed") => format!(
+            "rebuilt graph.db: incremental update failed ({}) ({ms} ms)",
+            info.get("incremental_error")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error")
+        ),
+        Some("no_signature") | Some("unreadable") => {
+            format!("rebuilt graph.db: no trusted freshness signature ({ms} ms)")
+        }
+        _ => format!("built graph.db on first use ({ms} ms)"),
     }
 }
 
@@ -1538,7 +1630,7 @@ const TRUNCATION_META_RESERVE: usize = 256;
 const TRUNCATION_MAX_ROUNDS: usize = 8;
 
 fn serialized_len(v: &Value) -> usize {
-    serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0)
+    serde_json::to_vec(v).map_or(0, |b| b.len())
 }
 
 /// Locate the non-empty array under `v` whose tail is worth cutting most:
@@ -1892,6 +1984,36 @@ mod render_data_tests {
 
     /// `status`/`ready` are freshness answers: the dirty LIST is what let an
     /// untracked vendor tree blow the cap, the COUNT is all they need.
+    /// The stderr line is how an agent tells a 1 s incremental update from
+    /// a 100 s rebuild of the whole tree; the two must not read the same.
+    #[test]
+    fn graph_build_notice_distinguishes_incremental_from_full() {
+        let incremental =
+            json!({"incremental": true, "changed_files": 2, "removed_files": 0, "build_ms": 1200});
+        assert_eq!(
+            graph_build_notice(&incremental),
+            "updated graph.db for 2 changed file(s) (1200 ms)"
+        );
+        let with_removed =
+            json!({"incremental": true, "changed_files": 1, "removed_files": 1, "build_ms": 40});
+        assert_eq!(
+            graph_build_notice(&with_removed),
+            "updated graph.db for 1 changed file(s), 1 removed (40 ms)"
+        );
+        let first = json!({"incremental": false, "reason": "missing", "build_ms": 36000});
+        assert_eq!(
+            graph_build_notice(&first),
+            "built graph.db on first use (36000 ms)"
+        );
+        let threshold = json!({"incremental": false, "reason": "threshold", "build_ms": 5});
+        assert!(graph_build_notice(&threshold).contains("PIXEL_GRAPH_INCREMENTAL_MAX_PCT"));
+        // Older daemon without the field: still the first-use wording.
+        assert_eq!(
+            graph_build_notice(&json!({"build_ms": 7})),
+            "built graph.db on first use (7 ms)"
+        );
+    }
+
     #[test]
     fn compact_snapshot_replaces_dirty_list_with_count() {
         let mut d = json!({"index": {"base_files": 1},
@@ -2104,8 +2226,7 @@ fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Res
         .unwrap_or_default();
     let created_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     let new_task = serde_json::json!({
         "id": targets_task_id(task),
         "task": task,
@@ -2127,8 +2248,7 @@ fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Res
     let active = manifest
         .get("tasks")
         .and_then(Value::as_array)
-        .map(Vec::len)
-        .unwrap_or(1);
+        .map_or(1, Vec::len);
     if let Some(parent) = manifest_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
@@ -2331,9 +2451,7 @@ pub(crate) fn discover_root(path: &Path) -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|e| format!("bad path {}: {e}", path.display()))?;
     let start = if abs.is_file() {
-        abs.parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| abs.clone())
+        abs.parent().map_or_else(|| abs.clone(), Path::to_path_buf)
     } else {
         abs.clone()
     };
@@ -2494,8 +2612,7 @@ fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
         let end_line = m
             .get("end_line")
             .and_then(Value::as_u64)
-            .map(|v| v as usize)
-            .unwrap_or(start_line)
+            .map_or(start_line, |v| v as usize)
             .max(start_line);
         if start_line == 0 {
             continue;
@@ -2756,9 +2873,7 @@ fn run_search_one(
 // ---------------------------------------------------------------------------
 
 fn daemon_ping(root: &Path) -> bool {
-    try_daemon(root, &Request::Ping)
-        .map(|r| r.ok)
-        .unwrap_or(false)
+    try_daemon(root, &Request::Ping).is_some_and(|r| r.ok)
 }
 
 fn daemon_start(path: PathBuf, foreground: bool, quiet: bool) -> Result<(), String> {
@@ -2865,6 +2980,47 @@ fn pixel_binaries_on_path(path_var: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     found
 }
 
+/// Cargo profile directory a build command writes to, from its own flags:
+/// `--profile <name>` / `--profile=<name>` wins, then `--release`
+/// (`release`), else cargo's default `debug`. `pixel upgrade` used to
+/// hardcode `target/release`, so a `--build` with another profile installed
+/// whatever stale binary sat there. A command that does not invoke cargo
+/// (a wrapper script, `/usr/bin/true` in tests) keeps the historical
+/// `release`: cargo's flag semantics do not apply to it.
+fn cargo_profile_dir(build: &str) -> String {
+    let mut args = build.split_whitespace().peekable();
+    let mut release = false;
+    let mut invokes_cargo = false;
+    while let Some(arg) = args.next() {
+        if arg == "cargo" || arg.ends_with("/cargo") {
+            invokes_cargo = true;
+        } else if arg == "--profile" {
+            if let Some(name) = args.next() {
+                return profile_dir_name(name);
+            }
+        } else if let Some(name) = arg.strip_prefix("--profile=") {
+            return profile_dir_name(name);
+        } else if arg == "--release" || arg == "-r" {
+            release = true;
+        }
+    }
+    if release || !invokes_cargo {
+        "release".into()
+    } else {
+        "debug".into()
+    }
+}
+
+/// Cargo maps the built-in `dev`/`test` profiles to `target/debug` and
+/// `bench` to `target/release`; custom profiles use their own name.
+fn profile_dir_name(name: &str) -> String {
+    match name {
+        "dev" | "test" => "debug".into(),
+        "bench" => "release".into(),
+        other => other.into(),
+    }
+}
+
 /// Decide where `pixel upgrade` installs.
 ///
 /// The historical fixed `~/.local/bin/pixel` was wrong on any machine whose
@@ -2928,6 +3084,47 @@ fn upgrade_shadowed_by(installed: &Path, path_var: Option<&std::ffi::OsStr>) -> 
 
 #[cfg(test)]
 mod upgrade_target_tests {
+    use super::cargo_profile_dir;
+
+    /// The install step must read the binary the build step wrote: a
+    /// `--build` on another profile (the `dev-release` iteration loop) used
+    /// to install the stale `target/release/pixel` without any error.
+    #[test]
+    fn profile_dir_follows_the_build_command() {
+        assert_eq!(
+            cargo_profile_dir("cargo build --release -p pixel-cli"),
+            "release"
+        );
+        assert_eq!(cargo_profile_dir("cargo build -r -p pixel-cli"), "release");
+        assert_eq!(cargo_profile_dir("cargo build -p pixel-cli"), "debug");
+        assert_eq!(
+            cargo_profile_dir("cargo build --profile dev-release -p pixel-cli"),
+            "dev-release"
+        );
+        assert_eq!(
+            cargo_profile_dir("cargo build --profile=dev-release"),
+            "dev-release"
+        );
+        // `--profile` beats `--release` whichever comes first, as in cargo.
+        assert_eq!(
+            cargo_profile_dir("cargo build --release --profile dev-release"),
+            "dev-release"
+        );
+        assert_eq!(cargo_profile_dir("cargo build --profile dev"), "debug");
+        assert_eq!(cargo_profile_dir("cargo build --profile bench"), "release");
+        assert_eq!(
+            cargo_profile_dir("~/.cargo/bin/cargo build -p pixel-cli"),
+            "debug"
+        );
+        // Not a cargo invocation: no flag semantics, historical `release`
+        // (the upgrade CLI tests fake the build with `/usr/bin/true`).
+        assert_eq!(cargo_profile_dir("/usr/bin/true"), "release");
+        assert_eq!(cargo_profile_dir("./scripts/build.sh"), "release");
+        assert_eq!(
+            cargo_profile_dir("./scripts/build.sh --profile fast"),
+            "fast"
+        );
+    }
     use super::*;
 
     fn sandbox(tag: &str) -> PathBuf {
@@ -3069,7 +3266,10 @@ fn daemon_status(path: PathBuf) -> Result<(), String> {
 /// Freshness/readiness answers (`status`, `ready`) only need to say HOW
 /// dirty the tree is: the list itself belongs to `inspect`/`review`, and
 /// carrying it here let one untracked `vendor/bundle` push a 200-byte
-/// answer past the global output cap.
+/// answer past the global output cap. The daemon now ships the compact
+/// form itself for every op but `inspect`/`review`
+/// (`SnapshotInfo::compact`); this stays as the client-side guard when
+/// talking to an older daemon that still sends the list.
 fn compact_snapshot(data: &mut Value) {
     if let Some(snap) = data.get_mut("snapshot").and_then(Value::as_object_mut)
         && let Some(dirty) = snap.remove("dirty")
@@ -3092,11 +3292,17 @@ fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
     if !no_daemon {
         daemon_start(root.clone(), false, json)?;
     }
-    let dirty_count = status
-        .get("snapshot")
-        .and_then(|s| s.get("dirty"))
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
+    let snapshot = status.get("snapshot");
+    let dirty_count = snapshot
+        .and_then(|s| s.get("dirty_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            // Older daemon: the status snapshot still carries the list.
+            snapshot
+                .and_then(|s| s.get("dirty"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len) as u64
+        });
     let data = serde_json::json!({
         "root": root,
         "index": status.get("index").cloned().unwrap_or(Value::Null),
@@ -3268,13 +3474,13 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 eprintln!(
                     "indexed via daemon: base_files={} delta_files={} overlay_files={}",
                     v.pointer("/index/base_files")
-                        .and_then(|x| x.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0),
                     v.pointer("/index/delta_files")
-                        .and_then(|x| x.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0),
                     v.pointer("/index/overlay_files")
-                        .and_then(|x| x.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0),
                 );
                 if history {
@@ -3340,7 +3546,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             context,
             ignore_case,
         } => {
-            if call_guard_check("search", &format!("{pattern} {:?}", paths)) {
+            if call_guard_check("search", &format!("{pattern} {paths:?}")) {
                 return Err("circuit breaker: repeated search calls".to_string());
             }
             run_search(
@@ -3911,7 +4117,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             // (schema version, phase-A state, hunk/gram counts). Only fill in
             // the client-side fallback when talking to an older daemon that
             // doesn't send one.
-            if data.get("facts").map(|f| f.is_null()).unwrap_or(true)
+            if data.get("facts").is_none_or(serde_json::Value::is_null)
                 && let Some(facts) = facts_status(&path)
             {
                 data["facts"] = facts;
@@ -3954,7 +4160,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                         f.get("total_commits").and_then(Value::as_u64),
                     ) {
                         if tc > 0 {
-                            line.push_str(&format!(" {}/{}", ci, tc));
+                            line.push_str(&format!(" {ci}/{tc}"));
                         }
                         let covered = ci == tc;
                         if let Some(pct) = f.get("diff_indexed_pct").and_then(Value::as_f64) {
@@ -3975,11 +4181,11 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     } else {
                         "stale"
                     };
-                    line.push_str(&format!(" {}", state));
+                    line.push_str(&format!(" {state}"));
                 } else {
                     line.push_str(" ?facts");
                 }
-                write_stdout(&format!("{}\n", line))?;
+                write_stdout(&format!("{line}\n"))?;
                 return Ok(());
             }
             if json {
@@ -4093,14 +4299,12 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 data["dirty_count"] = json!(
                     data.get("dirty")
                         .and_then(Value::as_array)
-                        .map(Vec::len)
-                        .unwrap_or(0)
+                        .map_or(0, Vec::len)
                 );
                 data["clean_count"] = json!(
                     data.get("clean")
                         .and_then(Value::as_array)
-                        .map(Vec::len)
-                        .unwrap_or(0)
+                        .map_or(0, Vec::len)
                 );
             }
             print_data(&data, json)
@@ -4154,6 +4358,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         }
         Command::Publish {
             message,
+            message_file,
             path,
             files,
             push,
@@ -4163,6 +4368,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             json,
         } => {
             let root = discover_root(&path)?;
+            let message = commit_message(message, message_file.as_deref())?;
             let opts = pixel_ops::publish::PublishOptions {
                 message,
                 files,
@@ -4195,6 +4401,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         }
         Command::Ship {
             message,
+            message_file,
             path,
             files,
             remote,
@@ -4204,6 +4411,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             json,
         } => {
             let root = discover_root(&path)?;
+            let message = commit_message(message, message_file.as_deref())?;
             let data = pixel_ops::ship::ship_with_lease(
                 &root,
                 &message,
@@ -4390,12 +4598,14 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             dry_run,
             binary_path,
             shell,
+            wrappers_only,
         } => {
             let report =
                 pixel_install::uninstall::uninstall(&pixel_install::uninstall::UninstallOptions {
                     binary_path,
                     dry_run,
                     shell,
+                    wrappers_only,
                     ..Default::default()
                 })
                 .map_err(|e| e.to_string())?;
@@ -4403,6 +4613,23 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 &serde_json::to_value(&report).map_err(|e| e.to_string())?,
                 json,
             )
+        }
+        Command::ReleaseCheck {
+            version,
+            repo,
+            json,
+        } => {
+            let report = pixel_release::run(&repo, &version)?;
+            if json {
+                print_data(&report.to_json(), true)?;
+            } else {
+                write_stdout(&report.render())?;
+            }
+            if report.ok() {
+                Ok(())
+            } else {
+                Err("release-check failed".to_string())
+            }
         }
         Command::Upgrade {
             build,
@@ -4437,11 +4664,12 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             if !status.success() {
                 return Err(format!("build exited with status {status}"));
             }
-            // 2. Find the built binary (target/release/pixel relative to cwd).
+            // 2. Find the built binary (target/<profile>/pixel relative to
+            //    cwd, profile taken from the build command's own flags).
             let src = std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .join("target")
-                .join("release")
+                .join(cargo_profile_dir(&build))
                 .join("pixel");
             if !src.is_file() {
                 return Err(format!("built binary not found at {}", src.display()));
@@ -5110,7 +5338,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             };
             let data = pixel_flow::flow(&action)?;
             if matches!(action, FlowAction::Execute { .. })
-                && data.get("success").and_then(|v| v.as_bool()) != Some(true)
+                && data.get("success").and_then(serde_json::Value::as_bool) != Some(true)
             {
                 return Err(format!(
                     "flow execution failed: {}",
@@ -5141,15 +5369,15 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     }
                     let success = data
                         .get("success")
-                        .and_then(|v| v.as_bool())
+                        .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false);
                     let steps = data
                         .get("steps_executed")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     let skipped = data
                         .get("steps_skipped")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     if success {
                         println!("✓ Flow executed: {} steps, {} skipped", steps, skipped);
@@ -5334,6 +5562,14 @@ fn run_log(
 /// Preserve legacy snippet/pool reports, separately aggregate versioned
 /// invocation metrics. Old measurements are never silently reclassified as v1.
 fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    /// Per-command aggregate: invocations, pool chars, snippet chars.
+    #[derive(Default)]
+    struct Agg {
+        count: u64,
+        pool: u64,
+        snippet: u64,
+    }
     let root = discover_root(path)?;
     let log_path = pixel_actionlog::ActionLog::path_for_root(&root);
     // Over-fetch; savings is a lightweight aggregate read.
@@ -5353,13 +5589,6 @@ fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), 
         .collect();
     let workflow_metrics = pixel_actionlog::summarize_metrics(&filtered);
     // Aggregate per command: pool chars, snippet chars, count.
-    use std::collections::BTreeMap;
-    #[derive(Default)]
-    struct Agg {
-        count: u64,
-        pool: u64,
-        snippet: u64,
-    }
     let mut by_cmd: BTreeMap<String, Agg> = BTreeMap::new();
     for e in &events {
         if let Some(c) = cutoff_ms
@@ -5537,6 +5766,90 @@ fn main() -> ExitCode {
 /// this binary's real clap definition — nothing is executed. Used by
 /// `pixel doctor`'s rule-vs-binary parity check so the installed rule text
 /// can never document syntax the parser would reject.
+/// The commit message of `publish`/`ship`: `-m <text>`, or the content of
+/// `--message-file <path>` (`-` reads stdin). Clap guarantees exactly one
+/// of the two is present.
+fn commit_message(inline: Option<String>, file: Option<&Path>) -> Result<String, String> {
+    let raw = match (inline, file) {
+        (Some(text), _) => text,
+        (None, Some(path)) if path == Path::new("-") => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                .map_err(|e| format!("cannot read commit message from stdin: {e}"))?;
+            text
+        }
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read commit message file {}: {e}", path.display()))?,
+        (None, None) => return Err("a commit message is required (-m or --message-file)".into()),
+    };
+    normalize_commit_message(&raw)
+}
+
+/// Trailing whitespace goes (an editor's final newline would otherwise
+/// become a blank trailer line); a blank message is refused before git
+/// sees it, so no journal entry is written for a commit git would reject.
+fn normalize_commit_message(raw: &str) -> Result<String, String> {
+    let text = raw.trim_end();
+    if text.trim().is_empty() {
+        return Err("commit message is empty".into());
+    }
+    Ok(text.to_string())
+}
+
+#[cfg(test)]
+mod commit_message_tests {
+    use super::{commit_message, normalize_commit_message};
+    use std::path::Path;
+
+    #[test]
+    fn normalize_should_keep_paragraphs_and_drop_trailing_whitespace() {
+        let raw = "subject\n\nbody line one\n\n- bullet\n\n";
+        assert_eq!(
+            normalize_commit_message(raw).unwrap(),
+            "subject\n\nbody line one\n\n- bullet"
+        );
+    }
+
+    #[test]
+    fn normalize_should_refuse_a_blank_message() {
+        assert_eq!(
+            normalize_commit_message(" \n\t\n").unwrap_err(),
+            "commit message is empty"
+        );
+    }
+
+    #[test]
+    fn commit_message_should_prefer_inline_text_and_name_a_missing_file() {
+        assert_eq!(
+            commit_message(Some("fix: x".into()), None).unwrap(),
+            "fix: x"
+        );
+        let missing = Path::new("/nonexistent/pixel-msg.txt");
+        let err = commit_message(None, Some(missing)).unwrap_err();
+        assert!(
+            err.starts_with("cannot read commit message file /nonexistent/pixel-msg.txt:"),
+            "{err}"
+        );
+        assert_eq!(
+            commit_message(None, None).unwrap_err(),
+            "a commit message is required (-m or --message-file)"
+        );
+    }
+
+    #[test]
+    fn commit_message_should_read_the_file_verbatim() {
+        let dir = std::env::temp_dir().join(format!("pixel-msg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("msg.txt");
+        std::fs::write(&file, "feat: a\n\nSecond paragraph.\n").unwrap();
+        assert_eq!(
+            commit_message(None, Some(&file)).unwrap(),
+            "feat: a\n\nSecond paragraph."
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 fn validate_cli_syntax(args: &[String]) -> Result<(), String> {
     let args = args.to_vec();
     std::thread::Builder::new()
@@ -6094,7 +6407,7 @@ mod tests {
 /// Every `pixel …` line in the fenced blocks of the two bundled prompt
 /// assets must parse against this binary's clap definition. `pixel doctor`'s
 /// `rule.parity` only covers the rule text installed on a machine; the
-/// assets themselves are what every wrapped `claude`/`codex` and every
+/// assets themselves are what every wrapped `claude`, every Codex session and every
 /// print-mode sub-agent reads, so their drift has to fail the build.
 #[cfg(test)]
 mod prompt_asset_parity {
@@ -6137,5 +6450,33 @@ mod prompt_asset_parity {
             "documented command lines the CLI rejects:\n{}",
             failures.join("\n")
         );
+    }
+
+    /// The kill switches (`PIXEL_DAEMON_AUTO_START=0`, `PIXEL_GUARD_*=off`)
+    /// fire only on an explicit off value: unset and any other value keep
+    /// the feature on.
+    #[test]
+    fn env_flag_off_fires_only_on_an_explicit_off_value() {
+        let name = format!("PIXEL_TEST_FLAG_{}_{}", std::process::id(), line!());
+        assert!(!crate::env_flag_off(&name), "unset");
+        for (value, expected) in [
+            ("0", true),
+            ("false", true),
+            ("off", true),
+            ("1", false),
+            ("", false),
+            ("no", false),
+        ] {
+            // SAFETY: the variable name is unique to this test (pid + line),
+            // so no other thread in the process reads or writes it.
+            unsafe {
+                std::env::set_var(&name, value);
+            }
+            assert_eq!(crate::env_flag_off(&name), expected, "{value:?}");
+        }
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var(&name);
+        }
     }
 }

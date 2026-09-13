@@ -16,8 +16,8 @@ pub fn review(
     _cursor: Option<&str>,
     byte_cap: Option<usize>,
 ) -> Result<Value, String> {
-    let runner = GitRunner::new(root);
     const DEFAULT_BYTE_CAP: usize = 64_000;
+    let runner = GitRunner::new(root);
     let cap = byte_cap.unwrap_or(DEFAULT_BYTE_CAP).clamp(128, 1_000_000);
 
     let status = runner.status_porcelain();

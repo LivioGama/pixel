@@ -3,10 +3,11 @@
 //! and serves `search` / `ask` over the standard daemon transport.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pixel_recall::ask::{ask, format_group};
 use pixel_recall::embed::{Embedder, open_default_embedder, run_backfill};
-use pixel_recall::ingest::ingest_source;
+use pixel_recall::ingest::{IngestReport, ingest_recent, ingest_source};
 use pixel_recall::search::{SearchFilters, format_hit, search};
 use pixel_recall::segment::SegmentSet;
 use pixel_recall::sources::SourceAdapter;
@@ -14,44 +15,78 @@ use pixel_recall::store::RecallStore;
 use pixel_recall::vector::VectorStore;
 use serde_json::{Value, json};
 
+/// The embed backlog the daemon drains inline. The daemon loop is
+/// single-threaded, and a bulk backfill would block the socket for minutes
+/// (that is `pixel recall embed`'s job).
+const MAX_INLINE_BACKLOG: i64 = 5_000;
+/// How often the daemon re-stats the recently modified transcripts
+/// independently of the watcher. FSEvents on macOS holds back the modify
+/// event of a file while its writer keeps it open, and an agent streams
+/// its transcript exactly that way: the session being written right now
+/// is the one the watcher does not report. The sweep is one directory
+/// walk per source; unchanged files are skipped on size and mtime.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+/// Only transcripts modified this recently are re-stated by the sweep;
+/// anything older is either already ingested or will arrive through the
+/// watcher when its writer closes it.
+const SWEEP_WINDOW_MS: i64 = 21_600_000; // 6 h
+
 use crate::api::{PROTOCOL_VERSION, Request, Response, ServeError, failure_response};
 use crate::daemon::Corpus;
 use pixel_proto::Envelope;
 
+/// One transcript store the daemon serves: the directory whose changes
+/// mean "new transcript content" and the adapter that parses it.
+pub struct RecallSource {
+    pub root: PathBuf,
+    pub adapter: Box<dyn SourceAdapter>,
+}
+
 pub struct RecallService {
     root: PathBuf,
     store: RecallStore,
+    segments_dir: PathBuf,
+    vectors_dir: PathBuf,
+    sources: Vec<RecallSource>,
     /// Lazily opened on first ask; kept warm for the daemon's lifetime.
     embedder: Option<Box<dyn Embedder>>,
     embedder_unavailable: bool,
 }
 
-fn all_adapters() -> Vec<Box<dyn SourceAdapter>> {
+/// Every transcript store this machine's agents write, under `HOME`.
+fn machine_sources() -> Vec<RecallSource> {
     use pixel_recall::sources::*;
-    vec![
-        Box::new(claude::ClaudeAdapter::new()),
-        Box::new(codex::Adapter::new()),
-        Box::new(cursor::Adapter::new()),
-        Box::new(gemini::Adapter::new()),
-        Box::new(opencode::Adapter::new()),
-        Box::new(zcode::Adapter::new()),
-        Box::new(devin::Adapter::new()),
-    ]
-}
-
-/// The directories whose changes mean "new transcript content", mapped to
-/// the adapter that owns them.
-fn watch_roots() -> Vec<(&'static str, PathBuf)> {
     let home = std::env::var("HOME").unwrap_or_default();
     let h = |suffix: &str| PathBuf::from(&home).join(suffix);
     vec![
-        ("claude", h(".claude/projects")),
-        ("codex", h(".codex/sessions")),
-        ("cursor", h(".cursor/projects")),
-        ("gemini", h(".gemini/antigravity-cli")),
-        ("opencode", h(".local/share/opencode")),
-        ("zcode", h(".zcode/cli/db")),
-        ("devin", h(".local/share/devin/cli")),
+        RecallSource {
+            root: h(".claude/projects"),
+            adapter: Box::new(claude::ClaudeAdapter::new()),
+        },
+        RecallSource {
+            root: h(".codex/sessions"),
+            adapter: Box::new(codex::Adapter::new()),
+        },
+        RecallSource {
+            root: h(".cursor/projects"),
+            adapter: Box::new(cursor::Adapter::new()),
+        },
+        RecallSource {
+            root: h(".gemini/antigravity-cli"),
+            adapter: Box::new(gemini::Adapter::new()),
+        },
+        RecallSource {
+            root: h(".local/share/opencode"),
+            adapter: Box::new(opencode::Adapter::new()),
+        },
+        RecallSource {
+            root: h(".zcode/cli/db"),
+            adapter: Box::new(zcode::Adapter::new()),
+        },
+        RecallSource {
+            root: h(".local/share/devin/cli"),
+            adapter: Box::new(devin::Adapter::new()),
+        },
     ]
 }
 
@@ -64,9 +99,33 @@ impl RecallService {
         Ok(Self {
             root,
             store,
+            segments_dir: pixel_recall::segments_dir(),
+            vectors_dir: pixel_recall::vectors_dir(),
+            sources: machine_sources(),
             embedder: None,
             embedder_unavailable: false,
         })
+    }
+
+    /// A service over explicit directories and sources, no `HOME` and no
+    /// embedding model: the seam the tests drive `sweep` through.
+    #[cfg(test)]
+    fn with_sources(
+        root: PathBuf,
+        store: RecallStore,
+        segments_dir: PathBuf,
+        vectors_dir: PathBuf,
+        sources: Vec<RecallSource>,
+    ) -> Self {
+        Self {
+            root,
+            store,
+            segments_dir,
+            vectors_dir,
+            sources,
+            embedder: None,
+            embedder_unavailable: true,
+        }
     }
 
     /// Lazy-load the model once; afterwards `self.embedder` stays warm.
@@ -101,7 +160,7 @@ impl RecallService {
                     .transpose()
                     .map_err(|e| format!("bad filters: {e}"))?
                     .unwrap_or_default();
-                let segments = SegmentSet::open(&pixel_recall::segments_dir())?;
+                let segments = SegmentSet::open(&self.segments_dir)?;
                 let result = search(
                     &self.store,
                     &segments,
@@ -161,8 +220,8 @@ impl RecallService {
                     .transpose()
                     .map_err(|e| format!("bad filters: {e}"))?
                     .unwrap_or_default();
-                let segments = SegmentSet::open(&pixel_recall::segments_dir())?;
-                let vectors = VectorStore::open(&pixel_recall::vectors_dir())?;
+                let segments = SegmentSet::open(&self.segments_dir)?;
+                let vectors = VectorStore::open(&self.vectors_dir)?;
                 if !lexical_only {
                     self.ensure_embedder();
                 }
@@ -224,24 +283,65 @@ impl RecallService {
     /// lexical segments, and drain the embed backlog while the model is
     /// warm. Best-effort: watcher-driven maintenance must never kill the
     /// daemon.
+    // Watcher-driven glue over this machine's real agent stores (HOME);
+    // `ingest_source`, the adapters, segments and backfill are unit-tested
+    // in pixel-recall.
+    #[cfg_attr(test, mutants::skip)]
     fn refresh_agents(&mut self, agents: &std::collections::BTreeSet<&'static str>) {
-        for adapter in all_adapters() {
-            if !agents.contains(adapter.agent()) {
+        for source in &self.sources {
+            if !agents.contains(source.adapter.agent()) {
                 continue;
             }
-            match ingest_source(&mut self.store, adapter.as_ref()) {
-                Ok(report) => {
-                    if report.sessions_written > 0 {
-                        eprintln!(
-                            "recall daemon: {} +{} sessions, +{} turns",
-                            report.agent, report.sessions_written, report.turns_written
-                        );
-                    }
-                }
-                Err(e) => eprintln!("recall daemon: ingest {}: {e}", adapter.agent()),
-            }
+            let report = ingest_source(&mut self.store, source.adapter.as_ref());
+            Self::log_ingest(source.adapter.agent(), report);
         }
-        match SegmentSet::open(&pixel_recall::segments_dir()) {
+        self.after_ingest();
+    }
+
+    /// The periodic sweep: re-stat the transcripts modified within
+    /// `SWEEP_WINDOW_MS` for every source present on this machine and
+    /// ingest the ones that grew, whether or not the watcher reported them.
+    fn sweep_recent(&mut self) {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        for source in &self.sources {
+            if !source.root.exists() {
+                continue;
+            }
+            let report = ingest_recent(
+                &mut self.store,
+                source.adapter.as_ref(),
+                now_ms,
+                SWEEP_WINDOW_MS,
+            );
+            Self::log_ingest(source.adapter.agent(), report);
+        }
+        self.after_ingest();
+    }
+
+    #[cfg_attr(test, mutants::skip)] // stderr diagnostics only
+    fn log_ingest(agent: &str, report: Result<IngestReport, pixel_recall::sources::IngestError>) {
+        match report {
+            Ok(report) => {
+                if report.sessions_written > 0 {
+                    eprintln!(
+                        "recall daemon: {} +{} sessions, +{} turns",
+                        report.agent, report.sessions_written, report.turns_written
+                    );
+                }
+            }
+            Err(e) => eprintln!("recall daemon: ingest {agent}: {e}"),
+        }
+    }
+
+    /// Refresh the lexical segments and drain a small embed backlog after
+    /// any ingest pass.
+    // Glue over the real segments and vectors directories; both are
+    // unit-tested in pixel-recall.
+    #[cfg_attr(test, mutants::skip)]
+    fn after_ingest(&mut self) {
+        match SegmentSet::open(&self.segments_dir) {
             Ok(mut segments) => {
                 if let Err(e) = segments.index_new(&self.store) {
                     eprintln!("recall daemon: segment index: {e}");
@@ -249,15 +349,13 @@ impl RecallService {
             }
             Err(e) => eprintln!("recall daemon: segments: {e}"),
         }
-        // Drain the embed backlog only when it is small: the daemon loop is
-        // single-threaded, and a bulk backfill here would block the socket
-        // for minutes (that is `pixel recall embed`'s job).
-        const MAX_INLINE_BACKLOG: i64 = 5_000;
+        // Drain the embed backlog only when it is small (see
+        // `MAX_INLINE_BACKLOG`).
         match self.store.embed_backlog() {
             Ok(backlog) if backlog > 0 && backlog <= MAX_INLINE_BACKLOG => {
                 self.ensure_embedder();
                 if let Some(embedder) = self.embedder.as_deref_mut() {
-                    let mut vectors = match VectorStore::open(&pixel_recall::vectors_dir()) {
+                    let mut vectors = match VectorStore::open(&self.vectors_dir) {
                         Ok(v) => v,
                         Err(e) => {
                             eprintln!("recall daemon: vectors: {e}");
@@ -311,9 +409,9 @@ impl Corpus for RecallService {
 
     fn apply_change(&mut self, abs: &Path, _removed: bool) {
         let mut touched = std::collections::BTreeSet::new();
-        for (agent, root) in watch_roots() {
-            if abs.starts_with(&root) {
-                touched.insert(agent);
+        for source in &self.sources {
+            if abs.starts_with(&source.root) {
+                touched.insert(source.adapter.agent());
             }
         }
         if !touched.is_empty() {
@@ -322,10 +420,233 @@ impl Corpus for RecallService {
     }
 
     fn watch_paths(&self) -> Vec<PathBuf> {
-        watch_roots()
-            .into_iter()
-            .map(|(_, p)| p)
+        self.sources
+            .iter()
+            .map(|s| s.root.clone())
             .filter(|p| p.exists())
             .collect()
+    }
+
+    fn sweep_interval(&self) -> Option<Duration> {
+        Some(SWEEP_INTERVAL)
+    }
+
+    fn sweep(&mut self) {
+        self.sweep_recent();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::time::SystemTime;
+
+    use pixel_recall::sources::claude::ClaudeAdapter;
+
+    use super::*;
+
+    /// A recall service over a scratch corpus and one Claude store holding a
+    /// single-turn session in `projects/-work-pixel/<id>.jsonl`.
+    struct Fixture {
+        scratch: PathBuf,
+        transcript: PathBuf,
+        service: RecallService,
+    }
+
+    impl Fixture {
+        fn new(tag: &str) -> Self {
+            let scratch = std::env::temp_dir().join(format!(
+                "pixel-recall-sweep-{tag}-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let _ = fs::remove_dir_all(&scratch);
+            let projects = scratch.join("projects");
+            let slug = projects.join("-work-pixel");
+            fs::create_dir_all(&slug).unwrap();
+            let transcript = slug.join("0123abcd-0000-4000-8000-000000000001.jsonl");
+            let record = json!({
+                "type": "user",
+                "cwd": "/work/pixel",
+                "timestamp": "2025-10-09T08:53:20.000Z",
+                "message": {"content": [{"type": "text", "text": "the streamed needle"}]},
+            });
+            fs::write(&transcript, format!("{record}\n")).unwrap();
+            let store = RecallStore::open(&scratch.join("recall.db")).unwrap();
+            let service = RecallService::with_sources(
+                scratch.clone(),
+                store,
+                scratch.join("segments"),
+                scratch.join("vectors"),
+                vec![RecallSource {
+                    root: projects,
+                    adapter: Box::new(ClaudeAdapter::with_root(
+                        slug.parent().unwrap().to_path_buf(),
+                    )),
+                }],
+            );
+            Self {
+                scratch,
+                transcript,
+                service,
+            }
+        }
+
+        fn age_transcript(&self, age: Duration) {
+            let f = fs::OpenOptions::new()
+                .write(true)
+                .open(&self.transcript)
+                .unwrap();
+            f.set_modified(SystemTime::now() - age).unwrap();
+        }
+
+        fn turns(&self) -> i64 {
+            self.service.store.total_turns().unwrap()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.scratch);
+        }
+    }
+
+    /// The reason the sweep exists: a transcript that grew without a
+    /// watcher event is in the corpus after one `sweep`.
+    #[test]
+    fn sweep_ingests_a_transcript_modified_within_the_window() {
+        let mut fx = Fixture::new("fresh");
+        assert_eq!(fx.turns(), 0);
+        fx.service.sweep();
+        assert_eq!(
+            fx.turns(),
+            1,
+            "the streamed turn must be ingested by the sweep"
+        );
+        // A second sweep re-stats the file and reparses nothing.
+        fx.service.sweep();
+        assert_eq!(fx.turns(), 1);
+    }
+
+    /// The window bounds the sweep's work: a transcript older than it is
+    /// left to the watcher, and picked up as soon as it is touched again.
+    #[test]
+    fn sweep_leaves_a_transcript_older_than_the_window_to_the_watcher() {
+        let mut fx = Fixture::new("stale");
+        fx.age_transcript(
+            Duration::from_millis(SWEEP_WINDOW_MS as u64) + Duration::from_secs(3600),
+        );
+        fx.service.sweep();
+        assert_eq!(
+            fx.turns(),
+            0,
+            "a transcript outside the window must not be re-stated"
+        );
+        fx.age_transcript(Duration::ZERO);
+        fx.service.sweep();
+        assert_eq!(fx.turns(), 1);
+    }
+
+    /// A source whose root is absent on this machine is skipped, not an
+    /// error that stops the other sources.
+    #[test]
+    fn sweep_skips_sources_whose_root_is_missing() {
+        let mut fx = Fixture::new("missing");
+        fx.service.sources.insert(
+            0,
+            RecallSource {
+                root: fx.scratch.join("no-such-store"),
+                adapter: Box::new(ClaudeAdapter::with_root(fx.scratch.join("no-such-store"))),
+            },
+        );
+        fx.service.sweep();
+        assert_eq!(fx.turns(), 1);
+    }
+
+    /// The machine's sources are the seven stores under `HOME`, one adapter
+    /// each; an empty list would make the daemon watch and sweep nothing.
+    #[test]
+    fn machine_sources_cover_every_agent_store_under_home() {
+        let sources = machine_sources();
+        let mut agents: Vec<&str> = sources.iter().map(|s| s.adapter.agent()).collect();
+        agents.sort_unstable();
+        assert_eq!(
+            agents,
+            vec![
+                "claude", "codex", "cursor", "devin", "gemini", "opencode", "zcode"
+            ]
+        );
+        let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        for source in &sources {
+            assert!(
+                source.root.starts_with(&home),
+                "{} is not under HOME",
+                source.root.display()
+            );
+        }
+        let claude = sources
+            .iter()
+            .find(|s| s.adapter.agent() == "claude")
+            .unwrap();
+        assert!(claude.root.ends_with(".claude/projects"));
+    }
+
+    /// The watcher observes exactly the source roots present on disk: a
+    /// missing store is neither watched (notify would refuse it) nor
+    /// replaced by an empty path.
+    #[test]
+    fn watch_paths_are_the_existing_source_roots() {
+        let mut fx = Fixture::new("watch");
+        let projects = fx.scratch.join("projects");
+        fx.service.sources.push(RecallSource {
+            root: fx.scratch.join("no-such-store"),
+            adapter: Box::new(ClaudeAdapter::with_root(fx.scratch.join("no-such-store"))),
+        });
+        assert_eq!(fx.service.watch_paths(), vec![projects]);
+    }
+
+    /// A watcher event under a source root ingests that source; an event
+    /// elsewhere on the machine touches nothing.
+    #[test]
+    fn apply_change_ingests_only_the_source_owning_the_path() {
+        let mut fx = Fixture::new("apply");
+        let outside = fx.scratch.join("elsewhere").join("x.jsonl");
+        fx.service.apply_change(&outside, false);
+        assert_eq!(fx.turns(), 0, "a path outside every root must not ingest");
+        let transcript = fx.transcript.clone();
+        fx.service.apply_change(&transcript, false);
+        assert_eq!(
+            fx.turns(),
+            1,
+            "a path under the root must ingest its source"
+        );
+    }
+
+    /// The daemon's `search` action answers from the corpus the sweep
+    /// filled, and an unknown action is an error, not an empty success.
+    #[test]
+    fn op_search_finds_the_swept_turn_and_rejects_unknown_actions() {
+        let mut fx = Fixture::new("op");
+        fx.service.sweep();
+        let out = fx
+            .service
+            .op("search", json!({"pattern": "streamed needle"}))
+            .unwrap();
+        assert_eq!(out["json"]["hits"].as_array().map(Vec::len), Some(1));
+        assert_eq!(out["json"]["truncated"], json!(false));
+        assert!(
+            out["text"].as_str().unwrap().contains("streamed needle"),
+            "text view must carry the hit: {out}"
+        );
+        let err = fx.service.op("bogus", json!({})).unwrap_err();
+        assert!(err.contains("unknown recall action"), "{err}");
+    }
+
+    /// The recall corpus opts into the sweep at the documented cadence; the
+    /// repo corpus does not.
+    #[test]
+    fn recall_service_sweeps_every_five_seconds() {
+        let fx = Fixture::new("interval");
+        assert_eq!(fx.service.sweep_interval(), Some(Duration::from_secs(5)));
     }
 }

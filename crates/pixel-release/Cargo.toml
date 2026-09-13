@@ -1,0 +1,12 @@
+[package]
+name = "pixel-release"
+version = "0.2.4"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }

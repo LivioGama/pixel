@@ -1,0 +1,102 @@
+# cargo-deny policy (https://embarkstudios.github.io/cargo-deny/). CI runs
+# `cargo deny check` on every push and pull request (the `deny` job in
+# .github/workflows/ci.yml); locally: `cargo install --locked cargo-deny`,
+# then `cargo deny check`. Every exception below states why it exists, so a
+# reader can tell a decision from an oversight; remove one when its reason
+# no longer holds (cargo-deny warns about an unused entry).
+
+[graph]
+# The targets pixel is built and tested for: the release matrix
+# (release.yml: two musl targets and Apple Silicon), CI (x86_64 Linux) and
+# Intel Macs. Restricting the graph drops the Windows-only crates, whose
+# four parallel `windows-sys` majors would otherwise dominate the
+# duplicate report for a platform nothing here builds.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+# Both embedding back ends (`fastembed`, `model2vec`) are default features of
+# the CLI; checking with everything on covers the union of the release lanes.
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # `paste` is archived upstream (proc-macro only, no runtime code). It
+    # reaches the tree through `tokenizers`, itself pulled by both
+    # `fastembed` and `model2vec-rs`; the fix is theirs (tokenizers 0.23
+    # moved to `pastey`; 0.21, model2vec-rs's pin, has not).
+    { id = "RUSTSEC-2024-0436", reason = "transitive via tokenizers 0.21 <- model2vec-rs; proc-macro, no runtime surface" },
+    # `number_prefix` (byte-size formatting) is unmaintained. Pulled by
+    # `indicatif` 0.17 <- `hf-hub` 0.4 <- `model2vec-rs`; pixel never
+    # calls it. Goes away when model2vec-rs moves to hf-hub 0.5.
+    { id = "RUSTSEC-2025-0119", reason = "transitive via indicatif 0.17 <- hf-hub 0.4 <- model2vec-rs; formatting helper, unused by pixel" },
+]
+
+[licenses]
+version = 2
+# Permissive licences only. Anything not listed here fails the check, so a
+# new copyleft dependency is a deliberate edit to this file.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "CC0-1.0",
+    # webpki-roots / webpki-root-certs: Mozilla's CA bundle data, permissive.
+    "CDLA-Permissive-2.0",
+    # option-ext (via dirs): file-level copyleft that never reaches pixel's
+    # sources; it is the only MPL crate in the tree.
+    "MPL-2.0",
+]
+# Unrecognised licence texts count as a failure below this confidence.
+confidence-threshold = 0.8
+
+# model2vec-rs ships `license-file = "LICENSE"` (MIT text, verified) instead
+# of an SPDX `license` field, so cargo-deny cannot classify it alone. The
+# hash pins the text: a relicensed release fails the check.
+[[licenses.clarify]]
+crate = "model2vec-rs"
+expression = "MIT"
+license-files = [{ path = "LICENSE", hash = 0x6fd19d50 }]
+
+[licenses.private]
+ignore = true
+
+[bans]
+# Two majors of one crate double the compile time and the audit surface for
+# nothing. Denied by default; the exceptions below are the ones pixel cannot
+# resolve from its side.
+multiple-versions = "deny"
+wildcards = "allow"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+# The two embedding back ends pin different generations of the same
+# Hugging Face stack (fastembed: hf-hub 0.5, tokenizers 0.23, ndarray
+# 0.17, ureq 3; model2vec-rs: hf-hub 0.4, tokenizers 0.21, ndarray 0.15,
+# ureq 2). Both are needed: fastembed has no musl build, model2vec is the
+# Linux release's only channel. Everything below either root is skipped
+# wholesale; a duplicate anywhere else still fails.
+skip-tree = [
+    { crate = "fastembed", reason = "ONNX embedding stack, pins its own hf-hub/tokenizers/ndarray generation" },
+    { crate = "model2vec-rs", reason = "pure-Rust embedding stack on the previous hf-hub/tokenizers/ndarray generation" },
+]
+skip = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

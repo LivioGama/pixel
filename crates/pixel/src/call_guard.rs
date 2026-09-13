@@ -99,8 +99,7 @@ fn session_id() -> String {
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Load the call history from `.pixel/calls.json`. Returns an empty
@@ -294,15 +293,24 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn with_session<T>(id: Option<&str>, f: impl FnOnce() -> T) -> T {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prev = std::env::var("PIXEL_SESSION_ID").ok();
+        // ENV_LOCK is held for the whole call, so no other test reads or
+        // writes PIXEL_SESSION_ID meanwhile; the previous value is restored
+        // before the lock is released.
         match id {
+            // SAFETY: under ENV_LOCK (see above).
             Some(v) => unsafe { std::env::set_var("PIXEL_SESSION_ID", v) },
+            // SAFETY: under ENV_LOCK (see above).
             None => unsafe { std::env::remove_var("PIXEL_SESSION_ID") },
         }
         let out = f();
         match prev {
+            // SAFETY: under ENV_LOCK (see above).
             Some(v) => unsafe { std::env::set_var("PIXEL_SESSION_ID", v) },
+            // SAFETY: under ENV_LOCK (see above).
             None => unsafe { std::env::remove_var("PIXEL_SESSION_ID") },
         }
         out

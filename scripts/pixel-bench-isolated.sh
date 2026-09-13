@@ -13,10 +13,12 @@
 # the other ~130KB belongs to unrelated rules.
 #
 # This script isolates pixel's OWN prompt/behavior cost: `claude --safe-mode
-# --append-system-prompt "$(cat pixel.md)"` gives an agent with pixel's
-# doctrine as its ONLY instructions and pixel on PATH, but (like the
-# pixel-free baseline) no PreToolUse guard hook — --safe-mode disables hooks
-# too (verified 2026-08-30: `git pull` under --safe-mode is NOT blocked).
+# --append-system-prompt-file <agent-prompt.md>` gives an agent with pixel's
+# doctrine (the prompt `pixel install` deploys to
+# ~/.local/share/pixel/agent-prompt.md; the bundled asset under crates/ when
+# nothing is installed) as its ONLY instructions and pixel on PATH, but (like
+# the pixel-free baseline) no PreToolUse guard hook — --safe-mode disables
+# hooks too (verified 2026-08-30: `git pull` under --safe-mode is NOT blocked).
 # So this measures "pixel's doctrine text + the agent choosing to call the
 # pixel binary voluntarily" — NOT the full product (doctrine + mechanical
 # guard enforcement). Read alongside pixel-bench.sh's numbers, not instead of
@@ -24,31 +26,44 @@
 # "is the user's full config stack + pixel faster than nothing at all".
 #
 # Usage: scripts/pixel-bench-isolated.sh [N reps, default 1]
+#   REPO=/path/to/repo         target repo (default: this checkout)
+#   PIXEL_BIN=/path/to/pixel   binary (default: installed pixel, else target/)
+#   AGENT_PROMPT=/path/to.md   doctrine (default: the deployed agent prompt)
+# Run scripts/pixel-bench.sh once first: it writes the shared prompt files.
 
 set -uo pipefail
 
-REPO="${REPO:-$HOME/Documents/pixel}"
-PIXEL_BIN="${PIXEL_BIN:-$HOME/.local/bin/pixel}"
-RULE_FILE="${RULE_FILE:-$HOME/.agent-config/rules/pixel.md}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Binary: $PIXEL_BIN, else the installed pixel (`command -v pixel`: mise shim,
+# Homebrew, ~/.cargo/bin, ~/.local/bin), else a local build (dev-release is the
+# reinstall-loop profile, see CONTRIBUTING.md; release is the shipped one).
+PIXEL_BIN="${PIXEL_BIN:-$(command -v pixel 2>/dev/null || true)}"
+if [ -z "$PIXEL_BIN" ]; then
+  for p in "$ROOT/target/dev-release/pixel" "$ROOT/target/release/pixel"; do
+    [ -x "$p" ] && PIXEL_BIN="$p" && break
+  done
+fi
+REPO="${REPO:-$ROOT}"
+AGENT_PROMPT="${AGENT_PROMPT:-$HOME/.local/share/pixel/agent-prompt.md}"
+[ -s "$AGENT_PROMPT" ] || AGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-agent-prompt.md"
 N="${1:-1}"
 OUTDIR="/tmp/pixel-bench-isolated-outputs"
 TMPDIR_M="/tmp/pixel-bench-isolated-tmp"
-RESULTS="$(pwd)/docs/bench/pixel-bench-isolated-results.txt"
+RESULTS="${RESULTS:-$ROOT/docs/bench/pixel-bench-isolated-results.txt}"
 mkdir -p "$OUTDIR" "$TMPDIR_M"
 rm -f "$TMPDIR_M"/*.json "$TMPDIR_M"/*.ms "$TMPDIR_M"/*.counts
 
-cd "$REPO"
+cd "$REPO" || exit 1
 
-if [ ! -x "$PIXEL_BIN" ]; then
-  echo "ERROR: pixel binary not found at $PIXEL_BIN." >&2
+if [ -z "$PIXEL_BIN" ] || [ ! -x "$PIXEL_BIN" ]; then
+  echo "ERROR: pixel binary not found (set PIXEL_BIN, install pixel, or build it)." >&2
   exit 1
 fi
-if [ ! -f "$RULE_FILE" ]; then
-  echo "ERROR: rule file not found at $RULE_FILE." >&2
+if [ ! -s "$AGENT_PROMPT" ]; then
+  echo "ERROR: agent prompt not found at $AGENT_PROMPT (run \`pixel install\`, or set AGENT_PROMPT)." >&2
   exit 1
 fi
 
-PIXEL_DOCTRINE="$(cat "$RULE_FILE")"
 PIXEL_DIR="$(dirname "$PIXEL_BIN")"
 PIXEL_PATH="$PIXEL_DIR:$PATH"
 
@@ -83,7 +98,7 @@ run_cell() {
   start=$(python3 -c 'import time; print(int(time.time()*1000))')
   if [ "$arm" = "pixel-isolated" ]; then
     PATH="$PIXEL_PATH" claude --safe-mode -p --dangerously-skip-permissions --verbose \
-      --append-system-prompt "$PIXEL_DOCTRINE" \
+      --append-system-prompt-file "$AGENT_PROMPT" \
       --output-format stream-json \
       < "$prompt_file" > "$OUTDIR/${label}.json" 2>&1 || true
   else
@@ -216,7 +231,8 @@ PY
 echo "=== pixel-bench-isolated: claude --safe-mode, pixel doctrine only vs nothing ===" > "$RESULTS"
 echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$RESULTS"
 echo "Reps per cell: $N" >> "$RESULTS"
-echo "Rule file: $RULE_FILE ($(wc -c < "$RULE_FILE") bytes)" >> "$RESULTS"
+echo "Agent prompt: $AGENT_PROMPT ($(wc -c < "$AGENT_PROMPT" | tr -d ' ') bytes)" >> "$RESULTS"
+echo "Pixel: $($PIXEL_BIN -V 2>/dev/null) ($PIXEL_BIN)" >> "$RESULTS"
 echo "NOTE: neither arm has the PreToolUse guard hook (--safe-mode disables hooks)." >> "$RESULTS"
 echo "This isolates pixel's DOCTRINE TEXT + voluntary tool use, not the full product." >> "$RESULTS"
 

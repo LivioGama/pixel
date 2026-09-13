@@ -415,7 +415,7 @@ fn run_context(
     }
     // L0: one header line per session group (always emitted, oldest cost first).
     for g in &result.groups {
-        let ts = g.best.ts.map(format_ms).unwrap_or_else(|| "?".to_string());
+        let ts = g.best.ts.map_or_else(|| "?".to_string(), format_ms);
         let line = format!(
             "- [{}:{} #{}] {} {} \"{}\"\n",
             g.best.agent,
@@ -873,7 +873,7 @@ fn run_search(
         return Ok(());
     }
     for h in &result.hits {
-        let ts = h.ts.map(format_ms).unwrap_or_else(|| "?".to_string());
+        let ts = h.ts.map_or_else(|| "?".to_string(), format_ms);
         let cwd = h.cwd.as_deref().unwrap_or("-");
         println!(
             "{}:{} #{} t{} {} {} {} \"{}\"",
@@ -930,8 +930,7 @@ fn parse_time(spec: &str, now_ms: i64) -> Result<i64, String> {
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 fn check_limit(limit: usize) -> Result<(), String> {
@@ -950,7 +949,7 @@ fn expand_repo(repo: &str) -> String {
 }
 
 fn session_line(s: &SessionRow) -> String {
-    let ts = s.ts_last.map(format_ms).unwrap_or_else(|| "?".to_string());
+    let ts = s.ts_last.map_or_else(|| "?".to_string(), format_ms);
     let ts_note = match s.ts_source {
         pixel_recall::model::TsSource::Iso | pixel_recall::model::TsSource::UnixMs => String::new(),
         other => format!(" [ts:{}]", other.as_str()),
@@ -1100,13 +1099,12 @@ fn run_show(session_ref: &str, turn: Option<&str>, json: bool) -> Result<(), Str
     println!("source: {}", session.source_path);
     println!();
     for t in &turns {
-        let ts = t.ts.map(format_ms).unwrap_or_else(|| "?".to_string());
+        let ts = t.ts.map_or_else(|| "?".to_string(), format_ms);
         let intent = t
             .intent_source
             .as_deref()
             .filter(|i| *i == "orchestrator")
-            .map(|_| " (orchestrator)")
-            .unwrap_or("");
+            .map_or("", |_| " (orchestrator)");
         let trunc = if t.truncated { " [truncated]" } else { "" };
         println!("--- #{} {} {}{}{} ---", t.seq, t.role, ts, intent, trunc);
         println!("{}", t.text);
@@ -1122,9 +1120,7 @@ fn run_status(json: bool) -> Result<(), String> {
     let stats = store.stats().map_err(|e| e.to_string())?;
     let total_turns = store.total_turns().map_err(|e| e.to_string())?;
     let backlog = store.embed_backlog().map_err(|e| e.to_string())?;
-    let db_bytes = std::fs::metadata(store.path())
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let db_bytes = std::fs::metadata(store.path()).map_or(0, |m| m.len());
     let segments = SegmentSet::open(&pixel_recall::segments_dir())?;
     let vectors = pixel_recall::vector::VectorStore::open(&pixel_recall::vectors_dir())?;
     let unsegmented: i64 = store
@@ -1167,8 +1163,7 @@ fn run_status(json: bool) -> Result<(), String> {
     for a in &stats {
         let last = a
             .last_ingest_at
-            .map(format_ms)
-            .unwrap_or_else(|| "never".to_string());
+            .map_or_else(|| "never".to_string(), format_ms);
         println!(
             "{:10} {:>7} sessions {:>9} turns  last ingest {}",
             a.agent, a.sessions, a.turns, last
@@ -1191,4 +1186,69 @@ fn run_status(json: bool) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pixel_recall::model::TsSource;
+
+    /// The clock helper returns the wall clock in milliseconds: bracketed
+    /// by two reads and above 2020-01-01, which rules out a constant.
+    #[test]
+    fn now_ms_is_the_wall_clock_in_milliseconds() {
+        let read = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64
+        };
+        let before = read();
+        let now = now_ms();
+        let after = read();
+        assert!(
+            before <= now && now <= after,
+            "{before} <= {now} <= {after}"
+        );
+        assert!(now > 1_577_836_800_000, "after 2020-01-01");
+    }
+
+    fn row() -> SessionRow {
+        SessionRow {
+            id: 42,
+            agent: "claude".to_string(),
+            source_session_id: "0123abcd-0000-4000-8000-000000000001".to_string(),
+            source_path: "/x.jsonl".to_string(),
+            cwd: Some("/work/pixel".to_string()),
+            git_branch: None,
+            title: Some("fix the engine".to_string()),
+            first_user_prompt: None,
+            ts_first: None,
+            ts_last: Some(1_760_000_000_000),
+            ts_source: TsSource::Iso,
+            turn_count: 7,
+            is_subagent: false,
+            parent_session_id: None,
+        }
+    }
+
+    /// The one-line session summary is what `sessions` and `show` print;
+    /// every field an agent uses to pick or cite a session is on it.
+    #[test]
+    fn session_line_carries_ref_time_cwd_count_and_title() {
+        assert_eq!(
+            session_line(&row()),
+            "claude:0123abcd #42 2025-10-09 08:53 /work/pixel (7 turns) \"fix the engine\""
+        );
+        let mut r = row();
+        r.ts_last = None;
+        r.ts_source = TsSource::Mtime;
+        r.cwd = None;
+        r.title = None;
+        r.is_subagent = true;
+        assert_eq!(
+            session_line(&r),
+            "claude:0123abcd #42 ? [ts:mtime] - (7 turns) [subagent] \"(untitled)\""
+        );
+    }
 }

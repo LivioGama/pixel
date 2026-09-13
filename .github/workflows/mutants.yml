@@ -1,0 +1,113 @@
+name: Mutants
+
+# Mutation testing on the code a pull request touches. cargo-mutants rewrites
+# each changed function (return a default, flip an operator, drop a match
+# guard) and requires the crate's tests to fail. A mutant that survives means
+# the change is not covered by a test that can fail, which is a gate in
+# CONTRIBUTING.md ("Mutation testing"). Full-tree runs are a local,
+# per-crate activity; CI only pays for the diff.
+on:
+  pull_request:
+    paths:
+      - ".cargo/mutants.toml"
+      - ".github/workflows/mutants.yml"
+      - "Cargo.*"
+      - "crates/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  in-diff:
+    name: Mutants in diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      # Full history so the merge base with the target branch is available.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          # The SHA pin no longer names the toolchain through the ref, so
+          # it is passed explicitly (same channel as before).
+          toolchain: stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # Same key as the CI test job: both build the Linux debug profile,
+          # and only that job (on develop/main pushes) writes the entry. This
+          # workflow runs on pull_request only, so `github.ref` is never a
+          # branch and it can never save; read-only by construction.
+          shared-key: linux-debug
+          save-if: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y perl make
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: cargo-mutants
+
+      # Three-dot diff: what this branch changed since it left the target
+      # branch, so mutants are generated only in code the PR authored.
+      - name: Diff against the target branch
+        run: git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
+
+      # --in-place: mutate the checkout itself instead of copying it (CI
+      # discards the tree). --no-shuffle: mutants run in source order, so
+      # two runs of the same diff produce the same log and annotations.
+      # `-- --all-targets`: the per-mutant `cargo test` skips doctests (one
+      # rustdoc pass per crate for a single doctest in the workspace); the
+      # CI workflow still runs them unmutated. Exit codes: 0 all caught,
+      # 2 missed, 3 timeout, 4 baseline tests already failing. Missed and
+      # timeouts fail the job; GitHub annotations point at each surviving
+      # mutant, and the job summary repeats the outcome list.
+      # rust-cache exports CARGO_INCREMENTAL=0 for the job (smaller cache
+      # entries). That is the wrong trade here: every mutant rebuilds the
+      # mutated crate after a one-function change, which is exactly what
+      # incremental compilation is for (pixel-cli: ~8 s -> ~3 s per mutant,
+      # and the build is where a 60-mutant run spends most of its time).
+      # Dependencies are never built incrementally, so the restored cache
+      # stays valid.
+      - name: Run mutants in the diff
+        # The explicit shell adds pipefail: `tee` must not mask the exit code.
+        shell: bash
+        env:
+          CARGO_INCREMENTAL: 1
+        run: >
+          cargo mutants -vV -C --locked --no-shuffle --in-place --in-diff pr.diff
+          -- --all-targets 2>&1 | tee results.txt
+
+      - name: Post job summary
+        if: always()
+        run: |
+          {
+            echo "### Mutants in the PR diff"
+            echo '```'
+            sed 's/\x1b\[[0-9;]*[mGKHF]//g' results.txt 2>/dev/null || echo "no output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload mutants.out
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: mutants-out
+          path: mutants.out
+          if-no-files-found: ignore

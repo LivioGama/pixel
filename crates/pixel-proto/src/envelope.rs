@@ -187,8 +187,7 @@ impl Envelope<serde_json::Value> {
     pub fn error_message(&self) -> String {
         self.error
             .as_ref()
-            .map(|e| e.message.clone())
-            .unwrap_or_else(|| "unknown error".to_string())
+            .map_or_else(|| "unknown error".to_string(), |e| e.message.clone())
     }
 }
 
@@ -213,6 +212,7 @@ mod tests {
                     head: Some("deadbeefcafefeed0000000000000000deadbee".into()),
                     branch: Some("main".into()),
                     dirty: vec!["src/a.rs".into()],
+                    dirty_count: None,
                 })
                 .with_epistemics(Epistemics {
                     closed_world: true,
@@ -319,6 +319,7 @@ mod tests {
                     head: Some("abc123".into()),
                     branch: Some("feature/x".into()),
                     dirty: vec!["src/main.rs".into(), "README.md".into()],
+                    dirty_count: None,
                 })
                 .with_epistemics(Epistemics {
                     closed_world: false,
@@ -336,8 +337,11 @@ mod tests {
 
         let value = serde_json::to_value(&envelope).unwrap();
 
-        // snapshot: token omitted (None), dirty is a file list
+        // snapshot: token omitted (None), dirty is a file list — the
+        // `inspect`/`review` shape; retrieval ops ship `dirty_count` instead
+        // (see `SnapshotInfo::compact`).
         assert_eq!(value["snapshot"]["head"], "abc123");
+        assert!(value["snapshot"].get("dirty_count").is_none());
         assert_eq!(value["snapshot"]["branch"], "feature/x");
         assert!(value["snapshot"].get("token").is_none());
         assert_eq!(
@@ -368,6 +372,7 @@ mod tests {
                     head: Some("abc".into()),
                     branch: None,
                     dirty: vec![],
+                    dirty_count: None,
                 }),
                 Some(Epistemics::default()),
                 Some(BudgetInfo {
@@ -453,6 +458,23 @@ mod validate_tests {
     /// A wire line from an older or foreign producer goes through serde,
     /// not the constructors, so the deserialized path must be validated
     /// the same way.
+    // `unwrap_response` in the CLI reads the payload and the error message
+    // through these accessors: a success envelope must hand back its result
+    // untouched, a failure envelope must degrade to `Null` plus the daemon's
+    // message, and a malformed failure (no error) must still print something.
+    #[test]
+    fn value_accessors_expose_result_or_error() {
+        let ok = Envelope::success("inspect", json!({"head": "abc"}));
+        assert_eq!(ok.data(), &json!({"head": "abc"}));
+        assert_eq!(ok.error_message(), "unknown error");
+        assert_eq!(ok.into_data(), json!({"head": "abc"}));
+
+        let failed = Envelope::<serde_json::Value>::failure("inspect", err("no repo"));
+        assert_eq!(failed.data(), &serde_json::Value::Null);
+        assert_eq!(failed.error_message(), "no repo");
+        assert_eq!(failed.into_data(), serde_json::Value::Null);
+    }
+
     #[test]
     fn deserialized_wire_line_is_validated() {
         let line = r#"{"ok":true,"op":"ping","protocol":1,"result":null,"error":null}"#;

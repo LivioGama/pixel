@@ -26,6 +26,38 @@ pub struct ExecResult {
 /// `vars` is a map of `key=value` substitutions. Missing required vars
 /// produce an error.
 pub fn execute(flow: &Flow, vars: &HashMap<String, String>) -> ExecResult {
+    execute_with(flow, vars, &mut AgentBrowser)
+}
+
+/// The process behind every step. `execute` drives the `agent-browser` on
+/// PATH; tests script the answers and skip the page-load waits, so every
+/// action arm is checked without a browser.
+pub(crate) trait Browser {
+    /// Run `agent-browser --session comet <args>` and return its stdout.
+    fn run(&mut self, args: &[&str]) -> Result<String, String>;
+    /// Give the page time to load or navigate.
+    fn pause(&mut self, duration: Duration);
+}
+
+struct AgentBrowser;
+
+impl Browser for AgentBrowser {
+    // Spawns the real agent-browser on PATH: the trait is what tests script.
+    #[cfg_attr(test, mutants::skip)]
+    fn run(&mut self, args: &[&str]) -> Result<String, String> {
+        run_agent_browser(args)
+    }
+
+    fn pause(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+pub(crate) fn execute_with(
+    flow: &Flow,
+    vars: &HashMap<String, String>,
+    browser: &mut dyn Browser,
+) -> ExecResult {
     let mut log = String::new();
     let mut steps_executed = 0usize;
     let mut steps_skipped = 0usize;
@@ -68,9 +100,9 @@ pub fn execute(flow: &Flow, vars: &HashMap<String, String>) -> ExecResult {
         log.push_str("# Stale tab cleanup:\n");
         for pattern in &flow.stale_tab_cleanup {
             let pat = substitute(pattern, vars);
-            log.push_str(&format!("#   closing tabs matching '{}'\n", pat));
-            if let Err(e) = close_stale_tabs(&pat, &mut log) {
-                log.push_str(&format!("#   WARN: stale cleanup failed: {}\n", e));
+            log.push_str(&format!("#   closing tabs matching '{pat}'\n"));
+            if let Err(e) = close_stale_tabs(&pat, &mut log, browser) {
+                log.push_str(&format!("#   WARN: stale cleanup failed: {e}\n"));
             }
         }
         log.push('\n');
@@ -79,16 +111,16 @@ pub fn execute(flow: &Flow, vars: &HashMap<String, String>) -> ExecResult {
     // Focus the flow's default tab.
     if let Some(ref tab) = flow.tab {
         let tab = substitute(tab, vars);
-        log.push_str(&format!("# Focusing flow tab: {}\n", tab));
-        if let Err(e) = switch_to_tab(&tab, &mut log) {
-            log.push_str(&format!("#   WARN: tab focus failed: {}\n", e));
+        log.push_str(&format!("# Focusing flow tab: {tab}\n"));
+        if let Err(e) = switch_to_tab(&tab, &mut log, browser) {
+            log.push_str(&format!("#   WARN: tab focus failed: {e}\n"));
         }
         log.push('\n');
     }
 
     // Execute steps.
     for (i, step) in flow.steps.iter().enumerate() {
-        match exec_step(step, i + 1, vars, flow.tab.as_deref(), &mut log, 0) {
+        match exec_step(step, i + 1, vars, flow.tab.as_deref(), &mut log, 0, browser) {
             Ok(executed) => {
                 if executed {
                     steps_executed += 1;
@@ -112,17 +144,16 @@ pub fn execute(flow: &Flow, vars: &HashMap<String, String>) -> ExecResult {
     // Success URL check — use `get url` to check the actual page URL,
     // and also check the snapshot for success signals.
     let mut url_ok = true;
-    let final_snapshot = run_agent_browser(&["snapshot", "-i"]).unwrap_or_default();
-    let final_url = run_agent_browser(&["get", "url"]).unwrap_or_default();
-    let combined = format!("{}\n{}", final_url, final_snapshot);
+    let final_snapshot = browser.run(&["snapshot", "-i"]).unwrap_or_default();
+    let final_url = browser.run(&["get", "url"]).unwrap_or_default();
+    let combined = format!("{final_url}\n{final_snapshot}");
 
     if !flow.success_url_contains.is_empty() {
         for u in &flow.success_url_contains {
             let u = substitute(u, vars);
             if !combined.contains(&u) {
                 log.push_str(&format!(
-                    "# WARN: success URL check — '{}' not found in URL or snapshot\n",
-                    u
+                    "# WARN: success URL check — '{u}' not found in URL or snapshot\n"
                 ));
                 url_ok = false;
             }
@@ -146,20 +177,19 @@ pub fn execute(flow: &Flow, vars: &HashMap<String, String>) -> ExecResult {
                 .any(|t| final_snapshot.to_lowercase().contains(&t.to_lowercase()))
         };
         if signal_met {
-            log.push_str(&format!("# ✓ Success signal detected: {}\n", signal));
+            log.push_str(&format!("# ✓ Success signal detected: {signal}\n"));
             url_ok = true;
         }
     }
 
     // MFA detection.
     if !flow.mfa_keywords.is_empty()
-        && let Ok(snapshot) = run_agent_browser(&["snapshot", "-i"])
+        && let Ok(snapshot) = browser.run(&["snapshot", "-i"])
     {
         for kw in &flow.mfa_keywords {
             if snapshot.contains(kw) {
                 log.push_str(&format!(
-                    "# MFA DETECTED: keyword '{}' found in snapshot.\n",
-                    kw
+                    "# MFA DETECTED: keyword '{kw}' found in snapshot.\n"
                 ));
                 log.push_str("# → Hand off to user — MFA cannot be automated.\n");
                 return ExecResult {
@@ -168,8 +198,7 @@ pub fn execute(flow: &Flow, vars: &HashMap<String, String>) -> ExecResult {
                     log,
                     success: false,
                     error: Some(format!(
-                        "MFA gate detected (keyword: '{}') — user intervention required",
-                        kw
+                        "MFA gate detected (keyword: '{kw}') — user intervention required"
                     )),
                 };
             }
@@ -177,8 +206,7 @@ pub fn execute(flow: &Flow, vars: &HashMap<String, String>) -> ExecResult {
     }
 
     log.push_str(&format!(
-        "\n# Flow complete: {} steps executed, {} skipped\n",
-        steps_executed, steps_skipped
+        "\n# Flow complete: {steps_executed} steps executed, {steps_skipped} skipped\n"
     ));
 
     if let Some(ref signal) = flow.success_signal {
@@ -207,6 +235,7 @@ fn exec_step(
     flow_tab: Option<&str>,
     log: &mut String,
     depth: usize,
+    browser: &mut dyn Browser,
 ) -> Result<bool, String> {
     let indent = "  ".repeat(depth);
     if let Some(r) = &step.rationale {
@@ -225,47 +254,52 @@ fn exec_step(
         && let Some(tab) = effective_tab
     {
         let tab = substitute(tab, vars);
-        log.push_str(&format!("{}# Switching to tab: {}\n", indent, tab));
-        switch_to_tab(&tab, log)?;
+        log.push_str(&format!("{indent}# Switching to tab: {tab}\n"));
+        switch_to_tab(&tab, log, browser)?;
     }
 
     match step.action.as_str() {
         "open" => {
             if let Some(ref url) = step.url {
                 let url = substitute(url, vars);
-                log.push_str(&format!("{}agent-browser open \"{}\"\n", indent, url));
+                log.push_str(&format!("{indent}agent-browser open \"{url}\"\n"));
                 // Try open first; if the bound tab is gone, use `tab new`.
-                match run_agent_browser(&["open", &url]) {
+                match browser.run(&["open", &url]) {
                     Ok(_) => {}
                     Err(e) if e.contains("tab_gone") || e.contains("no tab") => {
-                        log.push_str(&format!("{}# bound tab gone — opening new tab\n", indent));
-                        run_agent_browser(&["tab", "new", &url])
+                        log.push_str(&format!("{indent}# bound tab gone — opening new tab\n"));
+                        browser
+                            .run(&["tab", "new", &url])
                             .map_err(|e2| format!("open/tab new failed: {e2}"))?;
                     }
                     Err(e) => return Err(format!("open failed: {e}")),
                 }
                 // Give the page time to load (websites open in <5s).
-                std::thread::sleep(Duration::from_secs(3));
+                browser.pause(Duration::from_secs(3));
             }
             Ok(true)
         }
         "snapshot" => {
-            log.push_str(&format!("{}agent-browser snapshot -i\n", indent));
-            run_agent_browser(&["snapshot", "-i"]).map_err(|e| format!("snapshot failed: {e}"))?;
+            log.push_str(&format!("{indent}agent-browser snapshot -i\n"));
+            browser
+                .run(&["snapshot", "-i"])
+                .map_err(|e| format!("snapshot failed: {e}"))?;
             Ok(true)
         }
         "click" => {
             let target = substitute(step.ref_hint.as_deref().unwrap_or("element"), vars);
-            log.push_str(&format!("{}# Finding ref for: {}\n", indent, target));
-            let snapshot = run_agent_browser(&["snapshot", "-i"])
+            log.push_str(&format!("{indent}# Finding ref for: {target}\n"));
+            let snapshot = browser
+                .run(&["snapshot", "-i"])
                 .map_err(|e| format!("snapshot before click failed: {e}"))?;
             let ref_id = find_ref_in_snapshot(&snapshot, &target)
-                .ok_or_else(|| format!("no element matching '{}' found in snapshot", target))?;
-            log.push_str(&format!("{}agent-browser click @{}\n", indent, ref_id));
-            run_agent_browser(&["click", &format!("@{}", ref_id)])
-                .map_err(|e| format!("click @{} failed: {e}", ref_id))?;
+                .ok_or_else(|| format!("no element matching '{target}' found in snapshot"))?;
+            log.push_str(&format!("{indent}agent-browser click @{ref_id}\n"));
+            browser
+                .run(&["click", &format!("@{ref_id}")])
+                .map_err(|e| format!("click @{ref_id} failed: {e}"))?;
             // Wait for potential navigation.
-            std::thread::sleep(Duration::from_secs(2));
+            browser.pause(Duration::from_secs(2));
 
             // Check if the click actually navigated (snapshot changed).
             // If on_failure mentions JS click/eval, try that as a fallback.
@@ -277,18 +311,18 @@ fn exec_step(
                     || fix_lower.contains("queryselector")
                 {
                     // Check if the page is still on the same URL (click didn't work).
-                    let post_snapshot = run_agent_browser(&["snapshot", "-i"]).unwrap_or_default();
+                    let post_snapshot = browser.run(&["snapshot", "-i"]).unwrap_or_default();
                     // If the target is still visible, the click didn't navigate.
                     if post_snapshot.contains(&target) {
                         log.push_str(&format!(
-                            "{}# click didn't navigate — trying JS click fallback\n",
-                            indent
+                            "{indent}# click didn't navigate — trying JS click fallback\n"
                         ));
                         // Try eval with querySelector.
                         let js = "document.querySelector('button')?.click()".to_string();
-                        run_agent_browser(&["eval", &js])
+                        browser
+                            .run(&["eval", &js])
                             .map_err(|e| format!("JS click fallback failed: {e}"))?;
-                        std::thread::sleep(Duration::from_secs(2));
+                        browser.pause(Duration::from_secs(2));
                     }
                 }
             }
@@ -324,57 +358,69 @@ fn exec_step(
                 value
             };
 
-            log.push_str(&format!("{}# Finding ref for: {}\n", indent, target));
-            let snapshot = run_agent_browser(&["snapshot", "-i"])
+            log.push_str(&format!("{indent}# Finding ref for: {target}\n"));
+            let snapshot = browser
+                .run(&["snapshot", "-i"])
                 .map_err(|e| format!("snapshot before fill failed: {e}"))?;
             let ref_id = find_ref_in_snapshot(&snapshot, &target)
-                .ok_or_else(|| format!("no element matching '{}' found in snapshot", target))?;
+                .ok_or_else(|| format!("no element matching '{target}' found in snapshot"))?;
             log.push_str(&format!(
                 "{}agent-browser {} @{} \"{}\"\n",
                 indent, step.action, ref_id, value
             ));
-            run_agent_browser(&[&step.action, &format!("@{}", ref_id), &value])
+            browser
+                .run(&[&step.action, &format!("@{ref_id}"), &value])
                 .map_err(|e| format!("{} @{} failed: {e}", step.action, ref_id))?;
             Ok(true)
         }
         "select" => {
             let target = substitute(step.ref_hint.as_deref().unwrap_or("select"), vars);
             let value = resolve_value(step, vars);
-            let snapshot = run_agent_browser(&["snapshot", "-i"])
+            let snapshot = browser
+                .run(&["snapshot", "-i"])
                 .map_err(|e| format!("snapshot before select failed: {e}"))?;
             let ref_id = find_ref_in_snapshot(&snapshot, &target)
-                .ok_or_else(|| format!("no element matching '{}' found in snapshot", target))?;
+                .ok_or_else(|| format!("no element matching '{target}' found in snapshot"))?;
             log.push_str(&format!(
-                "{}agent-browser select @{} \"{}\"\n",
-                indent, ref_id, value
+                "{indent}agent-browser select @{ref_id} \"{value}\"\n"
             ));
-            run_agent_browser(&["select", &format!("@{}", ref_id), &value])
-                .map_err(|e| format!("select @{} failed: {e}", ref_id))?;
+            browser
+                .run(&["select", &format!("@{ref_id}"), &value])
+                .map_err(|e| format!("select @{ref_id} failed: {e}"))?;
             Ok(true)
         }
         "press" => {
             let key = substitute(step.key.as_deref().unwrap_or("Enter"), vars);
-            log.push_str(&format!("{}agent-browser press {}\n", indent, key));
-            run_agent_browser(&["press", &key])
-                .map_err(|e| format!("press {} failed: {e}", key))?;
+            log.push_str(&format!("{indent}agent-browser press {key}\n"));
+            browser
+                .run(&["press", &key])
+                .map_err(|e| format!("press {key} failed: {e}"))?;
             Ok(true)
         }
         "wait" => {
             let wait = step.wait.as_deref().unwrap_or("load");
             let dur = parse_wait_duration(wait);
             log.push_str(&format!("{}# Waiting {}s\n", indent, dur.as_secs()));
-            std::thread::sleep(dur);
+            browser.pause(dur);
             Ok(true)
         }
         "conditional" => {
             let cond = substitute(step.condition.as_deref().unwrap_or("condition"), vars);
-            log.push_str(&format!("{}# CONDITIONAL: if {}\n", indent, cond));
+            log.push_str(&format!("{indent}# CONDITIONAL: if {cond}\n"));
 
             // Take a snapshot to evaluate the condition.
-            let snapshot = run_agent_browser(&["snapshot", "-i"])
+            let snapshot = browser
+                .run(&["snapshot", "-i"])
                 .map_err(|e| format!("snapshot for conditional failed: {e}"))?;
 
-            let condition_met = evaluate_condition(&cond, &snapshot);
+            // A URL condition needs the page URL; the snapshot does not
+            // carry it.
+            let url = if cond.to_lowercase().contains("url contains") {
+                browser.run(&["get", "url"]).ok()
+            } else {
+                None
+            };
+            let condition_met = evaluate_condition(&cond, &snapshot, url.as_deref());
             log.push_str(&format!(
                 "{}# Condition {} — taking {} branch\n",
                 indent,
@@ -389,7 +435,7 @@ fn exec_step(
             };
             let mut any_executed = false;
             for (i, sub) in branch.iter().enumerate() {
-                match exec_step(sub, i + 1, vars, flow_tab, log, depth + 1) {
+                match exec_step(sub, i + 1, vars, flow_tab, log, depth + 1, browser) {
                     Ok(true) => any_executed = true,
                     Ok(false) => {}
                     Err(e) => return Err(e),
@@ -399,16 +445,18 @@ fn exec_step(
         }
         "switch_tab" => {
             let tab = substitute(step.tab.as_deref().unwrap_or("tab"), vars);
-            log.push_str(&format!("{}# Switch to tab: {}\n", indent, tab));
-            switch_to_tab(&tab, log)?;
+            log.push_str(&format!("{indent}# Switch to tab: {tab}\n"));
+            switch_to_tab(&tab, log, browser)?;
             Ok(true)
         }
         "eval" => {
             // Evaluate JS — for cases where regular click doesn't work.
             let js = substitute(step.value.as_deref().unwrap_or(""), vars);
             if !js.is_empty() {
-                log.push_str(&format!("{}agent-browser eval \"{}\"\n", indent, js));
-                run_agent_browser(&["eval", &js]).map_err(|e| format!("eval failed: {e}"))?;
+                log.push_str(&format!("{indent}agent-browser eval \"{js}\"\n"));
+                browser
+                    .run(&["eval", &js])
+                    .map_err(|e| format!("eval failed: {e}"))?;
             }
             Ok(true)
         }
@@ -540,7 +588,7 @@ fn extract_ref_if_matches(
     };
 
     if matched {
-        Some(format!("e{}", ref_id))
+        Some(format!("e{ref_id}"))
     } else {
         None
     }
@@ -561,7 +609,7 @@ fn extract_char_number(hint: &str) -> Option<usize> {
 }
 
 /// Extract single-quoted strings from a hint string.
-/// e.g. "button containing 'Continue'" → ["Continue"]
+/// e.g. `button containing 'Continue'` → `["Continue"]`
 fn extract_quoted_strings(s: &str) -> Vec<&str> {
     let mut result = Vec::new();
     let mut in_quote = false;
@@ -589,20 +637,18 @@ fn extract_quoted_strings(s: &str) -> Vec<&str> {
 ///   "page contains 'hCaptcha' or 'Drag'"
 ///   "page shows password input field"
 ///   "URL contains 'code=' parameter"
-fn evaluate_condition(condition: &str, snapshot: &str) -> bool {
+///
+/// `url` is the page URL when the caller could read it (`get url`); a URL
+/// condition without one is not met.
+fn evaluate_condition(condition: &str, snapshot: &str, url: Option<&str>) -> bool {
     let cond_lower = condition.to_lowercase();
     let snap_lower = snapshot.to_lowercase();
 
-    // Special case: URL check — need to get the URL.
-    if cond_lower.contains("url contains") {
-        // Extract the quoted term.
-        if let Some(term) = extract_quoted_strings(condition).first() {
-            // Try to get the URL from the snapshot or a separate command.
-            if let Ok(url_output) = run_agent_browser(&["get", "url"]) {
-                return url_output.to_lowercase().contains(&term.to_lowercase());
-            }
-            return false;
-        }
+    // Special case: URL check — the snapshot does not carry the URL.
+    if cond_lower.contains("url contains")
+        && let Some(term) = extract_quoted_strings(condition).first()
+    {
+        return url.is_some_and(|u| u.to_lowercase().contains(&term.to_lowercase()));
     }
 
     // Extract quoted terms and check if any/all appear in the snapshot.
@@ -638,9 +684,10 @@ fn evaluate_condition(condition: &str, snapshot: &str) -> bool {
 }
 
 /// Switch to a tab matching the given pattern.
-fn switch_to_tab(pattern: &str, log: &mut String) -> Result<(), String> {
-    let output =
-        run_agent_browser(&["tab", "list"]).map_err(|e| format!("tab list failed: {e}"))?;
+fn switch_to_tab(pattern: &str, log: &mut String, browser: &mut dyn Browser) -> Result<(), String> {
+    let output = browser
+        .run(&["tab", "list"])
+        .map_err(|e| format!("tab list failed: {e}"))?;
 
     // Parse tab list output to find a tab matching the pattern.
     // Output looks like:
@@ -654,8 +701,9 @@ fn switch_to_tab(pattern: &str, log: &mut String) -> Result<(), String> {
                 let after = &line[t_start..];
                 if let Some(end) = after.find(|c: char| !c.is_ascii_digit() && c != 't') {
                     let tab_id = &after[..end];
-                    log.push_str(&format!("#   switching to tab {}\n", tab_id));
-                    run_agent_browser(&["tab", tab_id])
+                    log.push_str(&format!("#   switching to tab {tab_id}\n"));
+                    browser
+                        .run(&["tab", tab_id])
                         .map_err(|e| format!("tab switch failed: {e}"))?;
                     return Ok(());
                 }
@@ -663,14 +711,19 @@ fn switch_to_tab(pattern: &str, log: &mut String) -> Result<(), String> {
         }
     }
     // Tab not found — not an error, the flow may be on the right tab already.
-    log.push_str(&format!("#   WARN: no tab matching '{}' found\n", pattern));
+    log.push_str(&format!("#   WARN: no tab matching '{pattern}' found\n"));
     Ok(())
 }
 
 /// Close stale tabs matching a pattern.
-fn close_stale_tabs(pattern: &str, log: &mut String) -> Result<(), String> {
-    let output =
-        run_agent_browser(&["tab", "list"]).map_err(|e| format!("tab list failed: {e}"))?;
+fn close_stale_tabs(
+    pattern: &str,
+    log: &mut String,
+    browser: &mut dyn Browser,
+) -> Result<(), String> {
+    let output = browser
+        .run(&["tab", "list"])
+        .map_err(|e| format!("tab list failed: {e}"))?;
 
     let pat_lower = pattern.to_lowercase();
     for line in output.lines() {
@@ -680,8 +733,8 @@ fn close_stale_tabs(pattern: &str, log: &mut String) -> Result<(), String> {
             let after = &line[t_start..];
             if let Some(end) = after.find(|c: char| !c.is_ascii_digit() && c != 't') {
                 let tab_id = &after[..end];
-                log.push_str(&format!("#   closing tab {}\n", tab_id));
-                let _ = run_agent_browser(&["tab", "close", tab_id]);
+                log.push_str(&format!("#   closing tab {tab_id}\n"));
+                let _ = browser.run(&["tab", "close", tab_id]);
             }
         }
     }
@@ -704,8 +757,7 @@ fn parse_wait_duration(s: &str) -> Duration {
     }
     // Try to parse as seconds.
     s.parse::<u64>()
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(2))
+        .map_or(Duration::from_secs(2), Duration::from_secs)
 }
 
 /// Resolve a step's value: `value_var` takes precedence, then `value`,
@@ -716,7 +768,7 @@ fn resolve_value(step: &FlowStep, vars: &HashMap<String, String>) -> String {
             return v.clone();
         }
         // Fall back to default or placeholder.
-        return format!("{{{{{}}}}}", var_name);
+        return format!("{{{{{var_name}}}}}");
     }
     if let Some(ref v) = step.value {
         return substitute(v, vars);
@@ -728,7 +780,7 @@ fn resolve_value(step: &FlowStep, vars: &HashMap<String, String>) -> String {
 fn substitute(s: &str, vars: &HashMap<String, String>) -> String {
     let mut result = s.to_string();
     for (k, v) in vars {
-        let placeholder = format!("{{{{{}}}}}", k);
+        let placeholder = format!("{{{{{k}}}}}");
         result = result.replace(&placeholder, v);
     }
     result
@@ -782,7 +834,8 @@ mod tests {
         let snapshot = "- heading \"hCaptcha\" [ref=e1]";
         assert!(evaluate_condition(
             "page contains 'hCaptcha' or 'Drag'",
-            snapshot
+            snapshot,
+            None
         ));
     }
 
@@ -791,7 +844,8 @@ mod tests {
         let snapshot = "- button \"Continue\" [ref=e5]\n- text \"signing back in\"";
         assert!(evaluate_condition(
             "page shows 'Continue' and 'signing back in'",
-            snapshot
+            snapshot,
+            None
         ));
     }
 
@@ -800,14 +854,19 @@ mod tests {
         let snapshot = "- heading \"Welcome\" [ref=e1]";
         assert!(!evaluate_condition(
             "page shows 'Continue with Google'",
-            snapshot
+            snapshot,
+            None
         ));
     }
 
     #[test]
     fn evaluate_condition_keyword() {
         let snapshot = "- button \"Continue\" [ref=e5]";
-        assert!(evaluate_condition("page shows Continue button", snapshot));
+        assert!(evaluate_condition(
+            "page shows Continue button",
+            snapshot,
+            None
+        ));
     }
 
     // Regression: codex-auth-flow account selection. When the account email
@@ -819,7 +878,7 @@ mod tests {
             - button \"Select account Bob bob@example.com\" [ref=e3]\n\
             - button \"Select account Alice alice@example.com\" [ref=e7]";
         let cond = "the desired account 'bob@example.com' is visible as a 'Select account' button";
-        assert!(evaluate_condition(cond, snapshot));
+        assert!(evaluate_condition(cond, snapshot, None));
     }
 
     #[test]
@@ -828,7 +887,7 @@ mod tests {
         let snapshot = "- heading \"Welcome back\" [level=1, ref=e1]\n\
             - button \"Select account Alice alice@example.com\" [ref=e7]";
         let cond = "the desired account 'bob@example.com' is visible as a 'Select account' button";
-        assert!(!evaluate_condition(cond, snapshot));
+        assert!(!evaluate_condition(cond, snapshot, None));
     }
 
     #[test]
@@ -860,5 +919,587 @@ mod tests {
     #[test]
     fn parse_wait_load() {
         assert_eq!(parse_wait_duration("load"), Duration::from_secs(2));
+    }
+
+    use crate::types::Flow;
+    use std::collections::VecDeque;
+
+    /// Scripted stand-in for agent-browser: every call is recorded, answers
+    /// come from the script in order (then `Ok("")`), waits are recorded
+    /// instead of slept.
+    struct Scripted {
+        calls: Vec<Vec<String>>,
+        answers: VecDeque<Result<String, String>>,
+        paused: Vec<Duration>,
+    }
+
+    impl Scripted {
+        fn new(answers: Vec<Result<&str, &str>>) -> Self {
+            Scripted {
+                calls: Vec::new(),
+                answers: answers
+                    .into_iter()
+                    .map(|a| a.map(str::to_string).map_err(str::to_string))
+                    .collect(),
+                paused: Vec::new(),
+            }
+        }
+
+        fn calls(&self) -> Vec<Vec<&str>> {
+            self.calls
+                .iter()
+                .map(|c| c.iter().map(String::as_str).collect())
+                .collect()
+        }
+    }
+
+    impl Browser for Scripted {
+        fn run(&mut self, args: &[&str]) -> Result<String, String> {
+            self.calls
+                .push(args.iter().map(ToString::to_string).collect());
+            self.answers
+                .pop_front()
+                .unwrap_or_else(|| Ok(String::new()))
+        }
+
+        fn pause(&mut self, duration: Duration) {
+            self.paused.push(duration);
+        }
+    }
+
+    fn step(action: &str) -> FlowStep {
+        FlowStep {
+            action: action.into(),
+            ..Default::default()
+        }
+    }
+
+    fn run_step(step: &FlowStep, browser: &mut Scripted) -> (Result<bool, String>, String) {
+        let mut log = String::new();
+        let result = exec_step(step, 1, &HashMap::new(), None, &mut log, 0, browser);
+        (result, log)
+    }
+
+    fn flow_with(steps: Vec<FlowStep>) -> Flow {
+        Flow {
+            name: "test".into(),
+            title: "Test".into(),
+            description: "Test flow".into(),
+            tags: vec![],
+            url: None,
+            tab: None,
+            success_url_contains: vec![],
+            success_url_excludes: vec![],
+            mfa_keywords: vec![],
+            stale_tab_cleanup: vec![],
+            preconditions: vec![],
+            vars: vec![],
+            steps,
+            success_signal: None,
+            created_unix: 1000,
+            revised_unix: 1000,
+            revision: 1,
+            proven: true,
+        }
+    }
+
+    #[test]
+    fn open_runs_the_url_then_waits_for_the_page() {
+        let mut b = Scripted::new(vec![]);
+        let s = FlowStep {
+            url: Some("https://example.com/{{p}}".into()),
+            ..step("open")
+        };
+        let mut log = String::new();
+        let vars = HashMap::from([("p".to_string(), "login".to_string())]);
+        let r = exec_step(&s, 1, &vars, None, &mut log, 0, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls(), vec![vec!["open", "https://example.com/login"]]);
+        assert_eq!(b.paused, vec![Duration::from_secs(3)]);
+    }
+
+    #[test]
+    fn open_falls_back_to_a_new_tab_only_when_the_bound_tab_is_gone() {
+        let s = FlowStep {
+            url: Some("https://e.com".into()),
+            ..step("open")
+        };
+        for gone in ["tab_gone: t3", "no tab bound"] {
+            let mut b = Scripted::new(vec![Err(gone), Ok("")]);
+            let (r, log) = run_step(&s, &mut b);
+            assert_eq!(r, Ok(true), "{gone}");
+            assert_eq!(
+                b.calls(),
+                vec![
+                    vec!["open", "https://e.com"],
+                    vec!["tab", "new", "https://e.com"]
+                ]
+            );
+            assert!(log.contains("bound tab gone"), "{log}");
+        }
+        // Any other failure is the step's failure: no retry.
+        let mut b = Scripted::new(vec![Err("connection refused")]);
+        let (r, _) = run_step(&s, &mut b);
+        assert_eq!(r, Err("open failed: connection refused".to_string()));
+        assert_eq!(b.calls().len(), 1);
+        // And a failed `tab new` is reported as such.
+        let mut b = Scripted::new(vec![Err("tab_gone"), Err("nope")]);
+        let (r, _) = run_step(&s, &mut b);
+        assert_eq!(r, Err("open/tab new failed: nope".to_string()));
+    }
+
+    #[test]
+    fn snapshot_takes_an_interactive_snapshot() {
+        let mut b = Scripted::new(vec![]);
+        let (r, log) = run_step(&step("snapshot"), &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls(), vec![vec!["snapshot", "-i"]]);
+        assert!(log.contains("agent-browser snapshot -i"), "{log}");
+        let mut b = Scripted::new(vec![Err("gone")]);
+        let (r, _) = run_step(&step("snapshot"), &mut b);
+        assert_eq!(r, Err("snapshot failed: gone".to_string()));
+    }
+
+    #[test]
+    fn click_resolves_the_ref_from_a_fresh_snapshot_then_waits() {
+        let mut b = Scripted::new(vec![Ok("- button \"Continue with Google\" [ref=e5]\n")]);
+        let s = FlowStep {
+            ref_hint: Some("button containing 'Continue with Google'".into()),
+            ..step("click")
+        };
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(
+            b.calls(),
+            vec![vec!["snapshot", "-i"], vec!["click", "@e5"]]
+        );
+        assert_eq!(b.paused, vec![Duration::from_secs(2)]);
+        assert!(log.contains("agent-browser click @e5"), "{log}");
+        // No matching element: the step fails before any click.
+        let mut b = Scripted::new(vec![Ok("- heading \"Welcome\" [ref=e1]\n")]);
+        let (r, _) = run_step(&s, &mut b);
+        assert_eq!(
+            r,
+            Err(
+                "no element matching 'button containing 'Continue with Google'' found in snapshot"
+                    .to_string()
+            )
+        );
+        assert_eq!(b.calls().len(), 1);
+    }
+
+    #[test]
+    fn click_retries_through_javascript_when_the_page_did_not_move() {
+        let snap = "- button \"Sign in\" [ref=e2]\n";
+        // The fallback fires when the post-click snapshot still shows the
+        // target text, so the hint is the visible label itself.
+        let s = FlowStep {
+            ref_hint: Some("Sign in".into()),
+            on_failure: Some("use a JS click via eval".into()),
+            ..step("click")
+        };
+        // Same snapshot after the click: the target is still there.
+        let mut b = Scripted::new(vec![Ok(snap), Ok(""), Ok(snap)]);
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(
+            b.calls()[2..],
+            vec![
+                vec!["snapshot", "-i"],
+                vec!["eval", "document.querySelector('button')?.click()"]
+            ]
+        );
+        assert!(log.contains("JS click fallback"), "{log}");
+        // Page moved: no fallback.
+        let mut b = Scripted::new(vec![Ok(snap), Ok(""), Ok("- heading \"Home\" [ref=e1]\n")]);
+        let (r, _) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls().len(), 3);
+    }
+
+    #[test]
+    fn fill_and_type_send_the_resolved_value_to_the_matched_field() {
+        for action in ["fill", "type"] {
+            let mut b = Scripted::new(vec![Ok("- textbox \"Email\" [ref=e3]\n")]);
+            let s = FlowStep {
+                ref_hint: Some("textbox matching 'Email'".into()),
+                value: Some("a@example.com".into()),
+                ..step(action)
+            };
+            let (r, log) = run_step(&s, &mut b);
+            assert_eq!(r, Ok(true), "{action}");
+            assert_eq!(
+                b.calls(),
+                vec![vec!["snapshot", "-i"], vec![action, "@e3", "a@example.com"]]
+            );
+            assert!(
+                log.contains(&format!("agent-browser {action} @e3 \"a@example.com\"")),
+                "{log}"
+            );
+        }
+    }
+
+    #[test]
+    fn fill_takes_the_nth_character_of_user_code_for_split_code_inputs() {
+        let mut b = Scripted::new(vec![Ok("- textbox \"Code character 3 of 9\" [ref=e8]\n")]);
+        let s = FlowStep {
+            ref_hint: Some("textbox matching 'Code character 3 of 9'".into()),
+            ..step("fill")
+        };
+        let vars = HashMap::from([("user_code".to_string(), "AB-CD".to_string())]);
+        let mut log = String::new();
+        let r = exec_step(&s, 1, &vars, None, &mut log, 0, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls()[1], vec!["fill", "@e8", "C"]);
+    }
+
+    #[test]
+    fn select_picks_the_option_on_the_matched_select() {
+        let mut b = Scripted::new(vec![Ok("- combobox \"Country\" [ref=e4]\n")]);
+        let s = FlowStep {
+            ref_hint: Some("combobox matching 'Country'".into()),
+            value: Some("FR".into()),
+            ..step("select")
+        };
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(
+            b.calls(),
+            vec![vec!["snapshot", "-i"], vec!["select", "@e4", "FR"]]
+        );
+        assert!(log.contains("agent-browser select @e4 \"FR\""), "{log}");
+    }
+
+    #[test]
+    fn press_sends_the_key_and_defaults_to_enter() {
+        let mut b = Scripted::new(vec![]);
+        let (r, _) = run_step(&step("press"), &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls(), vec![vec!["press", "Enter"]]);
+        let mut b = Scripted::new(vec![]);
+        let s = FlowStep {
+            key: Some("Tab".into()),
+            ..step("press")
+        };
+        run_step(&s, &mut b).0.unwrap();
+        assert_eq!(b.calls(), vec![vec!["press", "Tab"]]);
+    }
+
+    #[test]
+    fn wait_pauses_for_the_parsed_duration_without_touching_the_browser() {
+        let mut b = Scripted::new(vec![]);
+        let s = FlowStep {
+            wait: Some("10s".into()),
+            ..step("wait")
+        };
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert!(b.calls().is_empty());
+        assert_eq!(b.paused, vec![Duration::from_secs(10)]);
+        assert!(log.contains("# Waiting 10s"), "{log}");
+    }
+
+    #[test]
+    fn conditional_runs_the_then_branch_when_met_and_otherwise_when_not() {
+        let cond = FlowStep {
+            condition: Some("page shows 'Welcome back'".into()),
+            then: vec![FlowStep {
+                key: Some("Enter".into()),
+                ..step("press")
+            }],
+            otherwise: vec![step("snapshot")],
+            ..step("conditional")
+        };
+        let mut b = Scripted::new(vec![Ok("- heading \"Welcome back\" [ref=e1]\n")]);
+        let (r, log) = run_step(&cond, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(
+            b.calls(),
+            vec![vec!["snapshot", "-i"], vec!["press", "Enter"]]
+        );
+        assert!(log.contains("Condition MET — taking THEN branch"), "{log}");
+
+        let mut b = Scripted::new(vec![Ok("- heading \"Sign in\" [ref=e1]\n")]);
+        let (r, log) = run_step(&cond, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(
+            b.calls(),
+            vec![vec!["snapshot", "-i"], vec!["snapshot", "-i"]]
+        );
+        assert!(
+            log.contains("Condition NOT MET — taking ELSE branch"),
+            "{log}"
+        );
+
+        // An empty branch executes nothing: the step counts as skipped.
+        let empty = FlowStep {
+            otherwise: vec![],
+            ..cond.clone()
+        };
+        let mut b = Scripted::new(vec![Ok("- heading \"Sign in\" [ref=e1]\n")]);
+        assert_eq!(run_step(&empty, &mut b).0, Ok(false));
+    }
+
+    #[test]
+    fn conditional_on_the_url_reads_it_from_the_browser() {
+        let cond = FlowStep {
+            condition: Some("URL contains 'code='".into()),
+            then: vec![step("snapshot")],
+            ..step("conditional")
+        };
+        let mut b = Scripted::new(vec![Ok(""), Ok("https://e.com/cb?code=abc")]);
+        let (r, _) = run_step(&cond, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(
+            b.calls(),
+            vec![
+                vec!["snapshot", "-i"],
+                vec!["get", "url"],
+                vec!["snapshot", "-i"]
+            ]
+        );
+        let mut b = Scripted::new(vec![Ok(""), Ok("https://e.com/login")]);
+        assert_eq!(run_step(&cond, &mut b).0, Ok(false));
+        assert!(!evaluate_condition("URL contains 'code='", "", None));
+    }
+
+    #[test]
+    fn switch_tab_switches_to_the_first_matching_tab_or_warns() {
+        let tabs = "→ [t24] Welcome back - OpenAI - https://auth.openai.com/\n[t12] Claude - https://claude.ai/\n";
+        let mut b = Scripted::new(vec![Ok(tabs)]);
+        let s = FlowStep {
+            tab: Some("claude".into()),
+            ..step("switch_tab")
+        };
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls(), vec![vec!["tab", "list"], vec!["tab", "t12"]]);
+        assert!(log.contains("switching to tab t12"), "{log}");
+
+        let mut b = Scripted::new(vec![Ok(tabs)]);
+        let s = FlowStep {
+            tab: Some("github".into()),
+            ..step("switch_tab")
+        };
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls(), vec![vec!["tab", "list"]]);
+        assert!(log.contains("WARN: no tab matching 'github'"), "{log}");
+    }
+
+    #[test]
+    fn a_step_with_its_own_tab_switches_before_acting() {
+        let mut b = Scripted::new(vec![Ok("[t7] GitHub - https://github.com\n")]);
+        let s = FlowStep {
+            tab: Some("github".into()),
+            ..step("snapshot")
+        };
+        let (r, _) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(
+            b.calls(),
+            vec![
+                vec!["tab", "list"],
+                vec!["tab", "t7"],
+                vec!["snapshot", "-i"]
+            ]
+        );
+    }
+
+    #[test]
+    fn eval_runs_the_script_and_skips_an_empty_one() {
+        let mut b = Scripted::new(vec![]);
+        let s = FlowStep {
+            value: Some("document.title".into()),
+            ..step("eval")
+        };
+        let (r, _) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls(), vec![vec!["eval", "document.title"]]);
+        let mut b = Scripted::new(vec![]);
+        let (r, _) = run_step(&step("eval"), &mut b);
+        assert_eq!(r, Ok(true));
+        assert!(b.calls().is_empty(), "{:?}", b.calls());
+    }
+
+    #[test]
+    fn unknown_action_is_skipped_not_executed() {
+        let mut b = Scripted::new(vec![]);
+        let (r, log) = run_step(&step("teleport"), &mut b);
+        assert_eq!(r, Ok(false));
+        assert!(b.calls().is_empty());
+        assert!(log.contains("Unknown action: teleport"), "{log}");
+    }
+
+    #[test]
+    fn stale_tab_cleanup_closes_every_matching_tab_before_the_steps() {
+        let flow = Flow {
+            stale_tab_cleanup: vec!["chatgpt".into()],
+            ..flow_with(vec![])
+        };
+        let mut b = Scripted::new(vec![Ok(
+            "[t3] ChatGPT - https://chatgpt.com\n[t9] Other\n[t5] chatgpt again\n",
+        )]);
+        let result = execute_with(&flow, &HashMap::new(), &mut b);
+        assert!(result.success, "{}", result.log);
+        assert_eq!(
+            b.calls()[..3],
+            vec![
+                vec!["tab", "list"],
+                vec!["tab", "close", "t3"],
+                vec!["tab", "close", "t5"]
+            ]
+        );
+        assert!(result.log.contains("closing tab t3"), "{}", result.log);
+    }
+
+    #[test]
+    fn execute_counts_executed_and_skipped_steps_and_stops_at_the_first_error() {
+        let flow = flow_with(vec![step("snapshot"), step("teleport"), step("snapshot")]);
+        let mut b = Scripted::new(vec![]);
+        let result = execute_with(&flow, &HashMap::new(), &mut b);
+        assert!(result.success);
+        assert_eq!((result.steps_executed, result.steps_skipped), (2, 1));
+        assert!(
+            result.log.contains("2 steps executed, 1 skipped"),
+            "{}",
+            result.log
+        );
+
+        let mut b = Scripted::new(vec![Ok(""), Err("browser died")]);
+        let result = execute_with(&flow, &HashMap::new(), &mut b);
+        assert!(!result.success);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("step 3 failed: snapshot failed: browser died")
+        );
+        assert_eq!((result.steps_executed, result.steps_skipped), (1, 1));
+    }
+
+    #[test]
+    fn execute_numbers_the_steps_from_one_and_indents_nested_ones() {
+        let flow = flow_with(vec![
+            FlowStep {
+                rationale: Some("first".into()),
+                ..step("snapshot")
+            },
+            FlowStep {
+                rationale: Some("second".into()),
+                condition: Some("page shows 'A'".into()),
+                then: vec![FlowStep {
+                    rationale: Some("nested".into()),
+                    ..step("snapshot")
+                }],
+                ..step("conditional")
+            },
+        ]);
+        let mut b = Scripted::new(vec![Ok(""), Ok("- heading \"A\" [ref=e1]\n")]);
+        let result = execute_with(&flow, &HashMap::new(), &mut b);
+        assert!(result.success, "{}", result.log);
+        assert!(result.log.contains("\n# Step 1: first\n"), "{}", result.log);
+        assert!(
+            result.log.contains("\n# Step 2: second\n"),
+            "{}",
+            result.log
+        );
+        assert!(
+            result.log.contains("\n  # Step 1: nested\n"),
+            "{}",
+            result.log
+        );
+    }
+
+    #[test]
+    fn execute_hands_off_when_an_mfa_keyword_shows_on_the_final_page() {
+        let flow = Flow {
+            mfa_keywords: vec!["Verify your identity".into()],
+            ..flow_with(vec![step("snapshot")])
+        };
+        // step snapshot, final snapshot, get url, MFA snapshot.
+        let page = "- heading \"Verify your identity\" [ref=e1]\n";
+        let mut b = Scripted::new(vec![Ok(""), Ok(page), Ok("https://e.com"), Ok(page)]);
+        let result = execute_with(&flow, &HashMap::new(), &mut b);
+        assert!(!result.success);
+        assert_eq!(
+            result.error.as_deref(),
+            Some(
+                "MFA gate detected (keyword: 'Verify your identity') — user intervention required"
+            )
+        );
+        assert!(result.log.contains("# MFA DETECTED"), "{}", result.log);
+        // Without the keyword on the page the flow completes.
+        let mut b = Scripted::new(vec![Ok(""), Ok(""), Ok("https://e.com"), Ok("")]);
+        assert!(execute_with(&flow, &HashMap::new(), &mut b).success);
+    }
+
+    #[test]
+    fn execute_fails_the_success_url_check_unless_the_signal_overrides_it() {
+        let flow = Flow {
+            success_url_contains: vec!["/dashboard".into()],
+            ..flow_with(vec![])
+        };
+        let mut b = Scripted::new(vec![Ok(""), Ok("https://e.com/login")]);
+        let result = execute_with(&flow, &HashMap::new(), &mut b);
+        assert!(!result.success);
+        assert_eq!(result.error.as_deref(), Some("success URL check failed"));
+        let mut b = Scripted::new(vec![Ok(""), Ok("https://e.com/dashboard")]);
+        assert!(execute_with(&flow, &HashMap::new(), &mut b).success);
+        let signalled = Flow {
+            success_signal: Some("page shows 'Signed in'".into()),
+            ..flow.clone()
+        };
+        let mut b = Scripted::new(vec![
+            Ok("- text \"Signed in\"\n"),
+            Ok("https://e.com/login"),
+        ]);
+        let result = execute_with(&signalled, &HashMap::new(), &mut b);
+        assert!(result.success, "{}", result.log);
+        assert!(
+            result.log.contains("Success signal detected"),
+            "{}",
+            result.log
+        );
+    }
+
+    #[test]
+    fn the_real_browser_pause_waits_wall_clock_time() {
+        let start = std::time::Instant::now();
+        AgentBrowser.pause(Duration::from_millis(20));
+        assert!(start.elapsed() >= Duration::from_millis(20));
+    }
+
+    #[test]
+    fn resolve_value_prefers_the_variable_then_the_literal_then_nothing() {
+        let vars = HashMap::from([("who".to_string(), "alice".to_string())]);
+        let by_var = FlowStep {
+            value_var: Some("who".into()),
+            value: Some("ignored".into()),
+            ..step("fill")
+        };
+        assert_eq!(resolve_value(&by_var, &vars), "alice");
+        let missing_var = FlowStep {
+            value_var: Some("token".into()),
+            ..step("fill")
+        };
+        assert_eq!(resolve_value(&missing_var, &vars), "{{token}}");
+        let literal = FlowStep {
+            value: Some("hi {{who}}".into()),
+            ..step("fill")
+        };
+        assert_eq!(resolve_value(&literal, &vars), "hi alice");
+        assert_eq!(resolve_value(&step("fill"), &vars), "");
+    }
+
+    #[test]
+    fn substitute_replaces_every_placeholder_and_keeps_unknown_ones() {
+        let vars = HashMap::from([
+            ("a".to_string(), "1".to_string()),
+            ("b".to_string(), "2".to_string()),
+        ]);
+        assert_eq!(
+            substitute("{{a}}+{{b}}={{a}}{{b}} {{c}}", &vars),
+            "1+2=12 {{c}}"
+        );
+        assert_eq!(substitute("plain", &vars), "plain");
     }
 }

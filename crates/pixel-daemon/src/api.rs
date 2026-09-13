@@ -13,6 +13,7 @@ use std::time::Instant;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use pixel_context::estimate_tokens;
 use pixel_facts::FactsStore;
 use pixel_graph::{EdgeKind, EdgeRow, FileRow, GraphStore, SymbolKind, SymbolRow};
 use pixel_index::TrigramExtractor;
@@ -29,6 +30,33 @@ pub const GRAPH_DB_FILE: &str = "graph.db";
 /// snapshot, epistemics, budget, result, error, warnings`), gated by
 /// `pixel_proto::ENVELOPE_PROTOCOL_VERSION`.
 pub const PROTOCOL_VERSION: u64 = 9;
+
+/// The potion model the daemon warms; the `potion.ok` marker carries the
+/// repo name so a stale v1 marker cannot pass for v2.
+const POTION_V2_REPO: &str = "minishlab/potion-code-16M-v2";
+
+// `targets` (S3 probes, graph expansion and evidence): the caps keep the op
+// ms-scale; every cap that fires is named in the epistemics envelope.
+const CONTENT_PROBE_LIMIT: usize = 500;
+const MAX_SEED_FILES: usize = 8;
+const MAX_SEED_SYMBOLS: usize = 24;
+/// P0 is the only tier the doctrine mandates checking before the first
+/// edit, so it is the only tier worth spending tokens to pre-justify.
+const EVIDENCE_MAX_LINES_PER_TARGET: usize = 2;
+
+/// `context` and `uses`: edges returned per direction before elision.
+const EDGE_LIMIT: usize = 20;
+// `context` budget shape: item count and source bytes, per target and per
+// neighbour snippet.
+const MAX_CONTEXT_ITEMS: usize = 41;
+const MAX_CONTEXT_SOURCE_BYTES: usize = 262_144; // 256 KiB
+const MAX_TARGET_SNIPPET_BYTES: usize = 32_768; // 32 KiB
+const MAX_NEIGHBOR_SNIPPET_BYTES: usize = 4_096; // 4 KiB
+
+/// Hard cap so `map` on a pathological repo stays bounded; the flag
+/// surfaces in the output so a truncated map is never passed off as
+/// complete.
+const MAP_FILE_CAP: usize = 2000;
 
 // ---------------------------------------------------------------------------
 // errors
@@ -214,59 +242,102 @@ impl Service {
         }
     }
 
-    /// Make sure `self.graph` is populated; builds graph.db on first useand
-    /// rebuilds it when the working tree has drifted from the indexed state
-    /// (detected via the build-time freshness signature). Returns build info
-    /// (stats + timing) when a build/rebuild happened.
+    /// Make sure `self.graph` is populated. Builds graph.db on first use;
+    /// when the working tree has drifted from the built state (detected via
+    /// the build-time freshness signature) it re-extracts only the files
+    /// whose content hash changed and drops the removed ones, falling back
+    /// to a full rebuild when the db carries no signature or the drift
+    /// exceeds `PIXEL_GRAPH_INCREMENTAL_MAX_PCT` (default 20 %) of the
+    /// indexed files. Returns build info (stats, timing, `incremental`)
+    /// when a build/update happened.
+    ///
+    /// Without a git anchor (no `.git`) the same path applies: the walk
+    /// (`policy_walk`, which respects .gitignore in gitless trees) is capped
+    /// by `PIXEL_GRAPH_MAX_FILES` (default 50000) and the signature is
+    /// file-hash-based, so drift detection works without git.
     fn ensure_graph(&mut self) -> Result<Option<Value>, String> {
         if self.graph.is_some() {
             return Ok(None);
         }
         let db = self.graph_db_path();
-
-        // No git anchor (no `.git`): the graph build walks the tree via
-        // `policy_walk` (which respects .gitignore even in gitless trees) with
-        // a file-count cap (PIXEL_GRAPH_MAX_FILES, default 50000) to prevent
-        // pathological walks on huge or mis-rooted directories. The freshness
-        // signature is file-hash-based (not commit-OID-based), so incremental
-        // freshness checks work without git. An existing graph.db is reused if
-        // fresh; otherwise it is rebuilt from the filesystem walk.
-        if pixel_index::gitsync::rev_parse_head(&self.root).is_none() {
-            if db.exists() && bridge::is_fresh(&self.root, &db) {
-                self.graph = Some(GraphStore::open(&db).map_err(|e| e.to_string())?);
-                return Ok(None);
-            }
-            // Build from filesystem walk (capped). If the build fails (e.g.
-            // file-count cap hit on a huge directory), return an error that
-            // callers can degrade from — same pattern as op_targets.
-            let (stats, build_ms) = self.rebuild_graph()?;
-            self.graph = Some(GraphStore::open(&db).map_err(|e| e.to_string())?);
-            return Ok(Some(json!({
-                "graph_built": true,
-                "build_ms": build_ms,
-                "stats": stats,
-                "gitless": true,
-            })));
-        }
-
-        // An existing db is only reused if its freshness signature matches the
-        // current working tree; otherwise it is stale (files added/removed/
-        // edited since it was built)and is rebuilt from scratch.
-        let stale = db.exists() && !bridge::is_fresh(&self.root, &db);
-        let built = if !db.exists() || stale {
-            let (stats, build_ms) = self.rebuild_graph()?;
-            Some(json!({
-                "graph_built": true,
-                "build_ms": build_ms,
-                "stats": stats,
-            }))
+        let gitless = pixel_index::gitsync::rev_parse_head(&self.root).is_none();
+        let mut built = None;
+        if !db.exists() {
+            built = Some(self.full_rebuild_info("missing")?);
         } else {
-            None
-        };
+            // One walk answers both "fresh?" and "which files drifted?".
+            match bridge::tree_delta(&self.root, &db) {
+                Ok(Some(delta)) if delta.fresh => {}
+                Ok(Some(delta)) => {
+                    let pct = incremental_max_pct();
+                    if incremental_allowed(delta.changed_count(), delta.indexed_files, pct) {
+                        built = Some(self.incremental_update_info(&delta)?);
+                    } else {
+                        built = Some(self.full_rebuild_info("threshold")?);
+                    }
+                }
+                Ok(None) => built = Some(self.full_rebuild_info("no_signature")?),
+                Err(_) => built = Some(self.full_rebuild_info("unreadable")?),
+            }
+        }
         if self.graph.is_none() {
             self.graph = Some(GraphStore::open(&db).map_err(|e| e.to_string())?);
         }
+        if gitless && let Some(obj) = built.as_mut().and_then(Value::as_object_mut) {
+            obj.insert("gitless".into(), json!(true));
+        }
         Ok(built)
+    }
+
+    /// Full rebuild plus its `graph_build` record. If the build fails (e.g.
+    /// file-count cap hit on a huge gitless directory), the error is
+    /// returned so callers can degrade from it — same pattern as
+    /// `op_targets`.
+    fn full_rebuild_info(&mut self, reason: &str) -> Result<Value, String> {
+        let (stats, build_ms) = self.rebuild_graph()?;
+        Ok(json!({
+            "graph_built": true,
+            "incremental": false,
+            "reason": reason,
+            "build_ms": build_ms,
+            "stats": stats,
+        }))
+    }
+
+    /// Apply a tree delta in place. An incremental update that fails
+    /// (concurrent edit, unreadable row, sqlite busy) degrades to a full
+    /// rebuild rather than surfacing an error: the full path is always
+    /// available and the caller only asked for a fresh graph.
+    fn incremental_update_info(
+        &mut self,
+        delta: &pixel_graph::build::TreeDelta,
+    ) -> Result<Value, String> {
+        let db = self.graph_db_path();
+        self.graph.take();
+        let started = Instant::now();
+        if let Err(error) = bridge::apply_tree_delta(&self.root, &db, delta) {
+            let mut info = self.full_rebuild_info("incremental_failed")?;
+            info["incremental_error"] = json!(error);
+            return Ok(info);
+        }
+        let build_ms = started.elapsed().as_millis() as u64;
+        let store = GraphStore::open(&db).map_err(|e| e.to_string())?;
+        let (files, symbols, edges, unresolved) = store.counts().map_err(|e| e.to_string())?;
+        self.graph = Some(store);
+        Ok(json!({
+            "graph_built": true,
+            "incremental": true,
+            "changed_files": delta.changed.len(),
+            "removed_files": delta.removed.len(),
+            "build_ms": build_ms,
+            "stats": {
+                "files": files,
+                "symbols": symbols,
+                "edges": edges,
+                "unresolved": unresolved,
+                "elapsed_ms": build_ms,
+            },
+        }))
     }
 
     fn rebuild_graph(&mut self) -> Result<(Value, u64), String> {
@@ -346,6 +417,9 @@ impl Service {
     /// confirmed load failure on a cached model. This means `pixel ask`
     /// (which uses `download=true`) can cache the model at any time, and
     /// the next `--scope hybrid` search will pick it up without a restart.
+    // Loads or downloads the potion model: unit tests never have it, so no
+    // test can observe the difference (`pixel ask` covers it end to end).
+    #[cfg_attr(test, mutants::skip)]
     fn ensure_embedder(&mut self) {
         if self.embedder.is_some() || self.embedder_unavailable {
             return;
@@ -353,16 +427,17 @@ impl Service {
 
         // Check if the v2 model is cached. The marker file contains the
         // repo name, so a stale v1 marker won't cause a false positive.
-        const V2_REPO: &str = "minishlab/potion-code-16M-v2";
         let marker = pixel_recall::models_dir().join("potion.ok");
-        let is_cached = std::fs::read_to_string(&marker)
-            .map(|content| content.trim() == V2_REPO)
-            .unwrap_or(false);
+        let is_cached =
+            std::fs::read_to_string(&marker).is_ok_and(|content| content.trim() == POTION_V2_REPO);
 
         if is_cached {
             // Cached — load now (fast, no network).
+            // SAFETY: set_var is process-global. This runs on the request thread
+            // before the embedder is opened, and nothing else reads
+            // PIXEL_RECALL_MODEL_REPO concurrently.
             unsafe {
-                std::env::set_var("PIXEL_RECALL_MODEL_REPO", V2_REPO);
+                std::env::set_var("PIXEL_RECALL_MODEL_REPO", POTION_V2_REPO);
             }
             match open_default_embedder(false) {
                 Ok(e) => self.embedder = Some(e),
@@ -386,8 +461,10 @@ impl Service {
                  `--scope hybrid`. Degrading to `code` ranking for this call."
             );
             std::thread::spawn(move || {
+                // SAFETY: same variable and value as the cached path above; the only
+                // reader is the embedder opened on this thread right after.
                 unsafe {
-                    std::env::set_var("PIXEL_RECALL_MODEL_REPO", V2_REPO);
+                    std::env::set_var("PIXEL_RECALL_MODEL_REPO", POTION_V2_REPO);
                 }
                 // download=true: fetches + caches the model, writes marker.
                 // Result is intentionally ignored — best-effort background
@@ -478,11 +555,21 @@ impl Service {
             op_name,
             "inspect" | "review" | "diff" | "status" | "changes"
         ) || is_retrieval_op(op_name);
+        // Only the ops whose job is to report the working tree carry the
+        // dirty path list. Everything else gets `dirty_count`: a retrieval
+        // answer needs to say WHICH tree state it was computed against, not
+        // enumerate 15 000 untracked `vendor/bundle` paths on every call.
+        let full_dirty_list = matches!(op_name, "inspect" | "review");
         match self.dispatch(req) {
             Ok(v) => {
                 let mut env = Envelope::success(op_name, v);
                 if attach_snapshot {
-                    env = env.with_snapshot(self.repo_snapshot());
+                    let snapshot = self.repo_snapshot();
+                    env = env.with_snapshot(if full_dirty_list {
+                        snapshot
+                    } else {
+                        snapshot.compact()
+                    });
                 }
                 // Epistemics choke point: EVERY successful retrieval-class
                 // response carries an `epistemics` object — this is the ONLY
@@ -521,6 +608,7 @@ impl Service {
             head,
             branch,
             dirty,
+            dirty_count: None,
         }
     }
 
@@ -882,7 +970,6 @@ impl Service {
         let all_paths = self.index.paths();
 
         // S3: per-keyword content match counts (capped probes keep this ms-scale).
-        const CONTENT_PROBE_LIMIT: usize = 500;
         let mut content_hits: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
         // Epistemics: every probe cap that fires is NAMED here and forces
         // lower_bound on the report envelope — a truncated probe must never
@@ -946,8 +1033,6 @@ impl Service {
 
             // Graph expansion is seeded from the lexical pre-fuse so every
             // P1/P2 neighbor traces back to a lexical anchor.
-            const MAX_SEED_FILES: usize = 8;
-            const MAX_SEED_SYMBOLS: usize = 24;
             let seed_paths: Vec<String> =
                 engine::lexical_rank(&all_paths, &probe_keywords, &symbol_hits, &content_hits)
                     .into_iter()
@@ -1048,7 +1133,6 @@ impl Service {
         // "peripheral and droppable". P0 is the only tier the doctrine
         // mandates checking before the first edit, so it's the only tier
         // worth spending the token budget to pre-justify.
-        const EVIDENCE_MAX_LINES_PER_TARGET: usize = 2;
         if let Some(targets) = out.get_mut("targets").and_then(Value::as_array_mut) {
             for t in targets {
                 let is_p0 = t.get("tier").and_then(Value::as_str) == Some("P0");
@@ -1145,7 +1229,6 @@ impl Service {
             .envelope_for_name(&sym.name)
             .map_err(|e| e.to_string())?;
         let sym_json = symbol_json(&sym, &files);
-        use pixel_context::estimate_tokens;
 
         let budget = budget_tokens.unwrap_or(2000);
         let value_tokens =
@@ -1215,12 +1298,6 @@ impl Service {
                 && a.tier == b.tier
                 && a.site_line == b.site_line
         });
-
-        const EDGE_LIMIT: usize = 20;
-        const MAX_CONTEXT_ITEMS: usize = 41;
-        const MAX_CONTEXT_SOURCE_BYTES: usize = 256 * 1024;
-        const MAX_TARGET_SNIPPET_BYTES: usize = 32 * 1024;
-        const MAX_NEIGHBOR_SNIPPET_BYTES: usize = 4 * 1024;
 
         // Bound source retained before rendering. The target gets priority;
         // neighbors share only the remaining aggregate allowance.
@@ -1401,7 +1478,6 @@ impl Service {
             "callees" => (store.edges_from(sym.id, Some(EdgeKind::Calls)), false),
             _ => (store.edges_to(sym.id, Some(EdgeKind::Calls)), true),
         };
-        const EDGE_LIMIT: usize = 20;
         let mut edges = edges.map_err(|e| e.to_string())?;
         edges.sort_by(|a, b| {
             a.site_line
@@ -1672,8 +1748,7 @@ impl Service {
                 [],
                 |r| r.get::<_, String>(0),
             )
-            .map(|s| s == "done")
-            .unwrap_or(false);
+            .is_ok_and(|s| s == "done");
         // Full repo commit count via rev-list so a frozen enumeration is
         // visible as commits_indexed < total_commits. The facts universe also
         // covers stash/reflog-only commits that `--all` doesn't count, so take
@@ -1925,8 +2000,7 @@ impl Service {
             let p = Path::new(f);
             if p.is_absolute() {
                 p.strip_prefix(&self.root)
-                    .map(|r| r.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| f.to_string())
+                    .map_or_else(|_| f.to_string(), |r| r.to_string_lossy().into_owned())
             } else {
                 f.trim_start_matches("./").to_string()
             }
@@ -2014,10 +2088,6 @@ impl Service {
                 "graph unavailable — no index to map. Run `pixel graph .` first".to_string(),
             );
         };
-        // Hard cap so `map` on a pathological repo stays bounded; the flag
-        // surfaces in the output so a truncated map is never passed off as
-        // complete.
-        const MAP_FILE_CAP: usize = 2000;
         let files = store.files().map_err(|e| e.to_string())?;
         let truncated = files.len() > MAP_FILE_CAP;
         let mut grouped: Vec<(&FileRow, Vec<SymbolRow>)> = Vec::new();
@@ -2033,11 +2103,10 @@ impl Service {
         let mut md = String::new();
         if markdown {
             use std::fmt::Write;
-            let root_name = self
-                .root
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.root.display().to_string());
+            let root_name = self.root.file_name().map_or_else(
+                || self.root.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
             let _ = writeln!(
                 md,
                 "# pixel map — {root_name}\n\n{} files · {} symbols",
@@ -2046,12 +2115,7 @@ impl Service {
             );
             let mut cur_dir = String::new();
             for (f, syms) in &grouped {
-                let dir = f
-                    .path
-                    .rsplit_once('/')
-                    .map(|(d, _)| d)
-                    .unwrap_or("")
-                    .to_string();
+                let dir = f.path.rsplit_once('/').map_or("", |(d, _)| d).to_string();
                 if dir != cur_dir {
                     let _ = writeln!(md, "\n## {}", if dir.is_empty() { "." } else { &dir });
                     cur_dir = dir;
@@ -2127,8 +2191,7 @@ impl Service {
             .collect();
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_millis() as i64);
         // Fan-in (in-degree): count incoming `calls` edges per candidate
         // file via the graph.db escape hatch (`GraphStore::conn`). The graph
         // is lazily built by `ensure_graph` earlier in the request; if it is
@@ -2890,6 +2953,34 @@ fn read_snippet(
     snippet
 }
 
+/// Default share of indexed files above which a drifted graph is rebuilt
+/// from scratch instead of updated file by file. Re-extracting one file is
+/// cheap; re-resolving calls after a large drift is not much cheaper than a
+/// fresh parallel build, and a rebuild is the path with no state to trust.
+pub const DEFAULT_GRAPH_INCREMENTAL_MAX_PCT: u64 = 20;
+
+/// `PIXEL_GRAPH_INCREMENTAL_MAX_PCT`: percentage of indexed files (0-100)
+/// up to which drift is applied incrementally. `0` disables the incremental
+/// path (always rebuild); `100` never rebuilds for drift alone. Unset,
+/// empty, non-numeric or out-of-range values fall back to the default.
+fn incremental_max_pct() -> u64 {
+    std::env::var("PIXEL_GRAPH_INCREMENTAL_MAX_PCT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|pct| *pct <= 100)
+        .unwrap_or(DEFAULT_GRAPH_INCREMENTAL_MAX_PCT)
+}
+
+/// Whether `changed` drifted files out of `indexed` may be applied
+/// incrementally under a `pct` threshold. A graph that indexed nothing has
+/// no incremental state to reuse; a threshold of 0 means "never".
+fn incremental_allowed(changed: usize, indexed: usize, pct: u64) -> bool {
+    if pct == 0 || indexed == 0 {
+        return false;
+    }
+    (changed as u128) * 100 <= (indexed as u128) * (pct as u128)
+}
+
 fn merge_build_info(out: &mut Value, built: Option<Value>) {
     if let (Some(info), Some(obj)) = (built, out.as_object_mut()) {
         obj.insert("graph_build".into(), info);
@@ -2957,9 +3048,22 @@ mod bridge {
         }))
     }
 
-    /// True iff the on-disk graph is fresh relative to `root`'s working tree.
-    pub fn is_fresh(root: &Path, db: &Path) -> bool {
-        pixel_graph::build::is_fresh(root, db)
+    /// One walk of `root`: freshness verdict plus the files that drifted
+    /// from the on-disk graph. `None` when the db has no signature to trust.
+    pub fn tree_delta(
+        root: &Path,
+        db: &Path,
+    ) -> Result<Option<pixel_graph::build::TreeDelta>, String> {
+        pixel_graph::build::tree_delta(root, db).map_err(es)
+    }
+
+    /// Re-extract the drifted files only and publish the delta's signature.
+    pub fn apply_tree_delta(
+        root: &Path,
+        db: &Path,
+        delta: &pixel_graph::build::TreeDelta,
+    ) -> Result<(), String> {
+        pixel_graph::build::apply_tree_delta(root, db, delta).map_err(es)
     }
 
     pub fn update_file(root: &Path, db: &Path, rel: &str) {
@@ -3273,13 +3377,11 @@ fn rank_search_matches(
             .then_with(|| {
                 std::path::Path::new(&a.0)
                     .file_name()
-                    .map(|s| s.to_string_lossy().len())
-                    .unwrap_or(0)
+                    .map_or(0, |s| s.to_string_lossy().len())
                     .cmp(
                         &std::path::Path::new(&b.0)
                             .file_name()
-                            .map(|s| s.to_string_lossy().len())
-                            .unwrap_or(0),
+                            .map_or(0, |s| s.to_string_lossy().len()),
                     )
             })
             .then_with(|| a.0.cmp(&b.0))
@@ -3368,7 +3470,7 @@ fn rank_search_matches(
     // camelCase/snake_case segments line up on both sides.
     let mut density_rank: Vec<(String, usize)> = files
         .iter()
-        .map(|f| (f.clone(), by_file.get(f).map(|v| v.len()).unwrap_or(0)))
+        .map(|f| (f.clone(), by_file.get(f).map_or(0, Vec::len)))
         .collect();
     density_rank.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
@@ -3384,7 +3486,7 @@ fn rank_search_matches(
         .map(|f| {
             let mut term_freqs = vec![0u32; bm25_terms.len()];
             let mut len: u32 = 0;
-            for m in by_file.get(f).map(|v| v.as_slice()).unwrap_or(&[]) {
+            for m in by_file.get(f).map_or(&[][..], Vec::as_slice) {
                 for tok in tokenize_words(&m.line) {
                     len = len.saturating_add(1);
                     if let Some(j) = bm25_terms.iter().position(|t| *t == tok) {
@@ -3508,7 +3610,7 @@ mod tests {
             .env("GIT_COMMITTER_EMAIL", "t@t")
             .output()
             .unwrap();
-        assert!(out.status.success(), "git {args:?}: {:?}", out);
+        assert!(out.status.success(), "git {args:?}: {out:?}");
     }
 
     /// Every envelope the daemon emits must satisfy `Envelope::validate`,
@@ -3620,8 +3722,7 @@ mod tests {
         assert_eq!(
             data["lang"].as_str(),
             Some("rust"),
-            "skeleton must surface the detected lang: {:?}",
-            data
+            "skeleton must surface the detected lang: {data:?}"
         );
         let syms = data["symbols"].as_array().cloned().unwrap_or_default();
         assert!(!syms.is_empty(), "skeleton must find the indexed symbols");
@@ -3639,7 +3740,7 @@ mod tests {
             prev_line = start;
             // The skeleton contract: kind + sig (no body, no source text).
             let kind = s["kind"].as_str().unwrap_or("");
-            let sig = s["sig"].as_str().map(str::trim).unwrap_or("");
+            let sig = s["sig"].as_str().map_or("", str::trim);
             assert!(!kind.is_empty(), "skeleton symbol missing kind: {s:?}");
             assert!(!sig.is_empty(), "skeleton symbol missing sig: {s:?}");
             // No `body`/source-text field survives on any skeleton symbol.
@@ -3868,7 +3969,7 @@ mod tests {
         let sym = svc.handle(Request::Symbol {
             name: "alpha".into(),
         });
-        assert!(sym.ok, "symbol lookup: {:?}", sym);
+        assert!(sym.ok, "symbol lookup: {sym:?}");
         let uid = sym
             .data()
             .get("symbols")
@@ -3884,7 +3985,7 @@ mod tests {
             uid: uid.clone(),
             budget_tokens: Some(50),
         });
-        assert!(resp.ok, "context: {:?}", resp);
+        assert!(resp.ok, "context: {resp:?}");
         let serialized = serde_json::to_string(resp.data()).unwrap();
         let tokens = pixel_context::estimate_tokens(&serialized);
         assert!(
@@ -3948,7 +4049,7 @@ mod tests {
             uid: uid.clone(),
             budget_tokens: Some(500),
         });
-        assert!(resp.ok, "context: {:?}", resp);
+        assert!(resp.ok, "context: {resp:?}");
         let serialized = serde_json::to_string(resp.data()).unwrap();
         let tokens = pixel_context::estimate_tokens(&serialized);
         assert!(
@@ -3989,7 +4090,7 @@ mod tests {
             offset: None,
             scope: None,
         });
-        assert!(resp.ok, "search: {:?}", resp);
+        assert!(resp.ok, "search: {resp:?}");
         let matches = resp
             .data()
             .get("matches")
@@ -4369,8 +4470,8 @@ mod tests {
     /// gaps.
     #[test]
     fn search_scope_code_pagination_has_no_duplicates_or_gaps() {
-        let root = tmpdir("search-scope-pagination");
         const TOTAL: usize = 37;
+        let root = tmpdir("search-scope-pagination");
         for i in 0..TOTAL {
             std::fs::write(
                 root.join(format!("file{i:03}.rs")),
@@ -4809,14 +4910,57 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name}: retrieval response shipped WITHOUT snapshot"));
             assert!(snapshot.head.is_some(), "{name}: snapshot must carry HEAD");
+            // Retrieval answers carry the compact form: the dirty tree is
+            // counted, never enumerated (one untracked vendor tree used to
+            // turn every `symbol` answer into 240 KB).
             assert!(
-                snapshot.dirty.iter().any(|p| p == "a.ts"),
-                "{name}: snapshot must list the dirty file, got {:?}",
+                snapshot.dirty.is_empty(),
+                "{name}: retrieval snapshot must not enumerate dirty paths, got {:?}",
                 snapshot.dirty
+            );
+            let expected = pixel_index::gitsync::status_porcelain(&root).len() as u64;
+            assert!(expected >= 1, "fixture must have a dirty file");
+            assert_eq!(
+                snapshot.dirty_count,
+                Some(expected),
+                "{name}: snapshot must count every dirty path"
             );
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The incremental/full decision is what keeps an agent's
+    /// edit-then-`impact` loop at seconds instead of a full rebuild per
+    /// cycle; the threshold is the documented `PIXEL_GRAPH_INCREMENTAL_MAX_PCT`
+    /// contract (percentage of indexed files, `0` = always rebuild).
+    #[test]
+    fn incremental_allowed_follows_the_percentage_threshold() {
+        // 2 of 10 files = 20 %: at the default threshold, incremental.
+        assert!(incremental_allowed(
+            2,
+            10,
+            DEFAULT_GRAPH_INCREMENTAL_MAX_PCT
+        ));
+        // 3 of 10 = 30 %: rebuild.
+        assert!(!incremental_allowed(
+            3,
+            10,
+            DEFAULT_GRAPH_INCREMENTAL_MAX_PCT
+        ));
+        // 1 of 5 = 20 % still incremental; 3 of 5 (the test fixture) is not.
+        assert!(incremental_allowed(1, 5, 20));
+        assert!(!incremental_allowed(3, 5, 20));
+        // `0` disables the incremental path even for a single file.
+        assert!(!incremental_allowed(1, 10_000, 0));
+        // `100` never rebuilds for drift alone.
+        assert!(incremental_allowed(10_000, 10_000, 100));
+        // An empty graph has nothing to update incrementally.
+        assert!(!incremental_allowed(1, 0, 20));
+        // Removals count as drift too: 2 000 of 10 000 is the last
+        // incremental size at 20 %, 2 001 is not.
+        assert!(incremental_allowed(2_000, 10_000, 20));
+        assert!(!incremental_allowed(2_001, 10_000, 20));
     }
 
     /// Phase 3 item 2 — targets honesty: when the 500-match content probe
@@ -4982,6 +5126,148 @@ mod tests {
         };
         assert!(error.contains("facts lazy ingest failed"), "{error}");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two files, one commit, `login.rs` edited in a second commit and
+    /// dirty in the tree: enough history for the signals and the facts
+    /// index to have something to report.
+    fn signals_repo(tag: &str) -> PathBuf {
+        let root = tmpdir(tag);
+        std::fs::write(
+            root.join("login.rs"),
+            "pub fn login(user: &str) -> bool { !user.is_empty() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("caller.rs"),
+            "use crate::login::login;\npub fn go() { login(\"a\"); }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        std::fs::write(
+            root.join("login.rs"),
+            "pub fn login(user: &str) -> bool { user.len() > 1 }\n",
+        )
+        .unwrap();
+        git(&root, &["commit", "-qam", "tighten login"]);
+        std::fs::write(
+            root.join("login.rs"),
+            "pub fn login(user: &str) -> bool { user.len() > 2 }\n",
+        )
+        .unwrap();
+        root
+    }
+
+    /// `status.facts` is how an agent sees whether history queries are
+    /// answerable: phase A done, commit counts, diff text present.
+    #[test]
+    fn facts_visibility_reports_the_history_index_before_and_after_ingest() {
+        let root = signals_repo("facts-visibility");
+        let svc = Service::open(&root).unwrap();
+        let before = svc.facts_visibility();
+        assert_eq!(before["present"], true, "{before}");
+        assert_eq!(before["phase_a_done"], false, "{before}");
+        assert_eq!(before["total_commits"], 2, "rev-list count: {before}");
+        assert_eq!(before["fresh"], false, "{before}");
+
+        let mut facts = FactsStore::open(&root).unwrap();
+        let report = pixel_facts::ingest::ingest_until_fresh_within(
+            &mut facts,
+            &pixel_facts::ingest::IngestOptions::default(),
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+        assert!(report.fresh, "{report:?}");
+        let after = svc.facts_visibility();
+        assert_eq!(after["phase_a_done"], true, "{after}");
+        assert_eq!(after["commits_indexed"], 2, "{after}");
+        assert_eq!(after["total_commits"], 2, "{after}");
+        assert_eq!(after["fresh"], true, "{after}");
+        assert!(after["hunks_with_text"].as_i64().unwrap() >= 1, "{after}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn op_note_sets_gets_lists_and_removes_annotations_keyed_by_repo_path() {
+        let root = signals_repo("op-note");
+        let mut svc = Service::open(&root).unwrap();
+        // The service keys rows by the canonical root (macOS's temp dir is
+        // a symlink), so the absolute form must be canonical too.
+        let abs = root.canonicalize().unwrap().join("login.rs");
+        let set = svc
+            .op_note(
+                "set",
+                Some(abs.to_str().unwrap()),
+                Some("login"),
+                Some("guard first"),
+            )
+            .unwrap();
+        assert_eq!(set["ok"], true);
+        assert_eq!(
+            set["file"], "login.rs",
+            "absolute paths key the repo-relative row"
+        );
+        let got = svc
+            .op_note("get", Some("./login.rs"), Some("login"), None)
+            .unwrap();
+        assert_eq!(got["note"], "guard first");
+        let list = svc.op_note("list", None, None, None).unwrap();
+        assert_eq!(list["total"], 1, "{list}");
+        assert_eq!(list["capped"], false);
+        let listed = svc.op_note("list", Some("caller.rs"), None, None).unwrap();
+        assert_eq!(listed["total"], 0);
+        let rm = svc
+            .op_note("rm", Some("login.rs"), Some("login"), None)
+            .unwrap();
+        assert_eq!(rm["removed"], true);
+        let rm_again = svc
+            .op_note("rm", Some("login.rs"), Some("login"), None)
+            .unwrap();
+        assert_eq!(rm_again["removed"], false);
+        assert!(
+            svc.op_note("get", Some("login.rs"), Some("login"), None)
+                .unwrap()["note"]
+                .is_null()
+        );
+        assert!(svc.op_note("set", Some("login.rs"), None, None).is_err());
+        assert!(svc.op_note("teleport", None, None, None).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn op_map_lists_every_file_with_its_symbols_in_line_order() {
+        let root = signals_repo("op-map");
+        let mut svc = Service::open(&root).unwrap();
+        let map = svc.op_map(false).unwrap();
+        assert_eq!(map["file_count"], 2, "{map}");
+        assert_eq!(map["truncated"], false);
+        assert!(map["symbol_count"].as_u64().unwrap() >= 2, "{map}");
+        let files = map["files"].as_array().unwrap();
+        let login = files
+            .iter()
+            .find(|f| f["path"] == "login.rs")
+            .expect("login.rs");
+        assert_eq!(login["symbols"][0]["name"], "login", "{login}");
+        assert!(map.get("markdown").is_none());
+        let md = svc.op_map(true).unwrap();
+        assert!(md["markdown"].as_str().unwrap().contains("login"), "{md}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The reranker's signals: a file with commits behind it scores
+    /// activity, an untouched candidate does not.
+    #[test]
+    fn engine_signals_scores_activity_for_files_with_history() {
+        let root = signals_repo("engine-signals");
+        let svc = Service::open(&root).unwrap();
+        let bundle = svc.engine_signals(&["login.rs".to_string(), "caller.rs".to_string()]);
+        let login = bundle.activity.get("login.rs").copied().unwrap_or(0.0);
+        let caller = bundle.activity.get("caller.rs").copied().unwrap_or(0.0);
+        assert!(login > 0.0, "{:?}", bundle.activity);
+        assert!(login >= caller, "{:?}", bundle.activity);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

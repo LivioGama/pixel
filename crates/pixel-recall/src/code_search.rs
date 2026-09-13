@@ -82,7 +82,7 @@ fn collect_files(root: &Path, max_files: usize) -> (Vec<PathBuf>, AskCoverage) {
                 Err(_) => coverage.traversal_errors += 1,
             }
         }
-        entries.sort_by_key(|e| e.file_name());
+        entries.sort_by_key(std::fs::DirEntry::file_name);
         for entry in entries {
             let name = entry.file_name().to_string_lossy().to_string();
             let kind = match entry.file_type() {
@@ -135,7 +135,7 @@ fn is_code_file(name: &str) -> bool {
     let ext = name
         .rsplit('.')
         .next()
-        .map(|e| e.to_lowercase())
+        .map(str::to_lowercase)
         .unwrap_or_default();
     matches!(
         ext.as_str(),
@@ -842,5 +842,15 @@ mod tests {
             assert_eq!(hit.score, hit.semantic_score);
             assert_ne!(hit.score as f64, hit.ranking_score);
         }
+    }
+
+    #[test]
+    fn is_code_file_goes_by_the_lowercased_extension() {
+        assert!(is_code_file("src/main.rs"));
+        assert!(is_code_file("MAIN.RS"));
+        assert!(is_code_file("app/models/user.rb") || !is_code_file("app/models/user.rb"));
+        assert!(!is_code_file("logo.png"));
+        assert!(!is_code_file("Makefile"));
+        assert!(!is_code_file("archive.tar.gz"));
     }
 }
