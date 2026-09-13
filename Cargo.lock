@@ -2093,6 +2093,7 @@ version = "0.2.3"
 dependencies = [
  "clap",
  "libc",
+ "mutants",
  "pixel-actionlog",
  "pixel-daemon",
  "pixel-facts",
