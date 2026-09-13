@@ -15,3 +15,4 @@ mod search_compat_cli;
 mod targets_cli;
 #[cfg(unix)]
 mod upgrade_cli;
+mod version_cli;

@@ -318,6 +318,15 @@ reads `Cargo.toml`, every member's manifest, `Cargo.lock` and
 `changelog`), exit 1 on any failure. Pure functions over file contents;
 no git, no network.
 
+## Build provenance
+
+`crates/pixel/build.rs` captures the commit (`-dirty` when tracked files
+were modified), target triple, rustc version and build date at compile
+time and `pixel --version` prints them under the version line (`pixel -V`
+stays one line). Every value falls back to `unknown` rather than failing
+the build. The script re-runs when `.git/HEAD`, the ref it points to, or
+the index changes, so the flag follows commits without a `cargo clean`.
+
 ## Build features
 
 `pixel-cli` defaults to `fastembed` and `model2vec`. `fastembed` needs ONNX

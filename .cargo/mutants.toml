@@ -3,7 +3,9 @@
 
 # Benches are not shipped and carry no tests: every mutant there would be a
 # false "missed".
-exclude_globs = ["crates/pixel-bench/**", "**/benches/**"]
+# Build scripts run at compile time; a mutated one changes what the binary
+# reports, not what a test asserts.
+exclude_globs = ["crates/pixel-bench/**", "**/benches/**", "**/build.rs"]
 
 # Debug output is diagnostic, never part of the wire contract. Display is
 # deliberately kept: tokens, error codes and op names reach JSON and the
