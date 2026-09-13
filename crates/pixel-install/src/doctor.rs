@@ -323,7 +323,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         checks.push(check_status("rule.parity", move || {
             let Some((source, rule_text)) = installed_rule_text(&home_for_rule) else {
                 return Ok((CheckStatus::Yellow, DoctorCheckDetail {
-                    summary: "no installed rule text found (managed block or rule file) — parity not checked".into(),
+                    summary: "no installed rule text found (agent-prompt.md not deployed, no managed block or rule file) — run `pixel install`; parity not checked".into(),
                     detail: None,
                 }));
             };
@@ -386,7 +386,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 return Ok((
                     CheckStatus::Yellow,
                     DoctorCheckDetail {
-                        summary: "no installed rule text found — scenario consistency not checked"
+                        summary: "no installed rule text found (agent-prompt.md not deployed, no managed block or rule file) — run `pixel install`; scenario consistency not checked"
                             .into(),
                         detail: None,
                     },
@@ -698,10 +698,22 @@ fn age_secs(mtime: SystemTime) -> u64 {
     now.saturating_sub(m)
 }
 
-/// Locate the installed pixel rule text: the managed block inside the first
-/// CLAUDE.md/AGENTS.md that carries one, else the canonical rule source at
-/// `~/.agent-config/rules/pixel.md`. Returns the source path and the text.
+/// Path of the prompt `pixel install` deploys and the shell wrappers inject
+/// (`--append-system-prompt-file`): the rule text agents actually read.
+fn deployed_agent_prompt(home: &Path) -> PathBuf {
+    home.join(".local/share/pixel/agent-prompt.md")
+}
+
+/// Locate the installed pixel rule text, in the order agents receive it:
+/// the deployed `~/.local/share/pixel/agent-prompt.md` (0.2.x installs write
+/// nothing else), else the managed block inside the first CLAUDE.md/AGENTS.md
+/// that carries one (installs before 0.2.0), else the canonical rule source
+/// at `~/.agent-config/rules/pixel.md`. Returns the source path and the text.
 fn installed_rule_text(home: &Path) -> Option<(PathBuf, String)> {
+    let prompt = deployed_agent_prompt(home);
+    if let Ok(text) = fs::read_to_string(&prompt) {
+        return Some((prompt, text));
+    }
     for path in config::find_agent_configs(home) {
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
