@@ -137,7 +137,11 @@ the install flow:
 scripts/pixel-smoke-test.sh     # exercises ~/.local/bin/pixel end to end
 ```
 
-To reproduce the release cross-build for Linux:
+The `Cross-build` workflow (`.github/workflows/cross-build.yml`) builds the
+musl release lane on every push to `develop`/`main` and on pull requests
+that touch a Rust-affecting path (`crates/`, `Cargo.*`, `.cargo/`,
+`deny.toml`, the workflow itself); a docs, prompt or script PR skips it.
+To reproduce it locally:
 
 ```bash
 cross build --release --no-default-features --features model2vec \

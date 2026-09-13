@@ -1,0 +1,83 @@
+name: Cross-build
+
+# The musl release lane, built exactly as release.yml builds it (cross,
+# --locked, model2vec only). The Test job's `cargo check` of that feature
+# set runs on glibc and cannot see a dependency that fails to link against
+# musl or a Cargo.lock that --locked rejects, so this is the only job that
+# proves a change still ships. It runs on every develop/main push and on
+# the pull requests that can change the outcome; a docs, prompt or script
+# PR skips it. No branch rule requires this check today; if one is added,
+# the excluded paths need a twin workflow that reports success.
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    paths:
+      - ".cargo/**"
+      - ".github/workflows/cross-build.yml"
+      - "Cargo.*"
+      - "crates/**"
+      - "deny.toml"
+      - "rust-toolchain*"
+
+# A new push to a pull request cancels the run still in flight for its
+# previous commit; branch pushes keep a complete run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# CI only reads the checkout; it never writes to the repository.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cross-build:
+    name: Cross-build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+          - target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          # The SHA pin no longer names the toolchain through the ref, so
+          # it is passed explicitly (same channel as before).
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      # Keyed by target so the two musl caches do not overwrite each other.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # PRs read the cache but never write it: only develop/main
+          # merges refresh the shared entries, so one PR cannot thrash
+          # or poison them. A failed build still saves what it compiled.
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+          key: ${{ matrix.target }}
+
+      # Prebuilt binary instead of `cargo install cross` (~40 s per run).
+      # cross compiles inside its own Docker image, which carries the musl
+      # toolchain, so no host musl-tools/perl/make are needed.
+      - name: Install cross
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: cross
+
+      # Must match release.yml exactly: fastembed (ONNX) has no musl build,
+      # but model2vec is pure Rust and ships in the Linux release. Building
+      # without it here would leave the released feature set untested.
+      - name: Cross-build (model2vec only — ort-sys has no musl prebuilts)
+        run: cross build --release --locked --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
