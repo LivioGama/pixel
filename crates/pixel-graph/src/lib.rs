@@ -17,6 +17,7 @@ pub mod concept_resolve;
 pub mod extract;
 pub mod impact;
 pub mod imports;
+pub mod plan;
 pub mod process;
 pub mod resolve;
 pub mod store;

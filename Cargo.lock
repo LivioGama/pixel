@@ -2278,6 +2278,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "unicode-normalization",
  "xxhash-rust",
 ]
 

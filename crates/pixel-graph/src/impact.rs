@@ -62,6 +62,11 @@ pub struct ImpactReport {
     pub affected_files: u64,
     pub affected_processes: Vec<String>,
     pub envelope: Envelope,
+    /// Symbols that reference the target via a `References` edge (passed as
+    /// an argument to a call — a callback / plugin / handler registration).
+    /// Weaker evidence than `Calls`: "may be invoked", not "will break".
+    /// Populated for the upstream direction; empty otherwise.
+    pub referenced_by: Vec<ImpactItem>,
 }
 
 /// Fetch a symbol row by rowid via ad-hoc SQL (store exposes uid/name lookups only).
@@ -200,6 +205,39 @@ pub fn impact(
 
     let envelope = store.envelope_for_name(&target.name)?;
     let affected_processes: Vec<String> = proc_set.into_iter().collect();
+
+    // References edges: symbols passed as arguments to calls (callbacks /
+    // plugins / handlers). Weaker than Calls — "may be invoked", not "will
+    // break" — so they surface in `referenced_by` rather than the main BFS
+    // buckets. Only meaningful for the upstream direction (who passes me
+    // as a callback).
+    let mut referenced_by: Vec<ImpactItem> = Vec::new();
+    if matches!(direction, Direction::Upstream) {
+        let ref_edges = store.edges_to(target.id, Some(EdgeKind::References))?;
+        // Dedupe by src_id — the same referrer at N call sites shouldn't
+        // produce N identical items.
+        let mut seen_src: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        // Cap at 20 like the main BFS buckets — an unbounded list is noise.
+        const MAX_REFERENCED_BY: usize = 20;
+        for e in ref_edges {
+            if !seen_src.insert(e.src_id) || referenced_by.len() >= MAX_REFERENCED_BY {
+                continue;
+            }
+            if let Some(sym) = symbol_by_id(store, e.src_id)? {
+                // Don't count reference-side files/processes toward risk —
+                // References are weaker evidence than direct calls.
+                referenced_by.push(ImpactItem {
+                    uid: sym.uid,
+                    name: sym.name,
+                    path: file_path_by_id(store, sym.file_id)?,
+                    line: sym.start_line,
+                    tier: e.tier.as_str().to_string(),
+                    processes: Vec::new(),
+                });
+            }
+        }
+    }
+
     let d1 = counts[0];
     let nproc = affected_processes.len();
     let base = if d1 > 50 || nproc > 20 {
@@ -212,8 +250,17 @@ pub fn impact(
         0
     };
     let risk = risk_label(base, envelope.lower_bound);
+    let ref_suffix = if !referenced_by.is_empty() {
+        format!(
+            "; referenced as callback in {} site{}",
+            referenced_by.len(),
+            if referenced_by.len() == 1 { "" } else { "s" }
+        )
+    } else {
+        String::new()
+    };
     let summary = format!(
-        "{}: {} at depth 1, {} at depth 2, {} at depth 3 ({}) across {} files, {} processes; risk {}{}",
+        "{}: {} at depth 1, {} at depth 2, {} at depth 3 ({}) across {} files, {} processes; risk {}{}{}",
         target.name,
         counts[0],
         counts[1],
@@ -229,7 +276,8 @@ pub fn impact(
             )
         } else {
             String::new()
-        }
+        },
+        ref_suffix
     );
 
     let [d1_will_break, d2_likely_affected, d3_may_need_tests] = buckets;
@@ -245,6 +293,7 @@ pub fn impact(
         affected_files: files.len() as u64,
         affected_processes,
         envelope,
+        referenced_by,
     })
 }
 
@@ -333,7 +382,7 @@ mod tests {
         call(&store, c, b);
         // unresolved same-name call site for "alpha" → lower bound
         store
-            .insert_unresolved_call(fid, "alpha", None, 42, None)
+            .insert_unresolved_call(fid, "alpha", None, 42, None, "calls")
             .unwrap();
 
         let report = impact(
@@ -366,5 +415,44 @@ mod tests {
         assert_eq!(t.hops.len(), 3);
         assert_eq!(t.hops[0].name, "gamma");
         assert_eq!(t.hops[2].name, "alpha");
+    }
+
+    /// A symbol with 0 `Calls` callers but 1 `References` edge should show
+    /// `referenced_by` with 1 item in an upstream impact report.
+    #[test]
+    fn referenced_by_surfaces_callback_edges() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fid = store.replace_file("src/a.ts", "oid", "ts").unwrap();
+        let handler = sym(&store, fid, "handler", 1, 5);
+        let setup = sym(&store, fid, "setup", 10, 15);
+        // No Calls edge to handler; only a References edge from setup.
+        store
+            .insert_edge(&EdgeRow {
+                src_id: setup,
+                dst_id: handler,
+                kind: EdgeKind::References,
+                tier: Tier::Probable,
+                site_line: 12,
+                receiver: Some("on".to_string()),
+            })
+            .unwrap();
+
+        let report = impact(
+            &store,
+            "src/a.ts#handler#function",
+            Direction::Upstream,
+            3,
+            100,
+        )
+        .unwrap();
+        // No Calls callers.
+        assert_eq!(report.counts_by_depth, [0, 0, 0]);
+        assert!(report.d1_will_break.is_empty());
+        // But one referenced_by entry.
+        assert_eq!(report.referenced_by.len(), 1);
+        assert_eq!(report.referenced_by[0].name, "setup");
+        assert_eq!(report.referenced_by[0].tier, "probable");
+        // Summary mentions the callback reference.
+        assert!(report.summary.contains("referenced as callback in 1 site"));
     }
 }

@@ -4,6 +4,7 @@
 //! and posting-list algebra (`posting`). Shards, git anchoring, overlay,
 //! planner, and verification land in later phases (see the project plan).
 
+pub mod cache;
 pub mod gram;
 pub mod lock;
 pub mod posting;

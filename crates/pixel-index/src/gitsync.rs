@@ -28,8 +28,20 @@ pub fn current_branch(root: &Path) -> Option<String> {
 }
 
 /// Tracked files (repo-relative, NUL-safe). Empty outside a git repo.
+/// This reads the working-tree *index* — staged additions/deletions shift
+/// the result. For cache-keyed shard building use `ls_tree` instead, which
+/// reads the commit's tree (a pure function of the commit OID).
 pub fn ls_files(root: &Path) -> Vec<String> {
     GitRunner::new(root).ls_files()
+}
+
+/// All files in commit `oid`'s tree (repo-relative, NUL-safe).
+/// `git ls-tree -r --name-only -z <oid>` — the commit's file universe,
+/// not the working-tree index. Staged additions/deletions don't affect
+/// the result. Used to build cache-keyed base shards that are a pure
+/// function of (commit, extractor).
+pub fn ls_tree(root: &Path, oid: &str) -> Vec<String> {
+    GitRunner::new(root).ls_tree(oid)
 }
 
 /// Blob content of `path` as it exists in commit `oid` (`git show oid:path`).

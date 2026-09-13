@@ -27,6 +27,7 @@ mod call_guard;
 mod claude_controller;
 mod guard;
 mod operation_metrics;
+mod plan_cmd;
 mod post_compaction;
 mod prompt_submit;
 mod recall_cmd;
@@ -921,6 +922,33 @@ enum Command {
     Env {
         #[command(subcommand)]
         cmd: EnvCmd,
+    },
+    /// Deterministic todo list generation from code analysis.
+    Plan {
+        /// Natural-language prompt (optional if --query is used).
+        prompt: Option<String>,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Explicit query: dead-interactive | dead-code | hotspots | recent-changes | by-concept.
+        #[arg(long)]
+        query: Option<String>,
+        /// Tag filter for dead-interactive (e.g. button, a, Link).
+        #[arg(long)]
+        tag: Option<String>,
+        /// Limit for hotspots/recent-changes.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Output format: markdown | json | compact.
+        #[arg(long, default_value = "markdown")]
+        format: String,
+        /// Omit the trailing verification todo.
+        #[arg(long)]
+        no_verify: bool,
+        /// Cap the number of findings returned.
+        #[arg(long)]
+        max_todos: Option<usize>,
+        #[arg(long)]
+        json: bool,
     },
     /// Save, retrieve, list, revise, and replay proven agent-browser paths
     /// (auth flows, config flows) so the agent follows a deterministic
@@ -5240,6 +5268,29 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let root = discover_root(&path)?;
             let data = pixel_ops::envfile::envfile(&root, &action)?;
             print_data(&data, json)
+        }
+        Command::Plan {
+            prompt,
+            path,
+            query,
+            tag,
+            limit,
+            format,
+            no_verify,
+            max_todos,
+            json,
+        } => {
+            let format = if json { "json".to_string() } else { format };
+            plan_cmd::run(plan_cmd::PlanOptions {
+                prompt,
+                path,
+                query,
+                tag,
+                limit,
+                format,
+                no_verify,
+                max_todos,
+            })
         }
         Command::Flow { cmd } => {
             use pixel_flow::FlowAction;

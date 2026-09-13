@@ -1121,6 +1121,70 @@ impl Service {
             }
         };
         report.targets = pixel_rank::rerank::rerank_targets(report.targets, &signals, penalty);
+        // Cross-lingual semantic fallback: when lexical targeting returns 0
+        // P0/P1 files (e.g. a French task against English code), embed the
+        // query with the multilingual potion-code model and inject top-k
+        // files as a "P1 (semantic)" tier. English queries that produce P0/P1
+        // targets lexically never hit this path.
+        let has_p0_p1 = report
+            .targets
+            .iter()
+            .any(|t| matches!(t.tier.as_str(), "P0" | "P1"));
+        if !has_p0_p1 {
+            // Respect max_tier: a caller that asked for P0-only results
+            // should not receive P1 semantic hits.
+            let tier_ok = max_tier.map(|m| !matches!(m, "P0")).unwrap_or(true);
+            if tier_ok {
+                let eff_limit = limit.unwrap_or(engine::DEFAULT_LIMIT);
+                let hits =
+                    pixel_recall::code_search::semantic_fallback(&self.root, task, eff_limit);
+                if !hits.is_empty() {
+                    let hits_count = hits.len();
+                    // Dedupe against existing targets (a path may already be
+                    // present as P2).
+                    let existing: HashSet<String> =
+                        report.targets.iter().map(|t| t.path.clone()).collect();
+                    for (path, score) in hits {
+                        if existing.contains(&path) {
+                            continue;
+                        }
+                        report.targets.push(pixel_rank::TargetFile {
+                            path: path.clone(),
+                            tier: "P1".to_string(),
+                            score,
+                            reasons: vec!["semantic fallback (cross-lingual)".to_string()],
+                            symbols: Vec::new(),
+                        });
+                    }
+                    // Re-sort by tier (P0 < P1 < P2) then score descending so
+                    // injected P1s land before P2s, not after.
+                    report.targets.sort_by(|a, b| {
+                        let tier_ord = |t: &str| match t {
+                            "P0" => 0,
+                            "P1" => 1,
+                            _ => 2,
+                        };
+                        tier_ord(&a.tier).cmp(&tier_ord(&b.tier)).then_with(|| {
+                            b.score
+                                .partial_cmp(&a.score)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                    });
+                    // Re-enforce limit.
+                    report.targets.truncate(eff_limit);
+                    if let Some(stats) = report.stats.as_object_mut() {
+                        stats.insert(
+                            "fallback".to_string(),
+                            json!({
+                                "channel": "semantic",
+                                "reason": "no_p0_p1",
+                                "hits": hits_count,
+                            }),
+                        );
+                    }
+                }
+            }
+        }
         let mut out = serde_json::to_value(&report).map_err(|e| e.to_string())?;
         // Phase 3 item 1: attach per-file content evidence to each target so
         // the caller can trust a content match without re-searching (S2).
@@ -1714,8 +1778,9 @@ impl Service {
         // concurrent CLI also tries to build).
         let extractor: Box<dyn pixel_index::GramExtractor> =
             Box::new(pixel_index::TrigramExtractor);
-        let new_index = pixel_index::indexset::IndexSet::open_or_build(&self.root, extractor)
-            .map_err(|e| e.to_string())?;
+        let new_index =
+            pixel_index::indexset::IndexSet::open_or_build_bypass_cache(&self.root, extractor)
+                .map_err(|e| e.to_string())?;
         self.index = new_index;
         let s = self.index.status();
         Ok(json!({
@@ -1792,15 +1857,52 @@ impl Service {
             Some(s) => s,
             None => {
                 // Graph unavailable (e.g. non-git dir where build was refused
-                // or capped). Return an unresolved outcome with a clear basis
-                // instead of hard-failing — callers fall back to pixel search.
+                // or capped). The semantic fallback needs no graph — try it
+                // before returning the empty unresolved outcome.
+                let semantic = pixel_recall::code_search::semantic_fallback(
+                    &self.root,
+                    phrase,
+                    limit.unwrap_or(8),
+                );
+                let matches: Vec<Value> = semantic
+                    .iter()
+                    .map(|(path, score)| {
+                        json!({
+                            "path": path,
+                            "start_line": 0,
+                            "end_line": 0,
+                            "kind": null,
+                            "raw": phrase,
+                            "norm": phrase,
+                            "owner": null,
+                            "symbol_kind": null,
+                            "score": score,
+                            "tier": "semantic",
+                            "reasons": ["semantic fallback (cross-lingual, no graph)"],
+                        })
+                    })
+                    .collect();
+                let confidence = if matches.is_empty() {
+                    "unresolved"
+                } else {
+                    "ranked"
+                };
+                let tier: Option<&str> = if matches.is_empty() {
+                    None
+                } else {
+                    Some("semantic")
+                };
                 return Ok(serde_json::json!({
-                    "confidence": "unresolved",
-                    "tier": null,
-                    "matches": [],
+                    "confidence": confidence,
+                    "tier": tier,
+                    "matches": matches,
                     "tiers_attempted": [],
                     "scan_capped": false,
-                    "basis": "graph unavailable — no concept index to resolve against. Use `pixel search` for text matching.",
+                    "basis": if matches.is_empty() {
+                        "graph unavailable — no concept index to resolve against. Use `pixel search` for text matching."
+                    } else {
+                        "graph unavailable; semantic fallback via multilingual embeddings"
+                    },
                     "index_state": {
                         "concepts": 0,
                         "concepts_version": null,
@@ -1832,6 +1934,58 @@ impl Service {
         let outcome = pixel_graph::concept_resolve::resolve(store, phrase, &opts)
             .map_err(|e| e.to_string())?;
         let mut out = serde_json::to_value(&outcome).map_err(|e| e.to_string())?;
+        // Cross-lingual semantic fallback: when lexical matching returns 0
+        // matches (e.g. a French task against English code), embed the query
+        // with the multilingual potion-code model and match against code
+        // files. This is a fallback, not a replacement — English queries
+        // that resolve lexically never hit this path.
+        let matches_empty = out
+            .get("matches")
+            .and_then(Value::as_array)
+            .map(|m| m.is_empty())
+            .unwrap_or(false);
+        if matches_empty {
+            let limit = limit.unwrap_or(8);
+            if limit > 0 {
+                let hits = pixel_recall::code_search::semantic_fallback(&self.root, phrase, limit);
+                if !hits.is_empty() {
+                    // Emit the full ConceptMatch shape so downstream consumers
+                    // (enrich_resolve_matches_with_context, notes merge) can
+                    // process semantic hits the same way as lexical ones.
+                    let semantic_matches: Vec<Value> = hits
+                        .iter()
+                        .map(|(path, score)| {
+                            json!({
+                                "path": path,
+                                "start_line": 0,
+                                "end_line": 0,
+                                "kind": null,
+                                "raw": phrase,
+                                "norm": phrase,
+                                "owner": null,
+                                "symbol_kind": null,
+                                "score": score,
+                                "tier": "semantic",
+                                "reasons": ["semantic fallback (cross-lingual)"],
+                            })
+                        })
+                        .collect();
+                    out["matches"] = json!(semantic_matches);
+                    out["confidence"] = json!("ranked");
+                    out["tier"] = json!("semantic");
+                    // Record the fallback in tiers_attempted for the audit
+                    // trail — a consumer reconciling which tiers ran sees it.
+                    if let Some(tiers) =
+                        out.get_mut("tiers_attempted").and_then(Value::as_array_mut)
+                    {
+                        tiers.push(json!("semantic"));
+                    }
+                    out["basis"] = json!(
+                        "lexical matching returned 0 results; semantic fallback via multilingual embeddings"
+                    );
+                }
+            }
+        }
         // P2·2: merge durable human notes onto matches — keyed by concept
         // norm or owner symbol name inside the match's file, so a human
         // correction surfaces exactly where the agent lands.
@@ -2410,6 +2564,28 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
         basis.push_str(&caps.join("; "));
     }
 
+    // Static analysis (tree-sitter) cannot guarantee it found every call
+    // site: callbacks passed as arguments, dynamic dispatch, macro-generated
+    // calls, and eval are all invisible to it. This is an *extraction* limit
+    // — distinct from the *resolution* uncertainty (`lower_bound`) the
+    // envelope already tracks (same-name unresolved calls). Because
+    // extraction limits always apply, `closed_world` is never true: a
+    // "0 callers" answer means "no callers found", not "this symbol has no
+    // callers". This is Pixel's "I say when I don't know" value prop.
+    let extraction_limits = vec![
+        "callbacks passed as arguments (e.g. schema.plugin(fn), emitter.on('event', fn))"
+            .to_string(),
+        "dynamic dispatch (e.g. obj[methodName]())".to_string(),
+        "macro-generated calls".to_string(),
+        "eval / new Function".to_string(),
+    ];
+    if caps.is_empty() {
+        basis.push_str(
+            "; static analysis cannot guarantee completeness: tree-sitter may miss callbacks, \
+             dynamic dispatch, and macro-generated calls",
+        );
+    }
+
     // The one cheap staleness signal: a graph rebuilt for this very answer
     // is 0ms stale. Anything else is left unmeasured (None), never guessed.
     let staleness_ms = v
@@ -2427,11 +2603,14 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
         .map(String::from);
 
     let epistemics = Epistemics {
-        closed_world: caps.is_empty(),
+        // extraction_limits is never empty, so closed_world is always false:
+        // static analysis is never complete.
+        closed_world: caps.is_empty() && extraction_limits.is_empty(),
         lower_bound: !caps.is_empty(),
         basis,
         staleness_ms,
         confidence,
+        extraction_limits,
     };
     let warnings = caps
         .into_iter()
@@ -3845,7 +4024,10 @@ mod tests {
             assert!(response.ok);
             assert_eq!(response.data()["total_edges"], count);
             assert!(!response.epistemics.as_ref().unwrap().lower_bound);
-            assert!(response.epistemics.as_ref().unwrap().closed_world);
+            // closed_world is always false now: static analysis (tree-sitter)
+            // cannot guarantee completeness — callbacks, dynamic dispatch,
+            // and macro-generated calls are invisible to it.
+            assert!(!response.epistemics.as_ref().unwrap().closed_world);
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4899,11 +5081,13 @@ mod tests {
                 !epistemics.basis.is_empty(),
                 "{name}: epistemics.basis must name the answer's source"
             );
-            // A response claiming closed_world must not simultaneously admit
-            // a lower bound, and vice versa.
-            assert_ne!(
-                epistemics.closed_world, epistemics.lower_bound,
-                "{name}: closed_world and lower_bound must be complementary here: {epistemics:?}"
+            // closed_world is always false: static analysis (tree-sitter)
+            // is never complete — callbacks, dynamic dispatch, and
+            // macro-generated calls are invisible to it. lower_bound still
+            // flags resolution uncertainty (same-name unresolved calls).
+            assert!(
+                !epistemics.closed_world,
+                "{name}: closed_world must always be false — static analysis is never complete: {epistemics:?}"
             );
             let snapshot = resp
                 .snapshot

@@ -220,6 +220,7 @@ mod tests {
                     basis: "index".into(),
                     staleness_ms: Some(120),
                     confidence: None,
+                    extraction_limits: Vec::new(),
                 })
                 .with_budget(BudgetInfo {
                     byte_cap: 1024,
@@ -327,6 +328,7 @@ mod tests {
                     basis: "graph".into(),
                     staleness_ms: None,
                     confidence: None,
+                    extraction_limits: Vec::new(),
                 })
                 .with_budget(BudgetInfo {
                     byte_cap: 8192,

@@ -51,6 +51,27 @@ pub struct FileCalls {
     pub calls: Vec<PendingCall>,
 }
 
+/// One extracted callback/reference site awaiting resolution (symbol ids
+/// already assigned). A symbol passed as an argument to a call (e.g.
+/// `schema.plugin(tenantScopePlugin)`). Resolves to a `References` edge,
+/// which is weaker than `Calls` — it means "may be invoked", not "directly
+/// called". All resolved references use `Tier::Probable`.
+#[derive(Debug, Clone)]
+pub struct PendingReference {
+    pub name: String,
+    pub enclosing_symbol_id: Option<i64>,
+    pub site_line: u32,
+    /// The callee that received this argument, when known.
+    pub arg_of: Option<String>,
+}
+
+/// All pending references of one file.
+#[derive(Debug, Clone)]
+pub struct FileReferences {
+    pub file_id: i64,
+    pub references: Vec<PendingReference>,
+}
+
 /// Per-call resolution decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
@@ -270,6 +291,7 @@ pub fn resolve_calls(
                     None,
                     call.site_line,
                     call.receiver.as_deref(),
+                    "calls",
                 )?;
                 stats.unresolved += 1;
                 continue;
@@ -304,6 +326,67 @@ pub fn resolve_calls(
                         Some(src_id),
                         call.site_line,
                         call.receiver.as_deref(),
+                        "calls",
+                    )?;
+                    stats.unresolved += 1;
+                }
+            }
+        }
+    }
+    Ok(stats)
+}
+
+/// Resolve the given in-memory pending references (symbols passed as
+/// arguments to calls), writing `References` edges / unresolved rows into
+/// the store. Used by `build::build_graph` after extraction. Mirrors
+/// `resolve_calls` but inserts `EdgeKind::References` edges and always
+/// uses `Tier::Probable` (we don't know if the callee actually invokes
+/// the arg). Unresolved references go to `unresolved_calls` so the
+/// epistemic envelope counts them.
+pub fn resolve_references(
+    store: &GraphStore,
+    pending: &[FileReferences],
+) -> Result<ResolveStats, StoreError> {
+    let idx = ResolveIndex::build(store)?;
+    let mut stats = ResolveStats::default();
+    for fr in pending {
+        for r#ref in &fr.references {
+            let Some(src_id) = r#ref.enclosing_symbol_id else {
+                // Top-level reference site: no source symbol to hang an edge on.
+                store.insert_unresolved_call(
+                    fr.file_id,
+                    &r#ref.name,
+                    None,
+                    r#ref.site_line,
+                    r#ref.arg_of.as_deref(),
+                    "references",
+                )?;
+                stats.unresolved += 1;
+                continue;
+            };
+            // References resolve against the same T0/T1/T2 index. A real
+            // receiver is irrelevant here (the arg is an identifier, not a
+            // method call), so pass `None`.
+            match idx.decide(fr.file_id, &r#ref.name, None) {
+                Decision::Exact(dst) | Decision::Probable(dst) => {
+                    store.insert_edge(&EdgeRow {
+                        src_id,
+                        dst_id: dst,
+                        kind: EdgeKind::References,
+                        tier: Tier::Probable,
+                        site_line: r#ref.site_line,
+                        receiver: r#ref.arg_of.clone(),
+                    })?;
+                    stats.probable += 1;
+                }
+                Decision::Unresolved => {
+                    store.insert_unresolved_call(
+                        fr.file_id,
+                        &r#ref.name,
+                        Some(src_id),
+                        r#ref.site_line,
+                        r#ref.arg_of.as_deref(),
+                        "references",
                     )?;
                     stats.unresolved += 1;
                 }
@@ -326,12 +409,13 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
         enclosing: i64,
         site_line: u32,
         receiver: Option<String>,
+        kind: String,
     }
 
     let idx = ResolveIndex::build(store)?;
     let rows: Vec<Row> = {
         let mut stmt = store.conn().prepare(
-            "SELECT u.id, u.file_id, u.name, u.enclosing_symbol_id, u.site_line, u.receiver
+            "SELECT u.id, u.file_id, u.name, u.enclosing_symbol_id, u.site_line, u.receiver, u.kind
                FROM unresolved_calls u
                JOIN symbols s ON s.id = u.enclosing_symbol_id
               WHERE u.enclosing_symbol_id IS NOT NULL",
@@ -344,6 +428,9 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
                 enclosing: r.get(3)?,
                 site_line: r.get(4)?,
                 receiver: r.get(5)?,
+                kind: r
+                    .get::<_, Option<String>>(6)?
+                    .unwrap_or_else(|| "calls".to_string()),
             })
         })?;
         mapped.collect::<Result<_, _>>()?
@@ -359,10 +446,22 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
                 continue;
             }
         };
+        let edge_kind = if row.kind == "references" {
+            EdgeKind::References
+        } else {
+            EdgeKind::Calls
+        };
+        // References are always Probable — we don't know if the callee
+        // actually invokes the passed arg.
+        let tier = if edge_kind == EdgeKind::References {
+            Tier::Probable
+        } else {
+            tier
+        };
         store.insert_edge(&EdgeRow {
             src_id: row.enclosing,
             dst_id: dst,
-            kind: EdgeKind::Calls,
+            kind: edge_kind,
             tier,
             site_line: row.site_line,
             receiver: row.receiver.clone(),
@@ -382,6 +481,9 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
 /// Reconsider resolved calls whose target names were defined by a changed
 /// file. Adding a same-name definition can make a previously unique target
 /// ambiguous; unrelated call edges remain untouched.
+/// Both `Calls` and `References` edges are reconsidered — a reference to a
+/// previously-unique `handler` is just as stale when a second definition
+/// appears.
 pub fn reconsider_resolved_calls(
     store: &mut GraphStore,
     changed_names: &HashSet<String>,
@@ -392,16 +494,17 @@ pub fn reconsider_resolved_calls(
         enclosing: i64,
         site_line: u32,
         receiver: Option<String>,
+        kind: String,
     }
     let mut calls = Vec::new();
     for name in changed_names {
         let found: Vec<ResolvedCall> = {
             let mut stmt = store.conn().prepare(
-                "SELECT src.file_id, dst.name, e.src_id, e.site_line, e.receiver
+                "SELECT src.file_id, dst.name, e.src_id, e.site_line, e.receiver, e.kind
                    FROM edges e
                    JOIN symbols src ON src.id = e.src_id
                    JOIN symbols dst ON dst.id = e.dst_id
-                  WHERE e.kind = 'calls' AND dst.name = ?1",
+                  WHERE e.kind IN ('calls', 'references') AND dst.name = ?1",
             )?;
             let rows = stmt.query_map(params![name], |row| {
                 Ok(ResolvedCall {
@@ -410,6 +513,7 @@ pub fn reconsider_resolved_calls(
                     enclosing: row.get(2)?,
                     site_line: row.get(3)?,
                     receiver: row.get(4)?,
+                    kind: row.get(5)?,
                 })
             })?;
             rows.collect::<Result<_, _>>()?
@@ -417,7 +521,7 @@ pub fn reconsider_resolved_calls(
         calls.extend(found);
         store.conn().execute(
             "DELETE FROM edges
-              WHERE kind = 'calls'
+              WHERE kind IN ('calls', 'references')
                 AND dst_id IN (SELECT id FROM symbols WHERE name = ?1)",
             params![name],
         )?;
@@ -429,6 +533,7 @@ pub fn reconsider_resolved_calls(
             Some(call.enclosing),
             call.site_line,
             call.receiver.as_deref(),
+            &call.kind,
         )?;
     }
     Ok(())

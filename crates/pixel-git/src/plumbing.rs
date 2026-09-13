@@ -70,6 +70,26 @@ impl GitRunner {
             .run_opt(&["show", end_of_options(), &spec])
     }
 
+    /// All files in commit `oid`'s tree (`git ls-tree -r --name-only -z`).
+    /// Returns the commit's file universe, not the working-tree index —
+    /// staged additions/deletions don't affect this list. Used to build
+    /// cache-keyed base shards that are a pure function of (commit, extractor).
+    pub fn ls_tree(&self, oid: &str) -> Vec<String> {
+        if validate_ref(oid).is_err() {
+            return Vec::new();
+        }
+        let Some(out) = self
+            .with_max_output_bytes(Some(ENUMERATION_MAX_OUTPUT_BYTES))
+            .run_opt(&["ls-tree", "-r", "--name-only", "-z", oid])
+        else {
+            return Vec::new();
+        };
+        out.split(|&b| b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect()
+    }
+
     /// Size of a committed blob without materializing it.
     pub fn blob_size(&self, oid: &str, rel: &str) -> Option<u64> {
         validate_ref(oid).ok()?;
