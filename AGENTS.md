@@ -4,14 +4,14 @@ Build, gates, PR format and the definition of done live in [CONTRIBUTING.md](CON
 
 ## Mutation Testing Loop
 
-Mutation tests are run with `cargo mutants --in-diff <(git diff develop...HEAD)` after the gates (`cargo fmt`, `cargo test`, `cargo clippy`) pass; `scripts/gates.sh --mutants` runs all four with laptop-safe job and thread caps and skips when no Rust-affecting path changed. They must pass: the CI workflow `Mutants` fails a pull request on any surviving mutant.
+Mutation testing runs in CI only: the `Mutants` workflow runs `cargo mutants --in-diff` against the PR's base and fails the pull request on any surviving mutant. Do not run `cargo mutants` locally on your own initiative; it holds the tree (`--in-place`) and a laptop for up to hours, which is what the workflow's runners are for. The local loop is: write the code in the shapes `.agents/rules/mutation-gate.md` describes, pass the fast gates (`cargo fmt`, `cargo test`, `cargo clippy`), push, open the PR, then read the `Mutants` job's `MISSED`/`TIMEOUT` lines (`gh run view --log` or the job annotations). A local `cargo mutants … -F '<fn>'` on one or two functions, bounded to a few minutes, is acceptable only when explicitly asked for.
 
 For each `MISSED` line either:
 
 - add a test that fails under that exact mutation (an assertion on the observable contract, not a weaker one), or
 - when the mutation cannot matter (a diagnostic formatter, a `main`, dead-by-design code), annotate the function with `#[cfg_attr(test, mutants::skip)]` plus a one-line reason, adding `mutants = { workspace = true }` to that crate's `[dependencies]` if it is the crate's first skip.
 
-Re-run until the summary reports `0 missed`. Skipping a business rule because the test is hard is not an option; see CONTRIBUTING.md "Mutation testing" for the outcome table and exit codes.
+Push the fix and let the workflow re-run until it reports `0 missed`. Skipping a business rule because the test is hard is not an option; see CONTRIBUTING.md "Mutation testing" for the outcome table and exit codes.
 
 
 ## Rules Directory

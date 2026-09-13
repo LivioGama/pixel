@@ -28,6 +28,9 @@ export type Surface =
   | "vite-transform"
   | "vitest"
   | "tsc"
+  | "minitest"
+  | "rspec"
+  | "rubocop"
   | "run-wrapper"
   | "reported";
 

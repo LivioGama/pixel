@@ -23,7 +23,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` exits 0.
 - [ ] `cargo deny check` exits 0 (skip when `Cargo.lock` did not change); a new exception in `deny.toml` carries its reason.
 - [ ] New behaviour has a test that fails if the behaviour is removed.
-- [ ] `cargo mutants --in-diff <(git diff develop...HEAD)` reports no `MISSED` mutant (see "Mutation testing").
+- [ ] The `Mutants` CI job reports no `MISSED` mutant on the pull request (see "Mutation testing"); a local run is optional.
 - [ ] `CHANGELOG.md` has an entry under `## [Unreleased]` (skip for pure refactors and CI/deps chores).
 - [ ] The commit message follows the Conventional Commits format below.
 - [ ] The branch was created from `develop` and the pull request targets `develop`, not `main`.
@@ -120,11 +120,13 @@ regardless; `CI=1` disables both behaviours. Its contract is pinned by
 `scripts/test-gates.py`, which CI runs.
 
 The `Mutants` workflow (`.github/workflows/mutants.yml`) runs on every pull
-request that touches `crates/` and fails on a surviving mutant. Reproduce it
-locally before pushing:
+request that touches `crates/` and fails on a surviving mutant. It is the
+gate; push and read its output rather than reproducing it locally (a
+231-mutant PR held a laptop for two hours). To reproduce one finding
+locally, scope the run to the function:
 
 ```bash
-cargo mutants --in-diff <(git diff develop...HEAD)
+cargo mutants --in-diff <(git diff develop...HEAD) -F '<function name>'
 ```
 
 Optional but recommended when the change touches the CLI surface, hooks, or
@@ -181,9 +183,9 @@ is a behaviour no test can see. Configuration lives in
 ```bash
 cargo install --locked cargo-mutants        # or: cargo binstall cargo-mutants
 
-cargo mutants --in-diff <(git diff develop...HEAD)   # what your branch changed (the CI gate)
-cargo mutants -p pixel-proto                         # one crate, full sweep (about a minute)
-cargo mutants -p pixel-ops -j 4                      # bigger crates: cap the parallel jobs
+cargo mutants --in-diff <(git diff develop...HEAD) -F '<fn>'   # one finding from the CI job
+cargo mutants -p pixel-proto                                    # one crate, full sweep (about a minute)
+cargo mutants --in-diff <(git diff develop...HEAD)              # what CI runs; hours on a laptop for a big PR
 ```
 
 Read the summary line and `mutants.out/missed.txt`:
@@ -275,11 +277,12 @@ Pixel is dogfooded on itself. When an agent works in this repository:
 - Run `pixel impact "<symbol>"` before editing any function, struct, or
   method. Say so in the PR if it reported HIGH or CRITICAL risk.
 - Run `pixel changes` before editing to avoid duplicating in-progress work.
-- After the gates pass, run `cargo mutants --in-diff <(git diff develop...HEAD)`.
-  For each `MISSED` mutant either add a test that fails on that mutation or,
-  when the mutation cannot matter, annotate the function with
-  `#[cfg_attr(test, mutants::skip)]` and a one-line reason. Iterate until
-  the run reports no missed mutant; do not weaken an assertion to get there.
+- After the gates pass, push and open the PR; the `Mutants` job is the
+  mutation gate. For each `MISSED` mutant it reports either add a test that
+  fails on that mutation or, when the mutation cannot matter, annotate the
+  function with `#[cfg_attr(test, mutants::skip)]` and a one-line reason.
+  Push until the job reports no missed mutant; do not weaken an assertion to
+  get there, and do not run the full `cargo mutants` locally unasked.
 - Use `pixel review` to inspect the working tree and `pixel publish` to
   commit. The guard hook (`crates/pixel/src/guard.rs`) names a pixel
   alternative for destructive or substitutable git commands (`reset --hard`,
