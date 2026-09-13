@@ -85,8 +85,12 @@ struct InstalledAgents {
 
 /// First executable file named `name` on PATH.
 pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find_map(|dir| {
+    find_in_paths(name, &std::env::var_os("PATH")?)
+}
+
+/// First executable file named `name` in the PATH-style list `path`.
+fn find_in_paths(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path).find_map(|dir| {
         let candidate = dir.join(name);
         if !candidate.is_file() {
             return None;
@@ -96,8 +100,7 @@ pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
             use std::os::unix::fs::PermissionsExt;
             let executable = candidate
                 .metadata()
-                .map(|meta| meta.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false);
+                .is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0);
             executable.then_some(candidate)
         }
         #[cfg(not(unix))]
@@ -349,6 +352,8 @@ pub(crate) const SUBAGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-sub
 /// The prompt instructs agents to use `pixel search`/`pixel resolve`/`pixel impact`
 /// instead of `grep`/`rg` for code discovery in indexed repositories.
 fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
+    // The asset is embedded at compile time so the installed binary is self-contained.
+    const ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
     let dest_dir = home.join(".local/share/pixel");
     let dest = dest_dir.join("agent-prompt.md");
     let subagent_dest = dest_dir.join(SUBAGENT_PROMPT_FILE);
@@ -366,8 +371,6 @@ fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
         });
     }
     fs::create_dir_all(&dest_dir)?;
-    // The asset is embedded at compile time so the installed binary is self-contained.
-    const ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
     let needs_write = write_if_changed(&dest, ASSET)?;
     let subagent_written = write_if_changed(&subagent_dest, SUBAGENT_PROMPT_ASSET)?;
     // Deploy to Pi's APPEND_SYSTEM.md so pi reads it automatically.
@@ -540,24 +543,21 @@ pub(crate) fn shell_wrapper_block(
 ) -> String {
     let body = match (kind, subagent_prompt_path) {
         (ShellKind::Posix, None) => format!(
-            "claude() {{ command claude --append-system-prompt-file \"{prompt}\" \"$@\"; }}",
-            prompt = prompt_path,
+            "claude() {{ command claude --append-system-prompt-file \"{prompt_path}\" \"$@\"; }}",
         ),
         (ShellKind::Fish, None) => format!(
-            "function claude; command claude --append-system-prompt-file \"{prompt}\" $argv; end",
-            prompt = prompt_path,
+            "function claude; command claude --append-system-prompt-file \"{prompt_path}\" $argv; end",
         ),
         (ShellKind::Posix, Some(subagent)) => format!(
             "claude() {{\n\
              \x20 local _pixel_arg\n\
              \x20 for _pixel_arg in \"$@\"; do\n\
              \x20   case \"$_pixel_arg\" in\n\
-             \x20     -p*|-[!-]*p*|--print) command claude --append-system-prompt-file \"{prompt}\" --append-subagent-system-prompt-file \"{subagent}\" \"$@\"; return $?;;\n\
+             \x20     -p*|-[!-]*p*|--print) command claude --append-system-prompt-file \"{prompt_path}\" --append-subagent-system-prompt-file \"{subagent}\" \"$@\"; return $?;;\n\
              \x20   esac\n\
              \x20 done\n\
-             \x20 command claude --append-system-prompt-file \"{prompt}\" \"$@\"\n\
+             \x20 command claude --append-system-prompt-file \"{prompt_path}\" \"$@\"\n\
              }}",
-            prompt = prompt_path,
         ),
         // fish: `function name; ...; end`, arguments as `$argv`. `contains
         // -- -p` needs the `--` so `-p` is looked up rather than parsed as an
@@ -565,22 +565,19 @@ pub(crate) fn shell_wrapper_block(
         (ShellKind::Fish, Some(subagent)) => format!(
             "function claude\n\
              \x20 if contains -- --print $argv; or string match -qr -- '^-[^-]*p' $argv\n\
-             \x20   command claude --append-system-prompt-file \"{prompt}\" --append-subagent-system-prompt-file \"{subagent}\" $argv\n\
+             \x20   command claude --append-system-prompt-file \"{prompt_path}\" --append-subagent-system-prompt-file \"{subagent}\" $argv\n\
              \x20 else\n\
-             \x20   command claude --append-system-prompt-file \"{prompt}\" $argv\n\
+             \x20   command claude --append-system-prompt-file \"{prompt_path}\" $argv\n\
              \x20 end\n\
              end",
-            prompt = prompt_path,
         ),
     };
     format!(
-        "{begin}\n\
+        "{PIXEL_MANAGED_BEGIN}\n\
          # Pixel agent system prompt — added by `pixel install`\n\
          # Remove with `pixel uninstall`\n\
          {body}\n\
-         {end}",
-        begin = PIXEL_MANAGED_BEGIN,
-        end = PIXEL_MANAGED_END,
+         {PIXEL_MANAGED_END}",
     )
 }
 
@@ -1004,5 +1001,46 @@ mod migration_tests {
         assert!(second.new_state_directory_prepared);
         assert!(!second.new_state_rebuilt);
         assert_eq!(fs::read(&state).unwrap(), b"{\"preserve\":true}");
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::{find_in_paths, find_on_path};
+
+    #[test]
+    fn find_in_paths_returns_the_first_executable_file_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pixel-find-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = dir.join("first");
+        let second = dir.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        // `tool` is a plain file in `first` and an executable in `second`.
+        std::fs::write(first.join("tool"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(second.join("tool"), b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(second.join("tool"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        std::fs::create_dir_all(first.join("dirtool")).unwrap();
+        let path = std::env::join_paths([&first, &second]).unwrap();
+        assert_eq!(find_in_paths("tool", &path), Some(second.join("tool")));
+        assert_eq!(
+            find_in_paths("dirtool", &path),
+            None,
+            "a directory is not a binary"
+        );
+        assert_eq!(find_in_paths("absent", &path), None);
+        let only_first = std::env::join_paths([&first]).unwrap();
+        assert_eq!(find_in_paths("tool", &only_first), None, "not executable");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_on_path_reads_the_process_path() {
+        let sh = find_on_path("sh").expect("sh is on every unix PATH");
+        assert!(sh.ends_with("sh"), "{}", sh.display());
+        assert!(sh.is_absolute(), "{}", sh.display());
+        assert_eq!(find_on_path("pixel-definitely-not-installed-xyz"), None);
     }
 }

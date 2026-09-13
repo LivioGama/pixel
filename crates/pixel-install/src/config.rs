@@ -198,6 +198,7 @@ pub fn find_agent_configs(home: &Path) -> Vec<PathBuf> {
 /// Returns the backup path if one was written, or `None` if the file did
 /// not exist yet or its content is already identical to `new_content`.
 pub fn backup_if_changing(path: &Path, new_content: &[u8]) -> io::Result<Option<PathBuf>> {
+    static BACKUP_SEQ: AtomicU64 = AtomicU64::new(0);
     let current = match fs::read(path) {
         Ok(c) => c,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -206,16 +207,13 @@ pub fn backup_if_changing(path: &Path, new_content: &[u8]) -> io::Result<Option<
     if current == new_content {
         return Ok(None);
     }
-    static BACKUP_SEQ: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let seq = BACKUP_SEQ.fetch_add(1, Ordering::Relaxed);
     let file_name = path
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "file".into());
+        .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
     let backup_name = format!("{file_name}.pixel-bak.{nanos}-{seq}");
     let backup_path = match path.parent() {
         Some(parent) => parent.join(backup_name),
@@ -598,8 +596,7 @@ fn rewrite_guard_hook_commands(hooks: &mut serde_json::Map<String, serde_json::V
                     let references_guard = hook
                         .get("command")
                         .and_then(|c| c.as_str())
-                        .map(|c| c.contains(OLD_GUARD_HOOK))
-                        .unwrap_or(false);
+                        .is_some_and(|c| c.contains(OLD_GUARD_HOOK));
                     if references_guard {
                         changed += 1;
                     }
@@ -669,8 +666,7 @@ pub fn merge_flat_hook_entry(
         entry
             .get("command")
             .and_then(|c| c.as_str())
-            .map(|c| !c.contains(pixel_marker))
-            .unwrap_or(true)
+            .is_none_or(|c| !c.contains(pixel_marker))
     });
     entries.push(pixel_entry);
     serde_json::Value::Array(entries)
@@ -716,8 +712,7 @@ pub fn remove_hook_entries(existing: &serde_json::Value, marker: &str) -> serde_
                     let has_match = hooks.iter().any(|hook| {
                         hook.get("command")
                             .and_then(|command| command.as_str())
-                            .map(|command| command.contains(marker))
-                            .unwrap_or(false)
+                            .is_some_and(|command| command.contains(marker))
                     });
                     if !has_match {
                         return Some(entry.clone());
@@ -733,8 +728,7 @@ pub fn remove_hook_entries(existing: &serde_json::Value, marker: &str) -> serde_
                     cleaned_hooks.retain(|hook| {
                         hook.get("command")
                             .and_then(|command| command.as_str())
-                            .map(|command| !command.contains(marker))
-                            .unwrap_or(true)
+                            .is_none_or(|command| !command.contains(marker))
                     });
 
                     // Preserve the outer matcher when it still contains any
@@ -760,8 +754,7 @@ pub fn remove_flat_hook_entries(existing: &serde_json::Value, marker: &str) -> s
                 .filter(|e| {
                     e.get("command")
                         .and_then(|c| c.as_str())
-                        .map(|c| !c.contains(marker))
-                        .unwrap_or(true)
+                        .is_none_or(|c| !c.contains(marker))
                 })
                 .cloned()
                 .collect();
@@ -787,10 +780,7 @@ pub fn remove_guard_hook_entries(hooks: &mut serde_json::Map<String, serde_json:
         filtered = remove_hook_entries(&filtered, OLD_GUARD_HOOK);
         if filtered != existing {
             changed += 1;
-            if filtered
-                .as_array()
-                .is_some_and(|entries| entries.is_empty())
-            {
+            if filtered.as_array().is_some_and(std::vec::Vec::is_empty) {
                 hooks.remove(&event);
             } else {
                 hooks.insert(event, filtered);
@@ -816,10 +806,7 @@ pub fn remove_flat_guard_hook_entries(
         filtered = remove_flat_hook_entries(&filtered, OLD_GUARD_HOOK);
         if filtered != existing {
             changed += 1;
-            if filtered
-                .as_array()
-                .is_some_and(|entries| entries.is_empty())
-            {
+            if filtered.as_array().is_some_and(std::vec::Vec::is_empty) {
                 hooks.remove(&event);
             } else {
                 hooks.insert(event, filtered);
@@ -833,15 +820,13 @@ pub fn hook_entry_matches_marker(entry: &serde_json::Value, marker: &str) -> boo
     entry
         .get("hooks")
         .and_then(serde_json::Value::as_array)
-        .map(|hooks| {
+        .is_some_and(|hooks| {
             hooks.iter().any(|hook| {
                 hook.get("command")
                     .and_then(|c| c.as_str())
-                    .map(|c| c.contains(marker))
-                    .unwrap_or(false)
+                    .is_some_and(|c| c.contains(marker))
             })
         })
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -934,5 +919,116 @@ mod tests {
             hooks["PreToolUse"][0]["hooks"][0]["command"],
             "~/.claude/hooks/user-hook"
         );
+    }
+
+    #[test]
+    fn backup_if_changing_writes_a_copy_only_when_the_content_differs() {
+        let dir = std::env::temp_dir().join(format!("pixel-backup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        assert_eq!(
+            backup_if_changing(&file, b"new").unwrap(),
+            None,
+            "missing file"
+        );
+        fs::write(&file, b"old").unwrap();
+        assert_eq!(
+            backup_if_changing(&file, b"old").unwrap(),
+            None,
+            "identical content"
+        );
+        let backup = backup_if_changing(&file, b"new")
+            .unwrap()
+            .expect("backup written");
+        assert_eq!(fs::read(&backup).unwrap(), b"old");
+        let name = backup.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("settings.json.pixel-bak."), "{name}");
+        assert_eq!(backup.parent(), Some(dir.as_path()));
+        let second = backup_if_changing(&file, b"new").unwrap().unwrap();
+        assert_ne!(second, backup, "every backup gets a fresh name");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn flat(command: &str) -> serde_json::Value {
+        serde_json::json!({ "command": command })
+    }
+
+    #[test]
+    fn merge_flat_hook_entry_replaces_the_pixel_entry_and_keeps_the_rest() {
+        let existing = serde_json::json!([flat("lint"), flat("pixel hook guard --old")]);
+        let merged = merge_flat_hook_entry(Some(&existing), "pixel hook", flat("pixel hook guard"));
+        assert_eq!(
+            merged,
+            serde_json::json!([flat("lint"), flat("pixel hook guard")])
+        );
+        assert_eq!(
+            merge_flat_hook_entry(None, "pixel hook", flat("pixel hook guard")),
+            serde_json::json!([flat("pixel hook guard")])
+        );
+        // A scalar entry is wrapped, not dropped.
+        assert_eq!(
+            merge_flat_hook_entry(Some(&flat("lint")), "pixel hook", flat("pixel hook guard")),
+            serde_json::json!([flat("lint"), flat("pixel hook guard")])
+        );
+    }
+
+    #[test]
+    fn remove_flat_hook_entries_drops_only_the_marked_commands() {
+        let existing = serde_json::json!([flat("lint"), flat("pixel hook guard"), {"note": 1}]);
+        assert_eq!(
+            remove_flat_hook_entries(&existing, "pixel hook"),
+            serde_json::json!([flat("lint"), {"note": 1}])
+        );
+        let scalar = serde_json::json!("not an array");
+        assert_eq!(remove_flat_hook_entries(&scalar, "pixel hook"), scalar);
+    }
+
+    #[test]
+    fn remove_flat_guard_hook_entries_counts_changed_events_and_drops_emptied_ones() {
+        let mut hooks = serde_json::Map::new();
+        hooks.insert(
+            "preToolUse".into(),
+            serde_json::json!([flat("lint"), flat(&format!("sh {GUARD_HOOK}"))]),
+        );
+        hooks.insert(
+            "postToolUse".into(),
+            serde_json::json!([flat(&format!("sh {OLD_GUARD_HOOK}"))]),
+        );
+        hooks.insert("stop".into(), serde_json::json!([flat("say done")]));
+        assert_eq!(remove_flat_guard_hook_entries(&mut hooks), 2);
+        assert_eq!(
+            hooks.get("preToolUse"),
+            Some(&serde_json::json!([flat("lint")]))
+        );
+        assert!(
+            !hooks.contains_key("postToolUse"),
+            "emptied event is removed"
+        );
+        assert_eq!(
+            hooks.get("stop"),
+            Some(&serde_json::json!([flat("say done")]))
+        );
+        assert_eq!(remove_flat_guard_hook_entries(&mut hooks), 0, "idempotent");
+    }
+
+    #[test]
+    fn hook_entry_matches_marker_looks_inside_the_nested_hooks_commands() {
+        assert!(hook_entry_matches_marker(
+            &hook_entry("pixel hook guard"),
+            "pixel hook"
+        ));
+        assert!(!hook_entry_matches_marker(
+            &hook_entry("lint"),
+            "pixel hook"
+        ));
+        assert!(
+            !hook_entry_matches_marker(&flat("pixel hook guard"), "pixel hook"),
+            "flat entries have no nested hooks"
+        );
+        assert!(!hook_entry_matches_marker(
+            &serde_json::json!({"hooks": "x"}),
+            "pixel hook"
+        ));
     }
 }
