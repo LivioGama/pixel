@@ -62,4 +62,26 @@ pub(crate) mod testutil {
         git(root, &["commit", "-q", "-m", message]);
         git(root, &["rev-parse", "HEAD"])
     }
+
+    /// Two commits: `src/main.rs` added, then extended with `fn helper`.
+    pub(crate) fn two_commit_repo() -> (tempfile::TempDir, String, String) {
+        let dir = init_repo();
+        let first = commit(
+            dir.path(),
+            &[(
+                "src/main.rs",
+                b"fn main() {\n    println!(\"hello world\");\n}\n",
+            )],
+            "Add main with hello world greeting",
+        );
+        let second = commit(
+            dir.path(),
+            &[(
+                "src/main.rs",
+                b"fn main() {\n    println!(\"hello world\");\n}\n\nfn helper() {\n    let secret_token = 42;\n}\n",
+            )],
+            "Add helper with secret_token variable",
+        );
+        (dir, first, second)
+    }
 }

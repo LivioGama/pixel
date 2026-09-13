@@ -9,6 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
+mutants = { workspace = true }
 pixel-git = { path = "../pixel-git" }
 pixel-index = { path = "../pixel-index" }
 serde = { version = "1", features = ["derive"] }

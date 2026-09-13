@@ -5,11 +5,15 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use pixel_facts::ingest::{IngestOptions, ingest_tick, ingest_until_fresh};
+use pixel_facts::ingest::{IngestOptions, ingest_tick, ingest_until_fresh_within};
 use pixel_facts::lifecycle::Lifecycle;
 use pixel_facts::poison::{ContentKind, classify_content, skip_path};
 use pixel_facts::search::{SearchFacet, search};
 use pixel_facts::store::FactsStore;
+
+/// Cap on the ingest loop in tests: under cargo-mutants' automatic timeout
+/// (at least 20 s), so a phase broken by a mutant fails instead of hanging.
+const TEST_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(5);
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -100,7 +104,8 @@ fn ingest_phase_a_completes_and_index_state_reports_progress() {
 
     // Run ingest to completion (repo is tiny — one tick is enough).
     let opts = IngestOptions::default();
-    let report = ingest_until_fresh(&mut store, &opts).expect("ingest until fresh");
+    let report =
+        ingest_until_fresh_within(&mut store, &opts, TEST_WALL_CLOCK).expect("ingest until fresh");
 
     // Phase A must have completed: commits indexed.
     assert!(
@@ -127,7 +132,7 @@ fn search_finds_term_in_commit_messages() {
     let mut store = FactsStore::open(root).expect("open store");
 
     let opts = IngestOptions::default();
-    ingest_until_fresh(&mut store, &opts).expect("ingest");
+    ingest_until_fresh_within(&mut store, &opts, TEST_WALL_CLOCK).expect("ingest");
 
     // Search for "helper" which appears in a commit subject.
     let result = search(&store, "helper", SearchFacet::Message, 50).expect("message search");
@@ -151,7 +156,7 @@ fn search_finds_term_in_diff_content() {
     let mut store = FactsStore::open(root).expect("open store");
 
     let opts = IngestOptions::default();
-    ingest_until_fresh(&mut store, &opts).expect("ingest");
+    ingest_until_fresh_within(&mut store, &opts, TEST_WALL_CLOCK).expect("ingest");
 
     // Search for "secret_token" which only appears in diff content, not messages.
     let result = search(&store, "secret_token", SearchFacet::Diff, 50).expect("diff search");
@@ -172,7 +177,7 @@ fn path_lifecycle_reports_first_seen_and_last_changed() {
     let mut store = FactsStore::open(root).expect("open store");
 
     let opts = IngestOptions::default();
-    ingest_until_fresh(&mut store, &opts).expect("ingest");
+    ingest_until_fresh_within(&mut store, &opts, TEST_WALL_CLOCK).expect("ingest");
 
     let lifecycle: Lifecycle = store
         .path_lifecycle("src/main.rs")
@@ -252,7 +257,7 @@ fn poison_paths_excluded_from_diff_ingest() {
     let mut store = FactsStore::open(root).expect("open store");
 
     let opts = IngestOptions::default();
-    let report = ingest_until_fresh(&mut store, &opts).expect("ingest");
+    let report = ingest_until_fresh_within(&mut store, &opts, TEST_WALL_CLOCK).expect("ingest");
 
     // The package-lock.json commit's diff for that file should be skipped
     // (structural skip). The skip count or poisoned count should be >= 1
@@ -280,7 +285,7 @@ fn excavate_finds_phrase_in_history() {
     let mut store = FactsStore::open(root).expect("open store");
 
     let opts = IngestOptions::default();
-    ingest_until_fresh(&mut store, &opts).expect("ingest");
+    ingest_until_fresh_within(&mut store, &opts, TEST_WALL_CLOCK).expect("ingest");
 
     // Excavate for "secret_token" — should find the commit that added it.
     let result = store
@@ -313,7 +318,8 @@ fn excavate_result_carries_index_state() {
         "an un-ingested db must report fresh=false on its excavate result"
     );
 
-    ingest_until_fresh(&mut store, &IngestOptions::default()).expect("ingest");
+    ingest_until_fresh_within(&mut store, &IngestOptions::default(), TEST_WALL_CLOCK)
+        .expect("ingest");
     let result = store
         .excavate(Some("secret_token"), None, None, None, 50)
         .expect("excavate");
@@ -446,7 +452,8 @@ fn file_text_cap_genuinely_bounds_a_single_files_stored_diff_text() {
 
     let mut store = FactsStore::open(root).expect("open store");
     let opts = IngestOptions::default();
-    let report = ingest_until_fresh(&mut store, &opts).expect("ingest until fresh");
+    let report =
+        ingest_until_fresh_within(&mut store, &opts, TEST_WALL_CLOCK).expect("ingest until fresh");
     assert!(
         report.fresh,
         "ingest should still converge to fresh even with an over-cap file"
@@ -506,7 +513,7 @@ fn phase_a_reruns_when_refs_change() {
     let root = dir.path();
     let mut store = FactsStore::open(root).expect("open store");
     let opts = IngestOptions::default();
-    ingest_until_fresh(&mut store, &opts).expect("ingest until fresh");
+    ingest_until_fresh_within(&mut store, &opts, TEST_WALL_CLOCK).expect("ingest until fresh");
     assert!(store.index_state().fresh, "should be fresh after ingest");
 
     // Add a new commit: refs moved, so the index is stale again.
@@ -529,7 +536,7 @@ fn phase_a_reruns_when_refs_change() {
     );
 
     // Re-ingest converges to fresh again.
-    ingest_until_fresh(&mut store, &opts).expect("re-ingest until fresh");
+    ingest_until_fresh_within(&mut store, &opts, TEST_WALL_CLOCK).expect("re-ingest until fresh");
     assert!(
         store.index_state().fresh,
         "re-ingest should restore freshness after a ref move"
@@ -543,7 +550,8 @@ fn pre_versioned_db_with_rows_self_heals_on_open() {
     // Build a store and ingest so the db has rows.
     {
         let mut store = FactsStore::open(root).expect("open store");
-        ingest_until_fresh(&mut store, &IngestOptions::default()).expect("ingest");
+        ingest_until_fresh_within(&mut store, &IngestOptions::default(), TEST_WALL_CLOCK)
+            .expect("ingest");
         // Simulate a pre-versioned (poisoned) db: reset user_version to 0
         // while rows remain. On next open it must be rebuilt (self-healed).
         store
@@ -574,7 +582,8 @@ fn concurrent_open_on_poisoned_db_never_ioerrors() {
     let root = dir.path();
     {
         let mut store = FactsStore::open(root).expect("open store");
-        ingest_until_fresh(&mut store, &IngestOptions::default()).expect("ingest");
+        ingest_until_fresh_within(&mut store, &IngestOptions::default(), TEST_WALL_CLOCK)
+            .expect("ingest");
         store
             .conn()
             .pragma_update(None, "user_version", 0)

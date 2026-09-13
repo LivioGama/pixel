@@ -264,7 +264,7 @@ impl FactsStore {
 
         Ok(ExcavateResult {
             phrase,
-            path: path.map(|p| p.to_string()),
+            path: path.map(ToString::to_string),
             candidates,
             last_good,
             plan,

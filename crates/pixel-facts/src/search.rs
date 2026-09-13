@@ -87,13 +87,19 @@ pub fn sanitize_query(raw: &str) -> Vec<String> {
     let terms: Vec<String> = rest
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .filter(|t| t.chars().count() > 1)
-        .map(|t| t.to_string())
+        .map(ToString::to_string)
         .collect();
     units.extend(terms);
     units
 }
 
 /// The public search entry point.
+/// Snippet cap per hit. Snippets are diff text: a single large commit diff
+/// can be 50 KB+, and 200 hits × 50 KB = 10 MB into the agent's context
+/// window. 500 chars is enough to show the relevant context line; the
+/// agent can `pixel diff <oid>` for the full diff if needed.
+const SNIPPET_CAP_CHARS: usize = 500;
+
 pub fn search(
     store: &FactsStore,
     query: &str,
@@ -146,12 +152,7 @@ pub fn search(
     });
     candidates.truncate(limit);
 
-    // Cap snippet size per hit. Snippets are diff text — a single large
-    // commit diff can be 50KB+, and 200 hits × 50KB = 10MB into the
-    // agent's context window. 500 chars per snippet is enough to show
-    // the relevant context line; the agent can `pixel diff <oid>` for
-    // the full diff if needed.
-    const SNIPPET_CAP_CHARS: usize = 500;
+    // Cap snippet size per hit (see `SNIPPET_CAP_CHARS`).
     for hit in candidates.iter_mut() {
         if let Some(snippet) = hit.snippet.as_mut()
             && snippet.chars().count() > SNIPPET_CAP_CHARS
@@ -218,8 +219,8 @@ fn to_hit(
         subject: subject_of(subject).to_string(),
         author: author.to_string(),
         kind: kind.to_string(),
-        path: path.map(|p| p.to_string()),
-        snippet: snippet.map(|s| s.to_string()),
+        path: path.map(ToString::to_string),
+        snippet: snippet.map(ToString::to_string),
         files_touched,
         score,
     }
@@ -461,4 +462,70 @@ fn make_snippet(text: &str, units: &[String]) -> String {
         out.push('…');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ingest::tests::ingest_within;
+    use crate::testutil::two_commit_repo;
+
+    #[test]
+    fn sanitize_query_keeps_quoted_phrases_whole_and_drops_one_char_terms() {
+        assert_eq!(
+            sanitize_query(r#"fix "rate limit" x ab retry_once, y"#),
+            vec!["rate limit", "fix", "ab", "retry_once"]
+        );
+        // An unterminated quote is plain text.
+        assert_eq!(sanitize_query(r#""quote here"#), vec!["quote", "here"]);
+        assert!(sanitize_query("").is_empty());
+        assert!(sanitize_query(r#""x""#).is_empty());
+    }
+
+    #[test]
+    fn to_hit_carries_every_field_with_the_short_oid_and_subject_line() {
+        let hit = to_hit(
+            "0123456789abcdef0123456789abcdef01234567",
+            "2026-01-01T00:00:00Z",
+            "subject line\n\nbody",
+            "Ann",
+            3,
+            "diff",
+            Some("src/a.rs"),
+            Some("+added"),
+            2.5,
+        );
+        assert_eq!(
+            hit.oid,
+            short_oid("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert_eq!(hit.subject, "subject line");
+        assert_eq!(hit.at, "2026-01-01T00:00:00Z");
+        assert_eq!(hit.author, "Ann");
+        assert_eq!(hit.kind, "diff");
+        assert_eq!(hit.path.as_deref(), Some("src/a.rs"));
+        assert_eq!(hit.snippet.as_deref(), Some("+added"));
+        assert_eq!(hit.files_touched, 3);
+        assert_eq!(hit.score, 2.5);
+    }
+
+    #[test]
+    fn search_finds_a_commit_by_message_and_by_diff_text() {
+        let (dir, _, second) = two_commit_repo();
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        ingest_within(&mut store);
+        let by_message = search(&store, "helper", SearchFacet::Message, 50).unwrap();
+        assert_eq!(by_message.candidates.len(), 1, "{by_message:?}");
+        assert_eq!(by_message.candidates[0].oid, short_oid(&second));
+        let by_diff = search(&store, "secret_token", SearchFacet::Diff, 50).unwrap();
+        assert_eq!(by_diff.candidates.len(), 1, "{by_diff:?}");
+        assert_eq!(by_diff.candidates[0].oid, short_oid(&second));
+        assert!(
+            by_diff.candidates[0]
+                .snippet
+                .as_deref()
+                .unwrap_or("")
+                .contains("secret_token")
+        );
+    }
 }
