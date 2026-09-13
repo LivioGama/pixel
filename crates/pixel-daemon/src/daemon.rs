@@ -627,11 +627,12 @@ mod tests {
         wait_until("three sweeps", Duration::from_secs(10), || {
             sweeps.load(Ordering::SeqCst) >= 3
         });
-        // Three sweeps at 100 ms cannot land before 200 ms: the loop
-        // reschedules from the interval, it does not sweep every iteration.
+        // The first sweep waits one full interval (nothing to sweep at
+        // start-up) and each later one is rescheduled from the interval, so
+        // three sweeps at 100 ms cannot land before 300 ms.
         assert!(
-            started.elapsed() >= Duration::from_millis(200),
-            "sweeps ran back to back instead of on the interval"
+            started.elapsed() >= Duration::from_millis(300),
+            "sweeps ran early or back to back instead of on the interval"
         );
         // The count keeps rising: sweeps are periodic, not a one-off after
         // the first request.
