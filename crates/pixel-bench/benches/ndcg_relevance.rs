@@ -36,7 +36,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use pixel_bench::validate_query_score;
 use pixel_daemon::api::{Response, Service};
 use pixel_proto::Op;
@@ -390,7 +390,6 @@ fn bench(c: &mut Criterion) {
     );
     eprintln!("  NOTE: m1_latency.rs latency gates are COST-only; correctness axis is this");
     eprintln!("  success-rate lane (+ the agent-level A/B in the isolated harness).");
-    use criterion::BenchmarkId;
     let mut ranked_grp = c.benchmark_group("ndcg10");
     ranked_grp.sample_size(10);
     ranked_grp.bench_with_input(BenchmarkId::new("ranked_search", 10), &ranked, |b, _| {
