@@ -48,8 +48,10 @@ fn main() {
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .map_or_else(
+            || "unknown".to_string(),
+            |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        );
     println!("cargo:rustc-env=PIXEL_RUSTC_VERSION={rustc_version}");
 
     let epoch = std::env::var("SOURCE_DATE_EPOCH")

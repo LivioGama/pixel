@@ -171,7 +171,7 @@ fn composed_codex_merges_context_and_rewrites_after_exact_stdin_replay() {
         "cwd": repo.to_str().unwrap(),
         "tool_input": {"command": "grep -n GUARD_NEEDLE_XYZ src/lib.rs"},
     });
-    let raw = format!("  {}\n", payload);
+    let raw = format!("  {payload}\n");
     std::fs::write(&expected, &raw).unwrap();
     std::fs::write(
         &script,

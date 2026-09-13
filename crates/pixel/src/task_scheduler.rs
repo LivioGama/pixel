@@ -446,8 +446,7 @@ fn terminate_group(process_group: i32, pid: u32) -> Result<(), String> {
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 #[cfg(test)]
@@ -672,5 +671,25 @@ mod tests {
         let _ = crate::task_sandbox::cleanup(&root, &accepted.task_id, &first.candidate_id);
         let _ = crate::task_sandbox::cleanup(&root, &accepted.task_id, &second.candidate_id);
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// Packet and schedule timestamps are compared with wall-clock time by
+    /// their readers; a placeholder (0, 1) would date everything to 1970.
+    #[test]
+    fn now_unix_is_the_current_unix_epoch_in_seconds() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let now = now_unix();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(
+            now >= before && now <= after,
+            "{before} <= {now} <= {after}"
+        );
+        assert!(now > 1_577_836_800, "{now}"); // 2020-01-01T00:00:00Z
     }
 }
