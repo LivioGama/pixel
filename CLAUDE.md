@@ -4,7 +4,7 @@ Build, gates, PR format and the definition of done live in [CONTRIBUTING.md](CON
 
 ## Mutation Testing Loop
 
-Mutation tests are run with `cargo mutants --in-diff <(git diff develop...HEAD)` after the gates (`cargo fmt`, `cargo test`, `cargo clippy`) pass. They must pass: the CI workflow `Mutants` fails a pull request on any surviving mutant.
+Mutation tests are run with `cargo mutants --in-diff <(git diff develop...HEAD)` after the gates (`cargo fmt`, `cargo test`, `cargo clippy`) pass; `scripts/gates.sh --mutants` runs all four with laptop-safe job and thread caps and skips when no Rust-affecting path changed. They must pass: the CI workflow `Mutants` fails a pull request on any surviving mutant.
 
 For each `MISSED` line either:
 

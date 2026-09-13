@@ -73,6 +73,16 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+`scripts/gates.sh` runs the same three commands (plus `--mutants` for the
+mutation gate below) with two additions for a laptop: it exits 0 without
+compiling when neither the diff against `develop` nor the working tree
+touches a Rust-affecting path (`*.rs`, `Cargo.*`, `build.rs`, `.cargo/`,
+toolchain and lint config), and it runs cargo under `nice` with
+`CARGO_BUILD_JOBS=-2` (two CPUs left free) and `RUST_TEST_THREADS` at half
+the CPUs, unless those variables are already set. `--force` runs the gates
+regardless; `CI=1` disables both behaviours. Its contract is pinned by
+`scripts/test-gates.py`, which CI runs.
+
 The `Mutants` workflow (`.github/workflows/mutants.yml`) runs on every pull
 request that touches `crates/` and fails on a surviving mutant. Reproduce it
 locally before pushing:
