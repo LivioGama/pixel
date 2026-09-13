@@ -1,6 +1,7 @@
 # Manual Setup
 
-Prefer to control your own setup? You don't need `pixel install`.
+Prefer to control your own setup, or using an agent `pixel install` does not
+wire (Cursor, Gemini CLI, Copilot, ...)? You don't need `pixel install`.
 
 `pixel install` does four things, and you can do all of them by hand:
 
@@ -163,9 +164,19 @@ mkdir -p ~/.pi/agent
 cp crates/pixel-install/assets/pixel-agent-prompt.md ~/.pi/agent/APPEND_SYSTEM.md
 ```
 
+### Any other agent
+
+`pixel install` covers only the three agents above. For any other tool, put
+the full text of `~/.local/share/pixel/agent-prompt.md` wherever that tool
+reads always-on instructions: a rules file (`.cursor/rules`, `GEMINI.md`,
+`.github/copilot-instructions.md`), a system-prompt flag, or a global
+`AGENTS.md`. Copy the bundled prompt verbatim rather than a summary; it is
+the single source of truth, and `pixel doctor` checks the deployed copy
+against it. Re-copy it after each `pixel upgrade`.
+
 ## A note on prompt size
 
-The system prompt is ~266 lines (~3 000 tokens). That is deliberate.
+The system prompt is ~300 lines (~4 000 tokens). That is deliberate.
 
 Pixel plays a central role: it replaces `grep`, `rg`, `git log -S`, `git blame`,
 manual caller tracing, and exploratory file reading with a single indexed,
