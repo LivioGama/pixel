@@ -412,8 +412,7 @@ fn upsert_at(
     let revision = prior
         .as_ref()
         .filter(|_| !boundary)
-        .map(|packet| packet.revision.saturating_add(1))
-        .unwrap_or(1);
+        .map_or(1, |packet| packet.revision.saturating_add(1));
     let packet = Packet {
         version: STORE_VERSION,
         task_id: format!("claude:{session_id}:{generation}"),
@@ -425,8 +424,7 @@ fn upsert_at(
         created_unix: prior
             .as_ref()
             .filter(|_| !boundary)
-            .map(|packet| packet.created_unix)
-            .unwrap_or(now),
+            .map_or(now, |packet| packet.created_unix),
         updated_unix: now,
         evidence: EvidenceSnapshot {
             revision,
@@ -638,8 +636,7 @@ fn expired(updated_unix: u64, now: u64) -> bool {
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
@@ -895,5 +892,25 @@ mod tests {
         );
         assert!(transition(&root, &begun.task_id, "not valid", "worker_started").is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Packet and schedule timestamps are compared with wall-clock time by
+    /// their readers; a placeholder (0, 1) would date everything to 1970.
+    #[test]
+    fn now_unix_is_the_current_unix_epoch_in_seconds() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let now = now_unix();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(
+            now >= before && now <= after,
+            "{before} <= {now} <= {after}"
+        );
+        assert!(now > 1_577_836_800, "{now}"); // 2020-01-01T00:00:00Z
     }
 }

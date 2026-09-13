@@ -1433,9 +1433,7 @@ fn try_daemon_inner(root: &Path, req: &Request) -> Option<Response> {
 
 /// Check if an env var is explicitly set to "0"/"false"/"off".
 fn env_flag_off(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| matches!(v.as_str(), "0" | "false" | "off"))
-        .unwrap_or(false)
+    std::env::var(name).is_ok_and(|v| matches!(v.as_str(), "0" | "false" | "off"))
 }
 
 /// Prefer the daemon; fall back to an in-process Service. The given path may
@@ -1610,7 +1608,7 @@ const TRUNCATION_META_RESERVE: usize = 256;
 const TRUNCATION_MAX_ROUNDS: usize = 8;
 
 fn serialized_len(v: &Value) -> usize {
-    serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0)
+    serde_json::to_vec(v).map_or(0, |b| b.len())
 }
 
 /// Locate the non-empty array under `v` whose tail is worth cutting most:
@@ -2206,8 +2204,7 @@ fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Res
         .unwrap_or_default();
     let created_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     let new_task = serde_json::json!({
         "id": targets_task_id(task),
         "task": task,
@@ -2229,8 +2226,7 @@ fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Res
     let active = manifest
         .get("tasks")
         .and_then(Value::as_array)
-        .map(Vec::len)
-        .unwrap_or(1);
+        .map_or(1, Vec::len);
     if let Some(parent) = manifest_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
@@ -2433,9 +2429,7 @@ pub(crate) fn discover_root(path: &Path) -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|e| format!("bad path {}: {e}", path.display()))?;
     let start = if abs.is_file() {
-        abs.parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| abs.clone())
+        abs.parent().map_or_else(|| abs.clone(), Path::to_path_buf)
     } else {
         abs.clone()
     };
@@ -2596,8 +2590,7 @@ fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
         let end_line = m
             .get("end_line")
             .and_then(Value::as_u64)
-            .map(|v| v as usize)
-            .unwrap_or(start_line)
+            .map_or(start_line, |v| v as usize)
             .max(start_line);
         if start_line == 0 {
             continue;
@@ -2858,9 +2851,7 @@ fn run_search_one(
 // ---------------------------------------------------------------------------
 
 fn daemon_ping(root: &Path) -> bool {
-    try_daemon(root, &Request::Ping)
-        .map(|r| r.ok)
-        .unwrap_or(false)
+    try_daemon(root, &Request::Ping).is_some_and(|r| r.ok)
 }
 
 fn daemon_start(path: PathBuf, foreground: bool, quiet: bool) -> Result<(), String> {
@@ -3461,13 +3452,13 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 eprintln!(
                     "indexed via daemon: base_files={} delta_files={} overlay_files={}",
                     v.pointer("/index/base_files")
-                        .and_then(|x| x.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0),
                     v.pointer("/index/delta_files")
-                        .and_then(|x| x.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0),
                     v.pointer("/index/overlay_files")
-                        .and_then(|x| x.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0),
                 );
                 if history {
@@ -3533,7 +3524,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             context,
             ignore_case,
         } => {
-            if call_guard_check("search", &format!("{pattern} {:?}", paths)) {
+            if call_guard_check("search", &format!("{pattern} {paths:?}")) {
                 return Err("circuit breaker: repeated search calls".to_string());
             }
             run_search(
@@ -4104,7 +4095,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             // (schema version, phase-A state, hunk/gram counts). Only fill in
             // the client-side fallback when talking to an older daemon that
             // doesn't send one.
-            if data.get("facts").map(|f| f.is_null()).unwrap_or(true)
+            if data.get("facts").is_none_or(serde_json::Value::is_null)
                 && let Some(facts) = facts_status(&path)
             {
                 data["facts"] = facts;
@@ -4147,7 +4138,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                         f.get("total_commits").and_then(Value::as_u64),
                     ) {
                         if tc > 0 {
-                            line.push_str(&format!(" {}/{}", ci, tc));
+                            line.push_str(&format!(" {ci}/{tc}"));
                         }
                         let covered = ci == tc;
                         if let Some(pct) = f.get("diff_indexed_pct").and_then(Value::as_f64) {
@@ -4168,11 +4159,11 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     } else {
                         "stale"
                     };
-                    line.push_str(&format!(" {}", state));
+                    line.push_str(&format!(" {state}"));
                 } else {
                     line.push_str(" ?facts");
                 }
-                write_stdout(&format!("{}\n", line))?;
+                write_stdout(&format!("{line}\n"))?;
                 return Ok(());
             }
             if json {
@@ -4286,14 +4277,12 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 data["dirty_count"] = json!(
                     data.get("dirty")
                         .and_then(Value::as_array)
-                        .map(Vec::len)
-                        .unwrap_or(0)
+                        .map_or(0, Vec::len)
                 );
                 data["clean_count"] = json!(
                     data.get("clean")
                         .and_then(Value::as_array)
-                        .map(Vec::len)
-                        .unwrap_or(0)
+                        .map_or(0, Vec::len)
                 );
             }
             print_data(&data, json)
@@ -5321,7 +5310,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             };
             let data = pixel_flow::flow(&action)?;
             if matches!(action, FlowAction::Execute { .. })
-                && data.get("success").and_then(|v| v.as_bool()) != Some(true)
+                && data.get("success").and_then(serde_json::Value::as_bool) != Some(true)
             {
                 return Err(format!(
                     "flow execution failed: {}",
@@ -5352,15 +5341,15 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     }
                     let success = data
                         .get("success")
-                        .and_then(|v| v.as_bool())
+                        .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false);
                     let steps = data
                         .get("steps_executed")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     let skipped = data
                         .get("steps_skipped")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     if success {
                         println!("✓ Flow executed: {} steps, {} skipped", steps, skipped);
@@ -5545,6 +5534,14 @@ fn run_log(
 /// Preserve legacy snippet/pool reports, separately aggregate versioned
 /// invocation metrics. Old measurements are never silently reclassified as v1.
 fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    /// Per-command aggregate: invocations, pool chars, snippet chars.
+    #[derive(Default)]
+    struct Agg {
+        count: u64,
+        pool: u64,
+        snippet: u64,
+    }
     let root = discover_root(path)?;
     let log_path = pixel_actionlog::ActionLog::path_for_root(&root);
     // Over-fetch; savings is a lightweight aggregate read.
@@ -5564,13 +5561,6 @@ fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), 
         .collect();
     let workflow_metrics = pixel_actionlog::summarize_metrics(&filtered);
     // Aggregate per command: pool chars, snippet chars, count.
-    use std::collections::BTreeMap;
-    #[derive(Default)]
-    struct Agg {
-        count: u64,
-        pool: u64,
-        snippet: u64,
-    }
     let mut by_cmd: BTreeMap<String, Agg> = BTreeMap::new();
     for e in &events {
         if let Some(c) = cutoff_ms
@@ -6348,5 +6338,33 @@ mod prompt_asset_parity {
             "documented command lines the CLI rejects:\n{}",
             failures.join("\n")
         );
+    }
+
+    /// The kill switches (`PIXEL_DAEMON_AUTO_START=0`, `PIXEL_GUARD_*=off`)
+    /// fire only on an explicit off value: unset and any other value keep
+    /// the feature on.
+    #[test]
+    fn env_flag_off_fires_only_on_an_explicit_off_value() {
+        let name = format!("PIXEL_TEST_FLAG_{}_{}", std::process::id(), line!());
+        assert!(!crate::env_flag_off(&name), "unset");
+        for (value, expected) in [
+            ("0", true),
+            ("false", true),
+            ("off", true),
+            ("1", false),
+            ("", false),
+            ("no", false),
+        ] {
+            // SAFETY: the variable name is unique to this test (pid + line),
+            // so no other thread in the process reads or writes it.
+            unsafe {
+                std::env::set_var(&name, value);
+            }
+            assert_eq!(crate::env_flag_off(&name), expected, "{value:?}");
+        }
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var(&name);
+        }
     }
 }

@@ -121,9 +121,9 @@ fn metric_lines(output: &Output) -> Vec<String> {
 
 fn short_invocation_id(event: &Value) -> String {
     let id = event["invocation_id"].as_str().unwrap();
-    id.split('-')
-        .nth(1)
-        .map(|s| {
+    id.split('-').nth(1).map_or_else(
+        || id.to_owned(),
+        |s| {
             s.chars()
                 .rev()
                 .take(6)
@@ -131,8 +131,8 @@ fn short_invocation_id(event: &Value) -> String {
                 .chars()
                 .rev()
                 .collect()
-        })
-        .unwrap_or_else(|| id.to_owned())
+        },
+    )
 }
 
 fn assert_metric_identity(block: &str, event: &Value) {

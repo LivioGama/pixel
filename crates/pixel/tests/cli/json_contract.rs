@@ -261,7 +261,7 @@ fn big_untracked_tree_keeps_json_answers_structured() {
         doc.get("partial").is_none(),
         "structural cut, not wrapper: {doc}"
     );
-    assert_eq!(doc["branch"].as_str().map(|s| s.is_empty()), Some(false));
+    assert_eq!(doc["branch"].as_str().map(str::is_empty), Some(false));
     let cut = &doc["truncated_arrays"][0];
     assert_eq!(cut["path"], "dirty");
     assert_eq!(cut["total"], 3000);
@@ -283,4 +283,26 @@ fn big_untracked_tree_keeps_json_answers_structured() {
     assert_eq!(doc["dirty"].as_array().map(Vec::len), Some(3000));
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The statusline shows `indexed/total` commits only when the history index
+/// knows about commits: a repository without any must not print `0/0`.
+#[test]
+fn statusline_reports_the_commit_fraction_only_when_there_are_commits() {
+    let dir = fixture("statusline-commits");
+    let indexed = pixel(&dir, &["index", "--history", "."]);
+    assert!(indexed.status.success(), "{indexed:?}");
+    let out = pixel(&dir, &["status", ".", "--statusline"]);
+    assert!(out.status.success(), "{out:?}");
+    let line = String::from_utf8_lossy(&out.stdout);
+    assert!(line.contains(" 1/1"), "one commit indexed of one: {line}");
+
+    let empty = Scratch::for_test("pixel-json-contract", "statusline-empty");
+    std::fs::write(empty.join(".gitignore"), ".pixel/\n").unwrap();
+    git(&empty, &["init", "-q"]);
+    let _ = pixel(&empty, &["index", "--history", "."]);
+    let out = pixel(&empty, &["status", ".", "--statusline"]);
+    assert!(out.status.success(), "{out:?}");
+    let line = String::from_utf8_lossy(&out.stdout);
+    assert!(!line.contains("0/0"), "{line}");
 }

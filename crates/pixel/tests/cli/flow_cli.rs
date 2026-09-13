@@ -145,3 +145,24 @@ fn flow_execute_failure_is_nonzero_and_never_a_success_document() {
     assert!(!output.stderr.is_empty());
     assert!(fixture.0.join("calls").exists());
 }
+
+/// Without `--json`, `--execute` prints the browser log to stderr and one
+/// summary line to stdout: the agent reads the verdict, not a document.
+#[test]
+fn flow_execute_prints_a_summary_line_and_the_log_on_stderr() {
+    let fixture = Fixture::new("summary");
+    let output = fixture.run(&["flow", "replay", "audit", "--execute"], false);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim_end(),
+        "✓ Flow executed: 1 steps, 0 skipped",
+        "{output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("# Executing flow: audit"), "{stderr}");
+    assert!(
+        stderr.contains("agent-browser open \"https://example.test\""),
+        "{stderr}"
+    );
+}

@@ -57,11 +57,10 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         std::process::exit(0);
     };
 
-    let cwd = payload
-        .cwd
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let cwd = payload.cwd.as_deref().map_or_else(
+        || std::env::current_dir().unwrap_or_default(),
+        PathBuf::from,
+    );
 
     let is_claude_runtime = matches!(provider, Some(crate::guard::Provider::Claude));
     let session_id = payload.session_id.filter(|id| !id.is_empty());

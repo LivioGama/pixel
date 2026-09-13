@@ -322,11 +322,10 @@ fn provider_rewrite(provider: Provider, payload: &Value) -> Option<Value> {
     if command.is_empty() {
         return None;
     }
-    let base = payload
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let base = payload.get("cwd").and_then(Value::as_str).map_or_else(
+        || std::env::current_dir().unwrap_or_default(),
+        PathBuf::from,
+    );
     let cwd = input
         .get("workdir")
         .or_else(|| input.get("cwd"))
@@ -431,9 +430,7 @@ fn load_composed_backup(path: &Path) -> Option<Vec<ComposedForeignHook>> {
 
 fn composed_matches(matcher: &str, tool: &str) -> bool {
     matches!(matcher, "" | "*" | ".*")
-        || regex::Regex::new(matcher)
-            .map(|regex| regex.is_match(tool))
-            .unwrap_or(false)
+        || regex::Regex::new(matcher).is_ok_and(|regex| regex.is_match(tool))
 }
 
 fn run_foreign_command(command: &str, raw: &[u8], cwd: &Path) -> Option<Value> {
@@ -752,11 +749,10 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
         .get("tool_name")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let cwd = payload
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let cwd = payload.get("cwd").and_then(Value::as_str).map_or_else(
+        || std::env::current_dir().unwrap_or_default(),
+        PathBuf::from,
+    );
     let tool_input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
     let Some(tool_input) = tool_input.as_object() else {
         std::process::exit(0);
@@ -1039,11 +1035,10 @@ pub fn run_post_tool_use(provider: Option<Provider>) -> ! {
         .get("tool_name")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let cwd = payload
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let cwd = payload.get("cwd").and_then(Value::as_str).map_or_else(
+        || std::env::current_dir().unwrap_or_default(),
+        PathBuf::from,
+    );
     let tool_input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
     let Some(tool_input) = tool_input.as_object() else {
         std::process::exit(0);
@@ -1300,9 +1295,10 @@ fn all_files(m: &Manifest) -> impl Iterator<Item = &(String, String)> {
 }
 
 fn rel_of(abs: &Path, root: &Path) -> String {
-    abs.strip_prefix(root)
-        .map(|r| r.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| abs.to_string_lossy().into_owned())
+    abs.strip_prefix(root).map_or_else(
+        |_| abs.to_string_lossy().into_owned(),
+        |r| r.to_string_lossy().into_owned(),
+    )
 }
 
 /// Scoping verdict for one absolute path while a manifest is active.
@@ -1521,9 +1517,7 @@ fn read_scoping_advisory(abs: &Path, idx_root: &Path) -> ! {
 /// Check if an env var is explicitly set to "0"/"false"/"off" (kill-switch
 /// pattern, mirroring the top-level PIXEL_TARGETS_GUARD check).
 fn env_flag_off(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| matches!(v.as_str(), "0" | "false" | "off"))
-        .unwrap_or(false)
+    std::env::var(name).is_ok_and(|v| matches!(v.as_str(), "0" | "false" | "off"))
 }
 
 /// Advisory for Grep/Glob/find in an indexed repo with no active manifest.
@@ -1580,8 +1574,7 @@ fn suggest_index_advisory(dir: &Path, is_git: bool) -> ! {
     let repo_phrase = if is_git { "git repo" } else { "directory" };
     advise(&[
         format!(
-            "pixel-targets-guard advisory: this {} has not been indexed by pixel yet.",
-            repo_phrase
+            "pixel-targets-guard advisory: this {repo_phrase} has not been indexed by pixel yet."
         ),
         "Proceeding. To enable pixel's scoped retrieval (one-time, takes seconds):".into(),
         format!("  pixel index {}", dir.display()),
@@ -1905,7 +1898,8 @@ fn is_branch_like(ref_str: &str) -> bool {
 fn current_branch(root: &Path) -> Option<String> {
     let head = std::fs::read_to_string(root.join(".git").join("HEAD")).ok()?;
     let head = head.trim();
-    head.strip_prefix("ref: refs/heads/").map(|s| s.to_string())
+    head.strip_prefix("ref: refs/heads/")
+        .map(ToString::to_string)
 }
 
 /// Deny verdict for one parsed `git <sub> <args>` invocation. Flag-order
@@ -2319,8 +2313,7 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
             let msg = c
                 .message
                 .as_deref()
-                .map(shell_quote)
-                .unwrap_or_else(|| "\"<msg>\"".to_string());
+                .map_or_else(|| "\"<msg>\"".to_string(), shell_quote);
             let files = if c.files.is_empty() {
                 "--files <file> [--files <file2> …]".to_string()
             } else {
@@ -2378,12 +2371,10 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
             let words: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
             let remote = words
                 .first()
-                .map(|s| shell_quote(s))
-                .unwrap_or_else(|| "<remote>".to_string());
+                .map_or_else(|| "<remote>".to_string(), |s| shell_quote(s));
             let refspec = words
                 .get(1)
-                .map(|s| shell_quote(s))
-                .unwrap_or_else(|| "<refspec>".to_string());
+                .map_or_else(|| "<refspec>".to_string(), |s| shell_quote(s));
             Some(vec![
                 "BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw `git push` bypasses pixel's snapshot-gated, journaled mutation surface.".into(),
                 "Run the exact equivalent instead:".into(),
@@ -2394,16 +2385,14 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
             let pos = args.iter().position(|a| a == "-b")?;
             let name = args
                 .get(pos + 1)
-                .map(|s| shell_quote(s))
-                .unwrap_or_else(|| "<name>".to_string());
+                .map_or_else(|| "<name>".to_string(), |s| shell_quote(s));
             Some(branch_substitute_lines("`git checkout -b`", &name, &root_q))
         }
         "switch" => {
             let pos = args.iter().position(|a| a == "-c" || a == "--create")?;
             let name = args
                 .get(pos + 1)
-                .map(|s| shell_quote(s))
-                .unwrap_or_else(|| "<name>".to_string());
+                .map_or_else(|| "<name>".to_string(), |s| shell_quote(s));
             Some(branch_substitute_lines("`git switch -c`", &name, &root_q))
         }
         "rebase" => {
@@ -2706,9 +2695,7 @@ fn grep_redirect_advisory_lines(
             "Proceeding with the original Grep call; use Pixel search when those filters are not needed.".into(),
         ];
     }
-    let root = find_up(cwd, ".pixel")
-        .map(|r| r.display().to_string())
-        .unwrap_or_else(|| ".".to_string());
+    let root = find_up(cwd, ".pixel").map_or_else(|| ".".to_string(), |r| r.display().to_string());
     let Some(cmd) = search_can_replace(pattern, &flags, &root) else {
         return vec![
             "pixel-guard advisory: this Grep query cannot be represented exactly by Pixel search."
@@ -2765,7 +2752,7 @@ fn find_unquoted_double_amp(s: &str) -> Option<usize> {
             Some(_) => {}
             None if c == '\'' || c == '"' => quote = Some(c),
             None if c == '&' && chars[i + 1] == '&' => {
-                return Some(s.char_indices().nth(i).map(|(idx, _)| idx).unwrap_or(0));
+                return Some(s.char_indices().nth(i).map_or(0, |(idx, _)| idx));
             }
             None => {}
         }
@@ -3844,5 +3831,68 @@ mod tests {
             sequencer_in_progress(&root),
             "relative gitdir pointer must resolve against the worktree root"
         );
+    }
+
+    /// The kill switches (`PIXEL_DAEMON_AUTO_START=0`, `PIXEL_GUARD_*=off`)
+    /// fire only on an explicit off value: unset and any other value keep
+    /// the feature on.
+    #[test]
+    fn env_flag_off_fires_only_on_an_explicit_off_value() {
+        let name = format!("PIXEL_TEST_FLAG_{}_{}", std::process::id(), line!());
+        assert!(!env_flag_off(&name), "unset");
+        for (value, expected) in [
+            ("0", true),
+            ("false", true),
+            ("off", true),
+            ("1", false),
+            ("", false),
+            ("no", false),
+        ] {
+            // SAFETY: the variable name is unique to this test (pid + line),
+            // so no other thread in the process reads or writes it.
+            unsafe {
+                std::env::set_var(&name, value);
+            }
+            assert_eq!(env_flag_off(&name), expected, "{value:?}");
+        }
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var(&name);
+        }
+    }
+
+    /// A composed hook runs for a tool when its matcher is the catch-all or
+    /// a regex matching the tool name; anything else (or a broken regex)
+    /// leaves the hook out.
+    #[test]
+    fn composed_matches_accepts_catch_alls_and_matching_regexes_only() {
+        for catch_all in ["", "*", ".*"] {
+            assert!(composed_matches(catch_all, "Bash"), "{catch_all:?}");
+        }
+        assert!(composed_matches("Bash", "Bash"));
+        assert!(composed_matches("Bash|Edit", "Edit"));
+        assert!(!composed_matches("Edit", "Bash"));
+        assert!(
+            !composed_matches("(", "Bash"),
+            "an invalid regex never matches"
+        );
+    }
+
+    /// The branch name in a deny message comes from `.git/HEAD`; a detached
+    /// HEAD or a missing file yields no name rather than a wrong one.
+    #[test]
+    fn current_branch_reads_the_symbolic_head_only() {
+        let root = scratch_repo("current-branch");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        assert_eq!(current_branch(&root), None, "no HEAD file");
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/feature/x\n").unwrap();
+        assert_eq!(current_branch(&root).as_deref(), Some("feature/x"));
+        std::fs::write(
+            root.join(".git/HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        assert_eq!(current_branch(&root), None, "detached HEAD");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -84,11 +84,10 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         std::process::exit(0);
     }
 
-    let cwd = payload
-        .cwd
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let cwd = payload.cwd.as_deref().map_or_else(
+        || std::env::current_dir().unwrap_or_default(),
+        PathBuf::from,
+    );
 
     let event_name = payload
         .hook_event_name
@@ -239,8 +238,7 @@ fn tracked_paths(root: &Path) -> Result<Vec<String>, String> {
 fn worker_config() -> crate::task_scheduler::WorkerConfig {
     let executable = std::env::var_os("PIXEL_CLAUDE_EXECUTABLE")
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("claude"));
+        .map_or_else(|| PathBuf::from("claude"), PathBuf::from);
     let system_prompt_file = std::env::var_os("PIXEL_WORKER_SYSTEM_PROMPT_FILE")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -617,7 +615,7 @@ fn check_action_log_file(mut file: std::fs::File, cwd: &Path, cutoff: i64) -> bo
         return false;
     }
     let reader = BufReader::new(file);
-    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+    let lines: Vec<String> = reader.lines().filter_map(std::result::Result::ok).collect();
 
     for line in lines.iter().rev() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
