@@ -13,7 +13,7 @@ This file contains all guidelines concatenated for easy reference.
 
 ## Design with AI use in mind (M-DESIGN-FOR-AI) { #M-DESIGN-FOR-AI }
 
-<why>To maximize the utility you get from letting agents work in your code base.</why>
+<why>maximum utility from agents working in your codebase.</why>
 
 As a general rule, making APIs easier to use for humans also makes them easier to use by AI.
 If you follow the guidelines in this book, you should be in good shape.
@@ -56,7 +56,7 @@ This enables agents to work in a mostly hands-off mode when refactoring.
 
 ## Avoid meta design documentation (M-NO-META-DESIGN-DOCUMENTATION) { #M-NO-META-DESIGN-DOCUMENTATION }
 
-<why>to avoid confusing users with information not relevant to them.</why>
+<why>docs focused on what is relevant to users.</why>
 
 Crate and module documentation must be free of meta design narratives that were only relevant during the creation of a crate. In other words, it is the end-state that is to be documented, not the design journey.
 
@@ -79,7 +79,7 @@ This kind of content describes process, not behaviour, and goes stale over time.
 
 ## Rust code solves Rust problems (M-RUST-SHAPED) { #M-RUST-SHAPED }
 
-<why>To ensure code is idiomatic.</why>
+<why>idiomatic code.</why>
 
 When (automatically) porting C#, Java, C++, or similar code to Rust, technical constructs must not be copied 1-on-1.
 
@@ -103,7 +103,7 @@ As a rule of thumb, structs and their methods can have vaguely similar names, fl
 
 ## Items are only visible through one path (M-SINGLE-ITEM-PATH) { #M-SINGLE-ITEM-PATH }
 
-<why>to avoid confusion and clutter from offering the same type multiple times.</why>
+<why>a single, clutter-free path to each type.</why>
 
 Public items within a crate should be reachable only through one path. For example some `crate::db::Connection` should not also be visible as `crate::Connection`:
 
@@ -137,7 +137,7 @@ Likewise, this rule also does not apply to public-but-hidden `_private` modules 
 
 ## Tests do not assert ground truth (M-TAUTOLOGICAL-TESTS) { #M-TAUTOLOGICAL-TESTS }
 
-<why>to avoid adding noise without value.</why>
+<why>tests that add value, not noise.</why>
 
 Unit tests should verify meaningful behavior instead of repeating foundational definitions.
 
@@ -166,7 +166,7 @@ Instead, a meaningful test would check a property the constants are supposed to 
 
 ## Applications may use Anyhow or derivatives (M-APP-ERROR) { #M-APP-ERROR }
 
-<why>To simplify application-level error handling.</why>
+<why>simple application-level error handling.</why>
 
 > Note, this guideline is primarily a relaxation and clarification of [M-ERRORS-CANONICAL-STRUCTS].
 
@@ -197,7 +197,7 @@ Libraries (crates used by more than one crate) should always follow [M-ERRORS-CA
 
 ## Use mimalloc for apps (M-MIMALLOC-APPS) { #M-MIMALLOC-APPS }
 
-<why>To get significant performance for free.</why>
+<why>significant performance at no cost.</why>
 
 Applications should set [mimalloc](https://crates.io/crates/mimalloc) as their global allocator. This usually results in notable performance
 increases along allocating hot paths; we have seen up to 25% benchmark improvements.
@@ -222,7 +222,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 ## Applications target highest viable target-cpu (M-TARGET-CPU) { #M-TARGET-CPU }
 
-<why>to improve fleet performance.</why>
+<why>fleet performance.</why>
 
 Server applications should compile against the highest `target-cpu` that the deployment environment is guaranteed to support, rather than defaulting to the generic baseline.
 
@@ -250,7 +250,7 @@ Note this guideline applies only to applications, as target settings are ignored
 
 ## Panic continuation is last resort (M-PANIC-CONTINUATION) { #M-PANIC-CONTINUATION }
 
-<why>to avoid subtle bugs and state corruption.</why>
+<why>state integrity and freedom from subtle bugs.</why>
 
 Panic recovery via `catch_unwind()` is a matter of last resort and must generally be followed by a controlled application restart.
 
@@ -284,12 +284,12 @@ Systems where many unrelated tasks are in flight (e.g., server request handlers)
 
 ## Panic means 'stop the program' (M-PANIC-IS-STOP) { #M-PANIC-IS-STOP }
 
-<why>To ensure soundness and predictability.</why>
+<why>soundness and predictability.</why>
 
 Panics are not exceptions. Instead, they suggest immediate program termination.
 
-Although your code must be [panic-safe](https://doc.rust-lang.org/nomicon/exception-safety.html) (i.e., a survived panic may not lead to
-inconsistent state), invoking a panic means _this program should stop now_. It is not valid to:
+Although your code must be [_minimally_ panic-safe](https://doc.rust-lang.org/nomicon/exception-safety.html) (i.e., a survived panic may not lead to
+undefined state), invoking a panic means _this program should stop now_. It is not valid to:
 
 - use panics to communicate (errors) upstream,
 - use panics to handle self-inflicted error conditions,
@@ -315,7 +315,7 @@ Any of those are directly or indirectly linked to programming errors.
 
 ## Custom panics have a helpful message (M-PANIC-MESSAGE) { #M-PANIC-MESSAGE }
 
-<why>to lower the time it takes to understand bugs.</why>
+<why>faster bug diagnosis.</why>
 
 When code panics intentionally (via `panic!`, `assert!`, `unreachable!`, `todo!`, or similar), a message must be present to clearly state what went wrong and, where applicable, include relevant values.
 
@@ -335,7 +335,7 @@ Panic messages in tests are not generally needed.
 
 ## Detected programming bugs are panics, not errors (M-PANIC-ON-BUG) { #M-PANIC-ON-BUG }
 
-<why>To avoid impossible error handling code and ensure runtime consistency.</why>
+<why>tractable error handling and runtime consistency.</why>
 
 As an extension of [M-PANIC-IS-STOP] above, when an unrecoverable programming error has been
 detected, libraries and applications must panic, i.e., request program termination.
@@ -377,9 +377,26 @@ fn parse_uri(s: &str) -> Result<Uri, ParseError> { };
 
 
 
+## Unsafe implies undefined behavior (M-UNSAFE-IMPLIES-UB) { #M-UNSAFE-IMPLIES-UB }
+
+<why>semantic consistency without warning fatigue.</why>
+
+The marker `unsafe` may only be applied to functions and traits if misuse implies the risk of undefined behavior (UB).
+It must not be used to mark functions that are dangerous to call for other reasons.
+
+```rust
+// Valid use of unsafe
+unsafe fn print_string(x: *const String) { }
+
+// Invalid use of unsafe
+unsafe fn delete_database() { }
+```
+
+
+
 ## Unsafe needs reason, should be avoided (M-UNSAFE) { #M-UNSAFE }
 
-<why>To prevent undefined behavior, attack surface, and similar 'happy little accidents'.</why>
+<why>memory safety and a minimal attack surface.</why>
 
 You must have a valid reason to use `unsafe`. The only valid reasons are
 
@@ -435,26 +452,9 @@ In any case, `unsafe` must follow the guidelines outlined below.
 
 
 
-## Unsafe implies undefined behavior (M-UNSAFE-IMPLIES-UB) { #M-UNSAFE-IMPLIES-UB }
-
-<why>To ensure semantic consistency and prevent warning fatigue.</why>
-
-The marker `unsafe` may only be applied to functions and traits if misuse implies the risk of undefined behavior (UB).
-It must not be used to mark functions that are dangerous to call for other reasons.
-
-```rust
-// Valid use of unsafe
-unsafe fn print_string(x: *const String) { }
-
-// Invalid use of unsafe
-unsafe fn delete_database() { }
-```
-
-
-
 ## All code must be sound (M-UNSOUND) { #M-UNSOUND }
 
-<why>To prevent unexpected runtime behavior, leading to potential bugs and incompatibilities.</why>
+<why>predictable runtime behavior free of bugs and incompatibilities.</why>
 
 Unsound code is seemingly _safe_ code that may produce undefined behavior when called from other safe code, or on its own accord.
 
@@ -526,7 +526,7 @@ While you may break most guidelines if you have a good enough reason, there are 
 
 ## Documentation has canonical sections (M-CANONICAL-DOCS) { #M-CANONICAL-DOCS }
 
-<why>To follow established and expected Rust best practices.</why>
+<why>established Rust documentation practices.</why>
 
 Public library items must contain the canonical doc sections. The summary sentence must always be present. Extended documentation and examples
 are strongly encouraged. The other sections must be present when applicable.
@@ -580,7 +580,7 @@ fn copy(src: File, dst: File) {}
 
 ## Mark `pub use` items with `#[doc(inline)]` (M-DOC-INLINE) { #M-DOC-INLINE }
 
-<why>To make re-exported items 'fit in' with their non re-exported siblings.</why>
+<why>re-exported items that fit in with their siblings.</why>
 
 When publicly re-exporting crate items via `pub use foo::Foo` or `pub use foo::*`, they show up in an opaque re-export block. In most cases, this is not
 helpful to the reader:
@@ -614,7 +614,7 @@ This does not apply to `std` or 3rd party types; these should always be re-expor
 
 ## First sentence is one line; approx. 15 words (M-FIRST-DOC-SENTENCE) { #M-FIRST-DOC-SENTENCE }
 
-<why>To make API docs easily skimmable.</why>
+<why>easily skimmable API docs.</why>
 
 When you document your item, the first sentence becomes the "summary sentence" that is extracted and shown in the module summary:
 
@@ -643,7 +643,7 @@ As a rule of thumb, the first sentence should not exceed **15 words**.
 
 ## Has comprehensive module documentation (M-MODULE-DOCS) { #M-MODULE-DOCS }
 
-<why>To allow for better API docs navigation.</why>
+<why>easy API docs navigation.</why>
 
 Any public library module must have `//!` module documentation, and the first sentence must follow [M-DOC-FIRST-SENTENCE].
 
@@ -685,7 +685,7 @@ their module documentation is the right place.
 
 ## FFI crates follow established naming conventions (M-FFI-NAMING) { #M-FFI-NAMING }
 
-<why>to make the role of crates immediately recognizable across projects.</why>
+<why>immediately recognizable crate roles across projects.</why>
 
 Crates used for FFI should follow established naming practices:
 
@@ -1923,7 +1923,7 @@ style = { level = "warn", priority = -1 }
 suspicious = { level = "warn", priority = -1 }
 # nursery = { level = "warn", priority = -1 }  # optional, might cause more false positives
 
-# These lints are from the `restriction` lint group and prevent specific
+# Additional lints are from the `restriction` and `nursery` group that prevent specific
 # constructs being used in source code in order to drive up consistency,
 # quality, and brevity
 allow_attributes_without_reason = "warn"
@@ -1941,12 +1941,12 @@ map_err_ignore = "warn"
 redundant_type_annotations = "warn"
 renamed_function_params = "warn"
 semicolon_outside_block = "warn"
-string_to_string = "warn"
 undocumented_unsafe_blocks = "warn"
 unnecessary_safety_comment = "warn"
 unnecessary_safety_doc = "warn"
 unneeded_field_pattern = "warn"
 unused_result_ok = "warn"
+too_long_first_doc_paragraph = "warn"
 
 # May cause issues with structured logging otherwise.
 literal_string_with_formatting_args = "allow"
@@ -2525,19 +2525,6 @@ In projects with coverage targets, it is not uncommon for `src/` files to contai
 
 
 
-## Integration test utilities live in a separate crate (M-INTEGRATION-TEST-UTILS) { #M-INTEGRATION-TEST-UTILS }
-
-<why>reusable test scaffolding without polluting the production crate.</why>
-
-For complex projects, shared helpers used by integration tests (fixtures, builders, mock servers, assertion helpers, ...) should live in a dedicated crate rather than inside the production crate or copied between individual `tests/*.rs` files.
-
-- TODO: Define what counts as a "complex project" (e.g., number of integration tests, crates, or helpers that triggers this rule).
-- TODO: Specify the recommended crate name / location convention (e.g., sibling `foo-test-utils` crate in the workspace).
-- TODO: Clarify the relationship with [M-TEST-UTIL](./#M-TEST-UTIL) (feature-gated helpers within a crate) — when to prefer which.
-- TODO: Add a short example showing the crate layout and how integration tests depend on it (likely via `[dev-dependencies]`).
-
-
-
 ## Production code uses telemetry, not println (M-LOG-NOT-PRINT) { #M-LOG-NOT-PRINT }
 
 <why>diagnostics available where they are needed.</why>
@@ -2705,27 +2692,6 @@ pub use linux::*;
 
 
 
-## Use the proper type family (M-STRONG-TYPES) { #M-STRONG-TYPES }
-
-<why>the right data and safety invariants, at the right time.</why>
-
-Use the appropriate `std` type for your task. In general you should use the strongest type available, as early as possible in your API flow. Common offenders are
-
-| Do not use ... | use instead ... | Explanation |
-| --- | --- | --- |
-| `String`* | `PathBuf`* | Anything dealing with the OS should be `Path`-like |
-
-That said, you should also follow common Rust `std` conventions. Purely numeric types at public API boundaries (e.g., `window_size()`) are expected to
-be regular numbers, not `Saturating<usize>`, `NonZero<usize>`, or similar.
-
-<footnotes>
-
-<sup>*</sup> Including their siblings, e.g., `&str`, `Path`, ...
-
-</footnotes>
-
-
-
 ## Newtypes guard their invariants (M-STRONG-TYPES-GUARD) { #M-STRONG-TYPES-GUARD }
 
 <why>centralized correctness invariants.</why>
@@ -2765,6 +2731,27 @@ This means for any newtype that is non-total:
 >
 > Const constructors allows them to be used inside `const {}` blocks, which surfaces these violations as errors. This enables
 > users to do `let month_due = const { Month::new(14) }` and avoids hitting these paths during runtime.
+
+
+
+## Use the proper type family (M-STRONG-TYPES) { #M-STRONG-TYPES }
+
+<why>the right data and safety invariants, at the right time.</why>
+
+Use the appropriate `std` type for your task. In general you should use the strongest type available, as early as possible in your API flow. Common offenders are
+
+| Do not use ... | use instead ... | Explanation |
+| --- | --- | --- |
+| `String`* | `PathBuf`* | Anything dealing with the OS should be `Path`-like |
+
+That said, you should also follow common Rust `std` conventions. Purely numeric types at public API boundaries (e.g., `window_size()`) are expected to
+be regular numbers, not `Saturating<usize>`, `NonZero<usize>`, or similar.
+
+<footnotes>
+
+<sup>*</sup> Including their siblings, e.g., `&str`, `Path`, ...
+
+</footnotes>
 
 
 
