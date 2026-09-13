@@ -10,7 +10,7 @@ checklist as the contract for your pull request.
 - Security model and vulnerability reporting: [SECURITY.md](SECURITY.md)
 - Agent rules for this repo, whatever the tool: [AGENTS.md](AGENTS.md) (the
   loops) and [`.agents/rules/`](.agents/rules/) (scoped rules: mutation-gate-proof
-  code, test hygiene, long campaigns); `CLAUDE.md` and `.claude/rules` are
+  code, test hygiene, long campaigns, the lint idioms); `CLAUDE.md` and `.claude/rules` are
   symlinks to them
 - User-facing docs: [README.md](README.md), [docs/manual-setup.md](docs/manual-setup.md)
 
