@@ -2590,3 +2590,27 @@ fn doctor_reds_a_block_that_disagrees_with_the_claude_code_found_now() {
         "{upgraded:?}"
     );
 }
+
+/// Plugin-manifest surfaces (skills/, .cursor/rules/, …) are generated from
+/// `assets/pixel-agent-prompt.md` by `scripts/gen-plugin-assets.sh`. They must
+/// never drift: an edited prompt with stale plugin files silently ships an old
+/// protocol to every CLI that installs via plugin manifests.
+#[test]
+fn plugin_assets_are_in_sync() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    let script = repo.join("scripts").join("gen-plugin-assets.sh");
+    assert!(script.is_file(), "missing {}", script.display());
+    let out = std::process::Command::new("/bin/sh")
+        .arg(&script)
+        .arg("--check")
+        .output()
+        .expect("run gen-plugin-assets.sh --check");
+    assert!(
+        out.status.success(),
+        "plugin assets stale — run scripts/gen-plugin-assets.sh\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

@@ -65,6 +65,24 @@ pixel install       # let your agent use Pixel
 
 Pixel is local-first. Its index, graph, and optional history data live under `.pixel/`; it reports boundaries when results are capped, stale, or incomplete. Tests and code review remain necessary.
 
+### Plugin install (per-tool native)
+
+This repo carries native plugin manifests, so each agent CLI can install Pixel through its own plugin mechanism — no `pixel install` step. The skill bootstraps the binary on first use (`command -v pixel || curl … install.sh | sh`); no hooks are registered.
+
+| Tool | Install |
+| --- | --- |
+| Claude Code | `/plugin marketplace add LivioGama/pixel` then `/plugin install pixel@pixel` |
+| Codex | `codex plugin marketplace add LivioGama/pixel` then `codex plugin add pixel@pixel` |
+| Copilot CLI | `copilot plugin marketplace add LivioGama/pixel` then `copilot plugin install pixel@pixel` |
+| Devin | Add `github.com/LivioGama/pixel` as a Devin plugin — it picks up `.devin-plugin/` + `.cursor/rules/pixel.mdc` |
+| Gemini CLI | `gemini extensions install https://github.com/LivioGama/pixel` |
+| Pi | `pi install git:github.com/LivioGama/pixel` |
+| OpenCode | `"plugin": ["@liviogama/pixel"]` in `opencode.json` (or `"./.opencode/plugins/pixel.mjs"` from a checkout) |
+| Cursor / Windsurf / Kiro / Cline / Qoder | Rules ship under `.cursor/rules/`, `.windsurf/rules/`, `.kiro/steering/`, `.clinerules/`, `.qoder/rules/` — copy or vendor into your project |
+| Anything else | `PIXEL.md` at the repo root is the plain-markdown protocol — paste it into whatever instruction surface the tool offers |
+
+Generated surfaces (`skills/`, `PIXEL.md`, all rules files) come from `crates/pixel-install/assets/pixel-agent-prompt.md` via `scripts/gen-plugin-assets.sh`; a test fails if they drift.
+
 ### 🔌 Other agents and manual setup
 
 Using an agent the installer does not cover, or prefer to control your own setup? Deploy the agent

@@ -1,0 +1,13 @@
+{
+  "name": "pixel",
+  "version": "0.2.3",
+  "description": "Deterministic code retrieval layer: indexed search, concept resolve, impact analysis, task targets, plan generation, and git archaeology via the pixel CLI.",
+  "author": {
+    "name": "Livio Gama",
+    "url": "https://github.com/LivioGama"
+  },
+  "homepage": "https://github.com/LivioGama/pixel",
+  "repository": "https://github.com/LivioGama/pixel",
+  "license": "MIT",
+  "keywords": ["code-graph", "impact-analysis", "retrieval", "tree-sitter", "productivity"]
+}

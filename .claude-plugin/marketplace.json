@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "pixel",
+  "description": "Deterministic code retrieval layer for AI agents: indexed search, concept resolve, impact analysis, task targets, plan generation, and git archaeology via the pixel CLI.",
+  "owner": {
+    "name": "Livio Gama",
+    "url": "https://github.com/LivioGama"
+  },
+  "plugins": [
+    {
+      "name": "pixel",
+      "description": "Code-graph retrieval protocol: impact, targets, plan, resolve, excavate. Bootstraps the pixel binary on first use.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
