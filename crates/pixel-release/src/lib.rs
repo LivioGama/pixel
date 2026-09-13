@@ -1,6 +1,11 @@
 //! `pixel release-check`: the consistency a release tag must have before
 //! anything is built or published.
 //!
+//! A library crate of its own so the mutation gate runs only these unit
+//! tests for a change here; inside `pixel-cli` every mutant re-ran the whole
+//! CLI contract suite (a minute or more each). The CLI keeps its
+//! `release-check` contract tests.
+//!
 //! Three drifts have each produced a green tag and a broken release
 //! elsewhere, and the release workflow used to guard only the first:
 //!
@@ -465,6 +470,45 @@ mod tests {
         // `## [0.2.30]` must not satisfy a check for 0.2.3.
         let near = "## [Unreleased]\n\n## [0.2.30] - 2026-09-12\n- x\n";
         assert!(!check_changelog(near, "0.2.3").ok);
+    }
+
+    /// `run` reads the four files (plus one manifest per member) from the
+    /// repository and assembles the report; a missing file is an error that
+    /// names it, not a failed check.
+    #[test]
+    fn run_reads_the_workspace_files_and_names_a_missing_one() {
+        let dir = std::env::temp_dir().join(format!("pixel-release-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("crates/pixel")).unwrap();
+        std::fs::create_dir_all(dir.join("crates/pixel-ops")).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/pixel\", \"crates/pixel-ops\"]\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("crates/pixel/Cargo.toml"), CLI).unwrap();
+        std::fs::write(
+            dir.join("crates/pixel-ops/Cargo.toml"),
+            "[package]\nname = \"pixel-ops\"\nversion = \"0.2.2\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("Cargo.lock"), LOCK).unwrap();
+        std::fs::write(
+            dir.join("CHANGELOG.md"),
+            "## [Unreleased]\n\n## [0.2.3] - 2026-09-12\n- thing\n",
+        )
+        .unwrap();
+        let report = run(&dir, "v0.2.3").unwrap();
+        assert!(report.ok(), "{}", report.render());
+        assert_eq!(report.version, "0.2.3");
+        assert!(report.render().contains("2 workspace members"));
+        assert!(!run(&dir, "0.2.4").unwrap().ok());
+
+        std::fs::remove_file(dir.join("CHANGELOG.md")).unwrap();
+        let err = run(&dir, "0.2.3").unwrap_err();
+        assert!(err.starts_with("CHANGELOG.md: "), "{err}");
+        assert!(run(&dir, "nope").unwrap_err().contains("not a version"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

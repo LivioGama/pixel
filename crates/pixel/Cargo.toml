@@ -34,6 +34,7 @@ pixel-install = { path = "../pixel-install" }
 pixel-proto = { path = "../pixel-proto" }
 pixel-actionlog = { path = "../pixel-actionlog" }
 pixel-flow = { path = "../pixel-flow" }
+pixel-release = { path = "../pixel-release" }
 clap = { version = "4.5", features = ["derive"] }
 serde = "1"
 serde_json = "1"

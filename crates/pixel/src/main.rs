@@ -30,7 +30,6 @@ mod operation_metrics;
 mod post_compaction;
 mod prompt_submit;
 mod recall_cmd;
-mod release_check;
 mod rescue_cmd;
 mod search_compat;
 mod sniper_cmd;
@@ -4603,7 +4602,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             repo,
             json,
         } => {
-            let report = release_check::run(&repo, &version)?;
+            let report = pixel_release::run(&repo, &version)?;
             if json {
                 print_data(&report.to_json(), true)?;
             } else {

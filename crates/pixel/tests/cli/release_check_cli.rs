@@ -1,6 +1,6 @@
 //! `pixel release-check`: exit code and output contract against a fixture
-//! workspace. The checks themselves are unit-tested in
-//! `src/release_check.rs`; this pins what the release workflow relies on:
+//! workspace. The checks themselves are unit-tested in the `pixel-release`
+//! crate; this pins what the release workflow relies on:
 //! exit 0 only when every check passes, the table on stdout, `--json` as
 //! one document, and a malformed version rejected before any file is read.
 

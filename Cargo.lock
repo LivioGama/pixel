@@ -2105,6 +2105,7 @@ dependencies = [
  "pixel-proto",
  "pixel-rank",
  "pixel-recall",
+ "pixel-release",
  "pixel-session",
  "regex",
  "serde",
@@ -2295,6 +2296,13 @@ dependencies = [
  "tempfile",
  "time",
  "xxhash-rust",
+]
+
+[[package]]
+name = "pixel-release"
+version = "0.2.3"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
