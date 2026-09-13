@@ -289,24 +289,65 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     profile.display()
                 ));
             }
+            let installed = format!(
+                "{} shell wrappers installed in {}{}",
+                kind.as_str(),
+                profile.display(),
+                if with_subagent_prompt {
+                    ""
+                } else {
+                    " without the sub-agent prompt"
+                }
+            );
+            // A block in another shell's profile is the residue of an install
+            // that targeted the wrong shell; the resolved shell never loads
+            // it. Yellow, not red: a machine that deliberately runs `claude`
+            // from a second shell keeps a valid install here.
+            let strays = install::stray_wrapper_profiles(&home, &profile);
+            if !strays.is_empty() {
+                let fixes: Vec<String> = strays
+                    .iter()
+                    .map(|(shell, path)| {
+                        format!(
+                            "{} ({shell}, not loaded by {}; run `pixel uninstall --wrappers-only --shell {shell}`, or pass `--shell {shell}` if that is the shell you launch `claude` from)",
+                            path.display(),
+                            kind.as_str()
+                        )
+                    })
+                    .collect();
+                return Ok((
+                    CheckStatus::Yellow,
+                    DoctorCheckDetail {
+                        summary: format!(
+                            "{installed}; a pixel block also sits in {}",
+                            fixes.join(" and ")
+                        ),
+                        detail: Some(serde_json::json!({
+                            "profile": profile.display().to_string(),
+                            "shell": kind.as_str(),
+                            "subagent_prompt": with_subagent_prompt,
+                            "claude": claude.explanation(),
+                            "stray_profiles": strays
+                                .iter()
+                                .map(|(shell, path)| serde_json::json!({
+                                    "shell": shell,
+                                    "profile": path.display().to_string(),
+                                }))
+                                .collect::<Vec<_>>(),
+                        })),
+                    },
+                ));
+            }
             Ok((
                 CheckStatus::Green,
                 DoctorCheckDetail {
-                    summary: format!(
-                        "{} shell wrappers installed in {}{}",
-                        kind.as_str(),
-                        profile.display(),
-                        if with_subagent_prompt {
-                            ""
-                        } else {
-                            " without the sub-agent prompt"
-                        }
-                    ),
+                    summary: installed,
                     detail: Some(serde_json::json!({
                         "profile": profile.display().to_string(),
                         "shell": kind.as_str(),
                         "subagent_prompt": with_subagent_prompt,
                         "claude": claude.explanation(),
+                        "stray_profiles": [],
                     })),
                 },
             ))

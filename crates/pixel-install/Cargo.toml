@@ -9,6 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
+mutants = { workspace = true }
 pixel-proto = { path = "../pixel-proto" }
 pixel-daemon = { path = "../pixel-daemon" }
 pixel-index = { path = "../pixel-index" }

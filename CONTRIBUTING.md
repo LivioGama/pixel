@@ -231,9 +231,16 @@ cargo build --profile dev-release -p pixel-cli \
   && cp target/dev-release/pixel ~/.local/bin/.pixel.tmp.$$ \
   && mv -f ~/.local/bin/.pixel.tmp.$$ ~/.local/bin/pixel
 pixel index --history .   # rebuild facts/history index
-pixel install             # reinstall hooks and managed CLAUDE.md/AGENTS.md blocks
+pixel install             # reinstall hooks and the agent prompt
 pixel doctor .            # must be green; report any non-green check in the PR
 ```
+
+Both commands write and check the wrappers for the account's login shell,
+read from the user database rather than `$SHELL`: a coding agent's command
+tool frequently runs under another shell than the login one (a `/bin/zsh`
+tool shell on a fish machine), and the wrappers are a `claude` function a
+human runs from the login shell. `--shell fish` overrides the lookup when
+the shell you launch `claude` from is not the account's.
 
 `dev-release` (in the workspace `Cargo.toml`) is `release` without thin LTO
 and with 16 codegen units: same optimisation level, but an incremental

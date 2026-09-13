@@ -449,16 +449,162 @@ pub(crate) const SUBAGENT_PROMPT_PATH: &str = "$HOME/.local/share/pixel/subagent
 /// The Claude Code flag the wrapper adds in print mode (2.1.261+).
 pub(crate) const SUBAGENT_PROMPT_FLAG: &str = "--append-subagent-system-prompt-file";
 
-/// The shell to install wrappers for: the caller's override when given,
-/// otherwise `$SHELL`.
+/// The shell to install wrappers for: the caller's override, else the
+/// account's login shell, else `$SHELL`.
 ///
-/// The override exists because `$SHELL` is not always the user's login shell:
-/// a coding agent's command tool, `env -i`, or cron can report a different one,
-/// and installing zsh wrappers for a fish user is silently useless.
+/// The wrappers are a `claude` function a human runs from an interactive
+/// shell, so the shell that matters is the login shell. `$SHELL` is not a
+/// reliable witness of it: a coding agent's command tool (Claude Code's
+/// runs under `/bin/zsh` on a fish machine), `env -i` or cron report their
+/// own. The account database is asked first; `$SHELL` is the fallback when
+/// it cannot be read, and the override is for the case where both are
+/// wrong.
 pub(crate) fn resolve_shell(shell_override: Option<&str>) -> String {
-    match shell_override {
-        Some(s) => s.to_string(),
-        None => std::env::var("SHELL").unwrap_or_default(),
+    resolve_shell_from(
+        shell_override,
+        account_login_shell(),
+        std::env::var("SHELL").ok(),
+    )
+}
+
+/// The resolution order behind [`resolve_shell`], with every source passed
+/// in. An empty source counts as absent.
+pub(crate) fn resolve_shell_from(
+    shell_override: Option<&str>,
+    account: Option<String>,
+    env_shell: Option<String>,
+) -> String {
+    let present = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
+    shell_override
+        .map(ToString::to_string)
+        .or_else(|| present(account))
+        .or_else(|| present(env_shell))
+        .unwrap_or_default()
+}
+
+/// The login shell recorded for the current account: Directory Services on
+/// macOS (`dscl . -read /Users/<user> UserShell`), the passwd database
+/// elsewhere (`getent passwd <user>`, then `/etc/passwd`). `None` when the
+/// user name is unknown or nothing answers.
+#[cfg_attr(test, mutants::skip)] // process spawns and /etc reads over the tested parsers
+fn account_login_shell() -> Option<String> {
+    let user = std::env::var("USER")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .or_else(|| {
+            let out = std::process::Command::new("id").arg("-un").output().ok()?;
+            out.status
+                .success()
+                .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                .filter(|u| !u.is_empty())
+        })?;
+    if cfg!(target_os = "macos") {
+        let out = std::process::Command::new("dscl")
+            .args([".", "-read", &format!("/Users/{user}"), "UserShell"])
+            .output()
+            .ok()?;
+        return out
+            .status
+            .success()
+            .then(|| parse_dscl_user_shell(&String::from_utf8_lossy(&out.stdout)))
+            .flatten();
+    }
+    let getent = std::process::Command::new("getent")
+        .args(["passwd", &user])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
+    let passwd = match getent {
+        Some(text) => text,
+        None => fs::read_to_string("/etc/passwd").ok()?,
+    };
+    parse_passwd_shell(&passwd, &user)
+}
+
+/// The shell in `dscl` output: the value after `UserShell:`.
+pub(crate) fn parse_dscl_user_shell(output: &str) -> Option<String> {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("UserShell:"))
+        .map(str::trim)
+        .filter(|shell| !shell.is_empty())
+        .map(ToString::to_string)
+}
+
+/// The shell of `user` in passwd text: the seventh field of the line whose
+/// first field is exactly `user`.
+pub(crate) fn parse_passwd_shell(passwd: &str, user: &str) -> Option<String> {
+    passwd
+        .lines()
+        .map(|line| line.split(':').collect::<Vec<_>>())
+        .find(|fields| fields.first() == Some(&user))
+        .and_then(|fields| fields.get(6).map(|s| s.trim().to_string()))
+        .filter(|shell| !shell.is_empty())
+}
+
+#[cfg(test)]
+mod shell_resolution_tests {
+    use super::{parse_dscl_user_shell, parse_passwd_shell, resolve_shell_from};
+
+    /// The order is override, account, `$SHELL`: an agent's tool shell in
+    /// `$SHELL` must lose to the account's login shell, and an empty value
+    /// at any level must not shadow the next one.
+    #[test]
+    fn override_beats_account_beats_env_and_empty_values_are_skipped() {
+        let fish = || Some("/opt/homebrew/bin/fish".to_string());
+        let zsh = || Some("/bin/zsh".to_string());
+        assert_eq!(resolve_shell_from(Some("bash"), fish(), zsh()), "bash");
+        assert_eq!(
+            resolve_shell_from(None, fish(), zsh()),
+            "/opt/homebrew/bin/fish"
+        );
+        assert_eq!(resolve_shell_from(None, None, zsh()), "/bin/zsh");
+        assert_eq!(
+            resolve_shell_from(None, Some(" ".into()), zsh()),
+            "/bin/zsh"
+        );
+        assert_eq!(resolve_shell_from(None, None, Some(String::new())), "");
+        assert_eq!(resolve_shell_from(None, None, None), "");
+    }
+
+    #[test]
+    fn dscl_output_yields_the_user_shell_line_only() {
+        assert_eq!(
+            parse_dscl_user_shell("UserShell: /opt/homebrew/bin/fish\n"),
+            Some("/opt/homebrew/bin/fish".to_string())
+        );
+        assert_eq!(
+            parse_dscl_user_shell(
+                "RecordName: navid\nUserShell:\t/bin/zsh\nNFSHomeDirectory: /Users/navid\n"
+            ),
+            Some("/bin/zsh".to_string())
+        );
+        assert_eq!(parse_dscl_user_shell("UserShell:\n"), None);
+        assert_eq!(parse_dscl_user_shell("No such key: UserShell\n"), None);
+        assert_eq!(parse_dscl_user_shell(""), None);
+    }
+
+    #[test]
+    fn passwd_text_yields_the_seventh_field_of_the_exact_user() {
+        let passwd = "root:x:0:0:root:/root:/bin/bash\n\
+                      navid:x:501:20:Navid:/home/navid:/usr/bin/fish\n\
+                      navidx:x:502:20::/home/navidx:/bin/sh\n";
+        assert_eq!(
+            parse_passwd_shell(passwd, "navid"),
+            Some("/usr/bin/fish".to_string())
+        );
+        assert_eq!(
+            parse_passwd_shell(passwd, "navidx"),
+            Some("/bin/sh".to_string()),
+            "exact name, not prefix"
+        );
+        assert_eq!(parse_passwd_shell(passwd, "nobody"), None);
+        assert_eq!(parse_passwd_shell("short:x:1:1\n", "short"), None);
+        assert_eq!(
+            parse_passwd_shell("empty:x:1:1::/home/empty:\n", "empty"),
+            None
+        );
     }
 }
 
@@ -511,6 +657,31 @@ pub(crate) fn shell_profile_for(shell: &str, home: &Path) -> (ShellKind, PathBuf
         }
         ShellKind::Posix => (ShellKind::Posix, home.join(".zshrc")),
     }
+}
+
+/// The profiles of the other shells `pixel install` knows, with their
+/// shell name, that hold a pixel-managed block: the residue of an install
+/// that targeted the wrong shell (an agent's `$SHELL` on a fish machine).
+/// `resolved_profile` is the one the current shell loads and is skipped.
+pub(crate) fn stray_wrapper_profiles(
+    home: &Path,
+    resolved_profile: &Path,
+) -> Vec<(&'static str, PathBuf)> {
+    let candidates = [
+        ("zsh", home.join(".zshrc")),
+        ("bash", home.join(".bashrc")),
+        (
+            "fish",
+            fish_config_dir(home).join("conf.d").join(FISH_DROPIN),
+        ),
+    ];
+    candidates
+        .into_iter()
+        .filter(|(_, profile)| profile != resolved_profile)
+        .filter(|(_, profile)| {
+            fs::read_to_string(profile).is_ok_and(|text| extract_managed_block(&text).is_some())
+        })
+        .collect()
 }
 
 pub(crate) const PIXEL_MANAGED_BEGIN: &str = "# >>> pixel-managed >>>";

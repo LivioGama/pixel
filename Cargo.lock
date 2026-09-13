@@ -2229,6 +2229,7 @@ dependencies = [
 name = "pixel-install"
 version = "0.2.3"
 dependencies = [
+ "mutants",
  "pixel-daemon",
  "pixel-facts",
  "pixel-index",
