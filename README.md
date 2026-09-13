@@ -2,10 +2,6 @@
 
 > **A local control layer that helps coding agents spend less time on simple repository work.**
 
-[![agent-config managed](https://img.shields.io/badge/agent--config-managed-blue)](https://github.com/LivioGama/pixel-rules)
-
-<a href="https://liviogama.github.io/agent-config/redirect.html?url=https://raw.githubusercontent.com/LivioGama/pixel-rules/main/rules/pixel.md"><img src="https://raw.githubusercontent.com/LivioGama/agent-config/main/assets/install-badge-small.jpg" alt="Install pixel rules" height="40" /></a>
-
 Pixel is not just a search box. It is the control layer for the whole path from a task to a safe Git change.
 
 Pixel runs locally, connects repository structure with repository history, and returns evidence with boundaries. When it cannot prove that an answer is complete, it says so.
@@ -49,6 +45,17 @@ pixel doctor .      # optional health check
 pixel install       # let your agent use Pixel
 ```
 
+`pixel install` deploys the agent system prompt and wires it into the agents it knows:
+
+| Agent | How the prompt reaches it |
+| --- | --- |
+| Claude Code | a `claude` shell function adds `--append-system-prompt-file` (and the short sub-agent prompt in print mode) |
+| Codex | the `developer_instructions` key of `~/.codex/config.toml`, so every front end gets it |
+| Pi | `~/.pi/agent/APPEND_SYSTEM.md`, read automatically |
+
+> [!NOTE]
+> Any other agent (Cursor, Gemini CLI, Copilot, ...) is not wired by `pixel install` and will not know about Pixel on its own. Give it the same prompt through its own rules or system-prompt mechanism; see [Other agents and manual setup](#-other-agents-and-manual-setup).
+
 | Need | Pixel command |
 | --- | --- |
 | Find text, a symbol, or a concept | `pixel search`, `pixel resolve`, `pixel ask` |
@@ -58,16 +65,16 @@ pixel install       # let your agent use Pixel
 
 Pixel is local-first. Its index, graph, and optional history data live under `.pixel/`; it reports boundaries when results are capped, stale, or incomplete. Tests and code review remain necessary.
 
-### Manual setup
+### 🔌 Other agents and manual setup
 
-Don't want to run `pixel install`? That's fine. You can deploy the agent
+Using an agent the installer does not cover, or prefer to control your own setup? Deploy the agent
 system prompt and wire it into your agent by hand — see
 [Manual Setup](docs/manual-setup.md). The prompt itself lives at
 [`crates/pixel-install/assets/pixel-agent-prompt.md`](crates/pixel-install/assets/pixel-agent-prompt.md)
-(~266 lines / ~3 000 tokens). It's large because Pixel replaces a wide
-range of native commands (`grep`, `rg`, `git log -S`, `git blame`, manual
-caller tracing) with a single indexed workflow — and the token cost is
-recovered in as little as one `pixel impact` call.
+(~300 lines / ~4 000 tokens) and is the single source of truth: every agent, installed or manual, should read that exact text.
+
+> [!TIP]
+> It's large because Pixel replaces a wide range of native commands (`grep`, `rg`, `git log -S`, `git blame`, manual caller tracing) with a single indexed workflow — and the token cost is recovered in as little as one `pixel impact` call.
 
 For architecture and the full command surface, see [ARCHITECTURE.md](ARCHITECTURE.md) and `pixel --help`.
 To build from source, run the gates, or open a pull request (with or without an AI agent), see [CONTRIBUTING.md](CONTRIBUTING.md).
