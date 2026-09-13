@@ -6,7 +6,8 @@ paths:
 # Code That Passes the Mutation Gate on the First Run
 
 Loaded when a Rust source file is in play. The gate is `cargo mutants --in-diff`,
-run locally before the PR and by the CI `Mutants` job (90-minute limit).
+run by the CI `Mutants` job (90-minute limit) on every PR; it is not run
+locally, so the code must come out clean on the first CI pass.
 
 The gate mutates every function that has at least one line in the diff, not
 only the lines you wrote. A one-token change (an inlined format argument, a
@@ -27,7 +28,16 @@ Rules that make the first `cargo mutants` run come back clean:
 - **Keep the test cap under 20 s.** CI runs cargo-mutants with its automatic
   timeout: five times the baseline test time, never below 20 s. A test that
   waits 30 s for a broken loop is reported TIMEOUT in CI while it passes
-  locally with `--timeout 300`. Reproduce CI with `cargo mutants --timeout 20`.
+  locally with `--timeout 300`. Run locally with `cargo mutants --timeout 60`
+  (`--timeout 20` also caps the baseline, which the doctest rustdoc compile
+  alone pushes past 20 s on this workspace) and keep every test's own wait
+  under 20 s.
+- **Iterate with `for`, never with a hand-advanced index.** `while j < n {
+  …; j += 1 }` has three survivors per increment (`-=`, `*=`, and the
+  comparison) and a `-=` one is an infinite loop that costs the full
+  timeout. Precompute the block boundaries (`ruby::blocks(lines, is_start)`)
+  and `for line in &block[1..]`: a wrong slice bound gives a wrong record a
+  test can see, never a hang.
 - **Fake servers poll with a deadline.** A test that `accept()`s blockingly
   hangs forever under a mutant that never connects. `set_nonblocking(true)`,
   loop with a 5 s deadline, return on expiry so the assertion fails instead.
@@ -54,9 +64,10 @@ Rules that make the first `cargo mutants` run come back clean:
   --batch-check <object>` that git rejects, so every blob measured 0 bytes),
   fix the bug in its own PR with a CHANGELOG entry, below the PR that found
   it. Do not bend the test to the broken behaviour.
-- **Re-run on the fixed functions only, then commit.** `cargo mutants
-  --in-diff <diff> -F <function>` judges the functions you just covered in
-  minutes; the full in-diff run is for the final state. Never edit the tree
-  while a run is in flight: it mutates files in place. After a killed or
-  crashed run, `grep -rl "changed by cargo-mutants" crates/` and restore
-  before doing anything else.
+- **Fix from the CI report, verify locally only per function.** Read the
+  `Mutants` job's `MISSED`/`TIMEOUT` lines, write the test, and if asked to
+  check before pushing run `cargo mutants --in-diff <diff> -F <function>`
+  (minutes). Never the full in-diff run: it is the job's work. Never edit
+  the tree while a run is in flight: it mutates files in place. After a
+  killed or crashed run, `grep -rl "changed by cargo-mutants" crates/` and
+  restore before doing anything else.

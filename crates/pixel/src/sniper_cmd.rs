@@ -72,7 +72,8 @@ pub enum SniperCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Latest test signal (vitest failure record vs test-pass event).
+    /// Latest test signal: the newest vitest / Minitest / RSpec failure
+    /// record against the newest test-pass event.
     Test {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
@@ -113,8 +114,14 @@ pub enum SniperCmd {
         repo: PathBuf,
     },
     /// Wrap a command: tee its output live, mirror its exit code, and on
-    /// failure record structured errors (tsc parsed per TS code; otherwise a
-    /// generic tail record + full output in raw_fallbacks).
+    /// failure record structured errors. tsc is parsed per TS code; Minitest
+    /// and RSpec output (detected from the output, so `bundle exec rails
+    /// test` and `bundle exec rspec` both work) gives one record per failing
+    /// test (kind failure|error, class, name, file, line, message,
+    /// project-only backtrace, rerun command) plus a `summary` record;
+    /// rubocop gives one `lint` record per offense. Anything else gets a
+    /// generic tail record + full output in raw_fallbacks. A green Minitest
+    /// or RSpec run records a `test-pass` event with the run counters.
     Run {
         /// Name for the records (defaults to the command).
         #[arg(long)]

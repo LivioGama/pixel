@@ -210,8 +210,16 @@ pub fn env(store: &Store, diff: bool) -> Result<EnvFingerprint> {
     })
 }
 
+/// The surfaces whose failure records are test runs (`sniper test`).
+pub const TEST_SURFACES: [Surface; 3] = [Surface::Vitest, Surface::Minitest, Surface::Rspec];
+
 pub fn test_status(store: &Store) -> Result<TestStatus> {
-    let latest_failure = store.latest_error_by_surface(Surface::Vitest)?;
+    let mut candidates: Vec<ErrorRecord> = Vec::new();
+    for surface in TEST_SURFACES {
+        candidates.extend(store.latest_error_by_surface(surface)?);
+    }
+    // Newest row across the test surfaces; ids are unique so there is no tie.
+    let latest_failure = candidates.into_iter().max_by_key(|record| record.id);
     let latest_pass = store.latest_event_by_kind(EventKind::TestPass)?;
     let passing = match (&latest_failure, &latest_pass) {
         (Some(failure), Some(pass)) => Some(pass.ts >= failure.last_ts),

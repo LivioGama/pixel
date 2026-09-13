@@ -216,6 +216,34 @@ fn test_status_tracks_latest_signal() {
     assert_eq!(query::test_status(&store).unwrap().passing, Some(true));
 }
 
+#[test]
+fn test_status_picks_the_newest_failure_across_test_surfaces() {
+    for (first, second) in [
+        (Surface::Vitest, Surface::Minitest),
+        (Surface::Minitest, Surface::Vitest),
+        (Surface::Rspec, Surface::Minitest),
+    ] {
+        let state = TempRoot::new();
+        let store = Store::open_at(Path::new("/tmp/query-fixture"), &state.0).unwrap();
+        let now = now_ms();
+        store
+            .record_error(&error(first, "older run", Some(now - 2_000)))
+            .unwrap();
+        let newest = store
+            .record_error(&error(second, "newer run", Some(now - 1_000)))
+            .unwrap();
+        // A lint record is never a test signal, however new.
+        store
+            .record_error(&error(Surface::Rubocop, "Style/X: lint", Some(now)))
+            .unwrap();
+        let status = query::test_status(&store).unwrap();
+        assert_eq!(status.passing, Some(false));
+        let failure = status.latest_failure.unwrap();
+        assert_eq!(failure.id, newest.id, "{first:?} then {second:?}");
+        assert_eq!(failure.surface, second);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MCP (rmcp server): shared-module guarantee + server surface
 // ---------------------------------------------------------------------------
