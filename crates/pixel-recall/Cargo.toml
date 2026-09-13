@@ -13,6 +13,7 @@ fastembed = ["dep:fastembed", "dep:openssl"]
 model2vec = ["dep:model2vec-rs"]
 
 [dependencies]
+mutants = { workspace = true }
 # Default features minus `image-models`: pixel never embeds images, and
 # that feature alone pulls the `image` crate with every codec (rav1e, exr,
 # tiff, png…), 64 crates in the CLI's dependency graph.

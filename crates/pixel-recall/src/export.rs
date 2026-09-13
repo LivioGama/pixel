@@ -156,8 +156,7 @@ fn unique_file_name(
     let slug = slugify(slug_src);
     let date = session
         .ts_last
-        .map(date_stamp)
-        .unwrap_or_else(|| "nodate".to_string());
+        .map_or_else(|| "nodate".to_string(), date_stamp);
     let base = format!("{}-{}-{}", session.agent, slug, date);
     let mut name = format!("{base}.{}", format.ext());
     if !used.insert(name.clone()) {
@@ -224,7 +223,7 @@ fn render_md(session: &SessionRow, turns: &[TurnRow]) -> String {
     out.push_str(&format!("source: {}\n", session.source_path));
     out.push_str(&format!("{}\n\n", ts_source_note(session.ts_source)));
     for t in turns {
-        let ts = t.ts.map(format_ms).unwrap_or_else(|| "?".to_string());
+        let ts = t.ts.map_or_else(|| "?".to_string(), format_ms);
         out.push_str(&format!("## [{}] {}\n\n", t.role, ts));
         let fence = fence_for(&t.text);
         out.push_str(&format!("{fence}\n{}\n{fence}\n\n", t.text));

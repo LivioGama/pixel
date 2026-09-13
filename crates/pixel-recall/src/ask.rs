@@ -252,7 +252,7 @@ pub fn ask(
                     let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
                     let sql = crate::search::filter_sql(filters, &mut args);
                     let arg_refs: Vec<&dyn rusqlite::types::ToSql> =
-                        args.iter().map(|b| b.as_ref()).collect();
+                        args.iter().map(AsRef::as_ref).collect();
                     Some(
                         store
                             .allowed_chunk_ids(&sql, &arg_refs)
@@ -407,7 +407,7 @@ fn make_snippet(text: &str, word_re: Option<&regex::Regex>, chunk_start: Option<
 /// One line per session group, compact.
 pub fn format_group(g: &AskSessionGroup) -> String {
     let h = &g.best;
-    let ts = h.ts.map(format_ms).unwrap_or_else(|| "?".to_string());
+    let ts = h.ts.map_or_else(|| "?".to_string(), format_ms);
     let cwd = h.cwd.as_deref().unwrap_or("-");
     let channels = match (h.matched_lexical, h.matched_semantic) {
         (true, true) => "l+s",
@@ -471,5 +471,107 @@ mod tests {
         // the same None as "scan everything". It must not sink to the floor.
         assert!(word_weight(None) > word_weight(Some(MAX_WORD_CANDIDATES)));
         assert!(word_weight(None) < word_weight(Some(1)));
+    }
+}
+
+#[cfg(test)]
+mod lexical_tests {
+    use super::*;
+    use crate::model::Role;
+    use crate::testutil::{TS, add_session};
+
+    fn group(extra: usize, lexical: bool, semantic: bool) -> AskSessionGroup {
+        AskSessionGroup {
+            best: AskHit {
+                turn_id: 9,
+                session_id: 3,
+                seq: 2,
+                agent: "claude".to_string(),
+                source_session_id: "abcdef0123456789".to_string(),
+                cwd: Some("/work/pixel".to_string()),
+                role: "assistant".to_string(),
+                ts: Some(TS),
+                ts_source: "iso".to_string(),
+                snippet: "the needle".to_string(),
+                score: 1.0,
+                matched_lexical: lexical,
+                matched_semantic: semantic,
+            },
+            session_title: None,
+            extra_hits: extra,
+        }
+    }
+
+    #[test]
+    fn format_group_names_the_channels_and_the_extra_turns() {
+        let when = format_ms(TS);
+        assert_eq!(
+            format_group(&group(0, true, false)),
+            format!("claude:abcdef01 #3 t2 {when} /work/pixel [lex] \"the needle\"")
+        );
+        assert_eq!(
+            format_group(&group(2, true, true)),
+            format!(
+                "claude:abcdef01 #3 t2 {when} /work/pixel [l+s] \"the needle\" (+2 more turns)"
+            )
+        );
+        assert!(format_group(&group(0, false, true)).contains("[sem]"));
+        let mut unknown = group(0, false, false);
+        unknown.best.ts = None;
+        unknown.best.cwd = None;
+        assert!(format_group(&unknown).contains(" ? - [?] "));
+    }
+
+    /// Without an embedding model `ask` is lexical only: it still groups
+    /// the matching turns per session and says why the semantic channel is
+    /// missing.
+    #[test]
+    fn ask_without_an_embedder_answers_from_the_lexical_channel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+        add_session(
+            &mut store,
+            "claude",
+            "aaaa1111",
+            &[
+                (Role::User, "how do I rotate the daemon socket"),
+                (Role::Assistant, "the daemon socket rotates on restart"),
+            ],
+        );
+        add_session(
+            &mut store,
+            "codex",
+            "bbbb2222",
+            &[(Role::Assistant, "nothing about that topic here")],
+        );
+        let mut segments = SegmentSet::open(&tmp.path().join("segments")).unwrap();
+        segments.index_new(&store).unwrap();
+        let vectors = VectorStore::open(&tmp.path().join("vectors")).unwrap();
+        let result = ask(
+            &store,
+            &segments,
+            &vectors,
+            None,
+            "daemon socket",
+            &SearchFilters::default(),
+            5,
+        )
+        .unwrap();
+        assert_eq!(result.groups.len(), 1, "{:?}", result.groups);
+        let g = &result.groups[0];
+        assert_eq!(g.best.source_session_id, "aaaa1111");
+        assert!(g.best.matched_lexical);
+        assert!(!g.best.matched_semantic);
+        assert_eq!(g.extra_hits, 1, "both turns of the session match");
+        assert!(g.best.snippet.contains("daemon"), "{}", g.best.snippet);
+        assert!(
+            result
+                .notice
+                .as_deref()
+                .unwrap_or("")
+                .contains("no embedding model"),
+            "{:?}",
+            result.notice
+        );
     }
 }

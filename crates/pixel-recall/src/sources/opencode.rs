@@ -33,8 +33,7 @@ impl Adapter {
     pub fn new() -> Self {
         let home = std::env::var("HOME").unwrap_or_default();
         let data_home = std::env::var("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(&home).join(".local/share"));
+            .map_or_else(|_| PathBuf::from(&home).join(".local/share"), PathBuf::from);
         Self {
             db_path: data_home.join("opencode/opencode.db"),
         }
@@ -241,7 +240,7 @@ pub(crate) fn oc_parse(
                         let name = pv.get("tool").and_then(Value::as_str).unwrap_or("unknown");
                         let input = pv
                             .pointer("/state/input")
-                            .map(|v| v.to_string())
+                            .map(ToString::to_string)
                             .unwrap_or_default();
                         let (capped, cut) = cap_text(&input, TOOL_INPUT_CAP);
                         truncated |= cut;
@@ -300,4 +299,54 @@ pub(crate) fn oc_parse(
         consumed_bytes: unit.size,
         cursor: new_cursor.map(|c| c.to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT);
+             INSERT INTO session VALUES ('ses1', NULL, '/work/pixel', ' Fix build ');
+             INSERT INTO message VALUES ('m1', 'ses1', 1000, '{\"role\":\"user\"}');
+             INSERT INTO message VALUES ('m2', 'ses1', 2000, '{\"role\":\"assistant\"}');
+             INSERT INTO part VALUES ('p1', 'm1', '{\"type\":\"text\",\"text\":\"fix the build\"}');
+             INSERT INTO part VALUES ('p2', 'm2', '{\"type\":\"text\",\"text\":\"running\"}');
+             INSERT INTO part VALUES ('p3', 'm2', '{\"type\":\"tool\",\"tool\":\"bash\",\"state\":{\"input\":{\"cmd\":\"make\"}}}');
+             INSERT INTO part VALUES ('p4', 'm2', '{\"type\":\"reasoning\",\"text\":\"hidden\"}');",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn oc_parse_materializes_sessions_with_text_and_tool_parts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("opencode.db");
+        fixture(&db);
+        let unit = SourceUnit {
+            unit_key: "db:test".to_string(),
+            path: db.clone(),
+            size: std::fs::metadata(&db).unwrap().len(),
+            mtime_ms: 1,
+        };
+        let out = oc_parse("opencode", &unit, Change::New, None).unwrap();
+        assert_eq!(out.cursor.as_deref(), Some("2000"));
+        assert_eq!(out.sessions.len(), 1);
+        let s = &out.sessions[0];
+        assert_eq!(s.session.source_session_id, "ses1");
+        assert_eq!(s.session.title.as_deref(), Some("Fix build"));
+        assert_eq!(s.session.cwd.as_deref(), Some("/work/pixel"));
+        let roles: Vec<Role> = s.turns.iter().map(|t| t.role).collect();
+        assert_eq!(roles, vec![Role::User, Role::Assistant]);
+        assert_eq!(s.turns[0].text, "fix the build");
+        assert_eq!(s.turns[0].ts, Some(1000));
+        assert_eq!(
+            s.turns[1].text,
+            "running\n\u{22ee}tool bash {\"cmd\":\"make\"}"
+        );
+    }
 }

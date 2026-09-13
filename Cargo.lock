@@ -2286,6 +2286,7 @@ dependencies = [
  "fastembed",
  "memmap2",
  "model2vec-rs",
+ "mutants",
  "openssl",
  "pixel-index",
  "pixel-rank",

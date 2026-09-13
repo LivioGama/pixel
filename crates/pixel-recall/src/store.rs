@@ -218,7 +218,7 @@ impl RecallStore {
         args.push(Box::new(limit as i64));
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
-            rusqlite::params_from_iter(args.iter().map(|b| b.as_ref())),
+            rusqlite::params_from_iter(args.iter().map(AsRef::as_ref)),
             row_to_session,
         )?;
         rows.collect()
@@ -511,7 +511,7 @@ fn insert_turns(
             session_id,
             start_seq + i as i64,
             t.role.as_str(),
-            t.intent_source.map(|v| v.as_str()),
+            t.intent_source.map(super::model::IntentSource::as_str),
             t.ts,
             t.text,
             t.text.len() as i64,
@@ -559,8 +559,7 @@ fn finalize_session<'a>(
 fn upsert_state(conn: &Connection, agent: &str, unit_key: &str, st: &IngestState) -> Result<()> {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis() as i64);
     conn.execute(
         "INSERT INTO ingest_state (agent, unit_key, file_size, mtime_ms, bytes_ingested,
                                    cursor, last_ingest_at)
@@ -690,4 +689,48 @@ fn migrate(conn: &Connection) -> Result<()> {
     )?;
     conn.execute("DROP INDEX IF EXISTS idx_turns_unembedded", [])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ingest state is what makes the next pass incremental: a write
+    /// that does not land re-ingests every unit from scratch.
+    #[test]
+    fn touch_state_persists_and_overwrites_the_ingest_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+        assert!(store.ingest_state("claude", "/a.jsonl").unwrap().is_none());
+        let first = IngestState {
+            file_size: 10,
+            mtime_ms: 20,
+            bytes_ingested: 5,
+            cursor: Some("c1".to_string()),
+        };
+        store.touch_state("claude", "/a.jsonl", &first).unwrap();
+        let read = store.ingest_state("claude", "/a.jsonl").unwrap().unwrap();
+        assert_eq!(
+            (
+                read.file_size,
+                read.mtime_ms,
+                read.bytes_ingested,
+                read.cursor.as_deref()
+            ),
+            (10, 20, 5, Some("c1"))
+        );
+        let second = IngestState {
+            file_size: 30,
+            mtime_ms: 40,
+            bytes_ingested: 30,
+            cursor: None,
+        };
+        store.touch_state("claude", "/a.jsonl", &second).unwrap();
+        let read = store.ingest_state("claude", "/a.jsonl").unwrap().unwrap();
+        assert_eq!(
+            (read.file_size, read.bytes_ingested, read.cursor),
+            (30, 30, None)
+        );
+        assert!(store.ingest_state("codex", "/a.jsonl").unwrap().is_none());
+    }
 }

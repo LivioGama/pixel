@@ -37,8 +37,7 @@ impl Adapter {
     pub fn new() -> Self {
         let home = std::env::var("HOME").unwrap_or_default();
         let data_home = std::env::var("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(&home).join(".local/share"));
+            .map_or_else(|_| PathBuf::from(&home).join(".local/share"), PathBuf::from);
         Self {
             db_path: data_home.join("devin/cli/sessions.db"),
         }
