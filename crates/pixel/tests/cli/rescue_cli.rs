@@ -1,7 +1,9 @@
 //! `gitpixel rescue` — plan correctness and apply safety invariants.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
+
+use crate::support::{Scratch, pixel_command};
 
 fn git_out(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -23,7 +25,7 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn gitpixel(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_pixel"))
+    pixel_command()
         .args(args)
         .current_dir(dir)
         .output()
@@ -34,9 +36,8 @@ const V1: &str = "pub fn calc_total(items: &[u32]) -> u32 {\n    items.iter().su
 const V2: &str = "pub fn calc_total(items: &[u32]) -> u32 {\n    items.iter().product()\n}\n";
 
 /// Two commits: v1 good, v2 breaks calc (subject names it).
-fn fixture(tag: &str) -> (PathBuf, String, String) {
-    let dir = std::env::temp_dir().join(format!("gpx-rescue-{tag}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+fn fixture(tag: &str) -> (Scratch, String, String) {
+    let dir = Scratch::for_test("gpx-rescue", tag);
     std::fs::create_dir_all(dir.join("src")).unwrap();
     git(&dir, &["init", "-q"]);
     std::fs::write(dir.join("src/calc.rs"), V1).unwrap();
@@ -62,9 +63,8 @@ const D3: &str = "// totals are computed eagerly\npub fn calc_total(items: &[u32
 ///                                  apply_discount entirely
 /// The diff-content answer (suspect = C) must win over the subject-keyword
 /// answer (which would have flagged B).
-fn disagreement_fixture(tag: &str) -> (PathBuf, String, String, String) {
-    let dir = std::env::temp_dir().join(format!("gpx-rescue-{tag}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+fn disagreement_fixture(tag: &str) -> (Scratch, String, String, String) {
+    let dir = Scratch::for_test("gpx-rescue", tag);
     std::fs::create_dir_all(dir.join("src")).unwrap();
     git(&dir, &["init", "-q"]);
     std::fs::write(dir.join("src/calc.rs"), D1).unwrap();

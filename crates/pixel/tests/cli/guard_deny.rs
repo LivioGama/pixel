@@ -5,14 +5,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const PIXEL: &str = env!("CARGO_BIN_EXE_pixel");
+use crate::support::{Scratch, pixel_command};
 
 /// Unique scratch dir per test.
-fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("pixel-guard-deny-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.canonicalize().unwrap()
+fn scratch(tag: &str) -> Scratch {
+    Scratch::for_test("pixel-guard-deny", tag)
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -35,7 +32,7 @@ fn git(dir: &Path, args: &[&str]) {
 
 /// A committed git repo containing a needle, with the pixel text index
 /// built (first `pixel search` builds it lazily).
-fn indexed_repo(tag: &str) -> PathBuf {
+fn indexed_repo(tag: &str) -> Scratch {
     let dir = scratch(tag);
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
@@ -49,7 +46,7 @@ fn indexed_repo(tag: &str) -> PathBuf {
     // Build the index lazily via a first search; must succeed and hit.
     // PIXEL_TEST=1 disables the call-guard circuit breaker so repeated
     // search calls in tests don't get blocked.
-    let out = Command::new(PIXEL)
+    let out = pixel_command()
         .args(["search", "GUARD_NEEDLE_XYZ", dir.to_str().unwrap()])
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -74,7 +71,7 @@ fn run_guard(payload: &serde_json::Value) -> (i32, String) {
 /// (advisories are JSON on stdout with exit 0). The guard's escape-hatch
 /// vars are always cleared first so the ambient shell can't skew a test.
 fn run_guard_env(payload: &serde_json::Value, envs: &[(&str, &str)]) -> (i32, String, String) {
-    let mut cmd = Command::new(PIXEL);
+    let mut cmd = pixel_command();
     cmd.args(["hook", "guard"])
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -103,7 +100,7 @@ fn run_guard_env(payload: &serde_json::Value, envs: &[(&str, &str)]) -> (i32, St
 }
 
 fn run_composed_codex(raw: &[u8], backup: &Path) -> (i32, String, String) {
-    let mut cmd = Command::new(PIXEL);
+    let mut cmd = pixel_command();
     cmd.args([
         "hook",
         "composed-guard",
@@ -188,7 +185,7 @@ fn composed_codex_preserves_foreign_denial_without_pixel_rewrite() {
         "printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"foreign guard\"}}'",
     );
     let payload = serde_json::json!({
-        "hook_event_name": "PreToolUse", "tool_name": "shell", "cwd": repo,
+        "hook_event_name": "PreToolUse", "tool_name": "shell", "cwd": repo.to_str().unwrap(),
         "tool_input": {"command": "grep -n GUARD_NEEDLE_XYZ src/lib.rs"}
     });
     let (code, stdout, stderr) = run_composed_codex(payload.to_string().as_bytes(), &backup);
@@ -202,7 +199,7 @@ fn composed_codex_malformed_foreign_response_fails_open_without_rewrite() {
     let repo = indexed_repo("composed-malformed");
     let backup = composed_backup(&repo, "printf '%s' not-json");
     let payload = serde_json::json!({
-        "hook_event_name": "PreToolUse", "tool_name": "shell", "cwd": repo,
+        "hook_event_name": "PreToolUse", "tool_name": "shell", "cwd": repo.to_str().unwrap(),
         "tool_input": {"command": "grep -n GUARD_NEEDLE_XYZ src/lib.rs"}
     });
     let (code, stdout, stderr) = run_composed_codex(payload.to_string().as_bytes(), &backup);
@@ -222,7 +219,7 @@ fn composed_codex_refuses_a_non_private_backup() {
     let backup = composed_backup(&repo, "printf '%s' '{}'");
     std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o644)).unwrap();
     let payload = serde_json::json!({
-        "hook_event_name": "PreToolUse", "tool_name": "shell", "cwd": repo,
+        "hook_event_name": "PreToolUse", "tool_name": "shell", "cwd": repo.to_str().unwrap(),
         "tool_input": {"command": "grep -n GUARD_NEEDLE_XYZ src/lib.rs"}
     });
     let (code, stdout, stderr) = run_composed_codex(payload.to_string().as_bytes(), &backup);
@@ -416,7 +413,7 @@ fn targets_manifest_merges_two_tasks_and_guard_honors_union() {
     git(&repo, &["commit", "-q", "-m", "two modules"]);
 
     let run_targets = |task: &str| {
-        let out = Command::new(PIXEL)
+        let out = pixel_command()
             .args(["targets", task, repo.to_str().unwrap()])
             .env("PIXEL_TEST", "1")
             .output()

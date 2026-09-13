@@ -27,6 +27,7 @@ impl Fixture {
         let mut command = Command::new(binary);
         command
             .current_dir(&self.0)
+            .env("PIXEL_DAEMON_AUTO_START", "0")
             .env_remove("RIPGREP_CONFIG_PATH")
             .env_remove("GREP_OPTIONS")
             .env_remove("PIXEL_TARGETS_GUARD");
@@ -93,6 +94,9 @@ fn run_hook(mut command: Command, payload: &serde_json::Value) -> Output {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if !std::thread::panicking() {
+            crate::support::assert_no_daemon(&self.0);
+        }
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }

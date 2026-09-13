@@ -16,6 +16,12 @@ use crate::api::{Request, Response, ServeError, Service, failure_response};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const DEBOUNCE: Duration = Duration::from_millis(500);
+/// Longest the main loop sleeps before re-checking that the served root
+/// still exists. A daemon whose root was deleted (a removed worktree, a
+/// test fixture) has nothing left to serve and must not sit on the machine
+/// for the rest of `IDLE_TIMEOUT`: auto-started daemons are detached from
+/// their parent, so nothing else would ever reap them.
+const ROOT_POLL: Duration = Duration::from_secs(5);
 /// Idle poll interval for the facts ingest thread once fresh. A ref move
 /// re-triggers ingest on the next poll without blocking queries.
 const INGEST_IDLE_POLL: Duration = Duration::from_secs(5);
@@ -320,7 +326,8 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
         let timeout = match flush_at {
             Some(at) => at.saturating_duration_since(now).min(idle_left),
             None => idle_left,
-        };
+        }
+        .min(ROOT_POLL);
 
         match rx.recv_timeout(timeout.max(Duration::from_millis(10))) {
             Ok(Msg::Conn(stream)) => {
@@ -349,12 +356,26 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
             eprintln!("pixel daemon: idle timeout, exiting");
             break;
         }
+        if root_removed(&root) {
+            eprintln!(
+                "pixel daemon: root {} no longer exists, exiting",
+                root.display()
+            );
+            break;
+        }
     }
 
     let _ = std::fs::remove_file(&sock);
     let _ = std::fs::remove_file(pid_path(&root));
     let _ = std::fs::remove_file(&lock_path);
     Ok(())
+}
+
+/// The served root has been deleted (or replaced by a non-directory): every
+/// answer the daemon could give from here on would describe a tree that no
+/// longer exists, so the loop exits and releases the socket, pid and lock.
+fn root_removed(root: &Path) -> bool {
+    !root.is_dir()
 }
 
 fn record_event(ev: &notify::Event, pending: &mut BTreeMap<PathBuf, bool>) {
@@ -502,6 +523,88 @@ fn read_capped_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A corpus with no index behind it: enough to drive `run_corpus`'s
+    /// transport loop from a test.
+    struct StubCorpus(PathBuf);
+
+    impl Corpus for StubCorpus {
+        fn root(&self) -> &Path {
+            &self.0
+        }
+        fn handle(&mut self, _req: Request) -> Response {
+            failure_response("stub", "stub corpus")
+        }
+        fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+    }
+
+    fn wait_until(what: &str, limit: Duration, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + limit;
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// One round trip on the daemon socket: forces a loop iteration and
+    /// proves the daemon is serving.
+    fn ping(sock: &Path) -> bool {
+        let Ok(mut stream) = UnixStream::connect(sock) else {
+            return false;
+        };
+        let mut line = serde_json::to_string(&Request::Ping).unwrap();
+        line.push('\n');
+        if stream.write_all(line.as_bytes()).is_err() {
+            return false;
+        }
+        let mut reader = BufReader::new(stream);
+        let mut reply = String::new();
+        std::io::BufRead::read_line(&mut reader, &mut reply).is_ok() && !reply.is_empty()
+    }
+
+    /// An auto-started daemon is detached from its parent and would otherwise
+    /// live the full idle timeout after its root is deleted: a test suite
+    /// that runs the CLI against throwaway fixtures left one daemon per
+    /// fixture behind (18 per run, load average past 70 after a few runs).
+    #[test]
+    fn daemon_exits_once_its_root_is_deleted() {
+        let root = std::env::temp_dir().join(format!(
+            "pixel-daemon-root-gone-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let sock = socket_path(&root);
+        let served = root.clone();
+        let daemon = std::thread::spawn(move || run_corpus(StubCorpus(served)));
+
+        wait_until("socket to answer", Duration::from_secs(10), || ping(&sock));
+        // The first request ran one loop iteration with the root present; a
+        // daemon that exits on that iteration has released its socket by the
+        // time of the second request. The exit below is therefore tied to
+        // the removal, not to the check firing unconditionally.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(ping(&sock), "daemon stopped serving while its root existed");
+        assert!(
+            !daemon.is_finished(),
+            "daemon exited while its root existed"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+        wait_until(
+            "daemon to exit after root removal",
+            ROOT_POLL + Duration::from_secs(10),
+            || daemon.is_finished(),
+        );
+        daemon.join().unwrap().unwrap();
+        assert!(!sock.exists(), "socket must be released on exit");
+        assert!(
+            !pid_path(&root).exists(),
+            "pid file must be released on exit"
+        );
+    }
 
     #[test]
     fn capped_line_preserves_utf8() {

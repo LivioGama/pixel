@@ -104,6 +104,9 @@ fn accept_within(listener: &UnixListener, deadline: Duration) -> std::os::unix::
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if !std::thread::panicking() {
+            crate::support::assert_no_daemon(&self.0);
+        }
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }

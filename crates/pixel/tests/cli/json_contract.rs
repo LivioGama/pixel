@@ -12,8 +12,10 @@
 //! Each command runs against the in-process service (`PIXEL_DAEMON_AUTO_START=0`)
 //! so the test does not depend on, or leave behind, a background daemon.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
+
+use crate::support::{Scratch, pixel_command};
 
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
@@ -30,18 +32,15 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn pixel(dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pixel"))
+    pixel_command()
         .args(args)
         .current_dir(dir)
-        .env("PIXEL_DAEMON_AUTO_START", "0")
         .output()
         .unwrap()
 }
 
-fn fixture(tag: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("pixel-json-contract-{tag}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+fn fixture(tag: &str) -> Scratch {
+    let dir = Scratch::for_test("pixel-json-contract", tag);
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
         dir.join("src/login.rs"),
@@ -247,10 +246,9 @@ fn big_untracked_tree_keeps_json_answers_structured() {
 
     // `inspect` owns the list: under a small cap it is shortened, not
     // replaced by a textual wrapper.
-    let out = Command::new(env!("CARGO_BIN_EXE_pixel"))
+    let out = pixel_command()
         .args(["inspect", ".", "--json"])
         .current_dir(&dir)
-        .env("PIXEL_DAEMON_AUTO_START", "0")
         .env("PIXEL_OUTPUT_CAP_BYTES", "4096")
         .output()
         .unwrap();
@@ -274,10 +272,9 @@ fn big_untracked_tree_keeps_json_answers_structured() {
     assert!(cut["kept"].as_u64().unwrap() > 0);
 
     // `0` lifts the cap: the full list comes back and nothing is flagged.
-    let out = Command::new(env!("CARGO_BIN_EXE_pixel"))
+    let out = pixel_command()
         .args(["inspect", ".", "--json"])
         .current_dir(&dir)
-        .env("PIXEL_DAEMON_AUTO_START", "0")
         .env("PIXEL_OUTPUT_CAP_BYTES", "0")
         .output()
         .unwrap();
