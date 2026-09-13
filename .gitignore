@@ -8,6 +8,7 @@
 # Tool-local config stays out, the committed rules symlink stays in.
 .claude/*
 !.claude/rules
+!.claude/skills
 .codex/
 .cursor/
 .gemini/

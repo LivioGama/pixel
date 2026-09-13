@@ -40,4 +40,10 @@ This project bundles or depends on the following notable components:
   - potion-base-2M (model2vec)
   These models have their own licenses; see the Hugging Face model pages.
 
+- **Microsoft Pragmatic Rust Guidelines** (MIT, Copyright (c) Microsoft
+  Corporation) — the concatenated agent text `src/agents/all.txt` is
+  vendored verbatim as `.agents/skills/rust-guidelines/guidelines.txt` for
+  coding agents working on this repository; it is not part of the binary.
+  Source: https://github.com/microsoft/rust-guidelines
+
 No GPL or AGPL licensed components are used anywhere in this project.

@@ -34,6 +34,21 @@ files listed above before its first edit; the `paths:` front matter tells it
 which ones matter for the files it is about to touch. Add a rule as a new
 file here, never as a second copy in a tool-specific directory.
 
+## Skills Directory
+
+On-demand knowledge lives in [`.agents/skills/`](.agents/skills/), one
+directory per skill with a `SKILL.md` (front matter `name` + `description`)
+and its supporting files; `.claude/skills` is a symlink to it.
+
+| Skill | Load when | Content |
+| --- | --- | --- |
+| `rust-guidelines/` | writing, refactoring or reviewing anything under `crates/` | Microsoft's Pragmatic Rust Guidelines (`M-*` ids): a workspace-specific checklist in `SKILL.md`, the full MIT-licensed text in `guidelines.txt` to grep by id, never to read whole |
+
+Rules are always-on for the files they name; a skill is read when its
+`description` matches the task. A tool without skill support reads
+`.agents/skills/<name>/SKILL.md` before its first Rust edit. When a skill and
+a rule disagree, the rule wins (and the `Cargo.toml` lint table wins over both).
+
 ## Reinstall and Reconfig After Each Implementation Turn
 
 After finishing any implementation turn in this repo (code edit + verify cycle):
