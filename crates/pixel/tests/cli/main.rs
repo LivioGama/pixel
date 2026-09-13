@@ -13,6 +13,7 @@ mod post_edit_cli;
 mod release_check_cli;
 mod rescue_cli;
 mod search_compat_cli;
+mod support;
 mod targets_cli;
 #[cfg(unix)]
 mod upgrade_cli;

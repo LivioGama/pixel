@@ -1,8 +1,10 @@
 //! CLI round-trip: `gitpixel targets` writes the enforcement manifest,
 //! `--clear` removes it, `--no-manifest` leaves none.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
+
+use crate::support::{Scratch, pixel_command};
 
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
@@ -19,16 +21,15 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn gitpixel(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_pixel"))
+    pixel_command()
         .args(args)
         .current_dir(dir)
         .output()
         .unwrap()
 }
 
-fn fixture() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("gpx-targets-cli-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+fn fixture() -> Scratch {
+    let dir = Scratch::for_test("gpx-targets-cli", "manifest");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
         dir.join("src/login.rs"),

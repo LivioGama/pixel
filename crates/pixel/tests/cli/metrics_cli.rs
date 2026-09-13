@@ -83,6 +83,9 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if !std::thread::panicking() {
+            crate::support::assert_no_daemon(&self.0);
+        }
         let _ = fs::remove_dir_all(&self.0);
     }
 }
