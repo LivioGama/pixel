@@ -110,6 +110,35 @@ jobs:
           bun run test
           bun run typecheck
 
+  deny:
+    name: Dependency policy (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
+
+      # cargo-deny resolves the graph through `cargo metadata`; no build.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      # Prebuilt binary, same pinned installer as nextest and cross above.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: cargo-deny
+
+      # Policy in deny.toml: RustSec advisories (vulnerable, yanked and
+      # unmaintained crates), an allow-list of permissive licences, no two
+      # majors of one crate outside the two embedding stacks, crates.io as
+      # the only source. Every exception is documented in the file. The
+      # advisory database is fetched by cargo-deny itself.
+      - name: cargo deny check
+        run: cargo deny check
+
   cross-build:
     name: Cross-build ${{ matrix.target }}
     runs-on: ubuntu-latest
