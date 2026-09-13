@@ -163,15 +163,15 @@ pub fn shell_quote(value: &str) -> String {
 /// Eligibility is repeated at execution time. The hook checks only shape
 /// and an in-repository regular-file path, never starts/builds an index.
 pub fn rewrite(command: &str, cwd: &Path) -> Option<String> {
-    if native_configuration() {
-        return None;
-    }
     let argv = shell_argv(command)?;
     let tool = match argv.first()?.as_str() {
         "rg" => SearchTool::Rg,
         "grep" => SearchTool::Grep,
         _ => return None,
     };
+    if native_configuration(tool) {
+        return None;
+    }
     let parsed = parse_args(tool, &argv[1..])?;
     checked_path(&parsed.path, cwd)?;
     Some(format!(
@@ -244,12 +244,25 @@ fn credential_path(path: &Path) -> bool {
         .any(|suffix| name.ends_with(suffix))
 }
 
-fn native_configuration() -> bool {
-    std::env::var_os("RIPGREP_CONFIG_PATH").is_some() || std::env::var_os("GREP_OPTIONS").is_some()
+/// The user configured the tool being replaced: its native output may no
+/// longer match the literal-search emulation, so the command stays native.
+/// Only that tool's own configuration counts. `RIPGREP_CONFIG_PATH` changes
+/// nothing about `grep` and `GREP_OPTIONS` nothing about `rg`; a developer
+/// with an rg config would otherwise never get a `grep` rewrite.
+fn native_configuration(tool: SearchTool) -> bool {
+    let variable = match tool {
+        SearchTool::Rg => "RIPGREP_CONFIG_PATH",
+        SearchTool::Grep => "GREP_OPTIONS",
+    };
+    std::env::var_os(variable).is_some()
 }
 
-fn compatible_output(args: &SearchArgs, cwd: &Path) -> Result<(Vec<u8>, i32), &'static str> {
-    if std::io::stdout().is_terminal() || native_configuration() {
+fn compatible_output(
+    tool: SearchTool,
+    args: &SearchArgs,
+    cwd: &Path,
+) -> Result<(Vec<u8>, i32), &'static str> {
+    if std::io::stdout().is_terminal() || native_configuration(tool) {
         return Err("native-configuration");
     }
     let (root, abs, relative) = checked_path(&args.path, cwd).ok_or("unsupported-file")?;
@@ -321,7 +334,7 @@ pub fn run(tool: SearchTool, argv: Vec<String>) -> ! {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let result = parse_args(tool, &argv)
         .ok_or("unsupported-arguments")
-        .and_then(|args| compatible_output(&args, &cwd));
+        .and_then(|args| compatible_output(tool, &args, &cwd));
     match result {
         Ok((output, code)) => {
             record(&cwd, "pixel", "equivalent-literal-file");
