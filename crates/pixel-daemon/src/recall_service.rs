@@ -563,6 +563,85 @@ mod tests {
         assert_eq!(fx.turns(), 1);
     }
 
+    /// The machine's sources are the seven stores under `HOME`, one adapter
+    /// each; an empty list would make the daemon watch and sweep nothing.
+    #[test]
+    fn machine_sources_cover_every_agent_store_under_home() {
+        let sources = machine_sources();
+        let mut agents: Vec<&str> = sources.iter().map(|s| s.adapter.agent()).collect();
+        agents.sort_unstable();
+        assert_eq!(
+            agents,
+            vec![
+                "claude", "codex", "cursor", "devin", "gemini", "opencode", "zcode"
+            ]
+        );
+        let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        for source in &sources {
+            assert!(
+                source.root.starts_with(&home),
+                "{} is not under HOME",
+                source.root.display()
+            );
+        }
+        let claude = sources
+            .iter()
+            .find(|s| s.adapter.agent() == "claude")
+            .unwrap();
+        assert!(claude.root.ends_with(".claude/projects"));
+    }
+
+    /// The watcher observes exactly the source roots present on disk: a
+    /// missing store is neither watched (notify would refuse it) nor
+    /// replaced by an empty path.
+    #[test]
+    fn watch_paths_are_the_existing_source_roots() {
+        let mut fx = Fixture::new("watch");
+        let projects = fx.scratch.join("projects");
+        fx.service.sources.push(RecallSource {
+            root: fx.scratch.join("no-such-store"),
+            adapter: Box::new(ClaudeAdapter::with_root(fx.scratch.join("no-such-store"))),
+        });
+        assert_eq!(fx.service.watch_paths(), vec![projects]);
+    }
+
+    /// A watcher event under a source root ingests that source; an event
+    /// elsewhere on the machine touches nothing.
+    #[test]
+    fn apply_change_ingests_only_the_source_owning_the_path() {
+        let mut fx = Fixture::new("apply");
+        let outside = fx.scratch.join("elsewhere").join("x.jsonl");
+        fx.service.apply_change(&outside, false);
+        assert_eq!(fx.turns(), 0, "a path outside every root must not ingest");
+        let transcript = fx.transcript.clone();
+        fx.service.apply_change(&transcript, false);
+        assert_eq!(
+            fx.turns(),
+            1,
+            "a path under the root must ingest its source"
+        );
+    }
+
+    /// The daemon's `search` action answers from the corpus the sweep
+    /// filled, and an unknown action is an error, not an empty success.
+    #[test]
+    fn op_search_finds_the_swept_turn_and_rejects_unknown_actions() {
+        let mut fx = Fixture::new("op");
+        fx.service.sweep();
+        let out = fx
+            .service
+            .op("search", json!({"pattern": "streamed needle"}))
+            .unwrap();
+        assert_eq!(out["json"]["hits"].as_array().map(Vec::len), Some(1));
+        assert_eq!(out["json"]["truncated"], json!(false));
+        assert!(
+            out["text"].as_str().unwrap().contains("streamed needle"),
+            "text view must carry the hit: {out}"
+        );
+        let err = fx.service.op("bogus", json!({})).unwrap_err();
+        assert!(err.contains("unknown recall action"), "{err}");
+    }
+
     /// The recall corpus opts into the sweep at the documented cadence; the
     /// repo corpus does not.
     #[test]
