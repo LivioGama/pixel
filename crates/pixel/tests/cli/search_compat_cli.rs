@@ -35,9 +35,20 @@ impl Fixture {
     }
 
     fn compare(&self, tool: &str, args: &[&str], backend: &str) {
-        let native = self.command(tool).args(args).output().unwrap();
-        let routed = self
-            .command(PIXEL)
+        self.compare_with_env(tool, args, backend, &[]);
+    }
+
+    /// `compare` with extra environment variables on both the native and
+    /// the routed run.
+    fn compare_with_env(&self, tool: &str, args: &[&str], backend: &str, env: &[(&str, &str)]) {
+        let mut native_command = self.command(tool);
+        let mut routed_command = self.command(PIXEL);
+        for (key, value) in env {
+            native_command.env(key, value);
+            routed_command.env(key, value);
+        }
+        let native = native_command.args(args).output().unwrap();
+        let routed = routed_command
             .args(["search-compat", tool, "--"])
             .args(args)
             .output()
@@ -332,12 +343,17 @@ fn credential_shaped_paths_keep_native_permission_boundaries() {
 fn native_configuration_and_environment_overrides_never_get_autoauthorized() {
     let fixture = Fixture::new(b"needle\n");
     for provider in ["claude", "codex", "devin"] {
-        for key in ["RIPGREP_CONFIG_PATH", "GREP_OPTIONS", "env", "environment"] {
+        for (tool, key) in [
+            ("rg", "RIPGREP_CONFIG_PATH"),
+            ("grep", "GREP_OPTIONS"),
+            ("rg", "env"),
+            ("rg", "environment"),
+        ] {
             let mut payload = serde_json::json!({
                 "hook_event_name": "PreToolUse",
                 "tool_name": if provider == "devin" { "exec" } else { "Bash" },
                 "cwd": fixture.0,
-                "tool_input": {"command": "rg needle 'a file.rs'"}
+                "tool_input": {"command": format!("{tool} needle 'a file.rs'")}
             });
             let mut command = fixture.command(PIXEL);
             command.args(["hook", "guard", "--provider", provider]);
@@ -348,11 +364,69 @@ fn native_configuration_and_environment_overrides_never_get_autoauthorized() {
                 command.env(key, "fake-native-config");
             }
             let output = run_hook(command, &payload);
-            assert!(output.status.success(), "{provider}: {key}");
-            assert!(output.stdout.is_empty(), "{provider}: {key}");
-            assert!(output.stderr.is_empty(), "{provider}: {key}");
+            assert!(output.status.success(), "{provider}: {tool} {key}");
+            assert!(output.stdout.is_empty(), "{provider}: {tool} {key}");
+            assert!(output.stderr.is_empty(), "{provider}: {tool} {key}");
         }
     }
+}
+
+/// A configuration for the OTHER tool changes nothing about the command
+/// being rewritten: an exported `RIPGREP_CONFIG_PATH` (every ripgrep user
+/// with an rgrc) must not turn every `grep` rewrite off, and `GREP_OPTIONS`
+/// must not turn `rg` rewrites off. Two of the guard tests failed on such a
+/// machine while CI, with a bare environment, passed them.
+#[test]
+fn the_other_tools_configuration_does_not_keep_a_search_native() {
+    for provider in ["claude", "codex", "devin"] {
+        for (tool, foreign_key) in [("grep", "RIPGREP_CONFIG_PATH"), ("rg", "GREP_OPTIONS")] {
+            let fixture = Fixture::new(b"needle\n");
+            let payload = serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": if provider == "devin" { "exec" } else { "Bash" },
+                "cwd": fixture.0,
+                "tool_input": {"command": format!("{tool} -n needle 'a file.rs'")}
+            });
+            let mut command = fixture.command(PIXEL);
+            command
+                .args(["hook", "guard", "--provider", provider])
+                .env(foreign_key, "fake-native-config");
+            let output = run_hook(command, &payload);
+            assert!(
+                output.status.success(),
+                "{provider}: {tool} with {foreign_key}"
+            );
+            let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "{provider}: `{tool}` must be rewritten despite {foreign_key}: {:?}",
+                        String::from_utf8_lossy(&output.stdout)
+                    )
+                });
+            let rewritten = response["hookSpecificOutput"]["updatedInput"]["command"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                rewritten.starts_with(&format!("pixel search-compat {tool} --")),
+                "{provider}: {tool} with {foreign_key}: {rewritten}"
+            );
+        }
+    }
+    // Execution applies the same per-tool rule: `grep` still runs on the
+    // pixel backend under an rg configuration, and stays native under its
+    // own `GREP_OPTIONS`.
+    Fixture::new(b"first needle\nplain\n").compare_with_env(
+        "grep",
+        &["-n", "needle", "a file.rs"],
+        "pixel",
+        &[("RIPGREP_CONFIG_PATH", "/nonexistent/rgrc")],
+    );
+    Fixture::new(b"first needle\nplain\n").compare_with_env(
+        "grep",
+        &["-n", "needle", "a file.rs"],
+        "native",
+        &[("GREP_OPTIONS", "")],
+    );
 }
 
 #[test]

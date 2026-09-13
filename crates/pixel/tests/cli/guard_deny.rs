@@ -30,6 +30,15 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(ok, "git {args:?} failed in {}", dir.display());
 }
 
+/// The guard keeps a search native when the user configured that tool
+/// (`RIPGREP_CONFIG_PATH`, `GREP_OPTIONS`). A developer shell exporting one
+/// of them must not change what these tests observe: every hook invocation
+/// starts from a clean search-tool environment.
+fn hermetic_search_env(cmd: &mut Command) {
+    cmd.env_remove("RIPGREP_CONFIG_PATH")
+        .env_remove("GREP_OPTIONS");
+}
+
 /// A committed git repo containing a needle, with the pixel text index
 /// built (first `pixel search` builds it lazily).
 fn indexed_repo(tag: &str) -> Scratch {
@@ -72,6 +81,7 @@ fn run_guard(payload: &serde_json::Value) -> (i32, String) {
 /// vars are always cleared first so the ambient shell can't skew a test.
 fn run_guard_env(payload: &serde_json::Value, envs: &[(&str, &str)]) -> (i32, String, String) {
     let mut cmd = pixel_command();
+    hermetic_search_env(&mut cmd);
     cmd.args(["hook", "guard"])
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -101,6 +111,7 @@ fn run_guard_env(payload: &serde_json::Value, envs: &[(&str, &str)]) -> (i32, St
 
 fn run_composed_codex(raw: &[u8], backup: &Path) -> (i32, String, String) {
     let mut cmd = pixel_command();
+    hermetic_search_env(&mut cmd);
     cmd.args([
         "hook",
         "composed-guard",
