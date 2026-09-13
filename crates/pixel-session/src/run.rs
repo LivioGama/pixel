@@ -650,6 +650,48 @@ mod tests {
         assert_eq!(classify(&argv(&["jest"])), CommandClass::Test);
     }
 
+    fn failure(n: usize) -> TestFailure {
+        TestFailure {
+            kind: ruby::FailureKind::Failure,
+            test_class: Some("T".into()),
+            test_name: format!("test_{n}"),
+            file: Some("t.rb".into()),
+            line: Some(1),
+            message: "boom".into(),
+            expected: None,
+            actual: None,
+            backtrace: vec![],
+            rerun: None,
+        }
+    }
+
+    #[test]
+    fn summary_lists_at_most_fifty_failures_and_counts_the_rest() {
+        let fifty: Vec<TestFailure> = (0..50).map(failure).collect();
+        let input = summary_input(Surface::Minitest, "s", json!({}), &fifty, "l", 1, "r");
+        let extra = input.extra.unwrap();
+        assert_eq!(extra["failures"].as_array().unwrap().len(), 50);
+        assert!(extra.get("truncatedCount").is_none());
+
+        let fifty_one: Vec<TestFailure> = (0..51).map(failure).collect();
+        let input = summary_input(Surface::Minitest, "s", json!({}), &fifty_one, "l", 1, "r");
+        let extra = input.extra.unwrap();
+        assert_eq!(extra["failures"].as_array().unwrap().len(), 50);
+        assert_eq!(extra["truncatedCount"], 1);
+        assert_eq!(extra["failures"][0]["test"], "T#test_0: boom");
+    }
+
+    #[test]
+    fn failure_without_backtrace_gets_a_location_frame() {
+        let input = failure_input(Surface::Minitest, &failure(1), "r");
+        let frames = input.frames.unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].raw, "t.rb:1");
+        assert_eq!(frames[0].file.as_deref(), Some("t.rb"));
+        assert_eq!(frames[0].line, Some(1));
+        assert_eq!(input.stack_raw, None);
+    }
+
     #[test]
     fn classify_build_fallback() {
         assert_eq!(classify(&argv(&["cargo", "build"])), CommandClass::Build);

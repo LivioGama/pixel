@@ -18,7 +18,9 @@
 //! 12 runs, 10 assertions, 1 failures, 1 errors, 0 skips
 //! ```
 
-use super::ruby::{FailureKind, TestFailure, cap_message, counter, counters, project_frame};
+use super::ruby::{
+    FailureKind, TestFailure, blocks, cap_message, counter, counters, parse_frame, project_frame,
+};
 
 /// The counters of the `N runs, N assertions, …` summary line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,19 +140,16 @@ pub fn parse(output: &str) -> Report {
     let lines: Vec<&str> = output.lines().collect();
     let counters = lines.iter().rev().find_map(|l| parse_summary(l));
     let mut failures = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let Some(kind) = is_block_start(lines[i]) else {
-            i += 1;
+    for block in blocks(&lines, |l| is_block_start(l).is_some()) {
+        let Some(kind) = is_block_start(block[0]) else {
             continue;
         };
         // Header: first non-empty line after the marker.
-        let mut j = i + 1;
-        while j < lines.len() && lines[j].trim().is_empty() {
-            j += 1;
-        }
-        let Some(header) = lines.get(j).and_then(|l| parse_header(l)) else {
-            i = j.max(i + 1);
+        let body = &block[1..];
+        let Some(header_at) = body.iter().position(|l| !l.trim().is_empty()) else {
+            continue;
+        };
+        let Some(header) = parse_header(body[header_at]) else {
             continue;
         };
         let Header {
@@ -164,21 +163,18 @@ pub fn parse(output: &str) -> Report {
         let mut actual = None;
         let mut backtrace = Vec::new();
         let mut rerun = None;
-        j += 1;
-        while j < lines.len() {
-            let line = lines[j];
+        for line in &body[header_at + 1..] {
             let trimmed = line.trim();
-            if is_block_start(line).is_some() || trimmed.starts_with("Finished in ") {
+            if trimmed.starts_with("Finished in ") {
                 break;
             }
             if is_rerun_line(line) {
                 rerun = Some(trimmed.to_owned());
-                j += 1;
                 break;
             }
             if let Some(frame) = project_frame(line) {
                 backtrace.push(frame.raw);
-            } else if super::ruby::parse_frame(line).is_some() {
+            } else if parse_frame(line).is_some() {
                 // A gem/stdlib frame: filtered out, not a message line.
             } else if let Some(value) = trimmed.strip_prefix("Expected: ") {
                 expected = Some(value.to_owned());
@@ -189,7 +185,6 @@ pub fn parse(output: &str) -> Report {
             } else if !trimmed.is_empty() {
                 message_lines.push(trimmed.to_owned());
             }
-            j += 1;
         }
         if file.is_none()
             && let Some(first) = backtrace.first().and_then(|l| project_frame(l))
@@ -214,7 +209,6 @@ pub fn parse(output: &str) -> Report {
             backtrace,
             rerun,
         });
-        i = j;
     }
     Report { counters, failures }
 }
@@ -418,6 +412,11 @@ mod tests {
             header_parts("T#test_y [t.rb:x]:"),
             Some((Some("T".into()), "test_y".into(), Some("t.rb".into()), None))
         );
+        // An unclosed bracket is not a location: the ident keeps it whole.
+        assert_eq!(
+            header_parts("T#test_y [t.rb:3:"),
+            Some((Some("T".into()), "test_y [t.rb:3".into(), None, None))
+        );
         assert!(header_parts("no trailing colon").is_none());
         assert!(header_parts("UserTest#:").is_none());
     }
@@ -458,8 +457,14 @@ mod tests {
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.failures[0].test_name, "test_ok");
 
-        // Trailing marker with nothing after it.
+        // Trailing marker with nothing after it, or only blank lines.
         assert!(parse("Failure:").failures.is_empty());
+        assert!(parse("Failure:\n\n\n").failures.is_empty());
+        // Lines after the rerun line, or after `Finished in`, are not message.
+        let report = parse("Failure:\nT#test_a [t.rb:1]:\nmsg\nbin/rails test t.rb:1\nextra\n");
+        assert_eq!(report.failures[0].message, "msg");
+        let report = parse("Failure:\nT#test_a [t.rb:1]:\nmsg\nFinished in 1s\nextra\n");
+        assert_eq!(report.failures[0].message, "msg");
         // No location anywhere: rerun stays unknown.
         let report = parse("Error:\nBazTest#test_x:\nboom\n");
         assert_eq!(report.failures[0].rerun, None);

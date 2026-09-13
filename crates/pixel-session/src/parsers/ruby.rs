@@ -125,6 +125,24 @@ pub fn counters(summary: &str) -> Vec<(String, u64)> {
     out
 }
 
+/// Split `lines` into blocks: each block starts at a line `is_start`
+/// accepts (kept as its first line) and runs up to the next such line.
+/// Lines before the first start are dropped.
+pub fn blocks<'a>(lines: &'a [&'a str], is_start: impl Fn(&str) -> bool) -> Vec<&'a [&'a str]> {
+    let starts: Vec<usize> = (0..lines.len()).filter(|&k| is_start(lines[k])).collect();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(n, &start)| {
+            let end = starts
+                .get(n.wrapping_add(1))
+                .copied()
+                .unwrap_or(lines.len());
+            &lines[start..end]
+        })
+        .collect()
+}
+
 /// Look one counter up by its singular key.
 pub fn counter(counters: &[(String, u64)], key: &str) -> Option<u64> {
     counters.iter().find(|(k, _)| k == key).map(|(_, v)| *v)
@@ -222,13 +240,23 @@ mod tests {
     }
 
     #[test]
+    fn blocks_split_at_every_start_and_drop_the_preamble() {
+        let lines = ["noise", "A", "1", "2", "A", "A", "3"];
+        let got = blocks(&lines, |l| l == "A");
+        assert_eq!(got, vec![&["A", "1", "2"][..], &["A"][..], &["A", "3"][..]]);
+        assert!(blocks(&lines, |l| l == "Z").is_empty());
+        assert!(blocks(&[], |_| true).is_empty());
+        assert_eq!(blocks(&["A"], |l| l == "A"), vec![&["A"][..]]);
+    }
+
+    #[test]
     fn cap_message_cuts_on_char_boundary() {
         assert_eq!(cap_message("short"), "short");
-        let long = "é".repeat(MESSAGE_CAP);
+        // 3-byte chars: 1024 is not a boundary, the cut must step back to 1023.
+        let long = "€".repeat(MESSAGE_CAP);
         let capped = cap_message(&long);
-        assert!(capped.len() <= MESSAGE_CAP);
-        assert!(capped.len() >= MESSAGE_CAP - 1);
-        assert!(capped.chars().all(|c| c == 'é'));
+        assert_eq!(capped.len(), 1023);
+        assert!(capped.chars().all(|c| c == '€'));
         let exact = "a".repeat(MESSAGE_CAP);
         assert_eq!(cap_message(&exact).len(), MESSAGE_CAP);
     }

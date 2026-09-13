@@ -15,7 +15,9 @@
 //! rspec ./spec/models/user_spec.rb:10 # User validation requires a name
 //! ```
 
-use super::ruby::{FailureKind, TestFailure, cap_message, counter, counters, project_frame};
+use super::ruby::{
+    FailureKind, TestFailure, blocks, cap_message, counter, counters, project_frame,
+};
 
 /// The counters of the `N examples, N failures[, N pending]` summary line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,10 +142,8 @@ pub fn parse(output: &str) -> Report {
         lines.iter().filter_map(|l| parse_rerun_line(l)).collect();
 
     let mut failures = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let Some((index, description)) = parse_entry_header(lines[i]) else {
-            i += 1;
+    for block in blocks(&lines, |l| parse_entry_header(l).is_some()) {
+        let Some((index, description)) = parse_entry_header(block[0]) else {
             continue;
         };
         let mut message_lines: Vec<String> = Vec::new();
@@ -153,11 +153,9 @@ pub fn parse(output: &str) -> Report {
         let mut backtrace = Vec::new();
         let mut spec_location: Option<(String, u32)> = None;
         let mut first_project: Option<(String, u32)> = None;
-        let mut j = i + 1;
-        while j < lines.len() {
-            let line = lines[j];
+        for line in &block[1..] {
             let trimmed = line.trim();
-            if parse_entry_header(line).is_some() || is_section_end(line) {
+            if is_section_end(line) {
                 break;
             }
             if trimmed.starts_with("# ") {
@@ -183,7 +181,6 @@ pub fn parse(output: &str) -> Report {
             } else if !trimmed.is_empty() {
                 message_lines.push(trimmed.to_owned());
             }
-            j += 1;
         }
         let rerun = reruns.get(index.wrapping_sub(1));
         let (file, line_no) = match (spec_location.or(first_project), rerun) {
@@ -225,7 +222,6 @@ pub fn parse(output: &str) -> Report {
             backtrace,
             rerun,
         });
-        i = j;
     }
     Report { counters, failures }
 }
@@ -436,6 +432,15 @@ mod tests {
         assert_eq!(leading_constant("when the user is admin"), None);
         assert_eq!(leading_constant("POST /orders"), Some("POST".into()));
         assert_eq!(leading_constant("Foo::bar x"), None);
+        assert_eq!(
+            leading_constant("Some_Class does"),
+            Some("Some_Class".into())
+        );
+        assert_eq!(leading_constant("Foo-bar does"), None);
+        assert_eq!(
+            leading_constant("Foo2::Bar_3#x y"),
+            Some("Foo2::Bar_3".into())
+        );
         assert_eq!(leading_constant("#total"), None);
         assert_eq!(leading_constant(""), None);
     }
@@ -483,6 +488,9 @@ mod tests {
             Some("rspec ./spec/thing_spec.rb:9")
         );
 
+        // Lines after `Finished in` never reach the message.
+        let failure = &parse("  1) alone\n     msg\nFinished in 1s\n     later\n").failures[0];
+        assert_eq!(failure.message, "msg");
         // Nothing at all: no file, no rerun.
         let failure = &parse("  1) alone\n     Failure/Error: x\n").failures[0];
         assert_eq!(failure.file, None);
