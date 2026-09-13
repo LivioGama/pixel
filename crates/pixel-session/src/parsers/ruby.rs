@@ -50,10 +50,11 @@ pub fn cap_message(text: &str) -> String {
     if text.len() <= MESSAGE_CAP {
         return text.to_owned();
     }
-    let mut end = MESSAGE_CAP;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
+    // Highest boundary at or below the cap; 0 is always a boundary.
+    let end = (0..=MESSAGE_CAP)
+        .rev()
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(0);
     text[..end].to_owned()
 }
 
