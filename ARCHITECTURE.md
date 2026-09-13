@@ -22,7 +22,7 @@ read `CLAUDE.md`.
    ├── pixel-index    trigram text index          .pixel/ shards
    ├── pixel-graph    symbols / imports / calls   .pixel/graph.db
    ├── pixel-facts    history facts + diffs       .pixel/history.db
-   ├── pixel-rank     task -> ranked file list    (pure, no I/O)
+   ├── pixel-rank     task -> ranked file list    (scoring pure; signals read git + sniper)
    ├── pixel-context  token-budgeted rendering    (pure)
    ├── pixel-ops      guarded git mutations       .pixel/journal, snapshots
    ├── pixel-recall   transcript corpus + embeddings (machine-wide)
@@ -42,7 +42,7 @@ binary, and Pixel is deliberately a CLI plus hooks, not an MCP server.
 | `pixel-index` | Sparse n-gram (trigram) text index: gram extraction, window weighting, posting-list algebra, git-anchored base and delta shards, working-tree overlay, query planner, verification, and the `gitsync` helpers that read HEAD, branch, and porcelain status. | git |
 | `pixel-graph` | Code graph: tree-sitter extraction of symbols, imports, and call sites per file; import resolution; tiered call resolution with an epistemic envelope; and the analyses `impact`, `trace`, `process`, `cluster`, `changes`, `targets`. `store` owns the SQLite schema. | git, index |
 | `pixel-facts` | History-wide fact and diff ingest, search, lifecycle, and rescue discovery. Owns `history.db` plus trigram history segments, with a low-priority ingest thread that never blocks queries. Backs `excavate`, `lifecycle`, `history-search` and `rescue` discovery (`resolve` is the graph's concept index). | git, index |
-| `pixel-rank` | Pure fusion core for `targets` and ranked `search`: task text and signal inputs in, closed prioritized P0/P1/P2 file list out. | graph, git, session |
+| `pixel-rank` | Fusion core for `targets` and ranked `search`: task text and signal inputs in, closed prioritized P0/P1/P2 file list out. The scoring is pure; `compute_signals` gathers its inputs itself (git log activity when facts have none, recent sniper errors). | graph, git, session |
 | `pixel-context` | Semantic compression of code-context items: layered renderings that fit a token budget instead of raw source dumps. | none |
 | `pixel-ops` | Safe git mutation infrastructure ported from usable-git: snapshot store, repository lock, operation journal, recovery keys. Implements `inspect`, `review`, `history`, `diff`, `publish`, `push`, `ship`, `branch`, `update`, `sync`, `reconcile`, `rewrite`, `provenance`, `branches`, `env`. | git |
 | `pixel-git` | The single git subprocess wrapper for the workspace. Replaced three earlier ad-hoc wrappers. Any crate that shells out to git goes through here. | none |
@@ -143,6 +143,7 @@ Per repository, under `.pixel/` (git-ignored):
 | `reconcile-conflict.json`, `env-snapshots/` | `pixel-ops` | Conflict marker left by `reconcile` for the guard, and the pre-mutation copies `env` takes. |
 | `user-state.json` | `pixel-install` | Per-repository install state. |
 | `calls.json` | CLI | Circuit breaker counters for repeated identical calls. |
+| `task-runtime.json`, `tasks/<id>/task.json`, `tasks/<id>/events.jsonl` | CLI `task` and the hooks | Claude Code task-runtime packet: the active task record and its event log. |
 
 The prompt-submit hook writes task boundary events to
 `~/.pixel/inbox/task-boundary.json`, outside the repository.
@@ -154,6 +155,9 @@ Machine-wide:
 - `~/.local/share/pixel/recall/` and `~/.local/share/pixel/models/`: the
   recall corpus (`$PIXEL_RECALL_DIR` overrides) and the embedding models,
   downloaded once from Hugging Face on `pixel recall setup`.
+- `~/.local/state/pixel/sniper/<project key>/`: the `pixel-session` error sink
+  (`errors-v1.sqlite` plus a `project.json` naming the root);
+  `$PIXEL_SNIPER_STATE_ROOT` overrides the state root.
 - `~/.local/state/pixel/` (`$XDG_STATE_HOME/pixel`): `pixel-ops` crash-safety
   state, keyed by a hash of the repository: `journals/`, `snapshots/` and
   `locks/<hash>.lock/owner.json`. Guarded git mutations write nothing under
