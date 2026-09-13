@@ -24,7 +24,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] The commit message follows the Conventional Commits format below.
 - [ ] The branch was created from `develop` and the pull request targets `develop`, not `main`.
 - [ ] No file under `.pixel/`, `target/`, `.claude/`, `.codex/`, `.cursor/` is staged (they are gitignored; do not force-add).
-- [ ] If a command or op was added or renamed: `ARCHITECTURE.md`, `pixel --help` output, and the agent prompt in `crates/pixel-install/assets/pixel-agent-prompt.md` agree with each other.
+- [ ] If a command or op was added or renamed: `ARCHITECTURE.md` (its `## Command surface` table), `pixel --help` output, and the agent prompt in `crates/pixel-install/assets/pixel-agent-prompt.md` agree with each other. `cargo test -p pixel-cli --test cli docs_drift::` enforces both directions.
 - [ ] If `crates/` changed: the binary was rebuilt and reinstalled, and `pixel doctor .` is green (see "Local install loop").
 
 ## Prerequisites

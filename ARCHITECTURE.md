@@ -58,6 +58,74 @@ the integration point and is the only library crate allowed to depend on
 almost everything. The CLI depends on the daemon plus whatever it needs for
 commands that never touch the daemon (install, flow, actionlog, rescue).
 
+## Command surface
+
+Every subcommand of the built binary, one line each, in `pixel --help`
+order. `crates/pixel/tests/cli/docs_drift.rs` fails when a command listed
+by `--help` is missing here, or when any `` `pixel <name>` `` in README,
+ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md` or the bundled agent
+prompts names a command the binary does not have.
+
+| Command | Does |
+| --- | --- |
+| `pixel index` | Build (or rebuild) the text index for a directory tree |
+| `pixel search` | Search the indexed tree with a regex pattern. |
+| `pixel search-compat` | Native-output literal file search for automatic routing; unsupported inputs execute the original rg/grep command without modification |
+| `pixel query` | Compile and execute one bounded deterministic retrieval recipe |
+| `pixel ask` | Semantic code search: embed a natural-language question ("how is authentication handled?") and rank files by semantic/lexical rank fusion. |
+| `pixel targets` | Sniper target list: task description in, closed prioritized file list out (P0 = start here, P1 = likely, P2 = droppable). |
+| `pixel rescue` | Surgical revert planner: locate the files a problem points at, list recent versions with the likely-breaking commit flagged, recommend a last-known-good candidate. |
+| `pixel symbol` | Look up symbols by name in the code graph |
+| `pixel skeleton` | All signatures in a file — the skeleton view at ~10% of Read cost |
+| `pixel note` | Human notes on the map: durable annotations keyed by file + symbol name (or concept norm). |
+| `pixel map` | Structural repo map: every indexed file with its symbols. |
+| `pixel context` | Budget-fitted context for a symbol uid |
+| `pixel impact` | Blast radius of a symbol (callers upstream / callees downstream) |
+| `pixel uses` | Direct callers or callees of a symbol |
+| `pixel trace` | Call path between two symbols |
+| `pixel processes` | Discovered execution flows |
+| `pixel clusters` | Functional-area clusters |
+| `pixel changes` | Symbols/flows affected by working-tree changes |
+| `pixel graph` | Force (re)build of the code graph db |
+| `pixel status` | Index + graph freshness status |
+| `pixel ready` | Make a repository ready for agent work: index, graph, and warm daemon |
+| `pixel stats` | Show raw shard metadata (legacy) |
+| `pixel daemon` | Manage the per-root background daemon |
+| `pixel recall` | Search and browse LLM CLI transcripts (machine-wide corpus) |
+| `pixel sniper` | One-look error capture: query the sniper error sink |
+| `pixel inspect` | Show repo state: HEAD, branch, dirty files, fingerprints |
+| `pixel review` | Review working-tree changes (staged, unstaged, untracked, conflicted) |
+| `pixel history` | Commit history with detail levels and byte caps |
+| `pixel diff` | Structured diff between two refs (or ref → working tree) |
+| `pixel publish` | Stage files, commit, and optionally push (crash-safe, idempotent) |
+| `pixel push` | Leased push to a remote (crash-safe, idempotent) |
+| `pixel ship` | Publish + push in one op (commit then leased push) |
+| `pixel branch` | Create a new branch from HEAD (or --from <ref>) |
+| `pixel update` | Fast-forward merge to a target OID (refuses non-ff + dirty intersection) |
+| `pixel sync` | Fetch from a remote (idempotent) |
+| `pixel resolve` | Engine 1: resolve a phrase to code via the concept index |
+| `pixel history-search` | M3: history-wide fact + diff search |
+| `pixel lifecycle` | Engine 2: lifecycle of a path or token |
+| `pixel excavate` | Engine 2: history-wide discovery (rescue v2) |
+| `pixel reconcile` | Engine 4: one-call deterministic branch sync |
+| `pixel journal` | M5: journal a session event (fire-and-forget) |
+| `pixel install` | Idempotently deploy the agent prompt, the Claude shell wrapper and the Codex developer_instructions config key |
+| `pixel uninstall` | Remove everything `pixel install` wrote: managed blocks from agent-config files, hook entries from all settings files, hook scripts, the pi guard extension, the rule source file, and the pixel binary itself. |
+| `pixel release-check` | Check that a release tag is consistent with the tree before anything is built or published: crates/pixel/Cargo.toml carries the version, Cargo.lock is fresh for every workspace member, CHANGELOG.md has the `## [x.y.z]` heading and an empty Unreleased section. |
+| `pixel upgrade` | Rebuild the binary, stop the daemon, copy the new binary to the install path, and optionally restart the daemon. |
+| `pixel doctor` | Health check: install state, daemon, index/graph/facts freshness |
+| `pixel migrate` | Remove legacy .gitpixel/ and prepare .pixel/; indexes rebuild lazily on use |
+| `pixel hook` | Hook entrypoints (guard, session-start) invoked by Claude hooks |
+| `pixel task` | Inspect or reset Claude Code's local Pixel task-runtime packet |
+| `pixel log` | Self-assessment: pixel's own action log (what ran, what went wrong). |
+| `pixel savings` | Token-savings report: for retrieval-shaped commands (search/query/ context/resolve) that recorded snippet-vs-pool volumes, aggregate the fraction of the candidate pool the agent did NOT have to read. |
+| `pixel rewrite` | Squash every commit on the current branch since its base into ONE commit (crash-safe, backup-ref'd), optionally force-pushing with lease |
+| `pixel provenance` | Per-region blame attribution: who introduced/owns each region of a file |
+| `pixel branches` | One-call read-only branch inventory: ahead/behind, merged, stale, unpushed — the deterministic "did you push everything?" answer |
+| `pixel env` | Additive-only, key-level .env mutations with snapshots and restore. |
+| `pixel flow` | Save, retrieve, list, revise, and replay proven agent-browser paths (auth flows, config flows) so the agent follows a deterministic shortcut instead of re-discovering the UI from scratch every time |
+| `pixel help` | Print this message or the help of the given subcommand(s). |
+
 ## On-disk state
 
 Per repository, under `.pixel/` (git-ignored):
