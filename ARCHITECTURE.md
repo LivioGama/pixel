@@ -308,6 +308,16 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   rebuild, reinstall the binary atomically, re-index, reinstall hooks, and
   run `pixel doctor`.
 
+## Release gate
+
+`pixel release-check <version|tag> [--repo <path>] [--json]`
+(`crates/pixel/src/release_check.rs`) is the first job of
+`.github/workflows/release.yml` and a maintainer's last local step: it
+reads `Cargo.toml`, every member's manifest, `Cargo.lock` and
+`CHANGELOG.md` and reports three checks (`cli-version`, `cargo-lock`,
+`changelog`), exit 1 on any failure. Pure functions over file contents;
+no git, no network.
+
 ## Build features
 
 `pixel-cli` defaults to `fastembed` and `model2vec`. `fastembed` needs ONNX

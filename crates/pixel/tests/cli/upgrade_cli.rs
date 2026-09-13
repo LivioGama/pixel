@@ -78,6 +78,30 @@ impl Fixture {
     }
 }
 
+/// Accept one client or panic after `deadline`: a blocking `accept()` on a
+/// fake daemon that the upgrade never contacts would hang the test thread
+/// (and the mutation gate) forever instead of failing it.
+fn accept_within(listener: &UnixListener, deadline: Duration) -> std::os::unix::net::UnixStream {
+    listener.set_nonblocking(true).unwrap();
+    let start = Instant::now();
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    start.elapsed() < deadline,
+                    "no client connected to the fake daemon within {deadline:?}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("accept: {e}"),
+        }
+    }
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -91,7 +115,7 @@ fn upgrade_shutdown_is_scoped_to_selected_repository() {
     let unrelated = UnixListener::bind(fixture.socket(&fixture.0.join("other"))).unwrap();
     unrelated.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = selected.accept().unwrap();
+        let mut stream = accept_within(&selected, Duration::from_secs(10));
         stream
             .set_read_timeout(Some(Duration::from_secs(4)))
             .unwrap();
@@ -125,7 +149,7 @@ fn upgrade_reports_unresponsive_daemon_without_claiming_completion() {
     let fixture = Fixture::new("timeout");
     let listener = UnixListener::bind(fixture.socket(&fixture.0)).unwrap();
     let server = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
+        let stream = accept_within(&listener, Duration::from_secs(10));
         stream
             .set_read_timeout(Some(Duration::from_secs(4)))
             .unwrap();

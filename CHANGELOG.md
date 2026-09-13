@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `pixel release-check <version|tag> [--repo <path>] [--json]`: the release consistency gate. It checks that `crates/pixel/Cargo.toml` carries the tagged version, that `Cargo.lock` holds every workspace member at its manifest version (a stale lock used to fail `cargo build --locked` on the release runner, after the tests had passed), and that `CHANGELOG.md` has the `## [x.y.z]` heading with nothing left under `## [Unreleased]`. One `[ok  ]`/`[FAIL]` line per check with the fix in the failure text, exit 1 on any failure. The release workflow runs it before the tests; `v1.2.3` and `refs/tags/v1.2.3` are accepted.
+
 ### Changed
 - The `fastembed` feature no longer enables fastembed's `image-models` default: pixel never embeds images, and that feature alone pulled the `image` crate with every codec (rav1e, exr, tiff, png…), 64 crates and 600 lock lines out of the CLI's dependency graph. Text embedding, model download and the TLS stack are unchanged.
 - Building from source on macOS or Windows no longer compiles a vendored OpenSSL that was never linked: `pixel-recall` declares it only for the targets where native-tls actually uses it (`cfg(not(any(target_os = "windows", target_vendor = "apple")))`, native-tls's own gate). Linux builds with the `fastembed` feature are unchanged; about 90 s off a cold macOS build.

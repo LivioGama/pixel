@@ -23,16 +23,6 @@ jobs:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
 
-      - name: Tag must match the crate version
-        run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          CRATE="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pixel/Cargo.toml | head -1)"
-          if [ "$TAG" != "$CRATE" ]; then
-            echo "::error::tag v${TAG} does not match crates/pixel/Cargo.toml version ${CRATE}"
-            exit 1
-          fi
-          echo "tag v${TAG} matches crates/pixel/Cargo.toml"
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
@@ -45,8 +35,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y perl make
 
+      # Tag = crates/pixel version, Cargo.lock fresh for every member,
+      # CHANGELOG has the `## [x.y.z]` heading and an empty Unreleased.
+      # A stale lock used to surface only in the build job, after the tests.
+      # No --locked here on purpose: with it cargo would refuse before the
+      # report names the stale member; the build job stays --locked.
+      - name: Release consistency (pixel release-check)
+        run: cargo run -q -p pixel-cli -- release-check "$GITHUB_REF" --repo .
+
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
   build:
     name: Build ${{ matrix.target }}

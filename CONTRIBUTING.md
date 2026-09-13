@@ -345,14 +345,18 @@ naming the command or flag affected.
 ## Release (maintainers)
 
 1. Move the `Unreleased` entries under a new `## [x.y.z] - YYYY-MM-DD`.
-2. Bump `version` in `crates/pixel/Cargo.toml` and any crate that changed.
-3. Commit as `release: prepare x.y.z`.
-4. Tag `vx.y.z` and push the tag. `.github/workflows/release.yml` builds
+2. Bump `version` in `crates/pixel/Cargo.toml` and any crate that changed,
+   then `cargo build` so `Cargo.lock` follows.
+3. `pixel release-check x.y.z` must print `all checks passed`: it checks
+   the three points above (the same command gates the release workflow
+   before anything is built).
+4. Commit as `release: prepare x.y.z`.
+5. Tag `vx.y.z` and push the tag. `.github/workflows/release.yml` builds
    `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` and
    `aarch64-apple-darwin`, uploads tarballs with `.sha256` files, and
    generates the Homebrew formula with real hashes. `fail-fast: true`
    means a partial build failure publishes nothing.
-5. Only the latest release receives security fixes.
+6. Only the latest release receives security fixes.
 
 ## Security
 
