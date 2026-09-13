@@ -18,6 +18,8 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     groups:
-      # Action bumps are low-risk and reviewed together.
+      # Action bumps are low-risk and reviewed together. Workflows pin
+      # every action to a commit SHA with a `# vN` comment; Dependabot
+      # moves the SHA and the comment together.
       github-actions:
         patterns: ["*"]
