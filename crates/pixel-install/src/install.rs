@@ -659,6 +659,31 @@ pub(crate) fn shell_profile_for(shell: &str, home: &Path) -> (ShellKind, PathBuf
     }
 }
 
+/// The profiles of the other shells `pixel install` knows, with their
+/// shell name, that hold a pixel-managed block: the residue of an install
+/// that targeted the wrong shell (an agent's `$SHELL` on a fish machine).
+/// `resolved_profile` is the one the current shell loads and is skipped.
+pub(crate) fn stray_wrapper_profiles(
+    home: &Path,
+    resolved_profile: &Path,
+) -> Vec<(&'static str, PathBuf)> {
+    let candidates = [
+        ("zsh", home.join(".zshrc")),
+        ("bash", home.join(".bashrc")),
+        (
+            "fish",
+            fish_config_dir(home).join("conf.d").join(FISH_DROPIN),
+        ),
+    ];
+    candidates
+        .into_iter()
+        .filter(|(_, profile)| profile != resolved_profile)
+        .filter(|(_, profile)| {
+            fs::read_to_string(profile).is_ok_and(|text| extract_managed_block(&text).is_some())
+        })
+        .collect()
+}
+
 pub(crate) const PIXEL_MANAGED_BEGIN: &str = "# >>> pixel-managed >>>";
 pub(crate) const PIXEL_MANAGED_END: &str = "# <<< pixel-managed <<<";
 

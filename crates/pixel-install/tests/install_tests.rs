@@ -1452,6 +1452,90 @@ fn doctor_reads_the_profile_of_the_shell_it_is_asked_about() {
     );
 }
 
+/// The residue of an install that ran under an agent's `$SHELL`: a valid
+/// fish install plus a pixel block in `~/.zshrc`, which fish never loads.
+/// Doctor names the stray file, its shell and the two ways out, as yellow:
+/// a machine that launches `claude` from a second shell on purpose keeps a
+/// working install and must not be sent to `pixel install`.
+#[test]
+fn doctor_flags_a_pixel_block_in_another_shells_profile_as_yellow() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, FISH_SHELL);
+    let check = || {
+        doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: None,
+            shell: Some(FISH_SHELL.into()),
+            claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+            ..Default::default()
+        })
+        .expect("doctor runs")
+        .checks
+        .into_iter()
+        .find(|c| c.id == "install.shell-wrappers")
+        .expect("shell-wrappers check")
+    };
+
+    let clean = check();
+    assert_eq!(clean.status, pixel_install::doctor::CheckStatus::Green);
+    assert_eq!(
+        clean.detail.as_ref().unwrap()["stray_profiles"],
+        serde_json::json!([])
+    );
+
+    // A `.zshrc` without a block is not a stray: every macOS account has one.
+    fs::write(home.join(".zshrc"), "export EDITOR=vim\n").unwrap();
+    assert_eq!(check().status, pixel_install::doctor::CheckStatus::Green);
+
+    install_for_shell(home, "/bin/zsh");
+    let stray = check();
+    assert_eq!(stray.status, pixel_install::doctor::CheckStatus::Yellow);
+    let zshrc = home.join(".zshrc").display().to_string();
+    assert!(
+        stray
+            .summary
+            .starts_with("fish shell wrappers installed in "),
+        "{}",
+        stray.summary
+    );
+    assert!(stray.summary.contains(&zshrc), "{}", stray.summary);
+    assert!(
+        stray.summary.contains("not loaded by fish"),
+        "{}",
+        stray.summary
+    );
+    assert!(
+        stray.summary.contains("`pixel uninstall --shell zsh`")
+            && stray.summary.contains("`--shell zsh`"),
+        "{}",
+        stray.summary
+    );
+    assert_eq!(
+        stray.detail.as_ref().unwrap()["stray_profiles"],
+        serde_json::json!([{"shell": "zsh", "profile": zshrc}])
+    );
+
+    // The same install seen from zsh: green for zsh, with fish as the stray.
+    let from_zsh = doctor(&DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: None,
+        shell: Some("/bin/zsh".into()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        ..Default::default()
+    })
+    .expect("doctor runs")
+    .checks
+    .into_iter()
+    .find(|c| c.id == "install.shell-wrappers")
+    .unwrap();
+    assert_eq!(from_zsh.status, pixel_install::doctor::CheckStatus::Yellow);
+    assert_eq!(
+        from_zsh.detail.as_ref().unwrap()["stray_profiles"][0]["shell"],
+        "fish"
+    );
+}
+
 #[test]
 fn doctor_refuses_to_green_a_posix_block_sitting_in_the_fish_dropin() {
     // Reproduces the shipped bug in its observable form: the markers are
