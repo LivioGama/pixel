@@ -3,10 +3,11 @@
 //! and serves `search` / `ask` over the standard daemon transport.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pixel_recall::ask::{ask, format_group};
 use pixel_recall::embed::{Embedder, open_default_embedder, run_backfill};
-use pixel_recall::ingest::ingest_source;
+use pixel_recall::ingest::{IngestReport, ingest_recent, ingest_source};
 use pixel_recall::search::{SearchFilters, format_hit, search};
 use pixel_recall::segment::SegmentSet;
 use pixel_recall::sources::SourceAdapter;
@@ -18,6 +19,17 @@ use serde_json::{Value, json};
 /// single-threaded, and a bulk backfill would block the socket for minutes
 /// (that is `pixel recall embed`'s job).
 const MAX_INLINE_BACKLOG: i64 = 5_000;
+/// How often the daemon re-stats the recently modified transcripts
+/// independently of the watcher. FSEvents on macOS holds back the modify
+/// event of a file while its writer keeps it open, and an agent streams
+/// its transcript exactly that way: the session being written right now
+/// is the one the watcher does not report. The sweep is one directory
+/// walk per source; unchanged files are skipped on size and mtime.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+/// Only transcripts modified this recently are re-stated by the sweep;
+/// anything older is either already ingested or will arrive through the
+/// watcher when its writer closes it.
+const SWEEP_WINDOW_MS: i64 = 21_600_000; // 6 h
 
 use crate::api::{PROTOCOL_VERSION, Request, Response, ServeError, failure_response};
 use crate::daemon::Corpus;
@@ -238,18 +250,59 @@ impl RecallService {
             if !agents.contains(adapter.agent()) {
                 continue;
             }
-            match ingest_source(&mut self.store, adapter.as_ref()) {
-                Ok(report) => {
-                    if report.sessions_written > 0 {
-                        eprintln!(
-                            "recall daemon: {} +{} sessions, +{} turns",
-                            report.agent, report.sessions_written, report.turns_written
-                        );
-                    }
-                }
-                Err(e) => eprintln!("recall daemon: ingest {}: {e}", adapter.agent()),
-            }
+            let report = ingest_source(&mut self.store, adapter.as_ref());
+            Self::log_ingest(adapter.agent(), report);
         }
+        self.after_ingest();
+    }
+
+    /// The periodic sweep: re-stat the transcripts modified within
+    /// `SWEEP_WINDOW_MS` for every source present on this machine and
+    /// ingest the ones that grew, whether or not the watcher reported them.
+    // Same glue as `refresh_agents` over the real HOME; `ingest_recent` and
+    // the window edge are unit-tested in pixel-recall, the scheduling in
+    // `daemon.rs`.
+    #[cfg_attr(test, mutants::skip)]
+    fn sweep_recent(&mut self) {
+        let present: std::collections::BTreeSet<&'static str> = watch_roots()
+            .into_iter()
+            .filter(|(_, p)| p.exists())
+            .map(|(agent, _)| agent)
+            .collect();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        for adapter in all_adapters() {
+            if !present.contains(adapter.agent()) {
+                continue;
+            }
+            let report = ingest_recent(&mut self.store, adapter.as_ref(), now_ms, SWEEP_WINDOW_MS);
+            Self::log_ingest(adapter.agent(), report);
+        }
+        self.after_ingest();
+    }
+
+    #[cfg_attr(test, mutants::skip)] // stderr diagnostics only
+    fn log_ingest(agent: &str, report: Result<IngestReport, pixel_recall::sources::IngestError>) {
+        match report {
+            Ok(report) => {
+                if report.sessions_written > 0 {
+                    eprintln!(
+                        "recall daemon: {} +{} sessions, +{} turns",
+                        report.agent, report.sessions_written, report.turns_written
+                    );
+                }
+            }
+            Err(e) => eprintln!("recall daemon: ingest {agent}: {e}"),
+        }
+    }
+
+    /// Refresh the lexical segments and drain a small embed backlog after
+    /// any ingest pass.
+    // Glue over the real segments and vectors directories; both are
+    // unit-tested in pixel-recall.
+    #[cfg_attr(test, mutants::skip)]
+    fn after_ingest(&mut self) {
         match SegmentSet::open(&pixel_recall::segments_dir()) {
             Ok(mut segments) => {
                 if let Err(e) = segments.index_new(&self.store) {
@@ -334,5 +387,13 @@ impl Corpus for RecallService {
             .map(|(_, p)| p)
             .filter(|p| p.exists())
             .collect()
+    }
+
+    fn sweep_interval(&self) -> Option<Duration> {
+        Some(SWEEP_INTERVAL)
+    }
+
+    fn sweep(&mut self) {
+        self.sweep_recent();
     }
 }
