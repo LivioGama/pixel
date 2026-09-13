@@ -9,6 +9,7 @@ mod guard_deny;
 mod json_contract;
 mod metrics_cli;
 mod post_edit_cli;
+mod release_check_cli;
 mod rescue_cli;
 mod search_compat_cli;
 mod targets_cli;

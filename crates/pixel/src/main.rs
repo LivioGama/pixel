@@ -30,6 +30,7 @@ mod operation_metrics;
 mod post_compaction;
 mod prompt_submit;
 mod recall_cmd;
+mod release_check;
 mod rescue_cmd;
 mod search_compat;
 mod sniper_cmd;
@@ -710,6 +711,21 @@ enum Command {
         /// Shell whose wrapper block should be removed (default: $SHELL).
         #[arg(long)]
         shell: Option<String>,
+    },
+    /// Check that a release tag is consistent with the tree before anything
+    /// is built or published: crates/pixel/Cargo.toml carries the version,
+    /// Cargo.lock is fresh for every workspace member, CHANGELOG.md has the
+    /// `## [x.y.z]` heading and an empty Unreleased section. Exit 1 on any
+    /// failed check.
+    ReleaseCheck {
+        /// The version or tag: `1.2.3`, `v1.2.3` or `refs/tags/v1.2.3`.
+        version: String,
+        /// Repository root (default: current directory).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Emit the report as one JSON document.
+        #[arg(long)]
+        json: bool,
     },
     /// Rebuild the binary, stop the daemon, copy the new binary to the
     /// install path, and optionally restart the daemon. Solves the
@@ -4564,6 +4580,23 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 &serde_json::to_value(&report).map_err(|e| e.to_string())?,
                 json,
             )
+        }
+        Command::ReleaseCheck {
+            version,
+            repo,
+            json,
+        } => {
+            let report = release_check::run(&repo, &version)?;
+            if json {
+                print_data(&report.to_json(), true)?;
+            } else {
+                write_stdout(&report.render())?;
+            }
+            if report.ok() {
+                Ok(())
+            } else {
+                Err("release-check failed".to_string())
+            }
         }
         Command::Upgrade {
             build,
