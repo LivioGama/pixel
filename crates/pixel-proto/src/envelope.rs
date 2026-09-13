@@ -187,8 +187,7 @@ impl Envelope<serde_json::Value> {
     pub fn error_message(&self) -> String {
         self.error
             .as_ref()
-            .map(|e| e.message.clone())
-            .unwrap_or_else(|| "unknown error".to_string())
+            .map_or_else(|| "unknown error".to_string(), |e| e.message.clone())
     }
 }
 
