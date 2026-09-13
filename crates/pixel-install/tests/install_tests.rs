@@ -701,6 +701,166 @@ fn doctor_install_artifact_checks_red_and_green() {
     );
 }
 
+/// Dry-run "parser" standing in for the CLI's clap definition: rejects the
+/// one subcommand the tests plant, accepts everything else.
+fn stub_validator(argv: &[String]) -> Result<(), String> {
+    if argv.iter().any(|a| a == "bogus-subcommand") {
+        Err("unrecognized subcommand 'bogus-subcommand'".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn check<'a>(
+    report: &'a pixel_install::doctor::DoctorReport,
+    id: &str,
+) -> &'a pixel_install::doctor::DoctorCheck {
+    report
+        .checks
+        .iter()
+        .find(|c| c.id == id)
+        .unwrap_or_else(|| panic!("doctor has no {id} check"))
+}
+
+/// 0.2.x installs write no managed block: the rule text agents receive is
+/// the deployed `agent-prompt.md`, so that is what `rule.parity` and
+/// `rule.scenarios` must validate. Before this, both reported yellow "no
+/// installed rule text" on every current install, and a prompt documenting
+/// a command line the binary rejects went unnoticed.
+#[test]
+fn doctor_rule_checks_validate_the_deployed_agent_prompt() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let doc_opts = DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: None,
+        shell: Some(TEST_SHELL.into()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        syntax_validator: Some(stub_validator),
+        ..Default::default()
+    };
+
+    // 1. Nothing installed: no rule text anywhere → yellow, pointing at install.
+    let report = doctor(&doc_opts).expect("doctor runs");
+    for id in ["rule.parity", "rule.scenarios"] {
+        let c = check(&report, id);
+        assert_eq!(
+            c.status,
+            pixel_install::doctor::CheckStatus::Yellow,
+            "{id}: {c:?}"
+        );
+        assert!(
+            c.summary.contains("agent-prompt.md") && c.summary.contains("pixel install"),
+            "{id} names the missing artifact and the fix: {}",
+            c.summary
+        );
+    }
+
+    // 2. A plain install (no CLAUDE.md, no managed block): both checks read
+    //    the deployed prompt and go green.
+    install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .expect("install");
+    let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
+    let report = doctor(&doc_opts).expect("doctor runs");
+    for id in ["rule.parity", "rule.scenarios"] {
+        let c = check(&report, id);
+        assert_eq!(
+            c.status,
+            pixel_install::doctor::CheckStatus::Green,
+            "{id} after install: {:?} {:?}",
+            c.summary,
+            c.reason
+        );
+        assert_eq!(
+            c.detail.as_ref().and_then(|d| d["source"].as_str()),
+            Some(prompt_path.to_str().unwrap()),
+            "{id} validated the deployed prompt"
+        );
+    }
+    let parity = check(&report, "rule.parity");
+    let parsed = parity.detail.as_ref().unwrap()["parsed_ok"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        parsed > 0,
+        "the deployed prompt documents pixel command lines: {parity:?}"
+    );
+
+    // 3. A deployed prompt documenting a command the binary rejects is red,
+    //    even with a legacy managed block that would pass: the deployed
+    //    prompt is what agents read, so it wins over the older text.
+    let prompt = fs::read_to_string(&prompt_path).unwrap();
+    fs::write(
+        &prompt_path,
+        format!(
+            "{prompt}
+```bash
+pixel bogus-subcommand .
+```
+"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        home.join("CLAUDE.md"),
+        format!(
+            "# mine
+{MANAGED_BEGIN}
+```bash
+pixel targets task
+pixel resolve x
+pixel rescue
+pixel reconcile
+pixel impact x
+```
+{MANAGED_END}
+"
+        ),
+    )
+    .unwrap();
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let parity = check(&report, "rule.parity");
+    assert_eq!(
+        parity.status,
+        pixel_install::doctor::CheckStatus::Red,
+        "{parity:?}"
+    );
+    assert!(
+        parity
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("bogus-subcommand"),
+        "the rejected line is named: {:?}",
+        parity.reason
+    );
+    // Red at all proves the precedence: the managed block alone parses
+    // green, so the rejected line can only have come from the deployed
+    // prompt (a red check carries no detail to name its source).
+
+    // 4. With the deployed prompt gone, the legacy managed block is the
+    //    fallback for installs that predate agent-prompt.md.
+    fs::remove_file(&prompt_path).unwrap();
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let parity = check(&report, "rule.parity");
+    assert_eq!(
+        parity.status,
+        pixel_install::doctor::CheckStatus::Green,
+        "{parity:?}"
+    );
+    assert_eq!(
+        parity.detail.as_ref().and_then(|d| d["source"].as_str()),
+        Some(home.join("CLAUDE.md").to_str().unwrap()),
+        "legacy managed block is read when no prompt is deployed"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // uninstall tests
 // ---------------------------------------------------------------------------

@@ -45,6 +45,7 @@ can do the same task is a failure mode — it wastes tokens and misses the index
 | `git log --grep "term"` | `pixel history-search "term"` | Fact + diff search |
 | `git log --follow <path>` | `pixel lifecycle --file <path>` | Lifecycle of a path/token |
 | `git blame <file>` | `pixel provenance <file>` | Per-region attribution |
+| "it worked before": `git log` + `git checkout <sha> -- <file>` | `pixel rescue "<problem>"` | Revert plan: breaking commit flagged, last-known-good candidate; nothing written without `--apply` |
 
 ### Change Review & Git Operations (replaces raw git)
 
