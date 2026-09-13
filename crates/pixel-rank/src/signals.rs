@@ -516,7 +516,7 @@ fn path_concepts(path: &str) -> Vec<String> {
     path.split(['/', '.', '-', '_'])
         .filter(|s| s.len() >= 3)
         .filter(|s| !TRIVIAL.contains(s))
-        .map(|s| s.to_lowercase())
+        .map(str::to_lowercase)
         .collect()
 }
 
