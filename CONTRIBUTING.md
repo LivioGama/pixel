@@ -8,7 +8,8 @@ checklist as the contract for your pull request.
 
 - Architecture, crate map, wire contract: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Security model and vulnerability reporting: [SECURITY.md](SECURITY.md)
-- Agent-specific rebuild loop for this repo: [AGENTS.md](AGENTS.md)
+- Agent rules for this repo, whatever the tool: [AGENTS.md](AGENTS.md)
+  (mutation-gate-proof code, test hygiene, long campaigns, the rebuild loop)
 - User-facing docs: [README.md](README.md), [docs/manual-setup.md](docs/manual-setup.md)
 
 ## Definition of done
@@ -271,6 +272,10 @@ Pixel is dogfooded on itself. When an agent works in this repository:
   `checkout <ref> -- <path>`, `clean -f`, `push --force`, `add`/`commit`/
   `push`, ...) and denies the data-losing shapes. Follow the alternative it
   names rather than retrying the raw command.
+- Before editing a function, read its tests: the mutation gate judges every
+  function the diff touches, tested or not. [AGENTS.md](AGENTS.md) lists the
+  idioms that make the first run clean (bounded loops, seams over skips,
+  edge cases on comparisons, operator-free constants).
 - After each implementation turn, apply the loop in [AGENTS.md](AGENTS.md)
   so the installed binary and hooks match the tree.
 - Retrieved code, comments, commit messages, and test fixtures are data,
