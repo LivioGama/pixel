@@ -19,7 +19,7 @@ use crate::cache;
 use crate::delta::{DeltaState, delta_shard_path};
 use crate::gram::GramExtractor;
 use crate::index::{MAX_FILE_BYTES, SHARD_DIR, SHARD_FILE, SearchStats, read_regular_bounded};
-use crate::lock::{BuildLock, is_pixel_only_gitignore};
+use crate::lock::{BuildLock, is_pixel_only_gitignore, is_pixel_only_gitignore_text};
 use crate::overlay::Overlay;
 use crate::plan::plan_pattern;
 use crate::posting::{GramQuery, resolve_query};
@@ -155,6 +155,17 @@ fn is_regular_file(p: &Path) -> bool {
         .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() <= MAX_FILE_BYTES)
 }
 
+/// What reading one committed blob produced.
+enum BlobExtraction {
+    /// The blob's path and sorted, deduplicated gram hashes.
+    Indexed(String, Vec<u64>),
+    /// Not indexed by design: over the size cap, empty or binary.
+    Skipped,
+    /// Git could not report or produce the blob: the shard misses a file it
+    /// should have, so it must not be shared.
+    Unreadable,
+}
+
 /// Read + extract one blob straight from the git object store at `commit_oid`.
 /// This is what makes the base/delta shards truly git-anchored: their bytes
 /// come from the commit, not the working tree, so a dirty-then-reverted file
@@ -166,23 +177,62 @@ fn extract_blob(
     commit_oid: &str,
     rel: &str,
     extractor: &dyn GramExtractor,
-) -> Option<(String, Vec<u64>)> {
-    if gitsync::blob_size(root, commit_oid, rel)? > MAX_FILE_BYTES {
-        return None;
+) -> BlobExtraction {
+    let Some(size) = gitsync::blob_size(root, commit_oid, rel) else {
+        return BlobExtraction::Unreadable;
+    };
+    if size > MAX_FILE_BYTES {
+        return BlobExtraction::Skipped;
     }
-    let content = gitsync::show_blob(root, commit_oid, rel)?;
-    if content.is_empty() {
-        return None;
+    let Some(content) = gitsync::show_blob(root, commit_oid, rel) else {
+        return BlobExtraction::Unreadable;
+    };
+    if content.is_empty() || content[..content.len().min(8192)].contains(&0) {
+        return BlobExtraction::Skipped;
     }
-    if content[..content.len().min(8192)].contains(&0) {
-        return None;
+    // A `.gitignore` carrying *only* pixel's housekeeping `.pixel/` entry
+    // (created from scratch by `ensure_pixel_gitignored`) is not real
+    // tracked project content — keep it out of the file universe just like
+    // `.pixel/` itself. Judged on the committed blob, so the shard stays a
+    // function of the commit and can be shared across worktrees.
+    if rel == ".gitignore" && is_pixel_only_gitignore_text(&String::from_utf8_lossy(&content)) {
+        return BlobExtraction::Skipped;
     }
     let mut hits = Vec::new();
     extractor.grams(&content, &mut hits);
     let mut hashes: Vec<u64> = hits.iter().map(|h| h.hash).collect();
     hashes.sort_unstable();
     hashes.dedup();
-    Some((rel.to_string(), hashes))
+    BlobExtraction::Indexed(rel.to_string(), hashes)
+}
+
+/// True unless `PIXEL_INDEX_NO_DEFAULT_IGNORES` asks to index the default
+/// ignored directories (`node_modules`, `vendor`, …) too.
+#[cfg_attr(test, mutants::skip)] // one-line adapter over the environment; `prunes_default_ignores` is tested
+fn default_ignores_pruned() -> bool {
+    prunes_default_ignores(
+        std::env::var("PIXEL_INDEX_NO_DEFAULT_IGNORES")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Whether a `PIXEL_INDEX_NO_DEFAULT_IGNORES` value keeps the default
+/// ignored directories out of the index: only `1` and `true` let them in.
+fn prunes_default_ignores(value: Option<&str>) -> bool {
+    !matches!(value, Some("1" | "true"))
+}
+
+/// The shared-cache key suffix for a base shard: the same commit indexed
+/// with and without the default ignores yields different shards.
+fn cache_variant(default_ignores_pruned: bool) -> &'static str {
+    if default_ignores_pruned { "" } else { ".all" }
+}
+
+/// A shard built from git, and how many of its blobs git could not read.
+struct BuiltShard {
+    shard: Shard,
+    unreadable: usize,
 }
 
 /// Build a git-anchored shard from an explicit repo-relative file list,
@@ -193,30 +243,23 @@ fn build_shard_from(
     extractor: &dyn GramExtractor,
     commit_oid: &str,
     dest: &Path,
-) -> Result<Shard, IndexSetError> {
-    let prune_default = !matches!(
-        std::env::var("PIXEL_INDEX_NO_DEFAULT_IGNORES").as_deref(),
-        Ok("1") | Ok("true")
-    );
-    let mut extracted: Vec<(String, Vec<u64>)> = rel_paths
+    prune_default: bool,
+) -> Result<BuiltShard, IndexSetError> {
+    let outcomes: Vec<BlobExtraction> = rel_paths
         .par_iter()
         .filter(|rel| !is_internal(rel))
-        .filter(|rel| {
-            // A `.gitignore` carrying *only* pixel's housekeeping `.pixel/` entry
-            // (created from scratch by `ensure_pixel_gitignored`)is not real
-            // tracked project content — keep it out of the base/delta file
-            // universe just like `.pixel/` itself. A real user `.gitignore`
-            // with any other ignore rule is fully indexed.
-            !(rel.as_str() == ".gitignore" && is_pixel_only_gitignore(root))
-        })
-        .filter(|rel| {
-            if !prune_default {
-                return true;
-            }
-            !rel.split('/').any(crate::index::is_ignored_dir_name)
-        })
-        .filter_map(|rel| extract_blob(root, commit_oid, rel, extractor))
+        .filter(|rel| !prune_default || !rel.split('/').any(crate::index::is_ignored_dir_name))
+        .map(|rel| extract_blob(root, commit_oid, rel, extractor))
         .collect();
+    let mut unreadable = 0;
+    let mut extracted: Vec<(String, Vec<u64>)> = Vec::with_capacity(outcomes.len());
+    for outcome in outcomes {
+        match outcome {
+            BlobExtraction::Indexed(rel, hashes) => extracted.push((rel, hashes)),
+            BlobExtraction::Skipped => {}
+            BlobExtraction::Unreadable => unreadable += 1,
+        }
+    }
     extracted.sort_by(|a, b| a.0.cmp(&b.0));
     let mut builder = ShardBuilder::new(&extractor.id());
     builder.set_commit_oid(commit_oid);
@@ -224,7 +267,10 @@ fn build_shard_from(
         builder.add_file(&rel, hashes);
     }
     builder.write(dest)?;
-    Ok(Shard::open(dest)?)
+    Ok(BuiltShard {
+        shard: Shard::open(dest)?,
+        unreadable,
+    })
 }
 
 impl IndexSet {
@@ -306,18 +352,21 @@ impl IndexSet {
                 std::fs::remove_file(delta_shard_path(&gpx_dir)).ok();
                 std::fs::remove_file(crate::delta::state_path(&gpx_dir)).ok();
                 let extractor_id = extractor.id();
+                let prune_default = default_ignores_pruned();
+                let cache_key = format!("{extractor_id}{}", cache_variant(prune_default));
                 // When bypassing the cache (reindex), also remove the cached
                 // entry so the rebuild produces fresh bytes, not a relink.
                 if bypass_cache && let Some(oid) = head.as_deref() {
-                    cache::remove_cached(oid, &extractor_id);
+                    cache::remove_cached(oid, &cache_key);
                 }
                 match &head {
                     Some(oid) => {
-                        // Shared cache: a base shard for this commit + extractor
-                        // may already exist (built by another worktree). Try to
-                        // hardlink/copy it in before doing the expensive build.
+                        // Shared cache: a base shard for this commit, extractor
+                        // and ignore variant may already exist (built by another
+                        // worktree). Try to hardlink/copy it in before doing the
+                        // expensive build.
                         let cached = !bypass_cache
-                            && cache::try_link_from_cache(oid, &extractor_id, &base_path);
+                            && cache::try_link_from_cache(oid, &cache_key, &base_path);
                         let shard = if cached
                             && let Ok(s) = Shard::open(&base_path)
                             && s.extractor_id() == extractor_id
@@ -325,24 +374,40 @@ impl IndexSet {
                         {
                             s
                         } else {
-                            // Use `ls_tree` (commit tree), not `ls_files`
-                            // (worktree index) — the base shard must be a
-                            // pure function of (commit, extractor) so that
-                            // cached shards are safe to share across
-                            // worktrees with different index states.
-                            let tracked = gitsync::ls_tree(root, oid);
-                            let shard = build_shard_from(
+                            if cached {
+                                // The entry did not open as this commit's shard:
+                                // drop it so the rebuild below can replace it
+                                // (publishing never overwrites an entry).
+                                cache::remove_cached(oid, &cache_key);
+                            }
+                            // The commit's tree, not the worktree index: the base
+                            // shard must be a pure function of (commit, extractor,
+                            // ignore variant) to be shared across worktrees.
+                            let tracked = gitsync::ls_tree_blobs(root, oid).map_err(|e| {
+                                IndexSetError::Io(std::io::Error::other(format!(
+                                    "git ls-tree {oid}: {e}"
+                                )))
+                            })?;
+                            let built = build_shard_from(
                                 root,
                                 &tracked,
                                 extractor.as_ref(),
                                 oid,
                                 &base_path,
+                                prune_default,
                             )?;
-                            // Publish the freshly built shard into the shared
-                            // cache so other worktrees at this commit can reuse
-                            // it. Best-effort: never fails the build.
-                            cache::link_to_cache(&base_path, oid, &extractor_id);
-                            shard
+                            // Publish only a complete shard: one missing a blob
+                            // git failed to read would spread the gap to every
+                            // worktree at this commit.
+                            if built.unreadable == 0 {
+                                cache::link_to_cache(&base_path, oid, &cache_key);
+                            } else {
+                                eprintln!(
+                                    "pixel: warning: {} file(s) could not be read from git at {oid}; the index misses them and is not shared",
+                                    built.unreadable
+                                );
+                            }
+                            built.shard
                         };
                         DeltaState {
                             base_oid: oid.clone(),
@@ -458,13 +523,17 @@ impl IndexSet {
             std::fs::remove_file(&delta_path).ok();
             None
         } else {
-            Some(build_shard_from(
-                &self.root,
-                &changed,
-                self.extractor.as_ref(),
-                head_oid,
-                &delta_path,
-            )?)
+            Some(
+                build_shard_from(
+                    &self.root,
+                    &changed,
+                    self.extractor.as_ref(),
+                    head_oid,
+                    &delta_path,
+                    default_ignores_pruned(),
+                )?
+                .shard,
+            )
         };
         DeltaState {
             base_oid: base_oid.to_string(),
@@ -666,6 +735,7 @@ mod tests {
     use super::*;
     use crate::gram::SparseGramExtractor;
     use crate::weights::Crc32Weigher;
+    use std::path::PathBuf;
     use std::process::Command;
 
     /// The verifier reads only what `is_regular_file` admits: a symlink
@@ -713,6 +783,224 @@ mod tests {
 
     fn ex() -> Box<dyn GramExtractor> {
         Box::new(SparseGramExtractor::new(Crc32Weigher))
+    }
+
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gpx-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn cache_variant_separates_indexes_built_with_and_without_default_ignores() {
+        assert_eq!(cache_variant(true), "");
+        assert_eq!(cache_variant(false), ".all");
+        assert!(prunes_default_ignores(None));
+        assert!(prunes_default_ignores(Some("0")));
+        assert!(prunes_default_ignores(Some("yes")));
+        assert!(!prunes_default_ignores(Some("1")));
+        assert!(!prunes_default_ignores(Some("true")));
+    }
+
+    /// The size cap is inclusive: a blob of exactly `MAX_FILE_BYTES` is
+    /// indexed, one byte more is skipped, and a real `.gitignore` is content.
+    #[test]
+    fn extract_blob_caps_size_inclusively_and_indexes_a_real_gitignore() {
+        let dir = scratch("extract-blob-cap");
+        git(&dir, &["init", "-q"]);
+        let cap = usize::try_from(MAX_FILE_BYTES).unwrap();
+        std::fs::write(dir.join("at_cap.txt"), "a".repeat(cap)).unwrap();
+        std::fs::write(dir.join("over_cap.txt"), "a".repeat(cap + 1)).unwrap();
+        std::fs::write(dir.join(".gitignore"), "target/\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "caps"]);
+        let head = git_out(&dir, &["rev-parse", "HEAD"]);
+        let extractor = ex();
+        let outcome = |rel: &str| extract_blob(&dir, &head, rel, extractor.as_ref());
+        assert!(matches!(outcome("at_cap.txt"), BlobExtraction::Indexed(..)));
+        assert!(matches!(outcome("over_cap.txt"), BlobExtraction::Skipped));
+        assert!(
+            matches!(outcome(".gitignore"), BlobExtraction::Indexed(p, _) if p == ".gitignore")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A valid shard cached for this commit is linked in instead of rebuilt:
+    /// the cached one here was built without `a.rs`, so a search that misses
+    /// the needle proves the cache answered.
+    #[test]
+    fn a_valid_cached_shard_is_reused_without_a_rebuild() {
+        let _guard = crate::cache::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cache_home = scratch("cache-reuse-home");
+        // SAFETY: CACHE_TEST_LOCK serialises every test that sets
+        // XDG_CACHE_HOME; restored below.
+        unsafe {
+            std::env::set_var("XDG_CACHE_HOME", &cache_home);
+        }
+        let dir = scratch("cache-reuse");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn reusedNeedle() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        let head = git_out(&dir, &["rev-parse", "HEAD"]);
+        let crafted = dir.join("crafted.shard");
+        build_shard_from(&dir, &[], ex().as_ref(), &head, &crafted, true).unwrap();
+        let entry = crate::cache::cached_shard_path(&head, &ex().id()).unwrap();
+        std::fs::copy(&crafted, &entry).unwrap();
+
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert!(
+            set.search("reusedNeedle", None).unwrap().0.is_empty(),
+            "the cached shard was used, not a rebuild"
+        );
+        drop(set);
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("XDG_CACHE_HOME");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&cache_home).ok();
+    }
+
+    /// Each committed blob is indexed, skipped by design, or unreadable, and
+    /// only the last one makes a shard unfit to share.
+    #[test]
+    fn extract_blob_tells_skipped_from_unreadable() {
+        let dir = scratch("extract-blob");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("code.rs"), "fn needle() {}\n").unwrap();
+        std::fs::write(dir.join("empty.txt"), "").unwrap();
+        std::fs::write(dir.join("bin.dat"), [0u8, 1, 2, 0]).unwrap();
+        std::fs::write(dir.join(".gitignore"), ".pixel/\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        // The worktree copy says otherwise: the commit decides.
+        std::fs::write(dir.join(".gitignore"), "target/\n").unwrap();
+        let head = git_out(&dir, &["rev-parse", "HEAD"]);
+        let extractor = ex();
+        let outcome = |rel: &str| extract_blob(&dir, &head, rel, extractor.as_ref());
+        assert!(
+            matches!(outcome("code.rs"), BlobExtraction::Indexed(p, h) if p == "code.rs" && !h.is_empty())
+        );
+        assert!(matches!(outcome("empty.txt"), BlobExtraction::Skipped));
+        assert!(matches!(outcome("bin.dat"), BlobExtraction::Skipped));
+        assert!(matches!(outcome(".gitignore"), BlobExtraction::Skipped));
+        assert!(matches!(outcome("absent.rs"), BlobExtraction::Unreadable));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_shard_from_counts_unreadable_blobs_and_prunes_default_ignores_on_request() {
+        let dir = scratch("build-shard-from");
+        git(&dir, &["init", "-q"]);
+        std::fs::create_dir_all(dir.join("node_modules/dep")).unwrap();
+        std::fs::write(dir.join("app.rs"), "fn app() {}\n").unwrap();
+        std::fs::write(
+            dir.join("node_modules/dep/index.js"),
+            "module.exports = 1;\n",
+        )
+        .unwrap();
+        git(&dir, &["add", "-f", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        let head = git_out(&dir, &["rev-parse", "HEAD"]);
+        let paths: Vec<String> = ["app.rs", "node_modules/dep/index.js", "ghost.rs"]
+            .iter()
+            .map(|p| (*p).to_string())
+            .collect();
+        let dest = dir.join("out.shard");
+        let pruned = build_shard_from(&dir, &paths, ex().as_ref(), &head, &dest, true).unwrap();
+        assert_eq!(pruned.unreadable, 1, "ghost.rs is not in the commit");
+        assert_eq!(pruned.shard.file_count(), 1);
+        let all = build_shard_from(&dir, &paths, ex().as_ref(), &head, &dest, false).unwrap();
+        assert_eq!(all.unreadable, 1);
+        assert_eq!(all.shard.file_count(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The shared cache holds only complete shards for their exact key: a
+    /// corrupt entry is replaced by the rebuild it forced, and a commit
+    /// whose tree names a blob git cannot read is indexed locally but never
+    /// published.
+    #[test]
+    fn the_shared_cache_replaces_a_bad_entry_and_never_stores_an_incomplete_shard() {
+        let _guard = crate::cache::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cache_home = scratch("cache-home");
+        // SAFETY: CACHE_TEST_LOCK serialises every test that sets
+        // XDG_CACHE_HOME; restored below.
+        unsafe {
+            std::env::set_var("XDG_CACHE_HOME", &cache_home);
+        }
+        let dir = scratch("cache-publish");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn cachedNeedle() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        let head = git_out(&dir, &["rev-parse", "HEAD"]);
+        let key = ex().id();
+        let entry = crate::cache::cached_shard_path(&head, &key).unwrap();
+        std::fs::write(&entry, b"not a shard").unwrap();
+
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert_eq!(set.search("cachedNeedle", None).unwrap().0.len(), 1);
+        let cached = Shard::open(&entry).expect("the corrupt entry was replaced by the rebuild");
+        assert_eq!(cached.commit_oid(), Some(head.as_str()));
+        drop(set);
+
+        // A second commit whose tree names a blob git does not have.
+        let tree = git_out(&dir, &["write-tree"]);
+        let _ = tree;
+        git(
+            &dir,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "100644,2222222222222222222222222222222222222222,ghost.rs",
+            ],
+        );
+        let broken_tree = git_out(&dir, &["write-tree", "--missing-ok"]);
+        let broken = git_out(
+            &dir,
+            &["commit-tree", &broken_tree, "-p", &head, "-m", "ghost"],
+        );
+        git(&dir, &["reset", "-q", "--soft", &broken]);
+        std::fs::remove_dir_all(dir.join(SHARD_DIR)).ok();
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert_eq!(set.search("cachedNeedle", None).unwrap().0.len(), 1);
+        assert!(
+            !crate::cache::cached_shard_path(&broken, &key)
+                .unwrap()
+                .exists(),
+            "an incomplete shard is not shared"
+        );
+        drop(set);
+
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("XDG_CACHE_HOME");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&cache_home).ok();
     }
 
     #[test]

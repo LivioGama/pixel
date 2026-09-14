@@ -37,6 +37,12 @@ pub fn is_pixel_only_gitignore(root: &Path) -> bool {
     let Ok(content) = std::fs::read_to_string(root.join(".gitignore")) else {
         return false;
     };
+    is_pixel_only_gitignore_text(&content)
+}
+
+/// [`is_pixel_only_gitignore`] over the file's content: for a `.gitignore`
+/// read from a commit rather than the working tree.
+pub fn is_pixel_only_gitignore_text(content: &str) -> bool {
     // A purely-housekeeping `.gitignore` has at most two kinds of lines: the
     // optional header comment and the `.pixel`/`.pixel/` ignore entry. Anything
     // else (blank flames included) means real user content — index it normally.
@@ -123,6 +129,26 @@ impl Drop for BuildLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only pixel's own housekeeping `.gitignore` is not project content:
+    /// the header, `.pixel` or `.pixel/` and blank lines, read from the
+    /// worktree file or from committed text alike.
+    #[test]
+    fn pixel_only_gitignore_is_recognised_from_the_file_and_from_text() {
+        let dir = temp_dir();
+        assert!(!is_pixel_only_gitignore(&dir), "no file is not pixel-only");
+        std::fs::write(
+            dir.join(".gitignore"),
+            format!("{GITIGNORE_HEADER}.pixel/\n"),
+        )
+        .unwrap();
+        assert!(is_pixel_only_gitignore(&dir));
+        std::fs::write(dir.join(".gitignore"), ".pixel/\ntarget/\n").unwrap();
+        assert!(!is_pixel_only_gitignore(&dir));
+        assert!(is_pixel_only_gitignore_text(".pixel\n\n"));
+        assert!(!is_pixel_only_gitignore_text("node_modules\n"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn gitignore_created_when_missing() {
