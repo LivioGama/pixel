@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `pixel list-errors since --ts` rejects a duration it cannot represent instead of panicking or answering a wrong window: a non-ASCII unit (`--ts é`) cut the last byte inside a multi-byte character and panicked with `not a char boundary` (exit 101, empty stdout), and an overflowing value (`--ts 9223372036854775807d`) wrapped the multiplication to a negative window and reported "no errors". Both now print the existing `bad duration "…" (use 30s, 5m, 2h, 1d)` and exit 1.
 - `scripts/install.sh` finds the latest release from the redirect of `github.com/LivioGama/pixel/releases/latest` instead of the anonymous REST API, which allows 60 requests an hour per IP: from a shared address (a CI runner, an office NAT) it answered "No prebuilt release found" although 0.2.6 was published (the macOS release smoke of 0.2.6 failed twice this way). A failed lookup now shows curl's error instead of hiding it.
 
 ## [0.2.6] - 2026-09-14

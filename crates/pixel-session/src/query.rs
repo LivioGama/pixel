@@ -245,12 +245,19 @@ pub fn gc(store: &Store, vacuum: bool) -> Result<GcOutcome> {
 }
 
 /// Parse a human duration like `5m`, `30s`, `2h`, `1d` into milliseconds.
+///
+/// Returns `None` for anything else, including a window that cannot be
+/// represented: the text comes from `--ts`, so an invalid unit (a trailing
+/// multi-byte character) or an overflowing value is an error to report, never
+/// a panic or a wrapped window.
 pub fn parse_duration_ms(text: &str) -> Option<i64> {
     let text = text.trim();
     if text.is_empty() {
         return None;
     }
-    let (digits, unit) = text.split_at(text.len() - 1);
+    // `--ts` comes from the command line: cut on a char boundary so a trailing
+    // multi-byte character is an invalid unit (`None`), not a panic.
+    let (digits, unit) = text.split_at(text.floor_char_boundary(text.len() - 1));
     let (digits, multiplier) = match unit {
         "s" => (digits, 1_000),
         "m" => (digits, 60_000),
@@ -260,7 +267,7 @@ pub fn parse_duration_ms(text: &str) -> Option<i64> {
         _ => return None,
     };
     let value: i64 = digits.parse().ok()?;
-    Some(value * multiplier)
+    value.checked_mul(multiplier)
 }
 
 #[cfg(test)]
@@ -276,5 +283,22 @@ mod tests {
         assert_eq!(parse_duration_ms("45"), Some(45_000));
         assert_eq!(parse_duration_ms("nope"), None);
         assert_eq!(parse_duration_ms(""), None);
+    }
+
+    #[test]
+    fn parse_duration_ms_should_refuse_a_non_ascii_unit() {
+        assert_eq!(parse_duration_ms("é"), None);
+        assert_eq!(parse_duration_ms("5é"), None);
+    }
+
+    #[test]
+    fn parse_duration_ms_should_refuse_a_window_that_overflows() {
+        assert_eq!(parse_duration_ms("9223372036854775807d"), None);
+        assert_eq!(parse_duration_ms("9223372036854775807"), None);
+        // Just below the boundary: 9_223_372_036_854_775 s still fits in ms.
+        assert_eq!(
+            parse_duration_ms("9223372036854775s"),
+            Some(9_223_372_036_854_775_000)
+        );
     }
 }
