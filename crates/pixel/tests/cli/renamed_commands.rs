@@ -217,3 +217,39 @@ fn migrate_is_a_hidden_no_op_that_exits_zero() {
         "migrate stays out of --help"
     );
 }
+
+/// The agent prompt `pixel install` deployed from v0.2.4, the last release
+/// before the rename. Frozen here because CI checks out without tags.
+const PROMPT_0_2_4: &str = include_str!("fixtures/agent-prompt-0.2.4.md");
+
+#[test]
+fn doctor_accepts_the_agent_prompt_every_pre_rename_install_deployed() {
+    assert!(
+        PROMPT_0_2_4.contains("pixel targets") && !PROMPT_0_2_4.contains("pixel scope-task"),
+        "the fixture must be the pre-rename vocabulary"
+    );
+    let repo = fixture("doctor");
+    let home = Scratch::for_test("pixel-renamed", "doctor-home");
+    let prompts = home.join(".local/share/pixel");
+    std::fs::create_dir_all(&prompts).unwrap();
+    std::fs::write(prompts.join("agent-prompt.md"), PROMPT_0_2_4).unwrap();
+
+    let out = pixel(
+        &repo,
+        &["doctor", ".", "--json", "--shell", "fish"],
+        &[("HOME", home.to_str().unwrap()), ("PIXEL_METRICS", "0")],
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("doctor --json ({e}): {out:?}"));
+    for id in ["rule.parity", "rule.scenarios"] {
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("{id} missing: {report}"));
+        // Other checks legitimately fail in a bare HOME; these two judge
+        // only whether the deployed prompt still matches the binary.
+        assert_eq!(check["status"], "green", "{id}: {check}");
+    }
+}

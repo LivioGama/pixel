@@ -878,8 +878,11 @@ pub fn normalize_rule_command(line: &str) -> Option<Vec<String>> {
 pub fn scenario_mismatches(rule_text: &str, session_usage: &str) -> Vec<String> {
     let mut out = Vec::new();
     for scenario in MANDATORY_SCENARIOS {
-        let anchored = format!("pixel {scenario}");
-        let in_rule = rule_text.contains(&anchored);
+        // A rule text deployed before the command rename names the scenario
+        // by its old name (`pixel targets`); that still runs, so it counts.
+        let in_rule = rule_text.contains(&format!("pixel {scenario}"))
+            || pixel_proto::commands::former_name(scenario)
+                .is_some_and(|old| rule_text.contains(&format!("pixel {old}")));
         let in_usage = session_usage.contains(scenario);
         match (in_rule, in_usage) {
             (true, false) => out.push(format!(
@@ -1138,6 +1141,26 @@ git clone https://example.com/repo.git
             scenario_mismatches(rule, pixel_proto::op::SESSION_USAGE).is_empty(),
             "all five scenarios present on both sides must produce zero mismatches"
         );
+    }
+
+    #[test]
+    fn scenarios_named_by_their_pre_rename_names_still_agree() {
+        // Every install before the rename deployed this vocabulary.
+        let old_rule = "use pixel targets first, pixel resolve for phrases, \
+                        pixel rescue for history, pixel reconcile for sync, \
+                        pixel impact before edits";
+        assert!(
+            scenario_mismatches(old_rule, pixel_proto::op::SESSION_USAGE).is_empty(),
+            "old command names in the rule text must satisfy the scenarios"
+        );
+        let mixed =
+            "pixel scope-task, pixel resolve, pixel plan-rollback, pixel reconcile, pixel impact";
+        assert!(scenario_mismatches(mixed, pixel_proto::op::SESSION_USAGE).is_empty());
+        // A name that was never a scenario does not stand in for one.
+        let wrong = "pixel targets, pixel resolve, pixel rescue, pixel sync, pixel impact";
+        let drift = scenario_mismatches(wrong, pixel_proto::op::SESSION_USAGE);
+        assert_eq!(drift.len(), 1, "{drift:?}");
+        assert!(drift[0].contains("'sync-branch'"), "{drift:?}");
     }
 
     #[test]
