@@ -13,7 +13,10 @@
 # 4. an empty `## [Unreleased]` is kept and `## [x.y.z] - DATE` is inserted
 #    under it, so the entries move to the release section untouched;
 # 5. `cargo update --workspace` refreshes Cargo.lock for the members only;
-# 6. `pixel check-release` runs from the tree exactly as the Release
+# 6. the pull requests merged into develop since the last tag are listed, so
+#    each user-visible one can be matched to a changelog entry by eye
+#    (entries carry no PR number); skipped when `gh` is missing or offline;
+# 7. `pixel check-release` runs from the tree exactly as the Release
 #    workflow's verify job runs it, and its exit code is the script's.
 #
 # Review the result with `git diff`, then commit `release: prepare x.y.z`.
@@ -82,5 +85,21 @@ cargo update --workspace --quiet
 echo "prepare.sh: $ENTRIES changelog entries released as $VERSION ($DATE); members bumped:"
 for m in $MEMBERS; do printf '  %s\n' "$m"; done
 echo
+
+# Highest version tag, not `git describe`: a release tag is not always an
+# ancestor of develop (v0.2.4's commit was replayed there), so describe
+# answers an older tag and the list reaches back a release too far.
+LAST_TAG="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)"
+if [ -n "$LAST_TAG" ] && command -v gh >/dev/null 2>&1; then
+    SINCE="$(git log -1 --format=%cI "$LAST_TAG")"
+    if PRS="$(gh pr list --state merged --base develop --search "merged:>$SINCE" --limit 200 \
+        --json number,title --jq '.[] | "  #\(.number) \(.title)"' 2>/dev/null)"; then
+        echo "pull requests merged into develop since $LAST_TAG; each user-visible one needs an entry under ## [$VERSION]:"
+        if [ -n "$PRS" ]; then printf '%s\n' "$PRS"; else echo "  (none)"; fi
+    else
+        echo "prepare.sh: could not list the pull requests merged since $LAST_TAG (gh offline or unauthenticated); check CHANGELOG.md against them by hand"
+    fi
+    echo
+fi
 
 cargo run -q -p pixel-cli -- check-release "v$VERSION" --repo .
