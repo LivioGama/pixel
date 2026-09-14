@@ -2,7 +2,7 @@
  * Golden envelope shapes + LIVE round-trip through the real Rust binary:
  * every envelope this package emits must parse with
  * `pixel_sniper::types::ReportEnvelope` and come back intact from
- * `pixel sniper last/env --json`.
+ * `pixel list-errors last/env --json`.
  */
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -93,13 +93,13 @@ describe("live round-trip through the real pixel binary", () => {
     // retention expires historical fixtures. Live round-trips need a live clock.
     for (const golden of [goldenRun, goldenEvent, goldenError]) {
       const envelope = { ...golden, ts: Date.now() };
-      const result = run(["sniper", "report", "--json", "-", "--repo", project], JSON.stringify(envelope));
+      const result = run(["list-errors", "report", "--json", "-", "--repo", project], JSON.stringify(envelope));
       expect(result.status).toBe(0);
       expect(result.stderr).toBe("");
     }
 
     // Error round-trips intact via `sniper last --json`.
-    const last = run(["sniper", "last", "--json", "--repo", project]);
+    const last = run(["list-errors", "last", "--json", "--repo", project]);
     expect(last.status).toBe(0);
     const parsed = JSON.parse(last.stdout) as {
       errors: Array<Record<string, unknown>>;
@@ -119,7 +119,7 @@ describe("live round-trip through the real pixel binary", () => {
     expect(record.values).toEqual({ evaluatingChain: ["api", "sessions", "list"] });
 
     // Run fingerprint round-trips via `sniper env --json`.
-    const env = run(["sniper", "env", "--json", "--repo", project]);
+    const env = run(["list-errors", "env", "--json", "--repo", project]);
     expect(env.status).toBe(0);
     const envParsed = JSON.parse(env.stdout) as { latest?: Record<string, unknown> };
     const latest = envParsed.latest ?? (JSON.parse(env.stdout) as Record<string, unknown>);
@@ -129,7 +129,7 @@ describe("live round-trip through the real pixel binary", () => {
     void runRow;
 
     // HMR event round-trips via `sniper hmr --json`.
-    const hmr = run(["sniper", "hmr", "--json", "--repo", project]);
+    const hmr = run(["list-errors", "hmr", "--json", "--repo", project]);
     expect(hmr.status).toBe(0);
     expect(hmr.stdout).toContain("hmr-update");
     expect(hmr.stdout).toContain("/src/App.tsx");
@@ -138,8 +138,8 @@ describe("live round-trip through the real pixel binary", () => {
   test("dedup: the same error envelope twice yields one row with count 2", () => {
     const { project, run } = makeSandbox();
     const envelope = { ...goldenError, ts: Date.now() };
-    const first = run(["sniper", "report", "--json", "-", "--repo", project], JSON.stringify(envelope));
-    const second = run(["sniper", "report", "--json", "-", "--repo", project], JSON.stringify(envelope));
+    const first = run(["list-errors", "report", "--json", "-", "--repo", project], JSON.stringify(envelope));
+    const second = run(["list-errors", "report", "--json", "-", "--repo", project], JSON.stringify(envelope));
     expect(JSON.parse(first.stdout).deduped).toBe(false);
     const parsed = JSON.parse(second.stdout) as { deduped: boolean; count: number };
     expect(parsed.deduped).toBe(true);
@@ -149,9 +149,9 @@ describe("live round-trip through the real pixel binary", () => {
   test("historical golden error is accepted then expires on the next store open", () => {
     const { project, run } = makeSandbox();
     const historical = { ...goldenError, ts: Math.min(goldenError.ts!, Date.now() - 8 * 86_400_000) };
-    const reported = run(["sniper", "report", "--json", "-", "--repo", project], JSON.stringify(historical));
+    const reported = run(["list-errors", "report", "--json", "-", "--repo", project], JSON.stringify(historical));
     expect(reported.status).toBe(0);
-    const last = run(["sniper", "last", "--json", "--repo", project]);
+    const last = run(["list-errors", "last", "--json", "--repo", project]);
     expect(last.status).toBe(0);
     expect(JSON.parse(last.stdout).errors).toEqual([]);
   });
@@ -159,7 +159,7 @@ describe("live round-trip through the real pixel binary", () => {
   test("unknown surface is rejected by the Rust parser (contract guard)", () => {
     const { project, run } = makeSandbox();
     const result = run(
-      ["sniper", "report", "--json", "-", "--repo", project],
+      ["list-errors", "report", "--json", "-", "--repo", project],
       JSON.stringify({ surface: "not-a-surface", message: "x" }),
     );
     expect(result.status).not.toBe(0);
