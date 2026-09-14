@@ -63,7 +63,7 @@ if ! command -v claude &>/dev/null; then
   exit 1
 fi
 if [ -z "$PIXEL_BIN" ] || [ ! -x "$PIXEL_BIN" ]; then
-  echo "ERROR: pixel binary not found. Install it (pixel upgrade --repo . --build \"cargo build --profile dev-release -p pixel-cli\") or set PIXEL_BIN." >&2
+  echo "ERROR: pixel binary not found. Install it (pixel self-update --repo . --build \"cargo build --profile dev-release -p pixel-cli\") or set PIXEL_BIN." >&2
   exit 1
 fi
 # The pixel arm must receive what the `claude` shell wrapper written by

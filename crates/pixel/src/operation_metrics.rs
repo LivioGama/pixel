@@ -129,12 +129,12 @@ pub fn observe(value: &Value) {
 /// v1 command counts are explicit workflow policy, not measured executions.
 fn native_commands(command: &str) -> Option<u64> {
     match command {
-        "search" | "query" | "ask" | "resolve" | "symbol" | "context" | "skeleton" | "map"
-        | "targets" | "uses" | "impact" | "trace" | "changes" | "clusters" | "processes"
-        | "history" | "history-search" | "excavate" | "lifecycle" | "provenance" | "diff"
-        | "branches" | "sync" | "branch" | "update" => Some(1),
-        "inspect" | "review" | "publish" => Some(3),
-        "ship" => Some(4),
+        "search-content" | "run-recipe" | "search-meaning" | "find-code" | "find-symbol" | "pack-context" | "list-signatures" | "repo-map"
+        | "scope-task" | "who-calls" | "impact" | "call-path" | "what-changed" | "list-areas" | "list-flows"
+        | "commit-history" | "search-history" | "dig-history" | "file-history" | "who-wrote" | "diff"
+        | "list-branches" | "fetch" | "new-branch" | "fast-forward" => Some(1),
+        "repo-state" | "review-changes" | "commit" => Some(3),
+        "commit-and-push" => Some(4),
         // Recovery/task/flow/reconcile depend on the actual guarded plan; do not
         // invent the native steps for these or administrative commands.
         _ => None,
@@ -153,21 +153,21 @@ pub fn evidence(command: &str, succeeded: bool) -> Option<WorkflowEvidence> {
     }
     let reads_evidence = matches!(
         command,
-        "search"
-            | "query"
-            | "ask"
-            | "resolve"
-            | "symbol"
-            | "context"
-            | "skeleton"
-            | "map"
-            | "targets"
-            | "uses"
+        "search-content"
+            | "run-recipe"
+            | "search-meaning"
+            | "find-code"
+            | "find-symbol"
+            | "pack-context"
+            | "list-signatures"
+            | "repo-map"
+            | "scope-task"
+            | "who-calls"
             | "impact"
-            | "trace"
-            | "changes"
-            | "clusters"
-            | "processes"
+            | "call-path"
+            | "what-changed"
+            | "list-areas"
+            | "list-flows"
     );
     Some(WorkflowEvidence {
         distinct_files: if reads_evidence {
@@ -207,7 +207,7 @@ mod tests {
         assert_eq!(e.relationships.len(), 1);
         assert!(e.partial);
         assert!(!e.unavailable);
-        assert_eq!(native_commands("publish"), Some(3));
-        assert_eq!(native_commands("task"), None);
+        assert_eq!(native_commands("commit"), Some(3));
+        assert_eq!(native_commands("task-state"), None);
     }
 }

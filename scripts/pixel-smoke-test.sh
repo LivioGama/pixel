@@ -28,7 +28,7 @@ if [ -z "$PIXEL" ]; then
 fi
 if [ -z "$PIXEL" ] || [ ! -x "$PIXEL" ]; then
     echo "pixel-smoke-test: no pixel binary (PIXEL_BIN unset, none on PATH, none under target/)." >&2
-    echo "  build + install one: pixel upgrade --repo . --build \"cargo build --profile dev-release -p pixel-cli\"" >&2
+    echo "  build + install one: pixel self-update --repo . --build \"cargo build --profile dev-release -p pixel-cli\"" >&2
     exit 2
 fi
 REPO="$ROOT"

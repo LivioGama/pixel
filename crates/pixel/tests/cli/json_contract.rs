@@ -85,13 +85,13 @@ fn json_commands_emit_only_json_on_stdout() {
     // (argv, expected top-level keys on the single document)
     let single_doc: &[(&[&str], &[&str])] = &[
         (&["status", ".", "--json"], &[]),
-        (&["symbol", "login_user", ".", "--json"], &[]),
+        (&["find-symbol", "login_user", ".", "--json"], &[]),
         (&["impact", "login_user", ".", "--json"], &["epistemics"]),
         (
-            &["targets", "fix login_user", ".", "--json", "--no-manifest"],
+            &["scope-task", "fix login_user", ".", "--json", "--no-manifest"],
             &["targets", "epistemics"],
         ),
-        (&["inspect", ".", "--json"], &["head", "branch"]),
+        (&["repo-state", ".", "--json"], &["head", "branch"]),
     ];
     for (argv, keys) in single_doc {
         let out = pixel(&dir, argv);
@@ -118,7 +118,7 @@ fn json_commands_emit_only_json_on_stdout() {
     }
 
     // `search --json` is NDJSON: one match object per line, every line JSON.
-    let out = pixel(&dir, &["search", "login_user", ".", "--json"]);
+    let out = pixel(&dir, &["search-content", "login_user", ".", "--json"]);
     assert!(
         out.status.success(),
         "search: {}",
@@ -142,13 +142,13 @@ fn json_commands_emit_only_json_on_stdout() {
 #[test]
 fn failing_json_command_leaves_stdout_empty() {
     let dir = fixture("fail");
-    let out = pixel(&dir, &["symbol", "no_such_symbol_anywhere", ".", "--json"]);
+    let out = pixel(&dir, &["find-symbol", "no_such_symbol_anywhere", ".", "--json"]);
     // `symbol` on an unknown name may answer with an empty candidate set or
     // fail; either way stdout must be parseable and stderr must carry any
     // failure. Force a definite failure with a malformed regex on search.
     let _ = parse_stdout_lines(&out, "symbol unknown");
 
-    let out = pixel(&dir, &["search", "(", ".", "--json"]);
+    let out = pixel(&dir, &["search-content", "(", ".", "--json"]);
     assert!(!out.status.success(), "malformed regex must fail");
     assert!(
         out.stdout.is_empty(),
@@ -183,7 +183,7 @@ fn big_untracked_tree_keeps_json_answers_structured() {
 
     for args in [
         &["status", ".", "--json"][..],
-        &["ready", ".", "--json", "--no-daemon"][..],
+        &["prepare-repo", ".", "--json", "--no-daemon"][..],
     ] {
         let out = pixel(&dir, args);
         assert!(out.status.success(), "{args:?}: {out:?}");
@@ -201,7 +201,7 @@ fn big_untracked_tree_keeps_json_answers_structured() {
             assert!(doc["snapshot"].get("dirty").is_none(), "{args:?}: {doc}");
             doc["snapshot"]["dirty_count"].as_u64()
         } else {
-            assert!(doc.get("status").is_none(), "ready must not embed status");
+            assert!(doc.get("status").is_none(), "prepare-repo must not embed status");
             doc["dirty_count"].as_u64()
         };
         assert_eq!(dirty_count, Some(3000), "{args:?}: {doc}");
@@ -212,11 +212,11 @@ fn big_untracked_tree_keeps_json_answers_structured() {
     // paths. Before this, `symbol`/`resolve` on a CI checkout with an
     // untracked `vendor/bundle` weighed 238 KB each, all of it path list.
     for args in [
-        &["symbol", "login_user", ".", "--json"][..],
-        &["resolve", "login user", ".", "--json"][..],
+        &["find-symbol", "login_user", ".", "--json"][..],
+        &["find-code", "login user", ".", "--json"][..],
         &["impact", "login_user", ".", "--json"][..],
-        &["uses", "login_user", ".", "--role", "callers", "--json"][..],
-        &["changes", ".", "--json"][..],
+        &["who-calls", "login_user", ".", "--role", "callers", "--json"][..],
+        &["what-changed", ".", "--json"][..],
     ] {
         let out = pixel(&dir, args);
         assert!(out.status.success(), "{args:?}: {out:?}");
@@ -247,7 +247,7 @@ fn big_untracked_tree_keeps_json_answers_structured() {
     // `inspect` owns the list: under a small cap it is shortened, not
     // replaced by a textual wrapper.
     let out = pixel_command()
-        .args(["inspect", ".", "--json"])
+        .args(["repo-state", ".", "--json"])
         .current_dir(&dir)
         .env("PIXEL_OUTPUT_CAP_BYTES", "4096")
         .output()
@@ -273,7 +273,7 @@ fn big_untracked_tree_keeps_json_answers_structured() {
 
     // `0` lifts the cap: the full list comes back and nothing is flagged.
     let out = pixel_command()
-        .args(["inspect", ".", "--json"])
+        .args(["repo-state", ".", "--json"])
         .current_dir(&dir)
         .env("PIXEL_OUTPUT_CAP_BYTES", "0")
         .output()
@@ -290,7 +290,7 @@ fn big_untracked_tree_keeps_json_answers_structured() {
 #[test]
 fn statusline_reports_the_commit_fraction_only_when_there_are_commits() {
     let dir = fixture("statusline-commits");
-    let indexed = pixel(&dir, &["index", "--history", "."]);
+    let indexed = pixel(&dir, &["build-index", "--history", "."]);
     assert!(indexed.status.success(), "{indexed:?}");
     let out = pixel(&dir, &["status", ".", "--statusline"]);
     assert!(out.status.success(), "{out:?}");
@@ -300,7 +300,7 @@ fn statusline_reports_the_commit_fraction_only_when_there_are_commits() {
     let empty = Scratch::for_test("pixel-json-contract", "statusline-empty");
     std::fs::write(empty.join(".gitignore"), ".pixel/\n").unwrap();
     git(&empty, &["init", "-q"]);
-    let _ = pixel(&empty, &["index", "--history", "."]);
+    let _ = pixel(&empty, &["build-index", "--history", "."]);
     let out = pixel(&empty, &["status", ".", "--statusline"]);
     assert!(out.status.success(), "{out:?}");
     let line = String::from_utf8_lossy(&out.stdout);

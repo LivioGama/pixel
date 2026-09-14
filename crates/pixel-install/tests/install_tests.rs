@@ -811,10 +811,10 @@ pixel bogus-subcommand .
             "# mine
 {MANAGED_BEGIN}
 ```bash
-pixel targets task
-pixel resolve x
-pixel rescue
-pixel reconcile
+pixel scope-task task
+pixel find-code x
+pixel plan-rollback
+pixel sync-branch
 pixel impact x
 ```
 {MANAGED_END}
@@ -908,7 +908,7 @@ fn uninstall_removes_managed_block_and_preserves_user_content() {
     );
 }
 
-/// After uninstall, Claude settings.json should have no pixel hook entries,
+/// After uninstall, Claude settings.json should have no pixel run-hook entries,
 /// and the hook scripts should be deleted. The new install no longer
 /// installs hooks or scripts, so the fixture manually creates them
 /// (modeling a leftover from a previous hook-based install) for uninstall
@@ -921,7 +921,7 @@ fn uninstall_removes_claude_hooks_and_scripts() {
     let hooks_dir = claude_dir.join("hooks");
     fs::create_dir_all(&hooks_dir).unwrap();
 
-    // Manually wire pixel hook entries into settings.json (install() no
+    // Manually wire pixel run-hook entries into settings.json (install() no
     // longer does this) — including the blocking guard, a session-start,
     // and a prompt-submit entry.
     let settings = claude_dir.join("settings.json");
@@ -965,7 +965,7 @@ fn uninstall_removes_claude_hooks_and_scripts() {
     };
     uninstall(&uninstall_opts).expect("uninstall");
 
-    // Settings should have no pixel hook references.
+    // Settings should have no pixel run-hook references.
     let settings_content = fs::read_to_string(&settings).unwrap_or_default();
     assert!(
         !settings_content.contains("pixel-targets-guard"),
@@ -1097,7 +1097,7 @@ fn uninstall_dry_run_does_not_modify() {
     );
 }
 
-/// Uninstall removes pixel hook entries from Codex hooks.json while
+/// Uninstall removes pixel run-hook entries from Codex hooks.json while
 /// preserving non-pixel entries.
 #[test]
 fn uninstall_removes_codex_hooks_preserving_others() {
@@ -2276,7 +2276,7 @@ fn doctor_flags_a_missing_or_stale_subagent_prompt() {
         pixel_install::doctor::CheckStatus::Green,
         "freshly installed sub-agent prompt must be green"
     );
-    fs::write(subagent_prompt_path(home), "pixel uses X --callers\n").unwrap();
+    fs::write(subagent_prompt_path(home), "pixel who-calls X --callers\n").unwrap();
     assert_eq!(
         check(home),
         pixel_install::doctor::CheckStatus::Red,

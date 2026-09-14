@@ -951,7 +951,7 @@ mod tests {
     /// same batch, and imports of UNCHANGED files that pointed at a file
     /// which did not exist yet, resolve once the batch lands. Without this
     /// the resolver's import tier never saw the new file and the caller
-    /// edge came out `Probable` or unresolved, unlike after `pixel graph`.
+    /// edge came out `Probable` or unresolved, unlike after `pixel rebuild-graph`.
     #[test]
     fn incremental_update_resolves_imports_to_files_added_in_the_batch() {
         let root = tmpdir("delta-imports");

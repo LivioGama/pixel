@@ -121,9 +121,9 @@ fn every_subcommand_is_in_the_architecture_command_table() {
 
 #[test]
 fn referenced_commands_reads_only_backticked_command_names() {
-    let text = "Run `pixel search foo` then `pixel impact`.\n`pixel-cli` is the crate; the pixel binary; `pixel` alone; `pixel foo/bar`; `pixel --help` is a flag.";
+    let text = "Run `pixel search-content foo` then `pixel impact`.\n`pixel-cli` is the crate; the pixel binary; `pixel` alone; `pixel foo/bar`; `pixel --help` is a flag.";
     let got: Vec<String> = referenced_commands(text).into_iter().collect();
-    assert_eq!(got, ["impact", "search"]);
+    assert_eq!(got, ["impact", "search-content"]);
 }
 
 /// Rule ids (`M-…`) named in `text`, wildcards such as `M-FFI-*` excluded:

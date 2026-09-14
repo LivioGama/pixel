@@ -6,7 +6,7 @@ mise/asdf shim, Homebrew or `~/.cargo/bin`), else `target/dev-release/pixel`
 then `target/release/pixel`. Install a build that matches the tree with
 
 ```bash
-pixel upgrade --repo . --build "cargo build --profile dev-release -p pixel-cli"
+pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-cli"
 ```
 
 (never `cp` into `~/.local/bin` by hand; see CONTRIBUTING.md "Local install loop").
@@ -21,7 +21,7 @@ pixel upgrade --repo . --build "cargo build --profile dev-release -p pixel-cli"
 | `install.sh` | `curl -fsSL https://raw.githubusercontent.com/LivioGama/pixel/main/scripts/install.sh \| sh` | end-user installer: latest GitHub release, checksum, atomic rename into `$PIXEL_INSTALL_DIR` (default `~/.local/bin`) |
 | `refresh-guidelines.sh` | `scripts/refresh-guidelines.sh` | re-download the vendored Rust guidelines; exit 1 when rule headings moved |
 
-## Smoke and audits (after `pixel upgrade`, before a PR that touches the CLI, hooks or install)
+## Smoke and audits (after `pixel self-update`, before a PR that touches the CLI, hooks or install)
 
 | Script | Run | What |
 | --- | --- | --- |

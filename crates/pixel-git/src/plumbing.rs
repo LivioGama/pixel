@@ -155,7 +155,7 @@ impl GitRunner {
     /// output-cap overflow. Required by any safety-critical caller that
     /// decides whether it is safe to overwrite working-tree content:
     /// `status_porcelain`'s "empty on failure" behavior previously let
-    /// `pixel rescue --apply` conclude "nothing is dirty" (and overwrite an
+    /// `pixel plan-rollback --apply` conclude "nothing is dirty" (and overwrite an
     /// actually-dirty file with no strategy flag given) whenever a large
     /// untracked tree pushed `status --porcelain` output past the output
     /// cap. Uses `ENUMERATION_MAX_OUTPUT_BYTES` so a legitimately large

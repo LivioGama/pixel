@@ -28,7 +28,7 @@ cargo build --release -p pixel-cli
 cp target/release/pixel ~/.local/bin/pixel
 ```
 
-To update an existing install later, prefer `pixel upgrade` over a manual
+To update an existing install later, prefer `pixel self-update` over a manual
 copy: it rebuilds, installs over the binary that is actually running (a
 mise/asdf-managed install behind a shim, a Homebrew cellar, or
 `~/.local/bin/pixel`), uses an atomic rename, stops the repo's daemon, and
@@ -172,7 +172,7 @@ reads always-on instructions: a rules file (`.cursor/rules`, `GEMINI.md`,
 `.github/copilot-instructions.md`), a system-prompt flag, or a global
 `AGENTS.md`. Copy the bundled prompt verbatim rather than a summary; it is
 the single source of truth, and `pixel doctor` checks the deployed copy
-against it. Re-copy it after each `pixel upgrade`.
+against it. Re-copy it after each `pixel self-update`.
 
 ## A note on prompt size
 

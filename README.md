@@ -40,7 +40,7 @@ The same repository questions, shown as realistic terminal work. These are workf
 ```bash
 brew tap LivioGama/tap
 brew install pixel
-pixel ready .       # optional warm-up
+pixel prepare-repo .       # optional warm-up
 pixel doctor .      # optional health check
 pixel install       # let your agent use Pixel
 ```
@@ -58,10 +58,10 @@ pixel install       # let your agent use Pixel
 
 | Need | Pixel command |
 | --- | --- |
-| Find text, a symbol, or a concept | `pixel search`, `pixel resolve`, `pixel ask` |
-| Scope work and see risk | `pixel targets`, `pixel impact`, `pixel changes` |
-| Recover prior code or history | `pixel excavate`, `pixel history-search`, `pixel rescue` |
-| Review or safely publish | `pixel inspect`, `pixel review`, `pixel reconcile`, `pixel publish` |
+| Find text, a symbol, or a concept | `pixel search-content`, `pixel find-code`, `pixel search-meaning` |
+| Scope work and see risk | `pixel scope-task`, `pixel impact`, `pixel what-changed` |
+| Recover prior code or history | `pixel dig-history`, `pixel search-history`, `pixel plan-rollback` |
+| Review or safely publish | `pixel repo-state`, `pixel review-changes`, `pixel sync-branch`, `pixel commit` |
 
 Pixel is local-first. Its index, graph, and optional history data live under `.pixel/`; it reports boundaries when results are capped, stale, or incomplete. Tests and code review remain necessary.
 

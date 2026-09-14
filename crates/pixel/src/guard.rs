@@ -1,4 +1,4 @@
-//! `pixel hook guard` — provider-aware, exact-subset search routing.
+//! `pixel run-hook guard` — provider-aware, exact-subset search routing.
 //! Explicit providers preserve unsupported calls silently. Without a
 //! provider, legacy non-blocking task-scoping guidance remains available.
 //!
@@ -11,7 +11,7 @@
 //!    instead of denying.
 //! 2. MANDATE (ADVISORY) — in a pixel-indexed repo (a `.pixel` dir exists)
 //!    with NO active manifest, edits to *existing* files get an advisory
-//!    suggesting `pixel targets "<task>"` first; the edit proceeds. An
+//!    suggesting `pixel scope-task "<task>"` first; the edit proceeds. An
 //!    EXPIRED manifest (>24h) gets an expiry advisory instead of a block.
 //! 3. SAFETY (ADVISORY) — destructive git commands get a pixel alternative:
 //!    `git reset --hard/--keep`, raw historical file restores
@@ -19,10 +19,10 @@
 //!    `git checkout -f/--force`, `git stash drop/clear`, `git branch -D`, and
 //!    `git push --force`. The original command is still allowed to proceed.
 //! 4. SUBSTITUTE (ADVISORY) — plain git mutations with an exact pixel
-//!    equivalent get the substitute spelled out: `git add` → `pixel publish`,
-//!    `git commit` → `pixel publish`, `git push` → `pixel push`,
-//!    `git checkout -b`/`git switch -c` → `pixel branch`, and `git rebase` →
-//!    `pixel reconcile`. Pixel cannot safely rewrite these because they are
+//!    equivalent get the substitute spelled out: `git add` → `pixel commit`,
+//!    `git commit` → `pixel commit`, `git push` → `pixel push`,
+//!    `git checkout -b`/`git switch -c` → `pixel new-branch`, and `git rebase` →
+//!    `pixel sync-branch`. Pixel cannot safely rewrite these because they are
 //!    writes, so the original command remains available. Interactive/porcelain
 //!    shapes pixel can't cover pass through — see `git_substitute_deny` for
 //!    the documented table.
@@ -416,7 +416,7 @@ fn load_composed_backup(path: &Path) -> Option<Vec<ComposedForeignHook>> {
             }
             // A Pixel command in the backup would recurse; installers must
             // remove Pixel before snapshotting, and this is a second boundary.
-            if command.contains(" pixel hook ") || command.starts_with("pixel hook ") {
+            if command.contains(" pixel run-hook ") || command.starts_with("pixel run-hook ") {
                 return None;
             }
             result.push(ComposedForeignHook {
@@ -713,7 +713,7 @@ fn delegate_rtk_hook(raw: &str) -> ! {
     std::process::exit(0);
 }
 
-/// Entry point for `pixel hook guard`. Reads the PreToolUse hook payload
+/// Entry point for `pixel run-hook guard`. Reads the PreToolUse hook payload
 /// from stdin. Never returns an `Err` that would surface as exit 1 — every
 /// failure path is a deliberate exit 0 (allow, optionally with advice).
 pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
@@ -826,7 +826,7 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
         if let Some(store) = transcript_store_hit(cmd) {
             advise(&transcript_archaeology_advisory_lines(store));
         }
-        // REWRITE TIER: try transparent bash → pixel rewrite BEFORE any advisory.
+        // REWRITE TIER: try transparent bash → pixel squash-branch BEFORE any advisory.
         // Advisories (scoping, transcript) call advise() which exits, precluding
         // the rewrite. By checking rewrite first, we ensure the rewrite takes
         // priority over the advisory — the rewrite IS the resolution.
@@ -856,7 +856,7 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
         | "view_file" | "grep_search" | "find_by_name" | "list_dir"
         // Cursor composer: file_search
         | "file_search" => {
-            // In indexed repos, recommend pixel search for Grep tool calls.
+            // In indexed repos, recommend pixel search-content for Grep tool calls.
             // The hook cannot change the tool type (Grep→Bash), so this is an
             // advisory and the original Grep call proceeds.
             if idx_root.is_some() && is_grep_tool(tool, tool_input) {
@@ -872,20 +872,20 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
                 }
             }
             // RETRIEVAL ADVISORY — in an indexed repo with NO active manifest,
-            // suggest `pixel targets` first while allowing retrieval to proceed.
+            // suggest `pixel scope-task` first while allowing retrieval to proceed.
             // Read is allowed through (reading a known file is not retrieval),
             // but gets an advisory in indexed repos with no manifest if the
-            // file is a source file — suggesting `pixel targets` first.
+            // file is a source file — suggesting `pixel scope-task` first.
             // `PIXEL_GUARD_RETRIEVAL=0` disables this tier.
             if idx_root.is_some() && manifest.is_none() && !manifest_expired && is_retrieval_tool(tool)
                 && !env_flag_off("PIXEL_GUARD_RETRIEVAL") {
                     retrieval_guard_advisory(&cwd, idx_root.as_deref().unwrap());
                 }
             // Retrieval-first advisory for Read of source files: in an indexed
-            // repo with no active manifest, suggest `pixel targets` before
+            // repo with no active manifest, suggest `pixel scope-task` before
             // reading source files. Advisory only — the read proceeds. This
             // catches the "massive token waste via redundant reads" failure
-            // mode where agents read entire files instead of using pixel search.
+            // mode where agents read entire files instead of using pixel search-content.
             if idx_root.is_some() && manifest.is_none() && !manifest_expired && is_read_tool(tool)
                 && let Some(p) = resolve(raw_path, &cwd)
                     && p.is_file() && is_source_file(&p) && !is_exempt(&p, idx_root.as_deref().unwrap())
@@ -919,7 +919,7 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
                 std::process::exit(0);
             }
             // MANDATE ADVISORY — indexed repo, no active manifest: suggest
-            // `pixel targets` before edits to existing files, but proceed.
+            // `pixel scope-task` before edits to existing files, but proceed.
             if let Some(root) = &idx_root {
                 if exists && !is_exempt(&p, root) {
                     if manifest_expired {
@@ -1008,8 +1008,8 @@ fn find_up(start: &Path, rel: impl AsRef<Path>) -> Option<PathBuf> {
 /// advisory evidence, not proof of breakage or current-source freshness. A graph
 /// miss or unknown edited path remains a silent allow; no refresh is triggered.
 ///
-/// Entry point for the `pixel hook post-tool-use` hook: the already-written
-/// PostToolUse blast-radius hook invoked by `pixel hook post-tool-use` .
+/// Entry point for the `pixel run-hook post-tool-use` hook: the already-written
+/// PostToolUse blast-radius hook invoked by `pixel run-hook post-tool-use` .
 /// Unlike [`run`] which infers the event from the payload, this *forces* the event
 /// to `PostToolUse` — PostToolUse hook files are per-event,so `hook_event_name`
 /// is often absent from their payload. Reads stdin, resolves the edited path +
@@ -1400,8 +1400,8 @@ fn scoping_advisory_lines(abs: &Path, m: &Manifest) -> Vec<String> {
             .map(|t| format!("  - '{}'", short_task(&t.task, 70))),
     );
     lines
-        .push("Proceeding. If scope has drifted, re-run `pixel targets \"<refined task>\"`".into());
-    lines.push("to refresh your task's list, or `pixel targets --clear` to end scoping.".into());
+        .push("Proceeding. If scope has drifted, re-run `pixel scope-task \"<refined task>\"`".into());
+    lines.push("to refresh your task's list, or `pixel scope-task --clear` to end scoping.".into());
     lines
 }
 
@@ -1415,9 +1415,9 @@ fn mandate_advisory_lines(abs: &Path, idx_root: &Path) -> Vec<String> {
     vec![
         "pixel-targets-guard advisory: no sniper target list is active for this repo.".into(),
         format!("Proceeding with this edit ({rel}), but scoping first is recommended:"),
-        "  pixel targets \"<one-line task description>\" .".into(),
+        "  pixel scope-task \"<one-line task description>\" .".into(),
         "That returns the closed P0/P1/P2 file list and activates .pixel/targets.json.".into(),
-        "Ending a task: pixel targets --clear".into(),
+        "Ending a task: pixel scope-task --clear".into(),
     ]
 }
 
@@ -1442,7 +1442,7 @@ fn is_retrieval_tool(tool: &str) -> bool {
 /// True for tools that read file contents (Read, read_file, view_file, etc).
 /// Used for the retrieval-first scoping advisory — reading a source file in
 /// an indexed repo with no manifest gets a non-blocking suggestion to run
-/// `pixel targets` first.
+/// `pixel scope-task` first.
 fn is_read_tool(tool: &str) -> bool {
     matches!(
         tool,
@@ -1496,16 +1496,16 @@ fn is_source_file(p: &Path) -> bool {
 }
 
 /// Advisory note for reading a source file in an indexed repo with no active
-/// manifest. Non-blocking — the read proceeds. Suggests `pixel targets` first
-/// to scope the work, and `pixel search --context` as a cheaper alternative
+/// manifest. Non-blocking — the read proceeds. Suggests `pixel scope-task` first
+/// to scope the work, and `pixel search-content --context` as a cheaper alternative
 /// to reading the entire file.
 fn read_scoping_advisory_lines(abs: &Path, idx_root: &Path) -> Vec<String> {
     let rel = rel_of(abs, idx_root);
     vec![
         format!("pixel-guard advisory: reading source file '{rel}' in an indexed repo with no active targets manifest."),
         "Consider scoping first to identify the relevant files:".into(),
-        format!("  pixel targets \"<one-line task description>\" {}", idx_root.display()),
-        "Or use `pixel search '<pattern>' --context 5` to get the relevant code with surrounding context — no full-file Read needed.".into(),
+        format!("  pixel scope-task \"<one-line task description>\" {}", idx_root.display()),
+        "Or use `pixel search-content '<pattern>' --context 5` to get the relevant code with surrounding context — no full-file Read needed.".into(),
         "Proceeding with this read.".into(),
     ]
 }
@@ -1521,16 +1521,16 @@ fn env_flag_off(name: &str) -> bool {
 }
 
 /// Advisory for Grep/Glob/find in an indexed repo with no active manifest.
-/// Tells the agent to run `pixel targets` first while allowing retrieval.
+/// Tells the agent to run `pixel scope-task` first while allowing retrieval.
 fn retrieval_guard_advisory(_cwd: &Path, idx_root: &Path) -> ! {
     let root = idx_root.display().to_string();
     advise(&[
         "pixel-guard advisory: code search happened before retrieval scoping.".into(),
-        "In an indexed directory, consider running `pixel targets` before searching the codebase."
+        "In an indexed directory, consider running `pixel scope-task` before searching the codebase."
             .into(),
-        format!("  pixel targets \"<one-line task description>\" {root}"),
+        format!("  pixel scope-task \"<one-line task description>\" {root}"),
         "That returns the P0/P1/P2 file list in <50ms. Work P0 first, then P1.".into(),
-        "After scoping, use `pixel search` / `pixel resolve` for code search — not grep/glob."
+        "After scoping, use `pixel search-content` / `pixel find-code` for code search — not grep/glob."
             .into(),
         "Proceeding with the original retrieval call.".into(),
     ]);
@@ -1543,8 +1543,8 @@ fn edit_guard_advisory(abs: &Path, idx_root: &Path) -> ! {
     let root = idx_root.display().to_string();
     advise(&[
         format!("pixel-guard advisory: editing {rel} before retrieval scoping."),
-        "In an indexed directory, consider running `pixel targets` before editing existing files.".into(),
-        format!("  pixel targets \"<one-line task description>\" {root}"),
+        "In an indexed directory, consider running `pixel scope-task` before editing existing files.".into(),
+        format!("  pixel scope-task \"<one-line task description>\" {root}"),
         "That returns the P0/P1/P2 file list. If this file is in the list, it is a useful scope check.".into(),
         "Proceeding with the original edit.".into(),
     ]);
@@ -1559,7 +1559,7 @@ fn expired_manifest_advisory_lines(idx_root: &Path) -> Vec<String> {
             idx_root.join(".pixel").join("targets.json").display()
         ),
         "Proceeding unscoped. If you are still working a scoped task, re-run".into(),
-        "  pixel targets \"<one-line task description>\" .".into(),
+        "  pixel scope-task \"<one-line task description>\" .".into(),
     ]
 }
 
@@ -1577,8 +1577,8 @@ fn suggest_index_advisory(dir: &Path, is_git: bool) -> ! {
             "pixel-targets-guard advisory: this {repo_phrase} has not been indexed by pixel yet."
         ),
         "Proceeding. To enable pixel's scoped retrieval (one-time, takes seconds):".into(),
-        format!("  pixel index {}", dir.display()),
-        "Then scope tasks with: pixel targets \"<one-line task description>\" .".into(),
+        format!("  pixel build-index {}", dir.display()),
+        "Then scope tasks with: pixel scope-task \"<one-line task description>\" .".into(),
         "Pixel works in any directory — not just git repos. The index is a .pixel/ dir.".into(),
     ]);
 }
@@ -1647,84 +1647,84 @@ fn bypass_advisory_lines(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<Strin
 
         // sed as search: sed -n '/pattern/p' file
         "sed" if tokens.len() >= 3 && tokens.contains(&"-n".to_string()) => Some(vec![
-            "BLOCKED by pixel-guard: sed used as a search tool — use pixel search instead.".to_string(),
-            format!("  pixel search '<pattern>' {} --context 5", root.display()),
-            "sed -n '/p' prints matching lines; pixel search returns them with context.".to_string(),
+            "BLOCKED by pixel-guard: sed used as a search tool — use pixel search-content instead.".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
+            "sed -n '/p' prints matching lines; pixel search-content returns them with context.".to_string(),
         ]),
         // awk as search: awk '/pattern/' file
         "awk" if tokens.len() >= 3 && tokens.iter().any(|t| t.starts_with('/') && t.ends_with('/')) => Some(vec![
-            "BLOCKED by pixel-guard: awk used as a search tool — use pixel search instead.".to_string(),
-            format!("  pixel search '<pattern>' {} --context 5", root.display()),
-            "awk '/pattern/' prints matching lines; pixel search returns them with context.".to_string(),
+            "BLOCKED by pixel-guard: awk used as a search tool — use pixel search-content instead.".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
+            "awk '/pattern/' prints matching lines; pixel search-content returns them with context.".to_string(),
         ]),
         // perl one-liner search: perl -ne 'print if /pattern/' file
         "perl" if tokens.len() >= 3 && tokens.iter().any(|t| t.contains("/")) => Some(vec![
-            "BLOCKED by pixel-guard: perl used as a search tool — use pixel search instead.".to_string(),
-            format!("  pixel search '<pattern>' {} --context 5", root.display()),
-            "perl -ne 'print if /x/' prints matching lines; pixel search returns them with context.".to_string(),
+            "BLOCKED by pixel-guard: perl used as a search tool — use pixel search-content instead.".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
+            "perl -ne 'print if /x/' prints matching lines; pixel search-content returns them with context.".to_string(),
         ]),
         // python3 -c search: python3 -c "...open(f)...search..."
         "python3" if tokens.len() >= 4 && tokens.contains(&"-c".to_string()) => Some(vec![
-            "BLOCKED by pixel-guard: python3 used as a search tool — use pixel search instead.".to_string(),
-            format!("  pixel search '<pattern>' {} --context 5", root.display()),
+            "BLOCKED by pixel-guard: python3 used as a search tool — use pixel search-content instead.".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
             "Python one-liners for code search bypass the deterministic index; use pixel.".to_string(),
         ]),
         // python (alias) - same
         "python" if tokens.len() >= 4 && tokens.contains(&"-c".to_string()) => Some(vec![
-            "BLOCKED by pixel-guard: python used as a search tool — use pixel search instead.".to_string(),
-            format!("  pixel search '<pattern>' {} --context 5", root.display()),
+            "BLOCKED by pixel-guard: python used as a search tool — use pixel search-content instead.".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
             "Python one-liners for code search bypass the deterministic index; use pixel.".to_string(),
         ]),
         // node -e search
         "node" if tokens.len() >= 4 && tokens.contains(&"-e".to_string()) => Some(vec![
-            "BLOCKED by pixel-guard: node used as a search tool — use pixel search instead.".to_string(),
-            format!("  pixel search '<pattern>' {} --context 5", root.display()),
+            "BLOCKED by pixel-guard: node used as a search tool — use pixel search-content instead.".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
             "Node.js one-liners for code search bypass the deterministic index; use pixel.".to_string(),
         ]),
         // ruby -e search
         "ruby" if tokens.len() >= 4 && tokens.contains(&"-e".to_string()) => Some(vec![
-            "BLOCKED by pixel-guard: ruby used as a search tool — use pixel search instead.".to_string(),
-            format!("  pixel search '<pattern>' {} --context 5", root.display()),
+            "BLOCKED by pixel-guard: ruby used as a search tool — use pixel search-content instead.".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
             "Ruby one-liners for code search bypass the deterministic index; use pixel.".to_string(),
         ]),
         // lua -e search
         "lua" if tokens.len() >= 4 && tokens.contains(&"-e".to_string()) => Some(vec![
-            "BLOCKED by pixel-guard: lua used as a search tool — use pixel search instead.".to_string(),
-            format!("  pixel search '<pattern>' {} --context 5", root.display()),
+            "BLOCKED by pixel-guard: lua used as a search tool — use pixel search-content instead.".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
             "Lua one-liners for code search bypass the deterministic index; use pixel.".to_string(),
         ]),
         // ag (the silver searcher) - alternative to grep
         "ag" if tokens.len() >= 2 => Some(vec![
-            "BLOCKED by pixel-guard: ag (silver searcher) used for code search — use pixel search instead.".to_string(),
-            format!("  pixel search '<pattern>' {} --context 5", root.display()),
-            "ag is a grep alternative; pixel search provides deterministic retrieval from the index.".to_string(),
+            "BLOCKED by pixel-guard: ag (silver searcher) used for code search — use pixel search-content instead.".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
+            "ag is a grep alternative; pixel search-content provides deterministic retrieval from the index.".to_string(),
         ]),
         // ack - alternative to grep
         "ack" if tokens.len() >= 2 => Some(vec![
-            "BLOCKED by pixel-guard: ack used for code search — use pixel search instead.".to_string(),
-            format!("  pixel search '<pattern>' {} --context 5", root.display()),
-            "ack is a grep alternative; pixel search provides deterministic retrieval from the index.".to_string(),
+            "BLOCKED by pixel-guard: ack used for code search — use pixel search-content instead.".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
+            "ack is a grep alternative; pixel search-content provides deterministic retrieval from the index.".to_string(),
         ]),
         // egrep - extended grep
         "egrep" if tokens.len() >= 2 => Some(vec![
-            "BLOCKED by pixel-guard: egrep used for code search — use pixel search instead.".to_string(),
-            format!("  pixel search '<pattern>' {} --context 5", root.display()),
-            "egrep is grep with extended regex; pixel search handles all regex patterns.".to_string(),
+            "BLOCKED by pixel-guard: egrep used for code search — use pixel search-content instead.".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
+            "egrep is grep with extended regex; pixel search-content handles all regex patterns.".to_string(),
         ]),
         // fgrep - fixed-string grep
         "fgrep" if tokens.len() >= 2 => Some(vec![
-            "BLOCKED by pixel-guard: fgrep used for code search — use pixel search instead.".to_string(),
-            format!("  pixel search '<pattern>' {} --context 5", root.display()),
-            "fgrep is grep for fixed strings; pixel search handles literal patterns too.".to_string(),
+            "BLOCKED by pixel-guard: fgrep used for code search — use pixel search-content instead.".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
+            "fgrep is grep for fixed strings; pixel search-content handles literal patterns too.".to_string(),
         ]),
         // find -exec grep: find ... -exec grep ... {} +
         "find" if tokens.len() >= 5 && tokens.contains(&"-exec".to_string()) => {
             // Only block when the exec chain contains grep/rg/ag/ack
             if tokens.iter().any(|t| t == "grep" || t == "rg" || t == "ag" || t == "ack") {
                 Some(vec![
-                    "BLOCKED by pixel-guard: find -exec grep nests grep inside find — use pixel search directly.".to_string(),
-                    format!("  pixel search '<pattern>' {} --context 5", root.display()),
-                    "find -exec grep adds indirection; pixel search is the deterministic path.".to_string(),
+                    "BLOCKED by pixel-guard: find -exec grep nests grep inside find — use pixel search-content directly.".to_string(),
+                    format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
+                    "find -exec grep adds indirection; pixel search-content is the deterministic path.".to_string(),
                 ])
             } else {
                 None
@@ -1732,16 +1732,16 @@ fn bypass_advisory_lines(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<Strin
         }
         // find -name (file discovery): find ... -name "*.rs"
         "find" if tokens.contains(&"-name".to_string()) => Some(vec![
-            "BLOCKED by pixel-guard: find -name for file discovery — use pixel search or pixel targets.".to_string(),
-            format!("  pixel search '<pattern>' {} --context 5  # for content search", root.display()),
-            format!("  pixel targets \"<task>\" {}  # for file scoping", root.display()),
-            "find -name patterns locate files by name; pixel search finds content, pixel targets scopes files.".to_string(),
+            "BLOCKED by pixel-guard: find -name for file discovery — use pixel search-content or pixel scope-task.".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5  # for content search", root.display()),
+            format!("  pixel scope-task \"<task>\" {}  # for file scoping", root.display()),
+            "find -name patterns locate files by name; pixel search-content finds content, pixel scope-task scopes files.".to_string(),
         ]),
         // xargs grep: find ... | xargs grep
         "xargs" if tokens.len() >= 2 && tokens.iter().any(|t| t == "grep" || t == "rg" || t == "ag" || t == "ack") => Some(vec![
-            "BLOCKED by pixel-guard: xargs grep pattern — use pixel search directly.".to_string(),
-            format!("  pixel search '<pattern>' {} --context 5", root.display()),
-            "xargs grep adds pipeline indirection; pixel search is the deterministic path.".to_string(),
+            "BLOCKED by pixel-guard: xargs grep pattern — use pixel search-content directly.".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
+            "xargs grep adds pipeline indirection; pixel search-content is the deterministic path.".to_string(),
         ]),
         // ls of source dir: ls crates/pixel-graph/src/
         "ls" if tokens.len() >= 2 => {
@@ -1753,10 +1753,10 @@ fn bypass_advisory_lines(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<Strin
                     let dir_name = resolved.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     if dir_name == "src" || dir_name == "lib" || dir_name == "test" || dir_name == "tests" || dir_name == "include" {
                         return Some(vec![
-                            "BLOCKED by pixel-guard: ls of source directory — use pixel search or pixel targets.".to_string(),
-                            format!("  pixel search '<pattern>' {} --context 5  # for content search", root.display()),
-                            format!("  pixel targets \"<task>\" {}  # for file scoping", root.display()),
-                            "ls lists files; pixel search finds content deterministically.".to_string(),
+                            "BLOCKED by pixel-guard: ls of source directory — use pixel search-content or pixel scope-task.".to_string(),
+                            format!("  pixel search-content '<pattern>' {} --context 5  # for content search", root.display()),
+                            format!("  pixel scope-task \"<task>\" {}  # for file scoping", root.display()),
+                            "ls lists files; pixel search-content finds content deterministically.".to_string(),
                         ]);
                     }
                 }
@@ -1771,9 +1771,9 @@ fn bypass_advisory_lines(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<Strin
                     let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or("");
                     if matches!(ext, "rs" | "ts" | "tsx" | "js" | "py" | "go" | "java" | "c" | "cpp" | "h" | "hpp" | "cs") {
                         return Some(vec![
-                            "BLOCKED by pixel-guard: cat of source file — use pixel resolve or pixel search.".to_string(),
-                            format!("  pixel resolve '<symbol>' {}  # jump to definition", root.display()),
-                            format!("  pixel search '<pattern>' {} --context 5  # find in file", root.display()),
+                            "BLOCKED by pixel-guard: cat of source file — use pixel find-code or pixel search-content.".to_string(),
+                            format!("  pixel find-code '<symbol>' {}  # jump to definition", root.display()),
+                            format!("  pixel search-content '<pattern>' {} --context 5  # find in file", root.display()),
                             "Read tool is for known files; pixel handles code navigation.".to_string(),
                         ]);
                     }
@@ -1791,9 +1791,9 @@ fn bypass_advisory_lines(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<Strin
                     let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or("");
                     if matches!(ext, "rs" | "ts" | "tsx" | "js" | "py" | "go" | "java" | "c" | "cpp" | "h" | "hpp" | "cs") {
                         return Some(vec![
-                            format!("BLOCKED by pixel-guard: {} of source file — use pixel search --context or Read.", bin),
-                            format!("  pixel search '<pattern>' {} --context 10  # with more lines", root.display()),
-                            "Read tool for known files; pixel search for content discovery.".to_string(),
+                            format!("BLOCKED by pixel-guard: {} of source file — use pixel search-content --context or Read.", bin),
+                            format!("  pixel search-content '<pattern>' {} --context 10  # with more lines", root.display()),
+                            "Read tool for known files; pixel search-content for content discovery.".to_string(),
                         ]);
                     }
                 }
@@ -1930,8 +1930,8 @@ fn destructive_git_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<S
                 _ => Some(vec![
                     "BLOCKED by pixel-targets-guard: `git reset --hard/--keep` destroys in-progress work.".into(),
                     "\"It was working before\" is a rescue problem — use the surgical planner:".into(),
-                    "  pixel rescue \"<what broke>\" .            # plan: versions + recommended last-good".into(),
-                    "  pixel rescue --apply <oid> --file <path>  # gated restore (working tree only)".into(),
+                    "  pixel plan-rollback \"<what broke>\" .            # plan: versions + recommended last-good".into(),
+                    "  pixel plan-rollback --apply <oid> --file <path>  # gated restore (working tree only)".into(),
                     "Dirty files: add --merge (3-way, keeps your edits) or --stash-first.".into(),
                 ]),
             }
@@ -1946,8 +1946,8 @@ fn destructive_git_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<S
         "checkout" if has("--force") || cluster('f') => Some(vec![
             "BLOCKED by pixel-targets-guard: `git checkout -f/--force` discards in-progress work.".into(),
             "Use the surgical planner instead:".into(),
-            "  pixel rescue \"<what broke>\" .            # plan: versions + recommended last-good".into(),
-            "  pixel rescue --apply <oid> --file <path> [--merge|--stash-first]".into(),
+            "  pixel plan-rollback \"<what broke>\" .            # plan: versions + recommended last-good".into(),
+            "  pixel plan-rollback --apply <oid> --file <path> [--merge|--stash-first]".into(),
         ]),
         "restore" if args.iter().any(|a| a == "--source" || a.starts_with("--source=")) => {
             Some(raw_restore_deny())
@@ -1955,21 +1955,21 @@ fn destructive_git_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<S
         "clean" if has("--force") || cluster('f') => Some(vec![
             "BLOCKED by pixel-targets-guard: `git clean -f` permanently deletes untracked files.".into(),
             "If something went missing, recover it instead of deleting more:".into(),
-            "  pixel excavate --phrase \"<what you're looking for>\"  # history/stash/reflog search".into(),
-            "  pixel rescue \"<what broke>\" .".into(),
+            "  pixel dig-history --phrase \"<what you're looking for>\"  # history/stash/reflog search".into(),
+            "  pixel plan-rollback \"<what broke>\" .".into(),
         ]),
         // First NON-FLAG argument, so `git stash -q drop` doesn't slip past.
         "stash" if args.iter().find(|a| !a.starts_with('-')).is_some_and(|a| a == "drop" || a == "clear") => Some(vec![
             "BLOCKED by pixel-targets-guard: `git stash drop/clear` permanently discards stashed work.".into(),
             "Stashed code is recoverable history — use:".into(),
-            "  pixel excavate --phrase \"<what you're looking for>\"  # searches stash + reflog too".into(),
+            "  pixel dig-history --phrase \"<what you're looking for>\"  # searches stash + reflog too".into(),
         ]),
         "branch" if has("-D") || cluster('D') || (has("--delete") && (has("--force") || cluster('f'))) => {
             Some(vec![
                 "BLOCKED by pixel-targets-guard: `git branch -D` force-deletes unmerged work.".into(),
                 "If the branch's code matters, recover it deliberately:".into(),
-                "  pixel excavate --phrase \"<what you're looking for>\"".into(),
-                "  pixel rescue \"<what broke>\" .".into(),
+                "  pixel dig-history --phrase \"<what you're looking for>\"".into(),
+                "  pixel plan-rollback \"<what broke>\" .".into(),
             ])
         }
         // `--force-with-lease` (and `--force-if-includes`) are the safe
@@ -1978,7 +1978,7 @@ fn destructive_git_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<S
             "BLOCKED by pixel-targets-guard: `git push --force` can destroy remote history.".into(),
             "Use pixel's gated mutation ops instead:".into(),
             format!("  pixel push --request-id <id> {}", shell_quote(&root.display().to_string())),
-            format!("  pixel ship --files <f>... --message \"<msg>\" --request-id <id> {}", shell_quote(&root.display().to_string())),
+            format!("  pixel commit-and-push --files <f>... --message \"<msg>\" --request-id <id> {}", shell_quote(&root.display().to_string())),
             "(pixel push uses --force-with-lease semantics only where safe.)".into(),
         ]),
         // `git merge` used to integrate a branch is denied outright: the
@@ -1996,7 +1996,7 @@ fn destructive_git_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<S
                 "BLOCKED by pixel-targets-guard: `git merge` creates a merge commit — forbidden without exception.".into(),
                 "Branch integration is deterministic reconciliation:".into(),
                 format!(
-                    "  pixel reconcile {} --strategy rebase-if-clean",
+                    "  pixel sync-branch {} --strategy rebase-if-clean",
                     shell_quote(&root.display().to_string())
                 ),
                 "It proves a clean rebase via merge-tree before touching the worktree and".into(),
@@ -2013,9 +2013,9 @@ fn raw_restore_deny() -> Vec<String> {
         "BLOCKED by pixel-targets-guard: raw historical file restore can clobber in-progress work."
             .into(),
         "Use the surgical planner instead:".into(),
-        "  pixel rescue \"<what broke>\" .            # plan: versions + recommended last-good"
+        "  pixel plan-rollback \"<what broke>\" .            # plan: versions + recommended last-good"
             .into(),
-        "  pixel rescue --apply <oid> --file <path> [--merge|--stash-first]".into(),
+        "  pixel plan-rollback --apply <oid> --file <path> [--merge|--stash-first]".into(),
     ]
 }
 
@@ -2109,16 +2109,16 @@ fn extract_git_c_path(args: &[String], cwd: &Path) -> Option<PathBuf> {
 /// | `git push -o/--push-option`                     | server options pixel push doesn't forward      |
 /// | `git rebase -i/--interactive`                   | interactive todo editing                       |
 /// | `git rebase --continue/--abort/--skip/--quit/--edit-todo` | rebase-state exits — denying strands the agent mid-conflict |
-/// | `git rebase --onto/--exec/-x/--autosquash/--root` | not expressible as `pixel reconcile`         |
+/// | `git rebase --onto/--exec/-x/--autosquash/--root` | not expressible as `pixel sync-branch`         |
 /// | `git checkout -B` / plain `git checkout <ref>`  | force-reset / plain switch (destructive tier already covers `-f`/`--`) |
 /// | `git switch` without `-c`/`--create`            | plain branch switch, not a mutation            |
 /// | `git add -p`/`--patch`/`-i`/`--interactive`     | interactive hunk staging, no pixel equivalent  |
-/// | `git add` during active sequencer (cherry-pick/rebase/merge/revert) | conflict-resolution staging; `--continue` commits, not `pixel publish` |
-/// | `git commit` during active sequencer                | concludes the sequencer's own commit (a merge commit needs both parents) — `pixel publish` writes a plain commit and would corrupt the graph |
+/// | `git add` during active sequencer (cherry-pick/rebase/merge/revert) | conflict-resolution staging; `--continue` commits, not `pixel commit` |
+/// | `git commit` during active sequencer                | concludes the sequencer's own commit (a merge commit needs both parents) — `pixel commit` writes a plain commit and would corrupt the graph |
 /// Detect an active git sequencer state (cherry-pick, rebase, merge, or
 /// revert) by looking for the marker files git writes into the git
 /// directory. When any is present, `git add` is conflict-resolution staging
-/// and `git commit` is the sequencer's own conclusion — `pixel publish`
+/// and `git commit` is the sequencer's own conclusion — `pixel commit`
 /// (a plain single-parent commit) cannot substitute for either.
 ///
 /// Resolves the git directory from `root/.git`, handling both the common
@@ -2159,9 +2159,9 @@ fn sequencer_in_progress(root: &Path) -> bool {
         || git_dir.join("rebase-apply").is_dir()
 }
 
-/// Check if `pixel reconcile` has reported a conflict that requires manual
+/// Check if `pixel sync-branch` has reported a conflict that requires manual
 /// resolution. When true, the guard allows `git rebase` as an escape hatch —
-/// `pixel reconcile` itself reported "manual resolution required", so the
+/// `pixel sync-branch` itself reported "manual resolution required", so the
 /// deterministic path is exhausted and raw git is the only way forward.
 fn reconcile_conflict_pending(root: &Path) -> bool {
     root.join(".pixel")
@@ -2170,7 +2170,7 @@ fn reconcile_conflict_pending(root: &Path) -> bool {
 }
 
 /// Run `git status --porcelain` in `root` and return the list of modified
-/// (tracked) file paths. Used to auto-populate the `pixel publish --files`
+/// (tracked) file paths. Used to auto-populate the `pixel commit --files`
 /// recommendation for `git add .` with the actual files.
 /// Returns None on spawn failure; empty vec if no modified files.
 fn git_status_porcelain_files(root: &Path) -> Option<Vec<String>> {
@@ -2197,7 +2197,7 @@ fn git_status_porcelain_files(root: &Path) -> Option<Vec<String>> {
             }
             let status = &line[..2];
             // Skip untracked files (??) -- git add . would stage them, but
-            // pixel publish expects tracked files. Untracked files need to
+            // pixel commit expects tracked files. Untracked files need to
             // be explicitly listed by the agent.
             if status == "??" {
                 return None;
@@ -2230,7 +2230,7 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
             // Conflict-resolution staging during an active sequencer
             // (cherry-pick / rebase / merge): `git add` here stages resolved
             // files WITHOUT committing — the sequencer's own `--continue`
-            // creates the commit. `pixel publish` cannot substitute because it
+            // creates the commit. `pixel commit` cannot substitute because it
             // commits in one step, which would either conflict with the
             // sequencer state or produce a stray commit outside the sequencer's
             // replay. Pass through so the agent can resolve and continue.
@@ -2251,7 +2251,7 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                 .collect();
             let mut lines = vec![
                 "BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw `git add` stages files outside pixel's journaled mutation surface.".into(),
-                "`pixel publish` stages AND commits in one step — use it instead:".into(),
+                "`pixel commit` stages AND commits in one step — use it instead:".into(),
             ];
             if !pathspecs.is_empty() {
                 let files = pathspecs
@@ -2260,14 +2260,14 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                     .collect::<Vec<_>>()
                     .join(" ");
                 lines.push(format!(
-                    "  pixel publish {files} --message \"<msg>\" --request-id <id> {root_q}"
+                    "  pixel commit {files} --message \"<msg>\" --request-id <id> {root_q}"
                 ));
             } else if all_variant {
                 lines.push(format!(
-                    "  pixel publish --files <f1> [--files <f2> …] --message \"<msg>\" --request-id <id> {root_q}"
+                    "  pixel commit --files <f1> [--files <f2> …] --message \"<msg>\" --request-id <id> {root_q}"
                 ));
                 lines.push(
-                    "List each modified tracked file as its own --files flag (run `pixel changes .` to see them).".into(),
+                    "List each modified tracked file as its own --files flag (run `pixel what-changed .` to see them).".into(),
                 );
             } else {
                 // Deny-with-answer: query git status --porcelain to auto-populate
@@ -2283,7 +2283,7 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                         .collect::<Vec<_>>()
                         .join(" ");
                     lines.push(format!(
-                        "  pixel publish {files_str} --message \"<msg>\" --request-id <id> {root_q}"
+                        "  pixel commit {files_str} --message \"<msg>\" --request-id <id> {root_q}"
                     ));
                     lines.push(
                         "(Auto-populated from git status --porcelain -- adjust if needed.)".into(),
@@ -2291,7 +2291,7 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                     return Some(lines);
                 }
                 lines.push(format!(
-                    "  pixel publish --files <file> [--files <file2> …] --message \"<msg>\" --request-id <id> {root_q}"
+                    "  pixel commit --files <file> [--files <file2> …] --message \"<msg>\" --request-id <id> {root_q}"
                 ));
             }
             Some(lines)
@@ -2304,7 +2304,7 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
             // Concluding an in-progress sequencer (merge / cherry-pick /
             // revert / rebase): `git commit` here finishes what the sequencer
             // started — for a merge it writes the merge commit with BOTH
-            // parents recorded from MERGE_HEAD. `pixel publish` cannot
+            // parents recorded from MERGE_HEAD. `pixel commit` cannot
             // substitute: it creates a plain single-parent commit, silently
             // losing the merge parent. Same rule as the `add` arm above.
             if sequencer_in_progress(root) {
@@ -2335,7 +2335,7 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                 ),
                 "Run the exact equivalent instead (--files repeated once per file):".into(),
                 format!(
-                    "  pixel publish {amend}{files} --message {msg} --request-id <id> {root_q}"
+                    "  pixel commit {amend}{files} --message {msg} --request-id <id> {root_q}"
                 ),
             ];
             if c.all {
@@ -2413,7 +2413,7 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
             if args.iter().any(|a| REBASE_PASS.contains(&a.as_str())) {
                 return None; // pass-through: interactive / state exit / not reconcile-expressible
             }
-            // Escape hatch: if `pixel reconcile` already reported a conflict
+            // Escape hatch: if `pixel sync-branch` already reported a conflict
             // (state file exists), allow the rebase so the agent can resolve
             // manually. The guard already allows `git rebase --continue` etc.
             // via REBASE_PASS, but the initial `git rebase origin/main` that
@@ -2425,9 +2425,9 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
             Some(vec![
                 "BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw `git rebase` is replaced by deterministic reconciliation.".into(),
                 "Run the exact equivalent instead:".into(),
-                format!("  pixel reconcile {root_q} --strategy rebase-if-clean --push auto"),
+                format!("  pixel sync-branch {root_q} --strategy rebase-if-clean --push auto"),
                 "It proves a clean rebase via merge-tree before touching the worktree and reports structured conflicts when they exist.".into(),
-                "If reconcile already reported a conflict, use `pixel reconcile --into` or resolve the conflict markers manually.".into(),
+                "If reconcile already reported a conflict, use `pixel sync-branch --into` or resolve the conflict markers manually.".into(),
             ])
         }
         _ => None,
@@ -2440,12 +2440,12 @@ fn branch_substitute_lines(what: &str, name_q: &str, root_q: &str) -> Vec<String
             "BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw {what} bypasses pixel's journaled branch op."
         ),
         "Run the exact equivalent instead (creates AND checks out the branch):".into(),
-        format!("  pixel branch {name_q} --request-id <id> {root_q}"),
+        format!("  pixel new-branch {name_q} --request-id <id> {root_q}"),
     ]
 }
 
 /// Parsed shape of `git commit` arguments, enough to enrich the
-/// `pixel publish` substitute suggestion.
+/// `pixel commit` substitute suggestion.
 #[derive(Default)]
 struct CommitArgs {
     message: Option<String>,
@@ -2618,7 +2618,7 @@ fn simple_tokenize(s: &str) -> Vec<String> {
 /// (`&&`/`||` fall out of the single-char rule), tokenizing each segment
 /// with the same quote rules as `simple_tokenize`. Quote state is tracked
 /// BEFORE splitting — the raw-string pre-split this replaced cut through
-/// quoted arguments, so a multi-line `pixel publish --message "…git add…"`
+/// quoted arguments, so a multi-line `pixel commit --message "…git add…"`
 /// produced a phantom `git add` segment and denied its own substitute.
 fn tokenize_segments(s: &str) -> Vec<Vec<String>> {
     let mut segments = Vec::new();
@@ -2669,7 +2669,7 @@ fn is_grep_tool(tool: &str, input: &serde_json::Map<String, Value>) -> bool {
     input.get("pattern").is_some() || input.get("query").is_some() || input.get("Query").is_some()
 }
 
-/// Build an advisory for a Grep tool call redirecting to `pixel search` —
+/// Build an advisory for a Grep tool call redirecting to `pixel search-content` —
 /// but only when the search is actually equivalent. If the Grep tool
 /// carries fields Pixel search can't express (glob/type/output_mode), we
 /// Build a non-blocking advisory for a Grep-style tool call. The hook cannot
@@ -2779,14 +2779,14 @@ fn shell_quote(s: &str) -> String {
 }
 
 /// Shared equivalence predicate: can a grep-style search be transparently
-/// replaced by `pixel search`? Returns the pixel command (root already
+/// replaced by `pixel search-content`? Returns the pixel command (root already
 /// interpolated) if equivalent, or None if it can't be expressed. pixel
 /// search is regex-based, so any pattern is expressible; only
 /// output-modifying flags we can't honor fall through.
 ///
 /// `--include`/`--exclude`/`--glob`/`--type` are file-filter flags that
-/// `pixel search` doesn't support yet. We rewrite anyway and DROP them —
-/// `pixel search` searches all code files (a superset of `--include`), and
+/// `pixel search-content` doesn't support yet. We rewrite anyway and DROP them —
+/// `pixel search-content` searches all code files (a superset of `--include`), and
 /// the downstream pipeline (`| grep -v ...`) usually filters the rest.
 /// This is a deliberate superset rewrite: more results, but never fewer,
 /// and the agent can refine.
@@ -2814,7 +2814,7 @@ fn search_can_replace(pattern: &str, flags: &[String], root: &str) -> Option<Str
     }
     let escaped = pattern.replace('\'', "'\\''");
     Some(format!(
-        "pixel search '{}' {} --context 5",
+        "pixel search-content '{}' {} --context 5",
         escaped,
         shell_quote(root)
     ))
@@ -2876,7 +2876,7 @@ mod tests {
         );
         assert!(msg.contains("src/c.rs"), "must name the file: {msg}");
         assert!(
-            msg.contains("pixel targets"),
+            msg.contains("pixel scope-task"),
             "must suggest re-scoping: {msg}"
         );
         assert!(!msg.contains("BLOCKED"), "must not read as a deny: {msg}");
@@ -2893,7 +2893,7 @@ mod tests {
             msg.contains("advisory") && !msg.contains("BLOCKED"),
             "{msg}"
         );
-        assert!(msg.contains("pixel targets"), "{msg}");
+        assert!(msg.contains("pixel scope-task"), "{msg}");
         let msg = expired_manifest_advisory_lines(&repo).join("\n");
         assert!(msg.contains("expired") && !msg.contains("BLOCKED"), "{msg}");
         assert!(!msg.contains("PIXEL_TARGETS_GUARD"), "{msg}");
@@ -3029,7 +3029,7 @@ mod tests {
     #[test]
     fn reset_hard_branch_suggests_checkout_b() {
         // `git reset --hard <branch>` should suggest `git checkout -B`
-        // instead of `pixel rescue` — it's a repoint, not data loss.
+        // instead of `pixel plan-rollback` — it's a repoint, not data loss.
         let repo = scratch_repo("reset-branch");
         let lines = bash_deny_lines("git reset --hard history-rewrite", Some(&repo))
             .expect("branch-targeted reset --hard must still be denied");
@@ -3039,7 +3039,7 @@ mod tests {
             "should suggest checkout -B: {msg}"
         );
         assert!(
-            !msg.contains("pixel rescue"),
+            !msg.contains("pixel plan-rollback"),
             "should NOT suggest rescue for branch repoint: {msg}"
         );
     }
@@ -3052,7 +3052,7 @@ mod tests {
             .expect("HEAD~N reset must be denied");
         let msg = lines.join("\n");
         assert!(
-            msg.contains("pixel rescue"),
+            msg.contains("pixel plan-rollback"),
             "should suggest rescue for HEAD~N: {msg}"
         );
         assert!(
@@ -3069,7 +3069,7 @@ mod tests {
             .expect("raw OID reset must be denied");
         let msg = lines.join("\n");
         assert!(
-            msg.contains("pixel rescue"),
+            msg.contains("pixel plan-rollback"),
             "should suggest rescue for raw OID: {msg}"
         );
     }
@@ -3082,7 +3082,7 @@ mod tests {
             .expect("bare HEAD reset must be denied");
         let msg = lines.join("\n");
         assert!(
-            msg.contains("pixel rescue"),
+            msg.contains("pixel plan-rollback"),
             "should suggest rescue for bare HEAD: {msg}"
         );
     }
@@ -3124,14 +3124,14 @@ mod tests {
         );
         assert!(
             bash_deny_lines(
-                "pixel publish --message \"cleanup | git clean -fd equivalent\" .",
+                "pixel commit --message \"cleanup | git clean -fd equivalent\" .",
                 Some(repo)
             )
             .is_none()
         );
         assert!(
             git_mutation_substitute_lines(
-                "pixel publish --files a.rs --message \"fix(guard): pass git add through\ngit add now allowed mid-sequencer\" --request-id x .",
+                "pixel commit --files a.rs --message \"fix(guard): pass git add through\ngit add now allowed mid-sequencer\" --request-id x .",
                 Some(repo),
                 Path::new("/repo")
             )
@@ -3139,7 +3139,7 @@ mod tests {
             "a multi-line --message mentioning `git add` must not deny pixel's own substitute"
         );
         // …but a genuinely unquoted chained invocation is still caught.
-        assert!(bash_deny_lines("pixel search 'x' . && git reset --hard", Some(repo)).is_some());
+        assert!(bash_deny_lines("pixel search-content 'x' . && git reset --hard", Some(repo)).is_some());
     }
 
     #[test]
@@ -3383,17 +3383,17 @@ mod tests {
 
     #[test]
     fn substitute_commit_with_message_parsed() {
-        let msg = assert_substitute_contract("git commit -m 'fix the parser'", "pixel publish");
+        let msg = assert_substitute_contract("git commit -m 'fix the parser'", "pixel commit");
         assert!(
             msg.contains("--message 'fix the parser'"),
             "parsed -m must enrich the suggestion: {msg}"
         );
         assert!(msg.contains("--request-id <id>"), "{msg}");
         // --message form and -am cluster parse too.
-        let msg = assert_substitute_contract("git commit --message 'x y'", "pixel publish");
+        let msg = assert_substitute_contract("git commit --message 'x y'", "pixel commit");
         assert!(msg.contains("--message 'x y'"), "{msg}");
         // A single safe word stays bare through shell_quote.
-        let msg = assert_substitute_contract("git commit -am 'both words here'", "pixel publish");
+        let msg = assert_substitute_contract("git commit -am 'both words here'", "pixel commit");
         assert!(msg.contains("--message 'both words here'"), "{msg}");
         assert!(
             msg.contains("-a detected"),
@@ -3403,7 +3403,7 @@ mod tests {
 
     #[test]
     fn substitute_commit_without_message_uses_placeholder() {
-        let msg = assert_substitute_contract("git commit", "pixel publish");
+        let msg = assert_substitute_contract("git commit", "pixel commit");
         assert!(
             msg.contains("--message \"<msg>\""),
             "placeholder expected: {msg}"
@@ -3417,7 +3417,7 @@ mod tests {
     #[test]
     fn substitute_commit_pathspecs_become_files_flags() {
         let msg =
-            assert_substitute_contract("git commit -m fix src/a.rs src/b.rs", "pixel publish");
+            assert_substitute_contract("git commit -m fix src/a.rs src/b.rs", "pixel commit");
         assert!(
             msg.contains("--files src/a.rs --files src/b.rs"),
             "each pathspec must be its own --files: {msg}"
@@ -3427,7 +3427,7 @@ mod tests {
     #[test]
     fn substitute_commit_amend_suggests_publish_amend() {
         let msg =
-            assert_substitute_contract("git commit --amend -m better", "pixel publish --amend");
+            assert_substitute_contract("git commit --amend -m better", "pixel commit --amend");
         assert!(msg.contains("--message better"), "{msg}");
     }
 
@@ -3460,15 +3460,15 @@ mod tests {
     fn substitute_branch_creation() {
         assert_substitute_contract(
             "git checkout -b feature/x",
-            "pixel branch feature/x --request-id <id>",
+            "pixel new-branch feature/x --request-id <id>",
         );
         assert_substitute_contract(
             "git switch -c feature/y",
-            "pixel branch feature/y --request-id <id>",
+            "pixel new-branch feature/y --request-id <id>",
         );
         assert_substitute_contract(
             "git switch --create feature/z",
-            "pixel branch feature/z --request-id <id>",
+            "pixel new-branch feature/z --request-id <id>",
         );
     }
 
@@ -3476,10 +3476,10 @@ mod tests {
     fn substitute_rebase_suggests_reconcile() {
         let msg = assert_substitute_contract(
             "git rebase main",
-            "pixel reconcile /repo --strategy rebase-if-clean --push auto",
+            "pixel sync-branch /repo --strategy rebase-if-clean --push auto",
         );
         assert!(msg.contains("merge-tree"), "{msg}");
-        assert_substitute_contract("git rebase", "pixel reconcile /repo");
+        assert_substitute_contract("git rebase", "pixel sync-branch /repo");
     }
 
     #[test]
@@ -3520,7 +3520,7 @@ mod tests {
 
     #[test]
     fn substitute_add_with_pathspecs() {
-        let msg = assert_substitute_contract("git add src/a.rs src/b.rs", "pixel publish");
+        let msg = assert_substitute_contract("git add src/a.rs src/b.rs", "pixel commit");
         assert!(
             msg.contains("--files src/a.rs --files src/b.rs"),
             "each pathspec must be its own --files: {msg}"
@@ -3529,7 +3529,7 @@ mod tests {
 
     #[test]
     fn substitute_add_dot_suggests_enumerate() {
-        let msg = assert_substitute_contract("git add .", "pixel publish");
+        let msg = assert_substitute_contract("git add .", "pixel commit");
         assert!(
             msg.contains("List each modified tracked file"),
             "`git add .` must suggest enumerating files: {msg}"
@@ -3544,7 +3544,7 @@ mod tests {
             "git add -u",
             "git add --update",
         ] {
-            let msg = assert_substitute_contract(cmd, "pixel publish");
+            let msg = assert_substitute_contract(cmd, "pixel commit");
             assert!(
                 msg.contains("List each modified tracked file"),
                 "`{cmd}` must suggest enumerating files: {msg}"
@@ -3569,7 +3569,7 @@ mod tests {
         );
         assert!(advisory.contains("pixel-guard advisory"), "{advisory}");
         assert!(
-            advisory.contains("pixel publish"),
+            advisory.contains("pixel commit"),
             "suggestion must survive the downgrade: {advisory}"
         );
         assert!(
@@ -3615,7 +3615,7 @@ mod tests {
 
     #[test]
     fn grep_tool_gets_advisory_when_transparent_rewrite_is_unavailable() {
-        // A Grep tool call carrying fields pixel search can't express
+        // A Grep tool call carrying fields pixel search-content can't express
         // (glob/type/output_mode) must be allowed through with a non-blocking
         // advisory rather than a non-equivalent redirect.
         for field in ["glob", "type", "output_mode"] {
@@ -3646,7 +3646,7 @@ mod tests {
             "equivalent Grep must not be blocked: {msg}"
         );
         assert!(
-            msg.contains("pixel search"),
+            msg.contains("pixel search-content"),
             "advisory should show the Pixel equivalent: {msg}"
         );
         assert!(
@@ -3741,7 +3741,7 @@ mod tests {
     fn git_add_passes_through_during_cherry_pick() {
         // Regression: during cherry-pick/rebase/merge conflict resolution,
         // `git add` stages resolved files WITHOUT committing — the
-        // sequencer's `--continue` creates the commit. `pixel publish`
+        // sequencer's `--continue` creates the commit. `pixel commit`
         // commits in one step and cannot substitute. The guard must pass
         // `git add` through when a sequencer is active.
         let root = real_repo("add-cherrypick");
@@ -3788,7 +3788,7 @@ mod tests {
         // Regression: concluding a conflicted merge is `git add` (already
         // passed through) then `git commit` — which writes the merge commit
         // with BOTH parents from MERGE_HEAD. The old deny pointed at
-        // `pixel publish`, whose plain single-parent commit would silently
+        // `pixel commit`, whose plain single-parent commit would silently
         // corrupt the merge graph.
         let root = real_repo("commit-merge");
         std::fs::write(root.join(".git").join("MERGE_HEAD"), b"def456\n").unwrap();

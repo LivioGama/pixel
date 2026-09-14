@@ -4,7 +4,7 @@
 //!
 //! 1. The binary under test never auto-starts a repo daemon. A daemon is
 //!    detached from its parent (`process_group(0)`) and lives until its idle
-//!    timeout, so one seed `pixel search` per fixture left one
+//!    timeout, so one seed `pixel search-content` per fixture left one
 //!    `target/debug/pixel daemon` behind per test: 18 per run of this binary,
 //!    load average past 70 on 8 cores after a few runs.
 //! 2. Every fixture root checks on drop that no daemon is serving it, and

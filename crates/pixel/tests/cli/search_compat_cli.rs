@@ -49,7 +49,7 @@ impl Fixture {
         }
         let native = native_command.args(args).output().unwrap();
         let routed = routed_command
-            .args(["search-compat", tool, "--"])
+            .args(["search-like-rg", tool, "--"])
             .args(args)
             .output()
             .unwrap();
@@ -76,7 +76,7 @@ impl Fixture {
             "tool_input": {"command": command, "timeout_ms": 1234, "extra": {"keep": true}}
         });
         let mut cmd = self.command(PIXEL);
-        cmd.args(["hook", "guard", "--provider", provider]);
+        cmd.args(["run-hook", "guard", "--provider", provider]);
         if delegate {
             cmd.arg("--delegate-rtk");
         }
@@ -203,7 +203,7 @@ fn repeated_search_keeps_executing_and_reports_changed_file() {
         let output = fixture
             .command(PIXEL)
             .env_remove("PIXEL_TEST")
-            .args(["search", "needle", "a file.rs", "--json", "--no-daemon"])
+            .args(["search-content", "needle", "a file.rs", "--json", "--no-daemon"])
             .output()
             .unwrap();
         assert!(
@@ -242,7 +242,7 @@ fn provider_rewrites_preserve_metadata_and_authorize_only_codex() {
             output["updatedInput"]["command"]
                 .as_str()
                 .unwrap()
-                .starts_with("pixel search-compat grep --")
+                .starts_with("pixel search-like-rg grep --")
         );
         assert_eq!(output["updatedInput"]["timeout_ms"], 1234);
         assert_eq!(output["updatedInput"]["extra"]["keep"], true);
@@ -268,7 +268,7 @@ fn codex_argv_shell_events_rewrite_only_the_script_token() {
         }
     });
     let mut cmd = fixture.command(PIXEL);
-    cmd.args(["hook", "guard", "--provider", "codex"]);
+    cmd.args(["run-hook", "guard", "--provider", "codex"]);
     let out = run_hook(cmd, &payload);
     assert!(
         out.status.success(),
@@ -285,7 +285,7 @@ fn codex_argv_shell_events_rewrite_only_the_script_token() {
         output["updatedInput"]["command"][2]
             .as_str()
             .unwrap()
-            .starts_with("pixel search-compat grep --")
+            .starts_with("pixel search-like-rg grep --")
     );
     assert_eq!(output["updatedInput"]["timeout_ms"], 1234);
     assert_eq!(output["updatedInput"]["extra"]["keep"], true);
@@ -356,7 +356,7 @@ fn native_configuration_and_environment_overrides_never_get_autoauthorized() {
                 "tool_input": {"command": format!("{tool} needle 'a file.rs'")}
             });
             let mut command = fixture.command(PIXEL);
-            command.args(["hook", "guard", "--provider", provider]);
+            command.args(["run-hook", "guard", "--provider", provider]);
             if matches!(key, "env" | "environment") {
                 payload["tool_input"][key] =
                     serde_json::json!({"RIPGREP_CONFIG_PATH": "fake-native-config"});
@@ -389,7 +389,7 @@ fn the_other_tools_configuration_does_not_keep_a_search_native() {
             });
             let mut command = fixture.command(PIXEL);
             command
-                .args(["hook", "guard", "--provider", provider])
+                .args(["run-hook", "guard", "--provider", provider])
                 .env(foreign_key, "fake-native-config");
             let output = run_hook(command, &payload);
             assert!(
@@ -407,7 +407,7 @@ fn the_other_tools_configuration_does_not_keep_a_search_native() {
                 .as_str()
                 .unwrap_or_default();
             assert!(
-                rewritten.starts_with(&format!("pixel search-compat {tool} --")),
+                rewritten.starts_with(&format!("pixel search-like-rg {tool} --")),
                 "{provider}: {tool} with {foreign_key}: {rewritten}"
             );
         }

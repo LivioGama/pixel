@@ -11,13 +11,13 @@ elsewhere they build a full index first.
 Find a symbol with its bare method name, then use the uid it returns:
 
 ```bash
-pixel symbol <method_name> --json        # not Class#method — copy the returned uid
+pixel find-symbol <method_name> --json        # not Class#method — copy the returned uid
 pixel impact <uid> --json --direction upstream   # callers, transitive
-pixel uses <uid> --role callers --json   # direct callers (--role callees for the reverse)
-pixel context <uid> --json --budget 4000         # source, fitted to a token budget
-pixel changes --base <merge-base> --tests --json # symbols changed on this branch + their tests
-pixel review . --json                    # working-tree diff, structured
-pixel search "<regex>" [path] --json     # plain text search, indexed
+pixel who-calls <uid> --role callers --json   # direct callers (--role callees for the reverse)
+pixel pack-context <uid> --json --budget 4000         # source, fitted to a token budget
+pixel what-changed --base <merge-base> --tests --json # symbols changed on this branch + their tests
+pixel review-changes . --json                    # working-tree diff, structured
+pixel search-content "<regex>" [path] --json     # plain text search, indexed
 pixel plan "fix all clickable elements"  # deterministic todo list from AST + graph
 ```
 

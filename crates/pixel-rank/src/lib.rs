@@ -1,4 +1,4 @@
-//! `pixel-rank` — the pure fusion core for `pixel targets` and (later) ranked
+//! `pixel-rank` — the pure fusion core for `pixel scope-task` and (later) ranked
 //! `search`/`resolve`.
 //!
 //! Task text in, closed prioritized file list out. The `op_targets` service
@@ -1076,7 +1076,7 @@ pub fn compute_targets(
         // information the caller needs for files it's told are peripheral
         // and droppable. P0 keeps it — that's the tier the doctrine
         // mandates checking, where the uid is worth the bytes for a
-        // follow-up `pixel context`/`pixel impact` call.
+        // follow-up `pixel pack-context`/`pixel impact` call.
         let symbols = if tier == "P0" { e.symbols } else { Vec::new() };
         targets.push(TargetFile {
             path,

@@ -66,7 +66,7 @@ const SOFT_LOOP_THRESHOLD: usize = 5;
 /// because re-running targets with a different task description is
 /// legitimate (task evolution). `index`, `daemon`, `install`, `doctor`
 /// are infrastructure commands, not retrieval.
-const GUARDED_COMMANDS: &[&str] = &["search", "resolve", "context", "impact", "changes"];
+const GUARDED_COMMANDS: &[&str] = &["search-content", "find-code", "pack-context", "impact", "what-changed"];
 
 /// Stable hash for call args (FNV-1a 64, hex, first 12 chars — same
 /// scheme as `targets_task_id`). This is NOT a cryptographic hash; it
@@ -188,7 +188,7 @@ pub enum CallGuardResult {
 /// the call in history. Call this at the start of each guarded command
 /// handler. If it returns `Warn`, print the message and still execute.
 ///
-/// `command` is the subcommand name ("search", "resolve", etc.).
+/// `command` is the subcommand name ("search-content", "find-code", etc.).
 /// `args` is the stringified arguments (pattern + paths for search,
 /// phrase + paths for resolve, etc.).
 /// `cwd` is the current working directory (used to find `.pixel/`).
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn allows_first_call() {
         let dir = temp_dir();
-        with_session(None, || match check_and_record("search", "foo .", &dir) {
+        with_session(None, || match check_and_record("search-content", "foo .", &dir) {
             CallGuardResult::Allow => {}
             CallGuardResult::Warn(msg) => panic!("first call should be allowed: {msg}"),
         });
@@ -334,9 +334,9 @@ mod tests {
         // a concurrent scoped test would otherwise move these calls into a
         // different bucket.
         with_session(None, || {
-            check_and_record("search", "foo .", &dir);
-            check_and_record("search", "foo .", &dir);
-            match check_and_record("search", "foo .", &dir) {
+            check_and_record("search-content", "foo .", &dir);
+            check_and_record("search-content", "foo .", &dir);
+            match check_and_record("search-content", "foo .", &dir) {
                 CallGuardResult::Warn(msg) => {
                     assert!(
                         msg.contains("identical arguments"),
@@ -355,9 +355,9 @@ mod tests {
         with_session(None, || {
             // Call 5 times with different args (threshold is 5).
             for i in 0..5 {
-                check_and_record("search", &format!("query{i} ."), &dir);
+                check_and_record("search-content", &format!("query{i} ."), &dir);
             }
-            match check_and_record("search", "another-query .", &dir) {
+            match check_and_record("search-content", "another-query .", &dir) {
                 CallGuardResult::Warn(msg) => {
                     assert!(
                         msg.contains("counts alone"),
@@ -376,10 +376,10 @@ mod tests {
         with_session(None, || {
             // 4 searches + 4 resolves — neither hits the soft threshold.
             for i in 0..4 {
-                check_and_record("search", &format!("q{i} ."), &dir);
-                check_and_record("resolve", &format!("p{i} ."), &dir);
+                check_and_record("search-content", &format!("q{i} ."), &dir);
+                check_and_record("find-code", &format!("p{i} ."), &dir);
             }
-            match check_and_record("search", "another .", &dir) {
+            match check_and_record("search-content", "another .", &dir) {
                 CallGuardResult::Allow => {}
                 CallGuardResult::Warn(msg) => {
                     panic!("5th search with mixed commands should be allowed: {msg}")
@@ -395,7 +395,7 @@ mod tests {
         with_session(None, || {
             // `targets` is not in GUARDED_COMMANDS — unlimited calls.
             for _ in 0..20 {
-                match check_and_record("targets", "fix the bug .", &dir) {
+                match check_and_record("scope-task", "fix the bug .", &dir) {
                     CallGuardResult::Allow => {}
                     CallGuardResult::Warn(msg) => panic!("targets should not be guarded: {msg}"),
                 }
@@ -408,7 +408,7 @@ mod tests {
     fn fails_open_without_pixel_dir() {
         let dir = std::env::temp_dir().join(format!("pixel-no-dotdir-{}", now_unix()));
         std::fs::create_dir_all(&dir).unwrap();
-        with_session(None, || match check_and_record("search", "foo .", &dir) {
+        with_session(None, || match check_and_record("search-content", "foo .", &dir) {
             CallGuardResult::Allow => {}
             CallGuardResult::Warn(msg) => panic!("must fail open without .pixel/: {msg}"),
         });
@@ -537,7 +537,7 @@ mod tests {
         let path = dir.join(".pixel/calls.json");
         let calls: Vec<_> = (0..MAX_CALL_HISTORY + 100)
             .map(|i| CallEntry {
-                command: "search".into(),
+                command: "search-content".into(),
                 args_hash: args_hash(&i.to_string()),
                 timestamp: now_unix(),
                 session: String::new(),
@@ -546,7 +546,7 @@ mod tests {
         save_calls(&path, &calls);
         assert_eq!(load_calls(&path).len(), MAX_CALL_HISTORY);
         with_session(None, || {
-            match check_and_record("search", "new query", &dir) {
+            match check_and_record("search-content", "new query", &dir) {
                 CallGuardResult::Warn(message) => {
                     assert!(message.contains("Continuing retrieval"));
                     assert!(!message.contains("result will not change"));
@@ -567,7 +567,7 @@ mod tests {
         // Write a call from 20 minutes ago (past TTL).
         let old = serde_json::json!({
             "calls": [{
-                "command": "search",
+                "command": "search-content",
                 "args_hash": args_hash("old ."),
                 "timestamp": now_unix() - 1200,
             }]
@@ -575,7 +575,7 @@ mod tests {
         std::fs::write(&calls_path, old.to_string()).unwrap();
 
         // A new call should NOT trigger the hard loop (old entry pruned).
-        with_session(None, || match check_and_record("search", "old .", &dir) {
+        with_session(None, || match check_and_record("search-content", "old .", &dir) {
             CallGuardResult::Allow => {}
             CallGuardResult::Warn(msg) => panic!("expired entry must be pruned: {msg}"),
         });

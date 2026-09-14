@@ -1,4 +1,4 @@
-//! `gitpixel rescue` — plan correctness and apply safety invariants.
+//! `gitpixel plan-rollback` — plan correctness and apply safety invariants.
 
 use std::path::Path;
 use std::process::Command;
@@ -88,7 +88,7 @@ fn plan_suspect_is_diff_content_based_and_beats_subject_keywords() {
     let out = gitpixel(
         &dir,
         &[
-            "rescue",
+            "plan-rollback",
             "discount broken",
             ".",
             "--file",
@@ -158,7 +158,7 @@ fn plan_reports_depth_cap_honestly_when_no_suspect_found() {
     let out = gitpixel(
         &dir,
         &[
-            "rescue",
+            "plan-rollback",
             "zebra glitter feature",
             ".",
             "--file",
@@ -204,7 +204,7 @@ fn apply_restores_working_tree_only() {
     let (dir, v1, _) = fixture("apply");
     let out = gitpixel(
         &dir,
-        &["rescue", "--apply", &v1, "--file", "src/calc.rs", "."],
+        &["plan-rollback", "--apply", &v1, "--file", "src/calc.rs", "."],
     );
     assert!(out.status.success(), "apply failed: {out:?}");
     assert_eq!(
@@ -228,7 +228,7 @@ fn apply_refuses_dirty_without_strategy() {
 
     let out = gitpixel(
         &dir,
-        &["rescue", "--apply", &v1, "--file", "src/calc.rs", "."],
+        &["plan-rollback", "--apply", &v1, "--file", "src/calc.rs", "."],
     );
     assert!(!out.status.success(), "must refuse dirty overwrite");
     let err = String::from_utf8_lossy(&out.stderr);
@@ -251,7 +251,7 @@ fn apply_merge_keeps_in_progress_edits() {
     let out = gitpixel(
         &dir,
         &[
-            "rescue",
+            "plan-rollback",
             "--apply",
             &v1,
             "--file",
@@ -279,7 +279,7 @@ fn apply_rejects_bad_ref() {
     let out = gitpixel(
         &dir,
         &[
-            "rescue",
+            "plan-rollback",
             "--apply",
             "deadbeef",
             "--file",

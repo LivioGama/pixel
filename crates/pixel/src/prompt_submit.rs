@@ -1,4 +1,4 @@
-//! `pixel hook prompt-submit` — bounded task context and independent boundary detection.
+//! `pixel run-hook prompt-submit` — bounded task context and independent boundary detection.
 //!
 //! Fires on every `UserPromptSubmit` hook event. Embeds the new prompt and
 //! the recent conversation context (last N assistant turns from the recall
@@ -58,7 +58,7 @@ struct PromptSubmitPayload {
     session_id: Option<String>,
 }
 
-/// Entry point for `pixel hook prompt-submit`. Reads the hook payload from stdin.
+/// Entry point for `pixel run-hook prompt-submit`. Reads the hook payload from stdin.
 /// Never returns an `Err` as exit 1 — every failure path is a silent exit 0
 /// (prompt proceeds normally).
 pub fn run(provider: Option<crate::guard::Provider>) -> ! {

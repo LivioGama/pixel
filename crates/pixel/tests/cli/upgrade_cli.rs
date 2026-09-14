@@ -40,7 +40,7 @@ impl Fixture {
     ) -> (Output, Duration, bool) {
         let start = Instant::now();
         let mut command = Command::new(env!("CARGO_BIN_EXE_pixel"));
-        command.args(["upgrade", "--build", "/usr/bin/true"]);
+        command.args(["self-update", "--build", "/usr/bin/true"]);
         command.args(extra);
         command.args(extra_paths);
         if let Some(p) = path_var {

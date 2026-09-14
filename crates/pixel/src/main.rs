@@ -99,7 +99,7 @@ enum RoleArg {
 #[derive(Subcommand)]
 enum Command {
     /// Build (or rebuild) the text index for a directory tree.
-    Index {
+    BuildIndex {
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long, value_enum, default_value = "trigram")]
@@ -114,7 +114,7 @@ enum Command {
     /// Search the indexed tree with a regex pattern. Accepts any number of
     /// paths (repo roots, subdirectories, or files) — ripgrep-style; the repo
     /// root is discovered automatically for each.
-    Search {
+    SearchContent {
         pattern: String,
         /// Paths to search: repo roots, subdirectories, or files (any mix).
         #[arg(default_value = ".")]
@@ -154,14 +154,14 @@ enum Command {
     },
     /// Native-output literal file search for automatic routing; unsupported
     /// inputs execute the original rg/grep command without modification.
-    SearchCompat {
+    SearchLikeRg {
         #[arg(value_enum)]
         tool: search_compat::SearchTool,
         #[arg(last = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Compile and execute one bounded deterministic retrieval recipe.
-    Query {
+    RunRecipe {
         intent: String,
         #[arg(long, default_value = ".")]
         path: PathBuf,
@@ -180,7 +180,7 @@ enum Command {
     /// the answer is a ranked list, not a resolved certainty. First use
     /// downloads the embedding model into the shared recall model cache
     /// (once; subsequent calls are offline).
-    Ask {
+    SearchMeaning {
         /// The natural-language question.
         question: String,
         #[arg(default_value = ".")]
@@ -197,7 +197,7 @@ enum Command {
     /// Sniper target list: task description in, closed prioritized file list
     /// out (P0 = start here, P1 = likely, P2 = droppable). Writes the
     /// enforcement manifest .pixel/targets.json unless --no-manifest.
-    Targets {
+    ScopeTask {
         /// Task/feature description (omit with --clear).
         task: Option<String>,
         #[arg(default_value = ".")]
@@ -225,7 +225,7 @@ enum Command {
     /// recent versions with the likely-breaking commit flagged, recommend a
     /// last-known-good candidate. Plan only — nothing is written without
     /// --apply. Never resets; never touches the index or HEAD.
-    Rescue {
+    PlanRollback {
         /// Problem description ("login was working before ...").
         problem: Option<String>,
         #[arg(default_value = ".")]
@@ -253,7 +253,7 @@ enum Command {
         json: bool,
     },
     /// Look up symbols by name in the code graph.
-    Symbol {
+    FindSymbol {
         name: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -261,7 +261,7 @@ enum Command {
         json: bool,
     },
     /// All signatures in a file — the skeleton view at ~10% of Read cost.
-    Skeleton {
+    ListSignatures {
         file: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -289,7 +289,7 @@ enum Command {
     /// Structural repo map: every indexed file with its symbols. `--markdown`
     /// emits the exportable document form — the human-editable projection of
     /// the graph that `note` annotations key onto.
-    Map {
+    RepoMap {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Emit the exportable markdown document.
@@ -299,7 +299,7 @@ enum Command {
         json: bool,
     },
     /// Budget-fitted context for a symbol uid.
-    Context {
+    PackContext {
         uid: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -321,7 +321,7 @@ enum Command {
         json: bool,
     },
     /// Direct callers or callees of a symbol.
-    Uses {
+    WhoCalls {
         uid_or_name: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -334,7 +334,7 @@ enum Command {
         json: bool,
     },
     /// Call path between two symbols.
-    Trace {
+    CallPath {
         from: String,
         to: String,
         #[arg(default_value = ".")]
@@ -343,7 +343,7 @@ enum Command {
         json: bool,
     },
     /// Discovered execution flows.
-    Processes {
+    ListFlows {
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long, default_value_t = 0)]
@@ -352,7 +352,7 @@ enum Command {
         json: bool,
     },
     /// Functional-area clusters.
-    Clusters {
+    ListAreas {
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long, default_value_t = 0)]
@@ -361,7 +361,7 @@ enum Command {
         json: bool,
     },
     /// Symbols/flows affected by working-tree changes.
-    Changes {
+    WhatChanged {
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long)]
@@ -375,7 +375,7 @@ enum Command {
         json: bool,
     },
     /// Force (re)build of the code graph db.
-    Graph {
+    RebuildGraph {
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long)]
@@ -392,7 +392,7 @@ enum Command {
         statusline: bool,
     },
     /// Make a repository ready for agent work: index, graph, and warm daemon.
-    Ready {
+    PrepareRepo {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Build indexes only; do not start or use the background daemon.
@@ -402,7 +402,7 @@ enum Command {
         json: bool,
     },
     /// Show raw shard metadata (legacy).
-    Stats {
+    IndexStats {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
@@ -417,7 +417,7 @@ enum Command {
         cmd: recall_cmd::RecallCmd,
     },
     /// One-look error capture: query the sniper error sink.
-    Sniper {
+    ListErrors {
         #[command(subcommand)]
         cmd: sniper_cmd::SniperCmd,
     },
@@ -425,7 +425,7 @@ enum Command {
     // M2 — safe git mutation ops (pixel-ops)
     // -----------------------------------------------------------------
     /// Show repo state: HEAD, branch, dirty files, fingerprints.
-    Inspect {
+    RepoState {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Restrict the snapshot to these repo-relative paths.
@@ -435,7 +435,7 @@ enum Command {
         json: bool,
     },
     /// Review working-tree changes (staged, unstaged, untracked, conflicted).
-    Review {
+    ReviewChanges {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Pagination cursor (opaque).
@@ -448,7 +448,7 @@ enum Command {
         json: bool,
     },
     /// Commit history with detail levels and byte caps.
-    History {
+    CommitHistory {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Ref to log (default HEAD).
@@ -486,7 +486,7 @@ enum Command {
         json: bool,
     },
     /// Stage files, commit, and optionally push (crash-safe, idempotent).
-    Publish {
+    Commit {
         /// Commit message. Use `--message-file` for a multi-paragraph body.
         #[arg(
             short = 'm',
@@ -536,7 +536,7 @@ enum Command {
         json: bool,
     },
     /// Publish + push in one op (commit then leased push).
-    Ship {
+    CommitAndPush {
         /// Commit message. Use `--message-file` for a multi-paragraph body.
         #[arg(
             short = 'm',
@@ -572,7 +572,7 @@ enum Command {
         json: bool,
     },
     /// Create a new branch from HEAD (or --from <ref>).
-    Branch {
+    NewBranch {
         name: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -586,7 +586,7 @@ enum Command {
         json: bool,
     },
     /// Fast-forward merge to a target OID (refuses non-ff + dirty intersection).
-    Update {
+    FastForward {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Reject if HEAD does not match this OID.
@@ -602,7 +602,7 @@ enum Command {
         json: bool,
     },
     /// Fetch from a remote (idempotent).
-    Sync {
+    Fetch {
         remote: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -616,7 +616,7 @@ enum Command {
     // M3/M4 — engines (resolve, history, lifecycle, excavate, reconcile)
     // -----------------------------------------------------------------
     /// Engine 1: resolve a phrase to code via the concept index.
-    Resolve {
+    FindCode {
         phrase: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -626,7 +626,7 @@ enum Command {
         json: bool,
     },
     /// M3: history-wide fact + diff search.
-    HistorySearch {
+    SearchHistory {
         query: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -639,7 +639,7 @@ enum Command {
         json: bool,
     },
     /// Engine 2: lifecycle of a path or token.
-    Lifecycle {
+    FileHistory {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Repo-relative path to inspect.
@@ -652,7 +652,7 @@ enum Command {
         json: bool,
     },
     /// Engine 2: history-wide discovery (rescue v2).
-    Excavate {
+    DigHistory {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Phrase to search for in diff text.
@@ -682,7 +682,7 @@ enum Command {
         json: bool,
     },
     /// Engine 4: one-call deterministic branch sync.
-    Reconcile {
+    SyncBranch {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// report (default) | rebase-if-clean
@@ -703,7 +703,7 @@ enum Command {
         json: bool,
     },
     /// M5: journal a session event (fire-and-forget).
-    Journal {
+    RecordEvent {
         kind: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -757,7 +757,7 @@ enum Command {
     /// Cargo.lock is fresh for every workspace member, CHANGELOG.md has the
     /// `## [x.y.z]` heading and an empty Unreleased section. Exit 1 on any
     /// failed check.
-    ReleaseCheck {
+    CheckRelease {
         /// The version or tag: `1.2.3`, `v1.2.3` or `refs/tags/v1.2.3`.
         version: String,
         /// Repository root (default: current directory).
@@ -770,7 +770,7 @@ enum Command {
     /// Rebuild the binary, stop the daemon, copy the new binary to the
     /// install path, and optionally restart the daemon. Solves the
     /// "Text file busy" error when the daemon holds the binary open.
-    Upgrade {
+    SelfUpdate {
         /// Cargo build command to run (default: `cargo build --release -p pixel-cli`).
         /// The built binary is read from `target/<profile>/pixel`, with the
         /// profile taken from this command's `--profile`/`--release` flags.
@@ -802,27 +802,20 @@ enum Command {
         #[arg(long)]
         shell: Option<String>,
     },
-    /// Remove legacy .gitpixel/ and prepare .pixel/; indexes rebuild lazily on use.
-    Migrate {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
     /// Hook entrypoints (guard, session-start) invoked by Claude hooks.
-    Hook {
+    RunHook {
         #[command(subcommand)]
         cmd: HookCmd,
     },
     /// Inspect or reset Claude Code's local Pixel task-runtime packet.
-    Task {
+    TaskState {
         #[command(subcommand)]
         cmd: TaskCmd,
     },
     /// Self-assessment: pixel's own action log (what ran, what went wrong).
     /// Reads <path>/.pixel/actions.jsonl, written asynchronously by every
     /// pixel invocation.
-    Log {
+    ActionLog {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Most recent entries to show.
@@ -842,7 +835,7 @@ enum Command {
     /// fraction of the candidate pool the agent did NOT have to read. A
     /// measured counter to semble's '99% fewer tokens' claim — own numbers,
     /// same format.
-    Savings {
+    TokenSavings {
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long)]
@@ -853,7 +846,7 @@ enum Command {
     },
     /// Squash every commit on the current branch since its base into ONE
     /// commit (crash-safe, backup-ref'd), optionally force-pushing with lease.
-    Rewrite {
+    SquashBranch {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Explicit base ref (squash <onto>..HEAD). Default: merge-base with
@@ -883,7 +876,7 @@ enum Command {
         json: bool,
     },
     /// Per-region blame attribution: who introduced/owns each region of a file.
-    Provenance {
+    WhoWrote {
         /// Repo-relative file to attribute.
         file: String,
         #[arg(default_value = ".")]
@@ -903,7 +896,7 @@ enum Command {
     },
     /// One-call read-only branch inventory: ahead/behind, merged, stale,
     /// unpushed — the deterministic "did you push everything?" answer.
-    Branches {
+    ListBranches {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Run `git fetch --prune <remote>` first for a live view.
@@ -920,7 +913,7 @@ enum Command {
     },
     /// Additive-only, key-level .env mutations with snapshots and restore.
     /// Values are NEVER printed in any output.
-    Env {
+    EditEnv {
         #[command(subcommand)]
         cmd: EnvCmd,
     },
@@ -954,7 +947,7 @@ enum Command {
     /// Save, retrieve, list, revise, and replay proven agent-browser paths
     /// (auth flows, config flows) so the agent follows a deterministic
     /// shortcut instead of re-discovering the UI from scratch every time.
-    Flow {
+    ReplayFlow {
         #[command(subcommand)]
         cmd: FlowCmd,
     },
@@ -3434,8 +3427,8 @@ fn run() -> Result<(), String> {
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     let protected = matches!(
         &cli.command,
-        Command::SearchCompat { .. }
-            | Command::Hook { .. }
+        Command::SearchLikeRg { .. }
+            | Command::RunHook { .. }
             | Command::Status {
                 statusline: true,
                 ..
@@ -3446,7 +3439,7 @@ fn run() -> Result<(), String> {
                     ..
                 }
             }
-            | Command::Sniper {
+            | Command::ListErrors {
                 cmd: sniper_cmd::SniperCmd::Mcp { .. } | sniper_cmd::SniperCmd::Run { .. }
             }
     );
@@ -3458,7 +3451,7 @@ fn run() -> Result<(), String> {
     // Compatibility fallback must exec the original before any logging changes
     // its search corpus; its successful Pixel branch retains existing logging.
     let mut logger = match &root {
-        _ if matches!(&cli.command, Command::SearchCompat { .. }) => {
+        _ if matches!(&cli.command, Command::SearchLikeRg { .. }) => {
             pixel_actionlog::ActionLog::noop()
         }
         Ok(root) => pixel_actionlog::ActionLog::spawn_for_root(root),
@@ -3506,8 +3499,8 @@ fn run() -> Result<(), String> {
 
 fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<(), String> {
     match command {
-        Command::SearchCompat { tool, args } => search_compat::run(tool, args),
-        Command::Index {
+        Command::SearchLikeRg { tool, args } => search_compat::run(tool, args),
+        Command::BuildIndex {
             path,
             extractor,
             max_gram,
@@ -3581,7 +3574,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
             Ok(())
         }
-        Command::Search {
+        Command::SearchContent {
             pattern,
             paths,
             json,
@@ -3593,7 +3586,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             context,
             ignore_case,
         } => {
-            if call_guard_check("search", &format!("{pattern} {paths:?}")) {
+            if call_guard_check("search-content", &format!("{pattern} {paths:?}")) {
                 return Err("circuit breaker: repeated search calls".to_string());
             }
             run_search(
@@ -3610,7 +3603,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 logger,
             )
         }
-        Command::Query {
+        Command::RunRecipe {
             intent,
             path,
             kind,
@@ -3618,14 +3611,14 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             json,
             no_daemon,
         } => run_query(intent, path, &kind, budget, json, no_daemon, logger),
-        Command::Ask {
+        Command::SearchMeaning {
             question,
             path,
             limit,
             max_files,
             json,
         } => run_ask(question, path, limit, max_files, json),
-        Command::Targets {
+        Command::ScopeTask {
             task,
             path,
             json,
@@ -3692,7 +3685,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
             Ok(())
         }
-        Command::Rescue {
+        Command::PlanRollback {
             problem,
             path,
             files,
@@ -3830,7 +3823,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             println!("fix forward: keep current code and fix the bug in place");
             Ok(())
         }
-        Command::Symbol { name, path, json } => {
+        Command::FindSymbol { name, path, json } => {
             let data = execute(&path, Request::Symbol { name }, false)?;
             finish_graph_cmd(data, json, |d| {
                 let syms = d.get("symbols")?.as_array()?;
@@ -3848,7 +3841,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             })?;
             Ok(())
         }
-        Command::Skeleton { file, path, json } => {
+        Command::ListSignatures { file, path, json } => {
             let data = execute(&path, Request::Skeleton { file }, false)?;
             finish_graph_cmd(data, json, |d| {
                 let syms = d.get("symbols")?.as_array()?;
@@ -3928,7 +3921,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             })?;
             Ok(())
         }
-        Command::Map {
+        Command::RepoMap {
             path,
             markdown,
             json,
@@ -3964,13 +3957,13 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
             write_stdout(&output)
         }
-        Command::Context {
+        Command::PackContext {
             uid,
             path,
             budget,
             json,
         } => {
-            if call_guard_check("context", &format!("{uid} {}", path.display())) {
+            if call_guard_check("pack-context", &format!("{uid} {}", path.display())) {
                 return Err("circuit breaker: repeated context calls".to_string());
             }
             let data = execute(
@@ -4035,7 +4028,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }
-        Command::Uses {
+        Command::WhoCalls {
             uid_or_name,
             path,
             role,
@@ -4085,7 +4078,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             })?;
             Ok(())
         }
-        Command::Trace {
+        Command::CallPath {
             from,
             to,
             path,
@@ -4095,7 +4088,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }
-        Command::Processes { path, offset, json } => {
+        Command::ListFlows { path, offset, json } => {
             let data = execute(
                 &path,
                 Request::Processes {
@@ -4106,7 +4099,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }
-        Command::Clusters { path, offset, json } => {
+        Command::ListAreas { path, offset, json } => {
             let data = execute(
                 &path,
                 Request::Clusters {
@@ -4117,14 +4110,14 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }
-        Command::Changes {
+        Command::WhatChanged {
             path,
             base,
             offset,
             tests,
             json,
         } => {
-            if call_guard_check("changes", &format!("{} {:?}", path.display(), base)) {
+            if call_guard_check("what-changed", &format!("{} {:?}", path.display(), base)) {
                 return Err("circuit breaker: repeated changes calls".to_string());
             }
             let data = execute(
@@ -4139,7 +4132,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }
-        Command::Graph { path, json } => {
+        Command::RebuildGraph { path, json } => {
             let v = execute(&path, Request::Graph {}, false)?;
             eprintln!(
                 "graph built in {} ms -> {}",
@@ -4298,12 +4291,12 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
             Ok(())
         }
-        Command::Ready {
+        Command::PrepareRepo {
             path,
             no_daemon,
             json,
         } => ready(path, no_daemon, json),
-        Command::Stats { path } => {
+        Command::IndexStats { path } => {
             let path = discover_root(&path)?;
             let shard = Shard::open(&shard_path(&path)).map_err(|e| e.to_string())?;
             let _ = extractor_for_shard(&shard); // validates extractor id
@@ -4324,11 +4317,11 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             DaemonCmd::Status { path } => daemon_status(discover_root(&path)?),
         },
         Command::Recall { cmd } => recall_cmd::run_recall(cmd),
-        Command::Sniper { cmd } => sniper_cmd::run_sniper(cmd),
+        Command::ListErrors { cmd } => sniper_cmd::run_sniper(cmd),
         // -------------------------------------------------------------
         // M2 — safe git mutation ops (pixel-ops)
         // -------------------------------------------------------------
-        Command::Inspect { path, files, json } => {
+        Command::RepoState { path, files, json } => {
             let root = discover_root(&path)?;
             let mut data = pixel_ops::inspect::inspect(&root)?;
             if !files.is_empty() {
@@ -4356,7 +4349,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
             print_data(&data, json)
         }
-        Command::Review {
+        Command::ReviewChanges {
             path,
             cursor,
             byte_cap,
@@ -4366,7 +4359,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::review::review(&root, cursor.as_deref(), byte_cap)?;
             print_data(&data, json)
         }
-        Command::History {
+        Command::CommitHistory {
             path,
             ref_,
             limit,
@@ -4403,7 +4396,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::diff::diff(&root, &from, to.as_deref(), paths_opt, byte_cap)?;
             print_data(&data, json)
         }
-        Command::Publish {
+        Command::Commit {
             message,
             message_file,
             path,
@@ -4446,7 +4439,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::push::push(&root, &opts, None)?;
             print_data(&data, json)
         }
-        Command::Ship {
+        Command::CommitAndPush {
             message,
             message_file,
             path,
@@ -4470,7 +4463,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             )?;
             print_data(&data, json)
         }
-        Command::Branch {
+        Command::NewBranch {
             name,
             path,
             from,
@@ -4486,7 +4479,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::branch::branch(&root, &opts)?;
             print_data(&data, json)
         }
-        Command::Update {
+        Command::FastForward {
             path,
             expected_head,
             target_oid,
@@ -4502,7 +4495,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::update::update(&root, &opts)?;
             print_data(&data, json)
         }
-        Command::Sync {
+        Command::Fetch {
             remote,
             path,
             refspec,
@@ -4515,13 +4508,13 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         // -------------------------------------------------------------
         // M3/M4 — engines
         // -------------------------------------------------------------
-        Command::Resolve {
+        Command::FindCode {
             phrase,
             path,
             limit,
             json,
         } => {
-            if call_guard_check("resolve", &format!("{phrase} {}", path.display())) {
+            if call_guard_check("find-code", &format!("{phrase} {}", path.display())) {
                 return Err("circuit breaker: repeated resolve calls".to_string());
             }
             let mut data = execute(&path, Request::Resolve { phrase, limit }, false)?;
@@ -4534,7 +4527,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 print_resolve_human(&data)
             }
         }
-        Command::HistorySearch {
+        Command::SearchHistory {
             query,
             path,
             facet,
@@ -4552,7 +4545,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             )?;
             print_data(&data, json)
         }
-        Command::Lifecycle {
+        Command::FileHistory {
             path,
             file,
             token,
@@ -4561,7 +4554,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = execute(&path, Request::Lifecycle { path: file, token }, false)?;
             print_data(&data, json)
         }
-        Command::Excavate {
+        Command::DigHistory {
             path,
             phrase,
             file,
@@ -4588,7 +4581,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             )?;
             print_data(&data, json)
         }
-        Command::Reconcile {
+        Command::SyncBranch {
             path,
             strategy,
             push,
@@ -4608,7 +4601,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             )?;
             print_data(&data, json)
         }
-        Command::Journal {
+        Command::RecordEvent {
             kind,
             path,
             file,
@@ -4661,7 +4654,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 json,
             )
         }
-        Command::ReleaseCheck {
+        Command::CheckRelease {
             version,
             repo,
             json,
@@ -4678,7 +4671,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 Err("release-check failed".to_string())
             }
         }
-        Command::Upgrade {
+        Command::SelfUpdate {
             build,
             install_path,
             restart_daemon,
@@ -4810,15 +4803,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 json,
             )
         }
-        Command::Migrate { path, json } => {
-            let root = discover_root(&path)?;
-            let report = pixel_install::install::migrate(&root).map_err(|e| e.to_string())?;
-            print_data(
-                &serde_json::to_value(&report).map_err(|e| e.to_string())?,
-                json,
-            )
-        }
-        Command::Hook { cmd } => match cmd {
+        Command::RunHook { cmd } => match cmd {
             HookCmd::Guard {
                 path: _,
                 provider,
@@ -4924,7 +4909,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 guard::run_post_tool_use(provider);
             }
         },
-        Command::Task { cmd } => match cmd {
+        Command::TaskState { cmd } => match cmd {
             TaskCmd::Begin {
                 objective,
                 path,
@@ -5177,19 +5162,19 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 print_data(&json!({"session_id": session, "removed": removed}), json)
             }
         },
-        Command::Log {
+        Command::ActionLog {
             path,
             limit,
             errors_only,
             json,
             clear,
         } => run_log(&path, limit, errors_only, json, clear),
-        Command::Savings {
+        Command::TokenSavings {
             path,
             json,
             since_hours,
         } => run_savings(&path, json, since_hours),
-        Command::Rewrite {
+        Command::SquashBranch {
             path,
             onto,
             message,
@@ -5213,7 +5198,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::rewrite::rewrite(&root, &opts)?;
             print_data(&data, json)
         }
-        Command::Provenance {
+        Command::WhoWrote {
             file,
             path,
             lines,
@@ -5231,7 +5216,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::provenance::provenance(&root, &opts)?;
             print_data(&data, json)
         }
-        Command::Branches {
+        Command::ListBranches {
             path,
             fetch,
             remote,
@@ -5247,7 +5232,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::branches::branches(&root, &opts)?;
             print_data(&data, json)
         }
-        Command::Env { cmd } => {
+        Command::EditEnv { cmd } => {
             use pixel_ops::envfile::EnvAction;
             let (path, json, action) = match cmd {
                 EnvCmd::Inventory { path, json } => (path, json, EnvAction::Inventory),
@@ -5311,7 +5296,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 max_todos,
             })
         }
-        Command::Flow { cmd } => {
+        Command::ReplayFlow { cmd } => {
             use pixel_flow::FlowAction;
             let json = match &cmd {
                 FlowCmd::Save { json, .. }
@@ -6075,28 +6060,28 @@ mod tests {
             // NOTE: the historical rule text wrote `[--path <path>]` here —
             // the real flag is `--file`. That drift is exactly what the
             // runtime `rule.parity` doctor check flags.
-            r#"pixel excavate --phrase "<what you're looking for>" [--file <path>] [--json]"#,
-            r#"pixel rescue "<what broke, in the user's words>" /path/to/repo [--json]"#,
-            r#"pixel rescue --apply <oid> --file <path> /path/to/repo [--merge|--stash-first|--allow-dirty]"#,
-            r#"pixel resolve "<phrase>" /path/to/repo [--json] [--limit N]"#,
-            r#"pixel search "<pattern>" /path/to/repo --context 5 [--json] [--limit N]"#,
-            r#"pixel reconcile /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]"#,
-            r#"pixel targets "<one-line task description>" /path/to/repo [--json] [--limit N]"#,
-            r#"pixel targets --clear /path/to/repo"#,
+            r#"pixel dig-history --phrase "<what you're looking for>" [--file <path>] [--json]"#,
+            r#"pixel plan-rollback "<what broke, in the user's words>" /path/to/repo [--json]"#,
+            r#"pixel plan-rollback --apply <oid> --file <path> /path/to/repo [--merge|--stash-first|--allow-dirty]"#,
+            r#"pixel find-code "<phrase>" /path/to/repo [--json] [--limit N]"#,
+            r#"pixel search-content "<pattern>" /path/to/repo --context 5 [--json] [--limit N]"#,
+            r#"pixel sync-branch /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]"#,
+            r#"pixel scope-task "<one-line task description>" /path/to/repo [--json] [--limit N]"#,
+            r#"pixel scope-task --clear /path/to/repo"#,
             r#"pixel impact <symbol_name_or_uid> /path/to/repo [--direction upstream|downstream] [--depth N] [--json]"#,
-            r#"pixel changes /path/to/repo [--base <ref>] [--json]"#,
-            r#"pixel inspect /path/to/repo [--json]"#,
-            r#"pixel review /path/to/repo [--json]"#,
-            r#"pixel history /path/to/repo [--ref <ref>] [--limit N] [--json]"#,
+            r#"pixel what-changed /path/to/repo [--base <ref>] [--json]"#,
+            r#"pixel repo-state /path/to/repo [--json]"#,
+            r#"pixel review-changes /path/to/repo [--json]"#,
+            r#"pixel commit-history /path/to/repo [--ref <ref>] [--limit N] [--json]"#,
             r#"pixel diff <from> /path/to/repo [--paths <p>...] [--json]"#,
-            r#"pixel publish --files <f>... --message "<msg>" --request-id <id> /path/to/repo"#,
+            r#"pixel commit --files <f>... --message "<msg>" --request-id <id> /path/to/repo"#,
             r#"pixel push <remote> <refspec> /path/to/repo --request-id <id>"#,
-            r#"pixel ship --files <f>... --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
-            r#"pixel branch <name> /path/to/repo --request-id <id>"#,
-            r#"pixel sync <remote> /path/to/repo [--json]"#,
-            r#"pixel update /path/to/repo --expected-head <oid> --target-oid <oid> --request-id <id>"#,
+            r#"pixel commit-and-push --files <f>... --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
+            r#"pixel new-branch <name> /path/to/repo --request-id <id>"#,
+            r#"pixel fetch <remote> /path/to/repo [--json]"#,
+            r#"pixel fast-forward /path/to/repo --expected-head <oid> --target-oid <oid> --request-id <id>"#,
             r#"pixel status /path/to/repo"#,
-            r#"pixel index --history ."#,
+            r#"pixel build-index --history ."#,
             r#"pixel install"#,
             r#"pixel doctor"#,
         ];
@@ -6125,13 +6110,13 @@ mod tests {
         for bad in [
             vec![
                 "pixel".to_string(),
-                "search".into(),
+                "search-content".into(),
                 "--no-such-flag".into(),
             ],
             vec!["pixel".to_string(), "frobnicate".into()],
             vec![
                 "pixel".to_string(),
-                "rescue".into(),
+                "plan-rollback".into(),
                 "--limit".into(),
                 "3".into(),
             ],
@@ -6148,7 +6133,7 @@ mod tests {
         for argv in [
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "begin".into(),
                 "add durable task state".into(),
                 "--provider".into(),
@@ -6160,7 +6145,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "accept".into(),
                 "change greeting behavior".into(),
                 "--provider".into(),
@@ -6169,14 +6154,14 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "prepare".into(),
                 "task-100-1".into(),
                 "/repo".into(),
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "status".into(),
                 "task-100-1".into(),
                 "/repo".into(),
@@ -6184,14 +6169,14 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "events".into(),
                 "task-100-1".into(),
                 "/repo".into(),
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "sandbox-create".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6203,7 +6188,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "sandbox-inspect".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6211,7 +6196,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "sandbox-promote".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6219,7 +6204,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "sandbox-cancel".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6227,7 +6212,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "worker-start".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6239,7 +6224,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "worker-status".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6247,7 +6232,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "worker-stop".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6255,7 +6240,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "race-start".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6265,7 +6250,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "race-poll".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6275,7 +6260,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "plan-validate".into(),
                 "task-100-1".into(),
                 "--file".into(),
@@ -6285,7 +6270,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "show".into(),
                 "--session".into(),
                 "session-123".into(),
@@ -6294,7 +6279,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "reset".into(),
                 "--session".into(),
                 "session-123".into(),
@@ -6302,14 +6287,14 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "hook".into(),
+                "run-hook".into(),
                 "prompt-submit".into(),
                 "--provider".into(),
                 "claude".into(),
             ],
             vec![
                 "pixel".to_string(),
-                "hook".into(),
+                "run-hook".into(),
                 "post-compaction".into(),
                 "--provider".into(),
                 "claude".into(),

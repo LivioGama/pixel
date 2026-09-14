@@ -30,7 +30,7 @@ verify it exists:
 
 Then make sure the repo is indexed (once per clone/worktree):
 
-    pixel index
+    pixel build-index
 
 If `.pixel/` already exists in the repo root, skip straight to the commands.
 
