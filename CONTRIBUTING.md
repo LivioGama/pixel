@@ -229,7 +229,10 @@ running with an atomic rename (on macOS an in-place `cp` over a running
 Mach-O invalidates its signature and the next call is SIGKILLed), stops
 this repo's daemon, and warns when another `pixel` earlier on PATH would
 still shadow it. Never copy into `~/.local/bin` by hand: a second copy
-shadows the managed one.
+shadows the managed one. A binary that mise or Homebrew installed is
+refused (overwriting it leaves the manager listing a version that is gone):
+`pixel self-update --dev` installs the build as `~/.local/bin/pixel-dev`
+instead, and `--install-path <path>` overwrites a managed binary on purpose.
 
 ```bash
 pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-cli"

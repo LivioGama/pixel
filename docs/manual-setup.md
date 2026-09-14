@@ -29,10 +29,13 @@ cp target/release/pixel ~/.local/bin/pixel
 ```
 
 To update an existing install later, prefer `pixel self-update` over a manual
-copy: it rebuilds, installs over the binary that is actually running (a
-mise/asdf-managed install behind a shim, a Homebrew cellar, or
-`~/.local/bin/pixel`), uses an atomic rename, stops the repo's daemon, and
-warns when another `pixel` earlier on PATH would still shadow it.
+copy: it rebuilds, installs over the binary that is actually running (an
+install behind a shim, `~/.cargo/bin`, or `~/.local/bin/pixel`), uses an
+atomic rename, stops the repo's daemon, and warns when another `pixel`
+earlier on PATH would still shadow it. It refuses a binary that mise or
+Homebrew installed: update those with `mise`/`brew`, try a local build with
+`pixel self-update --dev` (installed as `pixel-dev`), or pass
+`--install-path` to overwrite on purpose.
 
 ## 2. Copy the system prompt
 

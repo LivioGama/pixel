@@ -814,9 +814,15 @@ enum Command {
         build: String,
         /// Install path. Default: the binary running this command (unless
         /// it lives in a cargo `target/` dir), else the first `pixel` on
-        /// PATH (shim directories skipped), else ~/.local/bin/pixel.
+        /// PATH (shim directories skipped), else ~/.local/bin/pixel. A
+        /// default that lands in a mise install dir or a Homebrew Cellar is
+        /// refused; passing this flag writes there anyway.
         #[arg(long)]
         install_path: Option<PathBuf>,
+        /// Install to ~/.local/bin/pixel-dev instead: a side build to call
+        /// as `pixel-dev`, which never shadows or replaces `pixel`.
+        #[arg(long, conflicts_with = "install_path")]
+        dev: bool,
         /// Restart the daemon after upgrade.
         #[arg(long)]
         restart_daemon: bool,
@@ -3041,6 +3047,92 @@ fn daemon_stop(path: PathBuf) -> Result<(), String> {
 struct UpgradeTarget {
     path: PathBuf,
     source: &'static str,
+    /// The user named this path (`--install-path`): no ownership check.
+    explicit: bool,
+}
+
+/// A directory whose files a package manager installed and checksummed.
+struct ManagedRoot {
+    root: PathBuf,
+    manager: &'static str,
+}
+
+/// The install trees `pixel upgrade` must not write into on its own:
+/// mise's `installs/` (`~/.local/share/mise`, or `$MISE_DATA_DIR`) and the
+/// Homebrew Cellars (`/opt/homebrew`, `/usr/local`, or `$HOMEBREW_CELLAR`
+/// that `brew shellenv` exports). Roots are canonicalized when they exist
+/// so they compare against a resolved binary path (`/tmp` is
+/// `/private/tmp` on macOS).
+fn package_manager_roots(
+    home: &Path,
+    mise_data_dir: Option<&std::ffi::OsStr>,
+    homebrew_cellar: Option<&std::ffi::OsStr>,
+) -> Vec<ManagedRoot> {
+    let mut roots = vec![ManagedRoot {
+        root: home.join(".local/share/mise/installs"),
+        manager: "mise",
+    }];
+    if let Some(dir) = mise_data_dir.filter(|d| !d.is_empty()) {
+        roots.push(ManagedRoot {
+            root: Path::new(dir).join("installs"),
+            manager: "mise",
+        });
+    }
+    for cellar in ["/opt/homebrew/Cellar", "/usr/local/Cellar"] {
+        roots.push(ManagedRoot {
+            root: PathBuf::from(cellar),
+            manager: "Homebrew",
+        });
+    }
+    if let Some(cellar) = homebrew_cellar.filter(|c| !c.is_empty()) {
+        roots.push(ManagedRoot {
+            root: PathBuf::from(cellar),
+            manager: "Homebrew",
+        });
+    }
+    for managed in &mut roots {
+        if let Ok(canonical) = managed.root.canonicalize() {
+            managed.root = canonical;
+        }
+    }
+    roots
+}
+
+/// Why `pixel upgrade` refuses `target`, or `None` when it may write there.
+///
+/// Overwriting a package manager's binary is silent corruption: on
+/// 2026-09-14 a bare `pixel upgrade` replaced the mise-installed 0.2.4 with
+/// a dirty `target/dev-release` build while mise still listed 0.2.4 (mise
+/// checks the checksum at install time only), and nothing said so. The
+/// path is resolved first, so a symlink into a Cellar (`/opt/homebrew/bin/
+/// pixel`) is refused like the Cellar file itself. `--install-path` is the
+/// user's decision and is never refused.
+fn upgrade_target_refusal(target: &UpgradeTarget, roots: &[ManagedRoot]) -> Option<String> {
+    if target.explicit {
+        return None;
+    }
+    let resolved = target
+        .path
+        .canonicalize()
+        .unwrap_or_else(|_| target.path.clone());
+    let owner = roots.iter().find(|r| resolved.starts_with(&r.root))?;
+    Some(format!(
+        "refusing to install over {resolved} ({source}): it lies under {root}, which {manager} \
+         installed; overwriting it would leave {manager} listing a version that is no longer \
+         there. Run `pixel self-update --dry-run` to see where an upgrade lands, pass \
+         `--install-path {resolved}` to write there anyway, or `--dev` to install a side build \
+         at ~/.local/bin/pixel-dev.",
+        resolved = resolved.display(),
+        source = target.source,
+        root = owner.root.display(),
+        manager = owner.manager,
+    ))
+}
+
+/// `pixel upgrade --dev` destination: a distinct name, so a local build
+/// can be exercised as `pixel-dev` while `pixel` stays the managed one.
+fn dev_install_path(home: &Path) -> PathBuf {
+    home.join(".local/bin/pixel-dev")
 }
 
 /// True when `path` has a `target` directory component: a cargo build
@@ -3129,6 +3221,9 @@ fn profile_dir_name(name: &str) -> String {
 ///    in a cargo `target/` dir (`target/release/pixel upgrade`).
 /// 3. The first `pixel` on PATH outside a `shims` dir or a `target/` dir.
 /// 4. `~/.local/bin/pixel`, the legacy default.
+///
+/// Steps 2 to 4 only find a path; `upgrade_target_refusal` then refuses one
+/// a package manager owns.
 fn resolve_upgrade_target(
     explicit: Option<PathBuf>,
     current_exe: Option<PathBuf>,
@@ -3139,6 +3234,7 @@ fn resolve_upgrade_target(
         return UpgradeTarget {
             path,
             source: "--install-path",
+            explicit: true,
         };
     }
     if let Some(exe) = current_exe {
@@ -3147,6 +3243,7 @@ fn resolve_upgrade_target(
             return UpgradeTarget {
                 path: exe,
                 source: "running binary",
+                explicit: false,
             };
         }
     }
@@ -3157,19 +3254,26 @@ fn resolve_upgrade_target(
         return UpgradeTarget {
             path,
             source: "first pixel on PATH",
+            explicit: false,
         };
     }
     UpgradeTarget {
         path: home.join(".local").join("bin").join("pixel"),
         source: "default",
+        explicit: false,
     }
 }
 
 /// The `pixel` that a shell would run INSTEAD of `installed`, if any: the
 /// first PATH hit that is a different file. This is how a stale copy in
 /// `~/.local/bin` silently kept serving an old version after an upgrade
-/// landed in a mise install dir that came later on PATH.
+/// landed in a mise install dir that came later on PATH. A binary installed
+/// under another name (`pixel-dev`) is not what `pixel` runs, so no other
+/// `pixel` can shadow it.
 fn upgrade_shadowed_by(installed: &Path, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    if installed.file_name() != Some(std::ffi::OsStr::new("pixel")) {
+        return None;
+    }
     let installed = installed.canonicalize().ok()?;
     pixel_binaries_on_path(path_var)
         .into_iter()
@@ -3246,6 +3350,7 @@ mod upgrade_target_tests {
         );
         assert_eq!(t.path, PathBuf::from("/opt/x/pixel"));
         assert_eq!(t.source, "--install-path");
+        assert!(t.explicit);
     }
 
     /// The point of the change: on a machine where `pixel` is a managed
@@ -3259,6 +3364,7 @@ mod upgrade_target_tests {
         let t = resolve_upgrade_target(None, Some(managed.clone()), None, &d);
         assert_eq!(t.path, managed);
         assert_eq!(t.source, "running binary");
+        assert!(!t.explicit, "a resolved default is subject to the refusal");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -3279,10 +3385,12 @@ mod upgrade_target_tests {
         let t = resolve_upgrade_target(None, Some(built.clone()), Some(&path_var), &d);
         assert_eq!(t.path, on_path, "shim dir and target dir skipped");
         assert_eq!(t.source, "first pixel on PATH");
+        assert!(!t.explicit);
 
         let t = resolve_upgrade_target(None, Some(built), None, &d);
         assert_eq!(t.path, d.join(".local/bin/pixel"));
         assert_eq!(t.source, "default");
+        assert!(!t.explicit);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -3316,6 +3424,104 @@ mod upgrade_target_tests {
         let link_first =
             std::env::join_paths([link_dir, stale.parent().unwrap().to_path_buf()]).unwrap();
         assert_eq!(upgrade_shadowed_by(&managed, Some(&link_first)), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `pixel upgrade --dev` exists to never touch `pixel`: a `pixel` earlier
+    /// on PATH is not shadowing `pixel-dev`, so warning about it would be a
+    /// false alarm on every dev install.
+    #[test]
+    fn a_binary_under_another_name_is_never_shadowed() {
+        let d = sandbox("devshadow");
+        let managed = touch(&d.join("mise/installs/pixel/bin/pixel"));
+        let dev = touch(&d.join("local/bin/pixel-dev"));
+        let path_var = std::env::join_paths([managed.parent().unwrap()]).unwrap();
+        assert_eq!(upgrade_shadowed_by(&dev, Some(&path_var)), None);
+        assert_eq!(
+            dev_install_path(Path::new("/home/u")),
+            PathBuf::from("/home/u/.local/bin/pixel-dev")
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn roots_of(roots: &[ManagedRoot]) -> Vec<(PathBuf, &'static str)> {
+        roots.iter().map(|r| (r.root.clone(), r.manager)).collect()
+    }
+
+    /// The trees a bare upgrade must not write into: mise's default and
+    /// relocated `installs/`, both Homebrew Cellars, and the Cellar
+    /// `brew shellenv` exports. An unset or empty variable adds nothing
+    /// (an empty `HOMEBREW_CELLAR` would otherwise make `""` a root).
+    #[test]
+    fn package_manager_roots_cover_mise_and_homebrew() {
+        let home = Path::new("/nonexistent-home");
+        let base = roots_of(&package_manager_roots(home, None, None));
+        assert_eq!(
+            base,
+            vec![
+                (home.join(".local/share/mise/installs"), "mise"),
+                (PathBuf::from("/opt/homebrew/Cellar"), "Homebrew"),
+                (PathBuf::from("/usr/local/Cellar"), "Homebrew"),
+            ]
+        );
+        let empty = std::ffi::OsStr::new("");
+        assert_eq!(
+            roots_of(&package_manager_roots(home, Some(empty), Some(empty))),
+            base
+        );
+        let with_env = roots_of(&package_manager_roots(
+            home,
+            Some(std::ffi::OsStr::new("/nonexistent-mise")),
+            Some(std::ffi::OsStr::new("/nonexistent-cellar")),
+        ));
+        assert!(with_env.contains(&(PathBuf::from("/nonexistent-mise/installs"), "mise")));
+        assert!(with_env.contains(&(PathBuf::from("/nonexistent-cellar"), "Homebrew")));
+        assert_eq!(with_env.len(), 5);
+    }
+
+    fn target(path: PathBuf, explicit: bool) -> UpgradeTarget {
+        UpgradeTarget {
+            path,
+            source: "running binary",
+            explicit,
+        }
+    }
+
+    /// The refusal is the guard against clobbering a managed install: a
+    /// resolved path under a root is refused (directly or through a
+    /// symlink), a sibling that merely shares a name prefix is not, and an
+    /// explicit `--install-path` is always the user's call.
+    #[test]
+    fn refusal_follows_symlinks_into_managed_roots_and_spares_explicit_paths() {
+        let d = sandbox("refusal");
+        let cellar = d.join("Cellar");
+        let keg = touch(&cellar.join("pixel/1.0/bin/pixel"));
+        let roots = vec![ManagedRoot {
+            root: cellar.canonicalize().unwrap(),
+            manager: "Homebrew",
+        }];
+
+        let reason = upgrade_target_refusal(&target(keg.clone(), false), &roots).unwrap();
+        assert!(reason.contains(&keg.display().to_string()), "{reason}");
+        assert!(reason.contains("(running binary)"), "{reason}");
+        assert!(reason.contains("Homebrew"), "{reason}");
+
+        let link = d.join("bin/pixel");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&keg, &link).unwrap();
+        let reason = upgrade_target_refusal(&target(link, false), &roots).unwrap();
+        assert!(
+            reason.contains(&keg.display().to_string()),
+            "resolved: {reason}"
+        );
+
+        assert!(upgrade_target_refusal(&target(keg, true), &roots).is_none());
+        let sibling = touch(&d.join("Cellarx/pixel"));
+        assert!(upgrade_target_refusal(&target(sibling, false), &roots).is_none());
+        // A path that does not exist yet (the `~/.local/bin/pixel` default)
+        // is compared as given.
+        let missing = cellar.canonicalize().unwrap().join("new/pixel");
+        assert!(upgrade_target_refusal(&target(missing, false), &roots).is_some());
         let _ = std::fs::remove_dir_all(&d);
     }
 }
@@ -4756,17 +4962,34 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         Command::SelfUpdate {
             build,
             install_path,
+            dev,
             restart_daemon,
             repo,
             dry_run,
         } => {
             let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
             let path_var = std::env::var_os("PATH");
-            let target = resolve_upgrade_target(
-                install_path,
-                std::env::current_exe().ok(),
-                path_var.as_deref(),
-                Path::new(&home),
+            let target = if dev {
+                UpgradeTarget {
+                    path: dev_install_path(Path::new(&home)),
+                    source: "--dev",
+                    explicit: false,
+                }
+            } else {
+                resolve_upgrade_target(
+                    install_path,
+                    std::env::current_exe().ok(),
+                    path_var.as_deref(),
+                    Path::new(&home),
+                )
+            };
+            let refusal = upgrade_target_refusal(
+                &target,
+                &package_manager_roots(
+                    Path::new(&home),
+                    std::env::var_os("MISE_DATA_DIR").as_deref(),
+                    std::env::var_os("HOMEBREW_CELLAR").as_deref(),
+                ),
             );
             let dest = target.path;
             eprintln!("Install path: {} ({})", dest.display(), target.source);
@@ -4774,7 +4997,15 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 if let Some(other) = upgrade_shadowed_by(&dest, path_var.as_deref()) {
                     eprintln!("warning: {} precedes that path on PATH", other.display());
                 }
-                return write_stdout(&format!("{}\n", dest.display()));
+                write_stdout(&format!("{}\n", dest.display()))?;
+            }
+            // A dry run still fails on a refused path, so
+            // `pixel self-update --dry-run && pixel self-update` never writes.
+            if let Some(reason) = refusal {
+                return Err(reason);
+            }
+            if dry_run {
+                return Ok(());
             }
             // 1. Build.
             eprintln!("Building: {build}");
