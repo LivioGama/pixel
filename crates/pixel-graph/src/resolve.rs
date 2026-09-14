@@ -187,6 +187,11 @@ impl ResolveIndex {
         })
     }
 
+    /// True iff some symbol in the graph is named `name`.
+    pub fn defines(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+
     /// The tier decision for one call from `caller_file_id` to `name`.
     /// `receiver` is the receiver expression text (if any) of the call site;
     /// a real receiver (not `self`/`Self`/`this`) caps the result at
@@ -341,8 +346,10 @@ pub fn resolve_calls(
 /// the store. Used by `build::build_graph` after extraction. Mirrors
 /// `resolve_calls` but inserts `EdgeKind::References` edges and always
 /// uses `Tier::Probable` (we don't know if the callee actually invokes
-/// the arg). Unresolved references go to `unresolved_calls` so the
-/// epistemic envelope counts them.
+/// the arg). A reference whose name no symbol carries is a plain value
+/// (`g(x)`), not a callback, and is dropped; only a named function the
+/// resolver could not pick goes to `unresolved_calls`, where the epistemic
+/// envelope counts it.
 pub fn resolve_references(
     store: &GraphStore,
     pending: &[FileReferences],
@@ -351,6 +358,9 @@ pub fn resolve_references(
     let mut stats = ResolveStats::default();
     for fr in pending {
         for r#ref in &fr.references {
+            if !idx.defines(&r#ref.name) {
+                continue;
+            }
             let Some(src_id) = r#ref.enclosing_symbol_id else {
                 // Top-level reference site: no source symbol to hang an edge on.
                 store.insert_unresolved_call(

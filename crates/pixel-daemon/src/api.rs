@@ -1567,10 +1567,12 @@ impl Service {
         if role == "callees" {
             // Name-based uncertainty describes incoming calls. Outgoing queries
             // must also account for unresolved calls enclosed by this symbol.
+            // Only calls: an unresolved callback argument is a reference the
+            // symbol passes on, not a callee it invokes.
             let unresolved: u64 = store
                 .conn()
                 .query_row(
-                    "SELECT COUNT(*) FROM unresolved_calls WHERE enclosing_symbol_id = ?1",
+                    "SELECT COUNT(*) FROM unresolved_calls WHERE enclosing_symbol_id = ?1 AND kind = 'calls'",
                     [sym.id],
                     |row| row.get::<_, i64>(0).map(|count| count as u64),
                 )
@@ -3981,9 +3983,14 @@ mod tests {
         std::fs::write(
             root.join("calls.ts"),
             "export function known() { return 1; }\n\
-             export function entry() { known(); missing(); missing(); }\n",
+             export function entry() { known(); missing(); missing(); }\n\
+             export function relay() { known(handler); }\n",
         )
         .unwrap();
+        // Two files define `handler` and calls.ts imports neither: the
+        // argument stays an unresolved reference.
+        std::fs::write(root.join("a.ts"), "export function handler() {}\n").unwrap();
+        std::fs::write(root.join("b.ts"), "export function handler() {}\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
         git(&root, &["commit", "-qm", "outgoing fixture"]);
@@ -4007,10 +4014,22 @@ mod tests {
                 .contains("2 unresolved outgoing call site(s)")
         );
 
+        // `relay` passes an unresolved callback on but invokes only `known`:
+        // the reference is not an outgoing call site the answer may miss.
+        let relay = svc.handle(Request::Uses {
+            uid_or_name: "relay".into(),
+            role: "callees".into(),
+            offset: None,
+        });
+        assert!(relay.ok);
+        assert_eq!(relay.data()["total_edges"], 1, "{:?}", relay.data());
+        assert_eq!(relay.data()["envelope"]["unresolved_outgoing"], 0);
+        assert!(!relay.epistemics.as_ref().unwrap().lower_bound);
+
         for (symbol, role, count) in [
             ("entry", "callers", 0),
             ("known", "callees", 0),
-            ("known", "callers", 1),
+            ("known", "callers", 2),
         ] {
             let response = svc.handle(Request::Uses {
                 uid_or_name: symbol.into(),

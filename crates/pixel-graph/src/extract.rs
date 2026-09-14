@@ -319,47 +319,69 @@ fn each_child<'t>(n: Node<'t>) -> Vec<Node<'t>> {
     n.children(&mut cursor).collect()
 }
 
+/// Words that parse as identifiers in some grammars but never name a
+/// function: literal keywords and the self pseudo-receivers.
+const NON_REFERENCE_WORDS: &[&str] = &[
+    "undefined",
+    "null",
+    "true",
+    "false",
+    "None",
+    "nil",
+    "self",
+    "this",
+];
+
+/// The receiver texts a member argument may start from and still name a
+/// function of the enclosing type (`this.onClick`, `self.handler`).
+const SELF_RECEIVERS: &[&str] = &["this", "self", "Self"];
+
 /// Walk the `arguments` field of a call/invocation node and record each
-/// identifier / member-expression argument as a `RawReference`. The callee
-/// name (`arg_of`) is the method/function that received the argument.
-/// Literal keywords (`undefined`, `null`, `true`, `false`) are skipped.
+/// argument that may name a function as a `RawReference`. The callee name
+/// (`arg_of`) is the method/function that received the argument.
+///
+/// - a bare identifier (`schema.plugin(tenantScopePlugin)`), literal
+///   keywords and self pseudo-receivers excepted;
+/// - a path (`Self::helper`, `module::func`), which names an item;
+/// - a member access only on a self receiver (`this.onClick`). A member of
+///   any other value (`user.name`) is data: resolving its property name
+///   against every function of that name linked unrelated code.
 fn walk_call_arguments(w: &mut Walker, call: Node, arg_of: Option<String>) {
     let Some(args) = call.child_by_field_name("arguments") else {
         return;
     };
     let mut cursor = args.walk();
     for arg in args.children(&mut cursor) {
-        match arg.kind() {
-            "identifier" | "simple_identifier" | "variable" => {
-                let name = w.text(arg);
-                if !name.is_empty()
-                    && !matches!(
-                        name.as_str(),
-                        "undefined" | "null" | "true" | "false" | "None" | "nil" | "self" | "this"
-                    )
-                {
-                    w.push_reference(name, call, arg_of.clone());
-                }
+        let name = match arg.kind() {
+            "identifier" | "simple_identifier" | "variable" => Some(w.text(arg)),
+            "scoped_identifier" => field_text(w, arg, "name"),
+            "member_expression" | "field_expression" | "attribute" | "member_access_expression" => {
+                self_member_name(w, arg)
             }
-            "member_expression"
-            | "field_expression"
-            | "attribute"
-            | "member_access_expression"
-            | "scoped_identifier" => {
-                // e.g. `obj.method` passed as arg — extract the property name.
-                let prop = ["property", "field", "attribute", "name"]
-                    .iter()
-                    .find_map(|f| arg.child_by_field_name(f))
-                    .map(|c| w.text(c));
-                if let Some(name) = prop
-                    && !name.is_empty()
-                {
-                    w.push_reference(name, call, arg_of.clone());
-                }
-            }
-            _ => {}
+            _ => None,
+        };
+        if let Some(name) = name
+            && !NON_REFERENCE_WORDS.contains(&name.as_str())
+        {
+            w.push_reference(name, call, arg_of.clone());
         }
     }
+}
+
+/// The property of a member access whose receiver is `this`/`self`/`Self`,
+/// or `None` for a member of any other value.
+fn self_member_name(w: &Walker, member: Node) -> Option<String> {
+    let receiver = ["object", "value", "expression"]
+        .iter()
+        .find_map(|f| member.child_by_field_name(f))
+        .map(|c| w.text(c))?;
+    if !SELF_RECEIVERS.contains(&receiver.as_str()) {
+        return None;
+    }
+    ["property", "field", "attribute", "name"]
+        .iter()
+        .find_map(|f| member.child_by_field_name(f))
+        .map(|c| w.text(c))
 }
 
 // --- TypeScript / TSX / JavaScript ---------------------------------------
@@ -467,6 +489,9 @@ fn walk_ts(w: &mut Walker, lang: &'static str, node: Node, depth: usize) {
                 let has_handler = jsx_has_handler(w, opening);
                 let text_content = jsx_text_content(w, node, opening, &tag);
                 jsx_handler_refs(w, opening, &tag);
+                if let Some((name, receiver)) = jsx_component_call(&tag) {
+                    w.push_call(name, receiver, node);
+                }
                 w.push_jsx_element(
                     tag,
                     has_handler,
@@ -482,6 +507,9 @@ fn walk_ts(w: &mut Walker, lang: &'static str, node: Node, depth: usize) {
                 let has_handler = jsx_has_handler(w, node);
                 let text_content = jsx_attr_text(w, node);
                 jsx_handler_refs(w, node, &tag);
+                if let Some((name, receiver)) = jsx_component_call(&tag) {
+                    w.push_call(name, receiver, node);
+                }
                 w.push_jsx_element(
                     tag,
                     has_handler,
@@ -565,6 +593,26 @@ fn sub_field_text(w: &Walker, node: Node, field: &str) -> Option<String> {
 }
 
 // --- JSX helpers ---------------------------------------------------------
+
+/// The call a JSX tag compiles to, as `(name, receiver)`: `<Button/>` renders
+/// the `Button` component, `<Menu.Item>` the `Item` member of `Menu`. A
+/// lowercase or namespaced tag (`div`, `svg:rect`) is an intrinsic element
+/// and renders no symbol. Without this edge every component that is only
+/// rendered, never called, had no callers.
+fn jsx_component_call(tag: &str) -> Option<(String, Option<String>)> {
+    if tag.contains(':') {
+        return None;
+    }
+    match tag.rsplit_once('.') {
+        Some((receiver, name)) if !receiver.is_empty() && !name.is_empty() => {
+            Some((name.to_string(), Some(receiver.to_string())))
+        }
+        Some(_) => None,
+        None => tag
+            .starts_with(|c: char| c.is_ascii_uppercase())
+            .then(|| (tag.to_string(), None)),
+    }
+}
 
 fn jsx_attr_name(w: &Walker, attr: Node) -> Option<String> {
     // jsx_attribute has no named fields and names like `aria-label` are parsed
@@ -1542,7 +1590,9 @@ fn generic_import(w: &mut Walker, node: Node) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileExtraction, RawCall, RawSymbol, assign_enclosing, extract_file};
+    use super::{
+        FileExtraction, RawCall, RawSymbol, assign_enclosing, extract_file, jsx_component_call,
+    };
     use crate::store::SymbolKind;
 
     fn sym(name: &str, start_line: u32, end_line: u32) -> RawSymbol {
@@ -1982,6 +2032,83 @@ export function wire(emitter: any) {
             extraction.references
         );
         assert_eq!(refs[0].arg_of.as_deref(), Some("on"));
+    }
+
+    fn reference_names(path: &str, source: &[u8]) -> Vec<String> {
+        let extraction = extract_file(path, source).unwrap();
+        extraction.references.into_iter().map(|r| r.name).collect()
+    }
+
+    /// A member argument names a function only on a self receiver:
+    /// `user.name` is data, and resolving `name` against every function of
+    /// that name linked unrelated code.
+    #[test]
+    fn member_arguments_are_references_only_on_a_self_receiver() {
+        assert_eq!(
+            reference_names(
+                "src/a.ts",
+                b"export class C { go(user: any) { consume(user.name, this.onClick, handler); } }\n",
+            ),
+            ["onClick", "handler"]
+        );
+        assert_eq!(
+            reference_names(
+                "src/a.py",
+                b"class C:\n    def go(self, obj):\n        register(self, self.handler, obj.attr, None)\n",
+            ),
+            ["handler"]
+        );
+        assert_eq!(
+            reference_names(
+                "src/a.rs",
+                b"impl C { fn go(&self, cfg: Cfg) { run(cfg.field, self.handler, Self::helper, self); } }\n",
+            ),
+            ["handler", "helper"]
+        );
+    }
+
+    #[test]
+    fn jsx_component_call_names_rendered_components_only() {
+        assert_eq!(
+            jsx_component_call("Button"),
+            Some(("Button".to_string(), None))
+        );
+        assert_eq!(
+            jsx_component_call("Menu.Item"),
+            Some(("Item".to_string(), Some("Menu".to_string())))
+        );
+        assert_eq!(
+            jsx_component_call("ui.menu.item"),
+            Some(("item".to_string(), Some("ui.menu".to_string())))
+        );
+        for intrinsic in ["div", "button", "svg:rect", "Svg:Rect", ".x", "x.", ""] {
+            assert_eq!(jsx_component_call(intrinsic), None, "{intrinsic:?}");
+        }
+    }
+
+    #[test]
+    fn rendered_jsx_components_are_calls_and_intrinsic_tags_are_not() {
+        let source = b"export function App() { return <div><Button label=\"x\" /><Menu.Item>go</Menu.Item></div>; }\n";
+        let extraction = extract_file("src/App.tsx", source).unwrap();
+        let calls: Vec<(&str, Option<&str>)> = extraction
+            .calls
+            .iter()
+            .map(|c| (c.callee_name.as_str(), c.receiver.as_deref()))
+            .collect();
+        assert_eq!(calls, [("Button", None), ("Item", Some("Menu"))]);
+        let app = extraction
+            .symbols
+            .iter()
+            .position(|s| s.name == "App")
+            .unwrap();
+        assert!(
+            extraction
+                .calls
+                .iter()
+                .all(|c| c.enclosing_index == Some(app)),
+            "the renderer encloses every component call: {:?}",
+            extraction.calls
+        );
     }
 
     #[test]
