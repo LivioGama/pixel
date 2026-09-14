@@ -627,7 +627,8 @@ fn rename_in_test_file(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Resu
 
     for pair in sorted_pairs {
         // .args(["old-name", ...]) → .args(["new-name", ...])
-        for prefix in ["[\"", ", \""] {
+        // Also handles multi-line arrays where "old-name" is on its own line
+        for prefix in ["[\"", ", \"", "\n        \"", "\n            \"", "\n                \""] {
             let old_full = format!("{}{}\"", prefix, pair.old_kebab);
             let new_full = format!("{}{}\"", prefix, pair.new_kebab);
             let count = new_content.matches(&old_full).count();
