@@ -3,7 +3,7 @@
 //! fast); an accept thread and a notify watcher feed one mpsc channel.
 
 use std::collections::BTreeMap;
-use std::io::{BufReader, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf};
@@ -120,6 +120,45 @@ fn runtime_dir() -> PathBuf {
 
 pub fn pid_path(root: &Path) -> PathBuf {
     socket_path(root).with_extension("pid")
+}
+
+/// How long the [`ping_only`] probe waits for a connect and a reply. A warm
+/// daemon answers a `Ping` immediately; a socket that stays silent past this
+/// is not the fast path the caller was looking for.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Probe a daemon without ever starting one: connect to [`socket_path`] and
+/// send one `Ping`, `true` only when the daemon answers `ok`.
+///
+/// Deliberately not the CLI's auto-starting `try_daemon`: any root it is
+/// given gets a repository `Service` spawned for it, which is wrong for the
+/// machine-wide corpus (`recall_dir()`), where only the recall daemon may
+/// serve and `Service::open` leaves `.pixel/` artifacts inside the corpus.
+/// A caller that wants a daemon running starts it explicitly.
+pub fn ping_only(root: &Path) -> bool {
+    let Ok(mut stream) = UnixStream::connect(socket_path(root)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
+    probe_ping(&mut stream)
+}
+
+/// One `Ping` round trip on an already-connected stream: `true` only for an
+/// `ok` reply. Split from [`ping_only`] so tests drive the framing over a
+/// socket pair instead of a real daemon.
+fn probe_ping(stream: &mut UnixStream) -> bool {
+    // A unit variant: serialization cannot fail.
+    let mut line = serde_json::to_string(&Request::Ping).expect("Request::Ping serializes");
+    line.push('\n');
+    if stream.write_all(line.as_bytes()).is_err() {
+        return false;
+    }
+    let mut reply = String::new();
+    if BufReader::new(stream).read_line(&mut reply).is_err() {
+        return false;
+    }
+    serde_json::from_str::<Response>(&reply).is_ok_and(|r| r.ok)
 }
 
 enum Msg {
@@ -592,6 +631,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root.canonicalize().unwrap()
+    }
+
+    /// A socket pair carrying a canned reply: the probe's contract is the
+    /// reply's `ok` field, not the transport.
+    #[test]
+    fn probe_ping_is_true_only_for_an_ok_reply() {
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let ok = Response::success("ping", serde_json::json!({"pong": true}));
+        writeln!(server, "{}", serde_json::to_string(&ok).unwrap()).unwrap();
+        assert!(probe_ping(&mut client), "an ok reply is a live daemon");
+
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let failed = failure_response("ping", "not serving");
+        writeln!(server, "{}", serde_json::to_string(&failed).unwrap()).unwrap();
+        assert!(!probe_ping(&mut client), "a failure envelope is not");
+
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        writeln!(server, "not json").unwrap();
+        assert!(!probe_ping(&mut client), "garbage is not a live daemon");
+    }
+
+    /// The probe must be false for a root nobody serves, and true for one a
+    /// daemon listens on: the two halves a constant-returning mutant breaks.
+    #[test]
+    fn ping_only_sees_a_listening_daemon_and_nothing_else() {
+        let bare = scratch_root("probe-none");
+        assert!(!ping_only(&bare));
+
+        let root = scratch_root("probe-live");
+        let listener = UnixListener::bind(socket_path(&root)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            // Poll with a deadline: a probe that never connects must fail the
+            // assertion, not hang the suite.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        // A non-blocking listener hands back a non-blocking
+                        // socket on BSD: reset it, or the read races the
+                        // client's write instead of waiting for it.
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                        let mut line = String::new();
+                        let Ok(n) = BufReader::new(&stream).read_line(&mut line) else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        assert_eq!(
+                            serde_json::from_str::<Request>(&line).unwrap(),
+                            Request::Ping,
+                            "the probe sends a Ping"
+                        );
+                        let reply = Response::success("ping", serde_json::json!({"pong": true}));
+                        writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+                        return;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        assert!(ping_only(&root));
+        server.join().unwrap();
+        let _ = std::fs::remove_file(socket_path(&root));
     }
 
     fn shutdown(sock: &Path) {

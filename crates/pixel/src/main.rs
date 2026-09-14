@@ -3043,8 +3043,89 @@ fn run_search_one(
 // daemon management
 // ---------------------------------------------------------------------------
 
+/// Probe a daemon without starting one. Deliberately not `try_daemon`: that
+/// one auto-starts a repository `Service` for any root it is given, which
+/// turns a `status` or a `daemon start` check (the recall daemon's included)
+/// into a spurious service — with `.pixel/` artifacts — on that root.
 fn daemon_ping(root: &Path) -> bool {
-    try_daemon(root, &Request::Ping).is_some_and(|r| r.ok)
+    pixel_daemon::daemon::ping_only(root)
+}
+
+#[cfg(test)]
+mod daemon_ping_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::time::Instant;
+
+    fn scratch_root(tag: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("pixel-daemon-ping-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    /// Nothing listens: the probe is false and opens nothing — the repository
+    /// `Service` an auto-starting probe would open is what left `.pixel/`
+    /// inside `~/.local/share/pixel/recall`.
+    #[test]
+    fn daemon_ping_is_false_without_a_daemon() {
+        let root = scratch_root("idle");
+        assert!(!daemon_ping(&root));
+        assert!(
+            !root.join(pixel_index::index::SHARD_DIR).exists(),
+            "the probe must not open a Service on {}",
+            root.display()
+        );
+    }
+
+    /// A daemon answering `Ping` is what the probe reports: without this half,
+    /// a probe that always returned false would pass the idle test.
+    #[test]
+    fn daemon_ping_is_true_when_a_daemon_answers() {
+        let root = scratch_root("live");
+        let listener = UnixListener::bind(daemon::socket_path(&root)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            // Poll with a deadline: a probe that never connects must fail the
+            // assertion, not hang the suite.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        // A non-blocking listener hands back a non-blocking
+                        // socket on BSD: reset it, or the read races the
+                        // client's write instead of waiting for it.
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                        let mut line = String::new();
+                        let Ok(n) = BufReader::new(&stream).read_line(&mut line) else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        assert_eq!(
+                            serde_json::from_str::<Request>(&line).unwrap(),
+                            Request::Ping,
+                            "the probe asks with a Ping"
+                        );
+                        let reply = Response::success("ping", json!({"pong": true}));
+                        writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+                        return;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        assert!(daemon_ping(&root));
+        server.join().unwrap();
+        let _ = std::fs::remove_file(daemon::socket_path(&root));
+    }
 }
 
 fn daemon_start(path: PathBuf, foreground: bool, quiet: bool) -> Result<(), String> {

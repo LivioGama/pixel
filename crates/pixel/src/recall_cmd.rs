@@ -339,20 +339,37 @@ fn run_daemon_cmd(cmd: RecallDaemonCmd) -> Result<(), String> {
     }
 }
 
-/// Daemon-first execution for the hot recall ops; None = no daemon (or the
-/// daemon errored) — caller falls back to the in-process path.
-fn try_recall_daemon(action: &str, params: serde_json::Value) -> Option<serde_json::Value> {
-    let root = pixel_recall::recall_dir();
+/// Daemon-first execution for the hot recall ops.
+///
+/// `Ok(None)` = no recall daemon is listening, so the caller takes the
+/// in-process path. `Err` = a daemon answered with a failure envelope, which
+/// the caller names before falling back: a daemon whose vectors are corrupt
+/// or whose model is incompatible is otherwise indistinguishable from "no
+/// daemon", and its work (the model load included) is silently redone.
+///
+/// Only the recall daemon serves `Recall` (`pixel recall daemon start
+/// --foreground`); a repository `Service` answers `Ping` and rejects it. The
+/// probe decides whether to ask at all, and never starts a daemon: `root` is
+/// a parameter rather than `recall_dir()` so tests can drive a fake socket.
+fn try_recall_daemon(
+    root: &std::path::Path,
+    action: &str,
+    params: serde_json::Value,
+) -> Result<Option<serde_json::Value>, String> {
+    if !pixel_daemon::daemon::ping_only(root) {
+        return Ok(None);
+    }
     let req = pixel_daemon::api::Request::Recall {
         action: action.to_string(),
         params,
     };
-    let resp = crate::try_daemon(&root, &req)?;
-    if resp.ok {
-        Some(resp.into_data())
-    } else {
-        None
+    let Some(resp) = crate::try_daemon_inner(root, &req) else {
+        return Ok(None);
+    };
+    if !resp.ok {
+        return Err(resp.error_message());
     }
+    Ok(Some(resp.into_data()))
 }
 
 fn print_daemon_result(data: &serde_json::Value, json: bool) {
@@ -462,8 +479,9 @@ fn run_context(
     out.push_str(&format!(
         "\nfitted: budget={budget} used={used} dropped_blocks={dropped}\n"
     ));
-    print!("{out}");
-    Ok(())
+    // Composed text, not a JSON document: `write_stdout` is what keeps these
+    // bytes in the output counters the metrics line reports.
+    crate::write_stdout(&out)
 }
 
 fn run_setup() -> Result<(), String> {
@@ -538,15 +556,20 @@ fn run_ask(
         session_id: None,
     };
     // The daemon keeps the model warm — ask is much faster through it.
-    if let Some(data) = try_recall_daemon(
+    match try_recall_daemon(
+        &pixel_recall::recall_dir(),
         "ask",
         json!({
             "query": query, "k": k, "lexical_only": lexical_only,
             "filters": filters,
         }),
     ) {
-        print_daemon_result(&data, json);
-        return Ok(());
+        Ok(Some(data)) => {
+            print_daemon_result(&data, json);
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("recall daemon: {e} — running in-process instead"),
     }
 
     let mut embedder_slot = if lexical_only {
@@ -833,15 +856,20 @@ fn run_search(
         human_only,
         session_id,
     };
-    if let Some(data) = try_recall_daemon(
+    match try_recall_daemon(
+        &pixel_recall::recall_dir(),
         "search",
         json!({
             "pattern": pattern, "word": word, "limit": limit, "offset": offset,
             "filters": filters,
         }),
     ) {
-        print_daemon_result(&data, json);
-        return Ok(());
+        Ok(Some(data)) => {
+            print_daemon_result(&data, json);
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("recall daemon: {e} — running in-process instead"),
     }
     let result = search(&store, &segments, pattern, word, &filters, offset, limit)?;
     if json {
@@ -1090,15 +1118,17 @@ fn run_show(session_ref: &str, turn: Option<&str>, json: bool) -> Result<(), Str
                 "truncated": t.truncated,
             })).collect::<Vec<_>>(),
         });
-        println!("{out}");
-        return Ok(());
+        // `print_data` caps the document (structurally, so it stays one JSON
+        // object with `truncated`) and counts the bytes it emits.
+        return crate::print_data(&out, true);
     }
-    println!("{}", session_line(&session));
+    let mut out = String::new();
+    out.push_str(&session_line(&session));
+    out.push('\n');
     if let Some(branch) = &session.git_branch {
-        println!("branch: {branch}");
+        out.push_str(&format!("branch: {branch}\n"));
     }
-    println!("source: {}", session.source_path);
-    println!();
+    out.push_str(&format!("source: {}\n\n", session.source_path));
     for t in &turns {
         let ts = t.ts.map_or_else(|| "?".to_string(), format_ms);
         let intent = t
@@ -1107,13 +1137,16 @@ fn run_show(session_ref: &str, turn: Option<&str>, json: bool) -> Result<(), Str
             .filter(|i| *i == "orchestrator")
             .map_or("", |_| " (orchestrator)");
         let trunc = if t.truncated { " [truncated]" } else { "" };
-        println!("--- #{} {} {}{}{} ---", t.seq, t.role, ts, intent, trunc);
-        println!("{}", t.text);
+        out.push_str(&format!(
+            "--- #{} {} {}{}{} ---\n{}",
+            t.seq, t.role, ts, intent, trunc, t.text
+        ));
+        out.push('\n');
     }
     if turns.is_empty() {
-        println!("(no turns in range)");
+        out.push_str("(no turns in range)\n");
     }
-    Ok(())
+    crate::write_stdout(&out)
 }
 
 fn run_status(json: bool) -> Result<(), String> {
@@ -1212,6 +1245,113 @@ mod tests {
             "{before} <= {now} <= {after}"
         );
         assert!(now > 1_577_836_800_000, "after 2020-01-01");
+    }
+
+    /// A temp root for the daemon-socket tests: `socket_path` keys off the
+    /// canonical root, so it has to exist.
+    fn scratch_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("pixel-recall-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    /// A recall-daemon socket that answers the client's `Ping` and then one
+    /// canned `Recall` envelope: the wire contract, with no corpus behind it.
+    fn fake_recall_daemon(
+        root: &std::path::Path,
+        answer: pixel_daemon::Response,
+    ) -> std::thread::JoinHandle<()> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let listener = UnixListener::bind(pixel_daemon::daemon::socket_path(root)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            // The client probes with `ping_only` on one connection and opens
+            // another for the op, so serve connections until one carries the
+            // `Recall`. Poll with a deadline: a client that never gets that
+            // far must fail its own assertion, not hang here.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut served = false;
+            while !served && std::time::Instant::now() < deadline {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    continue;
+                };
+                // A non-blocking listener hands back a non-blocking socket on
+                // BSD: reset it, or the read races the client's write.
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                while !served {
+                    let mut line = String::new();
+                    let Ok(n) = reader.read_line(&mut line) else {
+                        break;
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    let reply = match serde_json::from_str::<pixel_daemon::Request>(&line).unwrap()
+                    {
+                        pixel_daemon::Request::Ping => pixel_daemon::Response::success(
+                            "ping",
+                            json!({"pong": true, "protocol_version": pixel_daemon::api::PROTOCOL_VERSION}),
+                        ),
+                        pixel_daemon::Request::Recall { .. } => {
+                            served = true;
+                            answer.clone()
+                        }
+                        other => panic!("unexpected request: {other:?}"),
+                    };
+                    writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+                }
+            }
+        })
+    }
+
+    /// No recall daemon listening: the daemon path declines with no error, so
+    /// the caller runs in-process.
+    #[test]
+    fn recall_daemon_path_declines_when_no_daemon_listens() {
+        let root = scratch_root("no-daemon");
+        assert_eq!(
+            try_recall_daemon(&root, "search", json!({"pattern": "needle"})),
+            Ok(None)
+        );
+    }
+
+    /// A daemon's answer is handed back as the op's payload, unchanged.
+    #[test]
+    fn recall_daemon_answer_is_returned_as_is() {
+        let root = scratch_root("answering");
+        let server = fake_recall_daemon(
+            &root,
+            pixel_daemon::Response::success(
+                "recall",
+                json!({"json": {"hits": []}, "text": "no matches"}),
+            ),
+        );
+        assert_eq!(
+            try_recall_daemon(&root, "search", json!({"pattern": "needle"})),
+            Ok(Some(json!({"json": {"hits": []}, "text": "no matches"})))
+        );
+        server.join().unwrap();
+        let _ = std::fs::remove_file(pixel_daemon::daemon::socket_path(&root));
+    }
+
+    /// A daemon that answers with a failure envelope is an error to report,
+    /// not "no daemon": the in-process fallback must not be silent.
+    #[test]
+    fn recall_daemon_failure_is_reported_instead_of_swallowed() {
+        let root = scratch_root("failing");
+        let server = fake_recall_daemon(
+            &root,
+            pixel_daemon::api::failure_response("recall", "vector store is corrupt"),
+        );
+        let err = try_recall_daemon(&root, "ask", json!({"query": "needle"})).unwrap_err();
+        assert!(err.contains("vector store is corrupt"), "{err}");
+        server.join().unwrap();
+        let _ = std::fs::remove_file(pixel_daemon::daemon::socket_path(&root));
     }
 
     fn row() -> SessionRow {
