@@ -349,10 +349,11 @@ impl Op {
     }
 }
 
-/// User-facing op names for capability advertisement (the SessionStart
-/// hook, `pixel --help`, etc.) — every real variant's [`Op::op_name`]
-/// except `shutdown` (an internal admin op, not something to tell an
-/// agent to call). Kept in this file, beside the enum, so adding a
+/// The daemon ops a client may send — every real variant's [`Op::op_name`]
+/// except `shutdown` (an internal admin op). These are wire tags, not CLI
+/// commands: the SessionStart hook advertises the parser's subcommands
+/// instead, because several tags name another command or none (`update` is
+/// `fast-forward`, `sync` is `fetch`, `history_op` is `commit-history`). Kept in this file, beside the enum, so adding a
 /// variant is a one-line addition here too; `session_capabilities_track_every_real_op`
 /// below fails loudly if this list and the enum ever drift apart, which is
 /// the specific failure this const exists to make structurally impossible

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The session-start capability block lists the commands an agent can type (`scope-task`, `fast-forward`, `fetch`, …, as `pixel --help` shows them) instead of the daemon's op tags. An agent reading `update` or `sync` there ran `pixel update` (now `fast-forward`) or `pixel sync` (now `fetch`), and `targets`, `search` or `history_op` only worked, if at all, through the pre-rename aliases.
 - `pixel who-wrote` no longer fails on every file when git's `blame.ignoreRevsFile` names a file the repository lacks (a global `.git-blame-ignore-revs` default): git refused the blame with "could not open object name list". The blame is retried without the ignore list and the answer carries a warning saying so; an existing ignore-revs file is still honoured.
 
 ### Removed
