@@ -102,6 +102,9 @@ jobs:
       - name: Local gate runner contract (stub cargo, disposable repo)
         run: python3 scripts/test-gates.py
 
+      - name: Release prepare contract (stub gh and cargo, disposable repo)
+        run: python3 scripts/test-prepare.py
+
       - name: Warnings-denied Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
