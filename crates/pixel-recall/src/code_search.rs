@@ -196,43 +196,82 @@ pub fn ask(root: &Path, query: &str, k: usize, max_files: usize) -> Result<Vec<A
     ask_with_metadata(root, query, k, max_files).map(|result| result.hits)
 }
 
-/// Semantic fallback for cross-lingual concept resolution.
+/// Most files the semantic fallback embeds inside a daemon request.
+pub const SEMANTIC_FALLBACK_MAX_FILES: usize = 2000;
+
+/// Semantic leads for a query no lexical tier answered, with what the scan
+/// covered. The similarity scores do not separate related from unrelated
+/// files (measured on this repository, 2026-09-14: a nonsense query's best
+/// file scored 0.33, a relevant French question's 0.33 to 0.39), so callers
+/// present the hits as unverified leads, never as matches.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SemanticFallback {
+    /// `(repo-relative path, cosine similarity)`, best first, at most `limit`.
+    pub hits: Vec<(String, f64)>,
+    pub searched_files: usize,
+    /// The scan stopped at [`SEMANTIC_FALLBACK_MAX_FILES`].
+    pub file_limit_reached: bool,
+}
+
+impl SemanticFallback {
+    /// Caps a caller names in its epistemics when it shows these hits.
+    pub fn caps(&self) -> Vec<String> {
+        if self.hits.is_empty() {
+            return Vec::new();
+        }
+        let mut caps = vec![
+            "semantic leads are unverified: embedding similarity does not separate related from unrelated files"
+                .to_string(),
+        ];
+        if self.file_limit_reached {
+            caps.push(format!(
+                "semantic fallback embedded only the first {} of the eligible files",
+                self.searched_files
+            ));
+        }
+        caps
+    }
+}
+
+/// Semantic fallback for cross-lingual concept resolution: embeds the query
+/// with the multilingual `potion-code-16M-v2` model and ranks code files by
+/// the best-matching chunk.
 ///
-/// When lexical matching (`targets`/`resolve`) returns 0 results for a
-/// non-English query, this function embeds the query and finds matching code
-/// files using the multilingual `potion-code-16M-v2` model (distilled from
-/// bge-m3, which is cross-lingual).
-///
-/// Returns `(file_path, score)` pairs sorted by score descending, truncated
-/// to `limit`. The score is the cosine similarity of the query embedding to
-/// the best-matching chunk of each file. The daemon can map these to
-/// `ConceptMatch` / target tiers.
-///
-/// Graceful degradation: if the embedding model cannot be loaded (feature
-/// disabled, model missing, network error), returns an empty vec rather than
-/// propagating the error, so callers can fall through to other strategies.
+/// Never downloads the model: a daemon request must not block on the
+/// network. With no model on disk (fetched once by `pixel search-meaning`)
+/// or any other embedding error, the fallback is empty.
 ///
 /// Returned paths are repo-relative (stripped of `root`) so they join with
 /// index paths, annotations, and evidence maps that are all relative.
-pub fn semantic_fallback(root: &Path, query: &str, limit: usize) -> Vec<(String, f64)> {
-    // Reuse the existing ask() infrastructure but return a simpler type.
-    let hits = match ask(root, query, limit, 2000) {
-        Ok(hits) => hits,
-        Err(_) => return Vec::new(),
-    };
+#[cfg_attr(test, mutants::skip)] // adapter over the on-disk model; `fallback_from` holds the logic and is tested
+pub fn semantic_fallback(root: &Path, query: &str, limit: usize) -> SemanticFallback {
+    ask_with_embedder(root, query, limit, SEMANTIC_FALLBACK_MAX_FILES, false).map_or_else(
+        |_| SemanticFallback::default(),
+        |result| fallback_from(root, result),
+    )
+}
+
+/// The fallback answer for an ask `result` over `root`: repo-relative paths
+/// with their cosine similarity, and the scan coverage.
+fn fallback_from(root: &Path, result: AskResult) -> SemanticFallback {
     let root_str = root.display().to_string();
-    hits.into_iter()
-        .map(|h| {
-            // Strip the root prefix to produce repo-relative paths.
-            let rel = h
-                .path
-                .strip_prefix(&root_str)
-                .and_then(|s| s.strip_prefix('/'))
-                .unwrap_or(&h.path)
-                .to_string();
-            (rel, f64::from(h.semantic_score))
-        })
-        .collect()
+    SemanticFallback {
+        hits: result
+            .hits
+            .into_iter()
+            .map(|h| {
+                let rel = h
+                    .path
+                    .strip_prefix(&root_str)
+                    .and_then(|s| s.strip_prefix('/'))
+                    .unwrap_or(&h.path)
+                    .to_string();
+                (rel, f64::from(h.semantic_score))
+            })
+            .collect(),
+        searched_files: result.coverage.searched_files,
+        file_limit_reached: result.coverage.file_limit_reached,
+    }
 }
 
 pub fn ask_with_metadata(
@@ -240,6 +279,17 @@ pub fn ask_with_metadata(
     query: &str,
     k: usize,
     max_files: usize,
+) -> Result<AskResult, String> {
+    ask_with_embedder(root, query, k, max_files, true)
+}
+
+/// [`ask_with_metadata`], downloading the model only when `download`.
+fn ask_with_embedder(
+    root: &Path,
+    query: &str,
+    k: usize,
+    max_files: usize,
+    download: bool,
 ) -> Result<AskResult, String> {
     let (files, coverage) = collect_files(root, max_files);
     if files.is_empty() {
@@ -249,13 +299,13 @@ pub fn ask_with_metadata(
         });
     }
 
-    let mut embedder = open_code_embedder()?;
+    let mut embedder = open_code_embedder(download)?;
 
     ask_collected(query, k, files, coverage, embedder.as_mut())
 }
 
-fn open_code_embedder() -> Result<Box<dyn crate::embed::Embedder>, String> {
-    crate::embed::open_embedder_with_potion_repo(true, Some("minishlab/potion-code-16M-v2"))
+fn open_code_embedder(download: bool) -> Result<Box<dyn crate::embed::Embedder>, String> {
+    crate::embed::open_embedder_with_potion_repo(download, Some("minishlab/potion-code-16M-v2"))
 }
 
 fn ask_collected(
@@ -575,6 +625,59 @@ mod tests {
             .unwrap();
         assert!(error.contains("feature"));
         assert_eq!(std::env::var_os("PIXEL_RECALL_MODEL_REPO"), before);
+    }
+
+    fn hit(path: &str, semantic_score: f32) -> AskHit {
+        AskHit {
+            path: path.to_string(),
+            score: semantic_score,
+            semantic_score,
+            ranking_score: 0.0,
+            lexical_matches: 0,
+            query_terms: 0,
+            snippet: String::new(),
+        }
+    }
+
+    #[test]
+    fn fallback_from_makes_paths_repo_relative_and_keeps_the_coverage() {
+        let (_, mut coverage) = collect_files(Path::new("/nonexistent-root"), 3);
+        coverage.searched_files = 7;
+        coverage.file_limit_reached = true;
+        let result = AskResult {
+            hits: vec![hit("/repo/src/a.rs", 0.5), hit("elsewhere/b.rs", 0.25)],
+            coverage,
+        };
+        let fallback = fallback_from(Path::new("/repo"), result);
+        assert_eq!(
+            fallback.hits,
+            [
+                ("src/a.rs".to_string(), 0.5),
+                ("elsewhere/b.rs".to_string(), 0.25)
+            ]
+        );
+        assert_eq!(fallback.searched_files, 7);
+        assert!(fallback.file_limit_reached);
+    }
+
+    /// The caps travel with the hits: none without a lead, the unverified
+    /// warning with any, and the scan cap when the file limit stopped it.
+    #[test]
+    fn semantic_fallback_caps_follow_the_hits_and_the_scan() {
+        assert!(SemanticFallback::default().caps().is_empty());
+        let mut fallback = SemanticFallback {
+            hits: vec![("a.rs".to_string(), 0.3)],
+            searched_files: 2000,
+            file_limit_reached: false,
+        };
+        let caps = fallback.caps();
+        assert_eq!(caps.len(), 1);
+        assert!(caps[0].starts_with("semantic leads are unverified"));
+        fallback.file_limit_reached = true;
+        assert_eq!(
+            fallback.caps()[1],
+            "semantic fallback embedded only the first 2000 of the eligible files"
+        );
     }
 
     struct FixtureEmbedder {
