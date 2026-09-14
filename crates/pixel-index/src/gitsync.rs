@@ -44,6 +44,12 @@ pub fn ls_tree(root: &Path, oid: &str) -> Vec<String> {
     GitRunner::new(root).ls_tree(oid)
 }
 
+/// Blob paths of commit `oid`'s tree, or the git error (see
+/// `GitRunner::ls_tree_blobs`).
+pub fn ls_tree_blobs(root: &Path, oid: &str) -> Result<Vec<String>, pixel_git::GitError> {
+    GitRunner::new(root).ls_tree_blobs(oid)
+}
+
 /// Blob content of `path` as it exists in commit `oid` (`git show oid:path`).
 /// Returns the raw bytes git stores for that path at that commit — for a
 /// symlink this is the target text (a few bytes), never a traversal. `None`

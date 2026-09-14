@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-09-14
+
+### Fixed
+- `pixel search-meaning`, and the semantic fallback of `pixel scope-task` and `pixel find-code`, no longer search nested checkouts: a directory holding a `.git` file or directory (a linked worktree such as `.claude/worktrees/<name>`, a submodule, a nested clone) is skipped, so copies of the repository's own files on another branch stop filling the hits. The coverage `scope` says so.
+- `pixel scope-task` adds semantic hits as unverified P2 leads (`semantic lead (similarity 0.39, unverified)`) instead of P1 targets, names that caveat and a capped scan in its epistemics, and no longer downloads the embedding model inside the request. The similarity does not separate related from unrelated files: on this repository a nonsense task's best file scored 0.33, a relevant French one 0.33 to 0.39, so a nonsense task used to come back with P1 targets. `pixel find-code`'s semantic fallback carries the same caps and offline rule.
+- The per-commit base-shard cache (`~/.cache/pixel/shards`) no longer spreads an incomplete or foreign index to other worktrees. A shard built with `PIXEL_INDEX_NO_DEFAULT_IGNORES` shared its key with the default build; the pixel-only `.gitignore` rule read the worktree file instead of the commit; a blob git failed to read was dropped and the shard still published; a failed `git ls-tree` built and published an empty shard; and a corrupt entry was never replaced. The key now carries the ignore variant, the rule reads the committed blob, only complete shards are published (submodules are not counted as missing), a listing failure is an error, and a rebuild replaces an entry that did not open.
+- `pixel plan`'s dead-code query no longer reports Rust trait implementation methods (`fmt` in `impl Display for X`, `from`, `default`, `drop`): they are called through the trait, never by name. The graph records them (`symbols.trait_impl`, extractor version 3, so existing graphs rebuild once).
+- `pixel plan --query hotspots ../repo` plans `../repo`. Both the prompt and the path are optional positionals, so the directory was read as the prompt and the current directory was planned; with a query other than `by-concept`, a prompt that names a directory is now the path.
+- The session-start capability block lists the commands an agent can type (`scope-task`, `fast-forward`, `fetch`, …, as `pixel --help` shows them) instead of the daemon's op tags. An agent reading `update` or `sync` there ran `pixel update` (now `fast-forward`) or `pixel sync` (now `fetch`), and `targets`, `search` or `history_op` only worked, if at all, through the pre-rename aliases.
+- `pixel who-wrote` no longer fails on every file when git's `blame.ignoreRevsFile` names a file the repository lacks (a global `.git-blame-ignore-revs` default): git refused the blame with "could not open object name list". The blame is retried without the ignore list and the answer carries a warning saying so; an existing ignore-revs file is still honoured.
+
+### Removed
+- The root `plugin.json` (`{"name": "pixel"}` only). A root manifest takes precedence over the tool directories: Copilot CLI reads it before `.claude-plugin/plugin.json` and so loaded a plugin without the skill or the hooks, and Codex's Agent Plugins loader ignores the hooks declared in `.codex-plugin/plugin.json` when one is present (openai/codex#39895). Grok's `plugin.json` is optional metadata; its marketplace entry keeps the `pixel` name.
+
 ## [0.2.5] - 2026-09-14
 
 ### Added

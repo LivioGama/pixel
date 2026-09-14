@@ -2822,4 +2822,13 @@ fn plugin_manifests_parse_and_point_at_files_that_exist() {
     }
     assert_eq!(commands, 2, "SessionStart and SubagentStart");
     exists("hooks/plugin-hooks.json", "hooks/pixel-context.sh");
+
+    // A root `plugin.json` wins over the tool directories: Copilot CLI reads
+    // it before `.claude-plugin/plugin.json`, and Codex's Agent Plugins loader
+    // then ignores the hooks of `.codex-plugin/plugin.json`
+    // (openai/codex#39895). A bare one shipped neither skills nor hooks.
+    assert!(
+        !repo.join("plugin.json").exists(),
+        "a root plugin.json shadows .claude-plugin/ and .codex-plugin/"
+    );
 }

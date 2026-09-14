@@ -5117,11 +5117,12 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
             HookCmd::SessionStart { path } => {
                 let root = discover_root(&path)?;
-                // Emit the capability block from the live op registry —
-                // `SESSION_CAPABILITIES` lives next to `Op` itself and is
-                // tested for exhaustiveness against every real variant, so
-                // this can never advertise a capability that doesn't exist.
-                let ops: Vec<&str> = pixel_proto::op::SESSION_CAPABILITIES.to_vec();
+                // Advertise the commands the agent types, read from the
+                // parser itself so the block cannot name one that does not
+                // exist. The daemon's wire op tags (`targets`, `update`,
+                // `sync`) are not commands: `pixel update` is fast-forward,
+                // `pixel sync` is fetch.
+                let ops = session_commands();
                 // The usage doctrine is a shared constant beside the op
                 // registry (pixel-proto), so the injected text, the doctor's
                 // scenario-consistency check, and the rule file can never
@@ -5748,6 +5749,16 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
         }
     }
+}
+
+/// The subcommands `pixel --help` lists (hidden aliases and commands
+/// excluded), in declaration order: what the session-start block advertises.
+fn session_commands() -> Vec<String> {
+    Cli::command()
+        .get_subcommands()
+        .filter(|c| !c.is_hide_set())
+        .map(|c| c.get_name().to_string())
+        .collect()
 }
 
 fn run_query(

@@ -2,16 +2,18 @@ name: CI
 
 on:
   push:
-    # develop is the integration branch (feature PRs are routed there);
-    # main only receives release/hotfix merges. Both must stay green.
-    branches: [main, develop]
+    # develop is the integration branch (feature PRs are routed there). main
+    # is not built on push: it only receives a release PR whose tree is the
+    # tag's (already tested by the develop push and the release workflow's
+    # verify job) or a hotfix PR, whose own pull_request run below tests it.
+    branches: [develop]
   pull_request:
     # A pull request that only touches Markdown, docs/ or the licence files
     # cannot change a test result, so it skips the two-and-a-half-minute
     # run. Later patterns win: the negations drop the docs, then the last
     # line puts the bundled agent prompts (crates/**/*.md, checked by the
-    # install tests) back in. Branch pushes stay unfiltered so every merge
-    # commit on develop/main keeps a complete run. No branch rule requires
+    # install tests) back in. Develop pushes stay unfiltered so every merge
+    # commit there keeps a complete run. No branch rule requires
     # this check today; if one is added, the excluded paths need a twin
     # workflow that reports success.
     paths:
@@ -23,7 +25,7 @@ on:
       - "crates/**"
 
 # A new push to a pull request cancels the run still in flight for its
-# previous commit. Branch pushes (main, develop) are never cancelled so every
+# previous commit. Develop pushes are never cancelled so every
 # merge commit keeps a complete run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

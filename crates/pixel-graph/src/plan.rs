@@ -287,7 +287,7 @@ fn dead_code(
         "SELECT s.id, s.file_id, s.name, s.qualified, s.kind, s.start_line, f.path \
          FROM symbols s \
          JOIN files f ON s.file_id = f.id \
-         WHERE s.kind IN ('function', 'method') \
+         WHERE s.kind IN ('function', 'method') AND s.trait_impl = 0 \
          AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst_id = s.id AND e.kind IN ('calls', 'references')) \
          ORDER BY s.id",
     )?;
@@ -1225,6 +1225,31 @@ mod tests {
                 .iter()
                 .all(|f| f.severity == Severity::Low)
         );
+    }
+
+    /// A trait method implementation has no caller by name (`x.to_string()`
+    /// calls `fmt` through `Display`): a graph built from source never
+    /// reports it as dead, while a free function with no caller still is.
+    #[test]
+    fn dead_code_skips_trait_implementation_methods() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub struct X;\n\
+             impl std::fmt::Display for X {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { Ok(()) }\n}\n\
+             impl X {\n    pub fn inherent(&self) {}\n}\n",
+        )
+        .unwrap();
+        let db = dir.path().join("graph.db");
+        crate::build::build_graph(dir.path(), &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let labels: Vec<String> = dead_code(&store)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.label)
+            .collect();
+        assert_eq!(labels.len(), 1, "{labels:?}");
+        assert!(labels[0].contains("`inherent`"), "{labels:?}");
     }
 
     #[test]

@@ -14,6 +14,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Tests share the process-global `XDG_CACHE_HOME` env var, so every test
+/// that sets it (here and in `indexset`) holds this lock; the rest of the
+/// suite still runs in parallel.
+#[cfg(test)]
+pub(crate) static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Default cap for the on-disk shard cache.
 pub const DEFAULT_CACHE_CAP_BYTES: u64 = 5_000_000_000; // 5 GB
 
@@ -249,12 +255,8 @@ pub fn evict_cache(max_bytes: u64) -> Result<(), std::io::Error> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::Mutex;
 
-    /// Tests share the process-global `XDG_CACHE_HOME` env var, so the cache
-    /// tests must run serially. This mutex serializes only the cache tests;
-    /// the rest of the suite still runs in parallel.
-    static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
+    use super::CACHE_TEST_LOCK;
 
     /// Unique temp dir for this test process, used as `XDG_CACHE_HOME` so the
     /// cache is isolated from the real user cache. `tempfile` is not a
