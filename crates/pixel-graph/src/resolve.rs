@@ -13,6 +13,13 @@
 //! receiver is `self`/`Self`/`this` (or absent) keep the normal tier, since
 //! those resolve against the enclosing type's own methods.
 //!
+//! A real receiver whose callee name is also defined in the caller's own file
+//! is `Unresolved` instead: T0 would link the qualified call
+//! (`pixel_graph::build::build_graph` inside `api.rs`) to the caller's own
+//! same-name symbol — a shadow, not the callee. The unresolved row keeps the
+//! envelope honest (`lower_bound`, `unresolved_same_name`) instead of an edge
+//! to the wrong definition.
+//!
 //! Known limitation: T1 still matches at file granularity (an import resolves
 //! to a file, not to specific exported bindings). Refining this to per-name
 //! import tracking requires recording imported binding names, which is left
@@ -196,7 +203,13 @@ impl ResolveIndex {
     /// `receiver` is the receiver expression text (if any) of the call site;
     /// a real receiver (not `self`/`Self`/`this`) caps the result at
     /// `Probable` because the receiver's type is unknown to the resolver.
+    /// A real receiver whose name is also defined in the caller's own file is
+    /// `Unresolved`: T0 would otherwise point the qualified call at the
+    /// caller's same-name symbol (the shadow) instead of the named module's.
     pub fn decide(&self, caller_file_id: i64, name: &str, receiver: Option<&str>) -> Decision {
+        if has_real_receiver(receiver) && self.defines_in_file(caller_file_id, name) {
+            return Decision::Unresolved;
+        }
         let raw = self.decide_raw(caller_file_id, name);
         if matches!(raw, Decision::Exact(_)) && has_real_receiver(receiver) {
             // Downgrade: a non-self receiver means we cannot confirm the
@@ -207,6 +220,14 @@ impl ResolveIndex {
             };
         }
         raw
+    }
+
+    /// True iff `name` has a callable definition in `file_id` — the T0 case
+    /// `decide` must not use for a call with a real receiver.
+    fn defines_in_file(&self, file_id: i64, name: &str) -> bool {
+        self.by_name
+            .get(name)
+            .is_some_and(|cands| cands.iter().any(|c| c.file_id == file_id))
     }
 
     /// Tier decision ignoring receiver type (the original name-only logic).
@@ -547,4 +568,82 @@ pub fn reconsider_resolved_calls(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::GraphStore;
+
+    /// Two Rust files that both define `f`: the caller's own `src/local.rs`
+    /// and the `src/remote.rs` a qualified `other_crate::f()` names. `g` is
+    /// defined in `src/remote.rs` only.
+    fn fixture() -> (GraphStore, i64, i64, i64, i64) {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let local_file = store
+            .replace_file("src/local.rs", "oid-local", "rust")
+            .unwrap();
+        let remote_file = store
+            .replace_file("src/remote.rs", "oid-remote", "rust")
+            .unwrap();
+        let local_f = insert(&store, local_file, "src/local.rs", "f");
+        let remote_f = insert(&store, remote_file, "src/remote.rs", "f");
+        let remote_g = insert(&store, remote_file, "src/remote.rs", "g");
+        (store, local_file, local_f, remote_f, remote_g)
+    }
+
+    fn insert(store: &GraphStore, file_id: i64, path: &str, name: &str) -> i64 {
+        store
+            .insert_symbol(
+                file_id,
+                &format!("{path}#{name}#function"),
+                name,
+                name,
+                SymbolKind::Function,
+                1,
+                3,
+                "",
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn qualified_call_with_a_locally_defined_name_is_unresolved() {
+        let (store, caller_file, _local_f, _remote_f, _remote_g) = fixture();
+        let idx = ResolveIndex::build(&store).unwrap();
+        // `other_crate::f()` inside `src/local.rs` names another module; T0
+        // must not link it to the caller's own `f` (the shadow).
+        assert_eq!(
+            idx.decide(caller_file, "f", Some("other_crate")),
+            Decision::Unresolved
+        );
+    }
+
+    #[test]
+    fn unqualified_and_self_receiver_calls_keep_the_t0_definition() {
+        let (store, caller_file, local_f, _remote_f, _remote_g) = fixture();
+        let idx = ResolveIndex::build(&store).unwrap();
+        // No receiver: the plain `f()` is T0 Exact, unchanged.
+        assert_eq!(idx.decide(caller_file, "f", None), Decision::Exact(local_f));
+        // `self::f()` / `Self::f()` / `this.f()` keep their exemption.
+        for receiver in ["self", "Self", "this"] {
+            assert_eq!(
+                idx.decide(caller_file, "f", Some(receiver)),
+                Decision::Exact(local_f),
+                "receiver {receiver:?} keeps the T0 definition"
+            );
+        }
+    }
+
+    #[test]
+    fn real_receiver_with_a_name_defined_elsewhere_stays_probable() {
+        let (store, caller_file, _local_f, _remote_f, remote_g) = fixture();
+        let idx = ResolveIndex::build(&store).unwrap();
+        // `x.g()`: `g` has no local definition to shadow, so the unique
+        // repo-wide definition stays the (receiver-capped) Probable answer.
+        assert_eq!(
+            idx.decide(caller_file, "g", Some("x")),
+            Decision::Probable(remote_g)
+        );
+    }
 }
