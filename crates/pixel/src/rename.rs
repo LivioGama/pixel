@@ -355,7 +355,11 @@ fn rename_command_labels(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Re
     let mut new_content = content.clone();
     let mut edits = 0;
 
-    for pair in pairs {
+    // Sort by old_kebab length descending to prevent prefix matches
+    let mut sorted_pairs: Vec<&RenamePair> = pairs.iter().collect();
+    sorted_pairs.sort_by(|a, b| b.old_kebab.len().cmp(&a.old_kebab.len()));
+
+    for pair in sorted_pairs {
         // In operation_metrics.rs: match arms like `"search" |` → `"search-content" |`
         // and `"search" =>` patterns
         // These are command labels in match arms
@@ -384,13 +388,11 @@ fn rename_command_labels(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Re
         }
 
         // In call_guard.rs: GUARDED_COMMANDS array entries
-        // Pattern: `"old-name"` in the array — preceded by `&[` or `, ` or ` ` and followed by `,` or `]`
-        let old_guard_entry = format!("\"{}\"", pair.old_kebab);
-        let new_guard_entry = format!("\"{}\"", pair.new_kebab);
-        // Only replace if it's in GUARDED_COMMANDS context (preceded by `&[` or `, `)
+        // Pattern: `"old-name"` in the array — preceded by `&[` or `, ` and followed by `"` (closing quote)
+        // Use full pattern with closing quote to prevent prefix matches
         for prefix in ["&[\"", ", \""] {
-            let old_full = format!("{}{}", prefix, pair.old_kebab);
-            let new_full = format!("{}{}", prefix, pair.new_kebab);
+            let old_full = format!("{}{}\"", prefix, pair.old_kebab);
+            let new_full = format!("{}{}\"", prefix, pair.new_kebab);
             let count = new_content.matches(&old_full).count();
             if count > 0 {
                 new_content = new_content.replace(&old_full, &new_full);
