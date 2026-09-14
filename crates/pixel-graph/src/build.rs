@@ -59,6 +59,24 @@ type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 /// `meta` key under which the build-time freshness signature is stored.
 pub const FRESHNESS_KEY: &str = "freshness";
 
+/// `meta` key under which a full build records [`EXTRACTOR_VERSION`].
+pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
+
+/// What extraction writes for an unchanged file. The freshness signature
+/// only hashes file contents, so a graph built by an older extractor looks
+/// fresh forever; a stored version other than this one makes it stale and
+/// forces a full rebuild. Bump it whenever an extractor or resolver change
+/// alters the rows an unchanged source produces.
+///
+/// 2: JSX component call edges; callback references only for functions the
+/// graph defines, member arguments only on a self receiver.
+pub const EXTRACTOR_VERSION: &str = "2";
+
+/// True iff the graph's rows were written by the current extractor.
+fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
+    Ok(store.meta_get(EXTRACTOR_VERSION_KEY)?.as_deref() == Some(EXTRACTOR_VERSION))
+}
+
 #[derive(Debug, Clone)]
 pub struct GraphStats {
     pub files: u64,
@@ -333,6 +351,7 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
         )
         .into());
     }
+    store.meta_set(EXTRACTOR_VERSION_KEY, EXTRACTOR_VERSION)?;
     store.meta_set(FRESHNESS_KEY, &snapshot_signature)?;
 
     let (files, symbols, edges, unresolved) = store.counts()?;
@@ -423,13 +442,17 @@ impl TreeDelta {
 /// Compare `root`'s working tree with the graph at `db_path`. One walk
 /// (the same one `freshness_signature` makes) answers both "is it fresh"
 /// and "which files drifted". `Ok(None)` when the db carries no freshness
-/// signature (built before signatures existed, or interrupted): the caller
-/// cannot trust its rows and must rebuild.
+/// signature (built before signatures existed, or interrupted) or was
+/// written by another extractor version: the caller cannot trust its rows
+/// and must rebuild.
 pub fn tree_delta(root: &Path, db_path: &Path) -> Result<Option<TreeDelta>, BoxErr> {
     let store = GraphStore::open(db_path)?;
     let Some(stored) = store.meta_get(FRESHNESS_KEY)? else {
         return Ok(None);
     };
+    if !extractor_is_current(&store)? {
+        return Ok(None);
+    }
     let current = tree_hashes(root);
     let signature = signature_of(&current);
     let known: HashMap<String, String> = store
@@ -510,7 +533,7 @@ pub fn is_fresh(root: &Path, db_path: &Path) -> bool {
     let Ok(Some(stored)) = store.meta_get(FRESHNESS_KEY) else {
         return false;
     };
-    stored == freshness_signature(root)
+    extractor_is_current(&store).unwrap_or(false) && stored == freshness_signature(root)
 }
 
 /// Incrementally re-index a batch of files: preserve incoming call knowledge,
@@ -1352,6 +1375,124 @@ mod tests {
         let envelope = store.envelope_for_name("target").unwrap();
         assert!(envelope.lower_bound);
         assert!(envelope.unresolved_same_name >= 1);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A graph written by an older extractor lacks the rows the current one
+    /// emits for the same bytes; content hashes alone call it fresh forever.
+    #[test]
+    fn graph_from_another_extractor_version_is_stale_until_rebuilt() {
+        let root = tmpdir("extractor-version");
+        std::fs::write(root.join("a.ts"), "export function a() { return 1; }\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        assert_eq!(
+            store.meta_get(EXTRACTOR_VERSION_KEY).unwrap().as_deref(),
+            Some(EXTRACTOR_VERSION)
+        );
+        assert!(is_fresh(&root, &db));
+        assert!(tree_delta(&root, &db).unwrap().is_some_and(|d| d.fresh));
+
+        store.meta_set(EXTRACTOR_VERSION_KEY, "1").unwrap();
+        assert!(!is_fresh(&root, &db), "an older extractor's graph is stale");
+        assert!(
+            tree_delta(&root, &db).unwrap().is_none(),
+            "no delta can repair rows the extractor never wrote: rebuild"
+        );
+        store
+            .conn()
+            .execute("DELETE FROM meta WHERE key = ?1", [EXTRACTOR_VERSION_KEY])
+            .unwrap();
+        assert!(!is_fresh(&root, &db), "an unversioned graph is stale");
+        assert!(tree_delta(&root, &db).unwrap().is_none());
+        drop(store);
+
+        build_graph(&root, &db).unwrap();
+        assert!(
+            is_fresh(&root, &db),
+            "a rebuild records the current version"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn reference_rows(store: &GraphStore) -> Vec<String> {
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT name FROM unresolved_calls WHERE kind = 'references' ORDER BY name")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// Only an argument that may be a callback leaves a trace: a plain value
+    /// (`value`, `user.name`) creates no edge to a same-named function and no
+    /// unresolved row, while a function the resolver cannot pick stays
+    /// counted in the envelope.
+    #[test]
+    fn value_arguments_leave_no_references_and_ambiguous_callbacks_stay_unresolved() {
+        let root = tmpdir("reference-values");
+        std::fs::write(
+            root.join("name.ts"),
+            "export function name() { return 1; }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("h1.ts"), "export function handler() {}\n").unwrap();
+        std::fs::write(root.join("h2.ts"), "export function handler() {}\n").unwrap();
+        std::fs::write(
+            root.join("entry.ts"),
+            "export function entry(value: any, user: any) {\n  consume(value, user.name, handler, render);\n}\n",
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+
+        let store = GraphStore::open(&db).unwrap();
+        let name = &store.symbols_by_name("name", 10).unwrap()[0];
+        assert!(
+            store
+                .edges_to(name.id, Some(EdgeKind::References))
+                .unwrap()
+                .is_empty(),
+            "`user.name` is data, not a reference to `name()`"
+        );
+        assert_eq!(reference_rows(&store), ["handler"]);
+        assert!(store.envelope_for_name("handler").unwrap().lower_bound);
+        assert!(!store.envelope_for_name("value").unwrap().lower_bound);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `<Button/>` compiles to a call of `Button`: the component a file
+    /// renders is a callee of the renderer, across an import.
+    #[test]
+    fn rendering_a_component_links_the_renderer_as_its_caller() {
+        let root = tmpdir("jsx-component-call");
+        std::fs::write(
+            root.join("Button.tsx"),
+            "export function Button() { return <button>ok</button>; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("App.tsx"),
+            "import { Button } from \"./Button\";\nexport function App() { return <div><Button /></div>; }\n",
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+
+        let store = GraphStore::open(&db).unwrap();
+        let button = &store.symbols_by_name("Button", 10).unwrap()[0];
+        let callers = store.edges_to(button.id, Some(EdgeKind::Calls)).unwrap();
+        assert_eq!(callers.len(), 1, "{callers:?}");
+        assert_eq!(callers[0].tier, Tier::Exact, "import-bound");
+        let app = &store.symbols_by_name("App", 10).unwrap()[0];
+        assert_eq!(callers[0].src_id, app.id);
+        assert!(!store.envelope_for_name("div").unwrap().lower_bound);
+        assert!(!store.envelope_for_name("button").unwrap().lower_bound);
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
