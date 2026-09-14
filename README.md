@@ -67,7 +67,10 @@ Pixel is local-first. Its index, graph, and optional history data live under `.p
 
 ### Plugin install (per-tool native)
 
-This repo carries native plugin manifests, so each agent CLI can install Pixel through its own plugin mechanism — no `pixel install` step. Always-on delivery is a SessionStart/SubagentStart hook (`hooks/pixel-context.sh`) that injects the protocol as `additionalContext` — context only, it never blocks a tool call. The skill bootstraps the binary on first use (`command -v pixel || curl … install.sh | sh`).
+This repo carries native plugin manifests, so each agent CLI can install Pixel's protocol through its own plugin mechanism — no `pixel install` step. The `pixel` binary still has to be installed (see above); the plugin never installs it. Always-on delivery is a SessionStart/SubagentStart hook (`hooks/pixel-context.sh`) that injects the protocol as `additionalContext` (the short sub-agent prompt for sub-agents) — context only, it never blocks a tool call. When `pixel` is missing from PATH, or too old for the command names the protocol uses, the hook injects a one-paragraph notice instead.
+
+> [!NOTE]
+> The manifests live on `develop` and ship with the next release; the default branch `main`, which the commands below read, does not carry them yet.
 
 | Tool | Install |
 | --- | --- |
@@ -81,7 +84,7 @@ This repo carries native plugin manifests, so each agent CLI can install Pixel t
 | Cursor / Windsurf / Kiro / Cline / Qoder | Rules ship under `.cursor/rules/`, `.windsurf/rules/`, `.kiro/steering/`, `.clinerules/`, `.qoder/rules/` — copy or vendor into your project |
 | Anything else | `PIXEL.md` at the repo root is the plain-markdown protocol — paste it into whatever instruction surface the tool offers |
 
-Generated surfaces (`skills/`, `PIXEL.md`, all rules files) come from `crates/pixel-install/assets/pixel-agent-prompt.md` via `scripts/gen-plugin-assets.sh`; a test fails if they drift.
+Generated surfaces (`skills/`, `PIXEL.md`, `PIXEL-SUBAGENT.md`, all rules files) come from the prompts in `crates/pixel-install/assets/` via `scripts/gen-plugin-assets.sh`; a test fails if they drift, and `pixel check-release` fails a release whose plugin manifests do not carry its version.
 
 ### 🔌 Other agents and manual setup
 

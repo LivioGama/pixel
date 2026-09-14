@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-.}}/hooks/pixel-context.sh\" SessionStart",
+            "command": "\"${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/hooks/pixel-context.sh\" SessionStart",
             "timeout": 5,
             "statusMessage": "Loading pixel retrieval protocol..."
           }
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-.}}/hooks/pixel-context.sh\" SubagentStart",
+            "command": "\"${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/hooks/pixel-context.sh\" SubagentStart",
             "timeout": 5,
             "statusMessage": "Loading pixel retrieval protocol..."
           }

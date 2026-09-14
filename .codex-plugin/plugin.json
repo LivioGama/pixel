@@ -1,6 +1,6 @@
 {
   "name": "pixel",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Deterministic code retrieval layer: indexed search, concept resolve, impact analysis, task targets, plan generation, and git archaeology via the pixel CLI.",
   "author": {
     "name": "Livio Gama",
@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "Pixel",
     "shortDescription": "Deterministic code retrieval layer",
-    "longDescription": "Indexed search, concept resolve, impact analysis, task targets, plan generation, and git archaeology. The skill bootstraps the pixel binary on first use.",
+    "longDescription": "Indexed search, concept resolve, impact analysis, task targets, plan generation, and git archaeology. Requires the pixel binary on PATH.",
     "developerName": "Livio Gama",
     "category": "Productivity",
     "capabilities": ["Instructions"],

@@ -111,7 +111,10 @@ pixel new-branch release-x.y.z --from origin/develop --request-id "release-x.y.z
 already exists or Unreleased is empty. Otherwise it:
 
 1. sets `[package] version` to `x.y.z` in **every** workspace member
-   (lockstep, as 0.2.4 did);
+   (lockstep, as 0.2.4 did), and `version` in every plugin manifest
+   (`pixel_release::PLUGIN_MANIFESTS`), then regenerates the plugin prompt
+   surfaces with `scripts/gen-plugin-assets.sh`: Claude Code and Codex deliver
+   a plugin update only when its version changes;
 2. inserts `## [x.y.z] - DATE` under a kept, now empty `## [Unreleased]`;
 3. runs `cargo update --workspace` so `Cargo.lock` follows;
 4. lists the pull requests merged into `develop` since the last tag;

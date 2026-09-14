@@ -2,22 +2,22 @@
 name: pixel
 description: >
   Deterministic code retrieval: indexed search, concept resolve, impact
-  analysis, caller/callee tracing, task targets, plan generation, and git
+  analysis, caller/callee tracing, task scoping, plan generation, and git
   history archaeology via the `pixel` CLI. Use when the repo has a `.pixel`
   directory, when the user mentions pixel, or before editing a symbol when
-  blast radius matters. Bootstraps the binary via the install script when
-  `pixel` is not on PATH.
+  blast radius matters. Requires the `pixel` binary on PATH.
 license: MIT
 ---
 
 ## Setup — the `pixel` binary is required
 
 Pixel is a CLI, not just instructions. Before relying on any command below,
-verify it exists:
+check that it exists with `command -v pixel`. If it does not, tell the user
+that the pixel plugin needs the `pixel` binary (install instructions:
+https://github.com/LivioGama/pixel#-start-here) and work without the commands
+below; do not download or run an installer yourself.
 
-    command -v pixel || curl -fsSL https://raw.githubusercontent.com/LivioGama/pixel/main/scripts/install.sh | sh
-
-Then make sure the repo is indexed (once per clone/worktree):
+Make sure the repo is indexed (once per clone/worktree):
 
     pixel build-index
 
