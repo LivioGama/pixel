@@ -175,8 +175,8 @@ run_resolve_success_rate() {
     total=$((total + 1))
     local out json hit_path
     out=$(cd "$REPO" &&
-           "$PIXEL_BIN" resolve --json "$phrase" 2>/dev/null )
-    # `pixel resolve --json` prints a JSON doc within a {"matches":[{..."path"...}]}
+           "$PIXEL_BIN" find-code --json "$phrase" 2>/dev/null )
+    # `pixel find-code --json` prints a JSON doc within a {"matches":[{..."path"...}]}
     json=$(printf '%s' "$out")
     hit_path=$(printf '%s' "$json" \
       | python3 -c 'import json,sys

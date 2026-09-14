@@ -126,7 +126,6 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md` or the bundled agent prompts
 | `pixel edit-env` | Additive-only, key-level .env mutations with snapshots and restore. |
 | `pixel plan` | Deterministic todo list generation from code analysis |
 | `pixel replay-flow` | Save, retrieve, list, revise, and replay proven agent-browser paths (auth flows, config flows) so the agent follows a deterministic shortcut instead of re-discovering the UI from scratch every time |
-| `pixel rename` | AST-aware, namespace-aware CLI command renamer. Takes a JSON mapping {"old-name": "new-name"} and renames only CLI command definitions + user-facing references, leaving protocol ops, JSON fields, and agent tool names untouched. Use --dry-run to preview |
 | `pixel help` | Print this message or the help of the given subcommand(s). |
 
 ## On-disk state

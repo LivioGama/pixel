@@ -49,8 +49,8 @@ def audit(binary):
         for key, value in (("user.name", "Pixel Audit"), ("user.email", "audit@example.invalid")):
             subprocess.run(["git", "-C", str(repo), "config", key, value], check=True, env=env)
         (repo / "fixture.rs").write_text("pub fn manual_fixture() -> bool { true }\n")
-        run(["publish", "-m", "test: disposable audit fixture", "--files", "fixture.rs", "--request-id", "fixture-seed"])
-        run(["index"])
+        run(["commit", "-m", "test: disposable audit fixture", "--files", "fixture.rs", "--request-id", "fixture-seed"])
+        run(["build-index"])
         transcript = home / ".claude/projects/audit/session-audit.jsonl"
         transcript.parent.mkdir(parents=True)
         turns = [
@@ -111,9 +111,9 @@ def audit(binary):
         release.chmod(0o755)
         installed = home / "upgrade-pixel"
         installed.write_bytes(b"previous binary")
-        run(["upgrade", "--build", "exit 7", "--install-path", str(installed)], expected=1)
+        run(["self-update", "--build", "exit 7", "--install-path", str(installed)], expected=1)
         assert installed.read_bytes() == b"previous binary"
-        run(["upgrade", "--build", "true", "--install-path", str(installed)])
+        run(["self-update", "--build", "true", "--install-path", str(installed)])
         assert installed.read_bytes() == release.read_bytes()
         pkill = base / "pkill.log"
         assert not pkill.exists(), "upgrade attempted global pkill: " + pkill.read_text()

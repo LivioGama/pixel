@@ -3,7 +3,7 @@
 #
 # Shows the same task done two ways:
 #   1. MANUAL: git log -S + git show (the traditional approach)
-#   2. PIXEL: pixel excavate (indexed history search)
+#   2. PIXEL: pixel dig-history (indexed history search)
 #
 # The task: "Find where and how the Kimi model was plugged into the homepage engine"
 #
@@ -13,7 +13,7 @@
 #   PHRASE=stripe scripts/pixel-excavate-demo.sh /path/to/repo
 #
 # Prerequisites: pixel installed (or PIXEL_BIN), and the target repo's
-# history indexed once: `pixel index --history /path/to/repo`.
+# history indexed once: `pixel build-index --history /path/to/repo`.
 
 set -euo pipefail
 
@@ -42,7 +42,7 @@ if [ -z "$PIXEL_BIN" ] || [ ! -x "$PIXEL_BIN" ]; then
   exit 1
 fi
 if [ ! -f "$REPO/.pixel/history.db" ]; then
-  echo "ERROR: $REPO has no history index; run: pixel index --history \"$REPO\"" >&2
+  echo "ERROR: $REPO has no history index; run: pixel build-index --history \"$REPO\"" >&2
   exit 1
 fi
 
@@ -99,9 +99,9 @@ head -15 "$OUTDIR/m1.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/m1.txt") commits total)${R}"
 echo -e "  ${DIM}Time: ${M1}ms${R}"
 
-echo -e "\n  ${GRN}${B}── PIXEL: pixel excavate --phrase kimi ──${R}"
+echo -e "\n  ${GRN}${B}── PIXEL: pixel dig-history --phrase kimi ──${R}"
 P1=$(run_cmd "p1" "$OUTDIR/p1.txt" \
-  "$PIXEL_BIN" excavate --phrase "$PHRASE" . 2>/dev/null)
+  "$PIXEL_BIN" dig-history --phrase "$PHRASE" . 2>/dev/null)
 head -30 "$OUTDIR/p1.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/p1.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${P1}ms${R}"
@@ -118,9 +118,9 @@ head -15 "$OUTDIR/m2.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/m2.txt") commits total)${R}"
 echo -e "  ${DIM}Time: ${M2}ms${R}"
 
-echo -e "\n  ${GRN}${B}── PIXEL: pixel excavate --phrase 'kimi hybrid primary homepage' ──${R}"
+echo -e "\n  ${GRN}${B}── PIXEL: pixel dig-history --phrase 'kimi hybrid primary homepage' ──${R}"
 P2=$(run_cmd "p2" "$OUTDIR/p2.txt" \
-  "$PIXEL_BIN" excavate --phrase "kimi hybrid primary homepage" . 2>/dev/null)
+  "$PIXEL_BIN" dig-history --phrase "kimi hybrid primary homepage" . 2>/dev/null)
 head -30 "$OUTDIR/p2.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/p2.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${P2}ms${R}"
@@ -146,9 +146,9 @@ if [ -n "$KIMI_COMMIT" ]; then
   echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/m3.txt") lines total)${R}"
   echo -e "  ${DIM}Time: ${M3}ms${R}"
 
-  echo -e "\n  ${GRN}${B}── PIXEL: pixel excavate --show <commit> ──${R}"
+  echo -e "\n  ${GRN}${B}── PIXEL: pixel dig-history --show <commit> ──${R}"
   P3=$(run_cmd "p3" "$OUTDIR/p3.txt" \
-    "$PIXEL_BIN" excavate --show "$KIMI_COMMIT" . 2>/dev/null)
+    "$PIXEL_BIN" dig-history --show "$KIMI_COMMIT" . 2>/dev/null)
   head -20 "$OUTDIR/p3.txt" | sed 's/^/  /'
   echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/p3.txt") lines total)${R}"
   echo -e "  ${DIM}Time: ${P3}ms${R}"
@@ -169,9 +169,9 @@ M4=$(run_cmd "m4" "$OUTDIR/m4.txt" \
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/m4.txt") files total)${R}"
 echo -e "  ${DIM}Time: ${M4}ms${R}"
 
-echo -e "\n  ${GRN}${B}── PIXEL: pixel search kimi --context 3 ──${R}"
+echo -e "\n  ${GRN}${B}── PIXEL: pixel search-content kimi --context 3 ──${R}"
 P4=$(run_cmd "p4" "$OUTDIR/p4.txt" \
-  "$PIXEL_BIN" search "$PHRASE" . 2>/dev/null)
+  "$PIXEL_BIN" search-content "$PHRASE" . 2>/dev/null)
 head -20 "$OUTDIR/p4.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/p4.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${P4}ms${R}"

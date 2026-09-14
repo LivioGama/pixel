@@ -236,7 +236,7 @@ impl FactsStore {
             format!(
                 "{stripped} candidate(s) are metadata-only (snippets carry only the \
                  top {SNIPPET_TOP_N} matches, {} KB total); run \
-                 `pixel excavate --show <oid> --file <path>` for any of them",
+                 `pixel dig-history --show <oid> --file <path>` for any of them",
                 SNIPPET_TOTAL_BUDGET / 1024
             )
         });
@@ -250,13 +250,13 @@ impl FactsStore {
         // round of raw `git show`/`git log`.
         let next = match &last_good {
             Some(lg) => format!(
-                "full original file: `pixel excavate --show {} --file {}` \
+                "full original file: `pixel dig-history --show {} --file {}` \
                  (reads <oid>:<path>; on a deletion commit the parent's \
                  pre-deletion content is returned automatically, or pass \
                  --parent). No `git show` needed.",
                 lg.oid, lg.path
             ),
-            None => "full historical file content: `pixel excavate --show <oid> \
+            None => "full historical file content: `pixel dig-history --show <oid> \
                      --file <path>` (parent fallback for deletion commits; \
                      --parent forces <oid>^). No `git show` needed."
                 .to_string(),
