@@ -203,7 +203,13 @@ fn repeated_search_keeps_executing_and_reports_changed_file() {
         let output = fixture
             .command(PIXEL)
             .env_remove("PIXEL_TEST")
-            .args(["search-content", "needle", "a file.rs", "--json", "--no-daemon"])
+            .args([
+                "search-content",
+                "needle",
+                "a file.rs",
+                "--json",
+                "--no-daemon",
+            ])
             .output()
             .unwrap();
         assert!(

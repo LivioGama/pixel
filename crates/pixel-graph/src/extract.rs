@@ -457,21 +457,23 @@ fn walk_ts(w: &mut Walker, lang: &'static str, node: Node, depth: usize) {
                 w.push_import(spec, bindings);
             }
         }
-        "jsx_element" if matches!(lang, "tsx" | "js") => {
-            if let Some(opening) = node.child_by_field_name("open_tag") {
-                if let Some(tag_node) = opening.child_by_field_name("name") {
-                    let tag = w.text(tag_node);
-                    let has_handler = jsx_has_handler(w, opening);
-                    let text_content = jsx_text_content(w, node, opening, &tag);
-                    jsx_handler_refs(w, opening, &tag);
-                    w.push_jsx_element(
-                        tag,
-                        has_handler,
-                        text_content,
-                        line_start(node),
-                        line_end(node),
-                    );
-                }
+        // Only the tsx and js grammars produce this node; the ts grammar
+        // has no JSX, so no language guard is needed here.
+        "jsx_element" => {
+            if let Some(opening) = node.child_by_field_name("open_tag")
+                && let Some(tag_node) = opening.child_by_field_name("name")
+            {
+                let tag = w.text(tag_node);
+                let has_handler = jsx_has_handler(w, opening);
+                let text_content = jsx_text_content(w, node, opening, &tag);
+                jsx_handler_refs(w, opening, &tag);
+                w.push_jsx_element(
+                    tag,
+                    has_handler,
+                    text_content,
+                    line_start(node),
+                    line_end(node),
+                );
             }
         }
         "jsx_self_closing_element" if matches!(lang, "tsx" | "js") => {
@@ -588,12 +590,12 @@ fn jsx_attr_value(w: &Walker, attr: Node) -> Option<String> {
 
 fn jsx_has_handler(w: &Walker, element: Node) -> bool {
     for child in each_child(element) {
-        if child.kind() == "jsx_attribute" {
-            if let Some(name) = jsx_attr_name(w, child) {
-                let n = name.to_lowercase();
-                if n.starts_with("on") || n == "href" || n == "to" {
-                    return true;
-                }
+        if child.kind() == "jsx_attribute"
+            && let Some(name) = jsx_attr_name(w, child)
+        {
+            let n = name.to_lowercase();
+            if n.starts_with("on") || n == "href" || n == "to" {
+                return true;
             }
         }
     }
@@ -645,16 +647,15 @@ fn jsx_handler_refs(w: &mut Walker, element: Node, tag: &str) {
 
 fn jsx_attr_text(w: &Walker, element: Node) -> String {
     for child in each_child(element) {
-        if child.kind() == "jsx_attribute" {
-            if let Some(name) = jsx_attr_name(w, child) {
-                let n = name.to_lowercase();
-                if n == "aria-label" || n == "title" {
-                    if let Some(v) = jsx_attr_value(w, child) {
-                        if !v.is_empty() {
-                            return v;
-                        }
-                    }
-                }
+        if child.kind() == "jsx_attribute"
+            && let Some(name) = jsx_attr_name(w, child)
+        {
+            let n = name.to_lowercase();
+            if (n == "aria-label" || n == "title")
+                && let Some(v) = jsx_attr_value(w, child)
+                && !v.is_empty()
+            {
+                return v;
             }
         }
     }
@@ -1822,6 +1823,40 @@ end
         assert_eq!(e.tag, "button");
         assert!(e.has_handler);
         assert_eq!(e.text_content, "Save");
+    }
+
+    #[test]
+    fn jsx_element_without_a_handler_prop_is_not_wired() {
+        // `className` is an attribute but not a handler; `href` alone is.
+        // (A wrong comparison used to let any non-href attribute count.)
+        let source = br#"function App() { return <button className="x">Save</button>; }"#;
+        let extraction = extract_file("App.tsx", source).unwrap();
+        assert_eq!(extraction.jsx_elements.len(), 1);
+        assert!(
+            !extraction.jsx_elements[0].has_handler,
+            "{:?}",
+            extraction.jsx_elements
+        );
+        let source = br#"function App() { return <a href="/x">link</a>; }"#;
+        let extraction = extract_file("App.tsx", source).unwrap();
+        assert!(extraction.jsx_elements[0].has_handler);
+        let source = br#"function App() { return <button>Save</button>; }"#;
+        let extraction = extract_file("App.tsx", source).unwrap();
+        assert!(
+            !extraction.jsx_elements[0].has_handler,
+            "no attributes at all"
+        );
+    }
+
+    #[test]
+    fn plain_ts_source_yields_no_jsx_elements() {
+        let source = br#"function App() { return <button onClick={f}>Save</button>; }"#;
+        let extraction = extract_file("App.ts", source).unwrap();
+        assert!(
+            extraction.jsx_elements.is_empty(),
+            "{:?}",
+            extraction.jsx_elements
+        );
     }
 
     #[test]

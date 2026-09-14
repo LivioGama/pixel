@@ -780,7 +780,7 @@ pub fn remove_guard_hook_entries(hooks: &mut serde_json::Map<String, serde_json:
         filtered = remove_hook_entries(&filtered, OLD_GUARD_HOOK);
         if filtered != existing {
             changed += 1;
-            if filtered.as_array().is_some_and(std::vec::Vec::is_empty) {
+            if filtered.as_array().is_some_and(Vec::is_empty) {
                 hooks.remove(&event);
             } else {
                 hooks.insert(event, filtered);
@@ -806,7 +806,7 @@ pub fn remove_flat_guard_hook_entries(
         filtered = remove_flat_hook_entries(&filtered, OLD_GUARD_HOOK);
         if filtered != existing {
             changed += 1;
-            if filtered.as_array().is_some_and(std::vec::Vec::is_empty) {
+            if filtered.as_array().is_some_and(Vec::is_empty) {
                 hooks.remove(&event);
             } else {
                 hooks.insert(event, filtered);
@@ -957,7 +957,11 @@ mod tests {
     #[test]
     fn merge_flat_hook_entry_replaces_the_pixel_entry_and_keeps_the_rest() {
         let existing = serde_json::json!([flat("lint"), flat("pixel run-hook guard --old")]);
-        let merged = merge_flat_hook_entry(Some(&existing), "pixel run-hook", flat("pixel run-hook guard"));
+        let merged = merge_flat_hook_entry(
+            Some(&existing),
+            "pixel run-hook",
+            flat("pixel run-hook guard"),
+        );
         assert_eq!(
             merged,
             serde_json::json!([flat("lint"), flat("pixel run-hook guard")])
@@ -968,7 +972,11 @@ mod tests {
         );
         // A scalar entry is wrapped, not dropped.
         assert_eq!(
-            merge_flat_hook_entry(Some(&flat("lint")), "pixel run-hook", flat("pixel run-hook guard")),
+            merge_flat_hook_entry(
+                Some(&flat("lint")),
+                "pixel run-hook",
+                flat("pixel run-hook guard")
+            ),
             serde_json::json!([flat("lint"), flat("pixel run-hook guard")])
         );
     }

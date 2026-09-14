@@ -296,9 +296,9 @@ fn recent_changes(
     let text = String::from_utf8_lossy(&output);
     let mut paths: Vec<String> = text
         .lines()
-        .map(|l| l.trim())
+        .map(str::trim)
         .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
+        .map(ToString::to_string)
         .collect();
     paths.sort();
     paths.dedup();
@@ -347,7 +347,7 @@ fn fan_in_for_files(
         .iter()
         .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>)
         .collect();
-    let refs: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|b| b.as_ref()).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = ids.iter().map(AsRef::as_ref).collect();
     let rows = stmt.query_map(refs.as_slice(), |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
     })?;
@@ -383,7 +383,7 @@ fn fan_in_for_file_paths(
         .iter()
         .map(|p| Box::new(p.clone()) as Box<dyn rusqlite::ToSql>)
         .collect();
-    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(AsRef::as_ref).collect();
     let rows = stmt.query_map(refs.as_slice(), |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
     })?;
@@ -554,12 +554,145 @@ mod tests {
         // No edge → both are dead. Dedup: DeadCode twice → each symbol once.
         let queries = vec![PlanQuery::DeadCode, PlanQuery::DeadCode];
         let root = std::path::Path::new(".");
-        let runner = pixel_git::GitRunner::new(&root);
-        let findings = run_plan_queries(&store, &root, &runner, &queries).unwrap();
+        let runner = pixel_git::GitRunner::new(root);
+        let findings = run_plan_queries(&store, root, &runner, &queries).unwrap();
         let dead_count = findings
             .iter()
             .filter(|f| f.label.contains("dead_fn"))
             .count();
         assert_eq!(dead_count, 1);
+    }
+
+    #[test]
+    fn fan_in_counts_distinct_calling_files_by_id_and_by_path() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fa = file(&mut store, "src/a.ts");
+        let fb = file(&mut store, "src/b.ts");
+        let fc = file(&mut store, "src/c.ts");
+        let fd = file(&mut store, "src/d.ts");
+        let a1 = sym(&mut store, fa, "a1", SymbolKind::Function, 1);
+        let a2 = sym(&mut store, fa, "a2", SymbolKind::Function, 5);
+        let b1 = sym(&mut store, fb, "b1", SymbolKind::Function, 1);
+        let c1 = sym(&mut store, fc, "c1", SymbolKind::Function, 1);
+        // b and c call into a (two edges from b: still one file); d calls nobody
+        // and nobody calls d.
+        call(&mut store, b1, a1);
+        call(&mut store, b1, a2);
+        call(&mut store, c1, a1);
+        // A self-call within a must not count as fan-in.
+        call(&mut store, a2, a1);
+
+        let by_id = fan_in_for_files(&store, &[fa, fd]).unwrap();
+        assert_eq!(by_id.get("src/a.ts"), Some(&2), "{by_id:?}");
+        assert_eq!(by_id.get("src/d.ts"), None, "no callers, no row: {by_id:?}");
+        assert_eq!(by_id.len(), 1);
+        assert!(fan_in_for_files(&store, &[]).unwrap().is_empty());
+
+        let by_path =
+            fan_in_for_file_paths(&store, &["src/a.ts".to_string(), "src/d.ts".to_string()])
+                .unwrap();
+        assert_eq!(by_path.get("src/a.ts"), Some(&2), "{by_path:?}");
+        assert_eq!(by_path.get("src/d.ts"), None, "{by_path:?}");
+        assert_eq!(by_path.len(), 1);
+        assert!(fan_in_for_file_paths(&store, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dead_interactive_reports_handlerless_interactive_elements_with_fan_in() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fa = file(&mut store, "src/Form.tsx");
+        let fb = file(&mut store, "src/App.tsx");
+        let save = sym(&mut store, fa, "save", SymbolKind::Function, 1);
+        let app = sym(&mut store, fb, "App", SymbolKind::Function, 1);
+        call(&mut store, app, save);
+        // A wired button, a dead button, a dead div (not interactive).
+        store
+            .insert_jsx_element(fa, "button", true, "Save", 3, 3)
+            .unwrap();
+        store
+            .insert_jsx_element(fa, "button", false, "Cancel", 4, 4)
+            .unwrap();
+        store
+            .insert_jsx_element(fa, "div", false, "", 5, 5)
+            .unwrap();
+
+        let dead = store.jsx_elements_dead(None, Some("button")).unwrap();
+        assert_eq!(dead.len(), 1, "{dead:?}");
+        assert_eq!(dead[0].text_content, "Cancel");
+        assert_eq!(store.jsx_elements_dead(Some(fb), None).unwrap().len(), 0);
+        assert_eq!(store.jsx_elements_dead(None, None).unwrap().len(), 2);
+
+        let findings = dead_interactive(&store, None).unwrap();
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].file, "src/Form.tsx");
+        assert_eq!(findings[0].line, 4);
+        assert_eq!(findings[0].fan_in, 1, "App.tsx calls into Form.tsx");
+        assert_eq!(dead_interactive(&store, Some("div")).unwrap().len(), 1);
+        assert!(dead_interactive(&store, Some("form")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recent_changes_lists_committed_paths_known_to_the_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        for p in ["README.md", "src/a.ts", "src/b.ts"] {
+            std::fs::write(root.join(p), "x\n").unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-qm", "init"]);
+
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fa = file(&mut store, "src/a.ts");
+        let fb = file(&mut store, "src/b.ts");
+        let a1 = sym(&mut store, fa, "a1", SymbolKind::Function, 1);
+        let b1 = sym(&mut store, fb, "b1", SymbolKind::Function, 1);
+        call(&mut store, b1, a1);
+        let runner = pixel_git::GitRunner::new(root);
+
+        let findings = recent_changes(&store, root, &runner, 10).unwrap();
+        let files: Vec<&str> = findings.iter().map(|f| f.file.as_str()).collect();
+        assert_eq!(
+            files,
+            vec!["src/a.ts", "src/b.ts"],
+            "README.md is not in the graph, so it is not a finding"
+        );
+        assert_eq!(findings[0].label, "Review recent changes in src/a.ts");
+        assert_eq!(findings[0].fan_in, 1, "b.ts calls into a.ts");
+        assert_eq!(findings[1].fan_in, 0);
+        assert_eq!(findings[0].line, 1);
+
+        // The cap applies to the sorted, deduplicated path list.
+        let capped = recent_changes(&store, root, &runner, 2).unwrap();
+        assert_eq!(
+            capped.len(),
+            1,
+            "README.md and src/a.ts survive the cap: {capped:?}"
+        );
+        assert_eq!(capped[0].file, "src/a.ts");
+
+        // Outside a repository there is nothing recent.
+        let empty = tempfile::tempdir().unwrap();
+        let runner = pixel_git::GitRunner::new(empty.path());
+        assert!(
+            recent_changes(&store, empty.path(), &runner, 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

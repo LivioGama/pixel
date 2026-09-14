@@ -101,8 +101,12 @@ pub(crate) fn is_pixel_hook(command: &str) -> bool {
     }) {
         return true;
     }
+    // Entries written before the command rename say `pixel hook <verb>`;
+    // both spellings are pixel's and both must be recognised so an upgrade
+    // replaces the old entry instead of stacking a second one next to it.
     command
         .rsplit_once(" run-hook ")
+        .or_else(|| command.rsplit_once(" hook "))
         .is_some_and(|(executable, verb)| {
             executable_name(executable).as_deref() == Some("pixel")
                 && [
@@ -805,7 +809,9 @@ mod tests {
         assert!(is_pixel_hook(
             "'/tmp/Pixel tools/pixel' run-hook guard --provider claude"
         ));
-        assert!(is_pixel_hook("'/tmp/Pixel'\\''s/pixel' run-hook prompt-submit"));
+        assert!(is_pixel_hook(
+            "'/tmp/Pixel'\\''s/pixel' run-hook prompt-submit"
+        ));
         assert!(is_pixel_hook(
             "'/tmp/Pixel'\\''s/pixel' run-hook prompt-submit --provider claude"
         ));

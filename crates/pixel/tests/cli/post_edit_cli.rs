@@ -188,7 +188,14 @@ fn unresolved_receiver_evidence_stays_uncertain_without_inflating_known_callers(
     let store = pixel_graph::GraphStore::open(&fixture.0.join(".pixel/graph.db")).unwrap();
     let caller = store.file_by_path("src/caller_00.rs").unwrap().unwrap();
     store
-        .insert_unresolved_call(caller.id, "saved", None, 3, Some("unknown_receiver"), "call")
+        .insert_unresolved_call(
+            caller.id,
+            "saved",
+            None,
+            3,
+            Some("unknown_receiver"),
+            "call",
+        )
         .unwrap();
     drop(store);
     let note = fixture.note();

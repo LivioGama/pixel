@@ -127,7 +127,16 @@ fn render(opts: PlanOptions, findings: Vec<PlanFinding>) -> Result<(), String> {
     }
 }
 
+#[cfg_attr(test, mutants::skip)] // one print over `markdown`, which is tested
 fn render_markdown(opts: &PlanOptions, findings: &[PlanFinding]) -> Result<(), String> {
+    print!("{}", markdown(opts.no_verify, findings));
+    Ok(())
+}
+
+/// The markdown checklist: a numbered `[ ]` line per finding, a leading
+/// "map" item once there are enough findings to summarise, and a trailing
+/// verify item unless `--no-verify`.
+fn markdown(no_verify: bool, findings: &[PlanFinding]) -> String {
     let mut output = String::new();
     if findings.is_empty() {
         output.push_str("No plan findings.\n");
@@ -149,11 +158,10 @@ fn render_markdown(opts: &PlanOptions, findings: &[PlanFinding]) -> Result<(), S
                 f.severity.as_str()
             ));
         }
-        if !opts.no_verify {
+        if !no_verify {
             let n = findings.len() + 2;
             output.push_str(&format!(
-                "{}. [ ] Verify all plan targets in the running build\n",
-                n
+                "{n}. [ ] Verify all plan targets in the running build\n"
             ));
         }
     } else {
@@ -168,16 +176,14 @@ fn render_markdown(opts: &PlanOptions, findings: &[PlanFinding]) -> Result<(), S
                 f.severity.as_str()
             ));
         }
-        if !opts.no_verify {
+        if !no_verify {
             let n = findings.len() + 1;
             output.push_str(&format!(
-                "{}. [ ] Verify all plan targets in the running build\n",
-                n
+                "{n}. [ ] Verify all plan targets in the running build\n"
             ));
         }
     }
-    print!("{}", output);
-    Ok(())
+    output
 }
 
 fn render_compact(opts: &PlanOptions, findings: &[PlanFinding]) -> Result<(), String> {
@@ -219,4 +225,59 @@ fn file_count(findings: &[PlanFinding]) -> usize {
         set.insert(&f.file);
     }
     set.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pixel_graph::plan::Severity;
+
+    fn finding(file: &str, line: u32, fan_in: u32) -> PlanFinding {
+        PlanFinding {
+            file: file.to_string(),
+            line,
+            label: format!("Review {file}"),
+            fan_in,
+            severity: Severity::from_fan_in(fan_in),
+        }
+    }
+
+    #[test]
+    fn markdown_lists_findings_with_map_and_verify_items() {
+        assert_eq!(markdown(false, &[]), "No plan findings.\n");
+        assert_eq!(markdown(true, &[]), "No plan findings.\n");
+
+        // Under the summary threshold: plain numbering, verify last.
+        let one = [finding("src/a.rs", 3, 0)];
+        assert_eq!(
+            markdown(false, &one),
+            "1. [ ] Review src/a.rs in src/a.rs (line 3, fan-in: 0) [LOW]\n\
+             2. [ ] Verify all plan targets in the running build\n"
+        );
+        assert_eq!(
+            markdown(true, &one),
+            "1. [ ] Review src/a.rs in src/a.rs (line 3, fan-in: 0) [LOW]\n"
+        );
+
+        // Three findings across two files: a leading map item shifts the
+        // numbering by one and the verify item closes the list.
+        let three = [
+            finding("src/a.rs", 1, 9),
+            finding("src/a.rs", 7, 3),
+            finding("src/b.rs", 2, 0),
+        ];
+        let text = markdown(false, &three);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "1. [ ] Map 3 findings across 2 files (ranked by fan-in)",
+                "2. [ ] Review src/a.rs in src/a.rs (line 1, fan-in: 9) [HIGH]",
+                "3. [ ] Review src/a.rs in src/a.rs (line 7, fan-in: 3) [MEDIUM]",
+                "4. [ ] Review src/b.rs in src/b.rs (line 2, fan-in: 0) [LOW]",
+                "5. [ ] Verify all plan targets in the running build",
+            ]
+        );
+        assert!(!markdown(true, &three).contains("Verify"));
+    }
 }

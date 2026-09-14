@@ -27,11 +27,11 @@ mod call_guard;
 mod claude_controller;
 mod guard;
 mod operation_metrics;
-mod rename;
 mod plan_cmd;
 mod post_compaction;
 mod prompt_submit;
 mod recall_cmd;
+mod rename;
 mod rescue_cmd;
 mod search_compat;
 mod sniper_cmd;
@@ -5460,9 +5460,16 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let pairs = rename::load_mapping(&mapping)?;
             let report = rename::run(&root, &pairs, dry_run, regen)?;
             if json {
-                print_data(&serde_json::to_value(&report).map_err(|e| e.to_string())?, true)
+                print_data(
+                    &serde_json::to_value(&report).map_err(|e| e.to_string())?,
+                    true,
+                )
             } else {
-                println!("rename: {} edits across {} files", report.total_edits, report.files_changed.len());
+                println!(
+                    "rename: {} edits across {} files",
+                    report.total_edits,
+                    report.files_changed.len()
+                );
                 for f in &report.files_changed {
                     println!("  {f}");
                 }

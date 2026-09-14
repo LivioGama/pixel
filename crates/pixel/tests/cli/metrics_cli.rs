@@ -454,7 +454,14 @@ fn operation_error_precedes_metrics_and_preserves_failure() {
     assert!(events[0]["metrics"]["native_workflow_bytes"].is_null());
     assert_metric_identity(&lines[0], &events[0]);
 
-    let disabled = fixture.run(&["--metrics=off", "search-content", "(", ".", "--json", "--no-daemon"]);
+    let disabled = fixture.run(&[
+        "--metrics=off",
+        "search-content",
+        "(",
+        ".",
+        "--json",
+        "--no-daemon",
+    ]);
     assert_eq!(output.status.code(), disabled.status.code());
     assert_eq!(disabled.stdout, output.stdout);
     assert_eq!(disabled.stderr, diagnostics.as_bytes());
@@ -781,7 +788,8 @@ fn metrics_preserve_safe_publication_replay_and_head_guard() {
     ]);
     assert_eq!(refused.status.code(), Some(1));
     assert_eq!(metric_lines(&refused).len(), 1);
-    let after: Value = serde_json::from_slice(&fixture.run(&["repo-state", "--json"]).stdout).unwrap();
+    let after: Value =
+        serde_json::from_slice(&fixture.run(&["repo-state", "--json"]).stdout).unwrap();
     assert_eq!(after["head"], published["head"]);
     let events = fixture.events("commit");
     assert_eq!(events.len(), 3);

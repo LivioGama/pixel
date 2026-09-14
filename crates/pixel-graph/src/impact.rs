@@ -140,6 +140,10 @@ fn risk_label(mut level: u8, lower_bound: bool) -> String {
     .to_string()
 }
 
+/// Cap on `referenced_by` items, like the main BFS buckets: an unbounded
+/// list is noise.
+const MAX_REFERENCED_BY: usize = 20;
+
 pub fn impact(
     store: &GraphStore,
     uid: &str,
@@ -217,8 +221,6 @@ pub fn impact(
         // Dedupe by src_id — the same referrer at N call sites shouldn't
         // produce N identical items.
         let mut seen_src: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        // Cap at 20 like the main BFS buckets — an unbounded list is noise.
-        const MAX_REFERENCED_BY: usize = 20;
         for e in ref_edges {
             if !seen_src.insert(e.src_id) || referenced_by.len() >= MAX_REFERENCED_BY {
                 continue;

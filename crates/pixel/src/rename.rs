@@ -22,7 +22,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Convert kebab-case CLI name to PascalCase enum variant name.
 fn kebab_to_pascal(s: &str) -> String {
@@ -77,8 +77,8 @@ pub struct RenamePairReport {
 pub fn load_mapping(path: &Path) -> Result<Vec<RenamePair>, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("cannot read mapping file {}: {e}", path.display()))?;
-    let map: BTreeMap<String, String> = serde_json::from_str(&content)
-        .map_err(|e| format!("cannot parse mapping JSON: {e}"))?;
+    let map: BTreeMap<String, String> =
+        serde_json::from_str(&content).map_err(|e| format!("cannot parse mapping JSON: {e}"))?;
     Ok(map
         .into_iter()
         .map(|(old, new)| RenamePair::new(&old, &new))
@@ -288,7 +288,7 @@ fn rename_in_main_rs(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Result
     // Sort by old_pascal length descending so longer names are replaced first
     // (prevents "Search" matching inside "SearchCompat")
     let mut sorted_pairs: Vec<&RenamePair> = pairs.iter().collect();
-    sorted_pairs.sort_by(|a, b| b.old_pascal.len().cmp(&a.old_pascal.len()));
+    sorted_pairs.sort_by_key(|pair| std::cmp::Reverse(pair.old_pascal.len()));
 
     for pair in sorted_pairs {
         // Rename `Command::OldPascal` → `Command::NewPascal`
@@ -297,8 +297,8 @@ fn rename_in_main_rs(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Result
         let new_pat = format!("Command::{}", pair.new_pascal);
         // Replace only when followed by a non-identifier character (space, {, (, etc.)
         for suffix in [" {", "\n", "(", " ", ".", "::", ")"] {
-            let old_full = format!("{}{}", old_pat, suffix);
-            let new_full = format!("{}{}", new_pat, suffix);
+            let old_full = format!("{old_pat}{suffix}");
+            let new_full = format!("{new_pat}{suffix}");
             let count = new_content.matches(&old_full).count();
             if count > 0 {
                 new_content = new_content.replace(&old_full, &new_full);
@@ -350,14 +350,18 @@ fn rename_in_main_rs(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Result
 
 /// Rename command labels in string literals within specific function contexts.
 /// Only renames strings that are command labels, not JSON fields or agent tool names.
-fn rename_command_labels(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Result<usize, String> {
+fn rename_command_labels(
+    path: &Path,
+    pairs: &[RenamePair],
+    dry_run: bool,
+) -> Result<usize, String> {
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let mut new_content = content.clone();
     let mut edits = 0;
 
     // Sort by old_kebab length descending to prevent prefix matches
     let mut sorted_pairs: Vec<&RenamePair> = pairs.iter().collect();
-    sorted_pairs.sort_by(|a, b| b.old_kebab.len().cmp(&a.old_kebab.len()));
+    sorted_pairs.sort_by_key(|pair| std::cmp::Reverse(pair.old_kebab.len()));
 
     for pair in sorted_pairs {
         // In operation_metrics.rs: match arms like `"search" |` → `"search-content" |`
@@ -369,8 +373,8 @@ fn rename_command_labels(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Re
         // Only replace in match arm context: `"old" |` or `"old" =>` or `"old",`
         // This avoids replacing JSON field access like `data["old"]`
         for pattern in [" |", " =>", ",", ")"] {
-            let old_full = format!("{}{}", old_label, pattern);
-            let new_full = format!("{}{}", new_label, pattern);
+            let old_full = format!("{old_label}{pattern}");
+            let new_full = format!("{new_label}{pattern}");
             let count = new_content.matches(&old_full).count();
             if count > 0 {
                 new_content = new_content.replace(&old_full, &new_full);
@@ -497,8 +501,8 @@ fn rename_in_routing(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Result
         // Only rename "hook" → "run-hook" (the CLI command name)
         if pair.old_kebab == "hook" {
             // Generated hook commands: `"{} hook ` → `"{} run-hook `
-            let old_hook = format!("{{}} hook ");
-            let new_hook = format!("{{}} run-hook ");
+            let old_hook = "{} hook ".to_string();
+            let new_hook = "{} run-hook ".to_string();
             let count = new_content.matches(&old_hook).count();
             if count > 0 {
                 new_content = new_content.replace(&old_hook, &new_hook);
@@ -550,8 +554,8 @@ fn rename_in_config(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Result<
     for pair in pairs {
         if pair.old_kebab == "hook" {
             // `pixel run-hook` in comments and test strings
-            let old_cmd = "pixel run-hook";
-            let new_cmd = "pixel hook";
+            let _old_cmd = "pixel run-hook";
+            let _new_cmd = "pixel hook";
             // Actually, the current code (post-rename) uses "run-hook" in config.rs
             // We need to revert it to "hook" when going backwards, or keep it if going forwards
             // Since we're building on top of the renamed code, and will use this on the
@@ -592,7 +596,7 @@ fn rename_user_facing(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Resul
     // Sort by old_kebab length descending so longer names are replaced first
     // (prevents "pixel search" matching inside "pixel search-compat")
     let mut sorted_pairs: Vec<&RenamePair> = pairs.iter().collect();
-    sorted_pairs.sort_by(|a, b| b.old_kebab.len().cmp(&a.old_kebab.len()));
+    sorted_pairs.sort_by_key(|pair| std::cmp::Reverse(pair.old_kebab.len()));
 
     for pair in sorted_pairs {
         // `pixel old-name` → `pixel new-name` — only when followed by a non-identifier char
@@ -602,8 +606,8 @@ fn rename_user_facing(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Resul
         let old_cmd = format!("pixel {}", pair.old_kebab);
         let new_cmd = format!("pixel {}", pair.new_kebab);
         for suffix in ["`", " ", "\n", "\"", "'", ")", "/", ".", "|"] {
-            let old_full = format!("{}{}", old_cmd, suffix);
-            let new_full = format!("{}{}", new_cmd, suffix);
+            let old_full = format!("{old_cmd}{suffix}");
+            let new_full = format!("{new_cmd}{suffix}");
             let count = new_content.matches(&old_full).count();
             if count > 0 {
                 new_content = new_content.replace(&old_full, &new_full);
@@ -628,13 +632,12 @@ fn rename_in_test_file(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Resu
 
     // Sort by old_kebab length descending to prevent prefix matches
     let mut sorted_pairs: Vec<&RenamePair> = pairs.iter().collect();
-    sorted_pairs.sort_by(|a, b| b.old_kebab.len().cmp(&a.old_kebab.len()));
+    sorted_pairs.sort_by_key(|pair| std::cmp::Reverse(pair.old_kebab.len()));
 
     for line in &mut lines {
         // Skip lines that are git command invocations (not pixel commands)
-        let is_git_context = line.contains("git(")
-            || line.contains("git ")
-            || line.contains("\"git\"");
+        let is_git_context =
+            line.contains("git(") || line.contains("git ") || line.contains("\"git\"");
         if is_git_context {
             continue;
         }
@@ -656,8 +659,8 @@ fn rename_in_test_file(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Resu
             let old_cmd = format!("pixel {}", pair.old_kebab);
             let new_cmd = format!("pixel {}", pair.new_kebab);
             for suffix in ["`", " ", "\n", "\"", "'", ")"] {
-                let old_full = format!("{}{}", old_cmd, suffix);
-                let new_full = format!("{}{}", new_cmd, suffix);
+                let old_full = format!("{old_cmd}{suffix}");
+                let new_full = format!("{new_cmd}{suffix}");
                 let count = line.matches(&old_full).count();
                 if count > 0 {
                     *line = line.replace(&old_full, &new_full);
@@ -696,5 +699,190 @@ mod tests {
         assert_eq!(pair.new_kebab, "search-content");
         assert_eq!(pair.old_pascal, "Search");
         assert_eq!(pair.new_pascal, "SearchContent");
+    }
+
+    /// A throwaway directory removed on drop (the crate has no tempfile
+    /// dev-dependency).
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(name: &str, content: &str) -> (Scratch, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-rename-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        fs::write(&path, content).unwrap();
+        (Scratch(dir), path)
+    }
+
+    fn pairs(map: &[(&str, &str)]) -> Vec<RenamePair> {
+        map.iter().map(|(o, n)| RenamePair::new(o, n)).collect()
+    }
+
+    #[test]
+    fn load_mapping_reads_pairs_and_reports_unreadable_or_malformed_files() {
+        let (_d, path) = scratch(
+            "map.json",
+            r#"{"search": "search-content", "hook": "run-hook"}"#,
+        );
+        let loaded = load_mapping(&path).unwrap();
+        let names: Vec<(&str, &str)> = loaded
+            .iter()
+            .map(|p| (p.old_kebab.as_str(), p.new_kebab.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![("hook", "run-hook"), ("search", "search-content")]
+        );
+        assert_eq!(loaded[1].new_pascal, "SearchContent");
+
+        let (_d, bad) = scratch("bad.json", "{not json");
+        let err = load_mapping(&bad).unwrap_err();
+        assert!(err.starts_with("cannot parse mapping JSON:"), "{err}");
+        let err = load_mapping(Path::new("/nonexistent/map.json")).unwrap_err();
+        assert!(err.starts_with("cannot read mapping file"), "{err}");
+    }
+
+    #[test]
+    fn rename_in_main_rs_renames_variants_and_guard_labels_only() {
+        let src = "match cmd {\n    Command::Search { pattern } => run(),\n}\n\
+                   enum Command {\n    Search {\n        pattern: String,\n    },\n}\n\
+                   call_guard_check(\"search\", &args);\n\
+                   let op = Op::Search { pattern };\n";
+        let (_d, path) = scratch("main.rs", src);
+        let pairs = pairs(&[("search", "search-content")]);
+        assert_eq!(
+            rename_in_main_rs(&path, &pairs, true).unwrap(),
+            3,
+            "dry run counts"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            src,
+            "dry run writes nothing"
+        );
+        assert_eq!(rename_in_main_rs(&path, &pairs, false).unwrap(), 3);
+        let out = fs::read_to_string(&path).unwrap();
+        assert!(out.contains("Command::SearchContent { pattern }"), "{out}");
+        assert!(out.contains("\n    SearchContent {\n"), "{out}");
+        assert!(out.contains("call_guard_check(\"search-content\""), "{out}");
+        assert!(
+            out.contains("Op::Search { pattern }"),
+            "the wire enum keeps its name: {out}"
+        );
+        assert_eq!(
+            rename_in_main_rs(&path, &pairs, false).unwrap(),
+            0,
+            "idempotent"
+        );
+    }
+
+    #[test]
+    fn rename_command_labels_touches_match_arms_and_guard_lists_not_json_keys() {
+        let src = "match c {\n    \"search\" | \"query\" => Some(1),\n    \"targets\" => Some(3),\n}\n\
+                   check_and_record(\"search\", args);\n\
+                   const GUARDED: &[&str] = &[\"search\", \"impact\", \"targets\"];\n\
+                   let v = data[\"search\"].clone();\n";
+        let (_d, path) = scratch("labels.rs", src);
+        let pairs = pairs(&[("search", "search-content"), ("targets", "scope-task")]);
+        assert_eq!(rename_command_labels(&path, &pairs, false).unwrap(), 5);
+        let out = fs::read_to_string(&path).unwrap();
+        assert!(out.contains("\"search-content\" | \"query\""), "{out}");
+        assert!(out.contains("\"scope-task\" => Some(3)"), "{out}");
+        assert!(out.contains("check_and_record(\"search-content\""), "{out}");
+        assert!(
+            out.contains("&[\"search-content\", \"impact\", \"scope-task\"]"),
+            "{out}"
+        );
+        assert!(
+            out.contains("data[\"search\"]"),
+            "JSON field access is not a label: {out}"
+        );
+    }
+
+    #[test]
+    fn rename_in_routing_and_config_rewrite_the_hook_verb_only() {
+        let routing = "format!(\"{} hook guard\", exe);\n.rsplit_once(\" hook \")\n\
+                       \"'/tmp/pixel' hook prompt-submit\"\n\"pixel hook session-start\"\n";
+        let (_d, path) = scratch("routing.rs", routing);
+        let hook = pairs(&[("hook", "run-hook"), ("search", "search-content")]);
+        assert_eq!(rename_in_routing(&path, &hook, false).unwrap(), 4);
+        let out = fs::read_to_string(&path).unwrap();
+        assert!(out.contains("{} run-hook guard"), "{out}");
+        assert!(out.contains(".rsplit_once(\" run-hook \")"), "{out}");
+        assert!(out.contains("'/tmp/pixel' run-hook prompt-submit"), "{out}");
+        assert!(out.contains("\"pixel run-hook session-start\""), "{out}");
+        let (_d, other) = scratch("routing2.rs", routing);
+        assert_eq!(
+            rename_in_routing(&other, &pairs(&[("search", "search-content")]), false).unwrap(),
+            0,
+            "only the hook pair drives routing edits"
+        );
+
+        let config = "// pixel hook guard is registered here\nlet c = \"pixel hook\";\n";
+        let (_d, path) = scratch("config.rs", config);
+        assert_eq!(rename_in_config(&path, &hook, false).unwrap(), 2);
+        let out = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            out,
+            "// pixel run-hook guard is registered here\nlet c = \"pixel run-hook\";\n"
+        );
+    }
+
+    #[test]
+    fn rename_user_facing_rewrites_pixel_commands_longest_name_first() {
+        let doc = "Run `pixel search` then pixel search-compat foo; see (pixel search).\n";
+        let (_d, path) = scratch("README.md", doc);
+        let pairs = pairs(&[
+            ("search", "search-content"),
+            ("search-compat", "search-like-rg"),
+        ]);
+        assert_eq!(rename_user_facing(&path, &pairs, false).unwrap(), 3);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "Run `pixel search-content` then pixel search-like-rg foo; see (pixel search-content).\n"
+        );
+    }
+
+    #[test]
+    fn rename_in_test_file_rewrites_cli_args_but_never_git_invocations() {
+        let src = ".args([\"search\", \"x\", \"--json\"])\n\
+                   git(&root, &[\"search\", \"y\"]);\n\
+                   run(\"git status\", [\"search\"]);\n\
+                   // `pixel search` must answer\n";
+        let (_d, path) = scratch("cli.rs", src);
+        let pairs = pairs(&[("search", "search-content")]);
+        assert_eq!(
+            rename_in_test_file(&path, &pairs, true).unwrap(),
+            2,
+            "dry run counts"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), src);
+        assert_eq!(rename_in_test_file(&path, &pairs, false).unwrap(), 2);
+        let out = fs::read_to_string(&path).unwrap();
+        assert!(out.contains(".args([\"search-content\", \"x\""), "{out}");
+        assert!(
+            out.contains("git(&root, &[\"search\", \"y\"])"),
+            "git argv untouched: {out}"
+        );
+        assert!(
+            out.contains("run(\"git status\", [\"search\"])"),
+            "git line untouched: {out}"
+        );
+        assert!(
+            out.contains("// `pixel search-content` must answer"),
+            "{out}"
+        );
     }
 }

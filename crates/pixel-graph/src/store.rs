@@ -1058,7 +1058,7 @@ impl GraphStore {
         }
         sql.push_str(" ORDER BY start_line");
         let mut stmt = self.conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(AsRef::as_ref).collect();
         let rows = stmt.query_map(param_refs.as_slice(), Self::row_to_jsx_element)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
