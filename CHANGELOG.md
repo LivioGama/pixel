@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `pixel plan`'s dead-code query no longer reports Rust trait implementation methods (`fmt` in `impl Display for X`, `from`, `default`, `drop`): they are called through the trait, never by name. The graph records them (`symbols.trait_impl`, extractor version 3, so existing graphs rebuild once).
 - `pixel plan --query hotspots ../repo` plans `../repo`. Both the prompt and the path are optional positionals, so the directory was read as the prompt and the current directory was planned; with a query other than `by-concept`, a prompt that names a directory is now the path.
 - The session-start capability block lists the commands an agent can type (`scope-task`, `fast-forward`, `fetch`, …, as `pixel --help` shows them) instead of the daemon's op tags. An agent reading `update` or `sync` there ran `pixel update` (now `fast-forward`) or `pixel sync` (now `fetch`), and `targets`, `search` or `history_op` only worked, if at all, through the pre-rename aliases.
 - `pixel who-wrote` no longer fails on every file when git's `blame.ignoreRevsFile` names a file the repository lacks (a global `.git-blame-ignore-revs` default): git refused the blame with "could not open object name list". The blame is retried without the ignore list and the answer carries a warning saying so; an existing ignore-revs file is still honoured.

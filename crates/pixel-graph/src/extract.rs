@@ -18,6 +18,9 @@ pub struct RawSymbol {
     pub start_line: u32,
     pub end_line: u32,
     pub sig: String,
+    /// A method of a trait implementation (`impl Display for X { fn fmt }`):
+    /// called through the trait, so a missing direct caller proves nothing.
+    pub trait_impl: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +140,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         imports: Vec::new(),
         jsx_elements: Vec::new(),
         stack: Vec::new(),
+        in_trait_impl: false,
     };
     let root = tree.root_node();
     match lang {
@@ -198,6 +202,8 @@ struct Walker<'a> {
     jsx_elements: Vec<RawJsxElement>,
     /// Enclosing type names (class/impl/trait) for qualification.
     stack: Vec<String>,
+    /// Inside the body of a trait implementation (`impl Trait for Type`).
+    in_trait_impl: bool,
 }
 
 impl<'a> Walker<'a> {
@@ -234,6 +240,7 @@ impl<'a> Walker<'a> {
             return;
         }
         self.symbols.push(RawSymbol {
+            trait_impl: self.in_trait_impl && kind == SymbolKind::Method,
             sig: self.sig(node),
             start_line: line_start(node),
             end_line: line_end(node),
@@ -743,6 +750,7 @@ fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
         return;
     }
     let mut pushed = false;
+    let outer_trait_impl = w.in_trait_impl;
     match node.kind() {
         "function_item" => {
             if let Some(name) = field_text(w, node, "name") {
@@ -760,6 +768,7 @@ fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
                 w.stack.push(base);
                 pushed = true;
             }
+            w.in_trait_impl = node.child_by_field_name("trait").is_some();
         }
         "struct_item" => {
             if let Some(name) = field_text(w, node, "name") {
@@ -811,6 +820,7 @@ fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
     if pushed {
         w.stack.pop();
     }
+    w.in_trait_impl = outer_trait_impl;
 }
 
 fn rust_is_test_container(w: &Walker, node: Node) -> bool {
@@ -1603,6 +1613,7 @@ mod tests {
             start_line,
             end_line,
             sig: String::new(),
+            trait_impl: false,
         }
     }
 
@@ -2108,6 +2119,46 @@ export function wire(emitter: any) {
                 .all(|c| c.enclosing_index == Some(app)),
             "the renderer encloses every component call: {:?}",
             extraction.calls
+        );
+    }
+
+    /// `impl Display for X { fn fmt }` is called through the trait: its
+    /// methods are marked, inherent and trait-definition methods are not,
+    /// and the mark ends with the impl block, nested impls included.
+    #[test]
+    fn rust_trait_impl_methods_are_marked() {
+        let source = br#"
+struct X;
+impl std::fmt::Display for X {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { Ok(()) }
+}
+impl X {
+    fn own(&self) {
+        struct Y;
+        impl Default for Y { fn default() -> Self { Y } }
+    }
+    fn after(&self) {}
+}
+trait Greet { fn hello(&self) {} }
+fn free() {}
+"#;
+        let extraction = extract_file("src/lib.rs", source).unwrap();
+        let marked: Vec<(&str, bool)> = extraction
+            .symbols
+            .iter()
+            .filter(|s| matches!(s.kind, SymbolKind::Method | SymbolKind::Function))
+            .map(|s| (s.name.as_str(), s.trait_impl))
+            .collect();
+        assert_eq!(
+            marked,
+            [
+                ("fmt", true),
+                ("own", false),
+                ("default", true),
+                ("after", false),
+                ("hello", false),
+                ("free", false),
+            ]
         );
     }
 
