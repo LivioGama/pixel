@@ -1579,6 +1579,7 @@ mod tests {
             .args(["config", "user.name", "t"])
             .status()
             .unwrap();
+        pin_builtin_merge(root);
         std::fs::write(root.join("a.txt"), b"a").unwrap();
         std::process::Command::new("git")
             .arg("-C")
@@ -1622,6 +1623,18 @@ mod tests {
             .args(["push", "-u", "origin", "main"])
             .status()
             .unwrap();
+    }
+
+    /// Forces git's built-in text merge on every path of the fixture repo.
+    /// `reconcile` runs git through the runner, which inherits the
+    /// developer's global config: a `* merge=mergiraf` line in
+    /// `core.attributesFile` resolves the fixtures' conflicts cleanly, so the
+    /// conflict paths under test are never reached. `.git/info/attributes`
+    /// outranks both `core.attributesFile` and in-tree `.gitattributes`.
+    fn pin_builtin_merge(root: &Path) {
+        let info = root.join(".git").join("info");
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(info.join("attributes"), "* merge=text\n").unwrap();
     }
 
     #[test]
@@ -2179,6 +2192,47 @@ mod tests {
         let remote = tempdir().unwrap();
         let root = dir.path();
         init_repo_with_remote(root, remote.path());
+        assert_additive_conflict_is_auto_resolved(root);
+    }
+
+    #[test]
+    fn reconcile_fixture_should_reach_the_conflict_path_when_a_user_merge_driver_is_configured() {
+        // A developer's global config maps every path to a syntax-aware
+        // merge driver (mergiraf) that resolves the additive conflict by
+        // itself, so the probe comes back clean and the reconcile takes the
+        // `integrated` path instead of the auto-resolution under test. The
+        // same attribute slot is reachable from the repo config: a driver
+        // that always merges cleanly, installed after the fixture, must not
+        // change the outcome.
+        let dir = tempdir().unwrap();
+        let remote = tempdir().unwrap();
+        let root = dir.path();
+        init_repo_with_remote(root, remote.path());
+        let user_config = tempdir().unwrap();
+        let user_attributes = user_config.path().join("attributes");
+        std::fs::write(&user_attributes, "* merge=always-clean\n").unwrap();
+        for (key, value) in [
+            ("core.attributesFile", user_attributes.to_str().unwrap()),
+            (
+                "merge.always-clean.driver",
+                "git merge-file --union %A %O %B",
+            ),
+        ] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["config", key, value])
+                .status()
+                .unwrap();
+            assert!(status.success(), "git config {key}");
+        }
+        assert_additive_conflict_is_auto_resolved(root);
+    }
+
+    /// Makes `feature` and `main` append a different line to `a.txt`, then
+    /// checks that `reconcile --into main` stops on the conflict, resolves
+    /// it by union and finishes the rebase.
+    fn assert_additive_conflict_is_auto_resolved(root: &Path) {
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git")
                 .arg("-C")
