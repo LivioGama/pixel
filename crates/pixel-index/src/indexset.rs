@@ -807,6 +807,57 @@ mod tests {
         dir
     }
 
+    /// A private shard cache for one test. `open_or_build` reads and writes
+    /// the cache under `$XDG_CACHE_HOME`, so a test that opens an index
+    /// without it links from and publishes to the developer's real
+    /// `~/.cache/pixel/shards` (one entry per fixture commit, never evicted
+    /// by the suite). Holding the guard serialises the tests that set the
+    /// variable (`CACHE_TEST_LOCK`), points it at a fresh directory and puts
+    /// the previous value back on drop, a failed assertion included.
+    struct IsolatedCache {
+        home: PathBuf,
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl IsolatedCache {
+        fn new(tag: &str) -> Self {
+            let lock = crate::cache::CACHE_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = scratch(&format!("{tag}-cache-home"));
+            let previous = std::env::var_os("XDG_CACHE_HOME");
+            // SAFETY: every test that sets XDG_CACHE_HOME holds
+            // CACHE_TEST_LOCK, taken above.
+            unsafe {
+                std::env::set_var("XDG_CACHE_HOME", &home);
+            }
+            Self {
+                home,
+                previous,
+                _lock: lock,
+            }
+        }
+
+        /// Where the cache entries of this test live.
+        fn shards(&self) -> PathBuf {
+            self.home.join("pixel").join("shards")
+        }
+    }
+
+    impl Drop for IsolatedCache {
+        fn drop(&mut self) {
+            // SAFETY: the lock is still held; fields drop after this body.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("XDG_CACHE_HOME", value),
+                    None => std::env::remove_var("XDG_CACHE_HOME"),
+                }
+            }
+            std::fs::remove_dir_all(&self.home).ok();
+        }
+    }
+
     #[test]
     fn cache_variant_separates_indexes_built_with_and_without_default_ignores() {
         assert_eq!(cache_variant(true), "");
@@ -846,15 +897,7 @@ mod tests {
     /// the needle proves the cache answered.
     #[test]
     fn a_valid_cached_shard_is_reused_without_a_rebuild() {
-        let _guard = crate::cache::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let cache_home = scratch("cache-reuse-home");
-        // SAFETY: CACHE_TEST_LOCK serialises every test that sets
-        // XDG_CACHE_HOME; restored below.
-        unsafe {
-            std::env::set_var("XDG_CACHE_HOME", &cache_home);
-        }
+        let _cache = IsolatedCache::new("cache-reuse");
         let dir = scratch("cache-reuse");
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn reusedNeedle() {}\n").unwrap();
@@ -872,12 +915,7 @@ mod tests {
             "the cached shard was used, not a rebuild"
         );
         drop(set);
-        // SAFETY: as above.
-        unsafe {
-            std::env::remove_var("XDG_CACHE_HOME");
-        }
         std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&cache_home).ok();
     }
 
     /// Each committed blob is indexed, skipped by design, or unreadable, and
@@ -941,15 +979,7 @@ mod tests {
     /// published.
     #[test]
     fn the_shared_cache_replaces_a_bad_entry_and_never_stores_an_incomplete_shard() {
-        let _guard = crate::cache::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let cache_home = scratch("cache-home");
-        // SAFETY: CACHE_TEST_LOCK serialises every test that sets
-        // XDG_CACHE_HOME; restored below.
-        unsafe {
-            std::env::set_var("XDG_CACHE_HOME", &cache_home);
-        }
+        let _cache = IsolatedCache::new("cache-publish");
         let dir = scratch("cache-publish");
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a.rs"), "fn cachedNeedle() {}\n").unwrap();
@@ -995,16 +1025,12 @@ mod tests {
         );
         drop(set);
 
-        // SAFETY: as above.
-        unsafe {
-            std::env::remove_var("XDG_CACHE_HOME");
-        }
         std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&cache_home).ok();
     }
 
     #[test]
     fn git_anchored_layers_end_to_end() {
+        let _cache = IsolatedCache::new("git_anchored_layers_end_to_end");
         let dir = std::env::temp_dir().join(format!("gpx-indexset-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
@@ -1058,6 +1084,7 @@ mod tests {
 
     #[test]
     fn paths_merges_layers_and_honors_tombstones() {
+        let _cache = IsolatedCache::new("paths_merges_layers_and_honors_tombstones");
         let dir = std::env::temp_dir().join(format!("gpx-indexset-paths-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
@@ -1088,6 +1115,7 @@ mod tests {
 
     #[test]
     fn non_git_plain_build() {
+        let _cache = IsolatedCache::new("non_git_plain_build");
         let dir = std::env::temp_dir().join(format!("gpx-indexset-nogit-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
@@ -1106,6 +1134,7 @@ mod tests {
     /// `.pixel/` sidecar must never be, even with the hidden filter off.
     #[test]
     fn hidden_files_are_indexed_but_git_dir_is_not() {
+        let _cache = IsolatedCache::new("hidden_files_are_indexed_but_git_dir_is_not");
         let dir = std::env::temp_dir().join(format!(
             "gpx-indexset-hidden-{}-{}",
             std::process::id(),
@@ -1199,6 +1228,7 @@ mod tests {
     /// checking freshness, so new/edited files were invisible after reopening.
     #[test]
     fn non_git_reopen_detects_changes() {
+        let _cache = IsolatedCache::new("non_git_reopen_detects_changes");
         let dir = std::env::temp_dir().join(format!(
             "gpx-indexset-nongit-stale-{}-{}",
             std::process::id(),
@@ -1239,6 +1269,8 @@ mod tests {
 
     #[test]
     fn non_git_reopen_detects_equal_size_edit_with_restored_mtime() {
+        let _cache =
+            IsolatedCache::new("non_git_reopen_detects_equal_size_edit_with_restored_mtime");
         let dir = std::env::temp_dir().join(format!(
             "gpx-indexset-nongit-content-{}",
             std::process::id()
@@ -1287,6 +1319,7 @@ mod tests {
     /// searchable again.
     #[test]
     fn base_shard_uses_commit_bytes_not_working_tree() {
+        let _cache = IsolatedCache::new("base_shard_uses_commit_bytes_not_working_tree");
         let dir = std::env::temp_dir().join(format!(
             "gpx-indexset-prov-{}-{}",
             std::process::id(),
@@ -1342,6 +1375,7 @@ mod tests {
     #[test]
     fn symlink_escape_is_blocked() {
         use std::os::unix::fs::symlink;
+        let _cache = IsolatedCache::new("symlink_escape_is_blocked");
         let dir = std::env::temp_dir().join(format!(
             "gpx-indexset-symlink-{}-{}",
             std::process::id(),
@@ -1392,6 +1426,7 @@ mod tests {
 
     #[test]
     fn oversized_worktree_file_is_not_indexed_or_verified() {
+        let _cache = IsolatedCache::new("oversized_worktree_file_is_not_indexed_or_verified");
         let dir =
             std::env::temp_dir().join(format!("gpx-indexset-oversized-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
@@ -1415,6 +1450,7 @@ mod tests {
     /// and reports `truncated` when more matches exist beyond the slice.
     #[test]
     fn search_limit_truncates() {
+        let _cache = IsolatedCache::new("search_limit_truncates");
         let dir = std::env::temp_dir().join(format!(
             "gpx-indexset-limit-{}-{}",
             std::process::id(),
@@ -1450,5 +1486,64 @@ mod tests {
         assert!(!stats.truncated);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A test holding the guard builds and publishes its shard in its own
+    /// cache, and leaves `XDG_CACHE_HOME` as it found it.
+    #[test]
+    fn open_or_build_should_publish_into_the_test_cache_when_the_guard_is_held() {
+        let cache = IsolatedCache::new("isolated-publish");
+        let dir = scratch("isolated-publish");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn isolatedNeedle() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        let head = git_out(&dir, &["rev-parse", "HEAD"]);
+
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert_eq!(set.search("isolatedNeedle", None).unwrap().0.len(), 1);
+        drop(set);
+        let published: Vec<_> = std::fs::read_dir(cache.shards())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            published,
+            [format!("{head}.{}.v1.shard", ex().id())],
+            "the shard is published in the test's cache"
+        );
+
+        let previous = cache.previous.clone();
+        let home = cache.home.clone();
+        drop(cache);
+        assert!(!home.exists(), "the test cache is removed");
+        // Every holder restores the variable before releasing the lock.
+        let _lock = crate::cache::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(std::env::var_os("XDG_CACHE_HOME"), previous);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Every test that opens an index holds [`IsolatedCache`]: one that does
+    /// not writes a shard per fixture commit into the developer's real cache.
+    #[test]
+    fn every_test_that_opens_an_index_should_hold_an_isolated_cache() {
+        let source = include_str!("indexset.rs");
+        let tests = &source[source.find("\nmod tests {").unwrap()..];
+        let mut unguarded = Vec::new();
+        let mut opening = 0;
+        for chunk in tests.split("\n    #[test]\n    fn ").skip(1) {
+            let name = &chunk[..chunk.find('(').unwrap()];
+            let body = &chunk[..chunk.find("\n    }\n").unwrap()];
+            if body.contains("IndexSet::open_or_build") {
+                opening += 1;
+                if !body.contains("IsolatedCache::new(") {
+                    unguarded.push(name);
+                }
+            }
+        }
+        assert!(opening >= 13, "the scan found the tests: {opening}");
+        assert!(unguarded.is_empty(), "no isolated cache: {unguarded:?}");
     }
 }
