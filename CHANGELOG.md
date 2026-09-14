@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-09-14
+
 ### Added
+- `pixel plan "<prompt>"` (or `--query dead-interactive|dead-code|hotspots|recent-changes|by-concept`): a deterministic todo list from the code graph and git history, as markdown, `--format compact` or `--json`, each finding with file, line, severity and fan-in.
+- Native plugin manifests for Claude Code, Codex, Gemini CLI, OpenCode, pi, Devin, Qoder and Grok, plus generated rules for Cursor, Windsurf, Kiro and Cline, all from the agent prompt (`scripts/gen-plugin-assets.sh`). A SessionStart/SubagentStart hook (`hooks/pixel-context.sh`) injects the protocol as context.
+- `pixel recall` indexes pi sessions (`~/.pi/agent/sessions`, or `$PI_CODING_AGENT_DIR/sessions`).
+- `pixel impact` lists the symbols that pass the target as a callback argument under `referenced_by`, and graph answers carry `epistemics.extraction_limits` (callbacks, dynamic dispatch, macros, eval) next to `closed_world: false`.
+- `pixel scope-task` expands French task words to their English code terms, and falls back to semantic code search when the lexical pass finds no P0/P1 file.
+- Base shards are cached per commit under `$XDG_CACHE_HOME/pixel/shards` (else `~/.cache/pixel/shards`), so a second worktree at the same commit links the shard instead of rebuilding it.
 - `.agents/skills/release/`: the release procedure as a project skill (version choice, tag, the `develop` → `main` PR, a release record for resuming after a context loss, verification of the published release from a fresh download with the binary's `commit:` line matched to the tag, failure classification before any retry, hotfixes) plus `prepare.sh x.y.z`, which moves every workspace member to `x.y.z`, inserts `## [x.y.z] - DATE` under an empty Unreleased, refreshes `Cargo.lock`, lists the pull requests merged since the last tag for the changelog review and runs `check-release` from the tree, refusing before any write when the tag or heading exists or Unreleased is empty. Listed in AGENTS.md and CONTRIBUTING.md.
 
 ### Fixed
