@@ -38,8 +38,10 @@ const HOOK_DEADLINE: Duration = Duration::from_millis(750);
 const TASK_CONTEXT_BYTES: usize = 4096;
 const TASK_TARGET_LIMIT: usize = 8;
 
-/// Commands in actions.jsonl that signal task completion.
-const COMPLETION_COMMANDS: &[&str] = &["publish", "ship", "push", "commit"];
+/// Commands in actions.jsonl that signal task completion, under their current
+/// names. Entries logged before the command rename (`publish`, `ship`) are
+/// canonicalised before the lookup.
+const COMPLETION_COMMANDS: &[&str] = &["commit", "commit-and-push", "push"];
 
 /// The prompt submit hook payload (Claude Code / Gemini / Devin / Codex / zcode shape).
 #[derive(Deserialize)]
@@ -643,7 +645,7 @@ fn check_action_log_file(mut file: std::fs::File, cwd: &Path, cutoff: i64) -> bo
         if !cwd_matches(cwd, Path::new(log_cwd)) {
             continue;
         }
-        if COMPLETION_COMMANDS.contains(&command) {
+        if COMPLETION_COMMANDS.contains(&pixel_proto::commands::current_name(command)) {
             return true;
         }
     }
@@ -1284,6 +1286,21 @@ mod tests {
                 "recent publish here",
                 vec![entry(cutoff + 1, "publish", "/work/pixel", "ok")],
                 true,
+            ),
+            (
+                "commit-and-push, the current name of ship",
+                vec![entry(cutoff + 1, "commit-and-push", "/work/pixel", "ok")],
+                true,
+            ),
+            (
+                "push",
+                vec![entry(cutoff + 1, "push", "/work/pixel", "ok")],
+                true,
+            ),
+            (
+                "a retrieval command is not a completion",
+                vec![entry(cutoff + 1, "search-content", "/work/pixel", "ok")],
+                false,
             ),
             (
                 "exactly at the cutoff",

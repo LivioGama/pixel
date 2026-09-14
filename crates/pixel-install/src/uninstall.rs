@@ -780,8 +780,12 @@ fn legacy_composed_guard_signature(current_pre: &[serde_json::Value], sidecar: &
         return false;
     };
     let escaped_sidecar = sidecar.to_string_lossy().replace('\'', "'\\''");
-    command.contains(" hook composed-guard --provider codex --backup ")
-        && command.ends_with(&format!("'{escaped_sidecar}'"))
+    // Installs since the command rename write `run-hook`; 0.2.x wrote `hook`.
+    ["run-hook", "hook"].iter().any(|verb| {
+        command.contains(&format!(
+            " {verb} composed-guard --provider codex --backup "
+        ))
+    }) && command.ends_with(&format!("'{escaped_sidecar}'"))
 }
 
 /// Directories commonly holding project checkouts — mirrors the same logic
@@ -1041,6 +1045,31 @@ mod routing_tests {
             remove_pixel_hooks_from_settings(&home.path().join("absent.json"), false).unwrap(),
             (0, None)
         );
+    }
+
+    #[test]
+    fn legacy_composed_guard_signature_accepts_both_hook_verbs() {
+        let sidecar = Path::new("/p/.codex/pixel-composed.json");
+        let group = |command: &str| vec![json!({"hooks":[{"type":"command","command": command}]})];
+        for verb in ["run-hook", "hook"] {
+            let command = format!(
+                "'/tmp/pixel' {verb} composed-guard --provider codex --backup '/p/.codex/pixel-composed.json'"
+            );
+            assert!(
+                legacy_composed_guard_signature(&group(&command), sidecar),
+                "`{verb}` composed-guard entry is Pixel's: {command}"
+            );
+        }
+        assert!(!legacy_composed_guard_signature(
+            &group(
+                "'/tmp/pixel' run-hook guard --provider codex --backup '/p/.codex/pixel-composed.json'"
+            ),
+            sidecar
+        ));
+        assert!(!legacy_composed_guard_signature(
+            &group("'/tmp/pixel' run-hook composed-guard --provider codex --backup '/other.json'"),
+            sidecar
+        ));
     }
 
     #[test]

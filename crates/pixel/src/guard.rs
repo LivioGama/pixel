@@ -416,7 +416,7 @@ fn load_composed_backup(path: &Path) -> Option<Vec<ComposedForeignHook>> {
             }
             // A Pixel command in the backup would recurse; installers must
             // remove Pixel before snapshotting, and this is a second boundary.
-            if command.contains(" pixel run-hook ") || command.starts_with("pixel run-hook ") {
+            if invokes_pixel_hook(command) {
                 return None;
             }
             result.push(ComposedForeignHook {
@@ -2160,6 +2160,17 @@ fn sequencer_in_progress(root: &Path) -> bool {
         || git_dir.join("rebase-apply").is_dir()
 }
 
+/// Whether a hook command runs Pixel's own hook entrypoint, under the
+/// current verb (`pixel run-hook …`) or the one every 0.2.x install wrote
+/// (`pixel hook …`, still accepted as an alias). Either would recurse when
+/// replayed from a foreign-hook snapshot.
+fn invokes_pixel_hook(command: &str) -> bool {
+    ["run-hook", "hook"].iter().any(|verb| {
+        command.starts_with(&format!("pixel {verb} "))
+            || command.contains(&format!(" pixel {verb} "))
+    })
+}
+
 /// Check if `pixel sync-branch` has reported a conflict that requires manual
 /// resolution. When true, the guard allows `git rebase` as an escape hatch —
 /// `pixel sync-branch` itself reported "manual resolution required", so the
@@ -2811,6 +2822,75 @@ mod tests {
             std::env::temp_dir().join(format!("pixel-guard-{}-{}", name, std::process::id()));
         std::fs::create_dir_all(root.join("src")).unwrap();
         canonical(&root)
+    }
+
+    #[test]
+    fn composed_backup_replays_foreign_hooks_and_refuses_pixel_under_either_verb() {
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-guard-composed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, command: &str, mode: u32| {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.join(name);
+            let body = serde_json::json!({
+                "version": 1,
+                "provider": "codex",
+                "pre_tool_use": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": command}]}
+                ],
+            });
+            std::fs::write(&path, body.to_string()).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+
+        let foreign = load_composed_backup(&write("foreign.json", "keep-security-check", 0o600))
+            .expect("a sealed foreign hook is replayed");
+        assert_eq!(foreign.len(), 1);
+        assert_eq!(foreign[0].command, "keep-security-check");
+        assert_eq!(foreign[0].matcher, "Bash");
+
+        for command in [
+            "pixel run-hook guard --provider codex",
+            "pixel hook guard --provider codex",
+        ] {
+            assert!(
+                load_composed_backup(&write("pixel.json", command, 0o600)).is_none(),
+                "replaying `{command}` would recurse into Pixel"
+            );
+        }
+        assert!(
+            load_composed_backup(&write("open.json", "keep-security-check", 0o644)).is_none(),
+            "a group- or world-readable snapshot is not sealed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invokes_pixel_hook_recognises_both_hook_verbs_only() {
+        for command in [
+            "pixel run-hook guard --provider codex",
+            "pixel hook guard",
+            "security-check && pixel run-hook session-start",
+            "security-check; pixel hook prompt-submit",
+        ] {
+            assert!(invokes_pixel_hook(command), "{command}");
+        }
+        for command in [
+            "security-check --pixel",
+            "pixel hooked guard",
+            "mypixel hook guard",
+            "pixel search-content hook .",
+            "echo pixel-run-hook",
+        ] {
+            assert!(!invokes_pixel_hook(command), "{command}");
+        }
     }
 
     #[test]

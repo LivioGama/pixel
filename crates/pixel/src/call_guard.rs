@@ -199,6 +199,10 @@ pub enum CallGuardResult {
 /// phrase + paths for resolve, etc.).
 /// `cwd` is the current working directory (used to find `.pixel/`).
 pub fn check_and_record(command: &str, args: &str, cwd: &Path) -> CallGuardResult {
+    // A history written before the command rename records `search`, and a
+    // caller may still pass an old name: both count as the current command,
+    // so a loop that straddles an upgrade is still one loop.
+    let command = pixel_proto::commands::current_name(command);
     if !GUARDED_COMMANDS.contains(&command) {
         return CallGuardResult::Allow;
     }
@@ -229,7 +233,7 @@ pub fn check_and_record(command: &str, args: &str, cwd: &Path) -> CallGuardResul
     let hard_count = calls
         .iter()
         .filter(mine)
-        .filter(|c| c.command == command && c.args_hash == ah)
+        .filter(|c| pixel_proto::commands::current_name(&c.command) == command && c.args_hash == ah)
         .count();
     if hard_count >= HARD_LOOP_THRESHOLD {
         let msg = format!(
@@ -252,7 +256,7 @@ pub fn check_and_record(command: &str, args: &str, cwd: &Path) -> CallGuardResul
     let soft_count = calls
         .iter()
         .filter(mine)
-        .filter(|c| c.command == command)
+        .filter(|c| pixel_proto::commands::current_name(&c.command) == command)
         .count();
     if soft_count >= SOFT_LOOP_THRESHOLD {
         let msg = format!(
@@ -320,6 +324,76 @@ mod tests {
             None => unsafe { std::env::remove_var("PIXEL_SESSION_ID") },
         }
         out
+    }
+
+    fn seed_history(dir: &Path, entries: &[(&str, &str)]) {
+        let now = now_unix();
+        let calls: Vec<Value> = entries
+            .iter()
+            .map(|(command, args)| {
+                serde_json::json!({
+                    "command": command,
+                    "args_hash": args_hash(args),
+                    "timestamp": now,
+                    "session": "",
+                })
+            })
+            .collect();
+        std::fs::write(
+            dir.join(".pixel").join("calls.json"),
+            serde_json::json!({ "calls": calls }).to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn history_under_an_old_command_name_counts_toward_the_current_one() {
+        // Two identical `search` calls logged by a pre-rename binary, then
+        // the same query as `search-content`: that is the third identical
+        // call, a hard loop, not a first call.
+        let warning = |result: &CallGuardResult| match result {
+            CallGuardResult::Allow => None,
+            CallGuardResult::Warn(msg) => Some(msg.clone()),
+        };
+        let dir = temp_dir();
+        seed_history(&dir, &[("search", "foo ."), ("search", "foo .")]);
+        let hard = with_session(None, || check_and_record("search-content", "foo .", &dir));
+        let hard = warning(&hard);
+        assert!(
+            hard.as_deref()
+                .is_some_and(|msg| msg.contains("identical arguments")),
+            "old-name history must count: {hard:?}"
+        );
+
+        let dir2 = temp_dir();
+        seed_history(
+            &dir2,
+            &[
+                ("resolve", "a"),
+                ("resolve", "b"),
+                ("resolve", "c"),
+                ("resolve", "d"),
+                ("resolve", "e"),
+            ],
+        );
+        let soft = with_session(None, || check_and_record("find-code", "f", &dir2));
+        let soft = warning(&soft);
+        assert!(
+            soft.as_deref()
+                .is_some_and(|msg| msg.contains("prior calls in 10 minutes")),
+            "old-name history counts toward the soft threshold: {soft:?}"
+        );
+
+        // An old name passed in is guarded and recorded under the new name.
+        let dir3 = temp_dir();
+        let first = with_session(None, || check_and_record("context", "uid .", &dir3));
+        assert_eq!(warning(&first), None);
+        let saved = load_calls(&dir3.join(".pixel").join("calls.json"));
+        assert_eq!(saved.len(), 1, "an old guarded name is still guarded");
+        assert_eq!(saved[0].command, "pack-context");
+        for d in [dir, dir2, dir3] {
+            std::fs::remove_dir_all(&d).ok();
+        }
     }
 
     #[test]
