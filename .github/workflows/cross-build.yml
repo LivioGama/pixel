@@ -4,13 +4,15 @@ name: Cross-build
 # --locked, model2vec only). The Test job's `cargo check` of that feature
 # set runs on glibc and cannot see a dependency that fails to link against
 # musl or a Cargo.lock that --locked rejects, so this is the only job that
-# proves a change still ships. It runs on every develop/main push and on
-# the pull requests that can change the outcome; a docs, prompt or script
-# PR skips it. No branch rule requires this check today; if one is added,
+# proves a change still ships. It runs on every develop push and on the
+# pull requests that can change the outcome (a hotfix PR into main
+# included); a docs, prompt or script PR skips it. A push to main is not
+# rebuilt: the release workflow's build job builds the same lane from the
+# tag. No branch rule requires this check today; if one is added,
 # the excluded paths need a twin workflow that reports success.
 on:
   push:
-    branches: [main, develop]
+    branches: [develop]
   pull_request:
     paths:
       - ".cargo/**"

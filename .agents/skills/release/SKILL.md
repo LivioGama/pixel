@@ -29,10 +29,14 @@ Two facts shape everything below:
 Being asked to fix, merge or ship a change is not an authorization to
 release. A release starts on the user's explicit ask, and each outward step
 gets its own go: pushing the tag, pushing to `develop`/`main`, merging a PR,
-deleting a tag. Show the exact command before running it.
+deleting a tag. An ask that names the steps ("do the release, then bring
+main to it") is the go for those steps; say each command in a progress line
+just before running it. Anything the ask did not name (deleting a tag,
+force-pushing, retagging) still waits for its own go.
 
 Commands use the post-rename names (`new-branch`, `repo-state`, `commit`);
-a pixel 0.2.4 binary only knows the old ones (`branch`, `inspect`, `publish`).
+0.2.5 and later accept both spellings, a 0.2.4 binary only the old ones
+(`branch`, `inspect`, `publish`).
 
 ## The release record
 
@@ -77,7 +81,15 @@ gh secret list | grep HOMEBREW_TAP_TOKEN
   release's changelog heading never got that hotfix merged back. Settle
   either first.
 - A red `Cross-build` on develop means the musl lane fails with `--locked`:
-  the `build` job will fail the same way.
+  the `build` job will fail the same way. A red `Dependency policy
+  (cargo-deny)` blocks every PR, the prepare PR included: a RustSec advisory
+  published the same day (RUSTSEC-2026-0285 turned develop red during 0.2.5)
+  is a `chore(deps)` PR (`cargo update -p <crate>`) merged before step 3.
+- The local gates need room: a workspace build plus `target/debug/incremental`
+  filled the disk mid-gates during 0.2.5 (`No space left on device` from
+  `cargo nextest`). Check `df -h .` first; `target/debug`,
+  `target/dev-release` and `target/release` are rebuildable, and
+  `CARGO_INCREMENTAL=0` keeps a one-off gate run from growing the cache.
 - Without `HOMEBREW_TAP_TOKEN` the tap is not updated (a warning, not a
   failure).
 
@@ -117,7 +129,9 @@ already exists or Unreleased is empty. Otherwise it:
    a plugin update only when its version changes;
 2. inserts `## [x.y.z] - DATE` under a kept, now empty `## [Unreleased]`;
 3. runs `cargo update --workspace` so `Cargo.lock` follows;
-4. lists the pull requests merged into `develop` since the last tag;
+4. lists the pull requests merged into `develop` since the last tag, then
+   the commits since the tag that belong to no merged pull request (a push
+   straight to `develop`);
 5. runs `cargo run -q -p pixel-cli -- check-release vx.y.z --repo .`, the
    verify job's command, from the tree. It uses the tree's CLI on purpose: an
    installed 0.2.4 binary only knows the old `release-check` name.
@@ -128,13 +142,22 @@ It must end with `release-check: all checks passed`. Then:
   the listed PRs by hand: every `feat`, `fix` and `perf` PR, and any other
   with a user-visible effect, needs an entry under `## [x.y.z]`
   (CONTRIBUTING.md exempts pure refactors and CI/deps chores). Add the
-  missing ones now, in the same commit.
+  missing ones now, in the same commit. The commits listed as belonging to no
+  pull request are the ones nobody filed an entry for: 0.2.5's `pixel plan`,
+  plugin manifests, pi recall source and shard cache were all pushed straight
+  to `develop` and reached the prepare commit with no `Added` line. Check
+  whether a feature already shipped with `git cat-file -e v<last>:<path>`
+  before calling it new.
 - **Release body.** Read the new `## [x.y.z]` section as a stranger: it is
   published verbatim. Fix wording or subsection order now, not after the tag.
 - **Diff.** `pixel review-changes`: 17 `Cargo.toml` one-liners, `Cargo.lock`,
-  `CHANGELOG.md`. Anything else is a bug.
-- **Gates.** `scripts/gates.sh --force` (fmt, clippy, tests). The verify job
-  reruns the tests, but a red one there costs a tag deletion.
+  `CHANGELOG.md`, the 7 plugin manifests. Anything else is a bug.
+- **Gates.** `GIT_CONFIG_GLOBAL=/dev/null scripts/gates.sh --force` (fmt,
+  clippy, tests). Without `GIT_CONFIG_GLOBAL`, a developer's global git
+  config fails tests that CI passes (`blame.ignoreRevsFile`,
+  `rerere`/`mergiraf` in the provenance and reconcile tests); a red gate that
+  CI does not reproduce is not a release blocker. The verify job reruns the
+  tests, but a red one there costs a tag deletion.
 
 ```bash
 pixel commit -m "release: prepare x.y.z" --request-id "release-x.y.z-prepare"
@@ -154,7 +177,7 @@ push CI (CI, Cross-build) is green:
 git fetch origin
 SHA=$(git rev-parse origin/develop)
 git show --stat "$SHA" | head -5                      # the release: prepare x.y.z commit or its merge
-git show "$SHA:crates/pixel/Cargo.toml" | sed -n 3p   # version = "x.y.z"
+git show "${SHA}:crates/pixel/Cargo.toml" | sed -n 3p # version = "x.y.z"; braces: zsh reads "$SHA:c" as a modifier
 git tag -a vx.y.z -m "pixel x.y.z" "$SHA"             # annotated, as v0.2.4
 git push origin vx.y.z                                # ← the user's go first
 ```
@@ -167,6 +190,12 @@ gh run list --workflow release.yml -L 1               # the run for vx.y.z
 gh run watch <run-id> --exit-status                   # run_in_background: true
 ```
 
+Pass run ids literally. The agent's command tool runs zsh, which does not
+split an unquoted `$var` into words: `set -- $ids` or `for x in $list` over
+a space-separated string sees one word, and a watcher built that way reports
+failures that never happened (0.2.5's first watch printed `exit=1` for two
+green runs).
+
 About 10 minutes to publication (0.2.3 and 0.2.4 both took 10 min, before
 `smoke` existed), then the three `smoke` jobs. A failed
 `build` on `aarch64-apple-darwin` is the likeliest surprise (see the first
@@ -174,28 +203,41 @@ fact above).
 
 ## 5. Bring `main` to the release
 
-`main` only receives releases and must hold the tagged tree. Open a PR
-`develop` → `main` titled `release: x.y.z`:
+`main` only receives releases and must hold the tagged tree. Release PRs are
+squash-merged, so `main` is never an ancestor of `develop` and a `develop` →
+`main` PR conflicts as soon as `main` holds an earlier squash (0.2.5's #117
+was `DIRTY`). Open the PR from a branch that starts at `main` and whose one
+commit sets the tree to the tag, whatever `develop` did since:
 
 ```bash
-gh pr create --base main --head develop --title "release: x.y.z" --body-file <body>
-```
-
-Body (0.2.4's #101): "Brings `main` to the `release: prepare x.y.z` commit
-(`<sha>`), which is tagged `vx.y.z`. Release notes: the `## [x.y.z] - DATE`
-section of CHANGELOG.md."
-
-If `develop` has moved past the tag since, do not ship those commits to `main`
-under the release title: push the tag's commit as its own head and open the PR
-from it.
-
-```bash
-git push origin "vx.y.z^{commit}:refs/heads/release-x.y.z-main"
+git fetch origin --tags
+git worktree add <scratch>/wt-main origin/main
+cd <scratch>/wt-main
+git switch -c release-x.y.z-main
+git read-tree -u --reset vx.y.z                        # index and worktree = the tag's tree
+git commit -m "release: x.y.z" -m "Brings main to the tree of vx.y.z (<sha>)."
+git diff --quiet vx.y.z HEAD && echo "tree == vx.y.z"
+git push -u origin release-x.y.z-main
 gh pr create --base main --head release-x.y.z-main --title "release: x.y.z" --body-file <body>
+cd - && git worktree remove <scratch>/wt-main
 ```
 
-Merging is the maintainer's call; 0.2.1 and 0.2.4 were squash-merged. After
-the merge, `git diff --quiet vx.y.z origin/main` must succeed.
+Body: "Brings `main` to the tree of the `release: prepare x.y.z` commit
+(`<sha>`), tagged `vx.y.z`. Release notes: the `## [x.y.z] - DATE` section of
+CHANGELOG.md." plus the release run's outcome. The `release-` prefix keeps
+`route-prs-to-develop.yml` from retargeting it and skips the `Mutants` job,
+which on this PR would replay the whole release diff against `main`: every
+commit in it already passed the gate on its own PR into `develop`.
+
+Merge it squashed (0.2.1, 0.2.4, 0.2.5), then check the published state:
+
+```bash
+gh pr merge <n> --squash --subject "release: x.y.z (#<n>)"
+git fetch origin && git diff --quiet vx.y.z origin/main && echo "main == vx.y.z"
+```
+
+Nothing needs to run on `main` afterwards: its tree is the tag's, which the
+`develop` push, the release `verify` job and the `smoke` jobs already tested.
 
 ## 6. Verify the publication
 

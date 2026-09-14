@@ -9,10 +9,18 @@ Loaded when a Rust source file is in play. The gate is `cargo mutants --in-diff`
 run by the CI `Mutants` job (90-minute limit) on every PR; it is not run
 locally, so the code must come out clean on the first CI pass.
 
-The gate mutates every function that has at least one line in the diff, not
-only the lines you wrote. A one-token change (an inlined format argument, a
-`map_or`) in an untested function puts that whole function under the gate.
-Rules that make the first `cargo mutants` run come back clean:
+For every function with a line in the diff, the gate generates the
+mutants that sit on the changed lines (operators, match arms, guards) plus
+the replacement of the whole body (`Ok(Default::default())`, `vec![]`, `()`).
+A one-token change in an untested function is therefore enough to get its
+body replaced, and a reformatted line brings every operator on it. Measure
+the exposure before pushing, in seconds and without building:
+`cargo mutants --list --in-diff <(git diff <base>)`. Two settings in
+`.cargo/mutants.toml` shape the answer: `test_workspace = false` runs only
+the mutated crate's tests (a CLI contract test never kills a library
+mutant), and `**/build.rs` is excluded, which also skips any source file
+named `build.rs`. Rules that make the first `cargo mutants` run come back
+clean:
 
 - **Read the function's tests before touching it.** No test that would fail
   if the body were replaced by `Default::default()`? Write one first, on the
