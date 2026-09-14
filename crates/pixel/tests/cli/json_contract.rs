@@ -338,6 +338,27 @@ fn session_start_block_reports_the_history_index_phase_and_freshness() {
     let out = pixel(&dir, &["run-hook", "session-start", "."]);
     assert!(out.status.success(), "{out:?}");
     let block: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // The agent types what the block advertises: current command names,
+    // never a wire op tag that names another command (`update`, `sync`).
+    let capabilities: Vec<&str> = block["pixel"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    for command in ["scope-task", "fast-forward", "fetch", "plan", "impact"] {
+        assert!(
+            capabilities.contains(&command),
+            "{command}: {capabilities:?}"
+        );
+    }
+    for (old, _) in pixel_proto::commands::RENAMED_COMMANDS {
+        assert!(!capabilities.contains(old), "{old}: {capabilities:?}");
+    }
+    assert!(
+        !capabilities.contains(&"migrate"),
+        "hidden commands stay hidden"
+    );
     let repo = &block["pixel"]["repo"];
     assert!(
         repo["facts_phase"].is_string(),
