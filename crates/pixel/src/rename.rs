@@ -618,39 +618,51 @@ fn rename_user_facing(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Resul
 /// Only renames strings that appear as CLI args (in .args(["old-name", ...]) or ["old-name", ...])
 fn rename_in_test_file(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Result<usize, String> {
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let mut new_content = content.clone();
+    let mut lines: Vec<String> = content.lines().map(String::from).collect();
     let mut edits = 0;
 
     // Sort by old_kebab length descending to prevent prefix matches
     let mut sorted_pairs: Vec<&RenamePair> = pairs.iter().collect();
     sorted_pairs.sort_by(|a, b| b.old_kebab.len().cmp(&a.old_kebab.len()));
 
-    for pair in sorted_pairs {
-        // .args(["old-name", ...]) → .args(["new-name", ...])
-        // Also handles multi-line arrays where "old-name" is on its own line
-        for prefix in ["[\"", ", \"", "\n        \"", "\n            \"", "\n                \""] {
-            let old_full = format!("{}{}\"", prefix, pair.old_kebab);
-            let new_full = format!("{}{}\"", prefix, pair.new_kebab);
-            let count = new_content.matches(&old_full).count();
-            if count > 0 {
-                new_content = new_content.replace(&old_full, &new_full);
-                edits += count;
-            }
+    for line in &mut lines {
+        // Skip lines that are git command invocations (not pixel commands)
+        let is_git_context = line.contains("git(")
+            || line.contains("git ")
+            || line.contains("\"git\"");
+        if is_git_context {
+            continue;
         }
 
-        // `pixel old-name` in test comments — with word boundary
-        let old_cmd = format!("pixel {}", pair.old_kebab);
-        let new_cmd = format!("pixel {}", pair.new_kebab);
-        for suffix in ["`", " ", "\n", "\"", "'", ")"] {
-            let old_full = format!("{}{}", old_cmd, suffix);
-            let new_full = format!("{}{}", new_cmd, suffix);
-            let count = new_content.matches(&old_full).count();
-            if count > 0 {
-                new_content = new_content.replace(&old_full, &new_full);
-                edits += count;
+        for pair in &sorted_pairs {
+            // .args(["old-name", ...]) → .args(["new-name", ...])
+            // Line-by-line: match "old-name" at start of array or after comma
+            for prefix in ["[\"", ", \"", "    \"", "        \"", "            \""] {
+                let old_full = format!("{}{}\"", prefix, pair.old_kebab);
+                let new_full = format!("{}{}\"", prefix, pair.new_kebab);
+                let count = line.matches(&old_full).count();
+                if count > 0 {
+                    *line = line.replace(&old_full, &new_full);
+                    edits += count;
+                }
+            }
+
+            // `pixel old-name` in test comments — with word boundary
+            let old_cmd = format!("pixel {}", pair.old_kebab);
+            let new_cmd = format!("pixel {}", pair.new_kebab);
+            for suffix in ["`", " ", "\n", "\"", "'", ")"] {
+                let old_full = format!("{}{}", old_cmd, suffix);
+                let new_full = format!("{}{}", new_cmd, suffix);
+                let count = line.matches(&old_full).count();
+                if count > 0 {
+                    *line = line.replace(&old_full, &new_full);
+                    edits += count;
+                }
             }
         }
     }
+
+    let new_content = lines.join("\n") + if content.ends_with('\n') { "\n" } else { "" };
 
     if !dry_run && edits > 0 {
         fs::write(path, new_content).map_err(|e| e.to_string())?;
