@@ -58,7 +58,7 @@ fn collect_files(root: &Path, max_files: usize) -> (Vec<PathBuf>, AskCoverage) {
     let mut out = Vec::new();
     let mut coverage = AskCoverage {
         max_files,
-        scope: "eligible source/document extensions; excluded noise directories; no symlinks; files <=512KiB; UTF-8 text only",
+        scope: "eligible source/document extensions; excluded noise directories; nested checkouts skipped; no symlinks; files <=512KiB; UTF-8 text only",
         ..Default::default()
     };
     let mut queue = VecDeque::from([root.to_path_buf()]);
@@ -96,8 +96,9 @@ fn collect_files(root: &Path, max_files: usize) -> (Vec<PathBuf>, AskCoverage) {
                 continue;
             }
             if kind.is_dir() {
-                if !skip_dir(&name) {
-                    queue.push_back(entry.path());
+                let path = entry.path();
+                if !skip_dir(&name) && !is_nested_checkout(&path) {
+                    queue.push_back(path);
                 }
             } else if kind.is_file() && is_code_file(&name) {
                 if out.len() == max_files {
@@ -111,6 +112,16 @@ fn collect_files(root: &Path, max_files: usize) -> (Vec<PathBuf>, AskCoverage) {
     coverage.candidate_files = out.len();
     coverage.degraded = coverage.file_limit_reached || coverage.traversal_errors > 0;
     (out, coverage)
+}
+
+/// Whether `dir` is the top of another working tree: a linked worktree or a
+/// submodule (a `.git` file) or a nested clone (a `.git` directory). Its
+/// files belong to that checkout, often another branch of the same project
+/// (`git worktree add`, `.claude/worktrees/<name>`), and would rank copies
+/// of the searched tree's own code; git does not list them either. Only
+/// directories below the walk root are asked, so the root keeps its `.git`.
+fn is_nested_checkout(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir.join(".git")).is_ok()
 }
 
 fn skip_dir(name: &str) -> bool {
@@ -612,6 +623,45 @@ mod tests {
         let (_, coverage) = collect_files(&dir.path().join("missing"), 3);
         assert_eq!(coverage.traversal_errors, 1);
         assert!(coverage.degraded);
+    }
+
+    #[test]
+    fn collector_should_skip_nested_checkouts_when_walking_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // The searched repository itself is a checkout: its `.git` must not
+        // hide its own files.
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn own() {}").unwrap();
+        // A linked worktree (`.git` file), as `.claude/worktrees/<name>` is.
+        let worktree = root.join(".claude/worktrees/feature");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        std::fs::write(worktree.join("src/lib.rs"), "fn own() {}").unwrap();
+        // A nested clone (`.git` directory).
+        let clone = root.join("third_party/dep");
+        std::fs::create_dir_all(clone.join(".git")).unwrap();
+        std::fs::write(clone.join("dep.rs"), "fn dep() {}").unwrap();
+        // A plain directory next to them is still walked.
+        std::fs::create_dir_all(root.join(".claude/hooks")).unwrap();
+        std::fs::write(root.join(".claude/hooks/guard.py"), "def guard(): pass").unwrap();
+
+        let (files, coverage) = collect_files(root, 10);
+        let rel: Vec<_> = files
+            .iter()
+            .map(|f| f.strip_prefix(root).unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(rel, ["src/lib.rs", ".claude/hooks/guard.py"]);
+        assert_eq!(coverage.candidate_files, 2);
+        assert_eq!(coverage.max_files, 10);
+        // The coverage tells the caller what was left out of the search.
+        assert!(
+            coverage.scope.contains("nested checkouts skipped"),
+            "{}",
+            coverage.scope
+        );
+        assert!(!coverage.degraded, "{:?}", coverage.traversal_errors);
     }
 
     #[cfg(all(not(feature = "model2vec"), not(feature = "fastembed")))]
