@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "pixel",
-      "description": "Code-graph retrieval protocol: impact, targets, plan, resolve, excavate.",
+      "description": "Code-graph retrieval protocol: impact, scope-task, plan, find-code, dig-history.",
       "source": "./",
       "category": "productivity"
     }

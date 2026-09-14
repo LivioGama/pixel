@@ -1,6 +1,6 @@
 {
   "name": "@liviogama/pixel",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Deterministic code retrieval layer for AI agents: indexed search, concept resolve, impact analysis, task targets, plan generation, and git archaeology via the pixel CLI.",
   "keywords": ["opencode-plugin", "opencode", "pixel", "pi-package", "pi", "skills", "code-graph", "impact-analysis"],
   "license": "MIT",
@@ -23,10 +23,11 @@
   },
   "files": [
     "PIXEL.md",
+    "PIXEL-SUBAGENT.md",
     "skills/",
     "hooks/",
     ".opencode/",
-    ".agents/",
+    ".agents/plugins/",
     ".cursor/",
     ".windsurf/",
     ".kiro/",

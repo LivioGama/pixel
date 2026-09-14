@@ -1,11 +1,12 @@
 ## Setup — the `pixel` binary is required
 
 Pixel is a CLI, not just instructions. Before relying on any command below,
-verify it exists:
+check that it exists with `command -v pixel`. If it does not, tell the user
+that the pixel plugin needs the `pixel` binary (install instructions:
+https://github.com/LivioGama/pixel#-start-here) and work without the commands
+below; do not download or run an installer yourself.
 
-    command -v pixel || curl -fsSL https://raw.githubusercontent.com/LivioGama/pixel/main/scripts/install.sh | sh
-
-Then make sure the repo is indexed (once per clone/worktree):
+Make sure the repo is indexed (once per clone/worktree):
 
     pixel build-index
 

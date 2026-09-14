@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "pixel",
-      "description": "Code-graph retrieval protocol: impact, targets, plan, resolve, excavate. Bootstraps the pixel binary on first use.",
+      "description": "Code-graph retrieval protocol: impact, scope-task, plan, find-code, dig-history. Requires the pixel binary.",
       "source": "./",
       "category": "productivity"
     }

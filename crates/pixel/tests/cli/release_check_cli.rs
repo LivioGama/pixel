@@ -90,7 +90,10 @@ fn json_is_one_document_with_the_verdict_and_every_check() {
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["cli-version", "cargo-lock", "changelog"]);
+    assert_eq!(
+        names,
+        ["cli-version", "cargo-lock", "changelog", "plugin-versions"]
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
