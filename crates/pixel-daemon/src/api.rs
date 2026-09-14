@@ -1143,53 +1143,34 @@ impl Service {
             .iter()
             .any(|t| matches!(t.tier.as_str(), "P0" | "P1"));
         if semantic_fallback_wanted(has_p0_p1, max_tier) {
-            {
-                let eff_limit = limit.unwrap_or(engine::DEFAULT_LIMIT);
-                let hits =
-                    pixel_recall::code_search::semantic_fallback(&self.root, task, eff_limit);
-                if !hits.is_empty() {
-                    let hits_count = hits.len();
-                    // Dedupe against existing targets (a path may already be
-                    // present as P2).
-                    let existing: HashSet<String> =
-                        report.targets.iter().map(|t| t.path.clone()).collect();
-                    for (path, score) in hits {
-                        if existing.contains(&path) {
-                            continue;
-                        }
-                        report.targets.push(pixel_rank::TargetFile {
-                            path: path.clone(),
-                            tier: "P1".to_string(),
-                            score,
-                            reasons: vec!["semantic fallback (cross-lingual)".to_string()],
-                            symbols: Vec::new(),
-                        });
-                    }
-                    // Re-sort by tier (P0 < P1 < P2) then score descending so
-                    // injected P1s land before P2s, not after.
-                    report.targets.sort_by(|a, b| {
-                        let tier_ord = |t: &str| match t {
-                            "P0" => 0,
-                            "P1" => 1,
-                            _ => 2,
-                        };
-                        tier_ord(&a.tier).cmp(&tier_ord(&b.tier)).then_with(|| {
-                            b.score
-                                .partial_cmp(&a.score)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                    });
-                    // Re-enforce limit.
-                    report.targets.truncate(eff_limit);
-                    if let Some(stats) = report.stats.as_object_mut() {
-                        stats.insert(
-                            "fallback".to_string(),
-                            json!({
-                                "channel": "semantic",
-                                "reason": "no_p0_p1",
-                                "hits": hits_count,
-                            }),
-                        );
+            let eff_limit = limit.unwrap_or(engine::DEFAULT_LIMIT);
+            let fallback =
+                pixel_recall::code_search::semantic_fallback(&self.root, task, eff_limit);
+            let leads = semantic_leads(&fallback, &report.targets);
+            if !leads.is_empty() {
+                let hits_count = leads.len();
+                report.targets.extend(leads);
+                report.targets.truncate(eff_limit);
+                if let Some(stats) = report.stats.as_object_mut() {
+                    stats.insert(
+                        "fallback".to_string(),
+                        json!({
+                            "channel": "semantic",
+                            "reason": "no_p0_p1",
+                            "hits": hits_count,
+                            "searched_files": fallback.searched_files,
+                            "file_limit_reached": fallback.file_limit_reached,
+                        }),
+                    );
+                }
+                if let Some(envelope) = report.envelope.as_object_mut() {
+                    envelope.insert("lower_bound".to_string(), json!(true));
+                    let caps = envelope
+                        .entry("caps")
+                        .or_insert_with(|| json!([]))
+                        .as_array_mut();
+                    if let Some(caps) = caps {
+                        caps.extend(fallback.caps().into_iter().map(Value::from));
                     }
                 }
             }
@@ -1891,6 +1872,7 @@ impl Service {
                     limit.unwrap_or(8),
                 );
                 let matches: Vec<Value> = semantic
+                    .hits
                     .iter()
                     .map(|(path, score)| {
                         json!({
@@ -1904,7 +1886,7 @@ impl Service {
                             "symbol_kind": null,
                             "score": score,
                             "tier": "semantic",
-                            "reasons": ["semantic fallback (cross-lingual, no graph)"],
+                            "reasons": ["semantic lead (no graph, unverified)"],
                         })
                     })
                     .collect();
@@ -1934,6 +1916,7 @@ impl Service {
                         "concepts_version": null,
                         "fresh": false,
                     },
+                    "caps": semantic.caps(),
                     "envelope": {
                         "graph": "unavailable",
                         "lower_bound": true,
@@ -1972,7 +1955,9 @@ impl Service {
         if matches_empty {
             let limit = limit.unwrap_or(8);
             if limit > 0 {
-                let hits = pixel_recall::code_search::semantic_fallback(&self.root, phrase, limit);
+                let fallback =
+                    pixel_recall::code_search::semantic_fallback(&self.root, phrase, limit);
+                let hits = &fallback.hits;
                 if !hits.is_empty() {
                     // Emit the full ConceptMatch shape so downstream consumers
                     // (enrich_resolve_matches_with_context, notes merge) can
@@ -1991,7 +1976,7 @@ impl Service {
                                 "symbol_kind": null,
                                 "score": score,
                                 "tier": "semantic",
-                                "reasons": ["semantic fallback (cross-lingual)"],
+                                "reasons": ["semantic lead (unverified)"],
                             })
                         })
                         .collect();
@@ -2008,6 +1993,7 @@ impl Service {
                     out["basis"] = json!(
                         "lexical matching returned 0 results; semantic fallback via multilingual embeddings"
                     );
+                    out["caps"] = json!(fallback.caps());
                 }
             }
         }
@@ -2459,11 +2445,33 @@ fn fan_in_counts(
 /// test). Mutation and admin ops (publish/push/ping/…) are not listed: they
 /// report what they DID, not what exists, so completeness honesty does not
 /// apply the same way.
-/// Whether `targets` may add semantic hits: only when the lexical pass found
-/// nothing in P0/P1, and never when the caller asked for P0 only (a P1
-/// semantic hit would violate `max_tier`).
+/// Whether `targets` may add semantic leads: only when the lexical pass found
+/// nothing in P0/P1, and only when the caller accepts P2 (the tier the leads
+/// land in).
 fn semantic_fallback_wanted(has_p0_p1: bool, max_tier: Option<&str>) -> bool {
-    !has_p0_p1 && max_tier.is_none_or(|m| !matches!(m, "P0"))
+    !has_p0_p1 && max_tier.is_none_or(|m| m == "P2")
+}
+
+/// The semantic hits not already targeted, as P2 targets appended after the
+/// lexical ones: their similarity cannot tell a related file from an
+/// unrelated one, so they are leads to check, never a likely (P1) target.
+fn semantic_leads(
+    fallback: &pixel_recall::code_search::SemanticFallback,
+    targets: &[pixel_rank::TargetFile],
+) -> Vec<pixel_rank::TargetFile> {
+    let existing: HashSet<&str> = targets.iter().map(|t| t.path.as_str()).collect();
+    fallback
+        .hits
+        .iter()
+        .filter(|(path, _)| !existing.contains(path.as_str()))
+        .map(|(path, score)| pixel_rank::TargetFile {
+            path: path.clone(),
+            tier: "P2".to_string(),
+            score: *score,
+            reasons: vec![format!("semantic lead (similarity {score:.2}, unverified)")],
+            symbols: Vec::new(),
+        })
+        .collect()
 }
 
 pub const RETRIEVAL_OPS: &[&str] = &[
@@ -4561,17 +4569,51 @@ mod tests {
     #[test]
     fn semantic_fallback_only_when_lexical_pass_is_empty_and_p1_is_allowed() {
         assert!(semantic_fallback_wanted(false, None));
-        assert!(semantic_fallback_wanted(false, Some("P1")));
+        assert!(
+            !semantic_fallback_wanted(false, Some("P1")),
+            "semantic leads are P2: a P1 cap excludes them"
+        );
         assert!(semantic_fallback_wanted(false, Some("P2")));
         assert!(
             !semantic_fallback_wanted(false, Some("P0")),
-            "a P0-only caller must not receive P1 semantic hits"
+            "a P0-only caller must not receive semantic leads"
         );
         assert!(
             !semantic_fallback_wanted(true, None),
             "lexical P0/P1 hits make the fallback redundant"
         );
         assert!(!semantic_fallback_wanted(true, Some("P0")));
+    }
+
+    /// Semantic hits join `targets` as unverified P2 leads after the lexical
+    /// targets, never duplicating a file already targeted.
+    #[test]
+    fn semantic_leads_are_unverified_p2_targets_not_already_present() {
+        let fallback = pixel_recall::code_search::SemanticFallback {
+            hits: vec![
+                ("src/a.rs".to_string(), 0.391),
+                ("src/b.rs".to_string(), 0.2),
+            ],
+            searched_files: 2,
+            file_limit_reached: false,
+        };
+        let present = pixel_rank::TargetFile {
+            path: "src/b.rs".to_string(),
+            tier: "P2".to_string(),
+            score: 0.1,
+            reasons: Vec::new(),
+            symbols: Vec::new(),
+        };
+        let leads = semantic_leads(&fallback, std::slice::from_ref(&present));
+        assert_eq!(leads.len(), 1);
+        assert_eq!(leads[0].path, "src/a.rs");
+        assert_eq!(leads[0].tier, "P2");
+        assert!((leads[0].score - 0.391).abs() < f64::EPSILON);
+        assert_eq!(
+            leads[0].reasons,
+            ["semantic lead (similarity 0.39, unverified)"]
+        );
+        assert_eq!(semantic_leads(&fallback, &[]).len(), 2);
     }
 
     #[test]
