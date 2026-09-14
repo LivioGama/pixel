@@ -597,9 +597,11 @@ fn rename_user_facing(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Resul
     for pair in sorted_pairs {
         // `pixel old-name` → `pixel new-name` — only when followed by a non-identifier char
         // (space, backtick, quote, newline, etc.) to prevent prefix matches
+        // NOTE: "-" is excluded as a suffix because it would match inside hyphenated
+        // command names like "search-content" causing double-rename
         let old_cmd = format!("pixel {}", pair.old_kebab);
         let new_cmd = format!("pixel {}", pair.new_kebab);
-        for suffix in ["`", " ", "\n", "\"", "'", ")", "/", ".", "|", "-"] {
+        for suffix in ["`", " ", "\n", "\"", "'", ")", "/", ".", "|"] {
             let old_full = format!("{}{}", old_cmd, suffix);
             let new_full = format!("{}{}", new_cmd, suffix);
             let count = new_content.matches(&old_full).count();

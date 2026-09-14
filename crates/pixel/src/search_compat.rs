@@ -175,7 +175,7 @@ pub fn rewrite(command: &str, cwd: &Path) -> Option<String> {
     let parsed = parse_args(tool, &argv[1..])?;
     checked_path(&parsed.path, cwd)?;
     Some(format!(
-        "pixel search-compat {} -- {}",
+        "pixel search-like-rg {} -- {}",
         tool.name(),
         argv[1..]
             .iter()
