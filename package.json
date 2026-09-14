@@ -40,7 +40,6 @@
     ".devin-plugin/",
     ".grok-plugin/",
     "gemini-extension.json",
-    "plugin.json",
     "plugin.yaml",
     "opencode.json",
     "scripts/install.sh",

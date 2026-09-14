@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- The root `plugin.json` (`{"name": "pixel"}` only). A root manifest takes precedence over the tool directories: Copilot CLI reads it before `.claude-plugin/plugin.json` and so loaded a plugin without the skill or the hooks, and Codex's Agent Plugins loader ignores the hooks declared in `.codex-plugin/plugin.json` when one is present (openai/codex#39895). Grok's `plugin.json` is optional metadata; its marketplace entry keeps the `pixel` name.
+
 ## [0.2.5] - 2026-09-14
 
 ### Added
