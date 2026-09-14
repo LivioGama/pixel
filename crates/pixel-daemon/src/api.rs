@@ -988,7 +988,7 @@ impl Service {
         let mut evidence: BTreeMap<String, Vec<Value>> = BTreeMap::new();
 
         let mut probe_keywords = query.keywords.clone();
-        for exp in engine::expand_keywords(&query.keywords) {
+        for exp in engine::expand_keywords(&query.keywords, query.language) {
             if !probe_keywords.contains(&exp) && probe_keywords.len() < 6 {
                 probe_keywords.push(exp);
             }
@@ -1040,11 +1040,16 @@ impl Service {
 
             // Graph expansion is seeded from the lexical pre-fuse so every
             // P1/P2 neighbor traces back to a lexical anchor.
-            let seed_paths: Vec<String> =
-                engine::lexical_rank(&all_paths, &probe_keywords, &symbol_hits, &content_hits)
-                    .into_iter()
-                    .take(MAX_SEED_FILES)
-                    .collect();
+            let seed_paths: Vec<String> = engine::lexical_rank(
+                &all_paths,
+                &probe_keywords,
+                query.language,
+                &symbol_hits,
+                &content_hits,
+            )
+            .into_iter()
+            .take(MAX_SEED_FILES)
+            .collect();
             let seed_set: HashSet<&str> = seed_paths.iter().map(String::as_str).collect();
             let mut seed_symbol_ids: Vec<i64> = Vec::new();
             for hit in &symbol_hits {

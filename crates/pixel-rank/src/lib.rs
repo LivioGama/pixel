@@ -108,108 +108,73 @@ const STOPWORDS: &[&str] = &[
     "bug",
     "task",
     "issue",
-    // French articles / prepositions / pronouns / conjunctions
-    "le",
-    "la",
-    "les",
-    "un",
-    "une",
-    "des",
-    "du",
-    "de",
-    "et",
-    "ou",
-    "ne",
-    "pas",
-    "que",
-    "qui",
-    "dans",
-    "pour",
-    "sur",
-    "avec",
-    "sans",
-    "ce",
-    "cette",
-    "ces",
-    "son",
-    "sa",
-    "ses",
-    "mon",
-    "ma",
-    "mes",
-    "ton",
-    "ta",
-    "tes",
-    "notre",
-    "nos",
-    "votre",
-    "vos",
-    "leur",
-    "leurs",
-    "il",
-    "elle",
-    "ils",
-    "elles",
-    "nous",
-    "vous",
-    "je",
-    "tu",
-    "se",
-    "lui",
-    "en",
-    "y",
-    "tout",
-    "tous",
-    "toute",
-    "toutes",
-    "rien",
-    "personne",
-    "chaque",
-    "quelque",
-    "très",
-    "plus",
-    "moins",
-    "aussi",
-    "comme",
-    "si",
-    "alors",
-    "donc",
-    "mais",
-    "car",
-    "parce",
-    // French auxiliaries / question words / adverbs. Post-diacritic-fold forms.
-    "est",
-    "sont",
-    "etre",
-    "ete",
-    "avoir",
-    "ont",
-    "faire",
-    "fait",
-    "peut",
-    "doit",
-    "faut",
-    "comment",
-    "pourquoi",
-    "quand",
-    "quel",
-    "quelle",
-    "quels",
-    "quelles",
-    "dont",
-    "ca",
-    "cela",
-    "meme",
-    "bien",
-    "encore",
-    "deja",
-    "jamais",
-    "toujours",
-    "ici",
-    "ensuite",
-    "puis",
-    "quoi",
 ];
+
+/// French function words, dropped only from a task detected as French
+/// ([`TaskLanguage::French`]): several are English words or identifiers
+/// (`comment`, `car`, `plus`, `des`, `est`), and dropping them from an
+/// English task lost its subject ("fix comment parsing" searched `parsing`).
+/// Post-diacritic-fold forms.
+const FRENCH_STOPWORDS: &[&str] = &[
+    // French articles / prepositions / pronouns / conjunctions
+    "le", "la", "les", "un", "une", "des", "du", "de", "et", "ou", "ne", "pas", "que", "qui",
+    "dans", "pour", "sur", "avec", "sans", "ce", "cette", "ces", "son", "sa", "ses", "mon", "ma",
+    "mes", "ton", "ta", "tes", "notre", "nos", "votre", "vos", "leur", "leurs", "il", "elle",
+    "ils", "elles", "nous", "vous", "je", "tu", "se", "lui", "en", "y", "tout", "tous", "toute",
+    "toutes", "rien", "personne", "chaque", "quelque", "tres", "plus", "moins", "aussi", "comme",
+    "si", "alors", "donc", "mais", "car", "parce",
+    // French auxiliaries / question words / adverbs. Post-diacritic-fold forms.
+    "est", "sont", "etre", "ete", "avoir", "ont", "faire", "fait", "peut", "doit", "faut",
+    "comment", "pourquoi", "quand", "quel", "quelle", "quels", "quelles", "dont", "ca", "cela",
+    "meme", "bien", "encore", "deja", "jamais", "toujours", "ici", "ensuite", "puis", "quoi",
+];
+
+/// French words no English task uses: two distinct ones (or two
+/// unambiguous French relation keys, see [`FRENCH_RELATIONS`]) make a task
+/// French. Post-diacritic-fold forms.
+const FRENCH_MARKERS: &[&str] = &[
+    "le", "les", "une", "des", "du", "et", "pas", "que", "qui", "dans", "pour", "sur", "avec",
+    "cette", "ces", "est", "sont", "nous", "vous", "je", "ils", "elles", "mais", "donc",
+    "pourquoi", "quand", "quelle", "quels", "quelles", "dont", "cela", "deja", "toujours",
+    "jamais", "peut", "doit", "faut", "etre", "avoir", "ne", "au", "aux",
+];
+
+/// Distinct French markers a task needs to be treated as French.
+const FRENCH_MARKER_THRESHOLD: usize = 2;
+
+/// The language of a task as far as retrieval cares: which stopwords are
+/// dropped and whether French relation keys that are also English words
+/// expand.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TaskLanguage {
+    #[default]
+    English,
+    French,
+}
+
+/// French when [`FRENCH_MARKER_THRESHOLD`] distinct markers occur among the
+/// words of `folded_task` (diacritics already folded).
+pub fn detect_language(folded_task: &str) -> TaskLanguage {
+    let words: HashSet<String> = folded_task
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let relation_keys = FRENCH_RELATIONS
+        .iter()
+        .map(|(key, _)| *key)
+        .filter(|key| !FRENCH_HOMOGRAPHS.contains(key));
+    let markers = FRENCH_MARKERS
+        .iter()
+        .copied()
+        .chain(relation_keys)
+        .filter(|marker| words.contains(*marker))
+        .count();
+    if markers >= FRENCH_MARKER_THRESHOLD {
+        TaskLanguage::French
+    } else {
+        TaskLanguage::English
+    }
+}
 
 const MAX_KEYWORDS: usize = 12;
 const MIN_KEYWORD_LEN: usize = 3;
@@ -271,6 +236,10 @@ const SEMANTIC_RELATIONS: &[(&str, &[&str])] = &[
     ("language", &["extract", "grammar", "parser", "syntax"]),
     ("parser", &["language", "extract", "grammar", "syntax"]),
     ("grammar", &["language", "extract", "parser"]),
+];
+
+/// French → English cross-lingual mappings (software-development terms).
+const FRENCH_RELATIONS: &[(&str, &[&str])] = &[
     // French → English cross-lingual mappings (software-development terms).
     // Keys must be producible by `tokenize_task`: no accents (folded), no
     // underscores (split_ident_words splits on `_`), single words only.
@@ -385,6 +354,29 @@ const SEMANTIC_RELATIONS: &[(&str, &[&str])] = &[
     ("deployer", &["deploy"]),
 ];
 
+/// [`FRENCH_RELATIONS`] keys that are also English words: in an English task
+/// `client` is an HTTP client, not a customer, and `modifier` a keyword, not
+/// "edit". They expand only in a French task.
+const FRENCH_HOMOGRAPHS: &[&str] = &[
+    "message",
+    "client",
+    "dossier",
+    "variable",
+    "image",
+    "menu",
+    "theme",
+    "journal",
+    "vue",
+    "importer",
+    "exporter",
+    "installer",
+    "inscription",
+    "charger",
+    "modifier",
+    "lien",
+    "tableau",
+];
+
 pub const SHORT_TECH_KEYWORDS: &[&str] = &[
     "c", "r", "go", "rs", "ts", "js", "py", "rb", "sh", "ui", "ci", "cd", "db", "os", "io", "ip",
     "ai", "ml",
@@ -427,24 +419,26 @@ pub fn normalize_task_compounds(task: &str) -> String {
     out
 }
 
-/// Expand a single keyword to its semantic relatives.
-pub fn semantic_expand(word: &str) -> Vec<&'static str> {
-    for (term, related) in SEMANTIC_RELATIONS {
-        if *term == word {
-            return related.to_vec();
-        }
-    }
-    Vec::new()
+/// Expand a single keyword of a task in `language` to its semantic relatives.
+pub fn semantic_expand(word: &str, language: TaskLanguage) -> Vec<&'static str> {
+    let french = language == TaskLanguage::French || !FRENCH_HOMOGRAPHS.contains(&word);
+    let french_relations: &[(&str, &[&str])] = if french { FRENCH_RELATIONS } else { &[] };
+    SEMANTIC_RELATIONS
+        .iter()
+        .chain(french_relations)
+        .find(|(term, _)| *term == word)
+        .map(|(_, related)| related.to_vec())
+        .unwrap_or_default()
 }
 
 /// Expand a list of keywords, returning related terms that are not already
 /// present in the original list. Deterministic: preserves keyword order and
 /// then first-occurrence order of the thesaurus.
-pub fn expand_keywords(keywords: &[String]) -> Vec<String> {
+pub fn expand_keywords(keywords: &[String], language: TaskLanguage) -> Vec<String> {
     let mut seen: HashSet<&str> = keywords.iter().map(String::as_str).collect();
     let mut out = Vec::new();
     for kw in keywords {
-        for related in semantic_expand(kw) {
+        for related in semantic_expand(kw, language) {
             if seen.insert(related) {
                 out.push(related.to_string());
             }
@@ -464,6 +458,8 @@ pub struct TaskQuery {
     /// [`MAX_KEYWORDS`]: the dropped words contributed no signal, so any
     /// result built from this query is a lower bound, not exhaustive.
     pub keywords_truncated: bool,
+    /// Detected language: selects the stopwords and the expansions.
+    pub language: TaskLanguage,
 }
 
 fn is_ident(s: &str) -> bool {
@@ -490,7 +486,12 @@ pub fn tokenize_task(task: &str) -> Result<TaskQuery, String> {
     // terms ("base de données" → "base de donnees") can match their
     // replacements in `normalize_task_compounds`.
     let normalized = normalize_task_compounds(&fold_diacritics(task));
-    let stop: HashSet<&str> = STOPWORDS.iter().copied().collect();
+    let language = detect_language(&normalized);
+    let french_stopwords: &[&str] = match language {
+        TaskLanguage::French => FRENCH_STOPWORDS,
+        TaskLanguage::English => &[],
+    };
+    let stop: HashSet<&str> = STOPWORDS.iter().chain(french_stopwords).copied().collect();
     let mut exact_tokens: Vec<String> = Vec::new();
     let mut keywords: Vec<String> = Vec::new();
     let mut seen_kw: HashSet<String> = HashSet::new();
@@ -554,6 +555,7 @@ pub fn tokenize_task(task: &str) -> Result<TaskQuery, String> {
         exact_tokens,
         keywords,
         keywords_truncated,
+        language,
     })
 }
 
@@ -888,13 +890,14 @@ pub fn symbol_kind_boost(kind: &SymbolKind) -> f64 {
 pub fn lexical_rank(
     all_paths: &[String],
     keywords: &[String],
+    language: TaskLanguage,
     symbol_hits: &[SymbolHit],
     content_hits: &BTreeMap<String, Vec<(String, u32)>>,
 ) -> Vec<String> {
     let ranking_keywords: Vec<String> = keywords
         .iter()
         .cloned()
-        .chain(expand_keywords(keywords))
+        .chain(expand_keywords(keywords, language))
         .collect();
     let s1: Vec<String> = filename_rank(all_paths, &ranking_keywords)
         .into_iter()
@@ -973,7 +976,7 @@ pub fn compute_targets(
         .keywords
         .iter()
         .cloned()
-        .chain(expand_keywords(&query.keywords))
+        .chain(expand_keywords(&query.keywords, query.language))
         .collect();
 
     // Per-signal ranked lists.
@@ -1294,6 +1297,136 @@ mod tests {
         );
     }
 
+    /// French function words that are English words stay searchable in an
+    /// English task: "fix comment parsing" is about comments.
+    #[test]
+    fn english_task_keeps_words_that_are_french_stopwords() {
+        let q = tokenize_task("fix comment parsing for car plus sans rental").unwrap();
+        assert_eq!(q.language, TaskLanguage::English);
+        assert_eq!(
+            q.keywords,
+            vec!["comment", "parsing", "car", "plus", "sans", "rental"]
+        );
+    }
+
+    #[test]
+    fn french_task_drops_french_function_words() {
+        let q = tokenize_task("Pourquoi la connexion est très lente quand même ?").unwrap();
+        assert_eq!(q.language, TaskLanguage::French);
+        assert_eq!(q.keywords, vec!["connexion", "lente"]);
+
+        let q = tokenize_task("comment corriger le bouton de connexion").unwrap();
+        assert_eq!(q.language, TaskLanguage::French);
+        assert_eq!(q.keywords, vec!["corriger", "bouton", "connexion"]);
+    }
+
+    #[test]
+    fn two_distinct_french_markers_make_a_task_french() {
+        use TaskLanguage::{English, French};
+        assert_eq!(detect_language("fix the login"), English);
+        assert_eq!(detect_language("le login"), English, "one marker");
+        assert_eq!(
+            detect_language("le le login"),
+            English,
+            "one distinct marker"
+        );
+        assert_eq!(detect_language("le login est lent"), French);
+        assert_eq!(
+            detect_language("bouton connexion casse"),
+            French,
+            "unambiguous French relation keys count"
+        );
+        assert_eq!(
+            detect_language("client message queue"),
+            English,
+            "homograph keys are English words and prove nothing"
+        );
+        assert_eq!(detect_language("LE login EST lent"), French, "case-folded");
+        assert_eq!(detect_language(""), English);
+    }
+
+    /// `client` and `message` are English words: an English task keeps its
+    /// meaning, a French one gets the translation.
+    #[test]
+    fn homograph_keys_expand_only_in_a_french_task() {
+        let words = |ws: &[&str]| -> Vec<String> { ws.iter().map(|w| (*w).to_string()).collect() };
+        let english = expand_keywords(&words(&["client", "message"]), TaskLanguage::English);
+        assert!(english.is_empty(), "{english:?}");
+        let french = expand_keywords(&words(&["client", "message"]), TaskLanguage::French);
+        assert_eq!(french, ["customer", "user", "notification", "alert"]);
+
+        // An unambiguous French key expands whatever the detected language.
+        assert_eq!(
+            semantic_expand("connexion", TaskLanguage::English),
+            ["login", "auth", "connection", "session"]
+        );
+        // General relations do not depend on the language.
+        assert_eq!(
+            semantic_expand("cookie", TaskLanguage::French),
+            ["session", "auth", "login"]
+        );
+        assert!(semantic_expand("unrelated", TaskLanguage::French).is_empty());
+        // Terms already present are not repeated.
+        assert_eq!(
+            expand_keywords(&words(&["cookie", "auth"]), TaskLanguage::English),
+            ["session", "login", "authenticate", "user"]
+        );
+    }
+
+    #[test]
+    fn diacritics_fold_before_compounds_and_tokens() {
+        assert_eq!(
+            fold_diacritics("déconnexion paramètre très façade"),
+            "deconnexion parametre tres facade"
+        );
+        let q = tokenize_task("réparer la déconnexion de la base de données et le mot de passe")
+            .unwrap();
+        assert_eq!(q.language, TaskLanguage::French);
+        assert_eq!(
+            q.keywords,
+            vec!["reparer", "deconnexion", "database", "password"]
+        );
+        assert_eq!(
+            normalize_task_compounds("C# and c# then C++"),
+            "csharp and csharp then cpp"
+        );
+    }
+
+    /// The graph-expansion seeds follow the task's language: a French
+    /// `client` seeds the customer module, an English one does not.
+    #[test]
+    fn lexical_rank_expands_filenames_in_the_task_language() {
+        let paths: Vec<String> = ["src/customer.rs", "src/http.rs", "src/login.rs"]
+            .iter()
+            .map(|p| (*p).to_string())
+            .collect();
+        let mut content = BTreeMap::new();
+        content.insert(
+            "client".to_string(),
+            vec![("src/http.rs".to_string(), 3u32)],
+        );
+        let keywords = vec!["client".to_string()];
+        assert_eq!(
+            lexical_rank(&paths, &keywords, TaskLanguage::English, &[], &content),
+            ["src/http.rs"]
+        );
+        assert_eq!(
+            lexical_rank(&paths, &keywords, TaskLanguage::French, &[], &content),
+            ["src/customer.rs", "src/http.rs"],
+            "filename evidence outweighs content"
+        );
+        assert_eq!(
+            lexical_rank(
+                &paths,
+                &["connexion".to_string()],
+                TaskLanguage::English,
+                &[],
+                &BTreeMap::new()
+            ),
+            ["src/login.rs"]
+        );
+    }
+
     #[test]
     fn tokenize_all_stopwords_errors() {
         assert!(tokenize_task("fix the code in a file").is_err());
@@ -1317,7 +1450,7 @@ mod tests {
         let q_ruby = tokenize_task("add ruby on rails support").unwrap();
         assert_eq!(q_ruby.keywords, vec!["ruby"]);
 
-        let expanded = expand_keywords(&q_csharp.keywords);
+        let expanded = expand_keywords(&q_csharp.keywords, q_csharp.language);
         assert!(expanded.contains(&"language".to_string()));
         assert!(expanded.contains(&"extract".to_string()));
     }
@@ -1341,6 +1474,7 @@ mod tests {
         };
         let q = TaskQuery {
             keywords_truncated: false,
+            language: TaskLanguage::English,
             exact_tokens: vec![],
             keywords: vec!["login".into()],
         };
@@ -1369,6 +1503,7 @@ mod tests {
         };
         let q = TaskQuery {
             keywords_truncated: false,
+            language: TaskLanguage::English,
             exact_tokens: vec![],
             keywords: vec!["nothing".into()],
         };
@@ -1409,6 +1544,7 @@ mod tests {
         };
         let q = TaskQuery {
             keywords_truncated: false,
+            language: TaskLanguage::English,
             exact_tokens: vec!["login_user".into()],
             keywords: vec!["login".into(), "user".into()],
         };
@@ -1446,6 +1582,7 @@ mod tests {
         };
         let q = TaskQuery {
             keywords_truncated: false,
+            language: TaskLanguage::English,
             exact_tokens: vec![],
             keywords: vec!["login".into()],
         };
@@ -1484,6 +1621,7 @@ mod tests {
         };
         let q = TaskQuery {
             keywords_truncated: false,
+            language: TaskLanguage::English,
             exact_tokens: vec![],
             keywords: vec!["auth".into()],
         };
@@ -1503,6 +1641,7 @@ mod tests {
         };
         let q = TaskQuery {
             keywords_truncated: false,
+            language: TaskLanguage::English,
             exact_tokens: vec![],
             keywords: vec!["login".into()],
         };
