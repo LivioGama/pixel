@@ -43,16 +43,60 @@ impl GitRunner {
     /// treating that overflow as "no files" previously emptied the index
     /// outright above roughly 25k files.
     pub fn ls_files(&self) -> Vec<String> {
-        let Some(out) = self
+        self.ls_files_or_err().unwrap_or_default()
+    }
+
+    /// Same as `ls_files`, but propagates the `GitError` instead of
+    /// degrading to an empty list: for a caller that must tell "no tracked
+    /// files" from "not a repository" (the task handoff refuses to run on
+    /// either, with different messages).
+    pub fn ls_files_or_err(&self) -> Result<Vec<String>, GitError> {
+        let out = self
             .with_max_output_bytes(Some(ENUMERATION_MAX_OUTPUT_BYTES))
-            .run_opt(&["ls-files", "-z"])
-        else {
-            return Vec::new();
-        };
-        out.split(|&b| b == 0)
+            .run(&["ls-files", "-z"])?;
+        Ok(out
+            .split(|&b| b == 0)
             .filter(|s| !s.is_empty())
             .map(|s| String::from_utf8_lossy(s).into_owned())
-            .collect()
+            .collect())
+    }
+
+    /// Working-tree root as git sees it (`git rev-parse --show-toplevel`):
+    /// the enclosing repository from any subdirectory, the worktree itself
+    /// from a linked worktree. `None` outside a repository, inside a bare
+    /// one, or on any git failure.
+    pub fn show_toplevel(&self) -> Option<std::path::PathBuf> {
+        let out = self.run_opt(&["rev-parse", "--show-toplevel"])?;
+        let top = String::from_utf8_lossy(&out).trim().to_owned();
+        (!top.is_empty()).then(|| std::path::PathBuf::from(top))
+    }
+
+    /// Number of commits reachable from any ref (`git rev-list --count
+    /// --all`). `Some(0)` in a repository without commits; `None` outside a
+    /// repository or on any git failure. The `status` and `doctor`
+    /// freshness checks compare it with the facts store's commit count.
+    pub fn rev_list_count_all(&self) -> Option<u64> {
+        let out = self.run_opt(&["rev-list", "--count", "--all"])?;
+        String::from_utf8_lossy(&out).trim().parse().ok()
+    }
+
+    /// Raw `git status --porcelain=v2 -z --untracked-files=all --ignored=no
+    /// -- <path>` output for one path, for the porcelain-v2 fingerprint
+    /// parser in `pixel-ops`. Empty when the path is clean; an `Err` when
+    /// git fails, so a caller can tell "clean" from "unknown".
+    pub fn status_porcelain_v2_path(&self, path: &str) -> Result<String, GitError> {
+        let out = self
+            .with_max_output_bytes(Some(ENUMERATION_MAX_OUTPUT_BYTES))
+            .run(&[
+                "status",
+                "--porcelain=v2",
+                "-z",
+                "--untracked-files=all",
+                "--ignored=no",
+                "--",
+                path,
+            ])?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
     /// Blob content of `path` as it exists in commit `oid`
@@ -414,6 +458,111 @@ mod tests {
         std::fs::write(root.join("c.txt"), b"untracked\n").unwrap();
         let status = runner.status_porcelain();
         assert!(status.iter().any(|(xy, p)| xy == "??" && p == "c.txt"));
+    }
+
+    #[test]
+    fn rev_list_count_all_counts_every_ref_and_is_none_outside_a_repo() {
+        let root = tmpdir("plumbing-revlist");
+        init_repo(&root);
+        let runner = GitRunner::new(&root);
+        assert_eq!(runner.rev_list_count_all(), Some(0), "empty repo counts 0");
+
+        std::fs::write(root.join("a.txt"), b"a\n").unwrap();
+        git(&root, &["add", "a.txt"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        assert_eq!(runner.rev_list_count_all(), Some(1));
+
+        // A commit on another branch is still reachable from a ref, so
+        // `--all` counts it: two, not one.
+        git(&root, &["checkout", "-q", "-b", "side"]);
+        std::fs::write(root.join("b.txt"), b"b\n").unwrap();
+        git(&root, &["add", "b.txt"]);
+        git(&root, &["commit", "-q", "-m", "side"]);
+        assert_eq!(runner.rev_list_count_all(), Some(2));
+
+        let outside = tmpdir("plumbing-revlist-outside");
+        assert_eq!(GitRunner::new(&outside).rev_list_count_all(), None);
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn show_toplevel_resolves_a_subdirectory_to_the_repo_root() {
+        let root = tmpdir("plumbing-toplevel");
+        init_repo(&root);
+        let nested = root.join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        let top = GitRunner::new(&nested)
+            .show_toplevel()
+            .expect("inside a repo");
+        assert_eq!(top, root.canonicalize().unwrap());
+
+        let outside = tmpdir("plumbing-toplevel-outside");
+        assert_eq!(GitRunner::new(&outside).show_toplevel(), None);
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ls_files_or_err_distinguishes_no_files_from_no_repo() {
+        let root = tmpdir("plumbing-lsfiles-err");
+        init_repo(&root);
+        let runner = GitRunner::new(&root);
+        assert_eq!(runner.ls_files_or_err().unwrap(), Vec::<String>::new());
+
+        std::fs::write(root.join("a.txt"), b"a\n").unwrap();
+        std::fs::write(root.join("b.txt"), b"b\n").unwrap();
+        git(&root, &["add", "a.txt", "b.txt"]);
+        let mut files = runner.ls_files_or_err().unwrap();
+        files.sort();
+        assert_eq!(files, vec!["a.txt".to_string(), "b.txt".to_string()]);
+        assert_eq!(runner.ls_files(), files, "ls_files is the lenient view");
+
+        let outside = tmpdir("plumbing-lsfiles-outside");
+        let err = GitRunner::new(&outside).ls_files_or_err().unwrap_err();
+        assert!(
+            matches!(err, GitError::NonZeroExit { .. }),
+            "outside a repo git exits non-zero: {err}"
+        );
+        assert!(GitRunner::new(&outside).ls_files().is_empty());
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn status_porcelain_v2_path_reports_one_path_and_errors_outside_a_repo() {
+        let root = tmpdir("plumbing-status-v2");
+        init_repo(&root);
+        std::fs::write(root.join("a.txt"), b"a\n").unwrap();
+        std::fs::write(root.join("b.txt"), b"b\n").unwrap();
+        git(&root, &["add", "a.txt", "b.txt"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        let runner = GitRunner::new(&root);
+
+        assert_eq!(runner.status_porcelain_v2_path("a.txt").unwrap(), "");
+
+        std::fs::write(root.join("a.txt"), b"changed\n").unwrap();
+        std::fs::write(root.join("b.txt"), b"changed\n").unwrap();
+        let out = runner.status_porcelain_v2_path("a.txt").unwrap();
+        assert!(
+            out.starts_with("1 .M "),
+            "porcelain v2 ordinary record: {out:?}"
+        );
+        assert!(out.contains("a.txt"), "{out:?}");
+        assert!(!out.contains("b.txt"), "only the asked path: {out:?}");
+
+        std::fs::write(root.join("new.txt"), b"n\n").unwrap();
+        let out = runner.status_porcelain_v2_path("new.txt").unwrap();
+        assert_eq!(out, "? new.txt\0", "untracked records are requested");
+
+        let outside = tmpdir("plumbing-status-v2-outside");
+        assert!(
+            GitRunner::new(&outside)
+                .status_porcelain_v2_path("a.txt")
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

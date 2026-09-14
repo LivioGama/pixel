@@ -69,18 +69,10 @@ fn sha256_file(path: &Path) -> Option<String> {
     Some(hex)
 }
 
+/// HEAD of the repository under `root` for the run record; `None` outside
+/// a repository or before the first commit.
 fn git_head(root: &Path) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let head = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    (!head.is_empty()).then_some(head)
+    pixel_git::GitRunner::new(root).rev_parse_head()
 }
 
 fn lockfile_hash(root: &Path) -> Option<String> {
@@ -623,6 +615,40 @@ pub fn run_wrapped(store: &Store, label: Option<&str>, argv: &[String]) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_head_is_the_full_oid_of_head_and_none_without_a_commit() {
+        let root =
+            std::env::temp_dir().join(format!("pixel-session-githead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(git_head(&root), None, "not a repository");
+
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        assert_eq!(git_head(&root), None, "no commit yet");
+        std::fs::write(root.join("a.txt"), b"a\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "first"]);
+        let head = git_head(&root).expect("HEAD after a commit");
+        assert_eq!(head.len(), 40, "{head}");
+        assert!(head.bytes().all(|b| b.is_ascii_hexdigit()), "{head}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_owned()).collect()

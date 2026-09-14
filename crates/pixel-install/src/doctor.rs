@@ -570,12 +570,8 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 "SELECT count(*) FROM hunks WHERE length(added) > 0 OR length(removed) > 0",
             );
             let diff_grams = count("SELECT count(*) FROM diff_grams");
-            let repo_commits = Command::new("git")
-                .args(["rev-list", "--count", "--all"])
-                .current_dir(root)
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+            let repo_commits = pixel_git::GitRunner::new(root)
+                .rev_list_count_all()
                 .unwrap_or(0);
             if let Some(reason) =
                 facts_dead_reason(state.commits_indexed, repo_commits, diff_grams)

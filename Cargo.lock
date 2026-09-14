@@ -2232,6 +2232,7 @@ dependencies = [
  "mutants",
  "pixel-daemon",
  "pixel-facts",
+ "pixel-git",
  "pixel-index",
  "pixel-proto",
  "serde",
@@ -2313,6 +2314,7 @@ dependencies = [
 name = "pixel-session"
 version = "0.2.4"
 dependencies = [
+ "pixel-git",
  "rmcp",
  "rusqlite",
  "schemars",

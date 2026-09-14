@@ -1815,17 +1815,8 @@ impl Service {
         // visible as commits_indexed < total_commits. The facts universe also
         // covers stash/reflog-only commits that `--all` doesn't count, so take
         // the max — indexed exceeding rev-list is healthy, not suspicious.
-        let total_commits = std::process::Command::new("git")
-            .args(["rev-list", "--count", "--all"])
-            .current_dir(&self.root)
-            .output()
-            .ok()
-            .and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse::<u64>()
-                    .ok()
-            })
+        let total_commits = pixel_git::GitRunner::new(&self.root)
+            .rev_list_count_all()
             .unwrap_or(0)
             .max(state.total_commits);
         json!({
