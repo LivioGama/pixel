@@ -1130,11 +1130,8 @@ impl Service {
             .targets
             .iter()
             .any(|t| matches!(t.tier.as_str(), "P0" | "P1"));
-        if !has_p0_p1 {
-            // Respect max_tier: a caller that asked for P0-only results
-            // should not receive P1 semantic hits.
-            let tier_ok = max_tier.is_none_or(|m| !matches!(m, "P0"));
-            if tier_ok {
+        if semantic_fallback_wanted(has_p0_p1, max_tier) {
+            {
                 let eff_limit = limit.unwrap_or(engine::DEFAULT_LIMIT);
                 let hits =
                     pixel_recall::code_search::semantic_fallback(&self.root, task, eff_limit);
@@ -2433,6 +2430,13 @@ fn fan_in_counts(
 /// test). Mutation and admin ops (publish/push/ping/…) are not listed: they
 /// report what they DID, not what exists, so completeness honesty does not
 /// apply the same way.
+/// Whether `targets` may add semantic hits: only when the lexical pass found
+/// nothing in P0/P1, and never when the caller asked for P0 only (a P1
+/// semantic hit would violate `max_tier`).
+fn semantic_fallback_wanted(has_p0_p1: bool, max_tier: Option<&str>) -> bool {
+    !has_p0_p1 && max_tier.is_none_or(|m| !matches!(m, "P0"))
+}
+
 pub const RETRIEVAL_OPS: &[&str] = &[
     "search",
     "resolve",
@@ -2816,6 +2820,7 @@ fn symbol_by_id(store: &GraphStore, id: i64) -> Option<SymbolRow> {
     dead_code,
     reason = "retained for the full-detail graph response shape while context uses compact edges"
 )]
+#[cfg_attr(test, mutants::skip)] // no caller: a mutation here is unobservable by design
 fn edges_by_kind(
     store: &GraphStore,
     edges: &[EdgeRow],
@@ -4450,6 +4455,22 @@ mod tests {
     /// so a regex-alternation pattern stayed one token and every term
     /// frequency came out zero.
     #[test]
+    fn semantic_fallback_only_when_lexical_pass_is_empty_and_p1_is_allowed() {
+        assert!(semantic_fallback_wanted(false, None));
+        assert!(semantic_fallback_wanted(false, Some("P1")));
+        assert!(semantic_fallback_wanted(false, Some("P2")));
+        assert!(
+            !semantic_fallback_wanted(false, Some("P0")),
+            "a P0-only caller must not receive P1 semantic hits"
+        );
+        assert!(
+            !semantic_fallback_wanted(true, None),
+            "lexical P0/P1 hits make the fallback redundant"
+        );
+        assert!(!semantic_fallback_wanted(true, Some("P0")));
+    }
+
+    #[test]
     fn tokenize_words_splits_on_punctuation_and_case() {
         assert_eq!(
             tokenize_words("index|disambiguation"),
@@ -5088,6 +5109,19 @@ mod tests {
             assert!(
                 !epistemics.closed_world,
                 "{name}: closed_world must always be false — static analysis is never complete: {epistemics:?}"
+            );
+            // The basis names the store the answer came from, per op: a
+            // reader of `search` must not be told "code graph".
+            let source = match name {
+                "search" => "text index",
+                "targets" | "resolve" => "text index + code graph",
+                "changes" => "code graph + working-tree diff",
+                _ => "code graph",
+            };
+            assert!(
+                epistemics.basis.starts_with(source),
+                "{name}: basis must open with {source:?}: {:?}",
+                epistemics.basis
             );
             let snapshot = resp
                 .snapshot
