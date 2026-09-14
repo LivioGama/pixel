@@ -686,6 +686,28 @@ mod tests {
     }
 
     #[test]
+    fn hash_object_is_the_git_blob_oid_of_the_bytes() {
+        // The overlay patch file is named after this digest and a replay
+        // checks the file against it, so it must be git's own blob OID:
+        // "hello\n" hashes to a fixed value in every repository.
+        let root = fixture("hash-object");
+        assert_eq!(
+            hash_object(&root, b"hello\n").unwrap(),
+            "ce013625030ba8dba906f756967f9e9ca394464a"
+        );
+        let other = hash_object(&root, b"hello\n\n").unwrap();
+        assert_ne!(other, "ce013625030ba8dba906f756967f9e9ca394464a");
+        assert_eq!(other.len(), 40, "{other}");
+        fs::write(root.join("blob.txt"), "hello\n\n").unwrap();
+        assert_eq!(
+            current_path_hash(&root, "blob.txt").unwrap().as_deref(),
+            Some(other.as_str()),
+            "stdin and path hashing agree on the same bytes"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn promotes_owned_change_and_refuses_drift_or_out_of_ownership() {
         let root = fixture("promote");
         let candidate = create(&root, "task1", "candidate1", ["owned.txt".to_string()]).unwrap();
