@@ -88,7 +88,7 @@ fn machine_sources() -> Vec<RecallSource> {
             adapter: Box::new(devin::Adapter::new()),
         },
         RecallSource {
-            root: h(".pi/agent/sessions"),
+            root: pi::machine_sessions_dir(),
             adapter: Box::new(pi::Adapter::new()),
         },
     ]

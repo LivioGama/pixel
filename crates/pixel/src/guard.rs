@@ -230,6 +230,7 @@ const TRANSCRIPT_STORE_MARKERS: &[&str] = &[
     ".gemini/tmp",
     ".local/share/opencode",
     ".zcode/cli/db",
+    ".pi/agent/sessions",
 ];
 /// Tools capable of digging through a transcript store's raw records
 /// (queries a sqlite DB, or runs a script over JSON/JSONL). Deliberately
@@ -255,7 +256,7 @@ fn transcript_store_hit(cmd: &str) -> Option<&'static str> {
 fn transcript_archaeology_advisory_lines(store: &str) -> Vec<String> {
     vec![
         format!("Advisory: this command reads `{store}` — a transcript store `pixel recall` already indexes."),
-        "`pixel recall sessions --agent <devin|codex|claude|cursor|gemini|opencode|zcode>` lists sessions by title/cwd/turn-count in one call.".into(),
+        "`pixel recall sessions --agent <devin|codex|claude|cursor|gemini|opencode|zcode|pi>` lists sessions by title/cwd/turn-count in one call.".into(),
         "`pixel recall search \"<phrase>\" --agent <agent> --session <name>` pulls the exact turn text — no manual sqlite3/python needed.".into(),
         "Run `pixel recall index` first if this store hasn't been ingested yet.".into(),
     ]
@@ -3662,6 +3663,16 @@ mod tests {
             "{msg}"
         );
         assert!(msg.contains("pixel recall"), "{msg}");
+    }
+
+    /// pi sessions are indexed like every other store: digging through
+    /// them with jq earns the same pointer to `pixel recall`.
+    #[test]
+    fn pi_store_is_flagged() {
+        let store = transcript_store_hit("jq -c .type ~/.pi/agent/sessions/x/s.jsonl");
+        assert_eq!(store, Some(".pi/agent/sessions"));
+        let msg = transcript_archaeology_advisory_lines(store.unwrap()).join("\n");
+        assert!(msg.contains("zcode|pi>"), "{msg}");
     }
 
     #[test]
