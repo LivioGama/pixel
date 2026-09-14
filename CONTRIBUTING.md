@@ -138,7 +138,7 @@ scripts/pixel-smoke-test.sh     # exercises the installed pixel (command -v pixe
 ```
 
 The `Cross-build` workflow (`.github/workflows/cross-build.yml`) builds the
-musl release lane on every push to `develop`/`main` and on pull requests
+musl release lane on every push to `develop` and on pull requests
 that touch a Rust-affecting path (`crates/`, `Cargo.*`, `.cargo/`,
 `deny.toml`, the workflow itself); a docs, prompt or script PR skips it.
 To reproduce it locally:
