@@ -151,7 +151,7 @@ pub fn provenance(root: &Path, opts: &ProvenanceOptions) -> Result<Value, String
             retry.extend_from_slice(&blame_args[1..]);
             blame_runner
                 .run(&retry)
-                .map_err(|e| format!("git blame: {e}"))?
+                .map_err(|e| format!("git blame without ignored revisions: {e}"))?
         }
         Err(e) => return Err(format!("git blame: {e}")),
     };

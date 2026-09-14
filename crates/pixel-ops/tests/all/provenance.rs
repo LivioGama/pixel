@@ -303,6 +303,50 @@ fn a_missing_ignore_revs_file_does_not_break_attribution() {
     );
 }
 
+/// Only the missing ignore-revs file is retried: any other blame failure
+/// (here a line range past the end of the file) is reported as git gave it.
+#[test]
+fn other_blame_failures_are_not_retried() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    init_repo(root);
+    std::fs::write(root.join("f.txt"), "a1\na2\n").unwrap();
+    commit_all(root, "alice");
+    // An existing (empty) ignore list, so a global `blame.ignoreRevsFile`
+    // default cannot turn this into the missing-file case.
+    std::fs::write(root.join(".git-blame-ignore-revs"), "").unwrap();
+    let mut o = opts("f.txt");
+    o.lines = Some((50, 60));
+    let err = provenance(root, &o).unwrap_err();
+    assert!(err.starts_with("git blame: "), "{err}");
+}
+
+/// A region count equal to `limit_regions` is complete: nothing was cut.
+#[test]
+fn a_region_count_at_the_limit_is_not_truncated() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    init_repo(root);
+    std::fs::write(root.join("f.txt"), "a1\n").unwrap();
+    commit_all(root, "alice");
+    set_author(root, "Bob", "bob@example.com");
+    std::fs::write(root.join("f.txt"), "a1\nb2\n").unwrap();
+    commit_all(root, "bob");
+    let mut o = opts("f.txt");
+    o.limit_regions = 2;
+    let result = provenance(root, &o).unwrap();
+    assert_eq!(result["region_count_total"], 2, "{result}");
+    assert_eq!(result["lower_bound"], false, "{result}");
+    assert!(
+        !result["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("limit_regions")),
+        "{result}"
+    );
+}
+
 /// When the ignore-revs file exists it is honoured: a commit it lists does
 /// not take the lines it only reformatted.
 #[test]
