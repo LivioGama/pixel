@@ -11,7 +11,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The command rename had also renamed the wire layer: `Op::op_name`, `SESSION_CAPABILITIES`, the daemon's op-name matches and its JSON output keys (`targets`, `symbol`, `processes`, `clusters`) carried the new CLI spellings while the serde tags stayed `search`, `targets`, `symbol`, so `targets` responses lost their content evidence, the `inspect`/`review` dirty-list rule never matched, and the session-start capability block advertised names no op answers to. The wire layer is back on the serde tags; only the CLI surface, the agent prompt and the doctrine text use the new names. The doctrine's fourth scenario is `pixel sync-branch` (there is no `fetch-branch` command). `pixel install` and `pixel uninstall` recognise both `pixel hook …` (0.2.x installs) and `pixel run-hook …` entries, so an upgrade replaces the old hook instead of stacking a second one. The `@pixel/sniper` TypeScript package (Vite plugin, vitest reporter) shells out to `pixel list-errors report` again instead of the removed `pixel sniper report`, so browser, HMR and vitest records land in the sink. `develop` was also failing `cargo fmt --check` and `cargo clippy -D warnings` (`pixel-index`, `pixel-graph`, the rename tool); both gates pass again.
 
 ### Changed
+- Every subcommand renamed after 0.2.4 (verb-first names, commit 08268b0) accepts its old name again as a hidden alias, so a script, hook entry or agent prompt written for 0.2.x no longer fails with `unrecognized subcommand` (a CI job calling `ready` broke on 2026-09-14). The old names stay accepted until 1.0, which removes them. Invoking one prints a single stderr line, `note: 'ready' is now 'prepare-repo'; the old name stays accepted until 1.0`, never on stdout or in `--json` output, and silenced like the metrics line by `--metrics off`, `PIXEL_METRICS=0` and the protected streams (hooks, `search-like-rg`, the statusline). `--help` lists only the new names. Protocol op names and JSON fields are unchanged. The renames:
+
+| Old name | New name |
+| --- | --- |
+| `ask` | `search-meaning` |
+| `branch` | `new-branch` |
+| `branches` | `list-branches` |
+| `changes` | `what-changed` |
+| `clusters` | `list-areas` |
+| `context` | `pack-context` |
+| `env` | `edit-env` |
+| `excavate` | `dig-history` |
+| `flow` | `replay-flow` |
+| `graph` | `rebuild-graph` |
+| `history` | `commit-history` |
+| `history-search` | `search-history` |
+| `hook` | `run-hook` |
+| `index` | `build-index` |
+| `inspect` | `repo-state` |
+| `journal` | `record-event` |
+| `lifecycle` | `file-history` |
+| `log` | `action-log` |
+| `map` | `repo-map` |
+| `processes` | `list-flows` |
+| `provenance` | `who-wrote` |
+| `publish` | `commit` |
+| `query` | `run-recipe` |
+| `ready` | `prepare-repo` |
+| `reconcile` | `sync-branch` |
+| `release-check` | `check-release` |
+| `rescue` | `plan-rollback` |
+| `resolve` | `find-code` |
+| `review` | `review-changes` |
+| `rewrite` | `squash-branch` |
+| `savings` | `token-savings` |
+| `search` | `search-content` |
+| `search-compat` | `search-like-rg` |
+| `ship` | `commit-and-push` |
+| `skeleton` | `list-signatures` |
+| `sniper` | `list-errors` |
+| `stats` | `index-stats` |
+| `symbol` | `find-symbol` |
+| `sync` | `fetch` |
+| `targets` | `scope-task` |
+| `task` | `task-state` |
+| `trace` | `call-path` |
+| `update` | `fast-forward` |
+| `upgrade` | `self-update` |
+| `uses` | `who-calls` |
 - Every production git call now goes through `pixel_git::GitRunner`, with its 120 s timeout, output cap and credential-redacted stderr. Fourteen call sites used to spawn `git` bare: the `pixel status` and `pixel doctor` commit counts, the `git add .` file list in the guard hook, the task handoff's tracked-file list, the task sandbox (`diff`, `apply`, `hash-object`), `pixel repo-state`'s branch, the fingerprint status read, and the sniper run's HEAD and project-root lookups. A hung `git status` under the guard hook used to hang the agent's tool call indefinitely; it now fails after the timeout. The sandbox's `diff --binary` is capped at 64 MiB and reports an error past it instead of applying a truncated patch. `crates/pixel-git/tests/boundary.rs` fails the build when a `Command::new("git")` appears in another crate's non-test code.
+
+### Removed
+- `migrate` (delete the legacy `.gitpixel/` directory) was dropped by the rename without notice. It is back as a hidden command that exits 0, prints `note: 'migrate' was removed and does nothing` on stderr and touches nothing, so a script that still calls it keeps running; delete a leftover `.gitpixel/` by hand.
 
 ## [0.2.4] - 2026-09-14
 

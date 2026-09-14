@@ -119,6 +119,73 @@ fn every_subcommand_is_in_the_architecture_command_table() {
     );
 }
 
+/// The `(old, new)` rows of the first `| Old name | New name |` table in
+/// `text`, in document order.
+fn rename_table_rows(text: &str) -> Vec<(String, String)> {
+    let Some((_, after)) = text.split_once("| Old name | New name |") else {
+        return Vec::new();
+    };
+    after
+        .lines()
+        .skip(2) // the rest of the header line, then the `| --- |` separator
+        .map_while(|line| {
+            let cells: Vec<&str> = line
+                .trim()
+                .strip_prefix('|')?
+                .strip_suffix('|')?
+                .split('|')
+                .map(|cell| cell.trim().trim_matches('`'))
+                .collect();
+            match cells.as_slice() {
+                [old, new] => Some(((*old).to_string(), (*new).to_string())),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn renamed_command_tables_list_exactly_the_accepted_aliases() {
+    // The README and the changelog tell users which old names still work;
+    // the CLI registers those aliases from `RENAMED_COMMANDS`. A table that
+    // drops a row or keeps a stale one sends a user to a name that fails.
+    let expected: Vec<(String, String)> = pixel_proto::commands::RENAMED_COMMANDS
+        .iter()
+        .map(|(old, new)| ((*old).to_string(), (*new).to_string()))
+        .collect();
+    let root = repo_root();
+    for doc in ["README.md", "CHANGELOG.md"] {
+        let text = std::fs::read_to_string(root.join(doc)).unwrap();
+        assert_eq!(
+            rename_table_rows(&text),
+            expected,
+            "{doc}: the `| Old name | New name |` table must match RENAMED_COMMANDS row for row"
+        );
+    }
+}
+
+#[test]
+fn rename_table_rows_stop_at_the_end_of_the_table() {
+    let text = [
+        "intro",
+        "| Old name | New name |",
+        "| --- | --- |",
+        "| `ready` | `prepare-repo` |",
+        "| `hook` | `run-hook` |",
+        "",
+        "| `after` | `blank line` |",
+    ]
+    .join("\n");
+    assert_eq!(
+        rename_table_rows(&text),
+        vec![
+            ("ready".to_string(), "prepare-repo".to_string()),
+            ("hook".to_string(), "run-hook".to_string()),
+        ]
+    );
+    assert!(rename_table_rows("no table here").is_empty());
+}
+
 #[test]
 fn referenced_commands_reads_only_backticked_command_names() {
     let text = "Run `pixel search-content foo` then `pixel impact`.\n`pixel-cli` is the crate; the pixel binary; `pixel` alone; `pixel foo/bar`; `pixel --help` is a flag.";
