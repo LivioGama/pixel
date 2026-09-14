@@ -495,6 +495,16 @@ impl GraphStore {
         Ok(())
     }
 
+    /// Record that `symbol_id` implements a trait method: it is called
+    /// through the trait, never by name, so dead-code findings skip it.
+    pub fn mark_trait_impl(&self, symbol_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE symbols SET trait_impl = 1 WHERE id = ?1",
+            params![symbol_id],
+        )?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn insert_symbol(
         &self,
@@ -1325,7 +1335,8 @@ CREATE TABLE IF NOT EXISTS symbols (
   kind TEXT NOT NULL,
   start_line INTEGER NOT NULL,
   end_line INTEGER NOT NULL,
-  sig TEXT NOT NULL DEFAULT ''
+  sig TEXT NOT NULL DEFAULT '',
+  trait_impl INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id);
@@ -1461,6 +1472,12 @@ fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if !has_column("symbols", "trait_impl")? {
+        conn.execute(
+            "ALTER TABLE symbols ADD COLUMN trait_impl INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     if !has_column("edges", "receiver")? {
         conn.execute("ALTER TABLE edges ADD COLUMN receiver TEXT", [])?;
     }
@@ -1492,6 +1509,37 @@ fn migrate(conn: &Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A graph.db written before `symbols.trait_impl` existed opens with the
+    /// column added (default 0), and marking a symbol sets it.
+    #[test]
+    fn opening_an_older_graph_adds_the_trait_impl_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE symbols (id INTEGER PRIMARY KEY, uid TEXT NOT NULL UNIQUE, \
+                 file_id INTEGER NOT NULL, name TEXT NOT NULL, qualified TEXT NOT NULL, \
+                 kind TEXT NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, \
+                 sig TEXT NOT NULL DEFAULT '');\
+                 INSERT INTO symbols VALUES (1, 'a#f#method', 1, 'f', 'f', 'method', 1, 2, '');",
+            )
+            .unwrap();
+        }
+        let store = GraphStore::open(&path).unwrap();
+        let flag = |id: i64| -> i64 {
+            store
+                .conn()
+                .query_row("SELECT trait_impl FROM symbols WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(flag(1), 0);
+        store.mark_trait_impl(1).unwrap();
+        assert_eq!(flag(1), 1);
+    }
+
     use super::*;
     use std::os::unix::fs::symlink;
 

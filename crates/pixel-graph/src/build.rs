@@ -70,7 +70,8 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///
 /// 2: JSX component call edges; callback references only for functions the
 /// graph defines, member arguments only on a self receiver.
-pub const EXTRACTOR_VERSION: &str = "2";
+/// 3: Rust trait-implementation methods are marked (`symbols.trait_impl`).
+pub const EXTRACTOR_VERSION: &str = "3";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -262,6 +263,9 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
                 s.end_line,
                 &s.sig,
             )?;
+            if s.trait_impl {
+                store.mark_trait_impl(id)?;
+            }
             ids.push(id);
             lines.push((s.start_line, s.end_line));
 
@@ -662,6 +666,9 @@ fn update_files_unsigned(
                 s.end_line,
                 &s.sig,
             )?;
+            if s.trait_impl {
+                store.mark_trait_impl(id)?;
+            }
             ids.push(id);
             lines.push((s.start_line, s.end_line));
 
