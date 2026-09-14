@@ -27,6 +27,13 @@ env:
 jobs:
   in-diff:
     name: Mutants in diff
+    # A release PR into main (head develop or release-*) carries only commits
+    # that already passed this job on their own PR into develop; its diff
+    # against main is the whole release (0.2.5's ran past 20 minutes and
+    # would have hit the 90-minute cap). Hotfix PRs into main stay gated.
+    if: >-
+      github.base_ref != 'main' ||
+      (github.head_ref != 'develop' && !startsWith(github.head_ref, 'release-'))
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:

@@ -15,7 +15,9 @@
 # 5. `cargo update --workspace` refreshes Cargo.lock for the members only;
 # 6. the pull requests merged into develop since the last tag are listed, so
 #    each user-visible one can be matched to a changelog entry by eye
-#    (entries carry no PR number); skipped when `gh` is missing or offline;
+#    (entries carry no PR number), then the commits since the tag that no
+#    merged pull request contains (pushed straight to develop, so nobody filed
+#    an entry for them); skipped when `gh` is missing or offline;
 # 7. `pixel check-release` runs from the tree exactly as the Release
 #    workflow's verify job runs it, and its exit code is the script's.
 #
@@ -110,6 +112,27 @@ if [ -n "$LAST_TAG" ] && command -v gh >/dev/null 2>&1; then
         echo "prepare.sh: could not list the pull requests merged since $LAST_TAG (gh offline or unauthenticated); check CHANGELOG.md against them by hand"
     fi
     echo
+    # A commit pushed straight to develop never appears above. The commits
+    # since the tag are taken by patch, not by date or ancestry: the tag is
+    # not an ancestor of develop (its commit is replayed there), and a commit
+    # authored before the tag can still be missing from it. The commits API
+    # lists the pull requests containing a commit, open ones included: only a
+    # merged one counts.
+    NWO="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
+    if [ -n "$NWO" ]; then
+        DIRECT=""
+        for sha in $(git log --no-merges --cherry-pick --right-only --format=%H "$LAST_TAG...HEAD" | head -n 200); do
+            merged="$(gh api "repos/$NWO/commits/$sha/pulls" \
+                --jq 'map(select(.merged_at != null)) | length' 2>/dev/null || echo "?")"
+            if [ "$merged" = "0" ]; then
+                DIRECT="$DIRECT
+  $(git log -1 --format='%h %an: %s' "$sha")"
+            fi
+        done
+        echo "commits since $LAST_TAG in no merged pull request (no one filed a changelog entry for them):"
+        if [ -n "$DIRECT" ]; then printf '%s\n' "$DIRECT" | sed '/^$/d'; else echo "  (none)"; fi
+        echo
+    fi
 fi
 
 cargo run -q -p pixel-cli -- check-release "v$VERSION" --repo .
