@@ -3,7 +3,7 @@
 //! call gets the wall-clock timeout, the stdout cap and stderr redaction.
 //!
 //! Fourteen bare `Command::new("git")` sites had drifted in (the guard
-//! hook, the task sandbox, `pixel status`, `pixel doctor`, `pixel inspect`,
+//! hook, the task sandbox, `pixel status`, `pixel doctor`, `pixel repo-state`,
 //! the sniper run) before this test existed; one of them could hang an
 //! agent's tool call on a stuck `git status`. This test walks every other
 //! crate's `src/` and fails on a spawn outside a `#[cfg(test)] mod`.
