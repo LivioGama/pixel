@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `scripts/install.sh` finds the latest release from the redirect of `github.com/LivioGama/pixel/releases/latest` instead of the anonymous REST API, which allows 60 requests an hour per IP: from a shared address (a CI runner, an office NAT) it answered "No prebuilt release found" although 0.2.6 was published (the macOS release smoke of 0.2.6 failed twice this way). A failed lookup now shows curl's error instead of hiding it.
+
 ## [0.2.6] - 2026-09-14
 
 ### Fixed
