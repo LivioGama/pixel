@@ -204,7 +204,14 @@ fn apply_restores_working_tree_only() {
     let (dir, v1, _) = fixture("apply");
     let out = gitpixel(
         &dir,
-        &["plan-rollback", "--apply", &v1, "--file", "src/calc.rs", "."],
+        &[
+            "plan-rollback",
+            "--apply",
+            &v1,
+            "--file",
+            "src/calc.rs",
+            ".",
+        ],
     );
     assert!(out.status.success(), "apply failed: {out:?}");
     assert_eq!(
@@ -228,7 +235,14 @@ fn apply_refuses_dirty_without_strategy() {
 
     let out = gitpixel(
         &dir,
-        &["plan-rollback", "--apply", &v1, "--file", "src/calc.rs", "."],
+        &[
+            "plan-rollback",
+            "--apply",
+            &v1,
+            "--file",
+            "src/calc.rs",
+            ".",
+        ],
     );
     assert!(!out.status.success(), "must refuse dirty overwrite");
     let err = String::from_utf8_lossy(&out.stderr);

@@ -296,9 +296,9 @@ fn recent_changes(
     let text = String::from_utf8_lossy(&output);
     let mut paths: Vec<String> = text
         .lines()
-        .map(|l| l.trim())
+        .map(str::trim)
         .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
+        .map(ToString::to_string)
         .collect();
     paths.sort();
     paths.dedup();
@@ -347,7 +347,7 @@ fn fan_in_for_files(
         .iter()
         .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>)
         .collect();
-    let refs: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|b| b.as_ref()).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = ids.iter().map(AsRef::as_ref).collect();
     let rows = stmt.query_map(refs.as_slice(), |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
     })?;
@@ -383,7 +383,7 @@ fn fan_in_for_file_paths(
         .iter()
         .map(|p| Box::new(p.clone()) as Box<dyn rusqlite::ToSql>)
         .collect();
-    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(AsRef::as_ref).collect();
     let rows = stmt.query_map(refs.as_slice(), |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
     })?;
@@ -554,8 +554,8 @@ mod tests {
         // No edge → both are dead. Dedup: DeadCode twice → each symbol once.
         let queries = vec![PlanQuery::DeadCode, PlanQuery::DeadCode];
         let root = std::path::Path::new(".");
-        let runner = pixel_git::GitRunner::new(&root);
-        let findings = run_plan_queries(&store, &root, &runner, &queries).unwrap();
+        let runner = pixel_git::GitRunner::new(root);
+        let findings = run_plan_queries(&store, root, &runner, &queries).unwrap();
         let dead_count = findings
             .iter()
             .filter(|f| f.label.contains("dead_fn"))

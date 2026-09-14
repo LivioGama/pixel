@@ -129,10 +129,11 @@ pub fn observe(value: &Value) {
 /// v1 command counts are explicit workflow policy, not measured executions.
 fn native_commands(command: &str) -> Option<u64> {
     match command {
-        "search-content" | "run-recipe" | "search-meaning" | "find-code" | "find-symbol" | "pack-context" | "list-signatures" | "repo-map"
-        | "scope-task" | "who-calls" | "impact" | "call-path" | "what-changed" | "list-areas" | "list-flows"
-        | "commit-history" | "search-history" | "dig-history" | "file-history" | "who-wrote" | "diff"
-        | "list-branches" | "fetch" | "new-branch" | "fast-forward" => Some(1),
+        "search-content" | "run-recipe" | "search-meaning" | "find-code" | "find-symbol"
+        | "pack-context" | "list-signatures" | "repo-map" | "scope-task" | "who-calls"
+        | "impact" | "call-path" | "what-changed" | "list-areas" | "list-flows"
+        | "commit-history" | "search-history" | "dig-history" | "file-history" | "who-wrote"
+        | "diff" | "list-branches" | "fetch" | "new-branch" | "fast-forward" => Some(1),
         "repo-state" | "review-changes" | "commit" => Some(3),
         "commit-and-push" => Some(4),
         // Recovery/task/flow/reconcile depend on the actual guarded plan; do not

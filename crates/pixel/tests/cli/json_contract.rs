@@ -88,7 +88,13 @@ fn json_commands_emit_only_json_on_stdout() {
         (&["find-symbol", "login_user", ".", "--json"], &[]),
         (&["impact", "login_user", ".", "--json"], &["epistemics"]),
         (
-            &["scope-task", "fix login_user", ".", "--json", "--no-manifest"],
+            &[
+                "scope-task",
+                "fix login_user",
+                ".",
+                "--json",
+                "--no-manifest",
+            ],
             &["targets", "epistemics"],
         ),
         (&["repo-state", ".", "--json"], &["head", "branch"]),
@@ -142,7 +148,10 @@ fn json_commands_emit_only_json_on_stdout() {
 #[test]
 fn failing_json_command_leaves_stdout_empty() {
     let dir = fixture("fail");
-    let out = pixel(&dir, &["find-symbol", "no_such_symbol_anywhere", ".", "--json"]);
+    let out = pixel(
+        &dir,
+        &["find-symbol", "no_such_symbol_anywhere", ".", "--json"],
+    );
     // `symbol` on an unknown name may answer with an empty candidate set or
     // fail; either way stdout must be parseable and stderr must carry any
     // failure. Force a definite failure with a malformed regex on search.
@@ -201,7 +210,10 @@ fn big_untracked_tree_keeps_json_answers_structured() {
             assert!(doc["snapshot"].get("dirty").is_none(), "{args:?}: {doc}");
             doc["snapshot"]["dirty_count"].as_u64()
         } else {
-            assert!(doc.get("status").is_none(), "prepare-repo must not embed status");
+            assert!(
+                doc.get("status").is_none(),
+                "prepare-repo must not embed status"
+            );
             doc["dirty_count"].as_u64()
         };
         assert_eq!(dirty_count, Some(3000), "{args:?}: {doc}");
@@ -215,7 +227,14 @@ fn big_untracked_tree_keeps_json_answers_structured() {
         &["find-symbol", "login_user", ".", "--json"][..],
         &["find-code", "login user", ".", "--json"][..],
         &["impact", "login_user", ".", "--json"][..],
-        &["who-calls", "login_user", ".", "--role", "callers", "--json"][..],
+        &[
+            "who-calls",
+            "login_user",
+            ".",
+            "--role",
+            "callers",
+            "--json",
+        ][..],
         &["what-changed", ".", "--json"][..],
     ] {
         let out = pixel(&dir, args);

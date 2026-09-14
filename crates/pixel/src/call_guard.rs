@@ -66,7 +66,13 @@ const SOFT_LOOP_THRESHOLD: usize = 5;
 /// because re-running targets with a different task description is
 /// legitimate (task evolution). `index`, `daemon`, `install`, `doctor`
 /// are infrastructure commands, not retrieval.
-const GUARDED_COMMANDS: &[&str] = &["search-content", "find-code", "pack-context", "impact", "what-changed"];
+const GUARDED_COMMANDS: &[&str] = &[
+    "search-content",
+    "find-code",
+    "pack-context",
+    "impact",
+    "what-changed",
+];
 
 /// Stable hash for call args (FNV-1a 64, hex, first 12 chars — same
 /// scheme as `targets_task_id`). This is NOT a cryptographic hash; it
@@ -319,9 +325,11 @@ mod tests {
     #[test]
     fn allows_first_call() {
         let dir = temp_dir();
-        with_session(None, || match check_and_record("search-content", "foo .", &dir) {
-            CallGuardResult::Allow => {}
-            CallGuardResult::Warn(msg) => panic!("first call should be allowed: {msg}"),
+        with_session(None, || {
+            match check_and_record("search-content", "foo .", &dir) {
+                CallGuardResult::Allow => {}
+                CallGuardResult::Warn(msg) => panic!("first call should be allowed: {msg}"),
+            }
         });
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -408,9 +416,11 @@ mod tests {
     fn fails_open_without_pixel_dir() {
         let dir = std::env::temp_dir().join(format!("pixel-no-dotdir-{}", now_unix()));
         std::fs::create_dir_all(&dir).unwrap();
-        with_session(None, || match check_and_record("search-content", "foo .", &dir) {
-            CallGuardResult::Allow => {}
-            CallGuardResult::Warn(msg) => panic!("must fail open without .pixel/: {msg}"),
+        with_session(None, || {
+            match check_and_record("search-content", "foo .", &dir) {
+                CallGuardResult::Allow => {}
+                CallGuardResult::Warn(msg) => panic!("must fail open without .pixel/: {msg}"),
+            }
         });
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -575,9 +585,11 @@ mod tests {
         std::fs::write(&calls_path, old.to_string()).unwrap();
 
         // A new call should NOT trigger the hard loop (old entry pruned).
-        with_session(None, || match check_and_record("search-content", "old .", &dir) {
-            CallGuardResult::Allow => {}
-            CallGuardResult::Warn(msg) => panic!("expired entry must be pruned: {msg}"),
+        with_session(None, || {
+            match check_and_record("search-content", "old .", &dir) {
+                CallGuardResult::Allow => {}
+                CallGuardResult::Warn(msg) => panic!("expired entry must be pruned: {msg}"),
+            }
         });
         std::fs::remove_dir_all(&dir).ok();
     }

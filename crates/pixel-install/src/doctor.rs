@@ -19,7 +19,13 @@ pub type Result<T> = std::result::Result<T, InstallError>;
 /// it): targets (sniper scoping — mandatory first call, advisory fence),
 /// resolve (phrase → code), rescue (history recovery, includes excavate),
 /// reconcile (branch sync), impact (blast radius, includes changes).
-pub const MANDATORY_SCENARIOS: &[&str] = &["scope-task", "find-code", "plan-rollback", "fetch-branch", "impact"];
+pub const MANDATORY_SCENARIOS: &[&str] = &[
+    "scope-task",
+    "find-code",
+    "plan-rollback",
+    "sync-branch",
+    "impact",
+];
 
 /// Per-check status for the doctor report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1004,7 +1010,7 @@ mod tests {
                 let mut request = String::new();
                 reader.read_line(&mut request).unwrap();
                 let req: serde_json::Value = serde_json::from_str(&request).unwrap();
-                assert_eq!(req["op"], "search-content");
+                assert_eq!(req["op"], "search");
                 let mut stream = stream;
                 writeln!(stream, "{sent}").unwrap();
             });
@@ -1034,7 +1040,7 @@ Prose mentioning `pixel doctor` inline must NOT be extracted.
 
 ```bash
 pixel scope-task --clear /path/to/repo   # when the task ends
-pixel fetch-branch /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]
+pixel sync-branch /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]
 git clone https://example.com/repo.git
 ```
 "#;
@@ -1049,7 +1055,7 @@ git clone https://example.com/repo.git
                 "pixel plan-rollback \"<what broke, in the user's words>\" /path/to/repo [--json]",
                 "pixel plan-rollback --apply <oid> --file <path> /path/to/repo [--merge|--stash-first|--allow-dirty]",
                 "pixel scope-task --clear /path/to/repo",
-                "pixel fetch-branch /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]",
+                "pixel sync-branch /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]",
             ],
             "must extract exactly the fenced pixel lines, comment-stripped, no inline prose"
         );
@@ -1058,7 +1064,9 @@ git clone https://example.com/repo.git
     #[test]
     fn normalizes_placeholders_brackets_and_alternations() {
         assert_eq!(
-            normalize_rule_command("pixel find-code \"<phrase>\" /path/to/repo [--json] [--limit N]"),
+            normalize_rule_command(
+                "pixel find-code \"<phrase>\" /path/to/repo [--json] [--limit N]"
+            ),
             Some(vec![
                 "pixel".into(),
                 "find-code".into(),
@@ -1071,7 +1079,7 @@ git clone https://example.com/repo.git
         );
         assert_eq!(
             normalize_rule_command(
-                "pixel fetch-branch /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]"
+                "pixel sync-branch /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]"
             ),
             Some(vec![
                 "pixel".into(),
@@ -1113,7 +1121,10 @@ git clone https://example.com/repo.git
     #[test]
     fn unnormalizable_lines_are_reported_not_silently_passed() {
         // Unbalanced quotes.
-        assert_eq!(normalize_rule_command("pixel search-content \"unclosed"), None);
+        assert_eq!(
+            normalize_rule_command("pixel search-content \"unclosed"),
+            None
+        );
         // Ellipsis placeholder syntax the normalizer doesn't understand.
         assert_eq!(normalize_rule_command("pixel search-content a…b"), None);
         // Not a pixel line at all.
@@ -1125,7 +1136,7 @@ git clone https://example.com/repo.git
     #[test]
     fn scenario_agreement_is_empty_when_both_sides_name_all_five() {
         let rule = "use pixel scope-task first, pixel find-code for phrases, \
-                    pixel plan-rollback for history, pixel fetch-branch for sync, \
+                    pixel plan-rollback for history, pixel sync-branch for sync, \
                     pixel impact before edits";
         assert!(
             scenario_mismatches(rule, pixel_proto::op::SESSION_USAGE).is_empty(),
@@ -1135,8 +1146,10 @@ git clone https://example.com/repo.git
 
     #[test]
     fn scenario_drift_is_flagged_per_missing_side() {
-        let rule_without_impact = "pixel scope-task, pixel find-code, pixel plan-rollback, pixel fetch-branch";
-        let usage_without_impact = "targets resolve rescue reconcile — four scenarios only";
+        let rule_without_impact =
+            "pixel scope-task, pixel find-code, pixel plan-rollback, pixel sync-branch";
+        let usage_without_impact =
+            "scope-task find-code plan-rollback sync-branch — four scenarios only";
         // Rule lacks impact → usage-only drift message.
         let drift = scenario_mismatches(rule_without_impact, pixel_proto::op::SESSION_USAGE);
         assert_eq!(
@@ -1146,7 +1159,8 @@ git clone https://example.com/repo.git
         );
         assert!(drift[0].contains("impact"));
         // Usage lacks impact while the rule mandates it → red-worthy drift.
-        let rule_full = "pixel scope-task pixel find-code pixel plan-rollback pixel fetch-branch pixel impact";
+        let rule_full =
+            "pixel scope-task pixel find-code pixel plan-rollback pixel sync-branch pixel impact";
         let drift = scenario_mismatches(rule_full, usage_without_impact);
         assert_eq!(drift.len(), 1, "{drift:?}");
         assert!(drift[0].contains("missing from the session usage string"));

@@ -115,7 +115,10 @@ fn flow_json_lifecycle_emits_documents_and_executes_only_when_requested() {
         assert!(value.is_object() || value.is_array(), "{args:?}: {value}");
     }
     assert!(!fixture.0.join("calls").exists());
-    let output = fixture.run(&["replay-flow", "replay", "audit", "--execute", "--json"], false);
+    let output = fixture.run(
+        &["replay-flow", "replay", "audit", "--execute", "--json"],
+        false,
+    );
     assert!(output.status.success(), "{output:?}");
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["success"], true, "{value}");
@@ -136,7 +139,10 @@ fn flow_json_lifecycle_emits_documents_and_executes_only_when_requested() {
 #[test]
 fn flow_execute_failure_is_nonzero_and_never_a_success_document() {
     let fixture = Fixture::new("failure");
-    let output = fixture.run(&["replay-flow", "replay", "audit", "--execute", "--json"], true);
+    let output = fixture.run(
+        &["replay-flow", "replay", "audit", "--execute", "--json"],
+        true,
+    );
     assert!(
         !output.status.success(),
         "browser failure must fail CLI: {output:?}"

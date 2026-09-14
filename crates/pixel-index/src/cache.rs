@@ -233,7 +233,7 @@ pub fn evict_cache(max_bytes: u64) -> Result<(), std::io::Error> {
     }
 
     // Oldest first.
-    files.sort_by(|a, b| a.1.cmp(&b.1));
+    files.sort_by_key(|entry| entry.1);
     for (path, _mtime, len) in &files {
         if total <= max_bytes {
             break;
@@ -286,7 +286,9 @@ mod tests {
 
     #[test]
     fn cache_dir_is_created() {
-        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = CacheEnv::new("dir");
         let dir = cache_dir().expect("cache dir should be created");
         assert!(dir.exists());
@@ -295,7 +297,9 @@ mod tests {
 
     #[test]
     fn cached_shard_path_format() {
-        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = CacheEnv::new("path");
         let p = cached_shard_path("abc123", "trigram").unwrap();
         assert_eq!(p.file_name().unwrap(), "abc123.trigram.v1.shard");
@@ -303,7 +307,9 @@ mod tests {
 
     #[test]
     fn link_and_retrieve_roundtrip() {
-        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = CacheEnv::new("roundtrip");
         let work = std::env::temp_dir().join(format!("pixel-cache-work-{}", std::process::id()));
         let _ = fs::remove_dir_all(&work);
@@ -321,7 +327,9 @@ mod tests {
 
     #[test]
     fn miss_returns_false() {
-        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = CacheEnv::new("miss");
         let work = std::env::temp_dir().join(format!("pixel-cache-miss-{}", std::process::id()));
         let _ = fs::remove_dir_all(&work);
@@ -334,7 +342,9 @@ mod tests {
 
     #[test]
     fn evict_keeps_under_cap() {
-        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = CacheEnv::new("evict");
         let dir = cache_dir().unwrap();
         // Write three 10-byte files (30 bytes total), cap at 20.
@@ -363,7 +373,9 @@ mod tests {
 
     #[test]
     fn eexist_republish_keeps_existing() {
-        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = CacheEnv::new("eexist");
         let work = std::env::temp_dir().join(format!("pixel-cache-eexist-{}", std::process::id()));
         let _ = fs::remove_dir_all(&work);
@@ -385,7 +397,9 @@ mod tests {
 
     #[test]
     fn remove_cached_deletes_entry() {
-        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = CacheEnv::new("remove");
         let work = std::env::temp_dir().join(format!("pixel-cache-rm-{}", std::process::id()));
         let _ = fs::remove_dir_all(&work);

@@ -553,13 +553,13 @@ impl Service {
         // computed against.
         let attach_snapshot = matches!(
             op_name,
-            "repo-state" | "review-changes" | "diff" | "status" | "what-changed"
+            "inspect" | "review" | "diff" | "status" | "changes"
         ) || is_retrieval_op(op_name);
         // Only the ops whose job is to report the working tree carry the
         // dirty path list. Everything else gets `dirty_count`: a retrieval
         // answer needs to say WHICH tree state it was computed against, not
         // enumerate 15 000 untracked `vendor/bundle` paths on every call.
-        let full_dirty_list = matches!(op_name, "repo-state" | "review-changes");
+        let full_dirty_list = matches!(op_name, "inspect" | "review");
         match self.dispatch(req) {
             Ok(v) => {
                 let mut env = Envelope::success(op_name, v);
@@ -1133,7 +1133,7 @@ impl Service {
         if !has_p0_p1 {
             // Respect max_tier: a caller that asked for P0-only results
             // should not receive P1 semantic hits.
-            let tier_ok = max_tier.map(|m| !matches!(m, "P0")).unwrap_or(true);
+            let tier_ok = max_tier.is_none_or(|m| !matches!(m, "P0"));
             if tier_ok {
                 let eff_limit = limit.unwrap_or(engine::DEFAULT_LIMIT);
                 let hits =
@@ -1197,7 +1197,7 @@ impl Service {
         // "peripheral and droppable". P0 is the only tier the doctrine
         // mandates checking before the first edit, so it's the only tier
         // worth spending the token budget to pre-justify.
-        if let Some(targets) = out.get_mut("scope-task").and_then(Value::as_array_mut) {
+        if let Some(targets) = out.get_mut("targets").and_then(Value::as_array_mut) {
             for t in targets {
                 let is_p0 = t.get("tier").and_then(Value::as_str) == Some("P0");
                 if !is_p0 {
@@ -1217,7 +1217,7 @@ impl Service {
         // Notes are human-authored and rare, so no tier gate here (unlike
         // evidence): a note on a P2 file is still worth its few tokens.
         if let Some(store) = self.graph.as_ref()
-            && let Some(targets) = out.get_mut("scope-task").and_then(Value::as_array_mut)
+            && let Some(targets) = out.get_mut("targets").and_then(Value::as_array_mut)
         {
             for t in targets.iter_mut() {
                 let Some(path) = t.get("path").and_then(Value::as_str) else {
@@ -1435,7 +1435,7 @@ impl Service {
             incoming_total > EDGE_LIMIT || outgoing_total > EDGE_LIMIT || source_elided_items > 0
         );
         for (key, value) in [
-            ("find-symbol", sym_json),
+            ("symbol", sym_json),
             (
                 "envelope",
                 serde_json::to_value(envelope).unwrap_or(Value::Null),
@@ -1557,7 +1557,7 @@ impl Service {
             let other_id = if other_is_src { e.src_id } else { e.dst_id };
             let other = symbol_by_id(store, other_id);
             arr.push(json!({
-                "find-symbol": other.as_ref().map(|s| symbol_json(s, &files)),
+                "symbol": other.as_ref().map(|s| symbol_json(s, &files)),
                 "tier": e.tier.as_str(),
                 "site_line": e.site_line,
             }));
@@ -1590,7 +1590,7 @@ impl Service {
         let returned_edges = arr.len();
         let has_more = offset.saturating_add(returned_edges) < total_edges;
         let mut out = json!({
-            "find-symbol": symbol_json(&sym, &files),
+            "symbol": symbol_json(&sym, &files),
             "role": if role == "callees" { "callees" } else { "callers" },
             "edges": arr,
             "total_edges": total_edges,
@@ -1675,8 +1675,8 @@ impl Service {
             let end = start.saturating_add(SYMBOL_LIMIT).min(symbols.len());
             *symbols = symbols.drain(start..end).collect();
             for symbol in symbols {
-                let process_total = symbol["list-flows"].as_array().map_or(0, Vec::len);
-                if let Some(processes) = symbol["list-flows"].as_array_mut() {
+                let process_total = symbol["processes"].as_array().map_or(0, Vec::len);
+                if let Some(processes) = symbol["processes"].as_array_mut() {
                     processes.truncate(PROCESSES_PER_SYMBOL_LIMIT);
                 }
                 if let Some(object) = symbol.as_object_mut() {
@@ -1942,8 +1942,7 @@ impl Service {
         let matches_empty = out
             .get("matches")
             .and_then(Value::as_array)
-            .map(|m| m.is_empty())
-            .unwrap_or(false);
+            .is_some_and(Vec::is_empty);
         if matches_empty {
             let limit = limit.unwrap_or(8);
             if limit > 0 {
@@ -2239,7 +2238,8 @@ impl Service {
         let build_info = ensured.ok().flatten();
         let Some(store) = self.graph.as_ref() else {
             return Err(
-                "graph unavailable — no index to map. Run `pixel rebuild-graph .` first".to_string(),
+                "graph unavailable — no index to map. Run `pixel rebuild-graph .` first"
+                    .to_string(),
             );
         };
         let files = store.files().map_err(|e| e.to_string())?;
@@ -2434,17 +2434,17 @@ fn fan_in_counts(
 /// report what they DID, not what exists, so completeness honesty does not
 /// apply the same way.
 pub const RETRIEVAL_OPS: &[&str] = &[
-    "search-content",
-    "find-code",
-    "scope-task",
+    "search",
+    "resolve",
+    "targets",
     "impact",
-    "who-calls",
-    "call-path",
-    "what-changed",
-    "pack-context",
-    "find-symbol",
-    "list-flows",
-    "list-areas",
+    "uses",
+    "trace",
+    "changes",
+    "context",
+    "symbol",
+    "processes",
+    "clusters",
 ];
 
 fn is_retrieval_op(op_name: &str) -> bool {
@@ -2548,9 +2548,9 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
     }
 
     let source = match op_name {
-        "search-content" => "text index",
-        "scope-task" | "find-code" => "text index + code graph",
-        "what-changed" => "code graph + working-tree diff",
+        "search" => "text index",
+        "targets" | "resolve" => "text index + code graph",
+        "changes" => "code graph + working-tree diff",
         _ => "code graph",
     };
     let mut basis = String::from(source);
@@ -2827,7 +2827,7 @@ fn edges_by_kind(
         let other_id = if other_is_dst { e.dst_id } else { e.src_id };
         let other = symbol_by_id(store, other_id);
         grouped.entry(e.kind.as_str()).or_default().push(json!({
-            "find-symbol": other.as_ref().map(|s| symbol_json(s, files)),
+            "symbol": other.as_ref().map(|s| symbol_json(s, files)),
             "tier": e.tier.as_str(),
             "site_line": e.site_line,
         }));
@@ -3066,7 +3066,7 @@ mod context_crux_coordinate_tests {
         let stale = service.handle(request());
         assert!(stale.ok, "{stale:?}");
         assert_eq!(stale.data()["text"], "");
-        assert!(stale.data().get("find-symbol").is_none());
+        assert!(stale.data().get("symbol").is_none());
         let wire = serde_json::to_value(&stale).unwrap();
         assert_eq!(wire["epistemics"]["lower_bound"], true);
         assert_eq!(wire["epistemics"]["closed_world"], false);
@@ -3081,7 +3081,7 @@ mod context_crux_coordinate_tests {
         let mut refreshed = Service::open(&root).unwrap();
         let after = refreshed.handle(request());
         assert!(after.ok, "{after:?}");
-        assert_eq!(after.data()["find-symbol"]["start_line"], 21);
+        assert_eq!(after.data()["symbol"]["start_line"], 21);
         assert!(
             after.data()["text"]
                 .as_str()
@@ -3819,21 +3819,21 @@ mod tests {
             Request::Ping,
             Request::Status {},
             Request::Graph {},
-            serde_json::from_value(json!({"op":"search-content","pattern":"login"})).unwrap(),
-            serde_json::from_value(json!({"op":"search-content","pattern":"("})).unwrap(),
-            serde_json::from_value(json!({"op":"find-symbol","name":"login"})).unwrap(),
-            serde_json::from_value(json!({"op":"find-symbol","name":"does_not_exist"})).unwrap(),
+            serde_json::from_value(json!({"op":"search","pattern":"login"})).unwrap(),
+            serde_json::from_value(json!({"op":"search","pattern":"("})).unwrap(),
+            serde_json::from_value(json!({"op":"symbol","name":"login"})).unwrap(),
+            serde_json::from_value(json!({"op":"symbol","name":"does_not_exist"})).unwrap(),
             serde_json::from_value(
                 json!({"op":"impact","uid_or_name":"login","direction":"upstream"}),
             )
             .unwrap(),
-            serde_json::from_value(json!({"op":"pack-context","uid":"nope"})).unwrap(),
+            serde_json::from_value(json!({"op":"context","uid":"nope"})).unwrap(),
             serde_json::from_value(json!({"op":"skeleton","file":"login.rs"})).unwrap(),
-            serde_json::from_value(json!({"op":"scope-task","task":"fix login"})).unwrap(),
-            serde_json::from_value(json!({"op":"list-flows"})).unwrap(),
-            serde_json::from_value(json!({"op":"list-areas"})).unwrap(),
+            serde_json::from_value(json!({"op":"targets","task":"fix login"})).unwrap(),
+            serde_json::from_value(json!({"op":"processes"})).unwrap(),
+            serde_json::from_value(json!({"op":"clusters"})).unwrap(),
             serde_json::from_value(json!({"op":"inspect"})).unwrap(),
-            serde_json::from_value(json!({"op":"recall","action":"search-content"})).unwrap(),
+            serde_json::from_value(json!({"op":"recall","action":"search"})).unwrap(),
         ];
         let mut saw_failure = false;
         for req in reqs {
@@ -4063,7 +4063,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .filter_map(|edge| edge["find-symbol"]["uid"].as_str().map(str::to_string))
+                .filter_map(|edge| edge["symbol"]["uid"].as_str().map(str::to_string))
                 .collect::<std::collections::HashSet<_>>()
         };
         let first_uids = edge_uids(&first);
@@ -4463,7 +4463,7 @@ mod tests {
         );
         assert_eq!(
             tokenize_words("resolveConceptPhrase snake_case"),
-            vec!["find-code", "concept", "phrase", "snake", "case"],
+            vec!["resolve", "concept", "phrase", "snake", "case"],
             "camelCase and snake_case must still split"
         );
         assert!(
@@ -4883,7 +4883,7 @@ mod tests {
         assert!(resp.ok, "targets: {:?}", resp.error);
         let targets = resp
             .data()
-            .get("scope-task")
+            .get("targets")
             .and_then(Value::as_array)
             .unwrap();
         let ledger = targets
@@ -4984,7 +4984,7 @@ mod tests {
 
         let requests: Vec<(&str, Request)> = vec![
             (
-                "search-content",
+                "search",
                 Request::Search {
                     pattern: "alpha".into(),
                     json: true,
@@ -4995,14 +4995,14 @@ mod tests {
                 },
             ),
             (
-                "find-code",
+                "resolve",
                 Request::Resolve {
                     phrase: "alpha".into(),
                     limit: Some(5),
                 },
             ),
             (
-                "scope-task",
+                "targets",
                 Request::Targets {
                     task: "alpha beta".into(),
                     limit: Some(5),
@@ -5019,7 +5019,7 @@ mod tests {
                 },
             ),
             (
-                "who-calls",
+                "uses",
                 Request::Uses {
                     uid_or_name: "alpha".into(),
                     role: "callers".into(),
@@ -5027,14 +5027,14 @@ mod tests {
                 },
             ),
             (
-                "call-path",
+                "trace",
                 Request::Trace {
                     from: "beta".into(),
                     to: "alpha".into(),
                 },
             ),
             (
-                "what-changed",
+                "changes",
                 Request::Changes {
                     base: None,
                     offset: None,
@@ -5042,20 +5042,20 @@ mod tests {
                 },
             ),
             (
-                "pack-context",
+                "context",
                 Request::Context {
                     uid,
                     budget_tokens: Some(2000),
                 },
             ),
             (
-                "find-symbol",
+                "symbol",
                 Request::Symbol {
                     name: "alpha".into(),
                 },
             ),
-            ("list-flows", Request::Processes { offset: None }),
-            ("list-areas", Request::Clusters { offset: None }),
+            ("processes", Request::Processes { offset: None }),
+            ("clusters", Request::Clusters { offset: None }),
         ];
 
         // The walk itself must cover the registry exactly — a new retrieval
@@ -5229,7 +5229,7 @@ mod tests {
             precision: false,
         });
         assert!(resp.ok, "targets: {:?}", resp.error);
-        let targets = resp.data()["scope-task"].as_array().unwrap();
+        let targets = resp.data()["targets"].as_array().unwrap();
         let content_reason = |path: &str| -> bool {
             targets
                 .iter()

@@ -152,8 +152,7 @@ fn render_markdown(opts: &PlanOptions, findings: &[PlanFinding]) -> Result<(), S
         if !opts.no_verify {
             let n = findings.len() + 2;
             output.push_str(&format!(
-                "{}. [ ] Verify all plan targets in the running build\n",
-                n
+                "{n}. [ ] Verify all plan targets in the running build\n"
             ));
         }
     } else {
@@ -171,8 +170,7 @@ fn render_markdown(opts: &PlanOptions, findings: &[PlanFinding]) -> Result<(), S
         if !opts.no_verify {
             let n = findings.len() + 1;
             output.push_str(&format!(
-                "{}. [ ] Verify all plan targets in the running build\n",
-                n
+                "{n}. [ ] Verify all plan targets in the running build\n"
             ));
         }
     }

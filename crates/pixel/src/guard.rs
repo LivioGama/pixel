@@ -1399,8 +1399,9 @@ fn scoping_advisory_lines(abs: &Path, m: &Manifest) -> Vec<String> {
             .iter()
             .map(|t| format!("  - '{}'", short_task(&t.task, 70))),
     );
-    lines
-        .push("Proceeding. If scope has drifted, re-run `pixel scope-task \"<refined task>\"`".into());
+    lines.push(
+        "Proceeding. If scope has drifted, re-run `pixel scope-task \"<refined task>\"`".into(),
+    );
     lines.push("to refresh your task's list, or `pixel scope-task --clear` to end scoping.".into());
     lines
 }
@@ -2334,9 +2335,7 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                     "BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw {what} bypasses pixel's snapshot-gated, journaled mutation surface."
                 ),
                 "Run the exact equivalent instead (--files repeated once per file):".into(),
-                format!(
-                    "  pixel commit {amend}{files} --message {msg} --request-id <id> {root_q}"
-                ),
+                format!("  pixel commit {amend}{files} --message {msg} --request-id <id> {root_q}"),
             ];
             if c.all {
                 lines.push(
@@ -3139,7 +3138,9 @@ mod tests {
             "a multi-line --message mentioning `git add` must not deny pixel's own substitute"
         );
         // …but a genuinely unquoted chained invocation is still caught.
-        assert!(bash_deny_lines("pixel search-content 'x' . && git reset --hard", Some(repo)).is_some());
+        assert!(
+            bash_deny_lines("pixel search-content 'x' . && git reset --hard", Some(repo)).is_some()
+        );
     }
 
     #[test]
@@ -3416,8 +3417,7 @@ mod tests {
 
     #[test]
     fn substitute_commit_pathspecs_become_files_flags() {
-        let msg =
-            assert_substitute_contract("git commit -m fix src/a.rs src/b.rs", "pixel commit");
+        let msg = assert_substitute_contract("git commit -m fix src/a.rs src/b.rs", "pixel commit");
         assert!(
             msg.contains("--files src/a.rs --files src/b.rs"),
             "each pathspec must be its own --files: {msg}"
