@@ -1,12 +1,19 @@
 //! The git boundary: `pixel-git` is the only crate that spawns `git` in
-//! production code. Every other crate goes through `GitRunner`, so every
-//! call gets the wall-clock timeout, the stdout cap and stderr redaction.
+//! production code, and inside it only `runner.rs` does. Every other crate —
+//! and every other module of `pixel-git` — goes through `GitRunner`, so
+//! every call gets the wall-clock timeout, the stdout cap and stderr
+//! redaction.
 //!
-//! Fourteen bare `Command::new("git")` sites had drifted in (the guard
-//! hook, the task sandbox, `pixel status`, `pixel doctor`, `pixel repo-state`,
-//! the sniper run) before this test existed; one of them could hang an
-//! agent's tool call on a stuck `git status`. This test walks every other
-//! crate's `src/` and fails on a spawn outside a `#[cfg(test)] mod`.
+//! Fourteen bare `Command::new("git")` sites had drifted into the other
+//! crates (the guard hook, the task sandbox, `pixel status`, `pixel doctor`,
+//! `pixel repo-state`, the sniper run) before this test existed; one of them
+//! could hang an agent's tool call on a stuck `git status`. This test walks
+//! every other crate's `src/` and fails on a spawn outside a `#[cfg(test)]
+//! mod`. `pixel-git` is no exception on the inside: a second test walks its
+//! own `src/` and fails on any production spawn outside `src/runner.rs`,
+//! which is where the bounded primitive lives (`merge-file` used to be
+//! spawned directly by `plumbing.rs`, with no timeout, cap or captured
+//! stderr).
 //!
 //! Test code is exempt: fixtures drive real git directly by design (see
 //! `.agents/rules/test-hygiene.md`). A `#[cfg(test)]` attribute followed by
@@ -101,6 +108,41 @@ fn only_pixel_git_spawns_git_in_production_code() {
     assert!(
         offenders.is_empty(),
         "git spawned outside pixel-git; use pixel_git::GitRunner (timeout, output cap, redaction):\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+#[test]
+fn pixel_git_spawns_git_only_in_the_runner() {
+    // The crate is the boundary for everyone else; its own boundary is
+    // `GitRunner`'s bounded primitive in `runner.rs`. A bare spawn in
+    // another module has no timeout, no output cap and no captured stderr,
+    // and the cross-crate test above (which skips `pixel-git` entirely)
+    // could not see it.
+    let krate = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = krate.join("src");
+    let mut files = Vec::new();
+    rust_sources(&src, &mut files);
+    assert!(
+        files.iter().any(|f| f.ends_with("runner.rs")),
+        "walked {files:?} under {}: the walk is broken, not the code",
+        src.display()
+    );
+
+    let mut offenders = Vec::new();
+    for file in files {
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        if name == "runner.rs" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file).unwrap();
+        for line in production_spawns(&text) {
+            offenders.push(format!("src/{name}:{line}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "git spawned outside src/runner.rs; use GitRunner (timeout, output cap, redaction):\n  {}",
         offenders.join("\n  ")
     );
 }

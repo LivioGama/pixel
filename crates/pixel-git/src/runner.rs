@@ -6,7 +6,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::error::GitError;
@@ -175,34 +175,86 @@ impl GitRunner {
         execute_output_with_stdin(cmd, arg_strings, &self.options, Some(input.to_vec()))
     }
 
-    /// Runs `git merge-file <current> <base> <other>` (same positional
-    /// semantics as `pixel-cli::rescue_cmd`'s invocation, minus the
-    /// rescue-specific `-L` diff3 conflict-marker labels, which are cosmetic
-    /// and derived from rescue's own oid/state context rather than being
-    /// part of a generic git wrapper). Returns the raw exit status: 0 means
-    /// a clean merge, a positive count means that many conflicts were left
-    /// with markers in `current`, negative means a real failure.
+    /// Runs `git merge-file <current> <base> <other>` — git's result is the
+    /// exit code, not its output: 0 means a clean merge, a positive count
+    /// means that many conflicts were left with markers in `current`,
+    /// negative (or `None` for a signal) means a real failure. Bounded like
+    /// every other call: the runner's timeout and output cap apply, and
+    /// stderr is captured and redacted.
     pub fn merge_file(
         &self,
         current: &Path,
         base: &Path,
         other: &Path,
-    ) -> Result<ExitStatus, GitError> {
-        Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
-            .arg("merge-file")
-            .arg(current)
-            .arg(base)
-            .arg(other)
-            .status()
-            .map_err(GitError::from)
+    ) -> Result<GitOutput, GitError> {
+        self.run_merge_file(current, base, other, None)
+    }
+
+    /// [`GitRunner::merge_file`] with the three `-L` diff3 conflict-marker
+    /// labels when `labels` is `Some` (ours, base, theirs, in marker order);
+    /// git's own file-name labels otherwise. The one bounded primitive both
+    /// merge-file entry points go through
+    /// (`plumbing::merge_file_with_labels` is the other), so neither can
+    /// spawn a git that outlives the deadline or floods a pipe. The merged
+    /// text is written into `current`, not stdout, which is why the
+    /// runner's default cap leaves ample room here.
+    pub(crate) fn run_merge_file(
+        &self,
+        current: &Path,
+        base: &Path,
+        other: &Path,
+        labels: Option<[&str; 3]>,
+    ) -> Result<GitOutput, GitError> {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(&self.root).arg("merge-file");
+        let mut args_for_err = vec!["merge-file".to_string()];
+        if let Some(labels) = labels {
+            for label in labels {
+                cmd.arg("-L").arg(label);
+                args_for_err.push("-L".to_string());
+                args_for_err.push(label.to_string());
+            }
+        }
+        for path in [current, base, other] {
+            cmd.arg(path);
+            args_for_err.push(path.display().to_string());
+        }
+        execute_output(cmd, args_for_err, &self.options)
+    }
+}
+
+/// Why a capped read stopped before EOF, when it did: the output exceeded
+/// the cap, or the read itself failed. `Ok(bytes)` is EOF, i.e. the bytes
+/// are the complete output.
+#[derive(Debug)]
+enum ReadOutcome {
+    /// More than `cap` bytes arrived; the read stopped there.
+    Overflow,
+    /// Reading the pipe failed. What was read so far is a truncated prefix,
+    /// never a complete output, so the caller must not pass it on as one.
+    Io(std::io::Error),
+}
+
+impl ReadOutcome {
+    /// The error a stopped read means to a caller of the runner: stdout
+    /// past the cap, or the pipe failing under the reader.
+    fn into_git_error(self, args: Vec<String>, cap: Option<usize>) -> GitError {
+        match self {
+            ReadOutcome::Overflow => GitError::OutputTooLarge {
+                args,
+                cap: cap.unwrap_or(0),
+            },
+            ReadOutcome::Io(e) => GitError::Io(e),
+        }
     }
 }
 
 /// Read `r` into a growing buffer, stopping (and signalling overflow) as
-/// soon as the byte count exceeds `cap` — never buffers past the cap.
-fn read_capped<R: Read>(mut r: R, cap: Option<usize>) -> Result<Vec<u8>, ()> {
+/// soon as the byte count exceeds `cap` — never buffers past the cap. A
+/// failed read is an error, never a short-but-complete buffer: a truncated
+/// `ls-files`/`status` passed on as complete is how a dirty tree reads as
+/// clean.
+fn read_capped<R: Read>(mut r: R, cap: Option<usize>) -> Result<Vec<u8>, ReadOutcome> {
     let mut buf = Vec::new();
     // Heap, not stack: 64 KiB is past the stack-array lint's limit and this
     // runs on the daemon's request threads.
@@ -215,10 +267,10 @@ fn read_capped<R: Read>(mut r: R, cap: Option<usize>) -> Result<Vec<u8>, ()> {
                 if let Some(cap) = cap
                     && buf.len() > cap
                 {
-                    return Err(());
+                    return Err(ReadOutcome::Overflow);
                 }
             }
-            Err(_) => return Ok(buf),
+            Err(e) => return Err(ReadOutcome::Io(e)),
         }
     }
 }
@@ -324,31 +376,51 @@ fn execute_output_with_stdin(
     if timed_out {
         let _ = child.kill();
         let _ = child.wait();
-        let _ = stdout_thread.join();
-        let _ = stderr_thread.join();
-        if let Some(writer) = writer_thread {
-            let _ = writer.join();
-        }
+        // The reader and writer threads are left to end on their own
+        // (dropping a `JoinHandle` detaches it). They see EOF when the last
+        // write end of their pipe closes, and a grandchild that inherited a
+        // pipe — a hook that backgrounds a process — can hold it open far
+        // past the deadline; joining them here would hand it the power to
+        // block the caller, the very hang this deadline exists for.
         return Err(GitError::Timeout { args: args_for_err });
     }
 
     let stdout_result = stdout_thread
         .join()
         .map_err(|_| GitError::Io(std::io::Error::other("stdout reader thread panicked")))?;
-
-    if stdout_result.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = stderr_thread.join();
-        if let Some(writer) = writer_thread {
-            let _ = writer.join();
+    let stdout_bytes = match stdout_result {
+        Ok(bytes) => bytes,
+        Err(outcome) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            // Detached for the same reason as the timeout above.
+            return Err(outcome.into_git_error(args_for_err, max_out));
         }
-        return Err(GitError::OutputTooLarge {
-            args: args_for_err,
-            cap: max_out.unwrap_or(0),
-        });
+    };
+
+    // The reader reaching EOF is not the same as the child exiting. A git
+    // that closes its own fd 1 (a pager, a hook, a merge driver) leaves the
+    // reader at EOF while the process keeps running, and the `child.wait()`
+    // below would then block the caller with no deadline at all — the
+    // opposite of this crate's contract. Wait for the exit under the same
+    // deadline as the read above; `wait()` then returns the status `try_wait`
+    // already collected.
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(e) => return Err(GitError::Io(e)),
+        }
+        if let Some(timeout) = options.timeout
+            && start.elapsed() >= timeout
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            // Detached for the same reason as the timeout above.
+            return Err(GitError::Timeout { args: args_for_err });
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
-    let stdout_bytes = stdout_result.unwrap();
 
     let status = child.wait()?;
     if let Some(writer) = writer_thread {
@@ -390,6 +462,70 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(2),
             "timeout enforcement took too long: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_git_that_closes_its_stdout_does_not_outrun_the_deadline() {
+        // A git that closes its own fd 1 (a pager, a hook, a merge driver)
+        // gives the reader EOF while the process keeps running. The wait for
+        // the child must stay under the same deadline as the read: the old
+        // `child.wait()` after the loop blocked for the full 5s here.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exec 1>&-; sleep 5"]);
+        let options = GitOptions {
+            timeout: Some(Duration::from_millis(100)),
+            max_output_bytes: None,
+        };
+        let start = Instant::now();
+        let result = execute(cmd, vec!["sh".into(), "-c".into()], &options);
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(result, Err(GitError::Timeout { .. })),
+            "expected Timeout, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the closed stdout let the wait outrun the deadline: {elapsed:?}"
+        );
+    }
+
+    /// A pipe that yields one chunk and then fails the way a closed or
+    /// broken pipe does, instead of reporting EOF.
+    struct FailingPipe {
+        first: Option<Vec<u8>>,
+    }
+
+    impl Read for FailingPipe {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.first.take() {
+                Some(bytes) => {
+                    let n = bytes.len().min(buf.len());
+                    buf[..n].copy_from_slice(&bytes[..n]);
+                    Ok(n)
+                }
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "simulated read failure",
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_read_is_an_error_not_a_complete_output() {
+        // Half a `status --porcelain` read back as a complete one is how a
+        // dirty tree looks clean, so a read error must not be swallowed
+        // into the bytes collected so far.
+        let result = read_capped(
+            FailingPipe {
+                first: Some(b"partial".to_vec()),
+            },
+            None,
+        );
+        assert!(
+            matches!(result, Err(ReadOutcome::Io(_))),
+            "expected the read failure, got {result:?}"
         );
     }
 
@@ -589,7 +725,7 @@ mod tests {
         std::fs::write(dir.join("other.txt"), "line1\nline2\nline3-theirs\n").unwrap();
 
         let runner = GitRunner::new(&dir);
-        let status = runner
+        let merged = runner
             .merge_file(
                 &dir.join("current.txt"),
                 &dir.join("base.txt"),
@@ -597,7 +733,7 @@ mod tests {
             )
             .expect("merge-file spawns");
         assert_eq!(
-            status.code(),
+            merged.code,
             Some(0),
             "expected a clean, conflict-free merge"
         );
