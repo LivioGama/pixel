@@ -24,6 +24,7 @@ pub struct PlanOptions {
 }
 
 pub fn run(opts: PlanOptions) -> Result<(), String> {
+    let opts = path_given_as_prompt(opts);
     let data = crate::execute(
         &opts.path,
         Request::Plan {
@@ -36,6 +37,24 @@ pub fn run(opts: PlanOptions) -> Result<(), String> {
     )?;
     let findings = findings_of(&data)?;
     render(opts, findings)
+}
+
+/// `prompt` and `path` are both optional positionals, so
+/// `pixel plan --query hotspots ../repo` parses `../repo` as the prompt and
+/// plans the current directory. Only `by-concept` reads a prompt next to
+/// `--query`: for any other query, a prompt that names a directory while the
+/// path was left at its default is the path.
+fn path_given_as_prompt(mut opts: PlanOptions) -> PlanOptions {
+    let prompt_is_path = opts.query.as_deref().is_some_and(|q| q != "by-concept")
+        && opts.path == std::path::Path::new(".")
+        && opts
+            .prompt
+            .as_deref()
+            .is_some_and(|p| std::path::Path::new(p).is_dir());
+    if prompt_is_path && let Some(prompt) = opts.prompt.take() {
+        opts.path = PathBuf::from(prompt);
+    }
+    opts
 }
 
 /// The findings of a `plan` op answer.
@@ -171,6 +190,49 @@ mod tests {
             label: format!("Review {file}"),
             fan_in,
             severity: Severity::from_fan_in(fan_in),
+        }
+    }
+
+    fn options(prompt: Option<&str>, path: &str, query: Option<&str>) -> PlanOptions {
+        PlanOptions {
+            prompt: prompt.map(str::to_string),
+            path: PathBuf::from(path),
+            query: query.map(str::to_string),
+            tag: None,
+            limit: None,
+            format: "markdown".to_string(),
+            no_verify: false,
+            max_todos: None,
+        }
+    }
+
+    #[test]
+    fn a_directory_after_an_explicit_query_is_the_path_not_the_prompt() {
+        let dir = std::env::temp_dir();
+        let repo = dir.to_str().unwrap();
+        let moved = path_given_as_prompt(options(Some(repo), ".", Some("hotspots")));
+        assert_eq!(moved.path, dir);
+        assert_eq!(moved.prompt, None);
+
+        // Everything else keeps its meaning.
+        for (prompt, path, query) in [
+            (Some(repo), ".", Some("by-concept")), // the concept query reads the prompt
+            (Some(repo), ".", None),               // a classified prompt
+            (Some(repo), "other", Some("hotspots")), // the path was given
+            (Some("not a directory"), ".", Some("hotspots")),
+            (None, ".", Some("hotspots")),
+        ] {
+            let kept = path_given_as_prompt(options(prompt, path, query));
+            assert_eq!(
+                kept.prompt.as_deref(),
+                prompt,
+                "{prompt:?} {path} {query:?}"
+            );
+            assert_eq!(
+                kept.path,
+                PathBuf::from(path),
+                "{prompt:?} {path} {query:?}"
+            );
         }
     }
 
