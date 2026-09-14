@@ -284,14 +284,25 @@ fn rename_in_main_rs(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Result
     let mut new_content = content.clone();
     let mut edits = 0;
 
-    for pair in pairs {
+    // Sort by old_pascal length descending so longer names are replaced first
+    // (prevents "Search" matching inside "SearchCompat")
+    let mut sorted_pairs: Vec<&RenamePair> = pairs.iter().collect();
+    sorted_pairs.sort_by(|a, b| b.old_pascal.len().cmp(&a.old_pascal.len()));
+
+    for pair in sorted_pairs {
         // Rename `Command::OldPascal` → `Command::NewPascal`
+        // Use word boundary: the character after OldPascal must not be an identifier char
         let old_pat = format!("Command::{}", pair.old_pascal);
         let new_pat = format!("Command::{}", pair.new_pascal);
-        let count = new_content.matches(&old_pat).count();
-        if count > 0 {
-            new_content = new_content.replace(&old_pat, &new_pat);
-            edits += count;
+        // Replace only when followed by a non-identifier character (space, {, (, etc.)
+        for suffix in [" {", "\n", "(", " ", ".", "::", ")"] {
+            let old_full = format!("{}{}", old_pat, suffix);
+            let new_full = format!("{}{}", new_pat, suffix);
+            let count = new_content.matches(&old_full).count();
+            if count > 0 {
+                new_content = new_content.replace(&old_full, &new_full);
+                edits += count;
+            }
         }
 
         // Rename the variant definition: `    OldPascal {` → `    NewPascal {`
@@ -575,23 +586,24 @@ fn rename_user_facing(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Resul
     let mut new_content = content.clone();
     let mut edits = 0;
 
-    for pair in pairs {
-        // `pixel old-name` → `pixel new-name` (in backticks, code blocks, prose)
+    // Sort by old_kebab length descending so longer names are replaced first
+    // (prevents "pixel search" matching inside "pixel search-compat")
+    let mut sorted_pairs: Vec<&RenamePair> = pairs.iter().collect();
+    sorted_pairs.sort_by(|a, b| b.old_kebab.len().cmp(&a.old_kebab.len()));
+
+    for pair in sorted_pairs {
+        // `pixel old-name` → `pixel new-name` — only when followed by a non-identifier char
+        // (space, backtick, quote, newline, etc.) to prevent prefix matches
         let old_cmd = format!("pixel {}", pair.old_kebab);
         let new_cmd = format!("pixel {}", pair.new_kebab);
-        let count = new_content.matches(&old_cmd).count();
-        if count > 0 {
-            new_content = new_content.replace(&old_cmd, &new_cmd);
-            edits += count;
-        }
-
-        // Also handle `pixel old-name` with trailing space or backtick
-        let old_cmd_bt = format!("pixel {}`", pair.old_kebab);
-        let new_cmd_bt = format!("pixel {}`", pair.new_kebab);
-        let count = new_content.matches(&old_cmd_bt).count();
-        if count > 0 {
-            new_content = new_content.replace(&old_cmd_bt, &new_cmd_bt);
-            edits += count;
+        for suffix in ["`", " ", "\n", "\"", "'", ")", "/", ".", "|", "-"] {
+            let old_full = format!("{}{}", old_cmd, suffix);
+            let new_full = format!("{}{}", new_cmd, suffix);
+            let count = new_content.matches(&old_full).count();
+            if count > 0 {
+                new_content = new_content.replace(&old_full, &new_full);
+                edits += count;
+            }
         }
     }
 
@@ -609,18 +621,15 @@ fn rename_in_test_file(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Resu
     let mut new_content = content.clone();
     let mut edits = 0;
 
-    for pair in pairs {
-        // .args(["old-name", ...]) → .args(["new-name", ...])
-        // Pattern: "old-name" as first arg in args array
-        let old_arg = format!("\"{}\"", pair.old_kebab);
-        let new_arg = format!("\"{}\"", pair.new_kebab);
+    // Sort by old_kebab length descending to prevent prefix matches
+    let mut sorted_pairs: Vec<&RenamePair> = pairs.iter().collect();
+    sorted_pairs.sort_by(|a, b| b.old_kebab.len().cmp(&a.old_kebab.len()));
 
-        // Only replace if preceded by `[` or `, ` (array context) and NOT in a JSON field context
-        // This is a heuristic — we check that the string is at the start of an array
-        // or after a comma, which is the pattern for CLI args
+    for pair in sorted_pairs {
+        // .args(["old-name", ...]) → .args(["new-name", ...])
         for prefix in ["[\"", ", \""] {
-            let old_full = format!("{}{}", prefix, pair.old_kebab);
-            let new_full = format!("{}{}", prefix, pair.new_kebab);
+            let old_full = format!("{}{}\"", prefix, pair.old_kebab);
+            let new_full = format!("{}{}\"", prefix, pair.new_kebab);
             let count = new_content.matches(&old_full).count();
             if count > 0 {
                 new_content = new_content.replace(&old_full, &new_full);
@@ -628,13 +637,17 @@ fn rename_in_test_file(path: &Path, pairs: &[RenamePair], dry_run: bool) -> Resu
             }
         }
 
-        // Also handle `pixel old-name` in test comments
+        // `pixel old-name` in test comments — with word boundary
         let old_cmd = format!("pixel {}", pair.old_kebab);
         let new_cmd = format!("pixel {}", pair.new_kebab);
-        let count = new_content.matches(&old_cmd).count();
-        if count > 0 {
-            new_content = new_content.replace(&old_cmd, &new_cmd);
-            edits += count;
+        for suffix in ["`", " ", "\n", "\"", "'", ")"] {
+            let old_full = format!("{}{}", old_cmd, suffix);
+            let new_full = format!("{}{}", new_cmd, suffix);
+            let count = new_content.matches(&old_full).count();
+            if count > 0 {
+                new_content = new_content.replace(&old_full, &new_full);
+                edits += count;
+            }
         }
     }
 
