@@ -59,6 +59,42 @@ fn fixture(tag: &str) -> Scratch {
     dir
 }
 
+/// The standard fixture plus a file with enough matches that `--context 20`
+/// makes the enriched page outgrow a small `PIXEL_OUTPUT_CAP_BYTES` long
+/// before the daemon's own 64 KiB byte cap.
+fn fixture_with_many_matches(tag: &str) -> Scratch {
+    let dir = fixture(tag);
+    let terms: Vec<String> = (1..=200)
+        .map(|n| format!("// the line {n} mentions the search term"))
+        .collect();
+    std::fs::write(dir.join("src/terms.rs"), format!("{}\n", terms.join("\n"))).unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "terms"]);
+    dir
+}
+
+/// `pixel search-content the . --limit <limit> --json` against `dir` under a
+/// stdout cap, optionally with `--context <context>`.
+fn capped_search(dir: &Path, cap: usize, limit: usize, context: Option<usize>) -> Output {
+    let cap = cap.to_string();
+    let limit = limit.to_string();
+    let mut cmd = pixel_command();
+    cmd.args([
+        "search-content",
+        "the",
+        ".",
+        "--limit",
+        limit.as_str(),
+        "--json",
+    ])
+    .current_dir(dir)
+    .env("PIXEL_OUTPUT_CAP_BYTES", cap.as_str());
+    if let Some(context) = context {
+        cmd.args(["--context", &context.to_string()]);
+    }
+    cmd.output().unwrap()
+}
+
 /// Every non-empty stdout line must parse as a JSON value on its own.
 /// Returns the parsed documents so callers can assert on content.
 fn parse_stdout_lines(out: &Output, what: &str) -> Vec<serde_json::Value> {
@@ -123,7 +159,8 @@ fn json_commands_emit_only_json_on_stdout() {
         }
     }
 
-    // `search --json` is NDJSON: one match object per line, every line JSON.
+    // `search --json` is NDJSON: one match object per line, then the final
+    // page-metadata line, which is the only one without a `path`.
     let out = pixel(&dir, &["search-content", "login_user", ".", "--json"]);
     assert!(
         out.status.success(),
@@ -132,11 +169,14 @@ fn json_commands_emit_only_json_on_stdout() {
     );
     let docs = parse_stdout_lines(&out, "search --json");
     assert!(!docs.is_empty(), "search must find the fixture symbol");
-    for d in &docs {
-        assert!(
-            d.get("path").is_some() || d.get("epistemics").is_some(),
-            "unexpected line: {d}"
-        );
+    let (meta, matches) = docs.split_last().unwrap();
+    assert!(
+        meta.get("truncated").is_some(),
+        "the last line is the page metadata: {meta}"
+    );
+    assert!(meta.get("path").is_none(), "{meta}");
+    for d in matches {
+        assert!(d.get("path").is_some(), "unexpected line: {d}");
     }
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -171,6 +211,151 @@ fn failing_json_command_leaves_stdout_empty() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A capped `search --json` page must describe itself: the last NDJSON line
+/// carries the page state (`truncated`, `next_offset`) and the envelope's
+/// `epistemics`/`warnings`, because a page cut short is otherwise
+/// byte-for-byte a complete answer. The cap counts the `--context` text the
+/// CLI adds *after* the daemon's own byte cap — the 154 KB page measured
+/// under an 8 KB cap.
+#[test]
+fn search_json_page_ends_with_the_state_of_the_page_it_printed() {
+    let dir = fixture_with_many_matches("search-page-meta");
+    let cap = 8192;
+
+    // `--context 20` makes each match ~2 KB, so an 8 KB cap cuts the page long
+    // before the daemon's 64 KB byte cap: only the trailer can say so.
+    let out = capped_search(&dir, cap, 300, Some(20));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.len() <= cap + 1,
+        "stdout must respect PIXEL_OUTPUT_CAP_BYTES ({cap}): {} bytes",
+        out.stdout.len()
+    );
+    let docs = parse_stdout_lines(&out, "capped search --json --context 20");
+    let (meta, matches) = docs.split_last().expect("the metadata line at least");
+    assert!(
+        meta.get("path").is_none(),
+        "the last line is metadata: {meta}"
+    );
+    assert!(!matches.is_empty(), "the cap leaves room for matches");
+    assert_eq!(meta["truncated"], true, "{meta}");
+    assert_eq!(
+        meta["next_offset"].as_u64(),
+        Some(matches.len() as u64),
+        "the page resumes at the first match it did not print: {meta}"
+    );
+    assert!(meta["epistemics"].is_object(), "{meta}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("stdout cap (PIXEL_OUTPUT_CAP_BYTES)"),
+        "the cut is named on stderr: {stderr}"
+    );
+
+    // Without `--context` the rows are small enough to fill the cap tightly:
+    // the reserved metadata line stays inside the cap too.
+    let tight = capped_search(&dir, cap, 300, None);
+    assert!(tight.status.success(), "{tight:?}");
+    assert!(
+        tight.stdout.len() <= cap + 1,
+        "the reserved trailer must stay inside the cap: {} bytes",
+        tight.stdout.len()
+    );
+    let docs = parse_stdout_lines(&tight, "capped search --json");
+    let (meta, matches) = docs.split_last().unwrap();
+    assert_eq!(meta["truncated"], true, "{meta}");
+    assert_eq!(
+        meta["next_offset"].as_u64(),
+        Some(matches.len() as u64),
+        "{meta}"
+    );
+
+    // The same page without a cap is complete, and says so: the control that
+    // the daemon was not the one truncating the pages above.
+    let full = capped_search(&dir, 0, 300, Some(20));
+    assert!(full.status.success(), "{full:?}");
+    assert!(full.stdout.len() > cap, "the cap really cut something");
+    let docs = parse_stdout_lines(&full, "uncapped search --json --context 20");
+    let (meta, matches) = docs.split_last().unwrap();
+    assert_eq!(matches.len(), 200, "every match is in the page");
+    assert_eq!(meta["truncated"], false, "{meta}");
+    assert!(meta["next_offset"].is_null(), "{meta}");
+
+    // A page the daemon itself capped keeps the daemon's resume offset, and
+    // the stderr line names the daemon's row cap rather than the stdout cap.
+    let limited = capped_search(&dir, cap, 5, None);
+    assert!(limited.status.success(), "{limited:?}");
+    let docs = parse_stdout_lines(&limited, "row-capped search --json");
+    let (meta, matches) = docs.split_last().unwrap();
+    assert_eq!(matches.len(), 5, "{docs:?}");
+    assert_eq!(meta["truncated"], true, "{meta}");
+    assert_eq!(meta["next_offset"].as_u64(), Some(5), "{meta}");
+    let stderr = String::from_utf8_lossy(&limited.stderr);
+    assert!(
+        stderr.contains("row limit 5"),
+        "the daemon's cap is named on stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("stdout cap"),
+        "the stdout cap did not fire: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Human `search` output keeps its rendering and its stderr warning: the
+/// stdout cap cuts between rows, and the note names both how many rows were
+/// written and the offset that resumes the page.
+#[test]
+fn capped_search_human_output_names_the_stdout_cap() {
+    let dir = fixture_with_many_matches("search-page-human");
+    let cap = 8192usize;
+    let cap_arg = cap.to_string();
+    let out = pixel_command()
+        .args([
+            "search-content",
+            "the",
+            ".",
+            "--limit",
+            "300",
+            "--context",
+            "20",
+        ])
+        .current_dir(&dir)
+        .env("PIXEL_OUTPUT_CAP_BYTES", cap_arg.as_str())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        out.stdout.len() <= cap + 1,
+        "human output respects the cap too: {} bytes",
+        out.stdout.len()
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.starts_with("--- "),
+        "the context block rendering is unchanged: {}",
+        text.chars().take(80).collect::<String>()
+    );
+    assert!(!text.contains("\"path\":"), "human mode stays human");
+    let blocks = text.matches("--- ").count();
+    assert!(blocks > 0, "some matches fit under the cap: {text}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!("wrote {blocks} of ")),
+        "the note names how many rows were written ({blocks}): {stderr}"
+    );
+    assert!(
+        stderr.contains("stdout cap (PIXEL_OUTPUT_CAP_BYTES)"),
+        "and which cap cut the page: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A repo with a big untracked tree (a `vendor/bundle`) is the everyday

@@ -2600,31 +2600,115 @@ fn extractor_for_shard(shard: &Shard) -> Result<Box<dyn GramExtractor>, String> 
     ))
 }
 
-fn print_search_matches(matches: &[Value], json: bool) -> Result<(), String> {
-    let mut output = String::with_capacity(matches.len() * 80);
-    for m in matches {
-        let path = m.get("path").and_then(Value::as_str).unwrap_or("");
-        let line = m.get("line").and_then(Value::as_u64).unwrap_or(0);
-        let text = m.get("text").and_then(Value::as_str).unwrap_or("");
-        let context = m.get("context").and_then(Value::as_str);
-        if json {
-            let mut entry = serde_json::json!({"path": path, "line": line, "text": text});
-            if let Some(ctx) = context {
-                entry["context"] = Value::String(ctx.to_string());
-            }
-            output.push_str(&entry.to_string());
-            output.push('\n');
-        } else if let Some(ctx) = context {
-            output.push_str(&format!("--- {path}:{line} ---\n{ctx}\n"));
-        } else {
-            output.push_str(&format!("{path}:{line}:{text}\n"));
+/// One stdout line for a `search` match: the compact object in `--json`
+/// mode (with `context` when the CLI enriched the match), else the
+/// `path:line:text` row — or the `--- path:line ---` block once the match
+/// carries surrounding lines.
+fn search_match_line(m: &Value, json: bool) -> String {
+    let path = m.get("path").and_then(Value::as_str).unwrap_or("");
+    let line = m.get("line").and_then(Value::as_u64).unwrap_or(0);
+    let text = m.get("text").and_then(Value::as_str).unwrap_or("");
+    let context = m.get("context").and_then(Value::as_str);
+    if json {
+        let mut entry = serde_json::json!({"path": path, "line": line, "text": text});
+        if let Some(ctx) = context {
+            entry["context"] = Value::String(ctx.to_string());
         }
+        format!("{entry}\n")
+    } else if let Some(ctx) = context {
+        format!("--- {path}:{line} ---\n{ctx}\n")
+    } else {
+        format!("{path}:{line}:{text}\n")
     }
-    match operation_metrics::Counted(std::io::stdout().lock()).write_all(output.as_bytes()) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(error) => Err(format!("write search results: {error}")),
+}
+
+/// The NDJSON line a `--json` search page ends with: the page state no match
+/// line carries, because a page cut by a cap is otherwise byte-for-byte a
+/// complete answer. `epistemics`/`warnings` are the envelope honesty fields
+/// [`unwrap_response`] folded into the response. Every key is always present
+/// (`null` for the absent ones), so the trailer's size is bounded by its
+/// values alone.
+fn search_meta(data: &Value, truncated: bool, next_offset: Option<u64>) -> Value {
+    json!({
+        "truncated": truncated,
+        "next_offset": next_offset,
+        "epistemics": data.get("epistemics").cloned().unwrap_or(Value::Null),
+        "warnings": data.get("warnings").cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// Whether one more `line` fits: what is already assembled plus the line plus
+/// the room reserved for the metadata line stays within `cap`. Equality fits
+/// — the cap is a ceiling, not a limit one byte under it.
+fn fits_before_cap(assembled: usize, line: usize, reserve: usize, cap: usize) -> bool {
+    assembled + line + reserve <= cap
+}
+
+/// What one `search` page wrote: `printed` match lines out of the daemon's
+/// page, whether the page is partial (`truncated`, whether the daemon's own
+/// caps or the stdout cap cut it), and whether the stdout cap — not the
+/// daemon — is what cut it, so the caller names the right cap on stderr.
+struct SearchPage {
+    printed: usize,
+    truncated: bool,
+    cap_fired: bool,
+}
+
+/// Print a `search` page and report what reached stdout.
+///
+/// `--json` output is NDJSON: one match per line, then the [`search_meta`]
+/// line, so no reader has to guess whether a short page is the whole answer.
+/// The global stdout cap is enforced here, during assembly: `--context` text
+/// is added by the CLI, after the daemon's own byte cap, so this is the last
+/// place that can hold one.
+fn print_search_matches(data: &Value, matches: &[Value], json: bool) -> Result<SearchPage, String> {
+    let cap = stdout_byte_cap();
+    let offset = data.get("offset").and_then(Value::as_u64).unwrap_or(0);
+    let daemon_truncated = data
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // Reserve the metadata line before the matches: it is what tells the
+    // caller the page is partial, so it must not be the part that falls off
+    // the cap. Reserve the longer of the two reachable trailers (partial and
+    // resumable, or complete) with the largest `next_offset` this page can
+    // end on, so the trailer stays inside the cap. A `cap` smaller than the
+    // trailer itself is the one case it exceeds — bounded, and preferable to
+    // hiding the page state.
+    let reserve = if json {
+        let resumable = search_meta(
+            data,
+            true,
+            Some(offset.saturating_add(matches.len() as u64)),
+        );
+        let complete = search_meta(data, false, None);
+        serialized_len(&resumable).max(serialized_len(&complete))
+    } else {
+        0
+    };
+    let mut output = String::with_capacity(matches.len() * 80);
+    let mut printed = 0;
+    let mut cap_fired = false;
+    for m in matches {
+        let line = search_match_line(m, json);
+        if !fits_before_cap(output.len(), line.len(), reserve, cap) {
+            cap_fired = true;
+            break;
+        }
+        output.push_str(&line);
+        printed += 1;
     }
+    let truncated = cap_fired || daemon_truncated;
+    if json {
+        let next_offset = truncated.then_some(offset.saturating_add(printed as u64));
+        output.push_str(&format!("{}\n", search_meta(data, truncated, next_offset)));
+    }
+    write_stdout(&output)?;
+    Ok(SearchPage {
+        printed,
+        truncated,
+        cap_fired,
+    })
 }
 
 /// Read surrounding lines from the file and attach as a `context` field.
@@ -2896,21 +2980,26 @@ fn run_search_one(
     } else {
         matches.to_vec()
     };
-    print_search_matches(&enriched, json)?;
+    let page = print_search_matches(&data, &enriched, json)?;
     // Warn the user when results were truncated so the default row cap
     // is never a surprise.
-    let truncated = data
-        .get("truncated")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let match_count = data.get("match_count").and_then(Value::as_u64).unwrap_or(0);
     let limit = data.get("limit").and_then(Value::as_u64).unwrap_or(0);
-    if truncated {
+    if page.cap_fired {
+        // The `--context` text is added on this side of the daemon's byte
+        // cap, so the stdout cap can be what cut this page: name that cap and
+        // the offset that resumes the page instead of the daemon's row cap.
         eprintln!(
-            "⚠ results truncated: returned {}; more matches exist (row limit {}, byte cap {} bytes). \
+            "⚠ results truncated at the {}-byte stdout cap (PIXEL_OUTPUT_CAP_BYTES): wrote {} of {match_count} matches. \
+             Narrow --context/--limit, or continue with --offset {}.",
+            stdout_byte_cap(),
+            page.printed,
+            offset.saturating_add(page.printed),
+        );
+    } else if page.truncated {
+        eprintln!(
+            "⚠ results truncated: returned {match_count}; more matches exist (row limit {limit}, byte cap {} bytes). \
              Continue with --offset {} or pass --limit to raise the row cap (maximum 10000).",
-            match_count,
-            limit,
             data.get("byte_cap").and_then(Value::as_u64).unwrap_or(0),
             data.get("next_offset").and_then(Value::as_u64).unwrap_or(0),
         );
@@ -2944,7 +3033,7 @@ fn run_search_one(
     // returned evidence only; no metadata sweeps or duplicate search events.
     operation_metrics::observe(&json!({
         "matches": enriched,
-        "truncated": truncated || offset > 0,
+        "truncated": page.truncated || offset > 0,
         "epistemics": data.get("epistemics"),
     }));
     Ok(())
@@ -6765,6 +6854,62 @@ mod tests {
         });
         enrich_resolve_matches_with_context(&mut data, Path::new("/tmp"));
         assert!(data["matches"][0].get("context").is_none());
+    }
+
+    /// The `--json` page trailer: the page state a match row cannot carry,
+    /// plus the envelope honesty fields, with every key always present so a
+    /// strict NDJSON reader can tell a partial page from a complete one.
+    #[test]
+    fn search_meta_carries_the_page_state_and_the_envelope_honesty() {
+        let data = serde_json::json!({
+            "offset": 0,
+            "epistemics": {"basis": "text index", "lower_bound": false},
+            "warnings": [{"code": "cap", "message": "row cap"}],
+        });
+        let resumable = search_meta(&data, true, Some(3));
+        assert_eq!(resumable["truncated"], true);
+        assert_eq!(resumable["next_offset"], 3);
+        assert_eq!(resumable["epistemics"]["basis"], "text index");
+        assert_eq!(resumable["warnings"][0]["code"], "cap");
+        let complete = search_meta(&data, false, None);
+        assert_eq!(complete["truncated"], false);
+        assert!(complete["next_offset"].is_null());
+        let bare = search_meta(&serde_json::json!({}), true, None);
+        assert!(bare["epistemics"].is_null());
+        assert!(bare["warnings"].is_null());
+    }
+
+    /// The stdout cap counts the reserved metadata line, and a line that ends
+    /// exactly on the cap still prints: the cut lands between lines, so a
+    /// reader never gets a half-written JSON row.
+    #[test]
+    fn a_match_line_that_ends_exactly_on_the_cap_still_fits() {
+        assert!(fits_before_cap(0, 10, 0, 10));
+        assert!(!fits_before_cap(0, 11, 0, 10));
+        assert!(fits_before_cap(4, 4, 2, 10));
+        assert!(!fits_before_cap(4, 5, 2, 10), "the reserved trailer counts");
+    }
+
+    /// Both renderings of one match: the JSON object agents parse, and the
+    /// human row or `--- path:line ---` context block.
+    #[test]
+    fn search_match_lines_render_the_json_and_human_forms() {
+        let plain = serde_json::json!({"path": "a.rs", "line": 3, "text": "x"});
+        assert_eq!(
+            search_match_line(&plain, true),
+            "{\"line\":3,\"path\":\"a.rs\",\"text\":\"x\"}\n"
+        );
+        assert_eq!(search_match_line(&plain, false), "a.rs:3:x\n");
+        let enriched =
+            serde_json::json!({"path": "a.rs", "line": 3, "text": "x", "context": ">> 3: x"});
+        assert_eq!(
+            search_match_line(&enriched, true),
+            "{\"context\":\">> 3: x\",\"line\":3,\"path\":\"a.rs\",\"text\":\"x\"}\n"
+        );
+        assert_eq!(
+            search_match_line(&enriched, false),
+            "--- a.rs:3 ---\n>> 3: x\n"
+        );
     }
 }
 
