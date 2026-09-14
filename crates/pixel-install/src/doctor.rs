@@ -156,9 +156,12 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 return Err("agent-prompt.md not deployed — run `pixel install`".into());
             }
             let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            let has_replacement_map = content.contains("REPLACEMENT MAP");
-            let has_workflow = content.contains("MANDATORY WORKFLOW");
-            if !has_replacement_map || !has_workflow {
+            // Byte equality with the bundled asset, like the sub-agent
+            // prompt: a deployed copy that still carries the headline
+            // sections but has diverged on the command map, the call shapes
+            // or the mutation warning teaches agents syntax this binary may
+            // no longer accept, and `rule.parity` does not cover it.
+            if content != install::AGENT_PROMPT_ASSET {
                 return Err("agent-prompt.md is stale — run `pixel install` to update".into());
             }
             Ok(DoctorCheckDetail {
@@ -194,6 +197,36 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 summary: format!(
                     "{} deployed ({} bytes)",
                     install::SUBAGENT_PROMPT_FILE,
+                    content.len()
+                ),
+                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+            })
+        },
+    ));
+
+    checks.push(check(
+        "install.pi-prompt",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            let path = home.join(install::PI_PROMPT_REL);
+            if !path.is_file() {
+                return Err(format!(
+                    "{} not deployed — run `pixel install`",
+                    path.display()
+                ));
+            }
+            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            // The managed block, not the whole file: instructions the user
+            // keeps outside the markers are theirs, but a missing, stale or
+            // unterminated block is exactly what `pixel install` rewrites.
+            if content != config::apply_managed_markers(&content, install::AGENT_PROMPT_ASSET) {
+                return Err(format!(
+                    "{} is stale — run `pixel install` to update",
+                    path.display()
+                ));
+            }
+            Ok(DoctorCheckDetail {
+                summary: format!(
+                    "APPEND_SYSTEM.md carries the agent prompt ({} bytes)",
                     content.len()
                 ),
                 detail: Some(serde_json::json!({ "path": path.display().to_string() })),

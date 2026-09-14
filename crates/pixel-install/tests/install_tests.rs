@@ -679,13 +679,17 @@ fn doctor_install_artifact_checks_red_and_green() {
         );
     }
 
-    // 3. Corrupting the agent prompt makes install.agent-prompt red (stale).
+    // 3. A prompt edited after deployment is stale, even though it still
+    //    carries the two headline sections the old substring heuristic looked
+    //    for: the check asserts byte equality with the bundled asset.
     let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
-    fs::write(
-        &prompt_path,
-        "# stale prompt without the required markers\n",
-    )
-    .unwrap();
+    let mut edited = fs::read_to_string(&prompt_path).expect("agent-prompt deployed");
+    assert!(
+        edited.contains("REPLACEMENT MAP") && edited.contains("MANDATORY WORKFLOW"),
+        "fixture: the edited prompt must still satisfy the old heuristic"
+    );
+    edited.push_str("\nOne extra rule the bundled prompt does not carry.\n");
+    fs::write(&prompt_path, &edited).unwrap();
     let report = doctor(&doc_opts).expect("doctor runs");
     let prompt_check = report
         .checks
@@ -1616,6 +1620,120 @@ fn uninstall_wrappers_only_removes_one_shells_block_and_nothing_else() {
     assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
 }
 
+/// A begin marker with no end marker used to mean "everything to EOF is
+/// ours": the rest of the user's profile was deleted and the truncated file
+/// rewritten. Both install and uninstall now refuse it and write nothing.
+#[test]
+fn an_unterminated_managed_block_refuses_the_rewrite_and_keeps_the_profile() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let profile = shell_profile_path(home);
+    let original = "# user aliases\n\
+                    alias gs='git status'\n\
+                    # >>> pixel-managed >>>\n\
+                    # a block nobody closed\n\
+                    alias last='kept'\n";
+    fs::write(&profile, original).unwrap();
+
+    let report = install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .expect("install reports the refusal, it does not fail the run");
+    let step = wrappers_step(&report);
+    assert_eq!(
+        step.status,
+        pixel_install::install::CheckStatus::Red,
+        "{step:?}"
+    );
+    assert!(
+        step.summary.contains("pixel-managed"),
+        "the step must name what is wrong: {step:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&profile).unwrap(),
+        original,
+        "the lines after the unterminated marker are the user's"
+    );
+
+    let report = uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        binary_path: Some(home.join("pixel")),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .expect("uninstall reports the refusal");
+    let step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "shell-wrappers")
+        .expect("shell-wrappers step");
+    assert_eq!(
+        step.status,
+        pixel_install::install::CheckStatus::Red,
+        "{step:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&profile).unwrap(),
+        original,
+        "uninstall leaves the broken profile alone too"
+    );
+}
+
+/// The write is destructive (it replaces the user's profile), so the bytes it
+/// replaces are backed up first, and a re-install that changes nothing adds no
+/// second backup.
+#[test]
+fn rewriting_the_shell_profile_backs_it_up_first() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let profile = shell_profile_path(home);
+    let original = "# user aliases\nexport EDITOR=vim\n";
+    fs::write(&profile, original).unwrap();
+
+    install_for_shell(home, TEST_SHELL);
+
+    let profile_backups = |home: &std::path::Path| -> Vec<std::path::PathBuf> {
+        let mut paths: Vec<std::path::PathBuf> = fs::read_dir(home)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".zshrc.pixel-bak."))
+            })
+            .collect();
+        paths.sort();
+        paths
+    };
+    let backups = profile_backups(home);
+    assert_eq!(backups.len(), 1, "one backup of the profile: {backups:?}");
+    assert_eq!(
+        fs::read_to_string(&backups[0]).unwrap(),
+        original,
+        "the backup holds the bytes install replaced"
+    );
+    let installed = fs::read_to_string(&profile).unwrap();
+    assert!(installed.contains("export EDITOR=vim"), "{installed}");
+    assert!(installed.contains(PIXEL_MANAGED_BEGIN), "{installed}");
+
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(
+        profile_backups(home).len(),
+        1,
+        "an idempotent re-install must not back up an unchanged profile"
+    );
+    assert_eq!(
+        fs::read_to_string(&profile).unwrap(),
+        installed,
+        "an idempotent re-install must leave the profile byte-identical"
+    );
+}
+
 #[test]
 fn doctor_refuses_to_green_a_posix_block_sitting_in_the_fish_dropin() {
     // Reproduces the shipped bug in its observable form: the markers are
@@ -2318,6 +2436,231 @@ fn uninstall_removes_the_subagent_prompt() {
         !home.join(".local/share/pixel/agent-prompt.md").exists(),
         "agent-prompt.md is removed alongside"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Pi's APPEND_SYSTEM.md is a shared file: pixel owns a managed block inside
+// it, never the file. `pixel install` used to replace the whole file and
+// `pixel uninstall` deleted it, so the user's own pi instructions were lost.
+// ---------------------------------------------------------------------------
+
+fn pi_prompt_path(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".pi/agent/APPEND_SYSTEM.md")
+}
+
+/// Backup files `pixel install` wrote for the pi prompt, newest last.
+fn pi_backups(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<std::path::PathBuf> = fs::read_dir(home.join(".pi/agent"))
+        .map(|entries| {
+            entries
+                .filter_map(std::result::Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name.to_string_lossy().contains("pixel-bak"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    paths.sort();
+    paths
+}
+
+fn uninstall_home(home: &std::path::Path) {
+    uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        binary_path: Some(home.join("pixel")),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .expect("uninstall");
+}
+
+#[test]
+fn install_and_uninstall_keep_the_users_own_text_in_pis_append_system_file() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let pi_path = pi_prompt_path(home);
+    fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+    let original = "# my own pi instructions\nAlways answer in French.\n";
+    fs::write(&pi_path, original).unwrap();
+
+    install_for_shell(home, TEST_SHELL);
+
+    let deployed = fs::read_to_string(&pi_path).expect("pi prompt deployed");
+    assert!(
+        deployed.contains(original.trim_end()),
+        "the user's own instructions must survive install:\n{deployed}"
+    );
+    assert!(
+        deployed.contains(MANAGED_BEGIN) && deployed.contains(MANAGED_END),
+        "the bundled prompt must sit inside the managed markers:\n{deployed}"
+    );
+    let backups = pi_backups(home);
+    assert_eq!(backups.len(), 1, "one backup of the file install changed");
+    assert_eq!(
+        fs::read_to_string(&backups[0]).unwrap(),
+        original,
+        "the backup holds the bytes install replaced"
+    );
+
+    // A second install that finds a current block changes nothing.
+    let once = fs::read(&pi_path).unwrap();
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(
+        fs::read(&pi_path).unwrap(),
+        once,
+        "a current managed block is rewritten with the same bytes"
+    );
+
+    uninstall_home(home);
+    let after = fs::read_to_string(&pi_path).expect("the user's file survives uninstall");
+    assert_eq!(after, original, "uninstall removes the block, not the file");
+    assert!(!after.contains(MANAGED_BEGIN), "{after}");
+}
+
+#[test]
+fn a_pi_prompt_written_by_an_earlier_install_is_wrapped_not_duplicated() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, TEST_SHELL);
+    // What `pixel install` wrote before it treated the file as shared: the
+    // prompt verbatim, no markers around it.
+    let asset = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md"))
+        .expect("deployed prompt");
+    let pi_path = pi_prompt_path(home);
+    fs::write(&pi_path, &asset).unwrap();
+
+    install_for_shell(home, TEST_SHELL);
+
+    let deployed = fs::read_to_string(&pi_path).expect("pi prompt deployed");
+    assert!(
+        deployed.starts_with(MANAGED_BEGIN),
+        "the upgrade must put the markers around the prompt, not above it:\n{deployed}"
+    );
+    assert_eq!(
+        deployed.matches(asset.as_str()).count(),
+        1,
+        "the prompt must not appear twice after the upgrade"
+    );
+}
+
+#[test]
+fn uninstall_removes_the_pi_prompt_file_when_it_held_nothing_else() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let pi_path = pi_prompt_path(home);
+    fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+    fs::write(
+        &pi_path,
+        format!("{MANAGED_BEGIN}\n# pixel's own prompt\n{MANAGED_END}\n"),
+    )
+    .unwrap();
+
+    install_for_shell(home, TEST_SHELL);
+    uninstall_home(home);
+
+    assert!(
+        !pi_path.exists(),
+        "a file that held nothing but the pixel block is pixel's to delete"
+    );
+}
+
+#[test]
+fn uninstall_survives_a_missing_pi_prompt_file() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let prompts = home.join(".local/share/pixel");
+    fs::create_dir_all(&prompts).unwrap();
+    fs::write(prompts.join("agent-prompt.md"), "deployed prompt\n").unwrap();
+
+    uninstall_home(home);
+
+    assert!(
+        !prompts.join("agent-prompt.md").exists(),
+        "the prompt is removed even when the pi file was never deployed"
+    );
+    assert!(!pi_prompt_path(home).exists());
+}
+
+#[test]
+fn install_reports_a_pi_prompt_it_cannot_write_instead_of_greening_it() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    // A file where the directory should be: creating ~/.pi/agent fails
+    // whatever the user's permissions are.
+    fs::write(home.join(".pi"), "not a directory\n").unwrap();
+
+    let result = install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    });
+
+    assert!(
+        result.is_err(),
+        "a pi prompt that cannot be written must fail the install, not report a green step: {result:?}"
+    );
+}
+
+#[test]
+fn doctor_pi_prompt_check_is_red_until_the_managed_block_is_current() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, TEST_SHELL);
+    let pi_path = pi_prompt_path(home);
+    let doc_opts = DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: None,
+        shell: Some(TEST_SHELL.into()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        ..Default::default()
+    };
+    let status = |home: &std::path::Path| {
+        check(
+            &doctor(&DoctorOptions {
+                home: Some(home.to_path_buf()),
+                ..doc_opts.clone()
+            })
+            .expect("doctor"),
+            "install.pi-prompt",
+        )
+        .status
+    };
+    assert_eq!(
+        status(home),
+        CheckStatus::Green,
+        "a freshly installed pi prompt is green"
+    );
+
+    // The user's own text outside the markers is theirs: it does not make the
+    // check stale.
+    let with_user_text = format!("{}Be concise.\n", fs::read_to_string(&pi_path).unwrap());
+    fs::write(&pi_path, &with_user_text).unwrap();
+    assert_eq!(
+        status(home),
+        CheckStatus::Green,
+        "text outside the pixel markers belongs to the user"
+    );
+
+    // A block that no longer matches the bundled prompt is stale.
+    fs::write(
+        &pi_path,
+        format!("{MANAGED_BEGIN}\n# stale prompt\n{MANAGED_END}\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        status(home),
+        CheckStatus::Red,
+        "a stale block must send the user back to pixel install"
+    );
+
+    // And the file must carry the block at all.
+    fs::write(&pi_path, "my own instructions only\n").unwrap();
+    assert_eq!(status(home), CheckStatus::Red, "no block, no green");
 }
 
 // ---------------------------------------------------------------------------

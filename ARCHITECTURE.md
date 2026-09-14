@@ -274,8 +274,9 @@ envelope talks to the daemon socket directly.
 ## Agent integration
 
 `pixel install` deliberately deploys the bundled `pixel-agent-prompt.md`, the
-short `pixel-subagent-prompt.md`, a managed shell function for Claude Code and a managed
-`developer_instructions` block for Codex. It
+short `pixel-subagent-prompt.md`, a managed shell function for Claude Code, a managed
+`developer_instructions` block for Codex and a managed block in Pi's
+`~/.pi/agent/APPEND_SYSTEM.md`. It
 preserves agent settings and rule files, and does not register provider hooks or
 activate routing. The shell functions pass the prompt on a subsequent launch
 through the loaded profile; already-running agents and direct executable launches
@@ -298,7 +299,10 @@ prompt as a TOML literal multi-line string between `<!-- pixel:managed:begin
 of a file the desktop app also owns keeps its layout, refusing to touch a file
 that does not parse, and keeping text outside the markers. `doctor`
 (`install.codex-config`) compares the block with the bundled prompt; `uninstall`
-removes the block, or the key when nothing else was in it.
+removes the block, or the key when nothing else was in it. Pi reads
+`~/.pi/agent/APPEND_SYSTEM.md` automatically; that file is shared the same way
+(markers, text outside them kept, `install.pi-prompt` in `doctor`, block — not
+the file — removed by `uninstall`), so a user's own pi instructions survive.
 
 Existing hook entry points remain implemented, separately from active installation:
 
