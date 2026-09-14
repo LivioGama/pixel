@@ -134,6 +134,19 @@ impl GitRunner {
             .collect()
     }
 
+    /// Paths of the blobs in commit `oid`'s tree (`git ls-tree -r -z`),
+    /// gitlinks (submodules) excluded: their objects live in another
+    /// repository and cannot be read here. Unlike [`Self::ls_tree`] a git
+    /// failure is an error, never an empty list: a base shard built from a
+    /// failed listing is empty and looks complete.
+    pub fn ls_tree_blobs(&self, oid: &str) -> Result<Vec<String>, GitError> {
+        validate_ref(oid)?;
+        let out = self
+            .with_max_output_bytes(Some(ENUMERATION_MAX_OUTPUT_BYTES))
+            .run(&["ls-tree", "-r", "-z", oid])?;
+        Ok(parse_ls_tree_blobs(&out))
+    }
+
     /// Size of a committed blob without materializing it.
     pub fn blob_size(&self, oid: &str, rel: &str) -> Option<u64> {
         validate_ref(oid).ok()?;
@@ -392,6 +405,18 @@ impl GitRunner {
     }
 }
 
+/// The blob paths of `git ls-tree -r -z` output: each NUL-terminated entry
+/// is `<mode> SP <type> SP <object> TAB <path>`; only `blob` entries count.
+fn parse_ls_tree_blobs(out: &[u8]) -> Vec<String> {
+    out.split(|&b| b == 0)
+        .filter_map(|entry| {
+            let tab = entry.iter().position(|&b| b == b'\t')?;
+            let kind = entry[..tab].split(|&b| b == b' ').nth(1)?;
+            (kind == b"blob").then(|| String::from_utf8_lossy(&entry[tab + 1..]).into_owned())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -458,6 +483,49 @@ mod tests {
         std::fs::write(root.join("c.txt"), b"untracked\n").unwrap();
         let status = runner.status_porcelain();
         assert!(status.iter().any(|(xy, p)| xy == "??" && p == "c.txt"));
+    }
+
+    /// A submodule is a gitlink in the tree, not a blob: listing it would
+    /// make every base build count an unreadable file.
+    #[test]
+    fn ls_tree_blobs_lists_blobs_and_skips_gitlinks() {
+        let root = tmpdir("plumbing-ls-tree-blobs");
+        init_repo(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.txt"), b"a\n").unwrap();
+        std::fs::write(root.join("with space.txt"), b"b\n").unwrap();
+        git(&root, &["add", "."]);
+        git(
+            &root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000,1111111111111111111111111111111111111111,vendor/sub",
+            ],
+        );
+        git(&root, &["commit", "-q", "-m", "tree with a gitlink"]);
+        let runner = GitRunner::new(&root);
+        let head = runner.rev_parse_head().unwrap();
+        assert_eq!(
+            runner.ls_tree_blobs(&head).unwrap(),
+            ["src/a.txt", "with space.txt"]
+        );
+        assert!(
+            runner.ls_tree(&head).contains(&"vendor/sub".to_string()),
+            "ls_tree keeps listing every entry"
+        );
+        assert!(
+            runner
+                .ls_tree_blobs("0000000000000000000000000000000000000000")
+                .is_err()
+        );
+        assert!(runner.ls_tree_blobs("-bad").is_err());
+        assert_eq!(
+            parse_ls_tree_blobs(b"100644 blob abc\tx\x00garbage\x00040000 tree def\tdir\x00"),
+            ["x"],
+            "entries without a tab or of another type are not blobs"
+        );
     }
 
     #[test]

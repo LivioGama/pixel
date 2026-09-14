@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 crc32fast = { workspace = true }
+mutants = { workspace = true }
 pixel-git = { path = "../pixel-git" }
 fs2 = "0.4.3"
 grep-regex = "0.1.14"
