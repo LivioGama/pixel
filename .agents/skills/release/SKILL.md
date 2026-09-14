@@ -14,12 +14,13 @@ jobs, each needing the previous one:
 | `verify` | `check-release $GITHUB_REF` (tag = `crates/pixel` version, `Cargo.lock` fresh for all 17 members, `## [x.y.z]` heading and empty Unreleased), then `cargo test --workspace --locked` | nothing built, nothing published |
 | `build` | musl x86_64 + aarch64 via `cross` (`--no-default-features --features model2vec`), `aarch64-apple-darwin` natively; tarball + `.sha256` each; `fail-fast` | nothing published |
 | `release` | writes `pixel.rb` with the real hashes, cuts the release body from the `## [x.y.z]` section of `CHANGELOG.md`, creates the GitHub release (3 tarballs, 3 `.sha256`, `pixel.rb`), commits `pixel x.y.z` to `LivioGama/homebrew-tap` with `HOMEBREW_TAP_TOKEN` | published, possibly partially: see Recovery |
+| `smoke` (×3, `fail-fast: false`) | on each target's own runner, from an empty `HOME`: the release asset (checksum, run), `scripts/install.sh` (when the tag is the latest release), `brew install LivioGama/tap/pixel` + `brew test` (macOS, when the tap was pushed); each binary's `--version` must print `pixel x.y.z` and `commit: <tag commit>` | already published: the next patch is due |
 
 Two facts shape everything below:
 
-- **The macOS binary is first compiled by the tag.** `ci.yml` and
-  `cross-build.yml` run on `ubuntu-latest` only; a green `develop` proves the
-  musl lane, never `aarch64-apple-darwin`.
+- **The macOS binary is first compiled by the tag, and first run by
+  `smoke`.** `ci.yml` and `cross-build.yml` run on `ubuntu-latest` only; a
+  green `develop` proves the musl lane, never `aarch64-apple-darwin`.
 - **A published tag is immutable.** Once `release` has run, users can install
   it: never move, delete or reuse it; a fix ships as the next patch.
 
@@ -163,7 +164,8 @@ gh run list --workflow release.yml -L 1               # the run for vx.y.z
 gh run watch <run-id> --exit-status                   # run_in_background: true
 ```
 
-About 10 minutes end to end (0.2.3 and 0.2.4 both took 10 min). A failed
+About 10 minutes to publication (0.2.3 and 0.2.4 both took 10 min, before
+`smoke` existed), then the three `smoke` jobs. A failed
 `build` on `aarch64-apple-darwin` is the likeliest surprise (see the first
 fact above).
 
@@ -194,8 +196,17 @@ the merge, `git diff --quiet vx.y.z origin/main` must succeed.
 
 ## 6. Verify the publication
 
-Check the published state, never the local checkout, and download into a
-fresh directory so nothing local vouches for the release:
+Start from the `smoke` jobs: `gh run view <run-id> --repo LivioGama/pixel`
+must show all three green, and each job log names what it installed and
+the `--version` it read. A step that printed a `::notice::` (install.sh on a
+tag that is not the latest) or was skipped (Homebrew without the token) is a
+caveat to report, not a pass.
+
+`smoke` does not see the release body, the formula hashes against the tap,
+or `main`. Check those from the published state, never the local checkout,
+downloading into a fresh directory so nothing local vouches for the release.
+The binary lines repeat `smoke` by hand: run them when a `smoke` job failed,
+was skipped, or predates the job (0.2.4 and older):
 
 ```bash
 V=vx.y.z; D=$(mktemp -d); cd "$D"
@@ -225,7 +236,8 @@ Report in this shape, and copy it into the record:
 
 ```text
 Release vx.y.z: published and verified | NOT verified
-- run <url>: verify ✓, build ✓, release ✓
+- run <url>: verify ✓, build ✓, release ✓, smoke ✓✓✓
+- smoke: asset ✓✓✓, install.sh ✓✓✓ | notice, brew ✓ | skipped
 - assets: 7, 3 checksums OK, formula hashes match
 - body: CHANGELOG ## [x.y.z] section
 - tap: Formula/pixel.rb == release pixel.rb (commit "pixel x.y.z")
@@ -252,7 +264,9 @@ Then by how far the run got:
 | `verify` or `build` | tag pushed, nothing published | with the user's go, delete the tag (`git push origin :refs/tags/vx.y.z && git tag -d vx.y.z`) and re-tag the fixed commit. No release exists, so reusing the version is safe. A musl failure should have shown on develop's `Cross-build`: find out why it was green. |
 | `release`, before "Upload release assets" | nothing published | as above, or a rerun for infra |
 | `release`, tap steps only | GitHub release published, tap stale | infra: `gh run rerun <run-id> --failed` (the tap step exits 0 when the formula is already current). Otherwise copy the `pixel.rb` release asset into `Formula/pixel.rb` of `LivioGama/homebrew-tap` by hand, commit `pixel x.y.z`. |
-| after publication, a bad binary | users may have it | never move the tag: fix on `develop`, release `x.y.z+1`, say in its changelog what was wrong with `x.y.z`. |
+| `smoke`, install.sh only | release fine, the script is broken | the script is served from `main`, not from the release: fix it on `develop`, bring it to `main` with a hotfix PR; no new version needed |
+| `smoke`, asset or brew, infra | unknown | `gh run rerun <run-id> --failed` reruns only the failed `smoke` jobs |
+| `smoke`, asset or brew, code (wrong version or commit, crash, `brew test` fails) — or any later report of a bad binary | users may have it | never move the tag: fix on `develop`, release `x.y.z+1`, say in its changelog what was wrong with `x.y.z`. |
 
 ## Hotfix release
 
