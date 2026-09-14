@@ -226,6 +226,7 @@ pub fn run(
     // 13. Rename in other source files that reference command names in comments
     for src in [
         "crates/pixel/src/prompt_submit.rs",
+        "crates/pixel/src/guard.rs",
         "crates/pixel-daemon/src/api.rs",
         "crates/pixel-git/src/plumbing.rs",
         "crates/pixel-graph/src/build.rs",
