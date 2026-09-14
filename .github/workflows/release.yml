@@ -40,8 +40,8 @@ jobs:
       # A stale lock used to surface only in the build job, after the tests.
       # No --locked here on purpose: with it cargo would refuse before the
       # report names the stale member; the build job stays --locked.
-      - name: Release consistency (pixel release-check)
-        run: cargo run -q -p pixel-cli -- release-check "$GITHUB_REF" --repo .
+      - name: Release consistency (pixel check-release)
+        run: cargo run -q -p pixel-cli -- check-release "$GITHUB_REF" --repo .
 
       - name: Test
         run: cargo test --workspace --locked

@@ -3,10 +3,10 @@
 JS companion for the pixel **sniper** error sink. Every error from every
 common surface — browser runtime, node process-level, HTTP 5xx, Vite
 transform/HMR, vitest — lands at throw-time in ONE structured local store
-(`pixel sniper …`), enriched with source-mapped frames and package
+(`pixel list-errors …`), enriched with source-mapped frames and package
 provenance, so the agent's first look is the last look.
 
-All records ship through the Rust core: `pixel sniper report --json -`
+All records ship through the Rust core: `pixel list-errors report --json -`
 (one serialized child process at a time; the sink never breaks your dev
 server, your app, or your test run).
 
@@ -38,12 +38,12 @@ export default defineConfig({ test: { reporters: ["default", new SniperReporter(
 | `@pixel/sniper/vite` | run fingerprint (pid, port, git HEAD, lockfile + `.vite/deps` hashes), node uncaught/unhandled, HTTP 5xx (4KB excerpt, 499 skipped), vite transform errors, hmr-update / full-reload / dep-optimized events, and the browser ingest endpoint `POST /__sniper/report` (dev-only, loopback-gated) |
 | `@pixel/sniper/client` | window `error`, `unhandledrejection`, `console.error` (reentrancy-guarded patch), HMR rev tracking, plus `report(err, {values})` and `swallow(err, label, values?)` — the empty-catch replacement (depth-2 / 1KB serialization, secret-key redaction) |
 | `@pixel/sniper/vitest-reporter` | ONE record per failing run (`"2 failed | 10 passed (3.1s)"` + structured failures capped at 50), `test-pass` event when green; disabled under `CI` |
-| `pixel sniper run -- <cmd>` | Wraps any command (no JS needed): tees its output live, mirrors its exit code, records structured errors on failure. Parsers: `tsc` (one record per TS code + a summary), Minitest and RSpec (see below), `rubocop` (one `lint` record per offense: `file`, `line`, `column`, `severity`, `cop`, `correctable`). Anything else: one `run-wrapper` record with the last 100 lines in `extra.tail` and the full output in raw_fallbacks |
+| `pixel list-errors run -- <cmd>` | Wraps any command (no JS needed): tees its output live, mirrors its exit code, records structured errors on failure. Parsers: `tsc` (one record per TS code + a summary), Minitest and RSpec (see below), `rubocop` (one `lint` record per offense: `file`, `line`, `column`, `severity`, `cop`, `correctable`). Anything else: one `run-wrapper` record with the last 100 lines in `extra.tail` and the full output in raw_fallbacks |
 
 ### Ruby test runners under `sniper run`
 
 The runner is detected from the output, not the command line, so
-`pixel sniper run -- bundle exec rails test`, `bin/rails test`,
+`pixel list-errors run -- bundle exec rails test`, `bin/rails test`,
 `bundle exec rspec` and `parallel_rspec` all work. A failing run records:
 
 - one record per failing test, surface `minitest` or `rspec`, `kind`
@@ -55,12 +55,12 @@ The runner is detected from the output, not the command line, so
   project paths (gems, the Ruby stdlib and `<internal:…>` frames dropped);
 - one `summary` record last (`12 runs, 10 assertions, 1 failures, 1 errors,
   0 skips` / `7 examples, 2 failures, 1 pending`) with `extra.counters` and
-  the failing tests (capped at 50), which is what `pixel sniper test` shows.
+  the failing tests (capped at 50), which is what `pixel list-errors test` shows.
 
 A green run records a `test-pass` event with `runner` and the counters
 (`runs`, `assertions`, `failures`, `errors`, `skips` for Minitest;
 `examples`, `failures`, `pending` for RSpec; `passed` for both), so
-`pixel sniper test` answers `passing` for Ruby suites as it does for vitest.
+`pixel list-errors test` answers `passing` for Ruby suites as it does for vitest.
 Rails parallel workers and `parallel_tests` are handled: noise between
 failure blocks is ignored and the last summary line (the total) wins.
 Existing `tsc`/`vitest` records are unchanged.
@@ -95,12 +95,12 @@ never throws.
 
 Add to the adopting repo's CLAUDE.md / AGENTS.md:
 
-> After any edit or failed run, one call — `pixel sniper since <cursor>` —
+> After any edit or failed run, one call — `pixel list-errors since <cursor>` —
 > replaces dev-log reading, console polling, curl-polling, and test-log
 > grepping. Every listing footer prints the next cursor. Drill down with
-> `pixel sniper show <id>` (frames + provenance + values + run fingerprint
+> `pixel list-errors show <id>` (frames + provenance + values + run fingerprint
 > + ±30s correlated events); check "did my edit land?" with
-> `pixel sniper hmr --file src/x.tsx`.
+> `pixel list-errors hmr --file src/x.tsx`.
 
 ## Development
 
@@ -111,7 +111,7 @@ bun run typecheck
 ```
 
 The test suite builds the Rust binary (`cargo build -p pixel-cli`) once per
-test process, prints its SHA-256, and pipes golden envelopes through the real `pixel sniper report`
+test process, prints its SHA-256, and pipes golden envelopes through the real `pixel list-errors report`
 ingest path — the JSON contract is verified against the actual Rust parser,
 not a mock.
 

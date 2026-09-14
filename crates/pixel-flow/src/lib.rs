@@ -107,7 +107,7 @@ fn save_flow(
 ) -> Result<Value, String> {
     if exists(name) {
         return Err(format!(
-            "flow '{}' already exists — use `pixel flow revise {}` to update it",
+            "flow '{}' already exists — use `pixel replay-flow revise {}` to update it",
             slugify(name),
             slugify(name)
         ));

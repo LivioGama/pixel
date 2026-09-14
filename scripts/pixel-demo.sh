@@ -247,7 +247,7 @@ echo ""
 
 # ── Pre-index for pixel arm ─────────────────────────────────────────────
 echo -e "  ${DIM}Pre-indexing repo for pixel arm...${R}"
-PATH="$PIXEL_PATH" "$PIXEL_BIN" index "$REPO" 2>/dev/null || true
+PATH="$PIXEL_PATH" "$PIXEL_BIN" build-index "$REPO" 2>/dev/null || true
 echo ""
 
 # ── Run both arms ───────────────────────────────────────────────────────

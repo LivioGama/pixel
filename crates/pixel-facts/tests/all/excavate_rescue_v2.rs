@@ -352,9 +352,11 @@ fn excavate_next_step_points_at_show_not_git() {
         .excavate(Some(PHRASE), None, None, None, 50)
         .expect("excavate");
 
+    // The agent types this follow-up as written: it must name the command
+    // under its current spelling, not a pre-rename alias.
     assert!(
-        result.next.contains("--show"),
-        "result.next must tell the agent the follow-up is `excavate --show`: {:?}",
+        result.next.contains("`pixel dig-history --show "),
+        "result.next must tell the agent the follow-up is `pixel dig-history --show`: {:?}",
         result.next
     );
     // It names the recommended restore point concretely.

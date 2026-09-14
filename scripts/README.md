@@ -37,7 +37,7 @@ Both audits set `PIXEL_DAEMON_AUTO_START=0` and clean up after themselves;
 | Script | Run | What |
 | --- | --- | --- |
 | `pixel-vs-manual.sh` | `scripts/pixel-vs-manual.sh [repo]` | five retrieval tasks, grep/git vs pixel, timings side by side; no agent. Indexes the repo on first run |
-| `pixel-excavate-demo.sh` | `scripts/pixel-excavate-demo.sh /path/to/repo` (`PHRASE=…`) | history archaeology, `git log -S` vs `pixel excavate`; the repo needs `pixel index --history` once |
+| `pixel-excavate-demo.sh` | `scripts/pixel-excavate-demo.sh /path/to/repo` (`PHRASE=…`) | history archaeology, `git log -S` vs `pixel dig-history`; the repo needs `pixel build-index --history` once |
 | `pixel-demo.sh` | `SCENARIO=scope scripts/pixel-demo.sh [repo]` | one `claude -p` scenario, baseline (`--safe-mode`, pixel hooks stripped) vs pixel; a few minutes |
 | `pixel-bench.sh` | `N=3 scripts/pixel-bench.sh [repo]` | the 4-scenario A/B matrix; 10 to 40 minutes, results in `docs/bench/pixel-bench-results.txt` |
 | `pixel-bench-isolated.sh` | `scripts/pixel-bench-isolated.sh [N]` | pixel's doctrine alone vs a blank agent, both under `--safe-mode`; run `pixel-bench.sh` once first (it writes the prompt files) |

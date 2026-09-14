@@ -31,7 +31,6 @@ mod plan_cmd;
 mod post_compaction;
 mod prompt_submit;
 mod recall_cmd;
-mod rename;
 mod rescue_cmd;
 mod search_compat;
 mod sniper_cmd;
@@ -1011,24 +1010,6 @@ enum Command {
     ReplayFlow {
         #[command(subcommand)]
         cmd: FlowCmd,
-    },
-    /// AST-aware, namespace-aware CLI command renamer. Takes a JSON mapping
-    /// {"old-name": "new-name"} and renames only CLI command definitions +
-    /// user-facing references, leaving protocol ops, JSON fields, and agent
-    /// tool names untouched. Use --dry-run to preview.
-    Rename {
-        /// Path to JSON mapping file: {"old-name": "new-name", ...}
-        mapping: PathBuf,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Preview changes without writing.
-        #[arg(long)]
-        dry_run: bool,
-        /// Regenerate plugin surfaces after rename.
-        #[arg(long)]
-        regen: bool,
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -2615,7 +2596,7 @@ fn extractor_for_shard(shard: &Shard) -> Result<Box<dyn GramExtractor>, String> 
         )));
     }
     Err(format!(
-        "index built with unsupported extractor {id:?}; re-run `pixel index`"
+        "index built with unsupported extractor {id:?}; re-run `pixel build-index`"
     ))
 }
 
@@ -3967,7 +3948,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             finish_graph_cmd(data, json, pretty_targets)?;
             if let Some(active) = active_tasks {
                 eprintln!(
-                    "targets manifest active: {} ({active} task(s)) — scoping enforced; run `pixel targets --clear` when the task ends",
+                    "targets manifest active: {} ({active} task(s)) — scoping enforced; run `pixel scope-task --clear` when the task ends",
                     manifest_path.display()
                 );
             }
@@ -4137,7 +4118,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 let lang = d.get("lang")?.as_str().unwrap_or("");
                 let mut output = format!("// {fname} [{lang}]\n");
                 if syms.is_empty() {
-                    output.push_str("// (no indexed symbols — run `pixel index .` first)\n");
+                    output.push_str("// (no indexed symbols — run `pixel build-index .` first)\n");
                 } else {
                     for s in syms {
                         let kind = s.get("kind")?.as_str().unwrap_or("");
@@ -5766,36 +5747,6 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 _ => print_data(&data, true),
             }
         }
-        Command::Rename {
-            mapping,
-            path,
-            dry_run,
-            regen,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let pairs = rename::load_mapping(&mapping)?;
-            let report = rename::run(&root, &pairs, dry_run, regen)?;
-            if json {
-                print_data(
-                    &serde_json::to_value(&report).map_err(|e| e.to_string())?,
-                    true,
-                )
-            } else {
-                println!(
-                    "rename: {} edits across {} files",
-                    report.total_edits,
-                    report.files_changed.len()
-                );
-                for f in &report.files_changed {
-                    println!("  {f}");
-                }
-                for e in &report.errors {
-                    eprintln!("  error: {e}");
-                }
-                Ok(())
-            }
-        }
     }
 }
 
@@ -6287,7 +6238,7 @@ fn excavate_show(
     json: bool,
 ) -> Result<(), String> {
     let Some(file) = file else {
-        return Err("excavate --show requires --file <repo-relative path>".to_string());
+        return Err("dig-history --show requires --file <repo-relative path>".to_string());
     };
     let root = discover_root(path)?;
     let runner = pixel_git::GitRunner::new(&root);

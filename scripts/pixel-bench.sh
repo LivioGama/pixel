@@ -296,7 +296,7 @@ echo "" >> "$RESULTS"
 
 # Index the repo once before any pixel arm (lazy index would otherwise skew
 # the first pixel run).
-PATH="$PIXEL_PATH" "$PIXEL_BIN" index "$REPO" 2>/dev/null || true
+PATH="$PIXEL_PATH" "$PIXEL_BIN" build-index "$REPO" 2>/dev/null || true
 
 # --- Serial scenarios, order-randomized arms ---
 for s in $SCENARIOS; do

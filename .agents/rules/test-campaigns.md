@@ -30,7 +30,7 @@ Always loaded: how to run the long gates without losing an afternoon.
   review gets a follow-up commit pushed to its branch; the branches above
   keep their diff and the merge order stays bottom-up.
 - **Work on a lower branch from a second worktree**
-  (`git worktree add /tmp/pxwt/<name> <branch>`, then `pixel publish ... <path>`)
+  (`git worktree add /tmp/pxwt/<name> <branch>`, then `pixel commit ... <path>`)
   while a mutants run holds the main tree; remove it afterwards.
 - **Finish with a daemon check.** `pgrep -fl "target/.*/pixel daemon"` must
   print nothing; a fixture that left a daemon serving it is a test bug.

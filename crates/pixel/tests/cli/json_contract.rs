@@ -348,3 +348,39 @@ fn session_start_block_reports_the_history_index_phase_and_freshness() {
         "one commit, fully ingested: {block}"
     );
 }
+
+/// `dig-history --show` is the follow-up every `dig-history` answer names:
+/// it prints the file at the commit, and without `--file` it refuses under
+/// the command's current name, so the agent can correct the call it typed.
+#[test]
+fn dig_history_show_prints_the_file_and_requires_file() {
+    let dir = fixture("dig-history-show");
+    let shown = pixel(
+        &dir,
+        &[
+            "dig-history",
+            "--show",
+            "HEAD",
+            "--file",
+            "src/login.rs",
+            "--json",
+            ".",
+        ],
+    );
+    assert!(shown.status.success(), "{shown:?}");
+    let doc: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(
+        doc["content"],
+        "pub fn login_user(name: &str) -> bool {\n    !name.is_empty()\n}\n"
+    );
+    assert_eq!(doc["parent_fallback"], false);
+
+    let missing = pixel(&dir, &["dig-history", "--show", "HEAD", "."]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(missing.stdout.is_empty(), "{missing:?}");
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        stderr.contains("dig-history --show requires --file"),
+        "{stderr}"
+    );
+}

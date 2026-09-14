@@ -148,6 +148,27 @@ fn plan_suspect_is_diff_content_based_and_beats_subject_keywords() {
     assert_eq!(plan["decision"]["options"][0]["id"], "revert");
     assert_eq!(plan["decision"]["options"][1]["id"], "fix_forward");
 
+    // The agent runs the revert option's command verbatim, so it must be the
+    // current spelling of the command and a shape the CLI accepts: running it
+    // restores the recommended version.
+    let revert = plan["decision"]["options"][0]["command"]
+        .as_str()
+        .expect("the revert option carries a command");
+    assert_eq!(
+        revert,
+        format!("pixel plan-rollback --apply {b} --file src/calc.rs .")
+    );
+    let argv: Vec<&str> = revert.split_whitespace().skip(1).collect();
+    let applied = gitpixel(&dir, &argv);
+    assert!(
+        applied.status.success(),
+        "the suggested revert command must run as printed: {applied:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("src/calc.rs")).unwrap(),
+        D2
+    );
+
     std::fs::remove_dir_all(&dir).ok();
 }
 

@@ -92,6 +92,33 @@ fn flow_dry_run_and_execute_are_rejected_before_browser_launch() {
 }
 
 #[test]
+fn saving_an_existing_flow_fails_and_names_the_current_revise_command() {
+    let fixture = Fixture::new("dup");
+    let output = fixture.run(
+        &[
+            "replay-flow",
+            "save",
+            "audit",
+            "--title",
+            "Audit again",
+            "--from-file",
+            "steps.json",
+            "--json",
+        ],
+        false,
+    );
+    assert!(
+        !output.status.success(),
+        "a second save must not overwrite the proven flow: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`pixel replay-flow revise audit`"),
+        "the error must name the command that updates the flow: {stderr}"
+    );
+}
+
+#[test]
 fn flow_json_lifecycle_emits_documents_and_executes_only_when_requested() {
     let fixture = Fixture::new("json");
     for args in [
