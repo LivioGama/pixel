@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-09-14
+
 ### Fixed
 - `pixel search-meaning`, and the semantic fallback of `pixel scope-task` and `pixel find-code`, no longer search nested checkouts: a directory holding a `.git` file or directory (a linked worktree such as `.claude/worktrees/<name>`, a submodule, a nested clone) is skipped, so copies of the repository's own files on another branch stop filling the hits. The coverage `scope` says so.
 - `pixel scope-task` adds semantic hits as unverified P2 leads (`semantic lead (similarity 0.39, unverified)`) instead of P1 targets, names that caveat and a capped scan in its epistemics, and no longer downloads the embedding model inside the request. The similarity does not separate related from unrelated files: on this repository a nonsense task's best file scored 0.33, a relevant French one 0.33 to 0.39, so a nonsense task used to come back with P1 targets. `pixel find-code`'s semantic fallback carries the same caps and offline rule.
