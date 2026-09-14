@@ -29,6 +29,11 @@ pub enum InstallError {
     NoHome,
     #[error("cannot resolve current executable: {0}")]
     CurrentExe(io::Error),
+    #[error(
+        "the shell profile holds a `# >>> pixel-managed >>>` block with no \
+         `# <<< pixel-managed <<<` end marker; close or delete that block, then re-run"
+    )]
+    UnterminatedManagedBlock,
     #[error("invalid settings.json at {path}: {reason}")]
     InvalidSettings { path: PathBuf, reason: String },
 }

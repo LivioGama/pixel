@@ -343,51 +343,59 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
 /// long prompt loses to a long agent body: this one stays under 2 KB.
 pub(crate) const SUBAGENT_PROMPT_FILE: &str = "subagent-prompt.md";
 
+/// The agent prompt as bundled in the binary.
+pub(crate) const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
+
 /// The sub-agent prompt as bundled in the binary.
 pub(crate) const SUBAGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-subagent-prompt.md");
 
-/// Copy the bundled Pixel agent system prompt to `~/.local/share/pixel/agent-prompt.md`
-/// and to `~/.pi/agent/APPEND_SYSTEM.md` (Pi reads this automatically, no flag needed),
-/// and the sub-agent prompt to `~/.local/share/pixel/subagent-prompt.md`.
+/// Pi's system-prompt file, relative to home. Pi reads it automatically — no
+/// flag, no hook — and a user may already keep instructions in it, so pixel
+/// owns only the managed block inside it.
+pub(crate) const PI_PROMPT_REL: &str = ".pi/agent/APPEND_SYSTEM.md";
+
+/// Copy the bundled Pixel agent system prompt to `~/.local/share/pixel/agent-prompt.md`,
+/// the sub-agent prompt to `~/.local/share/pixel/subagent-prompt.md`, and the
+/// prompt into Pi's system-prompt file (pi reads it automatically, no flag needed).
 /// The prompt instructs agents to use `pixel search-content`/`pixel find-code`/`pixel impact`
 /// instead of `grep`/`rg` for code discovery in indexed repositories.
 fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
-    // The asset is embedded at compile time so the installed binary is self-contained.
-    const ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
     let dest_dir = home.join(".local/share/pixel");
     let dest = dest_dir.join("agent-prompt.md");
     let subagent_dest = dest_dir.join(SUBAGENT_PROMPT_FILE);
-    let pi_dest = home.join(".pi/agent/APPEND_SYSTEM.md");
+    let pi_dest = home.join(PI_PROMPT_REL);
     if dry_run {
         return Ok(InstallStep {
             id: "agent-prompt".into(),
             status: CheckStatus::Green,
             summary: format!("would deploy agent-prompt.md and {SUBAGENT_PROMPT_FILE}"),
             detail: Some(format!(
-                "dest={} subagent={}",
+                "dest={} subagent={} pi={}",
                 dest.display(),
-                subagent_dest.display()
+                subagent_dest.display(),
+                pi_dest.display()
             )),
         });
     }
     fs::create_dir_all(&dest_dir)?;
-    let needs_write = write_if_changed(&dest, ASSET)?;
+    let needs_write = write_if_changed(&dest, AGENT_PROMPT_ASSET)?;
     let subagent_written = write_if_changed(&subagent_dest, SUBAGENT_PROMPT_ASSET)?;
-    // Deploy to Pi's APPEND_SYSTEM.md so pi reads it automatically.
-    if let Some(pi_parent) = pi_dest.parent() {
-        let _ = fs::create_dir_all(pi_parent);
-        let _ = fs::write(&pi_dest, ASSET);
-    }
+    let pi_written = write_pi_prompt(&pi_dest)?;
     Ok(InstallStep {
         id: "agent-prompt".into(),
         status: CheckStatus::Green,
         summary: format!(
-            "{} agent-prompt.md, {} {SUBAGENT_PROMPT_FILE}",
+            "{} agent-prompt.md, {} {SUBAGENT_PROMPT_FILE}{}",
             if needs_write { "deployed" } else { "verified" },
             if subagent_written {
                 "deployed"
             } else {
                 "verified"
+            },
+            if pi_written {
+                ", updated Pi's APPEND_SYSTEM.md"
+            } else {
+                ""
             }
         ),
         detail: Some(format!(
@@ -410,6 +418,103 @@ fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
         fs::write(path, content)?;
     }
     Ok(needs_write)
+}
+
+/// Put the bundled prompt inside the managed markers in Pi's system-prompt
+/// file, backing the previous bytes up first. Pi reads that file
+/// automatically and a user may already keep instructions in it: everything
+/// outside the markers survives, and a failed write is an error rather than a
+/// silently green step (the prompts under `~/.local/share/pixel/` are pixel's
+/// own files; this one is not).
+fn write_pi_prompt(path: &Path) -> Result<bool> {
+    let existing = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let wanted = managed_pi_content(&existing, AGENT_PROMPT_ASSET);
+    if wanted == existing {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_atomically(path, &wanted)?;
+    Ok(true)
+}
+
+/// The content Pi's system-prompt file should hold, given `existing`.
+///
+/// A copy of the prompt that is not inside the markers yet — what an install
+/// before the markers wrote verbatim, or a hand copy — is wrapped in place
+/// instead of appended a second time, and text the user keeps around it
+/// survives. Anything else follows the Markdown agent-config rules
+/// ([`config::apply_managed_markers`]).
+fn managed_pi_content(existing: &str, asset: &str) -> String {
+    if !existing.contains(config::MANAGED_BEGIN) && existing.contains(asset) {
+        let begin = config::MANAGED_BEGIN;
+        let end = config::MANAGED_END;
+        let block = format!("{begin}\n{asset}\n{end}\n");
+        return existing.replacen(asset, &block, 1);
+    }
+    config::apply_managed_markers(existing, asset)
+}
+
+/// Replace `path` with `content` in one step: the bytes already there are
+/// backed up first, the new bytes go to a sibling temp file, and that file is
+/// renamed over the target. A crash mid-write leaves the old profile intact
+/// instead of a half-written one — a shell profile is read by every
+/// interactive shell, and it is the user's file.
+fn write_atomically(path: &Path, content: &str) -> Result<()> {
+    config::backup_if_changing(path, content.as_bytes())?;
+    let tmp = path.with_extension("pixel-tmp");
+    fs::write(&tmp, content)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod pi_prompt_content_tests {
+    use super::{AGENT_PROMPT_ASSET, managed_pi_content};
+    use crate::config::{MANAGED_BEGIN, MANAGED_END};
+
+    #[test]
+    fn a_prompt_file_written_by_an_older_install_is_wrapped_in_place_not_duplicated() {
+        let wrapped = managed_pi_content(AGENT_PROMPT_ASSET, AGENT_PROMPT_ASSET);
+        assert!(wrapped.starts_with(MANAGED_BEGIN), "{wrapped}");
+        assert!(wrapped.trim_end().ends_with(MANAGED_END), "{wrapped}");
+        assert_eq!(
+            wrapped.matches(AGENT_PROMPT_ASSET).count(),
+            1,
+            "the prompt must appear once, not once outside the markers and once inside"
+        );
+    }
+
+    #[test]
+    fn user_text_around_a_stale_copy_is_kept() {
+        let existing = format!("My own pi note.\n{AGENT_PROMPT_ASSET}");
+        let wrapped = managed_pi_content(&existing, AGENT_PROMPT_ASSET);
+        assert!(wrapped.starts_with("My own pi note.\n"), "{wrapped}");
+        assert_eq!(wrapped.matches(AGENT_PROMPT_ASSET).count(), 1);
+    }
+
+    #[test]
+    fn a_file_pixel_never_wrote_keeps_its_text_and_gets_one_block() {
+        let existing = "answer in French.\n";
+        let wanted = managed_pi_content(existing, AGENT_PROMPT_ASSET);
+        assert!(wanted.starts_with(existing), "{wanted}");
+        assert!(wanted.contains(MANAGED_BEGIN), "{wanted}");
+        assert_eq!(
+            wanted.matches(MANAGED_BEGIN).count(),
+            1,
+            "one block, not one per install"
+        );
+        assert_eq!(
+            managed_pi_content(&wanted, AGENT_PROMPT_ASSET),
+            wanted,
+            "a managed file is left alone on the next install"
+        );
+    }
 }
 
 /// Which shell dialect the managed wrapper block is written in.
@@ -783,7 +888,11 @@ pub(crate) fn extract_managed_block(content: &str) -> Option<String> {
 }
 
 /// Strip an existing pixel-managed block from a file's content.
-fn strip_shell_wrappers(content: &str) -> String {
+///
+/// An unterminated block is refused instead of swallowing the rest of the
+/// file: the caller reports it and writes nothing. "Everything from the begin
+/// marker to EOF is ours" is what used to delete the end of a user's profile.
+fn strip_shell_wrappers(content: &str) -> Result<String> {
     let begin = PIXEL_MANAGED_BEGIN;
     let end = PIXEL_MANAGED_END;
     let mut out = String::new();
@@ -802,11 +911,51 @@ fn strip_shell_wrappers(content: &str) -> String {
             out.push('\n');
         }
     }
+    if skipping {
+        return Err(InstallError::UnterminatedManagedBlock);
+    }
     // Remove trailing blank lines left by the stripped block.
     while out.ends_with("\n\n") {
         out.pop();
     }
-    out
+    Ok(out)
+}
+
+#[cfg(test)]
+mod shell_wrapper_strip_tests {
+    use super::{PIXEL_MANAGED_BEGIN, PIXEL_MANAGED_END, strip_shell_wrappers};
+    use crate::InstallError;
+
+    #[test]
+    fn a_terminated_block_is_stripped_and_the_surrounding_lines_kept() {
+        let profile = format!(
+            "alias first='one'\n{PIXEL_MANAGED_BEGIN}\nclaude() {{ :; }}\n{PIXEL_MANAGED_END}\nalias last='two'\n"
+        );
+        let cleaned = strip_shell_wrappers(&profile).expect("a closed block is strippable");
+        assert_eq!(cleaned, "alias first='one'\nalias last='two'\n");
+        assert!(
+            !cleaned.contains(PIXEL_MANAGED_BEGIN),
+            "the block must be gone"
+        );
+    }
+
+    #[test]
+    fn a_begin_without_an_end_is_refused_not_stripped_to_eof() {
+        let broken = format!("{PIXEL_MANAGED_BEGIN}\nalias keep='me'\n");
+        assert!(
+            matches!(
+                strip_shell_wrappers(&broken),
+                Err(InstallError::UnterminatedManagedBlock)
+            ),
+            "an unterminated block must be refused: the lines after it are the user's"
+        );
+    }
+
+    #[test]
+    fn a_stray_end_marker_without_a_begin_is_kept_as_user_content() {
+        let profile = format!("alias mine='kept'\n{PIXEL_MANAGED_END}\n");
+        assert_eq!(strip_shell_wrappers(&profile).unwrap(), profile);
+    }
 }
 
 /// Install the `claude` shell wrapper in the user's shell profile so every
@@ -875,7 +1024,19 @@ fn install_shell_wrappers(
     if let Some(parent) = profile.parent() {
         fs::create_dir_all(parent)?;
     }
-    let cleaned = strip_shell_wrappers(&existing);
+    // An unterminated block is refused, not stripped to EOF: the lines after
+    // it are the user's. Red, and the profile is left untouched.
+    let cleaned = match strip_shell_wrappers(&existing) {
+        Ok(cleaned) => cleaned,
+        Err(e) => {
+            return Ok(InstallStep {
+                id: "shell-wrappers".into(),
+                status: CheckStatus::Red,
+                summary: format!("{e} — profile not touched"),
+                detail,
+            });
+        }
+    };
     let had_old_block = cleaned != existing;
     let mut new_content = cleaned;
     if !new_content.ends_with('\n') && !new_content.is_empty() {
@@ -886,8 +1047,10 @@ fn install_shell_wrappers(
     }
     new_content.push_str(&block);
     new_content.push('\n');
-    // Always write — the block may need refreshing even if old content was clean.
-    fs::write(&profile, &new_content)?;
+    // Always write — the block may need refreshing even if old content was
+    // clean. The write backs the previous profile up and goes through a temp
+    // file and a rename, so a crash leaves the old profile readable.
+    write_atomically(&profile, &new_content)?;
     Ok(InstallStep {
         id: "shell-wrappers".into(),
         status,
@@ -929,7 +1092,17 @@ pub(crate) fn remove_shell_wrappers(
             });
         }
     };
-    let cleaned = strip_shell_wrappers(&existing);
+    let cleaned = match strip_shell_wrappers(&existing) {
+        Ok(cleaned) => cleaned,
+        Err(e) => {
+            return Ok(InstallStep {
+                id: "shell-wrappers".into(),
+                status: CheckStatus::Red,
+                summary: format!("{e} — profile not touched"),
+                detail,
+            });
+        }
+    };
     if cleaned == existing {
         return Ok(InstallStep {
             id: "shell-wrappers".into(),
@@ -943,9 +1116,10 @@ pub(crate) fn remove_shell_wrappers(
         // the block is stripped there is nothing left in it worth keeping. A
         // user's own .zshrc/.bashrc is only ever edited in place.
         if kind == ShellKind::Fish && cleaned.trim().is_empty() {
+            let _ = config::backup_if_changing(&profile, cleaned.as_bytes())?;
             fs::remove_file(&profile)?;
         } else {
-            fs::write(&profile, &cleaned)?;
+            write_atomically(&profile, &cleaned)?;
         }
     }
     Ok(InstallStep {
