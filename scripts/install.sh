@@ -24,16 +24,24 @@ esac
 
 TARGET="${ARCH_TARGET}-${OS_TARGET}"
 
-# Fetch latest release tag
+# Resolve the latest release tag from the redirect of the releases/latest page,
+# not from api.github.com: the anonymous REST API allows 60 requests an hour per
+# IP, which a shared address (CI runners, an office NAT) exhausts. The page
+# redirects to .../releases/tag/<tag>, or to .../releases when there is none.
 echo "Fetching latest release..."
-LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | head -1 | sed -E 's/.*"v?([^"]+)".*/\1/')
-if [ -z "$LATEST" ]; then
-    echo "No prebuilt release found for ${REPO}." >&2
-    echo "Install from source instead:" >&2
-    echo "  cargo install --git https://github.com/${REPO} --force" >&2
+if ! LATEST_URL=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest"); then
+    echo "Could not reach https://github.com/${REPO}/releases/latest (curl error above)." >&2
     exit 1
 fi
-VERSION="v${LATEST}"
+case "$LATEST_URL" in
+    */releases/tag/v?*) VERSION="${LATEST_URL##*/releases/tag/}" ;;
+    *)
+        echo "No prebuilt release found for ${REPO}." >&2
+        echo "Install from source instead:" >&2
+        echo "  cargo install --git https://github.com/${REPO} --force" >&2
+        exit 1
+        ;;
+esac
 ARCHIVE="pixel-${VERSION}-${TARGET}.tar.gz"
 URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE}"
 SHA_URL="${URL}.sha256"
