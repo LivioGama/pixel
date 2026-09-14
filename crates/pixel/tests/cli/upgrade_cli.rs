@@ -38,11 +38,28 @@ impl Fixture {
         extra_paths: &[PathBuf],
         path_var: Option<&Path>,
     ) -> (Output, Duration, bool) {
+        self.upgrade_env(extra, extra_paths, path_var, &[])
+    }
+
+    /// `upgrade_with` plus environment variables. The package-manager roots
+    /// read from the environment are cleared first, so the developer's own
+    /// `brew shellenv` or mise settings never decide a test's outcome.
+    fn upgrade_env(
+        &self,
+        extra: &[&str],
+        extra_paths: &[PathBuf],
+        path_var: Option<&Path>,
+        envs: &[(&str, &Path)],
+    ) -> (Output, Duration, bool) {
         let start = Instant::now();
         let mut command = Command::new(env!("CARGO_BIN_EXE_pixel"));
         command.args(["self-update", "--build", "/usr/bin/true"]);
         command.args(extra);
         command.args(extra_paths);
+        command
+            .env_remove("MISE_DATA_DIR")
+            .env_remove("HOMEBREW_CELLAR");
+        command.envs(envs.iter().copied());
         if let Some(p) = path_var {
             command.env("PATH", p);
         }
@@ -184,14 +201,14 @@ fn upgrade_reports_unresponsive_daemon_without_claiming_completion() {
 /// Without `--install-path`, the upgrade must replace the `pixel` a shell
 /// actually runs. The test binary lives in cargo's `target/`, so the
 /// resolver falls through to PATH: a `pixel` sitting in a `shims` dir is a
-/// launcher and must be skipped, the managed install behind it is the
-/// target, and `~/.local/bin/pixel` (the old fixed default) must stay
-/// untouched.
+/// launcher and must be skipped, the install behind it is the target, and
+/// `~/.local/bin/pixel` (the old fixed default) must stay untouched. The
+/// install sits outside any package manager's tree, so nothing refuses it.
 #[test]
 fn upgrade_without_install_path_replaces_the_pixel_on_path() {
     let fixture = Fixture::new("onpath");
-    let shim = fixture.0.join("mise/shims/pixel");
-    let managed = fixture.0.join("mise/installs/pixel/rev-1/bin/pixel");
+    let shim = fixture.0.join("tools/shims/pixel");
+    let managed = fixture.0.join("tools/installs/pixel/rev-1/bin/pixel");
     for p in [&shim, &managed] {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, b"old bytes\n").unwrap();
@@ -283,4 +300,159 @@ fn upgrade_dry_run_prints_target_and_installs_nothing() {
         managed.canonicalize().unwrap().display().to_string()
     );
     assert_eq!(std::fs::read(&managed).unwrap(), b"old bytes\n");
+}
+
+/// The layout `mise use github:LivioGama/pixel` leaves under a fixture HOME:
+/// a shim (skipped by the resolver) and the install dir mise put on PATH.
+/// Returns the installed binary and a PATH whose first `pixel` is it.
+fn mise_install(fixture: &Fixture) -> (PathBuf, std::ffi::OsString) {
+    let data = fixture.0.join("home/.local/share/mise");
+    let shim = data.join("shims/pixel");
+    let installed = data.join("installs/github-livio-gama-pixel/0.2.4/bin/pixel");
+    for p in [&shim, &installed] {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"mise 0.2.4 bytes\n").unwrap();
+    }
+    let path_var = std::env::join_paths([
+        shim.parent().unwrap().to_path_buf(),
+        installed.parent().unwrap().to_path_buf(),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+    ])
+    .unwrap();
+    (installed, path_var)
+}
+
+/// Assert the refusal message gives the user what they need to act: the
+/// resolved path it would have written, the owner, and the three ways out.
+fn assert_refusal_names(stderr: &str, resolved: &Path, manager: &str) {
+    let resolved = resolved.display().to_string();
+    assert!(stderr.contains("refusing to install over"), "{stderr}");
+    assert!(stderr.contains(&resolved), "names {resolved}: {stderr}");
+    assert!(stderr.contains(manager), "names {manager}: {stderr}");
+    for way_out in ["--dry-run", "--install-path", "--dev"] {
+        assert!(stderr.contains(way_out), "proposes {way_out}: {stderr}");
+    }
+}
+
+/// A bare `pixel self-update` resolved to the mise install dir and replaced
+/// mise's 0.2.4 with a local dirty build while `mise ls` kept saying 0.2.4
+/// (2026-09-14). A default that lands in mise's `installs/` must fail
+/// before anything is written, and say where and why.
+#[test]
+fn upgrade_refuses_a_mise_install_without_explicit_install_path() {
+    let fixture = Fixture::new("mise");
+    let (installed, path_var) = mise_install(&fixture);
+    let (output, _, timed_out) = fixture.upgrade_with(&[], &[], Some(Path::new(&path_var)));
+    assert!(!timed_out);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_refusal_names(&stderr, &installed.canonicalize().unwrap(), "mise");
+    assert!(!stderr.contains("Upgrade complete"), "{stderr}");
+    assert_eq!(std::fs::read(&installed).unwrap(), b"mise 0.2.4 bytes\n");
+    assert!(
+        !fixture.0.join("home/.local/bin/pixel").exists(),
+        "a refusal must not fall back to a second copy that shadows mise"
+    );
+}
+
+/// Homebrew links `bin/pixel` to `../Cellar/pixel/<ver>/bin/pixel`. Writing
+/// through that link corrupts the keg `brew` believes it installed, so the
+/// refusal must follow the symlink and name the Cellar file it points to.
+#[test]
+fn upgrade_refuses_a_homebrew_cellar_reached_through_a_symlink() {
+    let fixture = Fixture::new("cellar");
+    let prefix = fixture.0.join("homebrew");
+    let keg = prefix.join("Cellar/pixel/0.2.4/bin/pixel");
+    std::fs::create_dir_all(keg.parent().unwrap()).unwrap();
+    std::fs::write(&keg, b"brew 0.2.4 bytes\n").unwrap();
+    let link = prefix.join("bin/pixel");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("../Cellar/pixel/0.2.4/bin/pixel", &link).unwrap();
+    let path_var = std::env::join_paths([
+        link.parent().unwrap().to_path_buf(),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+    ])
+    .unwrap();
+    let cellar = prefix.join("Cellar");
+    let (output, _, timed_out) = fixture.upgrade_env(
+        &[],
+        &[],
+        Some(Path::new(&path_var)),
+        &[("HOMEBREW_CELLAR", &cellar)],
+    );
+    assert!(!timed_out);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_refusal_names(&stderr, &keg.canonicalize().unwrap(), "Homebrew");
+    assert_eq!(std::fs::read(&keg).unwrap(), b"brew 0.2.4 bytes\n");
+    assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+}
+
+/// `--install-path` is the escape hatch the refusal proposes: someone who
+/// names the mise binary on purpose (to test a fix in the exact place a
+/// wrapper runs it) gets the historical behaviour, no second-guessing.
+#[test]
+fn upgrade_writes_a_mise_install_when_install_path_is_explicit() {
+    let fixture = Fixture::new("explicit");
+    let (installed, path_var) = mise_install(&fixture);
+    let (output, _, timed_out) = fixture.upgrade_with(
+        &["--install-path"],
+        std::slice::from_ref(&installed),
+        Some(Path::new(&path_var)),
+    );
+    assert!(!timed_out);
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("refusing"), "{stderr}");
+    assert!(stderr.contains("Upgrade complete"), "{stderr}");
+    assert_eq!(
+        std::fs::read(&installed).unwrap(),
+        b"candidate fixture bytes\n"
+    );
+}
+
+/// The refusal tells the user to run `--dry-run` to see where an upgrade
+/// lands. On a refused path the dry run must still print that path on
+/// stdout, repeat the refusal, exit non-zero (so `--dry-run && self-update`
+/// stops there) and write nothing.
+#[test]
+fn upgrade_dry_run_on_a_mise_install_prints_the_path_and_writes_nothing() {
+    let fixture = Fixture::new("dryrefuse");
+    let (installed, path_var) = mise_install(&fixture);
+    let (output, _, timed_out) =
+        fixture.upgrade_with(&["--dry-run"], &[], Some(Path::new(&path_var)));
+    assert!(!timed_out);
+    let resolved = installed.canonicalize().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        resolved.display().to_string()
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert_refusal_names(&String::from_utf8_lossy(&output.stderr), &resolved, "mise");
+    assert_eq!(std::fs::read(&installed).unwrap(), b"mise 0.2.4 bytes\n");
+    assert!(!fixture.0.join("home/.local/bin").exists());
+}
+
+/// `--dev` is how a local build gets exercised on a mise machine: it lands
+/// in `~/.local/bin/pixel-dev`, a name no `pixel` lookup ever picks, so the
+/// managed `pixel` keeps its bytes and nothing on PATH is shadowed (and no
+/// shadow warning about an unrelated `pixel` is printed).
+#[test]
+fn upgrade_dev_installs_pixel_dev_and_leaves_pixel_alone() {
+    let fixture = Fixture::new("dev");
+    let (installed, path_var) = mise_install(&fixture);
+    let (output, _, timed_out) = fixture.upgrade_with(&["--dev"], &[], Some(Path::new(&path_var)));
+    assert!(!timed_out);
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("(--dev)"), "{stderr}");
+    assert!(!stderr.contains("warning:"), "{stderr}");
+    assert_eq!(
+        std::fs::read(fixture.0.join("home/.local/bin/pixel-dev")).unwrap(),
+        b"candidate fixture bytes\n"
+    );
+    assert!(!fixture.0.join("home/.local/bin/pixel").exists());
+    assert_eq!(std::fs::read(&installed).unwrap(), b"mise 0.2.4 bytes\n");
 }
