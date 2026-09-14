@@ -1,4 +1,4 @@
-//! CLI round-trip: `gitpixel targets` writes the enforcement manifest,
+//! CLI round-trip: `gitpixel scope-task` writes the enforcement manifest,
 //! `--clear` removes it, `--no-manifest` leaves none.
 
 use std::path::Path;
@@ -55,7 +55,7 @@ fn targets_round_trip_manifest_and_clear() {
     // Run with --json; manifest must be written and match the target list.
     let out = gitpixel(
         &dir,
-        &["targets", "fix `login_user` login flow", ".", "--json"],
+        &["scope-task", "fix `login_user` login flow", ".", "--json"],
     );
     assert!(out.status.success(), "targets failed: {out:?}");
     let data: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -85,14 +85,14 @@ fn targets_round_trip_manifest_and_clear() {
     assert_eq!(manifest_paths, target_paths);
 
     // Pretty output renders tiers.
-    let out = gitpixel(&dir, &["targets", "fix `login_user` login flow", "."]);
+    let out = gitpixel(&dir, &["scope-task", "fix `login_user` login flow", "."]);
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("P0 — primary"), "missing tier header: {text}");
     assert!(text.contains("closed list:"));
 
     // Clear removes the manifest.
-    let out = gitpixel(&dir, &["targets", "--clear", "."]);
+    let out = gitpixel(&dir, &["scope-task", "--clear", "."]);
     assert!(out.status.success(), "clear failed: {out:?}");
     assert!(!manifest.exists(), "manifest not cleared");
 
@@ -100,7 +100,7 @@ fn targets_round_trip_manifest_and_clear() {
     let out = gitpixel(
         &dir,
         &[
-            "targets",
+            "scope-task",
             "fix `login_user` login flow",
             ".",
             "--no-manifest",
@@ -111,7 +111,7 @@ fn targets_round_trip_manifest_and_clear() {
     assert!(!manifest.exists());
 
     // --clear with a task errors.
-    let out = gitpixel(&dir, &["targets", "some task", ".", "--clear"]);
+    let out = gitpixel(&dir, &["scope-task", "some task", ".", "--clear"]);
     assert!(!out.status.success());
 
     std::fs::remove_dir_all(&dir).ok();

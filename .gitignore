@@ -10,7 +10,8 @@
 !.claude/rules
 !.claude/skills
 .codex/
-.cursor/
+.cursor/*
+!.cursor/rules/
 .gemini/
 .pi/
 .zcode/

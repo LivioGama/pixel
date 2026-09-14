@@ -99,26 +99,26 @@ class Audit:
         self.tip = self.git("rev-parse", "HEAD")
 
     def retrieval(self):
-        self.call("index", ["index", "--history"])
+        self.call("build-index", ["build-index", "--history"])
         assert (self.repo / ".pixel").is_dir(), "index did not create repository state"
-        self.call("graph", ["graph", "--json"], contains="symbols", json_output=True)
+        self.call("rebuild-graph", ["rebuild-graph", "--json"], contains="symbols", json_output=True)
         self.call("status", ["status", "--json"], json_output=True)
-        self.call("stats", ["stats"], contains="files")
-        self.call("search", ["search", "login_user", "--no-daemon"], contains="login_user")
-        self.call("search-compat", ["search-compat", "grep", "--", "-n", "login_user", "lib.rs"], contains="login_user")
-        self.call("query", ["query", "login_user", "--no-daemon", "--json"], contains="login_user", json_output=True)
-        self.call("symbol", ["symbol", "login_user", "--json"], contains="login_user", json_output=True)
-        self.call("skeleton", ["skeleton", "lib.rs", "--json"], contains="login_user", json_output=True)
-        self.call("map", ["map", "--json"], contains="login_user", json_output=True)
-        self.call("context", ["context", "lib.rs#login_user#function", "--budget", "300", "--json"], contains="login_user", json_output=True)
-        self.call("targets", ["targets", "fix login_user", "--json", "--no-manifest"], contains="lib.rs", json_output=True)
-        self.call("resolve", ["resolve", "login user", "--json"], contains="login_user", json_output=True)
+        self.call("index-stats", ["index-stats"], contains="files")
+        self.call("search-content", ["search-content", "login_user", "--no-daemon"], contains="login_user")
+        self.call("search-like-rg", ["search-like-rg", "grep", "--", "-n", "login_user", "lib.rs"], contains="login_user")
+        self.call("run-recipe", ["run-recipe", "login_user", "--no-daemon", "--json"], contains="login_user", json_output=True)
+        self.call("find-symbol", ["find-symbol", "login_user", "--json"], contains="login_user", json_output=True)
+        self.call("list-signatures", ["list-signatures", "lib.rs", "--json"], contains="login_user", json_output=True)
+        self.call("repo-map", ["repo-map", "--json"], contains="login_user", json_output=True)
+        self.call("pack-context", ["pack-context", "lib.rs#login_user#function", "--budget", "300", "--json"], contains="login_user", json_output=True)
+        self.call("scope-task", ["scope-task", "fix login_user", "--json", "--no-manifest"], contains="lib.rs", json_output=True)
+        self.call("find-code", ["find-code", "login user", "--json"], contains="login_user", json_output=True)
         for leaf, args in [
             ("impact", ["impact", "login_user", "--json"]),
-            ("uses", ["uses", "login_user", "--role", "callers", "--json"]),
-            ("trace", ["trace", "main_entry", "login_user", "--json"]),
-            ("processes", ["processes", "--json"]),
-            ("clusters", ["clusters", "--json"]),
+            ("who-calls", ["who-calls", "login_user", "--role", "callers", "--json"]),
+            ("call-path", ["call-path", "main_entry", "login_user", "--json"]),
+            ("list-flows", ["list-flows", "--json"]),
+            ("list-areas", ["list-areas", "--json"]),
         ]:
             self.call(leaf, args, json_output=True)
         for leaf, args in [
@@ -130,48 +130,48 @@ class Audit:
             self.call(leaf, args, json_output=True)
         with (self.repo / "lib.rs").open("a") as source:
             source.write('pub fn changed_function() {}\n')
-        self.call("changes", ["changes", "--json"], contains="lib.rs", json_output=True)
-        self.call("inspect", ["inspect", "--json"], contains="lib.rs", json_output=True)
-        self.call("review", ["review", "--json"], contains="lib.rs", json_output=True)
+        self.call("what-changed", ["what-changed", "--json"], contains="lib.rs", json_output=True)
+        self.call("repo-state", ["repo-state", "--json"], contains="lib.rs", json_output=True)
+        self.call("review-changes", ["review-changes", "--json"], contains="lib.rs", json_output=True)
         self.call("diff", ["diff", "HEAD", "--json"], contains="changed_function", json_output=True)
-        self.call("history", ["history", "--json"], contains="fixture", json_output=True)
-        self.call("history-search", ["history-search", "removed_manual_history", "--json"], contains="removed_manual_history", json_output=True)
-        self.call("lifecycle", ["lifecycle", "--file", "removed.md", "--json"], contains="removed.md", json_output=True)
-        self.call("excavate", ["excavate", "--phrase", "removed_manual_history", "--json"], contains="removed_manual_history", json_output=True)
-        self.call("rescue", ["rescue", "login", "--file", "lib.rs", "--json"], contains="lib.rs", json_output=True)
-        self.call("provenance", ["provenance", "lib.rs", "--json"], contains="fixture", json_output=True)
-        self.call("branches", ["branches", "--json"], contains="main", json_output=True)
-        self.call("journal", ["journal", "read", "--file", "lib.rs", "--detail", "audit fixture", "--json"], json_output=True)
-        self.call("log", ["log", "--json"], json_output="ndjson")
-        self.call("savings", ["savings", "--json"], json_output=True)
+        self.call("commit-history", ["commit-history", "--json"], contains="fixture", json_output=True)
+        self.call("search-history", ["search-history", "removed_manual_history", "--json"], contains="removed_manual_history", json_output=True)
+        self.call("file-history", ["file-history", "--file", "removed.md", "--json"], contains="removed.md", json_output=True)
+        self.call("dig-history", ["dig-history", "--phrase", "removed_manual_history", "--json"], contains="removed_manual_history", json_output=True)
+        self.call("plan-rollback", ["plan-rollback", "login", "--file", "lib.rs", "--json"], contains="lib.rs", json_output=True)
+        self.call("who-wrote", ["who-wrote", "lib.rs", "--json"], contains="fixture", json_output=True)
+        self.call("list-branches", ["list-branches", "--json"], contains="main", json_output=True)
+        self.call("record-event", ["record-event", "read", "--file", "lib.rs", "--detail", "audit fixture", "--json"], json_output=True)
+        self.call("action-log", ["action-log", "--json"], json_output="ndjson")
+        self.call("token-savings", ["token-savings", "--json"], json_output=True)
 
     def mutations(self):
         remote = self.root / "remote.git"
         self.git("init", "--bare", str(remote))
         self.git("remote", "add", "origin", str(remote))
         self.git("push", "-u", "origin", "main")
-        self.call("branch", ["branch", "audit", "--request-id", "audit-branch", "--json"], contains="audit", json_output=True)
+        self.call("new-branch", ["new-branch", "audit", "--request-id", "audit-branch", "--json"], contains="audit", json_output=True)
         self.git("switch", "audit")
-        self.call("publish", ["publish", "--message", "fixture: preserve changed function", "--files", "lib.rs", "--request-id", "audit-publish", "--json"], json_output=True)
+        self.call("commit", ["commit", "--message", "fixture: preserve changed function", "--files", "lib.rs", "--request-id", "audit-publish", "--json"], json_output=True)
         published = self.git("rev-parse", "HEAD")
         assert published != self.tip
-        self.call("publish", ["publish", "--message", "fixture: preserve changed function", "--files", "lib.rs", "--request-id", "audit-publish", "--json"], json_output=True)
+        self.call("commit", ["commit", "--message", "fixture: preserve changed function", "--files", "lib.rs", "--request-id", "audit-publish", "--json"], json_output=True)
         assert self.git("rev-parse", "HEAD") == published, "idempotent publish made a second commit"
         self.call("push", ["push", "origin", "HEAD:refs/heads/audit", "--request-id", "audit-push", "--json"], json_output=True)
         assert self.git("--git-dir", str(remote), "rev-parse", "refs/heads/audit") == published
         with (self.repo / "lib.rs").open("a") as source:
             source.write("pub fn shipped_function() {}\n")
-        self.call("ship", ["ship", "origin", "HEAD:refs/heads/audit", "--message", "fixture: ship second function", "--files", "lib.rs", "--request-id", "audit-ship", "--json"], json_output=True)
+        self.call("commit-and-push", ["commit-and-push", "origin", "HEAD:refs/heads/audit", "--message", "fixture: ship second function", "--files", "lib.rs", "--request-id", "audit-ship", "--json"], json_output=True)
         shipped = self.git("rev-parse", "HEAD")
         assert shipped != published
         assert self.git("--git-dir", str(remote), "rev-parse", "refs/heads/audit") == shipped
-        self.call("sync", ["sync", "origin", "--json"], json_output=True)
-        self.call("reconcile", ["reconcile", "--strategy", "report", "--push", "none", "--json"], json_output=True)
+        self.call("fetch", ["fetch", "origin", "--json"], json_output=True)
+        self.call("sync-branch", ["sync-branch", "--strategy", "report", "--push", "none", "--json"], json_output=True)
         self.git("switch", "-c", "audit-update", self.tip)
-        self.call("update", ["update", "--expected-head", self.tip, "--target-oid", shipped, "--request-id", "audit-update", "--json"], json_output=True)
+        self.call("fast-forward", ["fast-forward", "--expected-head", self.tip, "--target-oid", shipped, "--request-id", "audit-update", "--json"], json_output=True)
         assert self.git("rev-parse", "HEAD") == shipped
         before = (self.repo / "lib.rs").read_bytes()
-        self.call("rewrite", ["rewrite", "--onto", self.tip, "--expected-head", shipped, "--request-id", "audit-rewrite", "--json"], json_output=True)
+        self.call("squash-branch", ["squash-branch", "--onto", self.tip, "--expected-head", shipped, "--request-id", "audit-rewrite", "--json"], json_output=True)
         assert (self.repo / "lib.rs").read_bytes() == before
         assert self.git("rev-list", "--count", f"{self.tip}..HEAD") == "1"
 
@@ -180,46 +180,46 @@ class Audit:
         original = b"# preserved fixture\nUNRELATED=fixture_secret_not_for_output\nEXISTING=before\n"
         env_file.write_bytes(original)
         for leaf, args in [
-            ("env inventory", ["env", "inventory", "--json"]),
-            ("env set", ["env", "set", "--file", ".env", "--key", "EXISTING", "--value", "after", "--json"]),
-            ("env check", ["env", "check", "--file", ".env", "--require", "UNRELATED", "--json"]),
-            ("env snapshots", ["env", "snapshots", "--file", ".env", "--json"]),
+            ("edit-env inventory", ["edit-env", "inventory", "--json"]),
+            ("edit-env set", ["edit-env", "set", "--file", ".env", "--key", "EXISTING", "--value", "after", "--json"]),
+            ("edit-env check", ["edit-env", "check", "--file", ".env", "--require", "UNRELATED", "--json"]),
+            ("edit-env snapshots", ["edit-env", "snapshots", "--file", ".env", "--json"]),
         ]:
             output = self.call(leaf, args, json_output=True)
             assert "fixture_secret_not_for_output" not in output, "environment value leaked"
         assert env_file.read_bytes() == original.replace(b"EXISTING=before", b"EXISTING=after")
-        self.call("env restore", ["env", "restore", "--file", ".env", "--json"], json_output=True)
+        self.call("edit-env restore", ["edit-env", "restore", "--file", ".env", "--json"], json_output=True)
         assert env_file.read_bytes() == original, "snapshot did not restore exact bytes"
 
     def sniper(self):
         error = {"surface": "reported", "message": "audit_error real boundary", "run_id": "audit-run"}
-        recorded = json.loads(self.call("sniper report", ["sniper", "report", "--json"], json_output=True, input_text=json.dumps(error)))
+        recorded = json.loads(self.call("list-errors report", ["list-errors", "report", "--json"], json_output=True, input_text=json.dumps(error)))
         error_id = str(recorded["id"])
         for event in [
             {"type": "run", "run_id": "audit-run", "pid": 123, "port": 4321},
             {"type": "event", "kind": "hmr-update", "run_id": "audit-run", "data": {"files": ["lib.rs"]}},
             {"type": "event", "kind": "test-pass", "run_id": "audit-run"},
         ]:
-            self.call("sniper report", ["sniper", "report", "--json"], json_output=True, input_text=json.dumps(event))
+            self.call("list-errors report", ["list-errors", "report", "--json"], json_output=True, input_text=json.dumps(event))
         for leaf, args, text in [
-            ("sniper last", ["sniper", "last", "--json"], "audit_error"),
-            ("sniper since", ["sniper", "since", "0", "--json"], "audit_error"),
-            ("sniper show", ["sniper", "show", error_id, "--json"], "audit_error"),
-            ("sniper query", ["sniper", "query", "audit_error", "--json"], "audit_error"),
-            ("sniper hmr", ["sniper", "hmr", "--json"], "lib.rs"),
-            ("sniper env", ["sniper", "env", "--json"], "audit-run"),
-            ("sniper test", ["sniper", "test", "--json"], "test-pass"),
-            ("sniper cursor", ["sniper", "cursor", "--json"], error_id),
-            ("sniper gc", ["sniper", "gc", "--json"], None),
+            ("list-errors last", ["list-errors", "last", "--json"], "audit_error"),
+            ("list-errors since", ["list-errors", "since", "0", "--json"], "audit_error"),
+            ("list-errors show", ["list-errors", "show", error_id, "--json"], "audit_error"),
+            ("list-errors query", ["list-errors", "query", "audit_error", "--json"], "audit_error"),
+            ("list-errors hmr", ["list-errors", "hmr", "--json"], "lib.rs"),
+            ("list-errors env", ["list-errors", "env", "--json"], "audit-run"),
+            ("list-errors test", ["list-errors", "test", "--json"], "test-pass"),
+            ("list-errors cursor", ["list-errors", "cursor", "--json"], error_id),
+            ("list-errors gc", ["list-errors", "gc", "--json"], None),
         ]:
             self.call(leaf, args, contains=text, json_output=True)
-        self.call("sniper run", ["sniper", "run", "--", "/bin/sh", "-c", "printf audit_wrapper_failure >&2; exit 9"], exit_code=9)
+        self.call("list-errors run", ["list-errors", "run", "--", "/bin/sh", "-c", "printf audit_wrapper_failure >&2; exit 9"], exit_code=9)
         # Search indexes the error message; the captured tail is separate extra data.
-        self.call("sniper query", ["sniper", "query", "exited 9", "--json"], contains="audit_wrapper_failure", json_output=True)
+        self.call("list-errors query", ["list-errors", "query", "exited 9", "--json"], contains="audit_wrapper_failure", json_output=True)
         self.mcp(int(error_id))
 
     def mcp(self, error_id):
-        argv = [str(self.pixel), "sniper", "mcp"]
+        argv = [str(self.pixel), "list-errors", "mcp"]
         process = subprocess.Popen(argv, cwd=self.repo, env=self.env,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
@@ -249,28 +249,28 @@ class Audit:
                 assert expected in json.dumps(result), result
             process.stdin.close()
             assert process.wait(timeout=10) == 0
-            self.results.append({"leaf": "sniper mcp", "argv": ["sniper", "mcp"], "exit_code": 0, "status": "PASS", "seconds": round(time.monotonic() - started, 4), "assertion": "initialize, list exactly 5 tools, call all 5 against populated store, EOF cleanup"})
+            self.results.append({"leaf": "list-errors mcp", "argv": ["list-errors", "mcp"], "exit_code": 0, "status": "PASS", "seconds": round(time.monotonic() - started, 4), "assertion": "initialize, list exactly 5 tools, call all 5 against populated store, EOF cleanup"})
         finally:
             if process.poll() is None:
                 process.kill()
                 process.wait()
 
     def tasks(self):
-        task = json.loads(self.call("task begin", ["task", "begin", "fix login_user boundary", "--session", "audit-session", "--provider", "codex", "--json"], json_output=True))["task_id"]
-        task = json.loads(self.call("task accept", ["task", "accept", "fix login_user boundary", "--session", "accepted-session", "--provider", "claude", "--json"], contains="accepted", json_output=True))["task_id"]
+        task = json.loads(self.call("task-state begin", ["task-state", "begin", "fix login_user boundary", "--session", "audit-session", "--provider", "codex", "--json"], json_output=True))["task_id"]
+        task = json.loads(self.call("task-state accept", ["task-state", "accept", "fix login_user boundary", "--session", "accepted-session", "--provider", "claude", "--json"], contains="accepted", json_output=True))["task_id"]
         for leaf in ["prepare", "status", "events"]:
-            self.call(f"task {leaf}", ["task", leaf, task, "--json"], contains=task, json_output=True)
+            self.call(f"task-state {leaf}", ["task-state", leaf, task, "--json"], contains=task, json_output=True)
         plan = self.root / "plan.json"
         plan.write_text(json.dumps({"lanes": [{"id": "login-lane", "owned_paths": ["lib.rs"], "symbols": ["lib.rs#login_user#function"], "depends_on": [], "candidate_count": 1}]}))
-        self.call("task plan-validate", ["task", "plan-validate", task, "--file", str(plan), "--json"], json_output=True)
-        candidate = json.loads(self.call("task sandbox-create", ["task", "sandbox-create", task, "candidate", "--owned-path", "lib.rs", "--json"], contains="sandbox_root", json_output=True))
+        self.call("task-state plan-validate", ["task-state", "plan-validate", task, "--file", str(plan), "--json"], json_output=True)
+        candidate = json.loads(self.call("task-state sandbox-create", ["task-state", "sandbox-create", task, "candidate", "--owned-path", "lib.rs", "--json"], contains="sandbox_root", json_output=True))
         sandbox = Path(candidate["sandbox_root"])
         with (sandbox / "lib.rs").open("a") as source:
             source.write("pub fn sandbox_verified() {}\n")
-        self.call("task sandbox-inspect", ["task", "sandbox-inspect", task, "candidate", "--json"], contains="eligible", json_output=True)
-        self.call("task sandbox-promote", ["task", "sandbox-promote", task, "candidate", "--json"], contains="promoted", json_output=True)
+        self.call("task-state sandbox-inspect", ["task-state", "sandbox-inspect", task, "candidate", "--json"], contains="eligible", json_output=True)
+        self.call("task-state sandbox-promote", ["task-state", "sandbox-promote", task, "candidate", "--json"], contains="promoted", json_output=True)
         assert "sandbox_verified" in (self.repo / "lib.rs").read_text()
-        self.call("task sandbox-cleanup", ["task", "sandbox-cleanup", task, "candidate", "--json"], json_output=True)
+        self.call("task-state sandbox-cleanup", ["task-state", "sandbox-cleanup", task, "candidate", "--json"], json_output=True)
         assert not sandbox.exists()
         self.git("add", "lib.rs")
         self.git("commit", "-m", "fixture: promoted sandbox")
@@ -279,61 +279,61 @@ class Audit:
         worker.chmod(0o700)
         cleanup = [(task, "worker")]
         try:
-            self.call("task sandbox-create", ["task", "sandbox-create", task, "worker", "--owned-path", "lib.rs", "--json"], json_output=True)
-            self.call("task worker-start", ["task", "worker-start", task, "worker", "--executable", str(worker), "--json"], json_output=True)
-            self.call("task worker-status", ["task", "worker-status", task, "worker", "--json"], contains="running", json_output=True)
-            self.call("task worker-stop", ["task", "worker-stop", task, "worker", "--json"], json_output=True)
-            self.call("task sandbox-cancel", ["task", "sandbox-cancel", task, "worker", "--json"], json_output=True)
+            self.call("task-state sandbox-create", ["task-state", "sandbox-create", task, "worker", "--owned-path", "lib.rs", "--json"], json_output=True)
+            self.call("task-state worker-start", ["task-state", "worker-start", task, "worker", "--executable", str(worker), "--json"], json_output=True)
+            self.call("task-state worker-status", ["task-state", "worker-status", task, "worker", "--json"], contains="running", json_output=True)
+            self.call("task-state worker-stop", ["task-state", "worker-stop", task, "worker", "--json"], json_output=True)
+            self.call("task-state sandbox-cancel", ["task-state", "sandbox-cancel", task, "worker", "--json"], json_output=True)
             # A completed/stopped worker task is not a new race authorization.
-            task = json.loads(self.call("task accept", ["task", "accept", "race login implementations", "--provider", "claude", "--session", "race-session", "--json"], contains="accepted", json_output=True))["task_id"]
+            task = json.loads(self.call("task-state accept", ["task-state", "accept", "race login implementations", "--provider", "claude", "--session", "race-session", "--json"], contains="accepted", json_output=True))["task_id"]
             for candidate_id in ["winner", "loser"]:
                 cleanup.append((task, candidate_id))
-                self.call("task sandbox-create", ["task", "sandbox-create", task, candidate_id, "--owned-path", "lib.rs", "--json"], json_output=True)
+                self.call("task-state sandbox-create", ["task-state", "sandbox-create", task, candidate_id, "--owned-path", "lib.rs", "--json"], json_output=True)
             worker.write_text("#!/bin/sh\nif [ \"$PIXEL_WORKTREE_ID\" = winner ]; then printf '\\npub fn race_winner() {}\\n' >> lib.rs; git add lib.rs; exit 0; fi\ntrap 'exit 0' TERM\nwhile :; do /bin/sleep 1; done\n")
-            self.call("task race-start", ["task", "race-start", task, "winner", "loser", "--executable", str(worker), "--json"], json_output=True)
+            self.call("task-state race-start", ["task-state", "race-start", task, "winner", "loser", "--executable", str(worker), "--json"], json_output=True)
             assert self.results[-1]["status"] == "PASS", "race did not start"
             deadline = time.monotonic() + 8
             while time.monotonic() < deadline:
-                self.call("task race-poll", ["task", "race-poll", task, "winner", "loser", "--json"], json_output=True)
+                self.call("task-state race-poll", ["task-state", "race-poll", task, "winner", "loser", "--json"], json_output=True)
                 if "race_winner" in (self.repo / "lib.rs").read_text():
                     break
                 time.sleep(0.1)
             assert "race_winner" in (self.repo / "lib.rs").read_text(), "race winner not promoted"
         finally:
             for task_id, candidate_id in cleanup:
-                subprocess.run([str(self.pixel), "task", "worker-stop", task_id, candidate_id, "--json"], cwd=self.repo, env=self.env, capture_output=True, timeout=10)
-                subprocess.run([str(self.pixel), "task", "sandbox-cleanup", task_id, candidate_id, "--json"], cwd=self.repo, env=self.env, capture_output=True, timeout=10)
-        self.call("task show", ["task", "show", "--session", "audit-session", "--json"], json_output=True)
-        self.call("task reset", ["task", "reset", "--session", "audit-session", "--json"], json_output=True)
+                subprocess.run([str(self.pixel), "task-state", "worker-stop", task_id, candidate_id, "--json"], cwd=self.repo, env=self.env, capture_output=True, timeout=10)
+                subprocess.run([str(self.pixel), "task-state", "sandbox-cleanup", task_id, candidate_id, "--json"], cwd=self.repo, env=self.env, capture_output=True, timeout=10)
+        self.call("task-state show", ["task-state", "show", "--session", "audit-session", "--json"], json_output=True)
+        self.call("task-state reset", ["task-state", "reset", "--session", "audit-session", "--json"], json_output=True)
 
     def hooks(self):
         # Prior mutation fixtures rewrote HEAD; refresh history before saving a
         # current-head manifest. Post-compaction correctly refuses stale hints.
-        self.call("index", ["index", "--history"])
-        self.call("ready", ["ready", "--json"], json_output=True)
-        self.call("targets", ["targets", "fix login_user", "--json"], contains="lib.rs", json_output=True)
+        self.call("build-index", ["build-index", "--history"])
+        self.call("prepare-repo", ["prepare-repo", "--json"], json_output=True)
+        self.call("scope-task", ["scope-task", "fix login_user", "--json"], contains="lib.rs", json_output=True)
         payload = {"cwd": str(self.repo), "session_id": "hook-audit", "hook_event_name": "PreToolUse", "tool_name": "shell", "tool_input": {"command": "grep -n login_user lib.rs"}}
-        self.call("hook guard", ["hook", "guard", "--provider", "codex"], input_text=json.dumps(payload), contains="pixel search-compat", json_output=True)
+        self.call("run-hook guard", ["run-hook", "guard", "--provider", "codex"], input_text=json.dumps(payload), contains="pixel search-like-rg", json_output=True)
         foreign = self.root / "foreign-hook.sh"
         foreign.write_text("printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"audit foreign context\"}}'\n")
         backup = self.root / "foreign-hook.json"
         backup.write_text(json.dumps({"version": 1, "provider": "codex", "pre_tool_use": [{"matcher": "shell", "hooks": [{"type": "command", "command": f'/bin/sh "{foreign}"'}]}], "managed_pre_tool_use": []}))
         backup.chmod(0o600)
-        self.call("hook composed-guard", ["hook", "composed-guard", "--backup", str(backup)], input_text=json.dumps(payload), contains="audit foreign context", json_output=True)
-        self.call("hook session-start", ["hook", "session-start"], input_text="{}", contains="capabilities", json_output=True)
+        self.call("run-hook composed-guard", ["run-hook", "composed-guard", "--backup", str(backup)], input_text=json.dumps(payload), contains="audit foreign context", json_output=True)
+        self.call("run-hook session-start", ["run-hook", "session-start"], input_text="{}", contains="capabilities", json_output=True)
         # This hook only queries an already-running daemon; warm the disposable one.
         try:
-            self.call("hook prompt-submit", ["hook", "prompt-submit", "--provider", "codex"], input_text=json.dumps({"cwd": str(self.repo), "session_id": "hook-audit", "prompt": "Fix login_user validation", "hook_event_name": "UserPromptSubmit"}), contains="lib.rs", json_output=True)
+            self.call("run-hook prompt-submit", ["run-hook", "prompt-submit", "--provider", "codex"], input_text=json.dumps({"cwd": str(self.repo), "session_id": "hook-audit", "prompt": "Fix login_user validation", "hook_event_name": "UserPromptSubmit"}), contains="lib.rs", json_output=True)
             # A question creates a real session packet without an automatic coding handoff.
-            self.call("hook prompt-submit", ["hook", "prompt-submit", "--provider", "claude"], input_text=json.dumps({"cwd": str(self.repo), "session_id": "display-session", "prompt": "How does login_user validation work?", "hook_event_name": "UserPromptSubmit"}), contains="lib.rs", json_output=True)
-            self.call("task show", ["task", "show", "--session", "display-session", "--json"], contains="display-session", json_output=True)
-            self.call("task reset", ["task", "reset", "--session", "display-session", "--json"], json_output=True)
-            reset = self.call("task show", ["task", "show", "--session", "display-session", "--json"], json_output=True)
+            self.call("run-hook prompt-submit", ["run-hook", "prompt-submit", "--provider", "claude"], input_text=json.dumps({"cwd": str(self.repo), "session_id": "display-session", "prompt": "How does login_user validation work?", "hook_event_name": "UserPromptSubmit"}), contains="lib.rs", json_output=True)
+            self.call("task-state show", ["task-state", "show", "--session", "display-session", "--json"], contains="display-session", json_output=True)
+            self.call("task-state reset", ["task-state", "reset", "--session", "display-session", "--json"], json_output=True)
+            reset = self.call("task-state show", ["task-state", "show", "--session", "display-session", "--json"], json_output=True)
             assert json.loads(reset)["status"] == "absent" and json.loads(reset)["task_id"] is None, "reset retained the populated session packet"
         finally:
             self.call("daemon stop", ["daemon", "stop"])
-        self.call("hook post-compaction", ["hook", "post-compaction"], input_text=json.dumps({"cwd": str(self.repo), "session_id": "hook-audit", "hook_event_name": "PostCompaction"}), contains="lib.rs", json_output=True)
-        self.call("hook post-tool-use", ["hook", "post-tool-use", "--provider", "claude"], input_text=json.dumps({"cwd": str(self.repo), "tool_name": "Edit", "tool_input": {"file_path": str(self.repo / "lib.rs")}}), contains="PostToolUse", json_output=True)
+        self.call("run-hook post-compaction", ["run-hook", "post-compaction"], input_text=json.dumps({"cwd": str(self.repo), "session_id": "hook-audit", "hook_event_name": "PostCompaction"}), contains="lib.rs", json_output=True)
+        self.call("run-hook post-tool-use", ["run-hook", "post-tool-use", "--provider", "claude"], input_text=json.dumps({"cwd": str(self.repo), "tool_name": "Edit", "tool_input": {"file_path": str(self.repo / "lib.rs")}}), contains="PostToolUse", json_output=True)
 
 
 def main():

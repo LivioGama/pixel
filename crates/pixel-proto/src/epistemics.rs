@@ -29,6 +29,13 @@ pub struct Epistemics {
     pub staleness_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<String>,
+    /// Known blind spots of static analysis that mean `closed_world` can
+    /// never be honestly asserted for graph-derived answers (callbacks
+    /// passed as arguments, dynamic dispatch, macro-generated calls, eval).
+    /// Populated by the daemon's `derive_epistemics`; left empty by
+    /// `from_sources` (facts/history have their own completeness semantics).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extraction_limits: Vec<String>,
 }
 
 impl Default for Epistemics {
@@ -39,6 +46,7 @@ impl Default for Epistemics {
             basis: String::new(),
             staleness_ms: None,
             confidence: None,
+            extraction_limits: Vec::new(),
         }
     }
 }
@@ -55,6 +63,7 @@ impl Epistemics {
                 .filter_map(|source| source.freshness_ms)
                 .max(),
             confidence: None,
+            extraction_limits: Vec::new(),
         }
     }
 }
@@ -111,6 +120,7 @@ mod tests {
             basis: "graph".into(),
             staleness_ms: Some(5_000),
             confidence: None,
+            extraction_limits: Vec::new(),
         };
         let value = serde_json::to_value(&epistemics).unwrap();
         assert_eq!(

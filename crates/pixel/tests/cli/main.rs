@@ -13,6 +13,7 @@ mod post_edit_cli;
 mod publish_cli;
 mod recall_cli;
 mod release_check_cli;
+mod renamed_commands;
 mod rescue_cli;
 mod search_compat_cli;
 mod support;

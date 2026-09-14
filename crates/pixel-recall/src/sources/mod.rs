@@ -6,6 +6,7 @@ pub mod cursor;
 pub mod devin;
 pub mod gemini;
 pub mod opencode;
+pub mod pi;
 pub mod zcode;
 
 use std::path::PathBuf;

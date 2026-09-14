@@ -2,7 +2,7 @@
  * Shared plumbing for every server-side adapter: the envelope types that
  * mirror the Rust ingest contract (`pixel-sniper/src/types.rs`), pixel
  * binary resolution, and a serialized shell-out queue that pipes one JSON
- * record at a time into `pixel sniper report --json -`.
+ * record at a time into `pixel list-errors report --json -`.
  *
  * Field names are snake_case on purpose — they must round-trip through the
  * Rust serde structs verbatim.
@@ -179,7 +179,7 @@ export interface SinkReporterOptions {
 
 /**
  * Queues envelopes and pipes them one at a time (a single child process at a
- * time, strictly ordered) into `pixel sniper report --json -`.
+ * time, strictly ordered) into `pixel list-errors report --json -`.
  *
  * Every path is best-effort: a failed shell-out is logged (rate-limited) and
  * dropped — the sink must never break the host process.
@@ -234,7 +234,7 @@ export class SinkReporter {
         const spawnImpl = this.opts.spawnImpl ?? spawn;
         const child = spawnImpl(
           this.opts.bin,
-          ["sniper", "report", "--json", "-", "--repo", this.opts.repo],
+          ["list-errors", "report", "--json", "-", "--repo", this.opts.repo],
           {
             stdio: ["pipe", "ignore", "pipe"],
             timeout: Math.max(1, this.opts.timeoutMs ?? 10_000),
@@ -246,13 +246,13 @@ export class SinkReporter {
           if (stderr.length < 2048) stderr += String(chunk);
         });
         child.on("error", (err: Error) => {
-          this.warn(`pixel sniper report spawn failed: ${err.message}`);
+          this.warn(`pixel list-errors report spawn failed: ${err.message}`);
           resolve();
         });
         child.on("close", (code: number | null) => {
           if (code !== 0) {
             this.warn(
-              `pixel sniper report exited ${code}${stderr ? `: ${stderr.trim()}` : ""}`,
+              `pixel list-errors report exited ${code}${stderr ? `: ${stderr.trim()}` : ""}`,
             );
           }
           resolve();
@@ -262,7 +262,7 @@ export class SinkReporter {
         });
         child.stdin?.end(JSON.stringify(envelope));
       } catch (err) {
-        this.warn(`pixel sniper report failed: ${String(err)}`);
+        this.warn(`pixel list-errors report failed: ${String(err)}`);
         resolve();
       }
     });

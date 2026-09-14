@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-09-14
+
+### Added
+- `pixel plan "<prompt>"` (or `--query dead-interactive|dead-code|hotspots|recent-changes|by-concept`): a deterministic todo list from the code graph and git history, as markdown, `--format compact` or `--json`, each finding with file, line, severity and fan-in.
+- Native plugin manifests for Claude Code, Codex, Gemini CLI, OpenCode, pi, Devin, Qoder and Grok, plus generated rules for Cursor, Windsurf, Kiro and Cline, all from the agent prompt (`scripts/gen-plugin-assets.sh`). A SessionStart/SubagentStart hook (`hooks/pixel-context.sh`) injects the protocol as context.
+- `pixel recall` indexes pi sessions (`~/.pi/agent/sessions`, or `$PI_CODING_AGENT_DIR/sessions`).
+- `pixel impact` lists the symbols that pass the target as a callback argument under `referenced_by`, and graph answers carry `epistemics.extraction_limits` (callbacks, dynamic dispatch, macros, eval) next to `closed_world: false`.
+- `pixel scope-task` expands French task words to their English code terms, and falls back to semantic code search when the lexical pass finds no P0/P1 file.
+- Base shards are cached per commit under `$XDG_CACHE_HOME/pixel/shards` (else `~/.cache/pixel/shards`), so a second worktree at the same commit links the shard instead of rebuilding it.
+- `.agents/skills/release/`: the release procedure as a project skill (version choice, tag, the `develop` → `main` PR, a release record for resuming after a context loss, verification of the published release from a fresh download with the binary's `commit:` line matched to the tag, failure classification before any retry, hotfixes) plus `prepare.sh x.y.z`, which moves every workspace member to `x.y.z`, inserts `## [x.y.z] - DATE` under an empty Unreleased, refreshes `Cargo.lock`, lists the pull requests merged since the last tag for the changelog review and runs `check-release` from the tree, refusing before any write when the tag or heading exists or Unreleased is empty. Listed in AGENTS.md and CONTRIBUTING.md.
+
+### Fixed
+- Plugin installs get updates and a protocol they can follow. The plugin manifests said 0.2.3 while the crates were at 0.2.4 and nothing bumped them; Claude Code and Codex only update a plugin when its version changes. They now carry the workspace version, `prepare.sh` bumps them and regenerates the prompt surfaces, and `pixel check-release` fails on a manifest at another version (new `plugin-versions` check). The SessionStart/SubagentStart hook no longer needs `python3`, gives sub-agents the short sub-agent prompt (new `PIXEL-SUBAGENT.md`) instead of the 18 KB agent prompt, and injects a short notice instead of the protocol when `pixel` is missing or predates the command names; the injected setup text no longer tells the agent to pipe an installer from `main` into `sh`. The hook command resolved against the non-existent `CODEX_PLUGIN_ROOT` and fell back to the project directory; it now uses `CLAUDE_PLUGIN_ROOT` or Codex's `PLUGIN_ROOT`. Manifest descriptions name the current commands.
+- `pixel recall` indexes pi sessions as pi writes them. A forked session starts with a copy of its parent's entries, which were indexed a second time (twice in search results and embeddings, with the parent's first timestamp); the fork now keeps only the entries after its header and records its parent. A subagent run (`<cwd>/<parent>/<hash>/run-<n>/session.jsonl`) is marked as a subagent of its parent instead of a top-level session, so `recall sessions` hides it by default and its orchestrator prompts are not embedded as human intent. `!command` runs (`bashExecution` messages) are indexed, string `content` is read as well as text parts, and `PI_CODING_AGENT_DIR` moves the indexed and watched directory as it moves pi's. The guard's transcript-store advisory covers `~/.pi/agent/sessions`.
+- `pixel scope-task` no longer drops French function words from English tasks: `comment`, `car`, `plus`, `sans`, `des`, `est` were stopwords for every task, so "fix comment parsing" searched for `parsing` alone. A task is French when two distinct French function words (or unambiguous French domain words such as `connexion`, `bouton`) occur; only then are the French stopwords dropped and the French relation keys that are also English words (`client`, `message`, `modifier`, `installer`, `vue`, …) expanded to their translation. `très` was never dropped (the task is accent-folded first); `tres` is.
+- `pixel plan` runs in the daemon (a new `plan` op, daemon protocol 10) instead of rebuilding the whole graph from the CLI on every call. The CLI build deleted and re-inserted each file's edges while a running daemon could read them (an `impact` answering 0 callers, or `SQLITE_BUSY`); the daemon now refreshes its graph incrementally and serves the queries.
+- `pixel plan`'s dead-code findings read `No callers found for function `x`: confirm it is unused before removing` instead of `Remove unused function`, and skip `main`, Go's `init` and functions in test files (`tests/`, `__tests__/`, `*.test.*`, `*.spec.*`, `*_test.go`, `test_*.py`). Prompts classify by whole words ("unlinked" no longer asks for dead links). `recent-changes` ranks the files the graph knows by commits in the last 30 days and caps after that filter (it used to keep the first paths alphabetically, README included, and returned nothing once a month of `git log` exceeded 1 MiB). Hotspots break fan-in ties by path, and fan-in lookups are deduplicated and chunked so a plan over more than 32 766 dead symbols no longer fails with "too many SQL variables".
+- The code graph no longer links a value passed to a call to a function of the same name: `consume(user.name)` made `name()` look referenced (hiding it from dead-code findings and adding it to `pixel impact`'s `referenced_by`). A member argument is a callback reference only on `this`/`self`/`Self` (`this.onClick`), and an argument no function in the graph is named after (`g(x)`) leaves no unresolved row, so `pixel who-calls <fn> --role callees` no longer reports `lower_bound` for every function that passes a variable on. An unresolved callback no longer counts as an unresolved outgoing call either.
+- Rendering a JSX component (`<Button />`, `<Menu.Item>`) is a call edge from the renderer to the component, so a component that is only rendered has callers in `pixel impact`/`who-calls` and is not reported as dead code by `pixel plan`.
+- A graph built by an older extractor is rebuilt: the freshness signature only hashed file contents, so existing `graph.db` files never picked up extraction changes. `graph.db` now records an extractor version and a mismatch forces a full rebuild.
+- The follow-up commands pixel prints for the agent use the current command names: `pixel plan-rollback`'s revert option (`pixel plan-rollback --apply …`, was `pixel rescue --apply`), `pixel dig-history`'s `--show` follow-up (was `pixel excavate --show`), the duplicate-flow error (`pixel replay-flow revise`), the scope-task manifest note (`pixel scope-task --clear`) and the rebuild hints (`pixel build-index`). The old spellings only ran through the aliases that go away at 1.0; a test now fails when production code prints a pre-rename or unknown command. `scripts/system_audit.py` expected the guard's rewrite to name `pixel search-compat` and failed; it and the demo and bench scripts call the current names.
+- `pixel self-update` (`upgrade`) no longer overwrites a binary a package manager installed. Without `--install-path`, its resolution (the running binary, else the first `pixel` on PATH, else `~/.local/bin/pixel`) lands on the mise install dir or the Homebrew keg on any machine where `pixel` comes from them, so a bare `self-update` from a checkout replaced mise's 0.2.4 with a local `target/dev-release` build while `mise ls` still reported 0.2.4. A resolved path under mise's `installs/` (`~/.local/share/mise`, or `$MISE_DATA_DIR`) or a Homebrew Cellar (`/opt/homebrew/Cellar`, `/usr/local/Cellar`, `$HOMEBREW_CELLAR`), symlinks followed, is now refused before the build runs, with an error that names the resolved path and its owner and proposes `--dry-run`, `--install-path` and `--dev`. `--dry-run` still prints the path, then exits 1 on a refused one. An explicit `--install-path` writes where it says, as before. The new `--dev` flag installs to `~/.local/bin/pixel-dev`, a side build called as `pixel-dev` that never shadows or replaces `pixel`.
+- The surfaces that read a command name back as text accept both spellings of a renamed command. `pixel uninstall` recognised the Codex composed-guard entry only as `hook composed-guard`, so the `run-hook composed-guard` entry every install since the rename writes was never restored from its snapshot. The prompt-submit hook no longer treated a successful `commit-and-push` (formerly `ship`) as a task completion. The guard's foreign-hook snapshot boundary refused to replay `pixel run-hook …` but let `pixel hook …` through, which recursed. The call-loop breaker counts history written under an old name (`search`) toward the current one (`search-content`). `pixel doctor`'s `rule.scenarios` accepts a deployed rule text that names the mandatory scenarios by their old names (`pixel targets`, `pixel resolve`, `pixel rescue`, `pixel reconcile`), as every agent prompt installed before the rename does. `scripts/pixel-smoke-test.sh` expects the current guard advisories (`pixel plan-rollback`, `pixel commit`, `pixel search-like-rg`) and checks `ready`, `changes`, `symbol` and `impact` under both names.
+- The command rename had also renamed the wire layer: `Op::op_name`, `SESSION_CAPABILITIES`, the daemon's op-name matches and its JSON output keys (`targets`, `symbol`, `processes`, `clusters`) carried the new CLI spellings while the serde tags stayed `search`, `targets`, `symbol`, so `targets` responses lost their content evidence, the `inspect`/`review` dirty-list rule never matched, and the session-start capability block advertised names no op answers to. The wire layer is back on the serde tags; only the CLI surface, the agent prompt and the doctrine text use the new names. The doctrine's fourth scenario is `pixel sync-branch` (there is no `fetch-branch` command). `pixel install` and `pixel uninstall` recognise both `pixel hook …` (0.2.x installs) and `pixel run-hook …` entries, so an upgrade replaces the old hook instead of stacking a second one. The `@pixel/sniper` TypeScript package (Vite plugin, vitest reporter) shells out to `pixel list-errors report` again instead of the removed `pixel sniper report`, so browser, HMR and vitest records land in the sink. `develop` was also failing `cargo fmt --check` and `cargo clippy -D warnings` (`pixel-index`, `pixel-graph`, the rename tool); both gates pass again.
+
+### Changed
+- Every subcommand renamed after 0.2.4 (verb-first names, commit 08268b0) accepts its old name again as a hidden alias, so a script, hook entry or agent prompt written for 0.2.x no longer fails with `unrecognized subcommand` (a CI job calling `ready` broke on 2026-09-14). The old names stay accepted until 1.0, which removes them. Invoking one prints a single stderr line, `note: 'ready' is now 'prepare-repo'; the old name stays accepted until 1.0`, never on stdout or in `--json` output, and silenced like the metrics line by `--metrics off`, `PIXEL_METRICS=0` and the protected streams (hooks, `search-like-rg`, the statusline). `--help` lists only the new names. Protocol op names and JSON fields are unchanged. The renames:
+
+| Old name | New name |
+| --- | --- |
+| `ask` | `search-meaning` |
+| `branch` | `new-branch` |
+| `branches` | `list-branches` |
+| `changes` | `what-changed` |
+| `clusters` | `list-areas` |
+| `context` | `pack-context` |
+| `env` | `edit-env` |
+| `excavate` | `dig-history` |
+| `flow` | `replay-flow` |
+| `graph` | `rebuild-graph` |
+| `history` | `commit-history` |
+| `history-search` | `search-history` |
+| `hook` | `run-hook` |
+| `index` | `build-index` |
+| `inspect` | `repo-state` |
+| `journal` | `record-event` |
+| `lifecycle` | `file-history` |
+| `log` | `action-log` |
+| `map` | `repo-map` |
+| `processes` | `list-flows` |
+| `provenance` | `who-wrote` |
+| `publish` | `commit` |
+| `query` | `run-recipe` |
+| `ready` | `prepare-repo` |
+| `reconcile` | `sync-branch` |
+| `release-check` | `check-release` |
+| `rescue` | `plan-rollback` |
+| `resolve` | `find-code` |
+| `review` | `review-changes` |
+| `rewrite` | `squash-branch` |
+| `savings` | `token-savings` |
+| `search` | `search-content` |
+| `search-compat` | `search-like-rg` |
+| `ship` | `commit-and-push` |
+| `skeleton` | `list-signatures` |
+| `sniper` | `list-errors` |
+| `stats` | `index-stats` |
+| `symbol` | `find-symbol` |
+| `sync` | `fetch` |
+| `targets` | `scope-task` |
+| `task` | `task-state` |
+| `trace` | `call-path` |
+| `update` | `fast-forward` |
+| `upgrade` | `self-update` |
+| `uses` | `who-calls` |
+- Every production git call now goes through `pixel_git::GitRunner`, with its 120 s timeout, output cap and credential-redacted stderr. Fourteen call sites used to spawn `git` bare: the `pixel status` and `pixel doctor` commit counts, the `git add .` file list in the guard hook, the task handoff's tracked-file list, the task sandbox (`diff`, `apply`, `hash-object`), `pixel repo-state`'s branch, the fingerprint status read, and the sniper run's HEAD and project-root lookups. A hung `git status` under the guard hook used to hang the agent's tool call indefinitely; it now fails after the timeout. The sandbox's `diff --binary` is capped at 64 MiB and reports an error past it instead of applying a truncated patch. `crates/pixel-git/tests/boundary.rs` fails the build when a `Command::new("git")` appears in another crate's non-test code.
+
+### Removed
+- `.agents/rules/pixel.md`, a generated copy of the agent prompt in the repository's own rules directory: it loaded the full protocol into every maintainer session a second time, next to the wrapper's copy, and no plugin manifest read it.
+- `pixel rename`, the one-shot tool that performed the command rename. It rewrote a hardcoded list of this repository's files with plain string replacement (its unbounded `pixel sync` match turned `sync-branch` into `fetch-branch`), wrote in place without a clean-tree check, and ran `scripts/gen-plugin-assets.sh` in whatever repository it was pointed at. `pixel_proto::commands::RENAMED_COMMANDS` is the rename table.
+- `migrate` (delete the legacy `.gitpixel/` directory) was dropped by the rename without notice. It is back as a hidden command that exits 0, prints `note: 'migrate' was removed and does nothing` on stderr and touches nothing, so a script that still calls it keeps running; delete a leftover `.gitpixel/` by hand.
+
+### Security
+- `rustls` 0.23.44 → 0.23.45 for RUSTSEC-2026-0285 (TLS 1.3 handshake messages accepted across encryption level boundaries), used by the model download path (`ureq` via `hf-hub`).
+
 ## [0.2.4] - 2026-09-14
 
 ### Added

@@ -22,7 +22,7 @@ fn ask_reports_cosine_ranking_coverage_and_honest_human_labels() {
     .unwrap();
     let run = |extra: &[&str]| {
         std::process::Command::new(env!("CARGO_BIN_EXE_pixel"))
-            .args(["ask", "manual setup", "."])
+            .args(["search-meaning", "manual setup", "."])
             .args(extra)
             .current_dir(&repo)
             .env("PIXEL_DAEMON_AUTO_START", "0")

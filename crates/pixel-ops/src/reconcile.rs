@@ -194,8 +194,8 @@ pub fn reconcile(root: &Path, opts: &ReconcileOptions) -> Result<Value, String> 
 }
 
 /// Write a `.pixel/reconcile-conflict.json` state file so the guard knows
-/// `pixel reconcile` has reported a conflict and should allow raw `git rebase`
-/// as an escape hatch. Cleared on successful reconcile or by `pixel targets --clear`.
+/// `pixel sync-branch` has reported a conflict and should allow raw `git rebase`
+/// as an escape hatch. Cleared on successful reconcile or by `pixel scope-task --clear`.
 fn write_conflict_state(root: &Path, conflict_count: usize) {
     let pixel_dir = root.join(".pixel");
     let _ = std::fs::create_dir_all(&pixel_dir);
@@ -295,9 +295,9 @@ pub fn reconcile_with_hooks(
     if let Some(op) = integration_in_progress(root) {
         return Err(format!(
             "{op} is already in progress in this repository; \
-             pixel reconcile would abort it. Finish it (git rebase --continue, \
+             pixel sync-branch would abort it. Finish it (git rebase --continue, \
              git merge --continue, git cherry-pick --continue) or abort it \
-             yourself, then re-run pixel reconcile."
+             yourself, then re-run pixel sync-branch."
         ));
     }
 

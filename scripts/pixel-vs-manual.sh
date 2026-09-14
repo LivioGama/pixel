@@ -11,7 +11,7 @@
 # Prerequisites:
 #   - pixel installed (`command -v pixel`), or built under target/ (see
 #     CONTRIBUTING.md "Local install loop"); PIXEL_BIN overrides
-#   - the repo is indexed on first run (pixel index + pixel graph, below)
+#   - the repo is indexed on first run (pixel build-index + pixel rebuild-graph, below)
 
 set -euo pipefail
 
@@ -83,13 +83,13 @@ row() {
 
 # ── Ensure repo is indexed ──────────────────────────────────────────────
 echo -e "${DIM}Indexing repo...${R}"
-"$PIXEL_BIN" index "$REPO" 2>/dev/null || true
-"$PIXEL_BIN" graph "$REPO" 2>/dev/null || true
+"$PIXEL_BIN" build-index "$REPO" 2>/dev/null || true
+"$PIXEL_BIN" rebuild-graph "$REPO" 2>/dev/null || true
 echo ""
 
 # `install` is ambiguous by bare name (a function, a module, a test method):
-# impact/context take the uid, which `pixel symbol` prints in its last column.
-INSTALL_UID=$("$PIXEL_BIN" symbol install "$REPO" 2>/dev/null | awk '$1=="function"{print $NF; exit}')
+# impact/context take the uid, which `pixel find-symbol` prints in its last column.
+INSTALL_UID=$("$PIXEL_BIN" find-symbol install "$REPO" 2>/dev/null | awk '$1=="function"{print $NF; exit}')
 INSTALL_UID="${INSTALL_UID:-crates/pixel-install/src/install.rs#install#function}"
 
 OUTDIR="/tmp/pixel-vs-manual"
@@ -118,9 +118,9 @@ head -10 "$OUTDIR/manual-1.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/manual-1.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${M1}ms${R}"
 
-echo -e "\n  ${GRN}${B}── PIXEL: pixel search GUARD_MATCHER ──${R}"
+echo -e "\n  ${GRN}${B}── PIXEL: pixel search-content GUARD_MATCHER ──${R}"
 P1=$(run_cmd "pixel-1" "$OUTDIR/pixel-1.txt" \
-  "$PIXEL_BIN" search "GUARD_MATCHER" "$REPO" 2>/dev/null || true)
+  "$PIXEL_BIN" search-content "GUARD_MATCHER" "$REPO" 2>/dev/null || true)
 head -10 "$OUTDIR/pixel-1.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/pixel-1.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${P1}ms${R}"
@@ -163,9 +163,9 @@ head -15 "$OUTDIR/manual-3.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/manual-3.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${M3}ms${R}"
 
-echo -e "\n  ${GRN}${B}── PIXEL: pixel excavate --phrase register_mcp_server ──${R}"
+echo -e "\n  ${GRN}${B}── PIXEL: pixel dig-history --phrase register_mcp_server ──${R}"
 P3=$(run_cmd "pixel-3" "$OUTDIR/pixel-3.txt" \
-  "$PIXEL_BIN" excavate --phrase "$DELETED_FN" "$REPO" 2>/dev/null || true)
+  "$PIXEL_BIN" dig-history --phrase "$DELETED_FN" "$REPO" 2>/dev/null || true)
 head -15 "$OUTDIR/pixel-3.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/pixel-3.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${P3}ms${R}"
@@ -184,9 +184,9 @@ head -10 "$OUTDIR/manual-4.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/manual-4.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${M4}ms${R}"
 
-echo -e "\n  ${GRN}${B}── PIXEL: pixel resolve 'guard matcher' ──${R}"
+echo -e "\n  ${GRN}${B}── PIXEL: pixel find-code 'guard matcher' ──${R}"
 P4=$(run_cmd "pixel-4" "$OUTDIR/pixel-4.txt" \
-  "$PIXEL_BIN" resolve "guard matcher" "$REPO" 2>/dev/null || true)
+  "$PIXEL_BIN" find-code "guard matcher" "$REPO" 2>/dev/null || true)
 head -15 "$OUTDIR/pixel-4.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/pixel-4.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${P4}ms${R}"
@@ -208,9 +208,9 @@ head -15 "$OUTDIR/manual-5.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/manual-5.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${M5}ms${R}"
 
-echo -e "\n  ${GRN}${B}── PIXEL: pixel context $SYMBOL_UID ──${R}"
+echo -e "\n  ${GRN}${B}── PIXEL: pixel pack-context $SYMBOL_UID ──${R}"
 P5=$(run_cmd "pixel-5" "$OUTDIR/pixel-5.txt" \
-  "$PIXEL_BIN" context "$SYMBOL_UID" "$REPO" 2>/dev/null || true)
+  "$PIXEL_BIN" pack-context "$SYMBOL_UID" "$REPO" 2>/dev/null || true)
 head -15 "$OUTDIR/pixel-5.txt" | sed 's/^/  /'
 echo -e "  ${DIM}... ($(wc -l < "$OUTDIR/pixel-5.txt") lines total)${R}"
 echo -e "  ${DIM}Time: ${P5}ms${R}"

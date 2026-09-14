@@ -157,10 +157,10 @@ fn assert_success(output: &Output) {
 #[test]
 fn dual_savings_use_recorded_round_trip_policy_without_changing_search_json() {
     let fixture = Fixture::new();
-    let args = ["search", "login_user", ".", "--json", "--no-daemon"];
+    let args = ["search-content", "login_user", ".", "--json", "--no-daemon"];
     let baseline = fixture.run(&args);
     assert_success(&baseline);
-    let default_event = fixture.events("search").pop().unwrap();
+    let default_event = fixture.events("search-content").pop().unwrap();
     assert_eq!(
         default_event["metrics"]["time_estimate"]["round_trip_ms"],
         2000
@@ -188,7 +188,7 @@ fn dual_savings_use_recorded_round_trip_policy_without_changing_search_json() {
         if expected_ms > 0 {
             assert!(lines[0].contains("against ~"));
         }
-        let event = fixture.events("search").pop().unwrap();
+        let event = fixture.events("search-content").pop().unwrap();
         let metrics = &event["metrics"];
         let time = &metrics["time_estimate"];
         assert_eq!(time["estimator_version"], "sequential-v1");
@@ -216,7 +216,7 @@ fn dual_savings_use_recorded_round_trip_policy_without_changing_search_json() {
     assert_success(&disabled);
     assert_eq!(disabled.stdout, baseline.stdout);
     assert!(metric_lines(&disabled).is_empty());
-    let event = fixture.events("search").pop().unwrap();
+    let event = fixture.events("search-content").pop().unwrap();
     assert_eq!(event["metrics"]["time_estimate"]["round_trip_ms"], 7000);
     assert_eq!(event["metrics"]["reporting_bytes"], 0);
 }
@@ -229,7 +229,7 @@ fn concurrent_time_policies_stay_with_their_own_invocations() {
         .map(|policy| {
             let child = fixture
                 .command()
-                .args(["inspect", ".", "--json"])
+                .args(["repo-state", ".", "--json"])
                 .env("PIXEL_METRICS_ROUND_TRIP_MS", policy.to_string())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -242,7 +242,7 @@ fn concurrent_time_policies_stay_with_their_own_invocations() {
         .into_iter()
         .map(|(policy, child)| (policy, child.wait_with_output().unwrap()))
         .collect();
-    let events = fixture.events("inspect");
+    let events = fixture.events("repo-state");
     assert_eq!(events.len(), 4);
     let mut ids = HashSet::new();
     for (policy, output) in outputs {
@@ -279,14 +279,14 @@ fn time_history_preserves_assumptions_legacy_unavailability_and_exact_lines() {
     for ms in [1000, 3500] {
         let output = fixture
             .command()
-            .args(["inspect", ".", "--json"])
+            .args(["repo-state", ".", "--json"])
             .env("PIXEL_METRICS_ROUND_TRIP_MS", ms.to_string())
             .output()
             .unwrap();
         assert_success(&output);
         historical_lines.extend(metric_lines(&output));
     }
-    let originals = fixture.events("inspect");
+    let originals = fixture.events("repo-state");
     let mut old_metrics = originals[0].clone();
     old_metrics["invocation_id"] = json!("old-token-only-record");
     old_metrics["metrics"]
@@ -303,7 +303,7 @@ fn time_history_preserves_assumptions_legacy_unavailability_and_exact_lines() {
         writeln!(log, "{event}").unwrap();
     }
     drop(log);
-    let report = fixture.run(&["savings", ".", "--json", "--metrics=off"]);
+    let report = fixture.run(&["token-savings", ".", "--json", "--metrics=off"]);
     assert_success(&report);
     let data: Value = serde_json::from_slice(&report.stdout).unwrap();
     let summary = &data["workflow_metrics"];
@@ -328,7 +328,7 @@ fn time_history_preserves_assumptions_legacy_unavailability_and_exact_lines() {
     // A later invocation's assumption cannot reinterpret saved records.
     let replay = fixture
         .command()
-        .args(["log", ".", "--metrics=off"])
+        .args(["action-log", ".", "--metrics=off"])
         .env("PIXEL_METRICS_ROUND_TRIP_MS", "99999")
         .output()
         .unwrap();
@@ -348,7 +348,7 @@ fn time_history_preserves_assumptions_legacy_unavailability_and_exact_lines() {
 #[test]
 fn search_json_is_identical_with_reporting_on_off_and_env_off() {
     let fixture = Fixture::new();
-    let args = ["search", "login_user", ".", "--json", "--no-daemon"];
+    let args = ["search-content", "login_user", ".", "--json", "--no-daemon"];
     let on = fixture.run(&args);
     assert_success(&on);
     let lines = metric_lines(&on);
@@ -357,7 +357,7 @@ fn search_json_is_identical_with_reporting_on_off_and_env_off() {
     for line in String::from_utf8_lossy(&on.stdout).lines() {
         serde_json::from_str::<Value>(line).unwrap();
     }
-    let events = fixture.events("search");
+    let events = fixture.events("search-content");
     assert_eq!(events.len(), 1, "search must finalize only one record");
     let event = &events[0];
     assert_eq!(event["outcome"], "ok");
@@ -400,7 +400,7 @@ fn search_json_is_identical_with_reporting_on_off_and_env_off() {
     assert_eq!(env_off.stdout, on.stdout);
     assert!(metric_lines(&env_off).is_empty());
     disabled_bytes.push(env_off.stdout.len() + env_off.stderr.len());
-    let events = fixture.events("search");
+    let events = fixture.events("search-content");
     assert_eq!(events.len(), 4, "disabled reporting retains accounting");
     for (event, bytes) in events[1..].iter().zip(disabled_bytes) {
         assert_eq!(event["metrics"]["reporting_bytes"], 0);
@@ -412,7 +412,7 @@ fn search_json_is_identical_with_reporting_on_off_and_env_off() {
 fn capped_search_marks_only_returned_evidence_partial() {
     let fixture = Fixture::new();
     let output = fixture.run(&[
-        "search",
+        "search-content",
         "login_user",
         ".",
         "--limit",
@@ -424,7 +424,7 @@ fn capped_search_marks_only_returned_evidence_partial() {
     let lines = metric_lines(&output);
     assert_eq!(lines.len(), 1);
     assert!(lines[0].contains("partial"), "{}", lines[0]);
-    let events = fixture.events("search");
+    let events = fixture.events("search-content");
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["metrics"]["evidence"]["partial"], true);
     assert_eq!(events[0]["metrics"]["evidence"]["distinct_files"], 1);
@@ -437,7 +437,7 @@ fn capped_search_marks_only_returned_evidence_partial() {
 #[test]
 fn operation_error_precedes_metrics_and_preserves_failure() {
     let fixture = Fixture::new();
-    let output = fixture.run(&["search", "(", ".", "--json", "--no-daemon"]);
+    let output = fixture.run(&["search-content", "(", ".", "--json", "--no-daemon"]);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr.clone()).unwrap();
@@ -447,14 +447,21 @@ fn operation_error_precedes_metrics_and_preserves_failure() {
     assert!(stderr.ends_with(&format!("\n{}\n", lines[0])));
     let diagnostics = stderr.strip_suffix(&format!("\n{}\n", lines[0])).unwrap();
     assert!(diagnostics.contains("regex") || diagnostics.contains("pattern"));
-    let events = fixture.events("search");
+    let events = fixture.events("search-content");
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["outcome"], "error");
     assert_eq!(events[0]["metrics"]["output_bytes"], diagnostics.len());
     assert!(events[0]["metrics"]["native_workflow_bytes"].is_null());
     assert_metric_identity(&lines[0], &events[0]);
 
-    let disabled = fixture.run(&["--metrics=off", "search", "(", ".", "--json", "--no-daemon"]);
+    let disabled = fixture.run(&[
+        "--metrics=off",
+        "search-content",
+        "(",
+        ".",
+        "--json",
+        "--no-daemon",
+    ]);
     assert_eq!(output.status.code(), disabled.status.code());
     assert_eq!(disabled.stdout, output.stdout);
     assert_eq!(disabled.stderr, diagnostics.as_bytes());
@@ -467,7 +474,7 @@ fn concurrent_invocations_keep_unique_complete_records_and_lines() {
         .map(|_| {
             fixture
                 .command()
-                .args(["inspect", ".", "--json"])
+                .args(["repo-state", ".", "--json"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -478,7 +485,7 @@ fn concurrent_invocations_keep_unique_complete_records_and_lines() {
         .into_iter()
         .map(|child| child.wait_with_output().unwrap())
         .collect();
-    let events = fixture.events("inspect");
+    let events = fixture.events("repo-state");
     assert_eq!(events.len(), 4);
     let ids: HashSet<_> = events
         .iter()
@@ -509,7 +516,7 @@ fn concurrent_invocations_keep_unique_complete_records_and_lines() {
 fn action_log_failure_does_not_change_success_or_reporting() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.0.join(".pixel/actions.jsonl")).unwrap();
-    let output = fixture.run(&["inspect", ".", "--json"]);
+    let output = fixture.run(&["repo-state", ".", "--json"]);
     assert_success(&output);
     let document: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(document["dirty_count"], 0);
@@ -529,7 +536,7 @@ fn protected_native_hook_and_statusline_streams_have_no_metrics_line() {
     let routed = fixture
         .command()
         .args([
-            "search-compat",
+            "search-like-rg",
             "grep",
             "--",
             "-n",
@@ -546,7 +553,7 @@ fn protected_native_hook_and_statusline_streams_have_no_metrics_line() {
 
     for args in [
         vec!["status", ".", "--statusline"],
-        vec!["hook", "session-start", "."],
+        vec!["run-hook", "session-start", "."],
     ] {
         let output = fixture.run(&args);
         assert_success(&output);
@@ -570,7 +577,7 @@ fn explicit_repository_impact_logs_at_target_and_preserves_json() {
     let fixture = Fixture::new();
     // First graph construction intentionally adds timing/freshness metadata;
     // compare equivalent warm results rather than cold-vs-warm output.
-    assert_success(&fixture.run(&["map", ".", "--json", "--metrics=off"]));
+    assert_success(&fixture.run(&["repo-map", ".", "--json", "--metrics=off"]));
     let output = fixture
         .command()
         .current_dir(std::env::temp_dir())
@@ -611,18 +618,18 @@ fn legacy_savings_and_error_details_survive_with_workflow_summary() {
         format!("{legacy}\n"),
     )
     .unwrap();
-    assert_success(&fixture.run(&["inspect", ".", "--json"]));
-    let failed = fixture.run(&["search", "(", ".", "--json", "--no-daemon"]);
+    assert_success(&fixture.run(&["repo-state", ".", "--json"]));
+    let failed = fixture.run(&["search-content", "(", ".", "--json", "--no-daemon"]);
     assert!(!failed.status.success());
-    let errors = fixture.run(&["log", ".", "--errors-only", "--metrics=off"]);
+    let errors = fixture.run(&["action-log", ".", "--errors-only", "--metrics=off"]);
     assert_success(&errors);
     let text = String::from_utf8(errors.stdout).unwrap();
-    assert!(text.contains("search ("), "arguments lost: {text}");
+    assert!(text.contains("search-content ("), "arguments lost: {text}");
     assert!(
         text.contains("regex") || text.contains("pattern"),
         "error lost: {text}"
     );
-    let report = fixture.run(&["savings", ".", "--json", "--metrics=off"]);
+    let report = fixture.run(&["token-savings", ".", "--json", "--metrics=off"]);
     assert_success(&report);
     let data: Value = serde_json::from_slice(&report.stdout).unwrap();
     assert_eq!(data["total_pool_chars"], 80);
@@ -646,9 +653,9 @@ fn legacy_savings_and_error_details_survive_with_workflow_summary() {
 #[test]
 fn graph_text_and_json_account_for_same_returned_files() {
     let fixture = Fixture::new();
-    for args in [vec!["resolve", "login_user", "."], vec!["map", "."]] {
+    for args in [vec!["find-code", "login_user", "."], vec!["repo-map", "."]] {
         let mut text_args = args.clone();
-        if args[0] == "map" {
+        if args[0] == "repo-map" {
             text_args.push("--markdown");
         }
         let text_output = fixture.run(&text_args);
@@ -694,7 +701,7 @@ fn negative_workflow_savings_are_not_clamped() {
         )
         .unwrap();
     }
-    let output = fixture.run(&["inspect", ".", "--json"]);
+    let output = fixture.run(&["repo-state", ".", "--json"]);
     assert_success(&output);
     let data: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(data["dirty_count"], 40);
@@ -705,7 +712,7 @@ fn negative_workflow_savings_are_not_clamped() {
         "negative token savings must not be presented as a saving: {}",
         lines[0]
     );
-    let event = &fixture.events("inspect")[0];
+    let event = &fixture.events("repo-state")[0];
     let metrics = &event["metrics"];
     assert!(
         metrics["native_workflow_bytes"].as_u64().unwrap()
@@ -732,7 +739,7 @@ fn metrics_preserve_safe_publication_replay_and_head_guard() {
         );
     }
     let before: Value =
-        serde_json::from_slice(&fixture.run(&["inspect", "--json"]).stdout).unwrap();
+        serde_json::from_slice(&fixture.run(&["repo-state", "--json"]).stdout).unwrap();
     let head = before["head"].as_str().unwrap();
     fs::write(
         fixture.0.join("src/login.rs"),
@@ -740,7 +747,7 @@ fn metrics_preserve_safe_publication_replay_and_head_guard() {
     )
     .unwrap();
     let args = [
-        "publish",
+        "commit",
         "--message",
         "test: greeting fixture",
         "--request-id",
@@ -768,7 +775,7 @@ fn metrics_preserve_safe_publication_replay_and_head_guard() {
     )
     .unwrap();
     let refused = fixture.run(&[
-        "publish",
+        "commit",
         "--message",
         "test: stale guard",
         "--request-id",
@@ -781,9 +788,10 @@ fn metrics_preserve_safe_publication_replay_and_head_guard() {
     ]);
     assert_eq!(refused.status.code(), Some(1));
     assert_eq!(metric_lines(&refused).len(), 1);
-    let after: Value = serde_json::from_slice(&fixture.run(&["inspect", "--json"]).stdout).unwrap();
+    let after: Value =
+        serde_json::from_slice(&fixture.run(&["repo-state", "--json"]).stdout).unwrap();
     assert_eq!(after["head"], published["head"]);
-    let events = fixture.events("publish");
+    let events = fixture.events("commit");
     assert_eq!(events.len(), 3);
     assert_eq!(events[2]["outcome"], "error");
     assert_eq!(events[2]["metrics"]["output_scope"], "cli-rendered-streams");
@@ -792,9 +800,9 @@ fn metrics_preserve_safe_publication_replay_and_head_guard() {
 #[test]
 fn daemon_reindex_reports_actual_nested_index_counts() {
     let fixture = Fixture::new();
-    assert_success(&fixture.run(&["index"]));
+    assert_success(&fixture.run(&["build-index"]));
     assert_success(&fixture.run(&["daemon", "start"]));
-    let reindexed = fixture.run(&["index"]);
+    let reindexed = fixture.run(&["build-index"]);
     let status = fixture.run(&["status", "--json"]);
     // Stop before assertions so a failed count assertion never leaves a daemon.
     assert_success(&fixture.run(&["daemon", "stop"]));

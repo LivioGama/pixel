@@ -732,6 +732,7 @@ fn adapters(filter: Option<&str>) -> Result<Vec<Box<dyn SourceAdapter>>, String>
         Box::new(pixel_recall::sources::opencode::Adapter::new()),
         Box::new(pixel_recall::sources::zcode::Adapter::new()),
         Box::new(pixel_recall::sources::devin::Adapter::new()),
+        Box::new(pixel_recall::sources::pi::Adapter::new()),
     ];
     match filter {
         None => Ok(all),

@@ -1,4 +1,4 @@
-//! `pixel hook prompt-submit` — bounded task context and independent boundary detection.
+//! `pixel run-hook prompt-submit` — bounded task context and independent boundary detection.
 //!
 //! Fires on every `UserPromptSubmit` hook event. Embeds the new prompt and
 //! the recent conversation context (last N assistant turns from the recall
@@ -18,7 +18,6 @@
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -39,8 +38,10 @@ const HOOK_DEADLINE: Duration = Duration::from_millis(750);
 const TASK_CONTEXT_BYTES: usize = 4096;
 const TASK_TARGET_LIMIT: usize = 8;
 
-/// Commands in actions.jsonl that signal task completion.
-const COMPLETION_COMMANDS: &[&str] = &["publish", "ship", "push", "commit"];
+/// Commands in actions.jsonl that signal task completion, under their current
+/// names. Entries logged before the command rename (`publish`, `ship`) are
+/// canonicalised before the lookup.
+const COMPLETION_COMMANDS: &[&str] = &["commit", "commit-and-push", "push"];
 
 /// The prompt submit hook payload (Claude Code / Gemini / Devin / Codex / zcode shape).
 #[derive(Deserialize)]
@@ -58,7 +59,7 @@ struct PromptSubmitPayload {
     session_id: Option<String>,
 }
 
-/// Entry point for `pixel hook prompt-submit`. Reads the hook payload from stdin.
+/// Entry point for `pixel run-hook prompt-submit`. Reads the hook payload from stdin.
 /// Never returns an `Err` as exit 1 — every failure path is a silent exit 0
 /// (prompt proceeds normally).
 pub fn run(provider: Option<crate::guard::Provider>) -> ! {
@@ -212,24 +213,9 @@ fn start_claude_handoff(
 /// Read the exact tracked snapshot from Git. We intentionally make no claim
 /// about untracked files: the sandbox layer independently refuses unsafe WIP.
 fn tracked_paths(root: &Path) -> Result<Vec<String>, String> {
-    let output = Command::new("git")
-        .args(["ls-files", "-z"])
-        .current_dir(root)
-        .output()
-        .map_err(|error| format!("spawn git ls-files: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git ls-files failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let paths: Vec<String> = output
-        .stdout
-        .split(|byte| *byte == b'\0')
-        .filter(|path| !path.is_empty())
-        .map(|path| std::str::from_utf8(path).map(str::to_string))
-        .collect::<Result<_, _>>()
-        .map_err(|error| format!("non-UTF8 tracked path: {error}"))?;
+    let paths = pixel_git::GitRunner::new(root)
+        .ls_files_or_err()
+        .map_err(|error| format!("git ls-files failed: {error}"))?;
     if paths.is_empty() {
         return Err("automatic handoff requires at least one tracked path".to_string());
     }
@@ -659,7 +645,7 @@ fn check_action_log_file(mut file: std::fs::File, cwd: &Path, cutoff: i64) -> bo
         if !cwd_matches(cwd, Path::new(log_cwd)) {
             continue;
         }
-        if COMPLETION_COMMANDS.contains(&command) {
+        if COMPLETION_COMMANDS.contains(&pixel_proto::commands::current_name(command)) {
             return true;
         }
     }
@@ -803,6 +789,7 @@ fn write_boundary_file(event: &BoundaryEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn cosine_identity() {
@@ -1085,6 +1072,49 @@ mod tests {
         assert!(!cwd_matches(Path::new("/tmp/foo"), Path::new("/tmp/baz")));
     }
 
+    #[test]
+    fn tracked_paths_reads_the_git_index_and_refuses_empty_or_absent_repos() {
+        let root = fixture_repo("tracked-paths");
+        assert_eq!(
+            tracked_paths(&root).unwrap(),
+            vec!["tracked.rs".to_string()]
+        );
+
+        // An untracked file is not a tracked path.
+        std::fs::write(root.join("loose.rs"), "// not added\n").unwrap();
+        assert_eq!(
+            tracked_paths(&root).unwrap(),
+            vec!["tracked.rs".to_string()]
+        );
+
+        let empty =
+            std::env::temp_dir().join(format!("pixel-handoff-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&empty)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let err = tracked_paths(&empty).unwrap_err();
+        assert!(
+            err.contains("at least one tracked path"),
+            "empty repo is refused with its own message: {err}"
+        );
+
+        let outside =
+            std::env::temp_dir().join(format!("pixel-handoff-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        let err = tracked_paths(&outside).unwrap_err();
+        assert!(
+            err.starts_with("git ls-files failed:"),
+            "outside a repo the git failure is reported: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&empty);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
     fn fixture_repo(label: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1256,6 +1286,21 @@ mod tests {
                 "recent publish here",
                 vec![entry(cutoff + 1, "publish", "/work/pixel", "ok")],
                 true,
+            ),
+            (
+                "commit-and-push, the current name of ship",
+                vec![entry(cutoff + 1, "commit-and-push", "/work/pixel", "ok")],
+                true,
+            ),
+            (
+                "push",
+                vec![entry(cutoff + 1, "push", "/work/pixel", "ok")],
+                true,
+            ),
+            (
+                "a retrieval command is not a completion",
+                vec![entry(cutoff + 1, "search-content", "/work/pixel", "ok")],
+                false,
             ),
             (
                 "exactly at the cutoff",

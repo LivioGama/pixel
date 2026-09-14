@@ -349,7 +349,7 @@ pub(crate) const SUBAGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-sub
 /// Copy the bundled Pixel agent system prompt to `~/.local/share/pixel/agent-prompt.md`
 /// and to `~/.pi/agent/APPEND_SYSTEM.md` (Pi reads this automatically, no flag needed),
 /// and the sub-agent prompt to `~/.local/share/pixel/subagent-prompt.md`.
-/// The prompt instructs agents to use `pixel search`/`pixel resolve`/`pixel impact`
+/// The prompt instructs agents to use `pixel search-content`/`pixel find-code`/`pixel impact`
 /// instead of `grep`/`rg` for code discovery in indexed repositories.
 fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     // The asset is embedded at compile time so the installed binary is self-contained.

@@ -1,7 +1,7 @@
 //! pixel-recall — machine-wide LLM transcript retrieval corpus.
 //!
 //! Ingests every parseable CLI transcript store (Claude Code, Codex,
-//! opencode, Devin, Cursor CLI, zcode, Gemini history) into one SQLite
+//! opencode, Devin, Cursor CLI, zcode, Gemini history, pi) into one SQLite
 //! corpus of turn-granular text, then serves lexical (trigram) and semantic
 //! (embedding) retrieval over it. Unlike the repo index, this corpus is
 //! global: transcripts belong to the machine, not to a repository.

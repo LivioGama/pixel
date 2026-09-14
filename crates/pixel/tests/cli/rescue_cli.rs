@@ -1,4 +1,4 @@
-//! `gitpixel rescue` — plan correctness and apply safety invariants.
+//! `gitpixel plan-rollback` — plan correctness and apply safety invariants.
 
 use std::path::Path;
 use std::process::Command;
@@ -88,7 +88,7 @@ fn plan_suspect_is_diff_content_based_and_beats_subject_keywords() {
     let out = gitpixel(
         &dir,
         &[
-            "rescue",
+            "plan-rollback",
             "discount broken",
             ".",
             "--file",
@@ -148,6 +148,27 @@ fn plan_suspect_is_diff_content_based_and_beats_subject_keywords() {
     assert_eq!(plan["decision"]["options"][0]["id"], "revert");
     assert_eq!(plan["decision"]["options"][1]["id"], "fix_forward");
 
+    // The agent runs the revert option's command verbatim, so it must be the
+    // current spelling of the command and a shape the CLI accepts: running it
+    // restores the recommended version.
+    let revert = plan["decision"]["options"][0]["command"]
+        .as_str()
+        .expect("the revert option carries a command");
+    assert_eq!(
+        revert,
+        format!("pixel plan-rollback --apply {b} --file src/calc.rs .")
+    );
+    let argv: Vec<&str> = revert.split_whitespace().skip(1).collect();
+    let applied = gitpixel(&dir, &argv);
+    assert!(
+        applied.status.success(),
+        "the suggested revert command must run as printed: {applied:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("src/calc.rs")).unwrap(),
+        D2
+    );
+
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -158,7 +179,7 @@ fn plan_reports_depth_cap_honestly_when_no_suspect_found() {
     let out = gitpixel(
         &dir,
         &[
-            "rescue",
+            "plan-rollback",
             "zebra glitter feature",
             ".",
             "--file",
@@ -204,7 +225,14 @@ fn apply_restores_working_tree_only() {
     let (dir, v1, _) = fixture("apply");
     let out = gitpixel(
         &dir,
-        &["rescue", "--apply", &v1, "--file", "src/calc.rs", "."],
+        &[
+            "plan-rollback",
+            "--apply",
+            &v1,
+            "--file",
+            "src/calc.rs",
+            ".",
+        ],
     );
     assert!(out.status.success(), "apply failed: {out:?}");
     assert_eq!(
@@ -228,7 +256,14 @@ fn apply_refuses_dirty_without_strategy() {
 
     let out = gitpixel(
         &dir,
-        &["rescue", "--apply", &v1, "--file", "src/calc.rs", "."],
+        &[
+            "plan-rollback",
+            "--apply",
+            &v1,
+            "--file",
+            "src/calc.rs",
+            ".",
+        ],
     );
     assert!(!out.status.success(), "must refuse dirty overwrite");
     let err = String::from_utf8_lossy(&out.stderr);
@@ -251,7 +286,7 @@ fn apply_merge_keeps_in_progress_edits() {
     let out = gitpixel(
         &dir,
         &[
-            "rescue",
+            "plan-rollback",
             "--apply",
             &v1,
             "--file",
@@ -279,7 +314,7 @@ fn apply_rejects_bad_ref() {
     let out = gitpixel(
         &dir,
         &[
-            "rescue",
+            "plan-rollback",
             "--apply",
             "deadbeef",
             "--file",

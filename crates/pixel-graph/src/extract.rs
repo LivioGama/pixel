@@ -29,6 +29,19 @@ pub struct RawCall {
     pub enclosing_index: Option<usize>,
 }
 
+/// A symbol passed as an argument to a call (callback / plugin / handler
+/// registration). The `arg_of` field is the callee that received the
+/// argument (e.g. `"plugin"` in `schema.plugin(tenantScopePlugin)`).
+#[derive(Debug, Clone)]
+pub struct RawReference {
+    pub name: String,
+    /// Index into `FileExtraction::symbols` of the smallest enclosing symbol.
+    pub enclosing_index: Option<usize>,
+    pub site_line: u32,
+    /// The callee that received this argument, when known.
+    pub arg_of: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RawImport {
     pub spec: String,
@@ -39,12 +52,23 @@ pub struct RawImport {
     pub bindings: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RawJsxElement {
+    pub tag: String,
+    pub has_handler: bool,
+    pub text_content: String,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
 #[derive(Debug)]
 pub struct FileExtraction {
     pub lang: &'static str,
     pub symbols: Vec<RawSymbol>,
     pub calls: Vec<RawCall>,
+    pub references: Vec<RawReference>,
     pub imports: Vec<RawImport>,
+    pub jsx_elements: Vec<RawJsxElement>,
 }
 
 /// Language tag for a repo-relative path, or `None` if unsupported.
@@ -109,12 +133,14 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         src: content,
         symbols: Vec::new(),
         calls: Vec::new(),
+        references: Vec::new(),
         imports: Vec::new(),
+        jsx_elements: Vec::new(),
         stack: Vec::new(),
     };
     let root = tree.root_node();
     match lang {
-        "ts" | "tsx" | "js" => walk_ts(&mut w, root, 0),
+        "ts" | "tsx" | "js" => walk_ts(&mut w, lang, root, 0),
         "rust" => walk_rust(&mut w, root, 0),
         "go" => walk_go(&mut w, root, 0),
         "java" => walk_java(&mut w, root, 0),
@@ -130,25 +156,33 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         lang,
         symbols: w.symbols,
         calls: w.calls,
+        references: w.references,
         imports: w.imports,
+        jsx_elements: w.jsx_elements,
     };
     assign_enclosing(&mut fx);
     Some(fx)
 }
 
-/// Smallest symbol whose line range contains the call site.
+/// Smallest symbol whose line range contains the call/reference site.
 fn assign_enclosing(fx: &mut FileExtraction) {
-    for call in &mut fx.calls {
+    let best = |line: u32| -> Option<usize> {
         let mut best: Option<(usize, u32)> = None;
         for (i, s) in fx.symbols.iter().enumerate() {
-            if s.start_line <= call.site_line && call.site_line <= s.end_line {
+            if s.start_line <= line && line <= s.end_line {
                 let span = s.end_line - s.start_line;
                 if best.is_none_or(|(_, b)| span < b) {
                     best = Some((i, span));
                 }
             }
         }
-        call.enclosing_index = best.map(|(i, _)| i);
+        best.map(|(i, _)| i)
+    };
+    for call in &mut fx.calls {
+        call.enclosing_index = best(call.site_line);
+    }
+    for r#ref in &mut fx.references {
+        r#ref.enclosing_index = best(r#ref.site_line);
     }
 }
 
@@ -159,7 +193,9 @@ struct Walker<'a> {
     src: &'a [u8],
     symbols: Vec<RawSymbol>,
     calls: Vec<RawCall>,
+    references: Vec<RawReference>,
     imports: Vec<RawImport>,
+    jsx_elements: Vec<RawJsxElement>,
     /// Enclosing type names (class/impl/trait) for qualification.
     stack: Vec<String>,
 }
@@ -219,10 +255,46 @@ impl<'a> Walker<'a> {
         });
     }
 
+    /// Record a symbol passed as an argument to a call (a callback / plugin /
+    /// handler reference). `call_node` is the enclosing call expression; its
+    /// start line becomes the reference site line. `arg_of` is the callee
+    /// that received the argument, when known.
+    fn push_reference(&mut self, name: String, call_node: Node, arg_of: Option<String>) {
+        if name.is_empty() {
+            return;
+        }
+        self.references.push(RawReference {
+            name,
+            enclosing_index: None,
+            site_line: line_start(call_node),
+            arg_of,
+        });
+    }
+
     fn push_import(&mut self, spec: String, bindings: Vec<String>) {
         if !spec.is_empty() {
             self.imports.push(RawImport { spec, bindings });
         }
+    }
+
+    fn push_jsx_element(
+        &mut self,
+        tag: String,
+        has_handler: bool,
+        text_content: String,
+        start_line: u32,
+        end_line: u32,
+    ) {
+        if tag.is_empty() {
+            return;
+        }
+        self.jsx_elements.push(RawJsxElement {
+            tag,
+            has_handler,
+            text_content,
+            start_line,
+            end_line,
+        });
     }
 }
 
@@ -247,9 +319,74 @@ fn each_child<'t>(n: Node<'t>) -> Vec<Node<'t>> {
     n.children(&mut cursor).collect()
 }
 
+/// Words that parse as identifiers in some grammars but never name a
+/// function: literal keywords and the self pseudo-receivers.
+const NON_REFERENCE_WORDS: &[&str] = &[
+    "undefined",
+    "null",
+    "true",
+    "false",
+    "None",
+    "nil",
+    "self",
+    "this",
+];
+
+/// The receiver texts a member argument may start from and still name a
+/// function of the enclosing type (`this.onClick`, `self.handler`).
+const SELF_RECEIVERS: &[&str] = &["this", "self", "Self"];
+
+/// Walk the `arguments` field of a call/invocation node and record each
+/// argument that may name a function as a `RawReference`. The callee name
+/// (`arg_of`) is the method/function that received the argument.
+///
+/// - a bare identifier (`schema.plugin(tenantScopePlugin)`), literal
+///   keywords and self pseudo-receivers excepted;
+/// - a path (`Self::helper`, `module::func`), which names an item;
+/// - a member access only on a self receiver (`this.onClick`). A member of
+///   any other value (`user.name`) is data: resolving its property name
+///   against every function of that name linked unrelated code.
+fn walk_call_arguments(w: &mut Walker, call: Node, arg_of: Option<String>) {
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    let mut cursor = args.walk();
+    for arg in args.children(&mut cursor) {
+        let name = match arg.kind() {
+            "identifier" | "simple_identifier" | "variable" => Some(w.text(arg)),
+            "scoped_identifier" => field_text(w, arg, "name"),
+            "member_expression" | "field_expression" | "attribute" | "member_access_expression" => {
+                self_member_name(w, arg)
+            }
+            _ => None,
+        };
+        if let Some(name) = name
+            && !NON_REFERENCE_WORDS.contains(&name.as_str())
+        {
+            w.push_reference(name, call, arg_of.clone());
+        }
+    }
+}
+
+/// The property of a member access whose receiver is `this`/`self`/`Self`,
+/// or `None` for a member of any other value.
+fn self_member_name(w: &Walker, member: Node) -> Option<String> {
+    let receiver = ["object", "value", "expression"]
+        .iter()
+        .find_map(|f| member.child_by_field_name(f))
+        .map(|c| w.text(c))?;
+    if !SELF_RECEIVERS.contains(&receiver.as_str()) {
+        return None;
+    }
+    ["property", "field", "attribute", "name"]
+        .iter()
+        .find_map(|f| member.child_by_field_name(f))
+        .map(|c| w.text(c))
+}
+
 // --- TypeScript / TSX / JavaScript ---------------------------------------
 
-fn walk_ts(w: &mut Walker, node: Node, depth: usize) {
+fn walk_ts(w: &mut Walker, lang: &'static str, node: Node, depth: usize) {
     if depth > MAX_DEPTH {
         return;
     }
@@ -303,21 +440,27 @@ fn walk_ts(w: &mut Walker, node: Node, depth: usize) {
             }
         }
         "call_expression" => {
+            let mut callee_name: Option<String> = None;
             if let Some(f) = node.child_by_field_name("function") {
                 match f.kind() {
                     "identifier" => {
                         let name = w.text(f);
+                        callee_name = Some(name.clone());
                         w.push_call(name, None, node);
                     }
                     "member_expression" => {
                         if let Some(prop) = field_text(w, f, "property") {
                             let recv = field_text(w, f, "object");
+                            callee_name = Some(prop.clone());
                             w.push_call(prop, recv, node);
                         }
                     }
                     _ => {}
                 }
             }
+            // After extracting the callee, check arguments for identifier
+            // references (callbacks / plugins / handlers passed as args).
+            walk_call_arguments(w, node, callee_name);
         }
         "new_expression" => {
             if let Some(c) = node.child_by_field_name("constructor")
@@ -326,6 +469,8 @@ fn walk_ts(w: &mut Walker, node: Node, depth: usize) {
                 let name = w.text(c);
                 w.push_call(name, None, node);
             }
+            // `new Foo(handler)` — constructor args can also be callbacks.
+            walk_call_arguments(w, node, None);
         }
         "import_statement" | "export_statement" => {
             if let Some(src) = node.child_by_field_name("source") {
@@ -334,10 +479,50 @@ fn walk_ts(w: &mut Walker, node: Node, depth: usize) {
                 w.push_import(spec, bindings);
             }
         }
+        // Only the tsx and js grammars produce this node; the ts grammar
+        // has no JSX, so no language guard is needed here.
+        "jsx_element" => {
+            if let Some(opening) = node.child_by_field_name("open_tag")
+                && let Some(tag_node) = opening.child_by_field_name("name")
+            {
+                let tag = w.text(tag_node);
+                let has_handler = jsx_has_handler(w, opening);
+                let text_content = jsx_text_content(w, node, opening, &tag);
+                jsx_handler_refs(w, opening, &tag);
+                if let Some((name, receiver)) = jsx_component_call(&tag) {
+                    w.push_call(name, receiver, node);
+                }
+                w.push_jsx_element(
+                    tag,
+                    has_handler,
+                    text_content,
+                    line_start(node),
+                    line_end(node),
+                );
+            }
+        }
+        "jsx_self_closing_element" if matches!(lang, "tsx" | "js") => {
+            if let Some(tag_node) = node.child_by_field_name("name") {
+                let tag = w.text(tag_node);
+                let has_handler = jsx_has_handler(w, node);
+                let text_content = jsx_attr_text(w, node);
+                jsx_handler_refs(w, node, &tag);
+                if let Some((name, receiver)) = jsx_component_call(&tag) {
+                    w.push_call(name, receiver, node);
+                }
+                w.push_jsx_element(
+                    tag,
+                    has_handler,
+                    text_content,
+                    line_start(node),
+                    line_end(node),
+                );
+            }
+        }
         _ => {}
     }
     for child in each_child(node) {
-        walk_ts(w, child, depth + 1);
+        walk_ts(w, lang, child, depth + 1);
     }
     if pushed {
         w.stack.pop();
@@ -407,6 +592,147 @@ fn sub_field_text(w: &Walker, node: Node, field: &str) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
+// --- JSX helpers ---------------------------------------------------------
+
+/// The call a JSX tag compiles to, as `(name, receiver)`: `<Button/>` renders
+/// the `Button` component, `<Menu.Item>` the `Item` member of `Menu`. A
+/// lowercase or namespaced tag (`div`, `svg:rect`) is an intrinsic element
+/// and renders no symbol. Without this edge every component that is only
+/// rendered, never called, had no callers.
+fn jsx_component_call(tag: &str) -> Option<(String, Option<String>)> {
+    if tag.contains(':') {
+        return None;
+    }
+    match tag.rsplit_once('.') {
+        Some((receiver, name)) if !receiver.is_empty() && !name.is_empty() => {
+            Some((name.to_string(), Some(receiver.to_string())))
+        }
+        Some(_) => None,
+        None => tag
+            .starts_with(|c: char| c.is_ascii_uppercase())
+            .then(|| (tag.to_string(), None)),
+    }
+}
+
+fn jsx_attr_name(w: &Walker, attr: Node) -> Option<String> {
+    // jsx_attribute has no named fields and names like `aria-label` are parsed
+    // as jsx_namespace_name. Use the raw attribute text and split on the first `=`.
+    let raw = w.text(attr);
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    raw.split('=').next().map(|s| s.trim().to_string())
+}
+
+fn jsx_attr_value(w: &Walker, attr: Node) -> Option<String> {
+    let raw = w.text(attr);
+    let raw = raw.trim();
+    if let Some((_, value)) = raw.split_once('=') {
+        let value = strip_quotes(value.trim());
+        if value.is_empty() { None } else { Some(value) }
+    } else {
+        None
+    }
+}
+
+fn jsx_has_handler(w: &Walker, element: Node) -> bool {
+    for child in each_child(element) {
+        if child.kind() == "jsx_attribute"
+            && let Some(name) = jsx_attr_name(w, child)
+        {
+            let n = name.to_lowercase();
+            if n.starts_with("on") || n == "href" || n == "to" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Emit `references` edges for JSX event-handler props: `onClick={handler}`,
+/// `onSubmit={this.save}`. Without this, a handler like `handleSubmit` has
+/// zero edges and reads as dead code even though the element wires it.
+/// Only bare identifiers and member expressions produce edges — inline
+/// arrows (`onClick={() => f()}`) are walked as ordinary code, so their
+/// inner calls are already extracted.
+fn jsx_handler_refs(w: &mut Walker, element: Node, tag: &str) {
+    for child in each_child(element) {
+        if child.kind() != "jsx_attribute" {
+            continue;
+        }
+        let Some(attr) = jsx_attr_name(w, child) else {
+            continue;
+        };
+        if !attr.to_lowercase().starts_with("on") {
+            continue;
+        }
+        let arg_of = Some(format!("{tag}.{attr}"));
+        let mut cursor = child.walk();
+        for part in child.children(&mut cursor) {
+            if part.kind() != "jsx_expression" {
+                continue;
+            }
+            let mut inner = part.walk();
+            for expr in part.children(&mut inner) {
+                match expr.kind() {
+                    "identifier" => {
+                        let name = w.text(expr);
+                        w.push_reference(name, child, arg_of.clone());
+                    }
+                    "member_expression" => {
+                        if let Some(prop) = expr.child_by_field_name("property") {
+                            let name = w.text(prop);
+                            w.push_reference(name, child, arg_of.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn jsx_attr_text(w: &Walker, element: Node) -> String {
+    for child in each_child(element) {
+        if child.kind() == "jsx_attribute"
+            && let Some(name) = jsx_attr_name(w, child)
+        {
+            let n = name.to_lowercase();
+            if (n == "aria-label" || n == "title")
+                && let Some(v) = jsx_attr_value(w, child)
+                && !v.is_empty()
+            {
+                return v;
+            }
+        }
+    }
+    String::new()
+}
+
+fn jsx_text_content(w: &Walker, element: Node, opening: Node, tag: &str) -> String {
+    let mut parts = Vec::new();
+    for child in each_child(element) {
+        if child.kind() == "jsx_text" {
+            let t = w.text(child);
+            if !t.trim().is_empty() {
+                parts.push(t.trim().to_string());
+            }
+        }
+    }
+    if !parts.is_empty() {
+        return parts.join(" ").trim().to_string();
+    }
+    // Fallback to aria-label or title attribute for interactive tags.
+    if matches!(tag.to_lowercase().as_str(), "button" | "a" | "link") {
+        let fallback = jsx_attr_text(w, opening);
+        if !fallback.is_empty() {
+            return fallback;
+        }
+    }
+    String::new()
+}
+
 // --- Rust ----------------------------------------------------------------
 
 fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
@@ -463,9 +789,13 @@ fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
             }
         }
         "call_expression" => {
+            let mut callee_name: Option<String> = None;
             if let Some(f) = node.child_by_field_name("function") {
-                rust_callee(w, node, f);
+                callee_name = rust_callee(w, node, f);
             }
+            // After extracting the callee, check arguments for identifier
+            // references (callbacks / closures passed as args).
+            walk_call_arguments(w, node, callee_name);
         }
         "use_declaration" => {
             if let Some(arg) = node.child_by_field_name("argument") {
@@ -507,30 +837,39 @@ fn rust_is_test_container(w: &Walker, node: Node) -> bool {
         || (node.kind() == "mod_item" && markers.contains("#[cfg(test)]"))
 }
 
-fn rust_callee(w: &mut Walker, call: Node, f: Node) {
+fn rust_callee(w: &mut Walker, call: Node, f: Node) -> Option<String> {
     match f.kind() {
         "identifier" => {
             let name = w.text(f);
-            w.push_call(name, None, call);
+            w.push_call(name.clone(), None, call);
+            Some(name)
         }
         "scoped_identifier" => {
             if let Some(name) = field_text(w, f, "name") {
                 let recv = field_text(w, f, "path");
-                w.push_call(name, recv, call);
+                w.push_call(name.clone(), recv, call);
+                Some(name)
+            } else {
+                None
             }
         }
         "field_expression" => {
             if let Some(name) = field_text(w, f, "field") {
                 let recv = field_text(w, f, "value");
-                w.push_call(name, recv, call);
+                w.push_call(name.clone(), recv, call);
+                Some(name)
+            } else {
+                None
             }
         }
         "generic_function" => {
             if let Some(inner) = f.child_by_field_name("function") {
-                rust_callee(w, call, inner);
+                rust_callee(w, call, inner)
+            } else {
+                None
             }
         }
-        _ => {}
+        _ => None,
     }
 }
 
@@ -574,21 +913,27 @@ fn walk_go(w: &mut Walker, node: Node, depth: usize) {
             }
         }
         "call_expression" => {
+            let mut callee_name: Option<String> = None;
             if let Some(f) = node.child_by_field_name("function") {
                 match f.kind() {
                     "identifier" => {
                         let name = w.text(f);
+                        callee_name = Some(name.clone());
                         w.push_call(name, None, node);
                     }
                     "selector_expression" => {
                         if let Some(name) = field_text(w, f, "field") {
                             let recv = field_text(w, f, "operand");
+                            callee_name = Some(name.clone());
                             w.push_call(name, recv, node);
                         }
                     }
                     _ => {}
                 }
             }
+            // After extracting the callee, check arguments for identifier
+            // references (callbacks / handlers passed as args).
+            walk_call_arguments(w, node, callee_name);
         }
         "import_spec" => {
             if let Some(path) = node.child_by_field_name("path") {
@@ -652,10 +997,15 @@ fn walk_java(w: &mut Walker, node: Node, depth: usize) {
             }
         }
         "method_invocation" => {
+            let mut callee_name: Option<String> = None;
             if let Some(name) = field_text(w, node, "name") {
                 let recv = field_text(w, node, "object");
+                callee_name = Some(name.clone());
                 w.push_call(name, recv, node);
             }
+            // After extracting the callee, check arguments for identifier
+            // references (callbacks / handlers passed as args).
+            walk_call_arguments(w, node, callee_name);
         }
         "object_creation_expression" => {
             if let Some(ty) = field_text(w, node, "type") {
@@ -663,6 +1013,8 @@ fn walk_java(w: &mut Walker, node: Node, depth: usize) {
                 let name = base.rsplit('.').next().unwrap_or(base).trim().to_string();
                 w.push_call(name, None, node);
             }
+            // `new Foo(handler)` — constructor args can also be callbacks.
+            walk_call_arguments(w, node, None);
         }
         "import_declaration" => {
             let mut spec = String::new();
@@ -716,21 +1068,27 @@ fn walk_python(w: &mut Walker, node: Node, depth: usize) {
             }
         }
         "call" => {
+            let mut callee_name: Option<String> = None;
             if let Some(f) = node.child_by_field_name("function") {
                 match f.kind() {
                     "identifier" => {
                         let name = w.text(f);
+                        callee_name = Some(name.clone());
                         w.push_call(name, None, node);
                     }
                     "attribute" => {
                         if let Some(name) = field_text(w, f, "attribute") {
                             let recv = field_text(w, f, "object");
+                            callee_name = Some(name.clone());
                             w.push_call(name, recv, node);
                         }
                     }
                     _ => {}
                 }
             }
+            // After extracting the callee, check arguments for identifier
+            // references (callbacks / handlers passed as args).
+            walk_call_arguments(w, node, callee_name);
         }
         "import_statement" => {
             for child in each_child(node) {
@@ -822,27 +1180,34 @@ fn walk_csharp(w: &mut Walker, node: Node, depth: usize) {
             }
         }
         "invocation_expression" => {
+            let mut callee_name: Option<String> = None;
             if let Some(f) = node.child_by_field_name("function") {
                 match f.kind() {
                     "identifier" => {
                         let name = w.text(f);
+                        callee_name = Some(name.clone());
                         w.push_call(name, None, node);
                     }
                     "member_access_expression" => {
                         if let Some(name) = field_text(w, f, "name") {
                             let recv = field_text(w, f, "expression");
+                            callee_name = Some(name.clone());
                             w.push_call(name, recv, node);
                         }
                     }
                     "generic_name" => {
                         if let Some(inner) = f.child_by_field_name("name") {
                             let name = w.text(inner);
+                            callee_name = Some(name.clone());
                             w.push_call(name, None, node);
                         }
                     }
                     _ => {}
                 }
             }
+            // After extracting the callee, check arguments for identifier
+            // references (callbacks / handlers passed as args).
+            walk_call_arguments(w, node, callee_name);
         }
         "object_creation_expression" => {
             if let Some(ty) = field_text(w, node, "type") {
@@ -850,6 +1215,8 @@ fn walk_csharp(w: &mut Walker, node: Node, depth: usize) {
                 let name = base.rsplit('.').next().unwrap_or(base).trim().to_string();
                 w.push_call(name, None, node);
             }
+            // `new Foo(handler)` — constructor args can also be callbacks.
+            walk_call_arguments(w, node, None);
         }
         "using_directive" => {
             // `name` field only exists for alias usings (`using Foo = X;`)
@@ -933,8 +1300,10 @@ fn walk_ruby(w: &mut Walker, node: Node, depth: usize) {
             }
         }
         "call" => {
+            let mut callee_name: Option<String> = None;
             if let Some(name) = field_text(w, node, "method") {
                 let recv = field_text(w, node, "receiver");
+                callee_name = Some(name.clone());
                 if recv.is_none() && RUBY_REQUIRE_METHODS.contains(&name.as_str()) {
                     if let Some(spec) = ruby_first_string_argument(w, node) {
                         w.push_import(spec, Vec::new());
@@ -944,6 +1313,12 @@ fn walk_ruby(w: &mut Walker, node: Node, depth: usize) {
                     // `before_action :auth`) and receiver calls (`user.save`).
                     w.push_call(name, recv, node);
                 }
+            }
+            // After extracting the callee, check arguments for identifier
+            // references (callbacks / handlers passed as args). Skip require
+            // methods — their string args are imports, not references.
+            if !matches!(callee_name.as_deref(), Some(n) if RUBY_REQUIRE_METHODS.contains(&n)) {
+                walk_call_arguments(w, node, callee_name);
             }
         }
         _ => {}
@@ -1172,7 +1547,10 @@ fn generic_call(w: &mut Walker, node: Node) {
         callee = Some(w.text(t));
     }
     if let (Some(c), r) = (callee, receiver) {
-        w.push_call(c, r, node);
+        w.push_call(c.clone(), r, node);
+        // After extracting the callee, check arguments for identifier
+        // references (callbacks / handlers passed as args).
+        walk_call_arguments(w, node, Some(c));
     }
 }
 
@@ -1212,7 +1590,9 @@ fn generic_import(w: &mut Walker, node: Node) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileExtraction, RawCall, RawSymbol, assign_enclosing, extract_file};
+    use super::{
+        FileExtraction, RawCall, RawSymbol, assign_enclosing, extract_file, jsx_component_call,
+    };
     use crate::store::SymbolKind;
 
     fn sym(name: &str, start_line: u32, end_line: u32) -> RawSymbol {
@@ -1250,6 +1630,8 @@ mod tests {
             ],
             calls: vec![call(95), call(98), call(7), call(50)],
             imports: vec![],
+            jsx_elements: vec![],
+            references: vec![],
         };
         assign_enclosing(&mut fx);
         let owners: Vec<Option<usize>> = fx.calls.iter().map(|c| c.enclosing_index).collect();
@@ -1479,6 +1861,266 @@ end
                 .map(|i| extraction.symbols[i].qualified.as_str()),
             Some("Admin::UsersController#index"),
             "call sites attach to the smallest enclosing method so impact walks method-to-method"
+        );
+    }
+
+    #[test]
+    fn jsx_button_with_onclick_is_wired() {
+        let source = br#"function App() { return <button onClick={() => {}}>Save</button>; }"#;
+        let extraction = extract_file("App.tsx", source).unwrap();
+        assert_eq!(extraction.jsx_elements.len(), 1);
+        let e = &extraction.jsx_elements[0];
+        assert_eq!(e.tag, "button");
+        assert!(e.has_handler);
+        assert_eq!(e.text_content, "Save");
+    }
+
+    #[test]
+    fn jsx_element_without_a_handler_prop_is_not_wired() {
+        // `className` is an attribute but not a handler; `href` alone is.
+        // (A wrong comparison used to let any non-href attribute count.)
+        let source = br#"function App() { return <button className="x">Save</button>; }"#;
+        let extraction = extract_file("App.tsx", source).unwrap();
+        assert_eq!(extraction.jsx_elements.len(), 1);
+        assert!(
+            !extraction.jsx_elements[0].has_handler,
+            "{:?}",
+            extraction.jsx_elements
+        );
+        let source = br#"function App() { return <a href="/x">link</a>; }"#;
+        let extraction = extract_file("App.tsx", source).unwrap();
+        assert!(extraction.jsx_elements[0].has_handler);
+        let source = br#"function App() { return <button>Save</button>; }"#;
+        let extraction = extract_file("App.tsx", source).unwrap();
+        assert!(
+            !extraction.jsx_elements[0].has_handler,
+            "no attributes at all"
+        );
+    }
+
+    #[test]
+    fn plain_ts_source_yields_no_jsx_elements() {
+        let source = br#"function App() { return <button onClick={f}>Save</button>; }"#;
+        let extraction = extract_file("App.ts", source).unwrap();
+        assert!(
+            extraction.jsx_elements.is_empty(),
+            "{:?}",
+            extraction.jsx_elements
+        );
+    }
+
+    #[test]
+    fn jsx_link_href_and_to_are_handlers() {
+        let source = br#"
+function App() {
+  return (
+    <>
+      <a href="/home" className="x">Home</a>
+      <Link to="/profile">Profile</Link>
+    </>
+  );
+}
+"#;
+        let extraction = extract_file("App.tsx", source).unwrap();
+        let tags: Vec<_> = extraction
+            .jsx_elements
+            .iter()
+            .map(|e| (e.tag.as_str(), e.has_handler))
+            .collect();
+        assert!(tags.contains(&("a", true)));
+        assert!(tags.contains(&("Link", true)));
+    }
+
+    #[test]
+    fn jsx_aria_label_and_title_fallback() {
+        let source = br#"
+function App() {
+  return (
+    <>
+      <button aria-label="Close" />
+      <button title="Submit form" />
+      <button aria-label="Dismiss" title="X">x</button>
+    </>
+  );
+}
+"#;
+        let extraction = extract_file("App.tsx", source).unwrap();
+        let texts: Vec<_> = extraction
+            .jsx_elements
+            .iter()
+            .map(|e| e.text_content.as_str())
+            .collect();
+        assert!(texts.contains(&"Close"));
+        assert!(texts.contains(&"Submit form"));
+        // Visible text wins over title/aria-label when present.
+        assert!(texts.contains(&"x"));
+    }
+
+    #[test]
+    fn jsx_self_closing_button_is_extracted() {
+        let source = br#"function App() { return <button onClick={handle} className="ok" aria-label="OK" />; }"#;
+        let extraction = extract_file("App.tsx", source).unwrap();
+        let e = extraction
+            .jsx_elements
+            .iter()
+            .find(|e| e.tag == "button")
+            .expect("button");
+        assert!(e.has_handler);
+        assert_eq!(e.text_content, "OK");
+    }
+
+    #[test]
+    fn jsx_malformed_does_not_crash() {
+        let source = br#"function App() { return <button onClick={}>  ; }"#;
+        let extraction = extract_file("App.tsx", source);
+        // Extraction should return a result even if the JSX is broken.
+        assert!(extraction.is_some());
+    }
+
+    #[test]
+    fn ts_callback_arg_extracted_as_reference() {
+        // `schema.plugin(tenantScopePlugin)` — tenantScopePlugin is passed
+        // as an argument to the `plugin` call, so it should be a RawReference
+        // with arg_of = "plugin".
+        let source = br#"
+export function tenantScopePlugin(schema: any) { return schema; }
+export function setup(schema: any) {
+  schema.plugin(tenantScopePlugin);
+}
+"#;
+        let extraction = extract_file("src/schema.ts", source).unwrap();
+        let refs: Vec<_> = extraction
+            .references
+            .iter()
+            .filter(|r| r.name == "tenantScopePlugin")
+            .collect();
+        assert_eq!(
+            refs.len(),
+            1,
+            "tenantScopePlugin passed as arg: {:?}",
+            extraction.references
+        );
+        assert_eq!(refs[0].name, "tenantScopePlugin");
+        assert_eq!(refs[0].arg_of.as_deref(), Some("plugin"));
+        // The reference is enclosed by `setup`, not `tenantScopePlugin`.
+        let enclosing = refs[0]
+            .enclosing_index
+            .map(|i| extraction.symbols[i].name.as_str());
+        assert_eq!(enclosing, Some("setup"));
+    }
+
+    #[test]
+    fn ts_emitter_on_handler_extracted_as_reference() {
+        // `emitter.on('event', handler)` — handler is passed as an argument
+        // to the `on` call, so it should be a RawReference with arg_of = "on".
+        let source = br#"
+export function handler() {}
+export function wire(emitter: any) {
+  emitter.on('event', handler);
+}
+"#;
+        let extraction = extract_file("src/emitter.ts", source).unwrap();
+        let refs: Vec<_> = extraction
+            .references
+            .iter()
+            .filter(|r| r.name == "handler")
+            .collect();
+        assert_eq!(
+            refs.len(),
+            1,
+            "handler passed as arg: {:?}",
+            extraction.references
+        );
+        assert_eq!(refs[0].arg_of.as_deref(), Some("on"));
+    }
+
+    fn reference_names(path: &str, source: &[u8]) -> Vec<String> {
+        let extraction = extract_file(path, source).unwrap();
+        extraction.references.into_iter().map(|r| r.name).collect()
+    }
+
+    /// A member argument names a function only on a self receiver:
+    /// `user.name` is data, and resolving `name` against every function of
+    /// that name linked unrelated code.
+    #[test]
+    fn member_arguments_are_references_only_on_a_self_receiver() {
+        assert_eq!(
+            reference_names(
+                "src/a.ts",
+                b"export class C { go(user: any) { consume(user.name, this.onClick, handler); } }\n",
+            ),
+            ["onClick", "handler"]
+        );
+        assert_eq!(
+            reference_names(
+                "src/a.py",
+                b"class C:\n    def go(self, obj):\n        register(self, self.handler, obj.attr, None)\n",
+            ),
+            ["handler"]
+        );
+        assert_eq!(
+            reference_names(
+                "src/a.rs",
+                b"impl C { fn go(&self, cfg: Cfg) { run(cfg.field, self.handler, Self::helper, self); } }\n",
+            ),
+            ["handler", "helper"]
+        );
+    }
+
+    #[test]
+    fn jsx_component_call_names_rendered_components_only() {
+        assert_eq!(
+            jsx_component_call("Button"),
+            Some(("Button".to_string(), None))
+        );
+        assert_eq!(
+            jsx_component_call("Menu.Item"),
+            Some(("Item".to_string(), Some("Menu".to_string())))
+        );
+        assert_eq!(
+            jsx_component_call("ui.menu.item"),
+            Some(("item".to_string(), Some("ui.menu".to_string())))
+        );
+        for intrinsic in ["div", "button", "svg:rect", "Svg:Rect", ".x", "x.", ""] {
+            assert_eq!(jsx_component_call(intrinsic), None, "{intrinsic:?}");
+        }
+    }
+
+    #[test]
+    fn rendered_jsx_components_are_calls_and_intrinsic_tags_are_not() {
+        let source = b"export function App() { return <div><Button label=\"x\" /><Menu.Item>go</Menu.Item></div>; }\n";
+        let extraction = extract_file("src/App.tsx", source).unwrap();
+        let calls: Vec<(&str, Option<&str>)> = extraction
+            .calls
+            .iter()
+            .map(|c| (c.callee_name.as_str(), c.receiver.as_deref()))
+            .collect();
+        assert_eq!(calls, [("Button", None), ("Item", Some("Menu"))]);
+        let app = extraction
+            .symbols
+            .iter()
+            .position(|s| s.name == "App")
+            .unwrap();
+        assert!(
+            extraction
+                .calls
+                .iter()
+                .all(|c| c.enclosing_index == Some(app)),
+            "the renderer encloses every component call: {:?}",
+            extraction.calls
+        );
+    }
+
+    #[test]
+    fn ts_literal_args_not_extracted_as_references() {
+        // `foo(undefined, null, true, false, "x", 42)` — none of the literal
+        // args should become references.
+        let source = b"export function f() { foo(undefined, null, true, false, \"x\", 42); }\n";
+        let extraction = extract_file("src/f.ts", source).unwrap();
+        assert!(
+            extraction.references.is_empty(),
+            "literal args must not be references: {:?}",
+            extraction.references
         );
     }
 }

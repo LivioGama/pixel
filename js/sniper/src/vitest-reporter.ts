@@ -151,7 +151,7 @@ export class SniperReporter {
     try {
       const bin = resolvePixelBin(this.opts.bin);
       const repo = this.opts.repo ?? process.cwd();
-      const result = spawnSync(bin, ["sniper", "report", "--json", "-", "--repo", repo], {
+      const result = spawnSync(bin, ["list-errors", "report", "--json", "-", "--repo", repo], {
         input: JSON.stringify(envelope),
         stdio: ["pipe", "ignore", "pipe"],
         timeout: 10_000,

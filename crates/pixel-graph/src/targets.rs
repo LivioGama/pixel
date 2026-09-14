@@ -431,13 +431,13 @@ mod tests {
         let mut store = GraphStore::open_in_memory().unwrap();
         let fa = store.replace_file("src/a.ts", "oid", "ts").unwrap();
         store
-            .insert_unresolved_call(fa, "alpha", None, 3, None)
+            .insert_unresolved_call(fa, "alpha", None, 3, None, "calls")
             .unwrap();
         store
-            .insert_unresolved_call(fa, "alpha", None, 9, None)
+            .insert_unresolved_call(fa, "alpha", None, 9, None, "calls")
             .unwrap();
         store
-            .insert_unresolved_call(fa, "beta", None, 4, None)
+            .insert_unresolved_call(fa, "beta", None, 4, None, "calls")
             .unwrap();
 
         let env = envelope_for_names(&store, &["alpha", "beta", "alpha"]).unwrap();

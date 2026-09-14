@@ -224,16 +224,19 @@ to write: the missed mutant is the bug report.
 The installed `pixel` (`command -v pixel`: a mise/asdf-managed install
 behind a shim, a Homebrew cellar, `~/.cargo/bin`, `~/.local/bin` as a last
 resort) is what your agent wrapper and the smoke test use, so it must match
-the working tree. `pixel upgrade` replaces the binary that is actually
+the working tree. `pixel self-update` replaces the binary that is actually
 running with an atomic rename (on macOS an in-place `cp` over a running
 Mach-O invalidates its signature and the next call is SIGKILLed), stops
 this repo's daemon, and warns when another `pixel` earlier on PATH would
 still shadow it. Never copy into `~/.local/bin` by hand: a second copy
-shadows the managed one.
+shadows the managed one. A binary that mise or Homebrew installed is
+refused (overwriting it leaves the manager listing a version that is gone):
+`pixel self-update --dev` installs the build as `~/.local/bin/pixel-dev`
+instead, and `--install-path <path>` overwrites a managed binary on purpose.
 
 ```bash
-pixel upgrade --repo . --build "cargo build --profile dev-release -p pixel-cli"
-pixel index --history .   # rebuild facts/history index
+pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-cli"
+pixel build-index --history .   # rebuild facts/history index
 pixel install             # redeploy the agent prompt, shell wrapper, Codex config
 pixel doctor .            # must be green; report any non-green check in the PR
 scripts/pixel-smoke-test.sh   # the installed binary end to end (read-only)
@@ -292,18 +295,18 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full map. The short version:
 
 Pixel is dogfooded on itself. When an agent works in this repository:
 
-- Start with `pixel targets "<task>"` to get the P0/P1/P2 file list. Stay
+- Start with `pixel scope-task "<task>"` to get the P0/P1/P2 file list. Stay
   inside it; refine the task and re-run rather than reading around.
 - Run `pixel impact "<symbol>"` before editing any function, struct, or
   method. Say so in the PR if it reported HIGH or CRITICAL risk.
-- Run `pixel changes` before editing to avoid duplicating in-progress work.
+- Run `pixel what-changed` before editing to avoid duplicating in-progress work.
 - After the gates pass, push and open the PR; the `Mutants` job is the
   mutation gate. For each `MISSED` mutant it reports either add a test that
   fails on that mutation or, when the mutation cannot matter, annotate the
   function with `#[cfg_attr(test, mutants::skip)]` and a one-line reason.
   Push until the job reports no missed mutant; do not weaken an assertion to
   get there, and do not run the full `cargo mutants` locally unasked.
-- Use `pixel review` to inspect the working tree and `pixel publish` to
+- Use `pixel review-changes` to inspect the working tree and `pixel commit` to
   commit. The guard hook (`crates/pixel/src/guard.rs`) names a pixel
   alternative for destructive or substitutable git commands (`reset --hard`,
   `checkout <ref> -- <path>`, `clean -f`, `push --force`, `add`/`commit`/
@@ -388,10 +391,14 @@ naming the command or flag affected.
 
 ## Release (maintainers)
 
+The full procedure, with the checks after publication and the recovery from
+a failed run, is the `release` skill (`.agents/skills/release/SKILL.md`).
+Steps 1 to 3 are `.agents/skills/release/prepare.sh x.y.z`.
+
 1. Move the `Unreleased` entries under a new `## [x.y.z] - YYYY-MM-DD`.
-2. Bump `version` in `crates/pixel/Cargo.toml` and any crate that changed,
-   then `cargo build` so `Cargo.lock` follows.
-3. `pixel release-check x.y.z` must print `all checks passed`: it checks
+2. Bump `version` in every workspace member (they move in lockstep since
+   0.2.4), then `cargo update --workspace` so `Cargo.lock` follows.
+3. `pixel check-release x.y.z` must print `all checks passed`: it checks
    the three points above (the same command gates the release workflow
    before anything is built).
 4. Commit as `release: prepare x.y.z`.

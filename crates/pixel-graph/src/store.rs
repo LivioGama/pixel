@@ -86,6 +86,10 @@ pub enum EdgeKind {
     Extends,
     Implements,
     HasMethod,
+    /// A symbol passed as an argument to a call (e.g. `schema.plugin(fn)` or
+    /// `emitter.on('e', handler)`). Weaker than `Calls`: it means "may be
+    /// invoked", not "directly called".
+    References,
 }
 
 impl EdgeKind {
@@ -96,6 +100,7 @@ impl EdgeKind {
             EdgeKind::Extends => "extends",
             EdgeKind::Implements => "implements",
             EdgeKind::HasMethod => "has_method",
+            EdgeKind::References => "references",
         }
     }
     pub fn parse(s: &str) -> Self {
@@ -104,6 +109,7 @@ impl EdgeKind {
             "extends" => EdgeKind::Extends,
             "implements" => EdgeKind::Implements,
             "has_method" => EdgeKind::HasMethod,
+            "references" => EdgeKind::References,
             _ => EdgeKind::Calls,
         }
     }
@@ -228,6 +234,18 @@ pub struct CruxLine {
     /// Stable anchor: FNV-1a of `text`. Content-derived, independent of line
     /// position — survives when the file is rearranged.
     pub fingerprint: u64,
+}
+
+/// One extracted JSX element for plan queries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsxElementRow {
+    pub id: i64,
+    pub file_id: i64,
+    pub tag: String,
+    pub has_handler: bool,
+    pub text_content: String,
+    pub start_line: u32,
+    pub end_line: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +443,7 @@ impl GraphStore {
                 params![id],
             )?;
             tx.execute("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
+            tx.execute("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
             tx.execute(
                 "UPDATE files SET blob_oid = ?2, lang = ?3 WHERE id = ?1",
                 params![id, blob_oid, lang],
@@ -469,6 +488,7 @@ impl GraphStore {
                 params![id],
             )?;
             tx.execute("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
+            tx.execute("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
             tx.execute("DELETE FROM files WHERE id = ?1", params![id])?;
         }
         tx.commit()?;
@@ -599,6 +619,9 @@ impl GraphStore {
         Ok(())
     }
 
+    /// Insert an unresolved call or reference. `kind` is `"calls"` (default)
+    /// or `"references"` — the latter prevents `resolve_all` from
+    /// resurrecting a passed-argument reference as a `Calls` edge.
     pub fn insert_unresolved_call(
         &self,
         file_id: i64,
@@ -606,13 +629,38 @@ impl GraphStore {
         enclosing_symbol_id: Option<i64>,
         site_line: u32,
         receiver: Option<&str>,
+        kind: &str,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO unresolved_calls (file_id, name, enclosing_symbol_id, site_line, receiver)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![file_id, name, enclosing_symbol_id, site_line, receiver],
+            "INSERT INTO unresolved_calls (file_id, name, enclosing_symbol_id, site_line, receiver, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![file_id, name, enclosing_symbol_id, site_line, receiver, kind],
         )?;
         Ok(())
+    }
+
+    pub fn insert_jsx_element(
+        &self,
+        file_id: i64,
+        tag: &str,
+        has_handler: bool,
+        text_content: &str,
+        start_line: u32,
+        end_line: u32,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO jsx_elements (file_id, tag, has_handler, text_content, start_line, end_line)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                file_id,
+                tag,
+                has_handler,
+                text_content,
+                start_line,
+                end_line,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
     }
 
     // --- concept write path (Engine 1) ---
@@ -887,6 +935,24 @@ impl GraphStore {
             .optional()?)
     }
 
+    pub fn file_by_id(&self, id: i64) -> Result<Option<FileRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, path, blob_oid, lang FROM files WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok(FileRow {
+                        id: r.get(0)?,
+                        path: r.get(1)?,
+                        blob_oid: r.get(2)?,
+                        lang: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     pub fn files(&self) -> Result<Vec<FileRow>> {
         let mut stmt = self
             .conn
@@ -944,6 +1010,56 @@ impl GraphStore {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![file_id], Self::row_to_symbol)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    const JSX_ELEMENT_COLS: &'static str =
+        "id, file_id, tag, has_handler, text_content, start_line, end_line";
+
+    fn row_to_jsx_element(r: &rusqlite::Row<'_>) -> rusqlite::Result<JsxElementRow> {
+        Ok(JsxElementRow {
+            id: r.get(0)?,
+            file_id: r.get(1)?,
+            tag: r.get(2)?,
+            has_handler: r.get::<_, i64>(3)? != 0,
+            text_content: r.get(4)?,
+            start_line: r.get(5)?,
+            end_line: r.get(6)?,
+        })
+    }
+
+    pub fn jsx_elements_in_file(&self, file_id: i64) -> Result<Vec<JsxElementRow>> {
+        let sql = format!(
+            "SELECT {} FROM jsx_elements WHERE file_id = ?1 ORDER BY start_line",
+            Self::JSX_ELEMENT_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![file_id], Self::row_to_jsx_element)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    pub fn jsx_elements_dead(
+        &self,
+        file_id: Option<i64>,
+        tag_filter: Option<&str>,
+    ) -> Result<Vec<JsxElementRow>> {
+        let mut sql = format!(
+            "SELECT {} FROM jsx_elements WHERE has_handler = 0",
+            Self::JSX_ELEMENT_COLS
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(fid) = file_id {
+            sql.push_str(" AND file_id = ?");
+            params.push(Box::new(fid));
+        }
+        if let Some(tag) = tag_filter {
+            sql.push_str(" AND tag = ?");
+            params.push(Box::new(tag));
+        }
+        sql.push_str(" ORDER BY start_line");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(AsRef::as_ref).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), Self::row_to_jsx_element)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
@@ -1308,6 +1424,17 @@ CREATE TABLE IF NOT EXISTS concept_words (
   PRIMARY KEY (word, concept_id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_concept_words_concept ON concept_words(concept_id);
+CREATE TABLE IF NOT EXISTS jsx_elements (
+  id INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL,
+  tag TEXT NOT NULL,
+  has_handler INTEGER NOT NULL DEFAULT 0,
+  text_content TEXT NOT NULL DEFAULT '',
+  start_line INTEGER NOT NULL,
+  end_line INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_jsx_elements_file_handler ON jsx_elements(file_id, has_handler);
+CREATE INDEX IF NOT EXISTS idx_jsx_elements_tag ON jsx_elements(tag);
 ";
 
 /// Idempotent schema migrations for graphs created before a column existed.
@@ -1327,6 +1454,12 @@ fn migrate(conn: &Connection) -> Result<()> {
     };
     if !has_column("unresolved_calls", "receiver")? {
         conn.execute("ALTER TABLE unresolved_calls ADD COLUMN receiver TEXT", [])?;
+    }
+    if !has_column("unresolved_calls", "kind")? {
+        conn.execute(
+            "ALTER TABLE unresolved_calls ADD COLUMN kind TEXT NOT NULL DEFAULT 'calls'",
+            [],
+        )?;
     }
     if !has_column("edges", "receiver")? {
         conn.execute("ALTER TABLE edges ADD COLUMN receiver TEXT", [])?;
