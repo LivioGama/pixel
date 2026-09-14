@@ -261,12 +261,78 @@ fn truncation_sets_lower_bound_and_warning() {
     assert_eq!(result["region_count_total"], 4);
     assert_eq!(result["lower_bound"], true);
     let warnings = result["warnings"].as_array().unwrap();
-    assert!(!warnings.is_empty());
-    assert!(warnings[0].as_str().unwrap().contains("limit_regions"));
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("limit_regions")),
+        "{result}"
+    );
     // Verdict still counts truncated-away regions.
     assert_eq!(result["verdict"]["lines_owned"], 2);
     assert_eq!(result["verdict"]["regions_owned"], 2);
     // Histogram too.
     assert_eq!(result["authors"]["Bob"], 2);
     assert_eq!(result["authors"]["Alice"], 2);
+}
+
+/// A `blame.ignoreRevsFile` pointing at a file the repository lacks is a
+/// common global default; git then refuses every blame. Attribution still
+/// answers, and the envelope says the ignore list was not applied.
+#[test]
+fn a_missing_ignore_revs_file_does_not_break_attribution() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    init_repo(root);
+    git(
+        root,
+        &["config", "blame.ignoreRevsFile", ".git-blame-ignore-revs"],
+    );
+    std::fs::write(root.join("f.txt"), "a1\na2\n").unwrap();
+    commit_all(root, "alice");
+
+    let result = provenance(root, &opts("f.txt")).unwrap();
+    assert_eq!(result["authors"]["Alice"], 2, "{result}");
+    let warnings = result["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{result}");
+    assert!(
+        warnings[0]
+            .as_str()
+            .unwrap()
+            .starts_with("blame.ignoreRevsFile names a file this repository does not have"),
+        "{result}"
+    );
+}
+
+/// When the ignore-revs file exists it is honoured: a commit it lists does
+/// not take the lines it only reformatted.
+#[test]
+fn an_existing_ignore_revs_file_is_honoured() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    init_repo(root);
+    std::fs::write(root.join("f.txt"), "a1\na2\na3\n").unwrap();
+    commit_all(root, "alice");
+    set_author(root, "Bob", "bob@example.com");
+    std::fs::write(root.join("f.txt"), "a1\nA2\na3\n").unwrap();
+    commit_all(root, "bob reformats a line");
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let bob = String::from_utf8(out.stdout).unwrap();
+    std::fs::write(root.join(".git-blame-ignore-revs"), bob).unwrap();
+    git(
+        root,
+        &["config", "blame.ignoreRevsFile", ".git-blame-ignore-revs"],
+    );
+
+    let result = provenance(root, &opts("f.txt")).unwrap();
+    assert_eq!(result["authors"]["Alice"], 3, "{result}");
+    assert!(result["authors"].get("Bob").is_none(), "{result}");
+    assert!(
+        result["warnings"].as_array().unwrap().is_empty(),
+        "{result}"
+    );
 }

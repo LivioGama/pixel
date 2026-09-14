@@ -16,7 +16,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use pixel_git::GitRunner;
+use pixel_git::{GitError, GitRunner};
 
 const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 /// Blame output on a large file can legitimately exceed the 1 MiB default
@@ -135,9 +135,26 @@ pub fn provenance(root: &Path, opts: &ProvenanceOptions) -> Result<Value, String
     blame_args.push(file);
 
     let blame_runner = runner.with_max_output_bytes(Some(BLAME_MAX_OUTPUT_BYTES));
-    let blame_out = blame_runner
-        .run(&blame_args)
-        .map_err(|e| format!("git blame: {e}"))?;
+    let mut warnings: Vec<String> = Vec::new();
+    let blame_out = match blame_runner.run(&blame_args) {
+        Ok(out) => out,
+        Err(e) if names_a_missing_ignore_revs_file(&e) => {
+            // A `blame.ignoreRevsFile` this repository lacks (a global
+            // `.git-blame-ignore-revs` default) makes git refuse every
+            // blame. Blame without the list rather than fail, and say so.
+            warnings.push(
+                "blame.ignoreRevsFile names a file this repository does not have; \
+                 attributed without ignored revisions"
+                    .to_string(),
+            );
+            let mut retry = vec!["blame", "--no-ignore-revs-file"];
+            retry.extend_from_slice(&blame_args[1..]);
+            blame_runner
+                .run(&retry)
+                .map_err(|e| format!("git blame: {e}"))?
+        }
+        Err(e) => return Err(format!("git blame: {e}")),
+    };
     let blame_text = String::from_utf8_lossy(&blame_out);
 
     let all_regions = parse_porcelain_regions(&blame_text);
@@ -194,7 +211,6 @@ pub fn provenance(root: &Path, opts: &ProvenanceOptions) -> Result<Value, String
     let total_regions = all_regions.len();
     let limit = opts.limit_regions.max(1);
     let truncated = total_regions > limit;
-    let mut warnings: Vec<String> = Vec::new();
     if truncated {
         warnings.push(format!(
             "regions truncated at limit_regions={limit} ({total_regions} total); \
@@ -221,6 +237,12 @@ pub fn provenance(root: &Path, opts: &ProvenanceOptions) -> Result<Value, String
         "warnings": warnings,
         "rename_follow": "log --follow only",
     }))
+}
+
+/// True iff `git blame` failed because a configured ignore-revs file does
+/// not exist ("could not open object name list: <file>").
+fn names_a_missing_ignore_revs_file(error: &GitError) -> bool {
+    matches!(error, GitError::NonZeroExit { stderr, .. } if stderr.contains("could not open object name list"))
 }
 
 /// Parse `git blame --porcelain` output into contiguous same-commit
