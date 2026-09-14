@@ -81,6 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pixel rename`, the one-shot tool that performed the command rename. It rewrote a hardcoded list of this repository's files with plain string replacement (its unbounded `pixel sync` match turned `sync-branch` into `fetch-branch`), wrote in place without a clean-tree check, and ran `scripts/gen-plugin-assets.sh` in whatever repository it was pointed at. `pixel_proto::commands::RENAMED_COMMANDS` is the rename table.
 - `migrate` (delete the legacy `.gitpixel/` directory) was dropped by the rename without notice. It is back as a hidden command that exits 0, prints `note: 'migrate' was removed and does nothing` on stderr and touches nothing, so a script that still calls it keeps running; delete a leftover `.gitpixel/` by hand.
 
+### Security
+- `rustls` 0.23.44 → 0.23.45 for RUSTSEC-2026-0285 (TLS 1.3 handshake messages accepted across encryption level boundaries), used by the model download path (`ureq` via `hf-hub`).
+
 ## [0.2.4] - 2026-09-14
 
 ### Added
