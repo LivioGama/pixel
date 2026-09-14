@@ -18,7 +18,6 @@
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -212,24 +211,9 @@ fn start_claude_handoff(
 /// Read the exact tracked snapshot from Git. We intentionally make no claim
 /// about untracked files: the sandbox layer independently refuses unsafe WIP.
 fn tracked_paths(root: &Path) -> Result<Vec<String>, String> {
-    let output = Command::new("git")
-        .args(["ls-files", "-z"])
-        .current_dir(root)
-        .output()
-        .map_err(|error| format!("spawn git ls-files: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git ls-files failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let paths: Vec<String> = output
-        .stdout
-        .split(|byte| *byte == b'\0')
-        .filter(|path| !path.is_empty())
-        .map(|path| std::str::from_utf8(path).map(str::to_string))
-        .collect::<Result<_, _>>()
-        .map_err(|error| format!("non-UTF8 tracked path: {error}"))?;
+    let paths = pixel_git::GitRunner::new(root)
+        .ls_files_or_err()
+        .map_err(|error| format!("git ls-files failed: {error}"))?;
     if paths.is_empty() {
         return Err("automatic handoff requires at least one tracked path".to_string());
     }
@@ -803,6 +787,7 @@ fn write_boundary_file(event: &BoundaryEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn cosine_identity() {
@@ -1083,6 +1068,49 @@ mod tests {
             Path::new("/tmp/foobar")
         ));
         assert!(!cwd_matches(Path::new("/tmp/foo"), Path::new("/tmp/baz")));
+    }
+
+    #[test]
+    fn tracked_paths_reads_the_git_index_and_refuses_empty_or_absent_repos() {
+        let root = fixture_repo("tracked-paths");
+        assert_eq!(
+            tracked_paths(&root).unwrap(),
+            vec!["tracked.rs".to_string()]
+        );
+
+        // An untracked file is not a tracked path.
+        std::fs::write(root.join("loose.rs"), "// not added\n").unwrap();
+        assert_eq!(
+            tracked_paths(&root).unwrap(),
+            vec!["tracked.rs".to_string()]
+        );
+
+        let empty =
+            std::env::temp_dir().join(format!("pixel-handoff-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&empty)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let err = tracked_paths(&empty).unwrap_err();
+        assert!(
+            err.contains("at least one tracked path"),
+            "empty repo is refused with its own message: {err}"
+        );
+
+        let outside =
+            std::env::temp_dir().join(format!("pixel-handoff-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        let err = tracked_paths(&outside).unwrap_err();
+        assert!(
+            err.starts_with("git ls-files failed:"),
+            "outside a repo the git failure is reported: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&empty);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     fn fixture_repo(label: &str) -> PathBuf {

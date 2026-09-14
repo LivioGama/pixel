@@ -75,16 +75,11 @@ fn classify_status(xy: &str) -> &'static str {
 
 /// Extract conflict hunks for a conflicted path using `git diff --diff-filter=U`.
 fn conflict_hunks(root: &Path, path: &str) -> Option<Value> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--diff-filter=U", "--", path])
-        .output()
+    let out = pixel_git::GitRunner::new(root)
+        .with_max_output_bytes(Some(pixel_git::ENUMERATION_MAX_OUTPUT_BYTES))
+        .run(&["diff", "--diff-filter=U", "--", path])
         .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let diff = String::from_utf8_lossy(&out.stdout);
+    let diff = String::from_utf8_lossy(&out);
     if diff.is_empty() {
         return None;
     }
@@ -184,5 +179,54 @@ mod tests {
                 .iter()
                 .any(|i| i["path"] == "c.txt" && i["kind"] == "untracked")
         );
+    }
+
+    fn git(root: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    #[test]
+    fn review_reports_conflict_hunks_for_a_conflicted_path() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        init_repo(root);
+        std::fs::write(root.join("a.txt"), b"base\n").unwrap();
+        assert!(git(root, &["add", "."]));
+        assert!(git(root, &["commit", "-qm", "init"]));
+        assert!(git(root, &["checkout", "-qb", "side"]));
+        std::fs::write(root.join("a.txt"), b"side\n").unwrap();
+        assert!(git(root, &["commit", "-qam", "side"]));
+        assert!(git(root, &["checkout", "-q", "-"]));
+        std::fs::write(root.join("a.txt"), b"main\n").unwrap();
+        assert!(git(root, &["commit", "-qam", "main"]));
+        assert!(!git(root, &["merge", "side"]), "the merge must conflict");
+
+        // A clean path has no conflict hunks; the conflicted one has at
+        // least one, with the marker lines in the diff excerpt.
+        assert_eq!(conflict_hunks(root, "missing.txt"), None);
+        let hunks = conflict_hunks(root, "a.txt").expect("conflicted path has hunks");
+        assert_eq!(hunks["path"], "a.txt");
+        assert!(hunks["hunk_count"].as_u64().unwrap() >= 1, "{hunks}");
+        assert!(
+            hunks["diff"].as_str().unwrap().contains("<<<<<<<"),
+            "{hunks}"
+        );
+
+        let result = review(root, None, None).unwrap();
+        let items = result["items"].as_array().unwrap();
+        let item = items
+            .iter()
+            .find(|i| i["path"] == "a.txt")
+            .expect("conflicted path listed");
+        assert_eq!(item["kind"], "conflicted", "{item}");
+        assert_eq!(item["conflicts"]["path"], "a.txt", "{item}");
     }
 }

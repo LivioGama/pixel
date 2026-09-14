@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+pixel-git = { path = "../pixel-git" }
 rmcp = { version = "3.1.4", features = ["transport-io"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 schemars = "1"

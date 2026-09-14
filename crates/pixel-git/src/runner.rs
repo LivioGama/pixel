@@ -161,6 +161,20 @@ impl GitRunner {
         execute_output(cmd, arg_strings, &self.options)
     }
 
+    /// Runs `git -C <root> <args>` with `input` written to the child's
+    /// stdin, and hands back stdout plus the exit code whatever the status
+    /// was (like [`GitRunner::run_output`]). For `apply` fed a patch and
+    /// `hash-object --stdin`: the two calls the task sandbox used to spawn
+    /// bare, with no timeout and no output cap. The input is written from
+    /// its own thread so a patch larger than the pipe buffer cannot
+    /// deadlock against a child that is already producing output.
+    pub fn run_with_stdin(&self, args: &[&str], input: &[u8]) -> Result<GitOutput, GitError> {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(&self.root).args(args);
+        let arg_strings: Vec<String> = args.iter().map(ToString::to_string).collect();
+        execute_output_with_stdin(cmd, arg_strings, &self.options, Some(input.to_vec()))
+    }
+
     /// Runs `git merge-file <current> <base> <other>` (same positional
     /// semantics as `pixel-cli::rescue_cmd`'s invocation, minus the
     /// rescue-specific `-L` diff3 conflict-marker labels, which are cosmetic
@@ -236,15 +250,42 @@ fn execute(
 /// the exit code as data. Only a timeout, an overflow or an I/O failure is
 /// an `Err` here; `execute` is the layer that makes a non-zero exit one.
 fn execute_output(
-    mut cmd: Command,
+    cmd: Command,
     args_for_err: Vec<String>,
     options: &GitOptions,
 ) -> Result<GitOutput, GitError> {
+    execute_output_with_stdin(cmd, args_for_err, options, None)
+}
+
+/// `execute_output` with an optional stdin payload. `None` closes the
+/// child's stdin (`Stdio::null`); `Some` pipes it and writes the bytes from
+/// a writer thread so the timeout loop below keeps running while the child
+/// consumes them. A child that exits before reading everything (a broken
+/// pipe) is not an error here: its exit code and stderr say what happened.
+fn execute_output_with_stdin(
+    mut cmd: Command,
+    args_for_err: Vec<String>,
+    options: &GitOptions,
+    input: Option<Vec<u8>>,
+) -> Result<GitOutput, GitError> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    cmd.stdin(Stdio::null());
+    cmd.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
 
     let mut child = cmd.spawn()?;
+
+    let writer_thread = input.map(|bytes| {
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(&bytes);
+            // Dropping `stdin` closes the pipe: EOF for the child.
+        })
+    });
 
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
@@ -285,6 +326,9 @@ fn execute_output(
         let _ = child.wait();
         let _ = stdout_thread.join();
         let _ = stderr_thread.join();
+        if let Some(writer) = writer_thread {
+            let _ = writer.join();
+        }
         return Err(GitError::Timeout { args: args_for_err });
     }
 
@@ -296,6 +340,9 @@ fn execute_output(
         let _ = child.kill();
         let _ = child.wait();
         let _ = stderr_thread.join();
+        if let Some(writer) = writer_thread {
+            let _ = writer.join();
+        }
         return Err(GitError::OutputTooLarge {
             args: args_for_err,
             cap: max_out.unwrap_or(0),
@@ -304,6 +351,9 @@ fn execute_output(
     let stdout_bytes = stdout_result.unwrap();
 
     let status = child.wait()?;
+    if let Some(writer) = writer_thread {
+        let _ = writer.join();
+    }
     let stderr_bytes = stderr_thread
         .join()
         .map_err(|_| GitError::Io(std::io::Error::other("stderr reader thread panicked")))?;
@@ -443,6 +493,78 @@ mod tests {
         assert_eq!(out.code, Some(1), "{out:?}");
         assert!(!out.success());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_with_stdin_feeds_the_child_and_reports_its_status() {
+        // `hash-object --stdin` is the sandbox's use: the OID of "hello\n"
+        // is fixed by git's object format, so a wrong or truncated payload
+        // (or stdin left closed) gives a different hash, not a flake.
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-git-stdin-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .arg(&dir)
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let runner = GitRunner::new(&dir);
+
+        let out = runner
+            .run_with_stdin(&["hash-object", "--stdin"], b"hello\n")
+            .unwrap();
+        assert_eq!(out.code, Some(0), "{out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "ce013625030ba8dba906f756967f9e9ca394464a"
+        );
+
+        // A payload past the pipe buffer must not deadlock: the writer
+        // runs on its own thread while stdout is drained.
+        let big = vec![b'x'; 4 * 1024 * 1024];
+        let out = runner
+            .run_with_stdin(&["hash-object", "--stdin"], &big)
+            .unwrap();
+        assert_eq!(out.code, Some(0), "{out:?}");
+        assert_eq!(out.stdout.len(), 41, "one OID line: {out:?}");
+
+        // A malformed patch: git exits non-zero, stderr comes back as
+        // data (what `promote` reports as `apply_failed:<stderr>`).
+        let out = runner
+            .run_with_stdin(&["apply", "--check"], b"not a patch\n")
+            .unwrap();
+        assert_ne!(out.code, Some(0), "{out:?}");
+        assert!(!out.success());
+        assert!(!out.stderr.is_empty(), "{out:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_with_stdin_still_times_out() {
+        // A stuck consumer must be killed like any other child; the writer
+        // thread must not keep the call alive after the deadline.
+        let mut cmd = Command::new("sleep");
+        cmd.arg("5");
+        let options = GitOptions {
+            timeout: Some(Duration::from_millis(100)),
+            max_output_bytes: None,
+        };
+        let start = Instant::now();
+        let result = execute_output_with_stdin(
+            cmd,
+            vec!["sleep".into(), "5".into()],
+            &options,
+            Some(b"ignored".to_vec()),
+        );
+        assert!(
+            matches!(result, Err(GitError::Timeout { .. })),
+            "expected Timeout, got {result:?}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

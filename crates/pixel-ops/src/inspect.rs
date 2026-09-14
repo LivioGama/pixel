@@ -40,7 +40,7 @@ const CLEAN_LIST_CAP: usize = 200;
 pub fn inspect(root: &Path) -> Result<Value, String> {
     let runner = GitRunner::new(root);
     let head = runner.rev_parse_head();
-    let branch = current_branch(root);
+    let branch = GitRunner::new(root).current_branch();
     let dirty = runner.status_porcelain();
 
     // Build dirty file list with fingerprints.
@@ -90,21 +90,6 @@ pub fn inspect(root: &Path) -> Result<Value, String> {
         "clean_list_truncated": clean_truncated,
         "clean_list_cap": CLEAN_LIST_CAP,
     }))
-}
-
-/// Get the current branch name (or None if detached HEAD).
-fn current_branch(root: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["symbolic-ref", "--short", "HEAD"])
-        .output()
-        .ok()?;
-    if out.status.success() {
-        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]

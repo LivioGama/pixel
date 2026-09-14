@@ -325,3 +325,26 @@ fn statusline_reports_the_commit_fraction_only_when_there_are_commits() {
     let line = String::from_utf8_lossy(&out.stdout);
     assert!(!line.contains("0/0"), "{line}");
 }
+
+/// The session-start capability block carries the history index's phase
+/// and freshness (`repo.facts_phase`, `repo.facts_fresh`), read through
+/// the CLI's own facts probe: an agent starting a session sees whether
+/// `excavate`/`rescue` have a fresh index without a second command.
+#[test]
+fn session_start_block_reports_the_history_index_phase_and_freshness() {
+    let dir = fixture("session-start-facts");
+    let indexed = pixel(&dir, &["index", "--history", "."]);
+    assert!(indexed.status.success(), "{indexed:?}");
+    let out = pixel(&dir, &["hook", "session-start", "."]);
+    assert!(out.status.success(), "{out:?}");
+    let block: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let repo = &block["pixel"]["repo"];
+    assert!(
+        repo["facts_phase"].is_string(),
+        "phase is the ingest phase name: {block}"
+    );
+    assert_eq!(
+        repo["facts_fresh"], true,
+        "one commit, fully ingested: {block}"
+    );
+}

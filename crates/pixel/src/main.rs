@@ -3365,20 +3365,6 @@ fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
 // main
 // ---------------------------------------------------------------------------
 
-/// Count all commits reachable from any ref (`git rev-list --count --all`).
-fn rev_list_count(root: &Path) -> Option<u64> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-list", "--count", "--all"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
-}
-
 /// Facts/history visibility block for `pixel status`: phase, commits indexed
 /// vs the git rev-list count, diff coverage, freshness, and schema version.
 fn facts_status(root: &Path) -> Option<Value> {
@@ -3387,7 +3373,9 @@ fn facts_status(root: &Path) -> Option<Value> {
     Some(json!({
         "phase": state.phase,
         "commits_indexed": state.commits_indexed,
-        "total_commits": rev_list_count(root).unwrap_or(state.total_commits),
+        "total_commits": pixel_git::GitRunner::new(root)
+            .rev_list_count_all()
+            .unwrap_or(state.total_commits),
         "diff_indexed_pct": state.diff_indexed_pct,
         "fresh": state.fresh,
         "schema_version": state.schema_version,

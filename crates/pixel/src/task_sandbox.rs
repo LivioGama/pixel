@@ -8,10 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
+use pixel_git::{ENUMERATION_MAX_OUTPUT_BYTES, GitRunner};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -289,33 +288,15 @@ pub(crate) fn promote(candidate: &Candidate) -> Result<CandidateInspection, Stri
         &candidate.sandbox_root,
         ["diff", "--binary", &candidate.baseline_tree_oid, "--"],
     )?;
-    let mut child = Command::new("git")
-        .arg("apply")
-        .arg("--whitespace=nowarn")
-        .current_dir(&candidate.primary_root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn git apply: {e}"))?;
-    child
-        .stdin
-        .as_mut()
-        .ok_or("git apply stdin unavailable")?
-        .write_all(patch.as_bytes())
-        .map_err(|e| format!("write git apply patch: {e}"))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("wait git apply: {e}"))?;
-    if !output.status.success() {
+    let output = runner(&candidate.primary_root)
+        .run_with_stdin(&["apply", "--whitespace=nowarn"], patch.as_bytes())
+        .map_err(|e| format!("git apply: {e}"))?;
+    if !output.success() {
         return Ok(rejected(
             candidate,
             inspection.changed_paths,
             inspection.untracked_paths,
-            &format!(
-                "apply_failed:{}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
+            &format!("apply_failed:{}", output.stderr),
         ));
     }
     Ok(CandidateInspection {
@@ -467,20 +448,20 @@ fn validate_id(value: &str, kind: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The sandbox's git runner: the default 120 s timeout, and the
+/// enumeration cap (64 MiB) rather than the 1 MiB default because
+/// `diff --binary` of a candidate tree and `ls-files` of a large repo are
+/// among its calls. Past the cap the call is an error, never a truncated
+/// patch applied to the primary tree.
+fn runner(root: &Path) -> GitRunner {
+    GitRunner::new(root).with_max_output_bytes(Some(ENUMERATION_MAX_OUTPUT_BYTES))
+}
+
 fn git_success<const N: usize>(root: &Path, args: [&str; N]) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("spawn git: {e}"))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        Err(format!(
-            "git failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    }
+    runner(root)
+        .run(&args)
+        .map(|out| String::from_utf8_lossy(&out).into_owned())
+        .map_err(|e| format!("git failed: {e}"))
 }
 
 fn lines(text: &str) -> Vec<String> {
@@ -520,7 +501,7 @@ fn capture_dirty_overlay(
     }
     reject_credential_paths(&paths)?;
     let patch = git_success(root, ["diff", "--binary", base_oid, "--"])?;
-    let digest = hash_object(patch.as_bytes())?;
+    let digest = hash_object(root, patch.as_bytes())?;
     let patch_path = overlay_path(root, task_id, &digest);
     if !patch_path.exists() {
         write_bytes(&patch_path, patch.as_bytes())?;
@@ -568,63 +549,32 @@ fn current_path_hash(root: &Path, path: &str) -> Result<Option<String>, String> 
     if !full_path.exists() && !full_path.is_symlink() {
         return Ok(None);
     }
-    let output = Command::new("git")
-        .args(["hash-object", "--", path])
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("spawn git hash-object: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git hash-object failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(Some(
-        String::from_utf8_lossy(&output.stdout).trim().to_string(),
-    ))
+    let output = runner(root)
+        .run(&["hash-object", "--", path])
+        .map_err(|e| format!("git hash-object failed: {e}"))?;
+    Ok(Some(String::from_utf8_lossy(&output).trim().to_string()))
 }
 
-fn hash_object(bytes: &[u8]) -> Result<String, String> {
-    let mut child = Command::new("git")
-        .args(["hash-object", "--stdin"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn git hash-object: {e}"))?;
-    child
-        .stdin
-        .as_mut()
-        .ok_or("git hash-object stdin unavailable")?
-        .write_all(bytes)
-        .map_err(|e| format!("write git hash-object input: {e}"))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("wait git hash-object: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git hash-object failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+/// OID of `bytes` as a blob (`git hash-object --stdin`), run in `root` so
+/// the repository's object format applies.
+fn hash_object(root: &Path, bytes: &[u8]) -> Result<String, String> {
+    let output = runner(root)
+        .run_with_stdin(&["hash-object", "--stdin"], bytes)
+        .map_err(|e| format!("git hash-object: {e}"))?;
+    if !output.success() {
+        return Err(format!("git hash-object failed: {}", output.stderr));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn apply_patch_file(root: &Path, patch_path: &Path) -> Result<(), String> {
-    let output = Command::new("git")
-        .args(["apply", "--binary", "--whitespace=nowarn"])
-        .arg(patch_path)
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("spawn git apply overlay: {e}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "apply dirty overlay failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    }
+    let patch = patch_path
+        .to_str()
+        .ok_or_else(|| format!("overlay path is not UTF-8: {}", patch_path.display()))?;
+    runner(root)
+        .run(&["apply", "--binary", "--whitespace=nowarn", patch])
+        .map(|_| ())
+        .map_err(|e| format!("apply dirty overlay failed: {e}"))
 }
 
 fn overlay_path(root: &Path, task_id: &str, digest: &str) -> PathBuf {

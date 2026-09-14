@@ -2170,48 +2170,27 @@ fn reconcile_conflict_pending(root: &Path) -> bool {
         .is_file()
 }
 
-/// Run `git status --porcelain` in `root` and return the list of modified
-/// (tracked) file paths. Used to auto-populate the `pixel commit --files`
-/// recommendation for `git add .` with the actual files.
-/// Returns None on spawn failure; empty vec if no modified files.
+/// Run `git status --porcelain` in `root` (through `GitRunner`, so a hung
+/// git cannot hang the hook past its timeout) and return the list of
+/// modified (tracked) file paths. Used to auto-populate the `pixel commit
+/// --files` recommendation for `git add .` with the actual files.
+/// Returns None when git fails; empty vec if no modified files.
 fn git_status_porcelain_files(root: &Path) -> Option<Vec<String>> {
-    let output = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(root)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
+    let entries = pixel_git::GitRunner::new(root)
+        .status_porcelain_or_err()
         .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let files: Vec<String> = text
-        .lines()
-        .filter_map(|line| {
-            // Format: "XY <path>" where XY is 2 status chars.
-            // Only include modified/added/staged files (not untracked ??).
-            if line.len() < 4 {
-                return None;
-            }
-            let status = &line[..2];
+    let files: Vec<String> = entries
+        .into_iter()
+        .filter_map(|(status, path)| {
             // Skip untracked files (??) -- git add . would stage them, but
             // pixel commit expects tracked files. Untracked files need to
-            // be explicitly listed by the agent.
-            if status == "??" {
+            // be explicitly listed by the agent. Renames are disabled in
+            // the porcelain call, so a rename lists as a delete plus an
+            // add and both paths reach the recommendation.
+            if status == "??" || path.trim().is_empty() {
                 return None;
             }
-            let path = line[3..].trim();
-            if path.is_empty() {
-                return None;
-            }
-            // Handle rename: "R  old -> new" -- take the new path
-            if let Some(arrow) = path.find(" -> ") {
-                return Some(path[arrow + 4..].to_string());
-            }
-            Some(path.to_string())
+            Some(path.trim().to_string())
         })
         .collect();
     Some(files)
@@ -3696,6 +3675,31 @@ mod tests {
             .status()
             .unwrap();
         canonical(&root)
+    }
+
+    #[test]
+    fn git_status_porcelain_files_lists_tracked_changes_only() {
+        let root = real_repo("porcelain-files");
+        assert_eq!(
+            git_status_porcelain_files(&root),
+            Some(Vec::new()),
+            "clean repo: nothing to stage"
+        );
+        std::fs::write(root.join("a.txt"), b"changed").unwrap();
+        std::fs::write(root.join("untracked.txt"), b"new").unwrap();
+        assert_eq!(
+            git_status_porcelain_files(&root),
+            Some(vec!["a.txt".to_string()]),
+            "modified tracked file listed, untracked file skipped"
+        );
+        let outside = std::env::temp_dir().join(format!(
+            "pixel-guard-porcelain-outside-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&outside).unwrap();
+        assert_eq!(git_status_porcelain_files(&outside), None);
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
