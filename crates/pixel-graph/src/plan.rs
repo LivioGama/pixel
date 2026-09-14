@@ -29,6 +29,120 @@ pub enum PlanQuery {
     RecentChanges { max_files: usize },
 }
 
+impl PlanQuery {
+    /// The `--query` spelling of this query.
+    pub fn name(&self) -> &'static str {
+        match self {
+            PlanQuery::DeadInteractive { .. } => "dead-interactive",
+            PlanQuery::DeadCode => "dead-code",
+            PlanQuery::Hotspots { .. } => "hotspots",
+            PlanQuery::ByConcept { .. } => "by-concept",
+            PlanQuery::RecentChanges { .. } => "recent-changes",
+        }
+    }
+}
+
+/// The queries a `pixel plan` invocation runs: the explicit `--query` when
+/// given, else the ones its prompt classifies to.
+pub fn plan_queries(
+    prompt: Option<&str>,
+    query: Option<&str>,
+    tag: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<PlanQuery>, String> {
+    if let Some(q) = query {
+        return explicit_query(q, prompt, tag, limit);
+    }
+    let prompt = prompt.ok_or_else(|| "missing prompt (or pass --query)".to_string())?;
+    Ok(classify_prompt(prompt))
+}
+
+fn explicit_query(
+    q: &str,
+    prompt: Option<&str>,
+    tag: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<PlanQuery>, String> {
+    match q {
+        "dead-interactive" => Ok(vec![PlanQuery::DeadInteractive {
+            tag_filter: tag.map(str::to_string),
+        }]),
+        "dead-code" => Ok(vec![PlanQuery::DeadCode]),
+        "hotspots" => Ok(vec![PlanQuery::Hotspots {
+            limit: limit.unwrap_or(10),
+        }]),
+        "recent-changes" => Ok(vec![PlanQuery::RecentChanges {
+            max_files: limit.unwrap_or(20),
+        }]),
+        "by-concept" => {
+            let query = prompt.ok_or_else(|| "by-concept requires a prompt".to_string())?;
+            Ok(vec![PlanQuery::ByConcept {
+                query: query.to_string(),
+            }])
+        }
+        _ => Err(format!(
+            "unknown query '{q}' (dead-interactive | dead-code | hotspots | recent-changes | by-concept)"
+        )),
+    }
+}
+
+/// Classify a prompt into plan queries by its words, not its substrings:
+/// "unlinked" is not about links, "clicked" is not "click". A word matches
+/// its plural too ("buttons"). A prompt no query claims gets a concept match
+/// on its own text.
+pub fn classify_prompt(prompt: &str) -> Vec<PlanQuery> {
+    let words: Vec<String> = prompt
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let has = |word: &str| {
+        words
+            .iter()
+            .any(|w| w == word || w.strip_suffix('s') == Some(word))
+    };
+    let phrase = format!(" {} ", words.join(" "));
+    let mut queries = Vec::new();
+
+    // Interactive-element queries: push all matching variants so multi-intent
+    // prompts ("links or buttons") get full coverage, not just the first hit.
+    if has("clickable") || has("interactive") {
+        queries.push(PlanQuery::DeadInteractive { tag_filter: None });
+    } else {
+        let mut tags = Vec::new();
+        if has("button") {
+            tags.push("button");
+        }
+        if has("link") || has("navigation") {
+            tags.push("a");
+            tags.push("Link");
+        }
+        if has("click") && tags.is_empty() {
+            queries.push(PlanQuery::DeadInteractive { tag_filter: None });
+        }
+        for tag in tags {
+            queries.push(PlanQuery::DeadInteractive {
+                tag_filter: Some(tag.to_string()),
+            });
+        }
+    }
+    if phrase.contains(" dead code ") || has("unused") || has("remove") {
+        queries.push(PlanQuery::DeadCode);
+    }
+    if has("refactor") || has("hotspot") || has("priority") {
+        queries.push(PlanQuery::Hotspots { limit: 10 });
+    }
+    if has("recent") || has("bug") || has("regression") {
+        queries.push(PlanQuery::RecentChanges { max_files: 20 });
+    }
+    if queries.is_empty() {
+        queries.push(PlanQuery::ByConcept {
+            query: prompt.to_string(),
+        });
+    }
+    queries
+}
+
 /// Severity derived from fan-in for prioritization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -199,6 +313,9 @@ fn dead_code(
     let fan_in = fan_in_for_files(store, &file_ids)?;
     let mut out = Vec::with_capacity(syms.len());
     for (_, _, name, qualified, kind, line, file) in syms {
+        if is_entry_point(&name, &file) {
+            continue;
+        }
         // Impact envelope: if unresolved same-name call sites exist, the
         // resolver gave up — the symbol may have callers we couldn't link.
         // Don't flag it as dead; that would be a false positive.
@@ -207,7 +324,12 @@ fn dead_code(
             continue;
         }
         let fi = *fan_in.get(&file).unwrap_or(&0);
-        let label = format!("Remove unused {kind} `{name}` (qualified: {qualified})");
+        // "No callers found", never "unused": static extraction misses
+        // dynamic dispatch, trait impls called through the trait, and
+        // framework entry points.
+        let label = format!(
+            "No callers found for {kind} `{name}`: confirm it is unused before removing (qualified: {qualified})"
+        );
         out.push(PlanFinding {
             file,
             line,
@@ -217,6 +339,25 @@ fn dead_code(
         });
     }
     Ok(out)
+}
+
+/// A function nothing in the repository calls by design: a program entry
+/// point (`main`, Go's `init`) or a test the harness runs. Reporting one as
+/// dead code is noise at best and a deleted test at worst.
+fn is_entry_point(name: &str, path: &str) -> bool {
+    if name == "main" || (name == "init" && path.ends_with(".go")) {
+        return true;
+    }
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let in_test_dir = path
+        .split('/')
+        .any(|dir| matches!(dir, "test" | "tests" | "__tests__" | "spec"));
+    in_test_dir
+        || file.ends_with("_test.go")
+        || file.ends_with("_test.py")
+        || (file.starts_with("test_") && file.ends_with(".py"))
+        || file.contains(".test.")
+        || file.contains(".spec.")
 }
 
 fn hotspots(
@@ -232,7 +373,7 @@ fn hotspots(
          JOIN files f2 ON s2.file_id = f2.id \
          WHERE e.kind = 'calls' AND f2.id != f.id \
          GROUP BY f.path \
-         ORDER BY fan_in DESC",
+         ORDER BY fan_in DESC, f.path ASC",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
@@ -290,71 +431,82 @@ fn recent_changes(
     runner: &pixel_git::GitRunner,
     max_files: usize,
 ) -> Result<Vec<PlanFinding>, Box<dyn std::error::Error + Send + Sync>> {
-    let output = runner
-        .run_opt(&["log", "--since=30.days", "--name-only", "--pretty=format:"])
-        .unwrap_or_default();
-    let text = String::from_utf8_lossy(&output);
-    let mut paths: Vec<String> = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(ToString::to_string)
-        .collect();
-    paths.sort();
-    paths.dedup();
-    paths.truncate(max_files);
-    if paths.is_empty() {
-        return Ok(Vec::new());
-    }
-    let fan_in = fan_in_for_file_paths(store, &paths)?;
-    let mut out = Vec::with_capacity(paths.len());
-    for p in paths {
-        if store.file_by_path(&p)?.is_some() {
-            let fi = *fan_in.get(&p).unwrap_or(&0);
-            out.push(PlanFinding {
-                file: p.clone(),
-                line: 1,
-                label: format!("Review recent changes in {p}"),
-                fan_in: fi,
-                severity: Severity::from_fan_in(fi),
-            });
+    // A month of history on a busy repository exceeds the default 1 MiB
+    // cap; the enumeration cap applies, and hitting it is an error, not an
+    // empty answer.
+    let runner = runner.with_max_output_bytes(Some(pixel_git::ENUMERATION_MAX_OUTPUT_BYTES));
+    let output = match runner.run(&[
+        "-c",
+        "core.quotepath=false",
+        "log",
+        "--since=30.days",
+        "--name-only",
+        "--pretty=format:",
+    ]) {
+        Ok(output) => output,
+        // Outside a repository or before the first commit nothing is recent.
+        Err(pixel_git::GitError::NonZeroExit { .. }) => return Ok(Vec::new()),
+        Err(e) => return Err(Box::new(e)),
+    };
+    let mut ranked = Vec::new();
+    for (path, commits) in paths_by_churn(&String::from_utf8_lossy(&output)) {
+        if ranked.len() == max_files {
+            break;
+        }
+        if store.file_by_path(&path)?.is_some() {
+            ranked.push((path, commits));
         }
     }
-    Ok(out)
+    let paths: Vec<String> = ranked.iter().map(|(p, _)| p.clone()).collect();
+    let fan_in = fan_in_for_file_paths(store, &paths)?;
+    Ok(ranked
+        .into_iter()
+        .map(|(p, commits)| {
+            let fi = *fan_in.get(&p).unwrap_or(&0);
+            PlanFinding {
+                label: format!("Review recent changes in {p} ({commits} commit(s) in 30 days)"),
+                file: p,
+                line: 1,
+                fan_in: fi,
+                severity: Severity::from_fan_in(fi),
+            }
+        })
+        .collect())
 }
+
+/// Paths of a `git log --name-only --pretty=format:` output with the number
+/// of commits that touched each, most-touched first, ties by path.
+fn paths_by_churn(log: &str) -> Vec<(String, usize)> {
+    let mut commits: HashMap<&str, usize> = HashMap::new();
+    for path in log.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        *commits.entry(path).or_default() += 1;
+    }
+    let mut ranked: Vec<(String, usize)> = commits
+        .into_iter()
+        .map(|(path, n)| (path.to_string(), n))
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked
+}
+
+/// SQLite's default bound on host parameters is 32 766; one query per chunk
+/// keeps `IN (…)` lists well under it on repositories of any size.
+const FAN_IN_CHUNK: usize = 500;
 
 fn fan_in_for_files(
     store: &GraphStore,
     file_ids: &[i64],
 ) -> Result<HashMap<String, u32>, Box<dyn std::error::Error + Send + Sync>> {
-    if file_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let placeholders: Vec<&str> = file_ids.iter().map(|_| "?").collect();
-    let sql = format!(
-        "SELECT f.path, COUNT(DISTINCT f2.id) AS fan_in \
-         FROM edges e \
-         JOIN symbols s ON e.dst_id = s.id \
-         JOIN files f ON s.file_id = f.id \
-         JOIN symbols s2 ON e.src_id = s2.id \
-         JOIN files f2 ON s2.file_id = f2.id \
-         WHERE e.kind = 'calls' AND f2.id != f.id AND f.id IN ({}) \
-         GROUP BY f.path",
-        placeholders.join(",")
-    );
-    let mut stmt = store.conn().prepare(&sql)?;
-    let ids: Vec<Box<dyn rusqlite::ToSql>> = file_ids
-        .iter()
-        .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>)
-        .collect();
-    let refs: Vec<&dyn rusqlite::ToSql> = ids.iter().map(AsRef::as_ref).collect();
-    let rows = stmt.query_map(refs.as_slice(), |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
-    })?;
+    let mut ids = file_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
     let mut out = HashMap::new();
-    for r in rows {
-        let (p, c) = r?;
-        out.insert(p, c);
+    for chunk in ids.chunks(FAN_IN_CHUNK) {
+        let params: Vec<Box<dyn rusqlite::ToSql>> = chunk
+            .iter()
+            .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        out.extend(fan_in_where(store, "f.id", &params)?);
     }
     Ok(out)
 }
@@ -363,10 +515,28 @@ fn fan_in_for_file_paths(
     store: &GraphStore,
     paths: &[String],
 ) -> Result<HashMap<String, u32>, Box<dyn std::error::Error + Send + Sync>> {
-    if paths.is_empty() {
-        return Ok(HashMap::new());
+    let mut unique = paths.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    let mut out = HashMap::new();
+    for chunk in unique.chunks(FAN_IN_CHUNK) {
+        let params: Vec<Box<dyn rusqlite::ToSql>> = chunk
+            .iter()
+            .map(|p| Box::new(p.clone()) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        out.extend(fan_in_where(store, "f.path", &params)?);
     }
-    let placeholders: Vec<&str> = paths.iter().map(|_| "?").collect();
+    Ok(out)
+}
+
+/// Distinct calling files per target file, for the files whose `column` is
+/// one of `params`.
+fn fan_in_where(
+    store: &GraphStore,
+    column: &str,
+    params: &[Box<dyn rusqlite::ToSql>],
+) -> Result<HashMap<String, u32>, Box<dyn std::error::Error + Send + Sync>> {
+    let placeholders = vec!["?"; params.len()].join(",");
     let sql = format!(
         "SELECT f.path, COUNT(DISTINCT f2.id) AS fan_in \
          FROM edges e \
@@ -374,15 +544,10 @@ fn fan_in_for_file_paths(
          JOIN files f ON s.file_id = f.id \
          JOIN symbols s2 ON e.src_id = s2.id \
          JOIN files f2 ON s2.file_id = f2.id \
-         WHERE e.kind = 'calls' AND f2.id != f.id AND f.path IN ({}) \
-         GROUP BY f.path",
-        placeholders.join(",")
+         WHERE e.kind = 'calls' AND f2.id != f.id AND {column} IN ({placeholders}) \
+         GROUP BY f.path"
     );
     let mut stmt = store.conn().prepare(&sql)?;
-    let params: Vec<Box<dyn rusqlite::ToSql>> = paths
-        .iter()
-        .map(|p| Box::new(p.clone()) as Box<dyn rusqlite::ToSql>)
-        .collect();
     let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(AsRef::as_ref).collect();
     let rows = stmt.query_map(refs.as_slice(), |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32))
@@ -631,60 +796,76 @@ mod tests {
         assert!(dead_interactive(&store, Some("form")).unwrap().is_empty());
     }
 
+    fn git(root: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    fn commit(root: &Path, files: &[&str], msg: &str) {
+        for p in files {
+            let path = root.join(p);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let previous = std::fs::read_to_string(&path).unwrap_or_default();
+            std::fs::write(&path, format!("{previous}{msg}\n")).unwrap();
+        }
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", msg]);
+    }
+
+    /// Recent churn points at the likely bug area: the files most commits
+    /// touched come first, only files the graph knows are findings, and the
+    /// cap keeps the most-touched ones rather than the first names.
     #[test]
-    fn recent_changes_lists_committed_paths_known_to_the_graph() {
+    fn recent_changes_ranks_graph_files_by_commits_in_the_window() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "t")
-                .env("GIT_AUTHOR_EMAIL", "t@t")
-                .env("GIT_COMMITTER_NAME", "t")
-                .env("GIT_COMMITTER_EMAIL", "t@t")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "git {args:?}: {out:?}");
-        };
-        git(&["init", "-q"]);
-        std::fs::create_dir_all(root.join("src")).unwrap();
-        for p in ["README.md", "src/a.ts", "src/b.ts"] {
-            std::fs::write(root.join(p), "x\n").unwrap();
-        }
-        git(&["add", "."]);
-        git(&["commit", "-qm", "init"]);
+        git(root, &["init", "-q"]);
+        commit(root, &["README.md", "src/a.ts", "src/b.ts"], "one");
+        commit(root, &["README.md", "src/b.ts"], "two");
+        commit(root, &["README.md", "src/b.ts", "src/c.ts"], "three");
+        commit(root, &["src/c.ts"], "four");
 
         let mut store = GraphStore::open_in_memory().unwrap();
         let fa = file(&mut store, "src/a.ts");
         let fb = file(&mut store, "src/b.ts");
+        file(&mut store, "src/c.ts");
         let a1 = sym(&mut store, fa, "a1", SymbolKind::Function, 1);
         let b1 = sym(&mut store, fb, "b1", SymbolKind::Function, 1);
-        call(&mut store, b1, a1);
+        call(&mut store, a1, b1);
         let runner = pixel_git::GitRunner::new(root);
 
         let findings = recent_changes(&store, root, &runner, 10).unwrap();
         let files: Vec<&str> = findings.iter().map(|f| f.file.as_str()).collect();
         assert_eq!(
             files,
-            vec!["src/a.ts", "src/b.ts"],
-            "README.md is not in the graph, so it is not a finding"
+            ["src/b.ts", "src/c.ts", "src/a.ts"],
+            "3 commits, then 2, then 1; README.md is not in the graph"
         );
-        assert_eq!(findings[0].label, "Review recent changes in src/a.ts");
-        assert_eq!(findings[0].fan_in, 1, "b.ts calls into a.ts");
-        assert_eq!(findings[1].fan_in, 0);
+        assert_eq!(
+            findings[0].label,
+            "Review recent changes in src/b.ts (3 commit(s) in 30 days)"
+        );
+        assert_eq!(findings[0].fan_in, 1, "a.ts calls into b.ts");
         assert_eq!(findings[0].line, 1);
 
-        // The cap applies to the sorted, deduplicated path list.
         let capped = recent_changes(&store, root, &runner, 2).unwrap();
+        let files: Vec<&str> = capped.iter().map(|f| f.file.as_str()).collect();
         assert_eq!(
-            capped.len(),
-            1,
-            "README.md and src/a.ts survive the cap: {capped:?}"
+            files,
+            ["src/b.ts", "src/c.ts"],
+            "the cap counts findings, after README.md was skipped"
         );
-        assert_eq!(capped[0].file, "src/a.ts");
+        assert!(recent_changes(&store, root, &runner, 0).unwrap().is_empty());
 
         // Outside a repository there is nothing recent.
         let empty = tempfile::tempdir().unwrap();
@@ -694,5 +875,377 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn paths_by_churn_counts_commits_per_path_most_touched_first() {
+        let log = [
+            "",
+            "src/b.ts",
+            "src/a.ts",
+            "",
+            "src/b.ts",
+            "  src/c.ts  ",
+            "",
+            "src/c.ts",
+        ]
+        .join("\n");
+        assert_eq!(
+            paths_by_churn(&log),
+            [
+                ("src/b.ts".to_string(), 2),
+                ("src/c.ts".to_string(), 2),
+                ("src/a.ts".to_string(), 1)
+            ]
+        );
+        assert!(paths_by_churn("").is_empty());
+    }
+
+    #[test]
+    fn prompts_classify_by_whole_words() {
+        use PlanQuery::*;
+        assert_eq!(
+            classify_prompt("fix all clickable elements"),
+            [DeadInteractive { tag_filter: None }]
+        );
+        assert_eq!(
+            classify_prompt("wire the Buttons and navigation Links"),
+            [
+                DeadInteractive {
+                    tag_filter: Some("button".into())
+                },
+                DeadInteractive {
+                    tag_filter: Some("a".into())
+                },
+                DeadInteractive {
+                    tag_filter: Some("Link".into())
+                },
+            ]
+        );
+        assert_eq!(
+            classify_prompt("nothing happens on click"),
+            [DeadInteractive { tag_filter: None }]
+        );
+        assert_eq!(
+            classify_prompt("delete dead code, refactor by priority; recent regression"),
+            [
+                DeadCode,
+                Hotspots { limit: 10 },
+                RecentChanges { max_files: 20 }
+            ]
+        );
+        assert_eq!(classify_prompt("remove unused helpers"), [DeadCode]);
+        // Each intent word stands on its own.
+        assert_eq!(classify_prompt("remove the legacy flag"), [DeadCode]);
+        assert_eq!(classify_prompt("list unused exports"), [DeadCode]);
+        assert_eq!(
+            classify_prompt("refactor the parser"),
+            [Hotspots { limit: 10 }]
+        );
+        assert_eq!(classify_prompt("show hotspots"), [Hotspots { limit: 10 }]);
+        assert_eq!(
+            classify_prompt("broken links"),
+            [
+                DeadInteractive {
+                    tag_filter: Some("a".into())
+                },
+                DeadInteractive {
+                    tag_filter: Some("Link".into())
+                },
+            ]
+        );
+        assert_eq!(
+            classify_prompt("recent work"),
+            [RecentChanges { max_files: 20 }]
+        );
+        assert_eq!(
+            classify_prompt("a bug in billing"),
+            [RecentChanges { max_files: 20 }]
+        );
+        // Substrings of other words are not intents.
+        for prompt in [
+            "unlinked invoices",
+            "debugging the clicked handler",
+            "codebase deadline",
+        ] {
+            assert_eq!(
+                classify_prompt(prompt),
+                [ByConcept {
+                    query: prompt.to_string()
+                }],
+                "{prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_queries_prefer_the_explicit_query_and_name_every_query() {
+        use PlanQuery::*;
+        let q = |query, prompt, tag, limit| plan_queries(prompt, Some(query), tag, limit);
+        assert_eq!(
+            q("dead-interactive", None, Some("Link"), None).unwrap(),
+            [DeadInteractive {
+                tag_filter: Some("Link".into())
+            }]
+        );
+        assert_eq!(
+            q("dead-code", Some("links"), None, None).unwrap(),
+            [DeadCode]
+        );
+        assert_eq!(
+            q("hotspots", None, None, None).unwrap(),
+            [Hotspots { limit: 10 }]
+        );
+        assert_eq!(
+            q("hotspots", None, None, Some(3)).unwrap(),
+            [Hotspots { limit: 3 }]
+        );
+        assert_eq!(
+            q("recent-changes", None, None, None).unwrap(),
+            [RecentChanges { max_files: 20 }]
+        );
+        assert_eq!(
+            q("recent-changes", None, None, Some(4)).unwrap(),
+            [RecentChanges { max_files: 4 }]
+        );
+        assert_eq!(
+            q("by-concept", Some("invoice totals"), None, None).unwrap(),
+            [ByConcept {
+                query: "invoice totals".into()
+            }]
+        );
+        assert_eq!(
+            q("by-concept", None, None, None).unwrap_err(),
+            "by-concept requires a prompt"
+        );
+        assert!(
+            q("dead", None, None, None)
+                .unwrap_err()
+                .starts_with("unknown query 'dead'")
+        );
+        assert_eq!(
+            plan_queries(Some("remove unused"), None, None, None).unwrap(),
+            [DeadCode]
+        );
+        assert_eq!(
+            plan_queries(None, None, None, None).unwrap_err(),
+            "missing prompt (or pass --query)"
+        );
+
+        let names: Vec<&str> = [
+            DeadInteractive { tag_filter: None },
+            DeadCode,
+            Hotspots { limit: 1 },
+            ByConcept { query: "x".into() },
+            RecentChanges { max_files: 1 },
+        ]
+        .iter()
+        .map(PlanQuery::name)
+        .collect();
+        assert_eq!(
+            names,
+            [
+                "dead-interactive",
+                "dead-code",
+                "hotspots",
+                "by-concept",
+                "recent-changes"
+            ]
+        );
+        for name in names {
+            let parsed = plan_queries(Some("p"), Some(name), None, None).unwrap();
+            assert_eq!(parsed[0].name(), name, "--query {name} round-trips");
+        }
+    }
+
+    #[test]
+    fn severity_names_are_the_rendered_labels() {
+        assert_eq!(Severity::High.as_str(), "HIGH");
+        assert_eq!(Severity::Medium.as_str(), "MEDIUM");
+        assert_eq!(Severity::Low.as_str(), "LOW");
+    }
+
+    #[test]
+    fn entry_points_and_tests_are_never_dead_code() {
+        for (name, path) in [
+            ("main", "src/main.rs"),
+            ("main", "cmd/tool/main.go"),
+            ("init", "pkg/db.go"),
+            ("test_login", "tests/test_auth.py"),
+            ("it_works", "crates/x/tests/all/smoke.rs"),
+            ("renders", "src/__tests__/App.tsx"),
+            ("helper", "src/login.test.ts"),
+            ("helper", "src/login.spec.ts"),
+            ("TestLogin", "auth/login_test.go"),
+            ("check", "auth/login_test.py"),
+            ("check", "auth/test_login.py"),
+            ("example", "spec/models/user_spec.rb"),
+        ] {
+            assert!(is_entry_point(name, path), "{name} in {path}");
+        }
+        for (name, path) in [
+            ("init", "src/init.rs"),
+            ("maintain", "src/main.rs"),
+            ("helper", "src/testing.ts"),
+            ("helper", "src/contest/score.py"),
+            ("latest", "src/latest.go"),
+        ] {
+            assert!(!is_entry_point(name, path), "{name} in {path}");
+        }
+    }
+
+    #[test]
+    fn dead_code_says_no_callers_found_and_skips_entry_points() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fa = file(&mut store, "src/main.rs");
+        let ft = file(&mut store, "src/app.test.ts");
+        sym(&mut store, fa, "main", SymbolKind::Function, 1);
+        sym(&mut store, fa, "orphan", SymbolKind::Function, 9);
+        sym(&mut store, ft, "helper", SymbolKind::Function, 1);
+        let findings = dead_code(&store).unwrap();
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].file, "src/main.rs");
+        assert_eq!(findings[0].line, 9);
+        assert_eq!(
+            findings[0].label,
+            "No callers found for function `orphan`: confirm it is unused before removing (qualified: orphan)"
+        );
+    }
+
+    /// Which files make the cut must not depend on row order: equal fan-in
+    /// ranks by path, and exactly `limit` rows come back.
+    #[test]
+    fn hotspots_break_ties_by_path_and_stop_at_the_limit() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let caller_file = file(&mut store, "src/app.ts");
+        let caller = sym(&mut store, caller_file, "app", SymbolKind::Function, 1);
+        for path in ["src/z.ts", "src/m.ts", "src/b.ts"] {
+            let fid = file(&mut store, path);
+            let target = sym(
+                &mut store,
+                fid,
+                &path.replace(['/', '.'], "_"),
+                SymbolKind::Function,
+                1,
+            );
+            call(&mut store, caller, target);
+        }
+        let files = |limit| -> Vec<String> {
+            hotspots(&store, limit)
+                .unwrap()
+                .into_iter()
+                .map(|f| f.file)
+                .collect()
+        };
+        assert_eq!(files(2), ["src/b.ts", "src/m.ts"]);
+        assert_eq!(files(3), ["src/b.ts", "src/m.ts", "src/z.ts"]);
+        assert!(files(0).is_empty());
+        let first = &hotspots(&store, 1).unwrap()[0];
+        assert_eq!(first.label, "Refactor hotspot file src/b.ts (1 dependents)");
+        assert_eq!(first.line, 1);
+    }
+
+    /// A plan over thousands of dead symbols asks for each file's fan-in
+    /// once, in chunks SQLite accepts, and loses no file on a chunk edge.
+    #[test]
+    fn fan_in_deduplicates_and_chunks_large_id_and_path_lists() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fa = file(&mut store, "src/a.ts");
+        let fb = file(&mut store, "src/b.ts");
+        let a1 = sym(&mut store, fa, "a1", SymbolKind::Function, 1);
+        let b1 = sym(&mut store, fb, "b1", SymbolKind::Function, 1);
+        call(&mut store, b1, a1);
+
+        let mut ids: Vec<i64> = (1_000..34_000).collect();
+        ids.extend(std::iter::repeat_n(fa, 40_000));
+        let by_id = fan_in_for_files(&store, &ids).unwrap();
+        assert_eq!(by_id.get("src/a.ts"), Some(&1), "{by_id:?}");
+        assert_eq!(by_id.len(), 1);
+
+        let mut paths: Vec<String> = (0..1_200).map(|i| format!("src/x{i}.ts")).collect();
+        paths.push("src/a.ts".to_string());
+        paths.push("src/a.ts".to_string());
+        let by_path = fan_in_for_file_paths(&store, &paths).unwrap();
+        assert_eq!(by_path.get("src/a.ts"), Some(&1), "{by_path:?}");
+        assert_eq!(by_path.len(), 1);
+    }
+
+    #[test]
+    fn run_plan_queries_orders_by_severity_then_fan_in_then_location() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let hot = file(&mut store, "src/hot.ts");
+        let warm = file(&mut store, "src/warm.ts");
+        let cold = file(&mut store, "src/cold.ts");
+        // Dead symbols: two in hot.ts (fan-in 8: HIGH), one in warm.ts
+        // (fan-in 3: MEDIUM), one in cold.ts (fan-in 0: LOW).
+        sym(&mut store, cold, "cold_dead", SymbolKind::Function, 1);
+        sym(&mut store, hot, "hot_dead_late", SymbolKind::Function, 20);
+        sym(&mut store, hot, "hot_dead_early", SymbolKind::Function, 10);
+        sym(&mut store, warm, "warm_dead", SymbolKind::Function, 5);
+        let hot_target = sym(&mut store, hot, "hot_used", SymbolKind::Function, 1);
+        let warm_target = sym(&mut store, warm, "warm_used", SymbolKind::Function, 1);
+        for i in 0..8 {
+            let fid = file(&mut store, &format!("src/callers/c{i}.ts"));
+            let c = sym(&mut store, fid, &format!("c{i}"), SymbolKind::Function, 1);
+            call(&mut store, c, hot_target);
+            if i < 3 {
+                call(&mut store, c, warm_target);
+            }
+        }
+        let root = Path::new(".");
+        let runner = pixel_git::GitRunner::new(root);
+        let findings = run_plan_queries(
+            &store,
+            root,
+            &runner,
+            &[PlanQuery::DeadCode, PlanQuery::DeadCode],
+        )
+        .unwrap();
+        let order: Vec<(&str, u32, u32)> = findings
+            .iter()
+            .filter(|f| !f.file.starts_with("src/callers/"))
+            .map(|f| (f.file.as_str(), f.line, f.fan_in))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("src/hot.ts", 10, 8),
+                ("src/hot.ts", 20, 8),
+                ("src/warm.ts", 5, 3),
+                ("src/cold.ts", 1, 0),
+            ],
+            "{findings:?}"
+        );
+        let first_low = findings
+            .iter()
+            .position(|f| f.severity == Severity::Low)
+            .unwrap();
+        assert!(
+            findings[first_low..]
+                .iter()
+                .all(|f| f.severity == Severity::Low)
+        );
+    }
+
+    #[test]
+    fn by_concept_turns_concept_matches_into_findings() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("billing.ts"),
+            "export function calculateInvoiceTotal(lines: number[]) { return lines.length; }\n",
+        )
+        .unwrap();
+        let db = dir.path().join("graph.db");
+        crate::build::build_graph(dir.path(), &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let findings = by_concept(&store, "invoice total").unwrap();
+        let hit = findings
+            .iter()
+            .find(|f| f.label.contains("calculateInvoiceTotal"))
+            .unwrap_or_else(|| panic!("{findings:?}"));
+        assert_eq!(hit.file, "billing.ts");
+        assert_eq!(hit.line, 1);
+        assert_eq!(hit.severity, Severity::Low);
+        assert!(by_concept(&store, "zzqx unrelated").unwrap().is_empty());
     }
 }

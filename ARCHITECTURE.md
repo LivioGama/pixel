@@ -203,7 +203,7 @@ Invariants enforced by `Service::handle`:
 
 - Success carries `result`, failure carries `error`. Never both.
 - Every retrieval op (`search`, `resolve`, `targets`, `impact`, `uses`,
-  `trace`, `changes`, `context`, `symbol`, `processes`, `clusters`) gets an
+  `trace`, `changes`, `context`, `symbol`, `processes`, `clusters`, `plan`) gets an
   `epistemics` object. Ops that hit a cap name it in `basis` and mirror it as
   a warning. Ops that attested nothing get a conservative not-closed-world
   default instead of an implied claim of completeness.

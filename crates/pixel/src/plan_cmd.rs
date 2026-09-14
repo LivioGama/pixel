@@ -1,11 +1,14 @@
 //! `pixel plan` command — deterministic todo list generation.
+//!
+//! The daemon owns the graph: the findings come from the `plan` op, which
+//! refreshes the graph incrementally before it runs the queries, and this
+//! module only renders them.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use pixel_git::{GitRunner, discover_root};
-use pixel_graph::plan::{PlanFinding, PlanQuery};
-use pixel_graph::{GraphStore, build};
+use pixel_daemon::api::Request;
+use pixel_graph::plan::PlanFinding;
 use serde_json::json;
 
 #[derive(Debug, Clone)]
@@ -21,98 +24,27 @@ pub struct PlanOptions {
 }
 
 pub fn run(opts: PlanOptions) -> Result<(), String> {
-    let root =
-        discover_root(&opts.path).ok_or_else(|| "could not discover repo root".to_string())?;
-    let db_path = root.join(pixel_index::index::SHARD_DIR).join("graph.db");
-    // Always rebuild the graph before planning so the analysis is current.
-    build::build_graph(&root, &db_path).map_err(|e| format!("graph build failed: {e}"))?;
-    let store = GraphStore::open(&db_path).map_err(|e| format!("graph store: {e}"))?;
-    let runner = GitRunner::new(&root);
-    let queries = build_queries(&opts)?;
-    let findings = pixel_graph::plan::run_plan_queries(&store, &root, &runner, &queries)
-        .map_err(|e| format!("plan: {e}"))?;
-    render(opts, findings)?;
-    Ok(())
+    let data = crate::execute(
+        &opts.path,
+        Request::Plan {
+            prompt: opts.prompt.clone(),
+            query: opts.query.clone(),
+            tag: opts.tag.clone(),
+            limit: opts.limit,
+        },
+        false,
+    )?;
+    let findings = findings_of(&data)?;
+    render(opts, findings)
 }
 
-fn build_queries(opts: &PlanOptions) -> Result<Vec<PlanQuery>, String> {
-    if let Some(q) = &opts.query {
-        return parse_explicit_query(q, opts);
-    }
-    let prompt = opts
-        .prompt
-        .as_deref()
-        .ok_or_else(|| "missing prompt (or pass --query)".to_string())?;
-    Ok(classify_prompt(prompt))
-}
-
-fn parse_explicit_query(q: &str, opts: &PlanOptions) -> Result<Vec<PlanQuery>, String> {
-    match q {
-        "dead-interactive" => Ok(vec![PlanQuery::DeadInteractive {
-            tag_filter: opts.tag.clone(),
-        }]),
-        "dead-code" => Ok(vec![PlanQuery::DeadCode]),
-        "hotspots" => Ok(vec![PlanQuery::Hotspots {
-            limit: opts.limit.unwrap_or(10),
-        }]),
-        "recent-changes" => Ok(vec![PlanQuery::RecentChanges {
-            max_files: opts.limit.unwrap_or(20),
-        }]),
-        "by-concept" => {
-            let query = opts
-                .prompt
-                .clone()
-                .ok_or_else(|| "by-concept requires a prompt".to_string())?;
-            Ok(vec![PlanQuery::ByConcept { query }])
-        }
-        _ => Err(format!("unknown query '{q}'")),
-    }
-}
-
-fn classify_prompt(prompt: &str) -> Vec<PlanQuery> {
-    let lower = prompt.to_lowercase();
-    let mut queries = Vec::new();
-
-    // Interactive-element queries: push all matching variants so multi-intent
-    // prompts ("links or buttons") get full coverage, not just the first hit.
-    if lower.contains("clickable") || lower.contains("interactive") {
-        queries.push(PlanQuery::DeadInteractive { tag_filter: None });
-    } else {
-        let mut tags = Vec::new();
-        if lower.contains("button") {
-            tags.push("button");
-        }
-        if lower.contains("link") || lower.contains("navigation") {
-            tags.push("a");
-            tags.push("Link");
-        }
-        if lower.contains("click") && tags.is_empty() {
-            queries.push(PlanQuery::DeadInteractive { tag_filter: None });
-        }
-        for tag in tags {
-            queries.push(PlanQuery::DeadInteractive {
-                tag_filter: Some(tag.to_string()),
-            });
-        }
-    }
-
-    if lower.contains("dead code") || lower.contains("unused") || lower.contains("remove") {
-        queries.push(PlanQuery::DeadCode);
-    }
-    if lower.contains("refactor") || lower.contains("hotspot") || lower.contains("priority") {
-        queries.push(PlanQuery::Hotspots { limit: 10 });
-    }
-    if lower.contains("recent") || lower.contains("bug") || lower.contains("regression") {
-        queries.push(PlanQuery::RecentChanges { max_files: 20 });
-    }
-
-    // Always try concept match as a fallback (plan Option A).
-    if queries.is_empty() {
-        queries.push(PlanQuery::ByConcept {
-            query: prompt.to_string(),
-        });
-    }
-    queries
+/// The findings of a `plan` op answer.
+fn findings_of(data: &serde_json::Value) -> Result<Vec<PlanFinding>, String> {
+    let findings = data
+        .get("findings")
+        .cloned()
+        .ok_or_else(|| "plan: the answer carries no findings".to_string())?;
+    serde_json::from_value(findings).map_err(|e| format!("plan: unreadable findings: {e}"))
 }
 
 fn render(opts: PlanOptions, findings: Vec<PlanFinding>) -> Result<(), String> {

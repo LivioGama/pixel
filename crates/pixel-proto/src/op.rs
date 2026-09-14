@@ -284,6 +284,21 @@ pub enum Op {
         #[serde(default)]
         markdown: bool,
     },
+    /// Deterministic todo list: graph and git-history findings for either an
+    /// explicit `query` (dead-interactive | dead-code | hotspots |
+    /// recent-changes | by-concept) or the queries `prompt` classifies to.
+    /// Served by the daemon so the graph it reads is the daemon's, kept
+    /// fresh incrementally and never rebuilt under a concurrent reader.
+    Plan {
+        #[serde(default)]
+        prompt: Option<String>,
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        tag: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     Shutdown,
 }
 
@@ -327,6 +342,7 @@ impl Op {
             Op::Sync { .. } => "sync",
             Op::Note { .. } => "note",
             Op::Map { .. } => "map",
+            Op::Plan { .. } => "plan",
             Op::Shutdown => "shutdown",
             Op::Reindex { .. } => "reindex",
         }
@@ -377,6 +393,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "sync",
     "note",
     "map",
+    "plan",
     "flow",
 ];
 
@@ -752,6 +769,15 @@ mod tests {
                 },
                 "sync",
             ),
+            (
+                Op::Plan {
+                    prompt: None,
+                    query: None,
+                    tag: None,
+                    limit: None,
+                },
+                "plan",
+            ),
             (Op::Shutdown, "shutdown"),
         ];
         for (op, expected) in cases {
@@ -819,6 +845,7 @@ mod tests {
             "sync",
             "note",
             "map",
+            "plan",
             "flow",
             "shutdown",
         ];
