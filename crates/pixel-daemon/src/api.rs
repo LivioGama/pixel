@@ -28,8 +28,9 @@ pub const GRAPH_DB_FILE: &str = "graph.db";
 /// to 7 with the Envelope v2 migration: the wire shape changed from
 /// `{ok, error, data}` to the full `Envelope` (`ok, op, protocol, requestId,
 /// snapshot, epistemics, budget, result, error, warnings`), gated by
-/// `pixel_proto::ENVELOPE_PROTOCOL_VERSION`.
-pub const PROTOCOL_VERSION: u64 = 9;
+/// `pixel_proto::ENVELOPE_PROTOCOL_VERSION`. 10: the `plan` op, which a
+/// daemon of an older build rejects as an unknown variant.
+pub const PROTOCOL_VERSION: u64 = 10;
 
 /// The potion model the daemon warms; the `potion.ok` marker carries the
 /// repo name so a stale v1 marker cannot pass for v2.
@@ -759,6 +760,12 @@ impl Service {
                 self.op_note(&action, file.as_deref(), target.as_deref(), note.as_deref())
             }
             Request::Map { markdown } => self.op_map(markdown),
+            Request::Plan {
+                prompt,
+                query,
+                tag,
+                limit,
+            } => self.op_plan(prompt.as_deref(), query.as_deref(), tag.as_deref(), limit),
         }
     }
 
@@ -1628,6 +1635,30 @@ impl Service {
         Ok(out)
     }
 
+    /// `pixel plan`: the findings of the requested plan queries over the
+    /// daemon's graph, brought up to date first like every graph op.
+    fn op_plan(
+        &mut self,
+        prompt: Option<&str>,
+        query: Option<&str>,
+        tag: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Value, String> {
+        let queries = pixel_graph::plan::plan_queries(prompt, query, tag, limit)?;
+        let built = self.ensure_graph()?;
+        let runner = pixel_git::GitRunner::new(&self.root);
+        let store = self.graph.as_ref().unwrap();
+        let findings = pixel_graph::plan::run_plan_queries(store, &self.root, &runner, &queries)
+            .map_err(|e| format!("plan: {e}"))?;
+        let names: Vec<&str> = queries
+            .iter()
+            .map(pixel_graph::plan::PlanQuery::name)
+            .collect();
+        let mut out = json!({ "queries": names, "findings": findings });
+        merge_build_info(&mut out, built);
+        Ok(out)
+    }
+
     fn op_graph(&mut self) -> Result<Value, String> {
         let (stats, build_ms) = self.rebuild_graph()?;
         Ok(json!({
@@ -2442,6 +2473,7 @@ pub const RETRIEVAL_OPS: &[&str] = &[
     "symbol",
     "processes",
     "clusters",
+    "plan",
 ];
 
 fn is_retrieval_op(op_name: &str) -> bool {
@@ -3964,6 +3996,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// `plan` answers from the daemon's own graph: an explicit query or the
+    /// prompt's classification picks the queries, the answer names them, and
+    /// an unknown query is an error rather than an empty plan.
+    #[test]
+    fn plan_runs_the_requested_queries_over_the_daemon_graph() {
+        let root = tmpdir("plan-op");
+        std::fs::write(
+            root.join("app.ts"),
+            "export function used() { return 1; }\n\
+             export function orphan() { return 2; }\n\
+             export function main() { return used(); }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "plan fixture"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let plan = |svc: &mut Service, prompt: Option<&str>, query: Option<&str>| {
+            svc.handle(Request::Plan {
+                prompt: prompt.map(str::to_string),
+                query: query.map(str::to_string),
+                tag: None,
+                limit: None,
+            })
+        };
+        let dead = plan(&mut svc, None, Some("dead-code"));
+        assert!(dead.ok, "{:?}", dead.error);
+        assert_eq!(dead.data()["queries"], json!(["dead-code"]));
+        let findings = dead.data()["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0]["file"], "app.ts");
+        assert_eq!(findings[0]["line"], 2);
+        assert!(
+            findings[0]["label"].as_str().unwrap().contains("`orphan`"),
+            "{findings:?}"
+        );
+        assert_eq!(dead.op, "plan");
+        assert!(dead.epistemics.is_some() && dead.snapshot.is_some());
+
+        let classified = plan(&mut svc, Some("remove unused code"), None);
+        assert!(classified.ok, "{:?}", classified.error);
+        assert_eq!(classified.data()["queries"], json!(["dead-code"]));
+        assert_eq!(classified.data()["findings"], dead.data()["findings"]);
+
+        let unknown = plan(&mut svc, None, Some("everything"));
+        assert!(!unknown.ok);
+        assert!(
+            unknown
+                .error_message()
+                .contains("unknown query 'everything'"),
+            "{:?}",
+            unknown.error
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn ping_reports_daemon_protocol_version() {
         let root = tmpdir("protocol-version");
@@ -5087,6 +5176,15 @@ mod tests {
             ),
             ("processes", Request::Processes { offset: None }),
             ("clusters", Request::Clusters { offset: None }),
+            (
+                "plan",
+                Request::Plan {
+                    prompt: None,
+                    query: Some("dead-code".into()),
+                    tag: None,
+                    limit: None,
+                },
+            ),
         ];
 
         // The walk itself must cover the registry exactly — a new retrieval

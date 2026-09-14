@@ -384,3 +384,56 @@ fn dig_history_show_prints_the_file_and_requires_file() {
         "{stderr}"
     );
 }
+
+/// `pixel plan` renders the daemon's findings: JSON carries each finding
+/// and the verify flag, compact prints `file:line label [SEVERITY]`, and an
+/// unknown query fails instead of printing an empty plan.
+#[test]
+fn plan_renders_daemon_findings_as_json_and_compact() {
+    let dir = fixture("plan");
+    let out = pixel(&dir, &["plan", "--query", "dead-code", "--json", "."]);
+    assert!(out.status.success(), "{out:?}");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["verify"], true, "{doc}");
+    let findings = doc["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "{doc}");
+    assert_eq!(findings[0]["file"], "src/caller.rs");
+    assert_eq!(findings[0]["severity"], "low");
+    assert!(
+        findings[0]["label"]
+            .as_str()
+            .unwrap()
+            .starts_with("No callers found for function `go`"),
+        "{doc}"
+    );
+
+    let compact = pixel(
+        &dir,
+        &[
+            "plan",
+            "--query",
+            "dead-code",
+            "--format",
+            "compact",
+            "--no-verify",
+            ".",
+        ],
+    );
+    assert!(compact.status.success(), "{compact:?}");
+    let text = String::from_utf8(compact.stdout).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    assert!(
+        lines[0].starts_with("src/caller.rs:2 No callers found"),
+        "{text}"
+    );
+    assert!(lines[0].ends_with("[LOW]"), "{text}");
+
+    let unknown = pixel(&dir, &["plan", "--query", "everything", "."]);
+    assert!(!unknown.status.success(), "{unknown:?}");
+    assert!(unknown.stdout.is_empty(), "{unknown:?}");
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("unknown query 'everything'"),
+        "{unknown:?}"
+    );
+}
