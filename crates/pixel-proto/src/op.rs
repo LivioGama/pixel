@@ -22,7 +22,7 @@ pub enum Op {
     Ping,
     /// Transcript-corpus operation, served only by a recall daemon (a repo
     /// daemon answers it with an "unsupported" error). `action` selects the
-    /// recall op ("search" | "ask"); `params` is its argument object.
+    /// recall op ("search-content" | "search-meaning"); `params` is its argument object.
     Recall {
         action: String,
         #[serde(default)]
@@ -61,7 +61,7 @@ pub enum Op {
     Symbol {
         name: String,
     },
-    /// All signatures in a file — the "skeleton" view at ~10% of Read cost.
+    /// All signatures in a file — the "list-signatures" view at ~10% of Read cost.
     Skeleton {
         file: String,
     },
@@ -138,7 +138,7 @@ pub enum Op {
         #[serde(default)]
         token: Option<String>,
     },
-    /// Engine 2: history-wide discovery ("excavate"). `phrase` may be empty
+    /// Engine 2: history-wide discovery ("dig-history"). `phrase` may be empty
     /// to list the ingest checkpoint/state only.
     Excavate {
         #[serde(default)]
@@ -284,12 +284,27 @@ pub enum Op {
         #[serde(default)]
         markdown: bool,
     },
+    /// Deterministic todo list: graph and git-history findings for either an
+    /// explicit `query` (dead-interactive | dead-code | hotspots |
+    /// recent-changes | by-concept) or the queries `prompt` classifies to.
+    /// Served by the daemon so the graph it reads is the daemon's, kept
+    /// fresh incrementally and never rebuilt under a concurrent reader.
+    Plan {
+        #[serde(default)]
+        prompt: Option<String>,
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        tag: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     Shutdown,
 }
 
 impl Op {
     /// The wire tag name for this variant — the value serde emits under the
-    /// `"op"` field (`"ping"`, `"search"`, `"targets"`, …). Used to populate
+    /// `"op"` field (`"ping"`, `"search-content"`, `"scope-task"`, …). Used to populate
     /// the response envelope's `op` field so every response self-describes
     /// which op it answers.
     pub fn op_name(&self) -> &'static str {
@@ -327,6 +342,7 @@ impl Op {
             Op::Sync { .. } => "sync",
             Op::Note { .. } => "note",
             Op::Map { .. } => "map",
+            Op::Plan { .. } => "plan",
             Op::Shutdown => "shutdown",
             Op::Reindex { .. } => "reindex",
         }
@@ -377,6 +393,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "sync",
     "note",
     "map",
+    "plan",
     "flow",
 ];
 
@@ -390,7 +407,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
 /// advisory fence — the guard warns on out-of-scope files rather than
 /// silently allowing drift), resolve, rescue/excavate, reconcile, and
 /// impact/changes (blast radius before edits).
-pub const SESSION_USAGE: &str = "pixel is the unified retrieval + git engine. Use `pixel <verb>` for search, resolve, targets, history, and safe git ops. Five mandatory scenarios: (1) `pixel targets \"<task>\"` — mandatory first call before the first file read (advisory fence: the guard warns on out-of-list files); (2) `pixel resolve \"<phrase>\"` before any free-text search; (3) `pixel rescue`/`pixel excavate` the moment code was working before; (4) `pixel reconcile` for any branch sync; (5) `pixel impact <symbol>` before editing any symbol and `pixel changes` before any edit batch — measure the blast radius before edits.";
+pub const SESSION_USAGE: &str = "pixel is the unified retrieval + git engine. Use `pixel <verb>` for search, resolve, targets, history, and safe git ops. Five mandatory scenarios: (1) `pixel scope-task \"<task>\"` — mandatory first call before the first file read (advisory fence: the guard warns on out-of-list files); (2) `pixel find-code \"<phrase>\"` before any free-text search; (3) `pixel plan-rollback`/`pixel dig-history` the moment code was working before; (4) `pixel sync-branch` for any branch sync; (5) `pixel impact <symbol>` before editing any symbol and `pixel what-changed` before any edit batch — measure the blast radius before edits.";
 
 #[cfg(test)]
 mod tests {
@@ -752,6 +769,15 @@ mod tests {
                 },
                 "sync",
             ),
+            (
+                Op::Plan {
+                    prompt: None,
+                    query: None,
+                    tag: None,
+                    limit: None,
+                },
+                "plan",
+            ),
             (Op::Shutdown, "shutdown"),
         ];
         for (op, expected) in cases {
@@ -764,12 +790,12 @@ mod tests {
     #[test]
     fn session_usage_names_all_five_mandatory_scenarios() {
         for scenario in [
-            "targets",
-            "resolve",
-            "rescue",
-            "reconcile",
+            "scope-task",
+            "find-code",
+            "plan-rollback",
+            "sync-branch",
             "impact",
-            "changes",
+            "what-changed",
         ] {
             assert!(
                 SESSION_USAGE.contains(scenario),
@@ -819,6 +845,7 @@ mod tests {
             "sync",
             "note",
             "map",
+            "plan",
             "flow",
             "shutdown",
         ];

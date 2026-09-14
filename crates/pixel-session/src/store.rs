@@ -7,7 +7,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -118,20 +117,9 @@ pub fn store_path(project_root: &Path, state_root: &Path) -> PathBuf {
 /// falling back to the canonicalized start path outside a git repo.
 pub fn resolve_project_root(start: &Path) -> Result<PathBuf> {
     let canonical = start.canonicalize()?;
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(&canonical)
-        .args(["rev-parse", "--show-toplevel"])
-        .output();
-    if let Ok(out) = out
-        && out.status.success()
-    {
-        let top = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        if !top.is_empty() {
-            return Ok(PathBuf::from(top));
-        }
-    }
-    Ok(canonical)
+    Ok(pixel_git::GitRunner::new(&canonical)
+        .show_toplevel()
+        .unwrap_or(canonical))
 }
 
 // ---------------------------------------------------------------------------

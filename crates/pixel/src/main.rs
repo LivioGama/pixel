@@ -27,6 +27,7 @@ mod call_guard;
 mod claude_controller;
 mod guard;
 mod operation_metrics;
+mod plan_cmd;
 mod post_compaction;
 mod prompt_submit;
 mod recall_cmd;
@@ -97,7 +98,8 @@ enum RoleArg {
 #[derive(Subcommand)]
 enum Command {
     /// Build (or rebuild) the text index for a directory tree.
-    Index {
+    #[command(alias = "index")]
+    BuildIndex {
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long, value_enum, default_value = "trigram")]
@@ -112,7 +114,8 @@ enum Command {
     /// Search the indexed tree with a regex pattern. Accepts any number of
     /// paths (repo roots, subdirectories, or files) — ripgrep-style; the repo
     /// root is discovered automatically for each.
-    Search {
+    #[command(alias = "search")]
+    SearchContent {
         pattern: String,
         /// Paths to search: repo roots, subdirectories, or files (any mix).
         #[arg(default_value = ".")]
@@ -152,14 +155,16 @@ enum Command {
     },
     /// Native-output literal file search for automatic routing; unsupported
     /// inputs execute the original rg/grep command without modification.
-    SearchCompat {
+    #[command(alias = "search-compat")]
+    SearchLikeRg {
         #[arg(value_enum)]
         tool: search_compat::SearchTool,
         #[arg(last = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Compile and execute one bounded deterministic retrieval recipe.
-    Query {
+    #[command(alias = "query")]
+    RunRecipe {
         intent: String,
         #[arg(long, default_value = ".")]
         path: PathBuf,
@@ -178,7 +183,8 @@ enum Command {
     /// the answer is a ranked list, not a resolved certainty. First use
     /// downloads the embedding model into the shared recall model cache
     /// (once; subsequent calls are offline).
-    Ask {
+    #[command(alias = "ask")]
+    SearchMeaning {
         /// The natural-language question.
         question: String,
         #[arg(default_value = ".")]
@@ -195,7 +201,8 @@ enum Command {
     /// Sniper target list: task description in, closed prioritized file list
     /// out (P0 = start here, P1 = likely, P2 = droppable). Writes the
     /// enforcement manifest .pixel/targets.json unless --no-manifest.
-    Targets {
+    #[command(alias = "targets")]
+    ScopeTask {
         /// Task/feature description (omit with --clear).
         task: Option<String>,
         #[arg(default_value = ".")]
@@ -223,7 +230,8 @@ enum Command {
     /// recent versions with the likely-breaking commit flagged, recommend a
     /// last-known-good candidate. Plan only — nothing is written without
     /// --apply. Never resets; never touches the index or HEAD.
-    Rescue {
+    #[command(alias = "rescue")]
+    PlanRollback {
         /// Problem description ("login was working before ...").
         problem: Option<String>,
         #[arg(default_value = ".")]
@@ -251,7 +259,8 @@ enum Command {
         json: bool,
     },
     /// Look up symbols by name in the code graph.
-    Symbol {
+    #[command(alias = "symbol")]
+    FindSymbol {
         name: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -259,7 +268,8 @@ enum Command {
         json: bool,
     },
     /// All signatures in a file — the skeleton view at ~10% of Read cost.
-    Skeleton {
+    #[command(alias = "skeleton")]
+    ListSignatures {
         file: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -287,7 +297,8 @@ enum Command {
     /// Structural repo map: every indexed file with its symbols. `--markdown`
     /// emits the exportable document form — the human-editable projection of
     /// the graph that `note` annotations key onto.
-    Map {
+    #[command(alias = "map")]
+    RepoMap {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Emit the exportable markdown document.
@@ -297,7 +308,8 @@ enum Command {
         json: bool,
     },
     /// Budget-fitted context for a symbol uid.
-    Context {
+    #[command(alias = "context")]
+    PackContext {
         uid: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -319,7 +331,8 @@ enum Command {
         json: bool,
     },
     /// Direct callers or callees of a symbol.
-    Uses {
+    #[command(alias = "uses")]
+    WhoCalls {
         uid_or_name: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -332,7 +345,8 @@ enum Command {
         json: bool,
     },
     /// Call path between two symbols.
-    Trace {
+    #[command(alias = "trace")]
+    CallPath {
         from: String,
         to: String,
         #[arg(default_value = ".")]
@@ -341,7 +355,8 @@ enum Command {
         json: bool,
     },
     /// Discovered execution flows.
-    Processes {
+    #[command(alias = "processes")]
+    ListFlows {
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long, default_value_t = 0)]
@@ -350,7 +365,8 @@ enum Command {
         json: bool,
     },
     /// Functional-area clusters.
-    Clusters {
+    #[command(alias = "clusters")]
+    ListAreas {
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long, default_value_t = 0)]
@@ -359,7 +375,8 @@ enum Command {
         json: bool,
     },
     /// Symbols/flows affected by working-tree changes.
-    Changes {
+    #[command(alias = "changes")]
+    WhatChanged {
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long)]
@@ -373,7 +390,8 @@ enum Command {
         json: bool,
     },
     /// Force (re)build of the code graph db.
-    Graph {
+    #[command(alias = "graph")]
+    RebuildGraph {
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long)]
@@ -390,7 +408,8 @@ enum Command {
         statusline: bool,
     },
     /// Make a repository ready for agent work: index, graph, and warm daemon.
-    Ready {
+    #[command(alias = "ready")]
+    PrepareRepo {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Build indexes only; do not start or use the background daemon.
@@ -400,7 +419,8 @@ enum Command {
         json: bool,
     },
     /// Show raw shard metadata (legacy).
-    Stats {
+    #[command(alias = "stats")]
+    IndexStats {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
@@ -415,7 +435,8 @@ enum Command {
         cmd: recall_cmd::RecallCmd,
     },
     /// One-look error capture: query the sniper error sink.
-    Sniper {
+    #[command(alias = "sniper")]
+    ListErrors {
         #[command(subcommand)]
         cmd: sniper_cmd::SniperCmd,
     },
@@ -423,7 +444,8 @@ enum Command {
     // M2 — safe git mutation ops (pixel-ops)
     // -----------------------------------------------------------------
     /// Show repo state: HEAD, branch, dirty files, fingerprints.
-    Inspect {
+    #[command(alias = "inspect")]
+    RepoState {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Restrict the snapshot to these repo-relative paths.
@@ -433,7 +455,8 @@ enum Command {
         json: bool,
     },
     /// Review working-tree changes (staged, unstaged, untracked, conflicted).
-    Review {
+    #[command(alias = "review")]
+    ReviewChanges {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Pagination cursor (opaque).
@@ -446,7 +469,8 @@ enum Command {
         json: bool,
     },
     /// Commit history with detail levels and byte caps.
-    History {
+    #[command(alias = "history")]
+    CommitHistory {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Ref to log (default HEAD).
@@ -484,7 +508,8 @@ enum Command {
         json: bool,
     },
     /// Stage files, commit, and optionally push (crash-safe, idempotent).
-    Publish {
+    #[command(alias = "publish")]
+    Commit {
         /// Commit message. Use `--message-file` for a multi-paragraph body.
         #[arg(
             short = 'm',
@@ -534,7 +559,8 @@ enum Command {
         json: bool,
     },
     /// Publish + push in one op (commit then leased push).
-    Ship {
+    #[command(alias = "ship")]
+    CommitAndPush {
         /// Commit message. Use `--message-file` for a multi-paragraph body.
         #[arg(
             short = 'm',
@@ -570,7 +596,8 @@ enum Command {
         json: bool,
     },
     /// Create a new branch from HEAD (or --from <ref>).
-    Branch {
+    #[command(alias = "branch")]
+    NewBranch {
         name: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -584,7 +611,8 @@ enum Command {
         json: bool,
     },
     /// Fast-forward merge to a target OID (refuses non-ff + dirty intersection).
-    Update {
+    #[command(alias = "update")]
+    FastForward {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Reject if HEAD does not match this OID.
@@ -600,7 +628,8 @@ enum Command {
         json: bool,
     },
     /// Fetch from a remote (idempotent).
-    Sync {
+    #[command(alias = "sync")]
+    Fetch {
         remote: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -614,7 +643,8 @@ enum Command {
     // M3/M4 — engines (resolve, history, lifecycle, excavate, reconcile)
     // -----------------------------------------------------------------
     /// Engine 1: resolve a phrase to code via the concept index.
-    Resolve {
+    #[command(alias = "resolve")]
+    FindCode {
         phrase: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -624,7 +654,8 @@ enum Command {
         json: bool,
     },
     /// M3: history-wide fact + diff search.
-    HistorySearch {
+    #[command(alias = "history-search")]
+    SearchHistory {
         query: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -637,7 +668,8 @@ enum Command {
         json: bool,
     },
     /// Engine 2: lifecycle of a path or token.
-    Lifecycle {
+    #[command(alias = "lifecycle")]
+    FileHistory {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Repo-relative path to inspect.
@@ -650,7 +682,8 @@ enum Command {
         json: bool,
     },
     /// Engine 2: history-wide discovery (rescue v2).
-    Excavate {
+    #[command(alias = "excavate")]
+    DigHistory {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Phrase to search for in diff text.
@@ -680,7 +713,8 @@ enum Command {
         json: bool,
     },
     /// Engine 4: one-call deterministic branch sync.
-    Reconcile {
+    #[command(alias = "reconcile")]
+    SyncBranch {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// report (default) | rebase-if-clean
@@ -701,7 +735,8 @@ enum Command {
         json: bool,
     },
     /// M5: journal a session event (fire-and-forget).
-    Journal {
+    #[command(alias = "journal")]
+    RecordEvent {
         kind: String,
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -755,7 +790,8 @@ enum Command {
     /// Cargo.lock is fresh for every workspace member, CHANGELOG.md has the
     /// `## [x.y.z]` heading and an empty Unreleased section. Exit 1 on any
     /// failed check.
-    ReleaseCheck {
+    #[command(alias = "release-check")]
+    CheckRelease {
         /// The version or tag: `1.2.3`, `v1.2.3` or `refs/tags/v1.2.3`.
         version: String,
         /// Repository root (default: current directory).
@@ -768,7 +804,8 @@ enum Command {
     /// Rebuild the binary, stop the daemon, copy the new binary to the
     /// install path, and optionally restart the daemon. Solves the
     /// "Text file busy" error when the daemon holds the binary open.
-    Upgrade {
+    #[command(alias = "upgrade")]
+    SelfUpdate {
         /// Cargo build command to run (default: `cargo build --release -p pixel-cli`).
         /// The built binary is read from `target/<profile>/pixel`, with the
         /// profile taken from this command's `--profile`/`--release` flags.
@@ -776,9 +813,15 @@ enum Command {
         build: String,
         /// Install path. Default: the binary running this command (unless
         /// it lives in a cargo `target/` dir), else the first `pixel` on
-        /// PATH (shim directories skipped), else ~/.local/bin/pixel.
+        /// PATH (shim directories skipped), else ~/.local/bin/pixel. A
+        /// default that lands in a mise install dir or a Homebrew Cellar is
+        /// refused; passing this flag writes there anyway.
         #[arg(long)]
         install_path: Option<PathBuf>,
+        /// Install to ~/.local/bin/pixel-dev instead: a side build to call
+        /// as `pixel-dev`, which never shadows or replaces `pixel`.
+        #[arg(long, conflicts_with = "install_path")]
+        dev: bool,
         /// Restart the daemon after upgrade.
         #[arg(long)]
         restart_daemon: bool,
@@ -800,7 +843,10 @@ enum Command {
         #[arg(long)]
         shell: Option<String>,
     },
-    /// Remove legacy .gitpixel/ and prepare .pixel/; indexes rebuild lazily on use.
+    /// Removed: the legacy `.gitpixel/` migration. Hidden and kept only so a
+    /// script that still calls it exits 0 with a note instead of failing
+    /// with "unrecognized subcommand".
+    #[command(hide = true)]
     Migrate {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -808,19 +854,22 @@ enum Command {
         json: bool,
     },
     /// Hook entrypoints (guard, session-start) invoked by Claude hooks.
-    Hook {
+    #[command(alias = "hook")]
+    RunHook {
         #[command(subcommand)]
         cmd: HookCmd,
     },
     /// Inspect or reset Claude Code's local Pixel task-runtime packet.
-    Task {
+    #[command(alias = "task")]
+    TaskState {
         #[command(subcommand)]
         cmd: TaskCmd,
     },
     /// Self-assessment: pixel's own action log (what ran, what went wrong).
     /// Reads <path>/.pixel/actions.jsonl, written asynchronously by every
     /// pixel invocation.
-    Log {
+    #[command(alias = "log")]
+    ActionLog {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Most recent entries to show.
@@ -840,7 +889,8 @@ enum Command {
     /// fraction of the candidate pool the agent did NOT have to read. A
     /// measured counter to semble's '99% fewer tokens' claim — own numbers,
     /// same format.
-    Savings {
+    #[command(alias = "savings")]
+    TokenSavings {
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long)]
@@ -851,7 +901,8 @@ enum Command {
     },
     /// Squash every commit on the current branch since its base into ONE
     /// commit (crash-safe, backup-ref'd), optionally force-pushing with lease.
-    Rewrite {
+    #[command(alias = "rewrite")]
+    SquashBranch {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Explicit base ref (squash <onto>..HEAD). Default: merge-base with
@@ -881,7 +932,8 @@ enum Command {
         json: bool,
     },
     /// Per-region blame attribution: who introduced/owns each region of a file.
-    Provenance {
+    #[command(alias = "provenance")]
+    WhoWrote {
         /// Repo-relative file to attribute.
         file: String,
         #[arg(default_value = ".")]
@@ -901,7 +953,8 @@ enum Command {
     },
     /// One-call read-only branch inventory: ahead/behind, merged, stale,
     /// unpushed — the deterministic "did you push everything?" answer.
-    Branches {
+    #[command(alias = "branches")]
+    ListBranches {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Run `git fetch --prune <remote>` first for a live view.
@@ -918,14 +971,43 @@ enum Command {
     },
     /// Additive-only, key-level .env mutations with snapshots and restore.
     /// Values are NEVER printed in any output.
-    Env {
+    #[command(alias = "env")]
+    EditEnv {
         #[command(subcommand)]
         cmd: EnvCmd,
+    },
+    /// Deterministic todo list generation from code analysis.
+    Plan {
+        /// Natural-language prompt (optional if --query is used).
+        prompt: Option<String>,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Explicit query: dead-interactive | dead-code | hotspots | recent-changes | by-concept.
+        #[arg(long)]
+        query: Option<String>,
+        /// Tag filter for dead-interactive (e.g. button, a, Link).
+        #[arg(long)]
+        tag: Option<String>,
+        /// Limit for hotspots/recent-changes.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Output format: markdown | json | compact.
+        #[arg(long, default_value = "markdown")]
+        format: String,
+        /// Omit the trailing verification todo.
+        #[arg(long)]
+        no_verify: bool,
+        /// Cap the number of findings returned.
+        #[arg(long)]
+        max_todos: Option<usize>,
+        #[arg(long)]
+        json: bool,
     },
     /// Save, retrieve, list, revise, and replay proven agent-browser paths
     /// (auth flows, config flows) so the agent follows a deterministic
     /// shortcut instead of re-discovering the UI from scratch every time.
-    Flow {
+    #[command(alias = "flow")]
+    ReplayFlow {
         #[command(subcommand)]
         cmd: FlowCmd,
     },
@@ -2514,7 +2596,7 @@ fn extractor_for_shard(shard: &Shard) -> Result<Box<dyn GramExtractor>, String> 
         )));
     }
     Err(format!(
-        "index built with unsupported extractor {id:?}; re-run `pixel index`"
+        "index built with unsupported extractor {id:?}; re-run `pixel build-index`"
     ))
 }
 
@@ -2946,6 +3028,92 @@ fn daemon_stop(path: PathBuf) -> Result<(), String> {
 struct UpgradeTarget {
     path: PathBuf,
     source: &'static str,
+    /// The user named this path (`--install-path`): no ownership check.
+    explicit: bool,
+}
+
+/// A directory whose files a package manager installed and checksummed.
+struct ManagedRoot {
+    root: PathBuf,
+    manager: &'static str,
+}
+
+/// The install trees `pixel upgrade` must not write into on its own:
+/// mise's `installs/` (`~/.local/share/mise`, or `$MISE_DATA_DIR`) and the
+/// Homebrew Cellars (`/opt/homebrew`, `/usr/local`, or `$HOMEBREW_CELLAR`
+/// that `brew shellenv` exports). Roots are canonicalized when they exist
+/// so they compare against a resolved binary path (`/tmp` is
+/// `/private/tmp` on macOS).
+fn package_manager_roots(
+    home: &Path,
+    mise_data_dir: Option<&std::ffi::OsStr>,
+    homebrew_cellar: Option<&std::ffi::OsStr>,
+) -> Vec<ManagedRoot> {
+    let mut roots = vec![ManagedRoot {
+        root: home.join(".local/share/mise/installs"),
+        manager: "mise",
+    }];
+    if let Some(dir) = mise_data_dir.filter(|d| !d.is_empty()) {
+        roots.push(ManagedRoot {
+            root: Path::new(dir).join("installs"),
+            manager: "mise",
+        });
+    }
+    for cellar in ["/opt/homebrew/Cellar", "/usr/local/Cellar"] {
+        roots.push(ManagedRoot {
+            root: PathBuf::from(cellar),
+            manager: "Homebrew",
+        });
+    }
+    if let Some(cellar) = homebrew_cellar.filter(|c| !c.is_empty()) {
+        roots.push(ManagedRoot {
+            root: PathBuf::from(cellar),
+            manager: "Homebrew",
+        });
+    }
+    for managed in &mut roots {
+        if let Ok(canonical) = managed.root.canonicalize() {
+            managed.root = canonical;
+        }
+    }
+    roots
+}
+
+/// Why `pixel upgrade` refuses `target`, or `None` when it may write there.
+///
+/// Overwriting a package manager's binary is silent corruption: on
+/// 2026-09-14 a bare `pixel upgrade` replaced the mise-installed 0.2.4 with
+/// a dirty `target/dev-release` build while mise still listed 0.2.4 (mise
+/// checks the checksum at install time only), and nothing said so. The
+/// path is resolved first, so a symlink into a Cellar (`/opt/homebrew/bin/
+/// pixel`) is refused like the Cellar file itself. `--install-path` is the
+/// user's decision and is never refused.
+fn upgrade_target_refusal(target: &UpgradeTarget, roots: &[ManagedRoot]) -> Option<String> {
+    if target.explicit {
+        return None;
+    }
+    let resolved = target
+        .path
+        .canonicalize()
+        .unwrap_or_else(|_| target.path.clone());
+    let owner = roots.iter().find(|r| resolved.starts_with(&r.root))?;
+    Some(format!(
+        "refusing to install over {resolved} ({source}): it lies under {root}, which {manager} \
+         installed; overwriting it would leave {manager} listing a version that is no longer \
+         there. Run `pixel self-update --dry-run` to see where an upgrade lands, pass \
+         `--install-path {resolved}` to write there anyway, or `--dev` to install a side build \
+         at ~/.local/bin/pixel-dev.",
+        resolved = resolved.display(),
+        source = target.source,
+        root = owner.root.display(),
+        manager = owner.manager,
+    ))
+}
+
+/// `pixel upgrade --dev` destination: a distinct name, so a local build
+/// can be exercised as `pixel-dev` while `pixel` stays the managed one.
+fn dev_install_path(home: &Path) -> PathBuf {
+    home.join(".local/bin/pixel-dev")
 }
 
 /// True when `path` has a `target` directory component: a cargo build
@@ -3034,6 +3202,9 @@ fn profile_dir_name(name: &str) -> String {
 ///    in a cargo `target/` dir (`target/release/pixel upgrade`).
 /// 3. The first `pixel` on PATH outside a `shims` dir or a `target/` dir.
 /// 4. `~/.local/bin/pixel`, the legacy default.
+///
+/// Steps 2 to 4 only find a path; `upgrade_target_refusal` then refuses one
+/// a package manager owns.
 fn resolve_upgrade_target(
     explicit: Option<PathBuf>,
     current_exe: Option<PathBuf>,
@@ -3044,6 +3215,7 @@ fn resolve_upgrade_target(
         return UpgradeTarget {
             path,
             source: "--install-path",
+            explicit: true,
         };
     }
     if let Some(exe) = current_exe {
@@ -3052,6 +3224,7 @@ fn resolve_upgrade_target(
             return UpgradeTarget {
                 path: exe,
                 source: "running binary",
+                explicit: false,
             };
         }
     }
@@ -3062,19 +3235,26 @@ fn resolve_upgrade_target(
         return UpgradeTarget {
             path,
             source: "first pixel on PATH",
+            explicit: false,
         };
     }
     UpgradeTarget {
         path: home.join(".local").join("bin").join("pixel"),
         source: "default",
+        explicit: false,
     }
 }
 
 /// The `pixel` that a shell would run INSTEAD of `installed`, if any: the
 /// first PATH hit that is a different file. This is how a stale copy in
 /// `~/.local/bin` silently kept serving an old version after an upgrade
-/// landed in a mise install dir that came later on PATH.
+/// landed in a mise install dir that came later on PATH. A binary installed
+/// under another name (`pixel-dev`) is not what `pixel` runs, so no other
+/// `pixel` can shadow it.
 fn upgrade_shadowed_by(installed: &Path, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    if installed.file_name() != Some(std::ffi::OsStr::new("pixel")) {
+        return None;
+    }
     let installed = installed.canonicalize().ok()?;
     pixel_binaries_on_path(path_var)
         .into_iter()
@@ -3151,6 +3331,7 @@ mod upgrade_target_tests {
         );
         assert_eq!(t.path, PathBuf::from("/opt/x/pixel"));
         assert_eq!(t.source, "--install-path");
+        assert!(t.explicit);
     }
 
     /// The point of the change: on a machine where `pixel` is a managed
@@ -3164,6 +3345,7 @@ mod upgrade_target_tests {
         let t = resolve_upgrade_target(None, Some(managed.clone()), None, &d);
         assert_eq!(t.path, managed);
         assert_eq!(t.source, "running binary");
+        assert!(!t.explicit, "a resolved default is subject to the refusal");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -3184,10 +3366,12 @@ mod upgrade_target_tests {
         let t = resolve_upgrade_target(None, Some(built.clone()), Some(&path_var), &d);
         assert_eq!(t.path, on_path, "shim dir and target dir skipped");
         assert_eq!(t.source, "first pixel on PATH");
+        assert!(!t.explicit);
 
         let t = resolve_upgrade_target(None, Some(built), None, &d);
         assert_eq!(t.path, d.join(".local/bin/pixel"));
         assert_eq!(t.source, "default");
+        assert!(!t.explicit);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -3221,6 +3405,104 @@ mod upgrade_target_tests {
         let link_first =
             std::env::join_paths([link_dir, stale.parent().unwrap().to_path_buf()]).unwrap();
         assert_eq!(upgrade_shadowed_by(&managed, Some(&link_first)), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `pixel upgrade --dev` exists to never touch `pixel`: a `pixel` earlier
+    /// on PATH is not shadowing `pixel-dev`, so warning about it would be a
+    /// false alarm on every dev install.
+    #[test]
+    fn a_binary_under_another_name_is_never_shadowed() {
+        let d = sandbox("devshadow");
+        let managed = touch(&d.join("mise/installs/pixel/bin/pixel"));
+        let dev = touch(&d.join("local/bin/pixel-dev"));
+        let path_var = std::env::join_paths([managed.parent().unwrap()]).unwrap();
+        assert_eq!(upgrade_shadowed_by(&dev, Some(&path_var)), None);
+        assert_eq!(
+            dev_install_path(Path::new("/home/u")),
+            PathBuf::from("/home/u/.local/bin/pixel-dev")
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn roots_of(roots: &[ManagedRoot]) -> Vec<(PathBuf, &'static str)> {
+        roots.iter().map(|r| (r.root.clone(), r.manager)).collect()
+    }
+
+    /// The trees a bare upgrade must not write into: mise's default and
+    /// relocated `installs/`, both Homebrew Cellars, and the Cellar
+    /// `brew shellenv` exports. An unset or empty variable adds nothing
+    /// (an empty `HOMEBREW_CELLAR` would otherwise make `""` a root).
+    #[test]
+    fn package_manager_roots_cover_mise_and_homebrew() {
+        let home = Path::new("/nonexistent-home");
+        let base = roots_of(&package_manager_roots(home, None, None));
+        assert_eq!(
+            base,
+            vec![
+                (home.join(".local/share/mise/installs"), "mise"),
+                (PathBuf::from("/opt/homebrew/Cellar"), "Homebrew"),
+                (PathBuf::from("/usr/local/Cellar"), "Homebrew"),
+            ]
+        );
+        let empty = std::ffi::OsStr::new("");
+        assert_eq!(
+            roots_of(&package_manager_roots(home, Some(empty), Some(empty))),
+            base
+        );
+        let with_env = roots_of(&package_manager_roots(
+            home,
+            Some(std::ffi::OsStr::new("/nonexistent-mise")),
+            Some(std::ffi::OsStr::new("/nonexistent-cellar")),
+        ));
+        assert!(with_env.contains(&(PathBuf::from("/nonexistent-mise/installs"), "mise")));
+        assert!(with_env.contains(&(PathBuf::from("/nonexistent-cellar"), "Homebrew")));
+        assert_eq!(with_env.len(), 5);
+    }
+
+    fn target(path: PathBuf, explicit: bool) -> UpgradeTarget {
+        UpgradeTarget {
+            path,
+            source: "running binary",
+            explicit,
+        }
+    }
+
+    /// The refusal is the guard against clobbering a managed install: a
+    /// resolved path under a root is refused (directly or through a
+    /// symlink), a sibling that merely shares a name prefix is not, and an
+    /// explicit `--install-path` is always the user's call.
+    #[test]
+    fn refusal_follows_symlinks_into_managed_roots_and_spares_explicit_paths() {
+        let d = sandbox("refusal");
+        let cellar = d.join("Cellar");
+        let keg = touch(&cellar.join("pixel/1.0/bin/pixel"));
+        let roots = vec![ManagedRoot {
+            root: cellar.canonicalize().unwrap(),
+            manager: "Homebrew",
+        }];
+
+        let reason = upgrade_target_refusal(&target(keg.clone(), false), &roots).unwrap();
+        assert!(reason.contains(&keg.display().to_string()), "{reason}");
+        assert!(reason.contains("(running binary)"), "{reason}");
+        assert!(reason.contains("Homebrew"), "{reason}");
+
+        let link = d.join("bin/pixel");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&keg, &link).unwrap();
+        let reason = upgrade_target_refusal(&target(link, false), &roots).unwrap();
+        assert!(
+            reason.contains(&keg.display().to_string()),
+            "resolved: {reason}"
+        );
+
+        assert!(upgrade_target_refusal(&target(keg, true), &roots).is_none());
+        let sibling = touch(&d.join("Cellarx/pixel"));
+        assert!(upgrade_target_refusal(&target(sibling, false), &roots).is_none());
+        // A path that does not exist yet (the `~/.local/bin/pixel` default)
+        // is compared as given.
+        let missing = cellar.canonicalize().unwrap().join("new/pixel");
+        assert!(upgrade_target_refusal(&target(missing, false), &roots).is_some());
         let _ = std::fs::remove_dir_all(&d);
     }
 }
@@ -3325,20 +3607,6 @@ fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
 // main
 // ---------------------------------------------------------------------------
 
-/// Count all commits reachable from any ref (`git rev-list --count --all`).
-fn rev_list_count(root: &Path) -> Option<u64> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-list", "--count", "--all"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
-}
-
 /// Facts/history visibility block for `pixel status`: phase, commits indexed
 /// vs the git rev-list count, diff coverage, freshness, and schema version.
 fn facts_status(root: &Path) -> Option<Value> {
@@ -3347,7 +3615,9 @@ fn facts_status(root: &Path) -> Option<Value> {
     Some(json!({
         "phase": state.phase,
         "commits_indexed": state.commits_indexed,
-        "total_commits": rev_list_count(root).unwrap_or(state.total_commits),
+        "total_commits": pixel_git::GitRunner::new(root)
+            .rev_list_count_all()
+            .unwrap_or(state.total_commits),
         "diff_indexed_pct": state.diff_indexed_pct,
         "fresh": state.fresh,
         "schema_version": state.schema_version,
@@ -3378,6 +3648,42 @@ fn operation_path(matches: &clap::ArgMatches) -> Option<PathBuf> {
         .and_then(|mut paths| paths.next().cloned())
 }
 
+/// What `pixel migrate` prints now that the command does nothing.
+const MIGRATE_REMOVED_NOTE: &str = "note: 'migrate' was removed and does nothing; pixel no longer \
+     reads legacy .gitpixel/ state, so delete that directory by hand if it is still there";
+
+/// The pre-rename subcommand this invocation was spelled with, and its
+/// current name. Only the first word that is not an option names the
+/// command (`pixel prepare-repo ready` runs `prepare-repo` on a path called
+/// `ready`); `--metrics` is the one option taking a separate value before it.
+fn renamed_invocation(argv: &[String]) -> Option<(&str, &'static str)> {
+    let mut words = argv.iter().skip(1);
+    while let Some(word) = words.next() {
+        if word == "--metrics" {
+            words.next();
+        } else if !word.starts_with('-') {
+            return pixel_proto::commands::renamed_to(word).map(|new| (word.as_str(), new));
+        }
+    }
+    None
+}
+
+/// The one stderr line announcing that an old command name was used, or
+/// `None` when the name is current or live reporting is off. `live` is the
+/// metrics gate: `--metrics off`, `PIXEL_METRICS=0` and the protected
+/// streams (hooks, `search-like-rg`, the statusline) silence both alike, so
+/// the note never lands in a hook response or a byte-compatible rg output.
+fn rename_note(argv: &[String], live: bool) -> Option<String> {
+    if !live {
+        return None;
+    }
+    let (old, new) = renamed_invocation(argv)?;
+    Some(format!(
+        "note: '{old}' is now '{new}'; the old name stays accepted until {}\n",
+        pixel_proto::commands::ALIAS_REMOVAL_VERSION
+    ))
+}
+
 fn run() -> Result<(), String> {
     let started = std::time::Instant::now();
     let argv: Vec<String> = std::env::args().collect();
@@ -3387,8 +3693,8 @@ fn run() -> Result<(), String> {
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     let protected = matches!(
         &cli.command,
-        Command::SearchCompat { .. }
-            | Command::Hook { .. }
+        Command::SearchLikeRg { .. }
+            | Command::RunHook { .. }
             | Command::Status {
                 statusline: true,
                 ..
@@ -3399,19 +3705,22 @@ fn run() -> Result<(), String> {
                     ..
                 }
             }
-            | Command::Sniper {
+            | Command::ListErrors {
                 cmd: sniper_cmd::SniperCmd::Mcp { .. } | sniper_cmd::SniperCmd::Run { .. }
             }
     );
     let live = !protected
         && cli.metrics != "off"
         && std::env::var_os("PIXEL_METRICS").is_none_or(|v| v != "0");
+    if let Some(note) = rename_note(&argv, live) {
+        eprint!("{note}");
+    }
     let root = discover_root(&path).or_else(|_| discover_root(Path::new(".")));
     operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
     // Compatibility fallback must exec the original before any logging changes
     // its search corpus; its successful Pixel branch retains existing logging.
     let mut logger = match &root {
-        _ if matches!(&cli.command, Command::SearchCompat { .. }) => {
+        _ if matches!(&cli.command, Command::SearchLikeRg { .. }) => {
             pixel_actionlog::ActionLog::noop()
         }
         Ok(root) => pixel_actionlog::ActionLog::spawn_for_root(root),
@@ -3459,8 +3768,8 @@ fn run() -> Result<(), String> {
 
 fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<(), String> {
     match command {
-        Command::SearchCompat { tool, args } => search_compat::run(tool, args),
-        Command::Index {
+        Command::SearchLikeRg { tool, args } => search_compat::run(tool, args),
+        Command::BuildIndex {
             path,
             extractor,
             max_gram,
@@ -3534,7 +3843,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
             Ok(())
         }
-        Command::Search {
+        Command::SearchContent {
             pattern,
             paths,
             json,
@@ -3546,7 +3855,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             context,
             ignore_case,
         } => {
-            if call_guard_check("search", &format!("{pattern} {paths:?}")) {
+            if call_guard_check("search-content", &format!("{pattern} {paths:?}")) {
                 return Err("circuit breaker: repeated search calls".to_string());
             }
             run_search(
@@ -3563,7 +3872,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 logger,
             )
         }
-        Command::Query {
+        Command::RunRecipe {
             intent,
             path,
             kind,
@@ -3571,14 +3880,14 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             json,
             no_daemon,
         } => run_query(intent, path, &kind, budget, json, no_daemon, logger),
-        Command::Ask {
+        Command::SearchMeaning {
             question,
             path,
             limit,
             max_files,
             json,
         } => run_ask(question, path, limit, max_files, json),
-        Command::Targets {
+        Command::ScopeTask {
             task,
             path,
             json,
@@ -3639,13 +3948,13 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             finish_graph_cmd(data, json, pretty_targets)?;
             if let Some(active) = active_tasks {
                 eprintln!(
-                    "targets manifest active: {} ({active} task(s)) — scoping enforced; run `pixel targets --clear` when the task ends",
+                    "targets manifest active: {} ({active} task(s)) — scoping enforced; run `pixel scope-task --clear` when the task ends",
                     manifest_path.display()
                 );
             }
             Ok(())
         }
-        Command::Rescue {
+        Command::PlanRollback {
             problem,
             path,
             files,
@@ -3783,7 +4092,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             println!("fix forward: keep current code and fix the bug in place");
             Ok(())
         }
-        Command::Symbol { name, path, json } => {
+        Command::FindSymbol { name, path, json } => {
             let data = execute(&path, Request::Symbol { name }, false)?;
             finish_graph_cmd(data, json, |d| {
                 let syms = d.get("symbols")?.as_array()?;
@@ -3801,7 +4110,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             })?;
             Ok(())
         }
-        Command::Skeleton { file, path, json } => {
+        Command::ListSignatures { file, path, json } => {
             let data = execute(&path, Request::Skeleton { file }, false)?;
             finish_graph_cmd(data, json, |d| {
                 let syms = d.get("symbols")?.as_array()?;
@@ -3809,7 +4118,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 let lang = d.get("lang")?.as_str().unwrap_or("");
                 let mut output = format!("// {fname} [{lang}]\n");
                 if syms.is_empty() {
-                    output.push_str("// (no indexed symbols — run `pixel index .` first)\n");
+                    output.push_str("// (no indexed symbols — run `pixel build-index .` first)\n");
                 } else {
                     for s in syms {
                         let kind = s.get("kind")?.as_str().unwrap_or("");
@@ -3881,7 +4190,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             })?;
             Ok(())
         }
-        Command::Map {
+        Command::RepoMap {
             path,
             markdown,
             json,
@@ -3917,13 +4226,13 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
             write_stdout(&output)
         }
-        Command::Context {
+        Command::PackContext {
             uid,
             path,
             budget,
             json,
         } => {
-            if call_guard_check("context", &format!("{uid} {}", path.display())) {
+            if call_guard_check("pack-context", &format!("{uid} {}", path.display())) {
                 return Err("circuit breaker: repeated context calls".to_string());
             }
             let data = execute(
@@ -3988,7 +4297,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }
-        Command::Uses {
+        Command::WhoCalls {
             uid_or_name,
             path,
             role,
@@ -4038,7 +4347,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             })?;
             Ok(())
         }
-        Command::Trace {
+        Command::CallPath {
             from,
             to,
             path,
@@ -4048,7 +4357,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }
-        Command::Processes { path, offset, json } => {
+        Command::ListFlows { path, offset, json } => {
             let data = execute(
                 &path,
                 Request::Processes {
@@ -4059,7 +4368,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }
-        Command::Clusters { path, offset, json } => {
+        Command::ListAreas { path, offset, json } => {
             let data = execute(
                 &path,
                 Request::Clusters {
@@ -4070,14 +4379,14 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }
-        Command::Changes {
+        Command::WhatChanged {
             path,
             base,
             offset,
             tests,
             json,
         } => {
-            if call_guard_check("changes", &format!("{} {:?}", path.display(), base)) {
+            if call_guard_check("what-changed", &format!("{} {:?}", path.display(), base)) {
                 return Err("circuit breaker: repeated changes calls".to_string());
             }
             let data = execute(
@@ -4092,7 +4401,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }
-        Command::Graph { path, json } => {
+        Command::RebuildGraph { path, json } => {
             let v = execute(&path, Request::Graph {}, false)?;
             eprintln!(
                 "graph built in {} ms -> {}",
@@ -4251,12 +4560,12 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
             Ok(())
         }
-        Command::Ready {
+        Command::PrepareRepo {
             path,
             no_daemon,
             json,
         } => ready(path, no_daemon, json),
-        Command::Stats { path } => {
+        Command::IndexStats { path } => {
             let path = discover_root(&path)?;
             let shard = Shard::open(&shard_path(&path)).map_err(|e| e.to_string())?;
             let _ = extractor_for_shard(&shard); // validates extractor id
@@ -4277,11 +4586,11 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             DaemonCmd::Status { path } => daemon_status(discover_root(&path)?),
         },
         Command::Recall { cmd } => recall_cmd::run_recall(cmd),
-        Command::Sniper { cmd } => sniper_cmd::run_sniper(cmd),
+        Command::ListErrors { cmd } => sniper_cmd::run_sniper(cmd),
         // -------------------------------------------------------------
         // M2 — safe git mutation ops (pixel-ops)
         // -------------------------------------------------------------
-        Command::Inspect { path, files, json } => {
+        Command::RepoState { path, files, json } => {
             let root = discover_root(&path)?;
             let mut data = pixel_ops::inspect::inspect(&root)?;
             if !files.is_empty() {
@@ -4309,7 +4618,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
             print_data(&data, json)
         }
-        Command::Review {
+        Command::ReviewChanges {
             path,
             cursor,
             byte_cap,
@@ -4319,7 +4628,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::review::review(&root, cursor.as_deref(), byte_cap)?;
             print_data(&data, json)
         }
-        Command::History {
+        Command::CommitHistory {
             path,
             ref_,
             limit,
@@ -4356,7 +4665,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::diff::diff(&root, &from, to.as_deref(), paths_opt, byte_cap)?;
             print_data(&data, json)
         }
-        Command::Publish {
+        Command::Commit {
             message,
             message_file,
             path,
@@ -4399,7 +4708,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::push::push(&root, &opts, None)?;
             print_data(&data, json)
         }
-        Command::Ship {
+        Command::CommitAndPush {
             message,
             message_file,
             path,
@@ -4423,7 +4732,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             )?;
             print_data(&data, json)
         }
-        Command::Branch {
+        Command::NewBranch {
             name,
             path,
             from,
@@ -4439,7 +4748,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::branch::branch(&root, &opts)?;
             print_data(&data, json)
         }
-        Command::Update {
+        Command::FastForward {
             path,
             expected_head,
             target_oid,
@@ -4455,7 +4764,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::update::update(&root, &opts)?;
             print_data(&data, json)
         }
-        Command::Sync {
+        Command::Fetch {
             remote,
             path,
             refspec,
@@ -4468,13 +4777,13 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         // -------------------------------------------------------------
         // M3/M4 — engines
         // -------------------------------------------------------------
-        Command::Resolve {
+        Command::FindCode {
             phrase,
             path,
             limit,
             json,
         } => {
-            if call_guard_check("resolve", &format!("{phrase} {}", path.display())) {
+            if call_guard_check("find-code", &format!("{phrase} {}", path.display())) {
                 return Err("circuit breaker: repeated resolve calls".to_string());
             }
             let mut data = execute(&path, Request::Resolve { phrase, limit }, false)?;
@@ -4487,7 +4796,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 print_resolve_human(&data)
             }
         }
-        Command::HistorySearch {
+        Command::SearchHistory {
             query,
             path,
             facet,
@@ -4505,7 +4814,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             )?;
             print_data(&data, json)
         }
-        Command::Lifecycle {
+        Command::FileHistory {
             path,
             file,
             token,
@@ -4514,7 +4823,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = execute(&path, Request::Lifecycle { path: file, token }, false)?;
             print_data(&data, json)
         }
-        Command::Excavate {
+        Command::DigHistory {
             path,
             phrase,
             file,
@@ -4541,7 +4850,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             )?;
             print_data(&data, json)
         }
-        Command::Reconcile {
+        Command::SyncBranch {
             path,
             strategy,
             push,
@@ -4561,7 +4870,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             )?;
             print_data(&data, json)
         }
-        Command::Journal {
+        Command::RecordEvent {
             kind,
             path,
             file,
@@ -4614,7 +4923,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 json,
             )
         }
-        Command::ReleaseCheck {
+        Command::CheckRelease {
             version,
             repo,
             json,
@@ -4631,20 +4940,37 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 Err("release-check failed".to_string())
             }
         }
-        Command::Upgrade {
+        Command::SelfUpdate {
             build,
             install_path,
+            dev,
             restart_daemon,
             repo,
             dry_run,
         } => {
             let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
             let path_var = std::env::var_os("PATH");
-            let target = resolve_upgrade_target(
-                install_path,
-                std::env::current_exe().ok(),
-                path_var.as_deref(),
-                Path::new(&home),
+            let target = if dev {
+                UpgradeTarget {
+                    path: dev_install_path(Path::new(&home)),
+                    source: "--dev",
+                    explicit: false,
+                }
+            } else {
+                resolve_upgrade_target(
+                    install_path,
+                    std::env::current_exe().ok(),
+                    path_var.as_deref(),
+                    Path::new(&home),
+                )
+            };
+            let refusal = upgrade_target_refusal(
+                &target,
+                &package_manager_roots(
+                    Path::new(&home),
+                    std::env::var_os("MISE_DATA_DIR").as_deref(),
+                    std::env::var_os("HOMEBREW_CELLAR").as_deref(),
+                ),
             );
             let dest = target.path;
             eprintln!("Install path: {} ({})", dest.display(), target.source);
@@ -4652,7 +4978,15 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 if let Some(other) = upgrade_shadowed_by(&dest, path_var.as_deref()) {
                     eprintln!("warning: {} precedes that path on PATH", other.display());
                 }
-                return write_stdout(&format!("{}\n", dest.display()));
+                write_stdout(&format!("{}\n", dest.display()))?;
+            }
+            // A dry run still fails on a refused path, so
+            // `pixel self-update --dry-run && pixel self-update` never writes.
+            if let Some(reason) = refusal {
+                return Err(reason);
+            }
+            if dry_run {
+                return Ok(());
             }
             // 1. Build.
             eprintln!("Building: {build}");
@@ -4763,15 +5097,11 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 json,
             )
         }
-        Command::Migrate { path, json } => {
-            let root = discover_root(&path)?;
-            let report = pixel_install::install::migrate(&root).map_err(|e| e.to_string())?;
-            print_data(
-                &serde_json::to_value(&report).map_err(|e| e.to_string())?,
-                json,
-            )
+        Command::Migrate { .. } => {
+            eprintln!("{MIGRATE_REMOVED_NOTE}");
+            Ok(())
         }
-        Command::Hook { cmd } => match cmd {
+        Command::RunHook { cmd } => match cmd {
             HookCmd::Guard {
                 path: _,
                 provider,
@@ -4877,7 +5207,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 guard::run_post_tool_use(provider);
             }
         },
-        Command::Task { cmd } => match cmd {
+        Command::TaskState { cmd } => match cmd {
             TaskCmd::Begin {
                 objective,
                 path,
@@ -5130,19 +5460,19 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 print_data(&json!({"session_id": session, "removed": removed}), json)
             }
         },
-        Command::Log {
+        Command::ActionLog {
             path,
             limit,
             errors_only,
             json,
             clear,
         } => run_log(&path, limit, errors_only, json, clear),
-        Command::Savings {
+        Command::TokenSavings {
             path,
             json,
             since_hours,
         } => run_savings(&path, json, since_hours),
-        Command::Rewrite {
+        Command::SquashBranch {
             path,
             onto,
             message,
@@ -5166,7 +5496,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::rewrite::rewrite(&root, &opts)?;
             print_data(&data, json)
         }
-        Command::Provenance {
+        Command::WhoWrote {
             file,
             path,
             lines,
@@ -5184,7 +5514,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::provenance::provenance(&root, &opts)?;
             print_data(&data, json)
         }
-        Command::Branches {
+        Command::ListBranches {
             path,
             fetch,
             remote,
@@ -5200,7 +5530,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::branches::branches(&root, &opts)?;
             print_data(&data, json)
         }
-        Command::Env { cmd } => {
+        Command::EditEnv { cmd } => {
             use pixel_ops::envfile::EnvAction;
             let (path, json, action) = match cmd {
                 EnvCmd::Inventory { path, json } => (path, json, EnvAction::Inventory),
@@ -5241,7 +5571,30 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let data = pixel_ops::envfile::envfile(&root, &action)?;
             print_data(&data, json)
         }
-        Command::Flow { cmd } => {
+        Command::Plan {
+            prompt,
+            path,
+            query,
+            tag,
+            limit,
+            format,
+            no_verify,
+            max_todos,
+            json,
+        } => {
+            let format = if json { "json".to_string() } else { format };
+            plan_cmd::run(plan_cmd::PlanOptions {
+                prompt,
+                path,
+                query,
+                tag,
+                limit,
+                format,
+                no_verify,
+                max_todos,
+            })
+        }
+        Command::ReplayFlow { cmd } => {
             use pixel_flow::FlowAction;
             let json = match &cmd {
                 FlowCmd::Save { json, .. }
@@ -5885,7 +6238,7 @@ fn excavate_show(
     json: bool,
 ) -> Result<(), String> {
     let Some(file) = file else {
-        return Err("excavate --show requires --file <repo-relative path>".to_string());
+        return Err("dig-history --show requires --file <repo-relative path>".to_string());
     };
     let root = discover_root(path)?;
     let runner = pixel_git::GitRunner::new(&root);
@@ -5982,28 +6335,28 @@ mod tests {
             // NOTE: the historical rule text wrote `[--path <path>]` here —
             // the real flag is `--file`. That drift is exactly what the
             // runtime `rule.parity` doctor check flags.
-            r#"pixel excavate --phrase "<what you're looking for>" [--file <path>] [--json]"#,
-            r#"pixel rescue "<what broke, in the user's words>" /path/to/repo [--json]"#,
-            r#"pixel rescue --apply <oid> --file <path> /path/to/repo [--merge|--stash-first|--allow-dirty]"#,
-            r#"pixel resolve "<phrase>" /path/to/repo [--json] [--limit N]"#,
-            r#"pixel search "<pattern>" /path/to/repo --context 5 [--json] [--limit N]"#,
-            r#"pixel reconcile /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]"#,
-            r#"pixel targets "<one-line task description>" /path/to/repo [--json] [--limit N]"#,
-            r#"pixel targets --clear /path/to/repo"#,
+            r#"pixel dig-history --phrase "<what you're looking for>" [--file <path>] [--json]"#,
+            r#"pixel plan-rollback "<what broke, in the user's words>" /path/to/repo [--json]"#,
+            r#"pixel plan-rollback --apply <oid> --file <path> /path/to/repo [--merge|--stash-first|--allow-dirty]"#,
+            r#"pixel find-code "<phrase>" /path/to/repo [--json] [--limit N]"#,
+            r#"pixel search-content "<pattern>" /path/to/repo --context 5 [--json] [--limit N]"#,
+            r#"pixel sync-branch /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]"#,
+            r#"pixel scope-task "<one-line task description>" /path/to/repo [--json] [--limit N]"#,
+            r#"pixel scope-task --clear /path/to/repo"#,
             r#"pixel impact <symbol_name_or_uid> /path/to/repo [--direction upstream|downstream] [--depth N] [--json]"#,
-            r#"pixel changes /path/to/repo [--base <ref>] [--json]"#,
-            r#"pixel inspect /path/to/repo [--json]"#,
-            r#"pixel review /path/to/repo [--json]"#,
-            r#"pixel history /path/to/repo [--ref <ref>] [--limit N] [--json]"#,
+            r#"pixel what-changed /path/to/repo [--base <ref>] [--json]"#,
+            r#"pixel repo-state /path/to/repo [--json]"#,
+            r#"pixel review-changes /path/to/repo [--json]"#,
+            r#"pixel commit-history /path/to/repo [--ref <ref>] [--limit N] [--json]"#,
             r#"pixel diff <from> /path/to/repo [--paths <p>...] [--json]"#,
-            r#"pixel publish --files <f>... --message "<msg>" --request-id <id> /path/to/repo"#,
+            r#"pixel commit --files <f>... --message "<msg>" --request-id <id> /path/to/repo"#,
             r#"pixel push <remote> <refspec> /path/to/repo --request-id <id>"#,
-            r#"pixel ship --files <f>... --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
-            r#"pixel branch <name> /path/to/repo --request-id <id>"#,
-            r#"pixel sync <remote> /path/to/repo [--json]"#,
-            r#"pixel update /path/to/repo --expected-head <oid> --target-oid <oid> --request-id <id>"#,
+            r#"pixel commit-and-push --files <f>... --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
+            r#"pixel new-branch <name> /path/to/repo --request-id <id>"#,
+            r#"pixel fetch <remote> /path/to/repo [--json]"#,
+            r#"pixel fast-forward /path/to/repo --expected-head <oid> --target-oid <oid> --request-id <id>"#,
             r#"pixel status /path/to/repo"#,
-            r#"pixel index --history ."#,
+            r#"pixel build-index --history ."#,
             r#"pixel install"#,
             r#"pixel doctor"#,
         ];
@@ -6032,13 +6385,13 @@ mod tests {
         for bad in [
             vec![
                 "pixel".to_string(),
-                "search".into(),
+                "search-content".into(),
                 "--no-such-flag".into(),
             ],
             vec!["pixel".to_string(), "frobnicate".into()],
             vec![
                 "pixel".to_string(),
-                "rescue".into(),
+                "plan-rollback".into(),
                 "--limit".into(),
                 "3".into(),
             ],
@@ -6055,7 +6408,7 @@ mod tests {
         for argv in [
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "begin".into(),
                 "add durable task state".into(),
                 "--provider".into(),
@@ -6067,7 +6420,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "accept".into(),
                 "change greeting behavior".into(),
                 "--provider".into(),
@@ -6076,14 +6429,14 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "prepare".into(),
                 "task-100-1".into(),
                 "/repo".into(),
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "status".into(),
                 "task-100-1".into(),
                 "/repo".into(),
@@ -6091,14 +6444,14 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "events".into(),
                 "task-100-1".into(),
                 "/repo".into(),
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "sandbox-create".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6110,7 +6463,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "sandbox-inspect".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6118,7 +6471,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "sandbox-promote".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6126,7 +6479,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "sandbox-cancel".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6134,7 +6487,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "worker-start".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6146,7 +6499,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "worker-status".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6154,7 +6507,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "worker-stop".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6162,7 +6515,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "race-start".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6172,7 +6525,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "race-poll".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
@@ -6182,7 +6535,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "plan-validate".into(),
                 "task-100-1".into(),
                 "--file".into(),
@@ -6192,7 +6545,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "show".into(),
                 "--session".into(),
                 "session-123".into(),
@@ -6201,7 +6554,7 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "task".into(),
+                "task-state".into(),
                 "reset".into(),
                 "--session".into(),
                 "session-123".into(),
@@ -6209,14 +6562,14 @@ mod tests {
             ],
             vec![
                 "pixel".to_string(),
-                "hook".into(),
+                "run-hook".into(),
                 "prompt-submit".into(),
                 "--provider".into(),
                 "claude".into(),
             ],
             vec![
                 "pixel".to_string(),
-                "hook".into(),
+                "run-hook".into(),
                 "post-compaction".into(),
                 "--provider".into(),
                 "claude".into(),
@@ -6478,5 +6831,108 @@ mod prompt_asset_parity {
         unsafe {
             std::env::remove_var(&name);
         }
+    }
+}
+
+#[cfg(test)]
+mod renamed_command_tests {
+    use super::{Cli, rename_note, renamed_invocation};
+    use clap::CommandFactory;
+    use std::collections::BTreeSet;
+
+    /// The full `Cli` definition overflows a 2 MiB test thread in debug
+    /// builds (the reason `validate_cli_syntax` runs on 4 MiB); build and
+    /// parse it on a thread sized the same way.
+    fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn clap_aliases_are_exactly_the_rename_table() {
+        // Every hidden alias the parser accepts must be a documented rename,
+        // and every documented rename must parse: a variant renamed again
+        // without updating the table fails here, not in a user's script.
+        let registered = on_big_stack(|| {
+            let cli = Cli::command();
+            let mut registered = BTreeSet::new();
+            for sub in cli.get_subcommands() {
+                for alias in sub.get_all_aliases() {
+                    registered.insert((alias.to_string(), sub.get_name().to_string()));
+                }
+            }
+            registered
+        });
+        let table: BTreeSet<(String, String)> = pixel_proto::commands::RENAMED_COMMANDS
+            .iter()
+            .map(|(old, new)| ((*old).to_string(), (*new).to_string()))
+            .collect();
+        assert_eq!(registered, table);
+    }
+
+    #[test]
+    fn an_old_name_parses_to_the_current_subcommand() {
+        let name = |words: &'static [&'static str]| {
+            on_big_stack(move || {
+                Cli::command()
+                    .try_get_matches_from(words)
+                    .unwrap()
+                    .subcommand_name()
+                    .map(str::to_string)
+            })
+        };
+        // The action log and the metrics evidence key on this name, so an
+        // alias invocation is recorded exactly like the current spelling.
+        assert_eq!(
+            name(&["pixel", "ready", "--no-daemon", "--json"]).as_deref(),
+            Some("prepare-repo")
+        );
+        assert_eq!(
+            name(&["pixel", "hook", "session-start"]).as_deref(),
+            Some("run-hook")
+        );
+    }
+
+    #[test]
+    fn renamed_invocation_reads_the_command_word_only() {
+        assert_eq!(
+            renamed_invocation(&argv(&["pixel", "ready"])),
+            Some(("ready", "prepare-repo"))
+        );
+        assert_eq!(
+            renamed_invocation(&argv(&["pixel", "--metrics", "off", "changes", "."])),
+            Some(("changes", "what-changed")),
+            "the value of --metrics is not the command"
+        );
+        assert_eq!(
+            renamed_invocation(&argv(&["pixel", "--metrics=off", "symbol", "x"])),
+            Some(("symbol", "find-symbol"))
+        );
+        assert_eq!(
+            renamed_invocation(&argv(&["pixel", "prepare-repo", "ready"])),
+            None,
+            "a path named like an old command is not a renamed invocation"
+        );
+        assert_eq!(renamed_invocation(&argv(&["pixel", "impact", "x"])), None);
+        assert_eq!(renamed_invocation(&argv(&["pixel", "--help"])), None);
+        assert_eq!(renamed_invocation(&argv(&["pixel"])), None);
+    }
+
+    #[test]
+    fn rename_note_is_one_line_and_follows_the_metrics_gate() {
+        assert_eq!(
+            rename_note(&argv(&["pixel", "ready", "--json"]), true).as_deref(),
+            Some("note: 'ready' is now 'prepare-repo'; the old name stays accepted until 1.0\n")
+        );
+        assert_eq!(rename_note(&argv(&["pixel", "ready"]), false), None);
+        assert_eq!(rename_note(&argv(&["pixel", "prepare-repo"]), true), None);
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "pixel-session"
-version = "0.2.4"
+version = "0.2.5"
 edition.workspace = true
 license.workspace = true
 
@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+pixel-git = { path = "../pixel-git" }
 rmcp = { version = "3.1.4", features = ["transport-io"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 schemars = "1"

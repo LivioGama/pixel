@@ -53,7 +53,7 @@ impl Fixture {
         }
         let fixture = Self(root.canonicalize().unwrap());
         let result = Command::new(PIXEL)
-            .args(["map", ".", "--json"])
+            .args(["repo-map", ".", "--json"])
             .current_dir(&fixture.0)
             .env("PIXEL_DAEMON_AUTO_START", "0")
             .output()
@@ -65,7 +65,7 @@ impl Fixture {
         let payload =
             json!({"cwd": self.0, "tool_name":tool, "tool_input":{"file_path": self.0.join(path)}});
         let mut child = Command::new(PIXEL)
-            .args(["hook", "post-tool-use", "--provider", "claude"])
+            .args(["run-hook", "post-tool-use", "--provider", "claude"])
             .current_dir(&self.0)
             .env("PIXEL_DAEMON_AUTO_START", "0")
             .env("PIXEL_METRICS", "1")
@@ -188,7 +188,14 @@ fn unresolved_receiver_evidence_stays_uncertain_without_inflating_known_callers(
     let store = pixel_graph::GraphStore::open(&fixture.0.join(".pixel/graph.db")).unwrap();
     let caller = store.file_by_path("src/caller_00.rs").unwrap().unwrap();
     store
-        .insert_unresolved_call(caller.id, "saved", None, 3, Some("unknown_receiver"))
+        .insert_unresolved_call(
+            caller.id,
+            "saved",
+            None,
+            3,
+            Some("unknown_receiver"),
+            "call",
+        )
         .unwrap();
     drop(store);
     let note = fixture.note();

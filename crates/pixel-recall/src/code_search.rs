@@ -196,6 +196,45 @@ pub fn ask(root: &Path, query: &str, k: usize, max_files: usize) -> Result<Vec<A
     ask_with_metadata(root, query, k, max_files).map(|result| result.hits)
 }
 
+/// Semantic fallback for cross-lingual concept resolution.
+///
+/// When lexical matching (`targets`/`resolve`) returns 0 results for a
+/// non-English query, this function embeds the query and finds matching code
+/// files using the multilingual `potion-code-16M-v2` model (distilled from
+/// bge-m3, which is cross-lingual).
+///
+/// Returns `(file_path, score)` pairs sorted by score descending, truncated
+/// to `limit`. The score is the cosine similarity of the query embedding to
+/// the best-matching chunk of each file. The daemon can map these to
+/// `ConceptMatch` / target tiers.
+///
+/// Graceful degradation: if the embedding model cannot be loaded (feature
+/// disabled, model missing, network error), returns an empty vec rather than
+/// propagating the error, so callers can fall through to other strategies.
+///
+/// Returned paths are repo-relative (stripped of `root`) so they join with
+/// index paths, annotations, and evidence maps that are all relative.
+pub fn semantic_fallback(root: &Path, query: &str, limit: usize) -> Vec<(String, f64)> {
+    // Reuse the existing ask() infrastructure but return a simpler type.
+    let hits = match ask(root, query, limit, 2000) {
+        Ok(hits) => hits,
+        Err(_) => return Vec::new(),
+    };
+    let root_str = root.display().to_string();
+    hits.into_iter()
+        .map(|h| {
+            // Strip the root prefix to produce repo-relative paths.
+            let rel = h
+                .path
+                .strip_prefix(&root_str)
+                .and_then(|s| s.strip_prefix('/'))
+                .unwrap_or(&h.path)
+                .to_string();
+            (rel, f64::from(h.semantic_score))
+        })
+        .collect()
+}
+
 pub fn ask_with_metadata(
     root: &Path,
     query: &str,

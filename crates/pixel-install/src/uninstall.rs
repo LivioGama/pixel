@@ -3,9 +3,9 @@
 //! Removes every trace pixel install wrote:
 //!   - managed blocks from CLAUDE.md / AGENTS.md / .zcode/AGENTS.md /
 //!     .pi/agent/AGENTS.md
-//!   - pixel hook entries from Claude, Devin, Codex, Gemini, zcode, Cursor,
+//!   - pixel run-hook entries from Claude, Devin, Codex, Gemini, zcode, Cursor,
 //!     and project-level .codex/hooks.json settings files
-//!   - pixel hook scripts from ~/.claude/hooks/
+//!   - pixel run-hook scripts from ~/.claude/hooks/
 //!   - the pi guard extension (~/.pi/agent/extensions/pixel-guard.ts)
 //!   - the pixel rule source file (~/.agent-config/rules/pixel.md)
 //!   - the pixel binary (~/.local/bin/pixel by default)
@@ -92,10 +92,10 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         install::remove_shell_wrappers(&home, options.shell.as_deref(), dry_run)?,
         // 2. Strip managed blocks from all agent-config Markdown files.
         strip_agent_configs(&home, dry_run)?,
-        // 3. Remove pixel hook entries from Claude settings.json + delete hook
+        // 3. Remove pixel run-hook entries from Claude settings.json + delete hook
         //    scripts from ~/.claude/hooks/.
         remove_claude_hooks(&home, dry_run)?,
-        // 4. Remove pixel hook entries from every other tool's settings file.
+        // 4. Remove pixel run-hook entries from every other tool's settings file.
         remove_devin_hooks(&home, dry_run)?,
         remove_codex_hooks(&home, dry_run)?,
         remove_gemini_hooks(&home, dry_run)?,
@@ -780,8 +780,12 @@ fn legacy_composed_guard_signature(current_pre: &[serde_json::Value], sidecar: &
         return false;
     };
     let escaped_sidecar = sidecar.to_string_lossy().replace('\'', "'\\''");
-    command.contains(" hook composed-guard --provider codex --backup ")
-        && command.ends_with(&format!("'{escaped_sidecar}'"))
+    // Installs since the command rename write `run-hook`; 0.2.x wrote `hook`.
+    ["run-hook", "hook"].iter().any(|verb| {
+        command.contains(&format!(
+            " {verb} composed-guard --provider codex --backup "
+        ))
+    }) && command.ends_with(&format!("'{escaped_sidecar}'"))
 }
 
 /// Directories commonly holding project checkouts — mirrors the same logic
@@ -898,7 +902,7 @@ fn remove_binary(binary_path: &Path, dry_run: bool) -> Result<InstallStep> {
 }
 
 // -------------------------------------------------------------------------
-// Shared helper: remove pixel hook entries from a settings file with a
+// Shared helper: remove pixel run-hook entries from a settings file with a
 // top-level `hooks` object (Claude/Devin/Codex/Gemini schema).
 // -------------------------------------------------------------------------
 
@@ -1015,7 +1019,7 @@ mod routing_tests {
         let path = home.path().join("settings.json");
         let lint = json!({"matcher":"Bash","hooks":[{"type":"command","command":"lint"}]});
         let guard = json!({"matcher":"Bash","hooks":[{"type":"command","command":format!("sh {}", config::GUARD_HOOK)}]});
-        let start = json!({"hooks":[{"type":"command","command":format!("pixel hook {}", config::SESSION_START_HOOK)}]});
+        let start = json!({"hooks":[{"type":"command","command":format!("pixel run-hook {}", config::SESSION_START_HOOK)}]});
         let stop = json!({"hooks":[{"type":"command","command":"say done"}]});
         install::write_settings(
             &path,
@@ -1041,6 +1045,31 @@ mod routing_tests {
             remove_pixel_hooks_from_settings(&home.path().join("absent.json"), false).unwrap(),
             (0, None)
         );
+    }
+
+    #[test]
+    fn legacy_composed_guard_signature_accepts_both_hook_verbs() {
+        let sidecar = Path::new("/p/.codex/pixel-composed.json");
+        let group = |command: &str| vec![json!({"hooks":[{"type":"command","command": command}]})];
+        for verb in ["run-hook", "hook"] {
+            let command = format!(
+                "'/tmp/pixel' {verb} composed-guard --provider codex --backup '/p/.codex/pixel-composed.json'"
+            );
+            assert!(
+                legacy_composed_guard_signature(&group(&command), sidecar),
+                "`{verb}` composed-guard entry is Pixel's: {command}"
+            );
+        }
+        assert!(!legacy_composed_guard_signature(
+            &group(
+                "'/tmp/pixel' run-hook guard --provider codex --backup '/p/.codex/pixel-composed.json'"
+            ),
+            sidecar
+        ));
+        assert!(!legacy_composed_guard_signature(
+            &group("'/tmp/pixel' run-hook composed-guard --provider codex --backup '/other.json'"),
+            sidecar
+        ));
     }
 
     #[test]

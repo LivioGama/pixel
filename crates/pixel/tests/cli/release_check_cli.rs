@@ -1,4 +1,4 @@
-//! `pixel release-check`: exit code and output contract against a fixture
+//! `pixel check-release`: exit code and output contract against a fixture
 //! workspace. The checks themselves are unit-tested in the `pixel-release`
 //! crate; this pins what the release workflow relies on:
 //! exit 0 only when every check passes, the table on stdout, `--json` as
@@ -60,7 +60,7 @@ fn pixel(dir: &Path, args: &[&str]) -> Output {
 #[test]
 fn consistent_release_passes_with_the_table_on_stdout() {
     let dir = fixture("ok");
-    let out = pixel(&dir, &["release-check", "v0.2.3"]);
+    let out = pixel(&dir, &["check-release", "v0.2.3"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{out:?}");
     assert!(stdout.starts_with("release-check 0.2.3\n"), "{stdout}");
@@ -79,7 +79,7 @@ fn consistent_release_passes_with_the_table_on_stdout() {
 #[test]
 fn json_is_one_document_with_the_verdict_and_every_check() {
     let dir = fixture("json");
-    let out = pixel(&dir, &["release-check", "--json", "refs/tags/v0.2.3"]);
+    let out = pixel(&dir, &["check-release", "--json", "refs/tags/v0.2.3"]);
     assert!(out.status.success(), "{out:?}");
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("single JSON document");
     assert_eq!(doc["version"], "0.2.3");
@@ -90,7 +90,10 @@ fn json_is_one_document_with_the_verdict_and_every_check() {
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["cli-version", "cargo-lock", "changelog"]);
+    assert_eq!(
+        names,
+        ["cli-version", "cargo-lock", "changelog", "plugin-versions"]
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -98,7 +101,7 @@ fn json_is_one_document_with_the_verdict_and_every_check() {
 fn stale_lock_fails_the_command_and_names_the_fix() {
     let dir = fixture("stale");
     write_lock(&dir, "0.2.2");
-    let out = pixel(&dir, &["release-check", "0.2.3"]);
+    let out = pixel(&dir, &["check-release", "0.2.3"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
@@ -116,7 +119,7 @@ fn stale_lock_fails_the_command_and_names_the_fix() {
     );
     assert!(stderr.contains("release-check failed"), "{stderr}");
 
-    let json = pixel(&dir, &["release-check", "--json", "0.2.3"]);
+    let json = pixel(&dir, &["check-release", "--json", "0.2.3"]);
     assert_eq!(json.status.code(), Some(1));
     let doc: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(doc["ok"], false);
@@ -129,7 +132,7 @@ fn tag_that_is_not_a_version_is_rejected_before_reading_files() {
     let dir =
         std::env::temp_dir().join(format!("pixel-release-check-absent-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
-    let out = pixel(&dir, &["release-check", "release-candidate"]);
+    let out = pixel(&dir, &["check-release", "release-candidate"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(out.stdout.is_empty(), "no report for a malformed tag");

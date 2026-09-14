@@ -79,6 +79,10 @@ const DOCS: &[&str] = &[
     "docs/manual-setup.md",
     "crates/pixel-install/assets/pixel-agent-prompt.md",
     "crates/pixel-install/assets/pixel-subagent-prompt.md",
+    "AGENTS.md",
+    ".agents/rules/test-campaigns.md",
+    "scripts/README.md",
+    "js/sniper/README.md",
 ];
 
 #[test]
@@ -101,6 +105,87 @@ fn every_documented_pixel_command_exists() {
     );
 }
 
+/// Commands a runtime string tells the agent to run: `` `pixel <name>`` or
+/// `"pixel <name>` on a line of production code. Comments and everything
+/// from the first `#[cfg(test)]` on are skipped: tests name old spellings on
+/// purpose (alias and hook-compatibility fixtures).
+fn runtime_command_mentions(source: &str) -> BTreeSet<String> {
+    let production = source.split("#[cfg(test)]").next().unwrap_or_default();
+    let code: String = production
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let mut out = referenced_commands(&code);
+    // A quoted `"pixel …` is a command only when it names one: "pixel is the
+    // engine" is prose, "pixel rescue --apply" is a pre-rename spelling.
+    out.extend(
+        referenced_commands(&code.replace("\"pixel ", "`pixel "))
+            .into_iter()
+            .filter(|name| pixel_proto::commands::renamed_to(name).is_some()),
+    );
+    out
+}
+
+fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap().map(Result::unwrap) {
+        let path = entry.path();
+        if path.is_dir() {
+            rust_sources(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// The CLI prints follow-up commands for the agent to type (a revert plan, a
+/// `--show` follow-up, a hint to rebuild the index). A pre-rename spelling
+/// there still runs through its alias today and fails once the aliases go.
+#[test]
+fn every_command_production_code_prints_is_a_current_subcommand() {
+    let known = subcommands();
+    let crates = repo_root().join("crates");
+    let mut sources = Vec::new();
+    for krate in std::fs::read_dir(&crates).unwrap().map(Result::unwrap) {
+        let src = krate.path().join("src");
+        if src.is_dir() {
+            rust_sources(&src, &mut sources);
+        }
+    }
+    assert!(sources.len() > 50, "source walk broke: {}", sources.len());
+    let mut stale = Vec::new();
+    for path in &sources {
+        let text = std::fs::read_to_string(path).unwrap();
+        for name in runtime_command_mentions(&text) {
+            if !known.contains(&name) {
+                let shown = path.strip_prefix(&crates).unwrap_or(path).display();
+                stale.push(format!("{shown}: pixel {name}"));
+            }
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "production code prints commands the help does not list:\n{}",
+        stale.join("\n")
+    );
+}
+
+#[test]
+fn runtime_command_mentions_skip_comments_and_tests() {
+    let source = [
+        "/// `pixel rescue` is the old name",
+        "fn f() -> String { format!(\"pixel plan-rollback --apply {oid} .\") }",
+        "const HINT: &str = \"run `pixel build-index .` first\";",
+        "const OLD: &str = \"pixel rescue backup\";",
+        "const PROSE: &str = \"pixel is the engine\";",
+        "#[cfg(test)]",
+        "mod tests { const OLD: &str = \"pixel hook guard\"; }",
+    ]
+    .join("\n");
+    let got: Vec<String> = runtime_command_mentions(&source).into_iter().collect();
+    assert_eq!(got, ["build-index", "rescue"]);
+}
+
 #[test]
 fn every_subcommand_is_in_the_architecture_command_table() {
     let known = subcommands();
@@ -119,11 +204,78 @@ fn every_subcommand_is_in_the_architecture_command_table() {
     );
 }
 
+/// The `(old, new)` rows of the first `| Old name | New name |` table in
+/// `text`, in document order.
+fn rename_table_rows(text: &str) -> Vec<(String, String)> {
+    let Some((_, after)) = text.split_once("| Old name | New name |") else {
+        return Vec::new();
+    };
+    after
+        .lines()
+        .skip(2) // the rest of the header line, then the `| --- |` separator
+        .map_while(|line| {
+            let cells: Vec<&str> = line
+                .trim()
+                .strip_prefix('|')?
+                .strip_suffix('|')?
+                .split('|')
+                .map(|cell| cell.trim().trim_matches('`'))
+                .collect();
+            match cells.as_slice() {
+                [old, new] => Some(((*old).to_string(), (*new).to_string())),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn renamed_command_tables_list_exactly_the_accepted_aliases() {
+    // The README and the changelog tell users which old names still work;
+    // the CLI registers those aliases from `RENAMED_COMMANDS`. A table that
+    // drops a row or keeps a stale one sends a user to a name that fails.
+    let expected: Vec<(String, String)> = pixel_proto::commands::RENAMED_COMMANDS
+        .iter()
+        .map(|(old, new)| ((*old).to_string(), (*new).to_string()))
+        .collect();
+    let root = repo_root();
+    for doc in ["README.md", "CHANGELOG.md"] {
+        let text = std::fs::read_to_string(root.join(doc)).unwrap();
+        assert_eq!(
+            rename_table_rows(&text),
+            expected,
+            "{doc}: the `| Old name | New name |` table must match RENAMED_COMMANDS row for row"
+        );
+    }
+}
+
+#[test]
+fn rename_table_rows_stop_at_the_end_of_the_table() {
+    let text = [
+        "intro",
+        "| Old name | New name |",
+        "| --- | --- |",
+        "| `ready` | `prepare-repo` |",
+        "| `hook` | `run-hook` |",
+        "",
+        "| `after` | `blank line` |",
+    ]
+    .join("\n");
+    assert_eq!(
+        rename_table_rows(&text),
+        vec![
+            ("ready".to_string(), "prepare-repo".to_string()),
+            ("hook".to_string(), "run-hook".to_string()),
+        ]
+    );
+    assert!(rename_table_rows("no table here").is_empty());
+}
+
 #[test]
 fn referenced_commands_reads_only_backticked_command_names() {
-    let text = "Run `pixel search foo` then `pixel impact`.\n`pixel-cli` is the crate; the pixel binary; `pixel` alone; `pixel foo/bar`; `pixel --help` is a flag.";
+    let text = "Run `pixel search-content foo` then `pixel impact`.\n`pixel-cli` is the crate; the pixel binary; `pixel` alone; `pixel foo/bar`; `pixel --help` is a flag.";
     let got: Vec<String> = referenced_commands(text).into_iter().collect();
-    assert_eq!(got, ["impact", "search"]);
+    assert_eq!(got, ["impact", "search-content"]);
 }
 
 /// Rule ids (`M-…`) named in `text`, wildcards such as `M-FFI-*` excluded:

@@ -22,7 +22,7 @@ impl Fixture {
         let fixture = Self(root);
         let saved = fixture.run(
             &[
-                "flow",
+                "replay-flow",
                 "save",
                 "audit",
                 "--title",
@@ -71,7 +71,7 @@ fn flow_dry_run_and_execute_are_rejected_before_browser_launch() {
     let fixture = Fixture::new("dry");
     let output = fixture.run(
         &[
-            "flow",
+            "replay-flow",
             "replay",
             "audit",
             "--execute",
@@ -92,21 +92,48 @@ fn flow_dry_run_and_execute_are_rejected_before_browser_launch() {
 }
 
 #[test]
+fn saving_an_existing_flow_fails_and_names_the_current_revise_command() {
+    let fixture = Fixture::new("dup");
+    let output = fixture.run(
+        &[
+            "replay-flow",
+            "save",
+            "audit",
+            "--title",
+            "Audit again",
+            "--from-file",
+            "steps.json",
+            "--json",
+        ],
+        false,
+    );
+    assert!(
+        !output.status.success(),
+        "a second save must not overwrite the proven flow: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`pixel replay-flow revise audit`"),
+        "the error must name the command that updates the flow: {stderr}"
+    );
+}
+
+#[test]
 fn flow_json_lifecycle_emits_documents_and_executes_only_when_requested() {
     let fixture = Fixture::new("json");
     for args in [
-        vec!["flow", "get", "audit", "--json"],
-        vec!["flow", "list", "--json"],
-        vec!["flow", "show", "audit", "--json"],
+        vec!["replay-flow", "get", "audit", "--json"],
+        vec!["replay-flow", "list", "--json"],
+        vec!["replay-flow", "show", "audit", "--json"],
         vec![
-            "flow",
+            "replay-flow",
             "revise",
             "audit",
             "--title",
             "Revised audit",
             "--json",
         ],
-        vec!["flow", "replay", "audit", "--dry-run", "--json"],
+        vec!["replay-flow", "replay", "audit", "--dry-run", "--json"],
     ] {
         let output = fixture.run(&args, false);
         assert!(output.status.success(), "{args:?}: {output:?}");
@@ -115,7 +142,10 @@ fn flow_json_lifecycle_emits_documents_and_executes_only_when_requested() {
         assert!(value.is_object() || value.is_array(), "{args:?}: {value}");
     }
     assert!(!fixture.0.join("calls").exists());
-    let output = fixture.run(&["flow", "replay", "audit", "--execute", "--json"], false);
+    let output = fixture.run(
+        &["replay-flow", "replay", "audit", "--execute", "--json"],
+        false,
+    );
     assert!(output.status.success(), "{output:?}");
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["success"], true, "{value}");
@@ -127,7 +157,7 @@ fn flow_json_lifecycle_emits_documents_and_executes_only_when_requested() {
             .unwrap()
             .contains("open https://example.test")
     );
-    let deleted = fixture.run(&["flow", "delete", "audit", "--json"], false);
+    let deleted = fixture.run(&["replay-flow", "delete", "audit", "--json"], false);
     assert!(deleted.status.success(), "{deleted:?}");
     assert!(serde_json::from_slice::<serde_json::Value>(&deleted.stdout).is_ok());
     assert!(!fixture.0.join("flows/audit.json").exists());
@@ -136,7 +166,10 @@ fn flow_json_lifecycle_emits_documents_and_executes_only_when_requested() {
 #[test]
 fn flow_execute_failure_is_nonzero_and_never_a_success_document() {
     let fixture = Fixture::new("failure");
-    let output = fixture.run(&["flow", "replay", "audit", "--execute", "--json"], true);
+    let output = fixture.run(
+        &["replay-flow", "replay", "audit", "--execute", "--json"],
+        true,
+    );
     assert!(
         !output.status.success(),
         "browser failure must fail CLI: {output:?}"
@@ -151,7 +184,7 @@ fn flow_execute_failure_is_nonzero_and_never_a_success_document() {
 #[test]
 fn flow_execute_prints_a_summary_line_and_the_log_on_stderr() {
     let fixture = Fixture::new("summary");
-    let output = fixture.run(&["flow", "replay", "audit", "--execute"], false);
+    let output = fixture.run(&["replay-flow", "replay", "audit", "--execute"], false);
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(

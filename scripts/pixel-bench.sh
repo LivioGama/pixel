@@ -63,7 +63,7 @@ if ! command -v claude &>/dev/null; then
   exit 1
 fi
 if [ -z "$PIXEL_BIN" ] || [ ! -x "$PIXEL_BIN" ]; then
-  echo "ERROR: pixel binary not found. Install it (pixel upgrade --repo . --build \"cargo build --profile dev-release -p pixel-cli\") or set PIXEL_BIN." >&2
+  echo "ERROR: pixel binary not found. Install it (pixel self-update --repo . --build \"cargo build --profile dev-release -p pixel-cli\") or set PIXEL_BIN." >&2
   exit 1
 fi
 # The pixel arm must receive what the `claude` shell wrapper written by
@@ -296,7 +296,7 @@ echo "" >> "$RESULTS"
 
 # Index the repo once before any pixel arm (lazy index would otherwise skew
 # the first pixel run).
-PATH="$PIXEL_PATH" "$PIXEL_BIN" index "$REPO" 2>/dev/null || true
+PATH="$PIXEL_PATH" "$PIXEL_BIN" build-index "$REPO" 2>/dev/null || true
 
 # --- Serial scenarios, order-randomized arms ---
 for s in $SCENARIOS; do

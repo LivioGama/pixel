@@ -1,4 +1,4 @@
-//! Integration: `pixel hook guard` rewrites equivalent searches and emits
+//! Integration: `pixel run-hook guard` rewrites equivalent searches and emits
 //! non-blocking guidance for operations that Pixel cannot safely rewrite.
 
 use std::io::Write;
@@ -40,7 +40,7 @@ fn hermetic_search_env(cmd: &mut Command) {
 }
 
 /// A committed git repo containing a needle, with the pixel text index
-/// built (first `pixel search` builds it lazily).
+/// built (first `pixel search-content` builds it lazily).
 fn indexed_repo(tag: &str) -> Scratch {
     let dir = scratch(tag);
     std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -56,7 +56,7 @@ fn indexed_repo(tag: &str) -> Scratch {
     // PIXEL_TEST=1 disables the call-guard circuit breaker so repeated
     // search calls in tests don't get blocked.
     let out = pixel_command()
-        .args(["search", "GUARD_NEEDLE_XYZ", dir.to_str().unwrap()])
+        .args(["search-content", "GUARD_NEEDLE_XYZ", dir.to_str().unwrap()])
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("PIXEL_TEST", "1")
@@ -70,7 +70,7 @@ fn indexed_repo(tag: &str) -> Scratch {
     dir
 }
 
-/// Pipe a PreToolUse payload into `pixel hook guard`; return (code, stderr).
+/// Pipe a PreToolUse payload into `pixel run-hook guard`; return (code, stderr).
 fn run_guard(payload: &serde_json::Value) -> (i32, String) {
     let (code, _stdout, stderr) = run_guard_env(payload, &[]);
     (code, stderr)
@@ -82,7 +82,7 @@ fn run_guard(payload: &serde_json::Value) -> (i32, String) {
 fn run_guard_env(payload: &serde_json::Value, envs: &[(&str, &str)]) -> (i32, String, String) {
     let mut cmd = pixel_command();
     hermetic_search_env(&mut cmd);
-    cmd.args(["hook", "guard"])
+    cmd.args(["run-hook", "guard"])
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("PIXEL_TEST", "1")
@@ -113,7 +113,7 @@ fn run_composed_codex(raw: &[u8], backup: &Path) -> (i32, String, String) {
     let mut cmd = pixel_command();
     hermetic_search_env(&mut cmd);
     cmd.args([
-        "hook",
+        "run-hook",
         "composed-guard",
         "--provider",
         "codex",
@@ -184,7 +184,7 @@ fn composed_codex_merges_context_and_rewrites_after_exact_stdin_replay() {
     let backup = composed_backup(&repo, "/bin/sh \"$PWD/foreign-context.sh\"");
     let (code, stdout, stderr) = run_composed_codex(raw.as_bytes(), &backup);
     assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("pixel search-compat"), "{stdout}");
+    assert!(stdout.contains("pixel search-like-rg"), "{stdout}");
     assert!(stdout.contains("foreign context"), "{stdout}");
 }
 
@@ -261,7 +261,7 @@ fn bash_literal_file_search_uses_compatibility_rewrite() {
         let (code, stdout, stderr) = run_guard_env(&bash_payload(&repo, cmd), &[]);
         assert_eq!(code, 0, "`{cmd}` must remain available: {stderr}");
         assert!(
-            stdout.contains("updatedInput") && stdout.contains("pixel search"),
+            stdout.contains("updatedInput") && stdout.contains("pixel search-like-rg"),
             "{stdout}"
         );
     }
@@ -377,7 +377,7 @@ fn grep_tool_remains_available_with_search_advisory() {
         "advisory header missing: {stdout}"
     );
     assert!(
-        stdout.contains("GUARD_NEEDLE_XYZ") && stdout.contains("pixel search"),
+        stdout.contains("GUARD_NEEDLE_XYZ") && stdout.contains("pixel search-content"),
         "advisory should include the equivalent search: {stdout}"
     );
 }
@@ -397,7 +397,7 @@ fn grep_advisory_falls_back_when_search_cannot_answer() {
     let (code, stdout, stderr) = run_guard_env(&payload, &[]);
     assert_eq!(code, 0, "Grep must remain available on fallback: {stderr}");
     assert!(
-        stdout.contains("pixel search"),
+        stdout.contains("pixel search-content"),
         "fallback must carry the suggestion: {stderr}"
     );
     assert!(
@@ -425,7 +425,7 @@ fn targets_manifest_merges_two_tasks_and_guard_honors_union() {
 
     let run_targets = |task: &str| {
         let out = pixel_command()
-            .args(["targets", task, repo.to_str().unwrap()])
+            .args(["scope-task", task, repo.to_str().unwrap()])
             .env("PIXEL_TEST", "1")
             .output()
             .unwrap();
@@ -486,7 +486,7 @@ fn bash_git_commit_gets_substitute_advisory() {
         stdout.contains("pixel-guard advisory [PIXEL_SUBSTITUTE]"),
         "{stdout}"
     );
-    assert!(stdout.contains("pixel publish"), "{stdout}");
+    assert!(stdout.contains("pixel commit"), "{stdout}");
     assert!(
         stdout.contains("--message 'fix parser'"),
         "parsed -m must enrich the substitute: {stdout}"
@@ -507,7 +507,7 @@ fn bash_git_add_gets_substitute_advisory() {
         stdout.contains("pixel-guard advisory [PIXEL_SUBSTITUTE]"),
         "{stdout}"
     );
-    assert!(stdout.contains("pixel publish"), "{stdout}");
+    assert!(stdout.contains("pixel commit"), "{stdout}");
     assert!(
         stdout.contains("--files src/a.rs --files src/b.rs"),
         "each pathspec must be its own --files: {stdout}"
@@ -528,7 +528,7 @@ fn bash_git_add_dot_gets_substitute_advisory() {
         stdout.contains("pixel-guard advisory [PIXEL_SUBSTITUTE]"),
         "{stdout}"
     );
-    assert!(stdout.contains("pixel publish"), "{stdout}");
+    assert!(stdout.contains("pixel commit"), "{stdout}");
     assert!(
         stdout.contains("List each modified tracked file"),
         "`git add .` must suggest enumerating files: {stdout}"
@@ -561,7 +561,7 @@ fn bash_git_add_interactive_passes_through() {
 fn bash_sequencer_state_passes_add_commit_and_side_selection() {
     // End-to-end sequencer pass-through: with MERGE_HEAD present, the full
     // merge-conclusion workflow — stage, select a side, commit — must run.
-    // `pixel publish` cannot substitute mid-sequencer (a merge commit needs
+    // `pixel commit` cannot substitute mid-sequencer (a merge commit needs
     // both parents; a plain publish would corrupt the graph).
     let repo = indexed_repo("sequencer-merge");
     std::fs::write(repo.join(".git").join("MERGE_HEAD"), b"abc123\n").unwrap();
@@ -607,7 +607,7 @@ fn escape_hatch_downgrades_commit_to_advisory() {
     let (code, stdout, stderr) = run_guard_env(&payload, &[("PIXEL_GUARD_RAW_GIT", "1")]);
     assert_eq!(code, 0, "escape hatch must allow the command: {stderr}");
     assert!(
-        stdout.contains("pixel publish"),
+        stdout.contains("pixel commit"),
         "advisory must still carry the substitute: {stdout}"
     );
     assert!(

@@ -28,8 +28,9 @@ pub const GRAPH_DB_FILE: &str = "graph.db";
 /// to 7 with the Envelope v2 migration: the wire shape changed from
 /// `{ok, error, data}` to the full `Envelope` (`ok, op, protocol, requestId,
 /// snapshot, epistemics, budget, result, error, warnings`), gated by
-/// `pixel_proto::ENVELOPE_PROTOCOL_VERSION`.
-pub const PROTOCOL_VERSION: u64 = 9;
+/// `pixel_proto::ENVELOPE_PROTOCOL_VERSION`. 10: the `plan` op, which a
+/// daemon of an older build rejects as an unknown variant.
+pub const PROTOCOL_VERSION: u64 = 10;
 
 /// The potion model the daemon warms; the `potion.ok` marker carries the
 /// repo name so a stale v1 marker cannot pass for v2.
@@ -414,11 +415,11 @@ impl Service {
     ///    call picks it up.
     ///
     /// `embedder_unavailable` is NEVER set for "not cached" — only for a
-    /// confirmed load failure on a cached model. This means `pixel ask`
+    /// confirmed load failure on a cached model. This means `pixel search-meaning`
     /// (which uses `download=true`) can cache the model at any time, and
     /// the next `--scope hybrid` search will pick it up without a restart.
     // Loads or downloads the potion model: unit tests never have it, so no
-    // test can observe the difference (`pixel ask` covers it end to end).
+    // test can observe the difference (`pixel search-meaning` covers it end to end).
     #[cfg_attr(test, mutants::skip)]
     fn ensure_embedder(&mut self) {
         if self.embedder.is_some() || self.embedder_unavailable {
@@ -452,12 +453,12 @@ impl Service {
         // In daemon mode (long-running), the thread completes and the next
         // search picks up the cached model. In `--no-daemon` mode (one-shot
         // CLI), the process exits before the thread finishes — the user
-        // sees the hint below and runs `pixel ask` once to cache the model.
+        // sees the hint below and runs `pixel search-meaning` once to cache the model.
         if !self.embedder_download_started {
             self.embedder_download_started = true;
             eprintln!(
                 "pixel: semantic channel unavailable — model not cached yet. \
-                 Run `pixel ask \"test\" .` once to download it (~1s), then retry \
+                 Run `pixel search-meaning \"test\" .` once to download it (~1s), then retry \
                  `--scope hybrid`. Degrading to `code` ranking for this call."
             );
             std::thread::spawn(move || {
@@ -759,6 +760,12 @@ impl Service {
                 self.op_note(&action, file.as_deref(), target.as_deref(), note.as_deref())
             }
             Request::Map { markdown } => self.op_map(markdown),
+            Request::Plan {
+                prompt,
+                query,
+                tag,
+                limit,
+            } => self.op_plan(prompt.as_deref(), query.as_deref(), tag.as_deref(), limit),
         }
     }
 
@@ -981,7 +988,7 @@ impl Service {
         let mut evidence: BTreeMap<String, Vec<Value>> = BTreeMap::new();
 
         let mut probe_keywords = query.keywords.clone();
-        for exp in engine::expand_keywords(&query.keywords) {
+        for exp in engine::expand_keywords(&query.keywords, query.language) {
             if !probe_keywords.contains(&exp) && probe_keywords.len() < 6 {
                 probe_keywords.push(exp);
             }
@@ -1033,11 +1040,16 @@ impl Service {
 
             // Graph expansion is seeded from the lexical pre-fuse so every
             // P1/P2 neighbor traces back to a lexical anchor.
-            let seed_paths: Vec<String> =
-                engine::lexical_rank(&all_paths, &probe_keywords, &symbol_hits, &content_hits)
-                    .into_iter()
-                    .take(MAX_SEED_FILES)
-                    .collect();
+            let seed_paths: Vec<String> = engine::lexical_rank(
+                &all_paths,
+                &probe_keywords,
+                query.language,
+                &symbol_hits,
+                &content_hits,
+            )
+            .into_iter()
+            .take(MAX_SEED_FILES)
+            .collect();
             let seed_set: HashSet<&str> = seed_paths.iter().map(String::as_str).collect();
             let mut seed_symbol_ids: Vec<i64> = Vec::new();
             for hit in &symbol_hits {
@@ -1121,6 +1133,67 @@ impl Service {
             }
         };
         report.targets = pixel_rank::rerank::rerank_targets(report.targets, &signals, penalty);
+        // Cross-lingual semantic fallback: when lexical targeting returns 0
+        // P0/P1 files (e.g. a French task against English code), embed the
+        // query with the multilingual potion-code model and inject top-k
+        // files as a "P1 (semantic)" tier. English queries that produce P0/P1
+        // targets lexically never hit this path.
+        let has_p0_p1 = report
+            .targets
+            .iter()
+            .any(|t| matches!(t.tier.as_str(), "P0" | "P1"));
+        if semantic_fallback_wanted(has_p0_p1, max_tier) {
+            {
+                let eff_limit = limit.unwrap_or(engine::DEFAULT_LIMIT);
+                let hits =
+                    pixel_recall::code_search::semantic_fallback(&self.root, task, eff_limit);
+                if !hits.is_empty() {
+                    let hits_count = hits.len();
+                    // Dedupe against existing targets (a path may already be
+                    // present as P2).
+                    let existing: HashSet<String> =
+                        report.targets.iter().map(|t| t.path.clone()).collect();
+                    for (path, score) in hits {
+                        if existing.contains(&path) {
+                            continue;
+                        }
+                        report.targets.push(pixel_rank::TargetFile {
+                            path: path.clone(),
+                            tier: "P1".to_string(),
+                            score,
+                            reasons: vec!["semantic fallback (cross-lingual)".to_string()],
+                            symbols: Vec::new(),
+                        });
+                    }
+                    // Re-sort by tier (P0 < P1 < P2) then score descending so
+                    // injected P1s land before P2s, not after.
+                    report.targets.sort_by(|a, b| {
+                        let tier_ord = |t: &str| match t {
+                            "P0" => 0,
+                            "P1" => 1,
+                            _ => 2,
+                        };
+                        tier_ord(&a.tier).cmp(&tier_ord(&b.tier)).then_with(|| {
+                            b.score
+                                .partial_cmp(&a.score)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                    });
+                    // Re-enforce limit.
+                    report.targets.truncate(eff_limit);
+                    if let Some(stats) = report.stats.as_object_mut() {
+                        stats.insert(
+                            "fallback".to_string(),
+                            json!({
+                                "channel": "semantic",
+                                "reason": "no_p0_p1",
+                                "hits": hits_count,
+                            }),
+                        );
+                    }
+                }
+            }
+        }
         let mut out = serde_json::to_value(&report).map_err(|e| e.to_string())?;
         // Phase 3 item 1: attach per-file content evidence to each target so
         // the caller can trust a content match without re-searching (S2).
@@ -1193,7 +1266,7 @@ impl Service {
         Ok(out)
     }
 
-    /// `pixel skeleton <file>` — all signatures in a file at ~10% of Read cost.
+    /// `pixel list-signatures <file>` — all signatures in a file at ~10% of Read cost.
     /// The user-supplied path is converted to repo-relative before lookup.
     fn op_skeleton(&mut self, file: &str) -> Result<Value, String> {
         let built = self.ensure_graph()?;
@@ -1506,10 +1579,12 @@ impl Service {
         if role == "callees" {
             // Name-based uncertainty describes incoming calls. Outgoing queries
             // must also account for unresolved calls enclosed by this symbol.
+            // Only calls: an unresolved callback argument is a reference the
+            // symbol passes on, not a callee it invokes.
             let unresolved: u64 = store
                 .conn()
                 .query_row(
-                    "SELECT COUNT(*) FROM unresolved_calls WHERE enclosing_symbol_id = ?1",
+                    "SELECT COUNT(*) FROM unresolved_calls WHERE enclosing_symbol_id = ?1 AND kind = 'calls'",
                     [sym.id],
                     |row| row.get::<_, i64>(0).map(|count| count as u64),
                 )
@@ -1561,6 +1636,30 @@ impl Service {
         let built = self.ensure_graph()?;
         let store = self.graph.as_mut().unwrap();
         let mut out = bridge::processes(store, offset.unwrap_or(0))?;
+        merge_build_info(&mut out, built);
+        Ok(out)
+    }
+
+    /// `pixel plan`: the findings of the requested plan queries over the
+    /// daemon's graph, brought up to date first like every graph op.
+    fn op_plan(
+        &mut self,
+        prompt: Option<&str>,
+        query: Option<&str>,
+        tag: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Value, String> {
+        let queries = pixel_graph::plan::plan_queries(prompt, query, tag, limit)?;
+        let built = self.ensure_graph()?;
+        let runner = pixel_git::GitRunner::new(&self.root);
+        let store = self.graph.as_ref().unwrap();
+        let findings = pixel_graph::plan::run_plan_queries(store, &self.root, &runner, &queries)
+            .map_err(|e| format!("plan: {e}"))?;
+        let names: Vec<&str> = queries
+            .iter()
+            .map(pixel_graph::plan::PlanQuery::name)
+            .collect();
+        let mut out = json!({ "queries": names, "findings": findings });
         merge_build_info(&mut out, built);
         Ok(out)
     }
@@ -1714,8 +1813,9 @@ impl Service {
         // concurrent CLI also tries to build).
         let extractor: Box<dyn pixel_index::GramExtractor> =
             Box::new(pixel_index::TrigramExtractor);
-        let new_index = pixel_index::indexset::IndexSet::open_or_build(&self.root, extractor)
-            .map_err(|e| e.to_string())?;
+        let new_index =
+            pixel_index::indexset::IndexSet::open_or_build_bypass_cache(&self.root, extractor)
+                .map_err(|e| e.to_string())?;
         self.index = new_index;
         let s = self.index.status();
         Ok(json!({
@@ -1753,17 +1853,8 @@ impl Service {
         // visible as commits_indexed < total_commits. The facts universe also
         // covers stash/reflog-only commits that `--all` doesn't count, so take
         // the max — indexed exceeding rev-list is healthy, not suspicious.
-        let total_commits = std::process::Command::new("git")
-            .args(["rev-list", "--count", "--all"])
-            .current_dir(&self.root)
-            .output()
-            .ok()
-            .and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse::<u64>()
-                    .ok()
-            })
+        let total_commits = pixel_git::GitRunner::new(&self.root)
+            .rev_list_count_all()
             .unwrap_or(0)
             .max(state.total_commits);
         json!({
@@ -1792,15 +1883,52 @@ impl Service {
             Some(s) => s,
             None => {
                 // Graph unavailable (e.g. non-git dir where build was refused
-                // or capped). Return an unresolved outcome with a clear basis
-                // instead of hard-failing — callers fall back to pixel search.
+                // or capped). The semantic fallback needs no graph — try it
+                // before returning the empty unresolved outcome.
+                let semantic = pixel_recall::code_search::semantic_fallback(
+                    &self.root,
+                    phrase,
+                    limit.unwrap_or(8),
+                );
+                let matches: Vec<Value> = semantic
+                    .iter()
+                    .map(|(path, score)| {
+                        json!({
+                            "path": path,
+                            "start_line": 0,
+                            "end_line": 0,
+                            "kind": null,
+                            "raw": phrase,
+                            "norm": phrase,
+                            "owner": null,
+                            "symbol_kind": null,
+                            "score": score,
+                            "tier": "semantic",
+                            "reasons": ["semantic fallback (cross-lingual, no graph)"],
+                        })
+                    })
+                    .collect();
+                let confidence = if matches.is_empty() {
+                    "unresolved"
+                } else {
+                    "ranked"
+                };
+                let tier: Option<&str> = if matches.is_empty() {
+                    None
+                } else {
+                    Some("semantic")
+                };
                 return Ok(serde_json::json!({
-                    "confidence": "unresolved",
-                    "tier": null,
-                    "matches": [],
+                    "confidence": confidence,
+                    "tier": tier,
+                    "matches": matches,
                     "tiers_attempted": [],
                     "scan_capped": false,
-                    "basis": "graph unavailable — no concept index to resolve against. Use `pixel search` for text matching.",
+                    "basis": if matches.is_empty() {
+                        "graph unavailable — no concept index to resolve against. Use `pixel search-content` for text matching."
+                    } else {
+                        "graph unavailable; semantic fallback via multilingual embeddings"
+                    },
                     "index_state": {
                         "concepts": 0,
                         "concepts_version": null,
@@ -1832,6 +1960,57 @@ impl Service {
         let outcome = pixel_graph::concept_resolve::resolve(store, phrase, &opts)
             .map_err(|e| e.to_string())?;
         let mut out = serde_json::to_value(&outcome).map_err(|e| e.to_string())?;
+        // Cross-lingual semantic fallback: when lexical matching returns 0
+        // matches (e.g. a French task against English code), embed the query
+        // with the multilingual potion-code model and match against code
+        // files. This is a fallback, not a replacement — English queries
+        // that resolve lexically never hit this path.
+        let matches_empty = out
+            .get("matches")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty);
+        if matches_empty {
+            let limit = limit.unwrap_or(8);
+            if limit > 0 {
+                let hits = pixel_recall::code_search::semantic_fallback(&self.root, phrase, limit);
+                if !hits.is_empty() {
+                    // Emit the full ConceptMatch shape so downstream consumers
+                    // (enrich_resolve_matches_with_context, notes merge) can
+                    // process semantic hits the same way as lexical ones.
+                    let semantic_matches: Vec<Value> = hits
+                        .iter()
+                        .map(|(path, score)| {
+                            json!({
+                                "path": path,
+                                "start_line": 0,
+                                "end_line": 0,
+                                "kind": null,
+                                "raw": phrase,
+                                "norm": phrase,
+                                "owner": null,
+                                "symbol_kind": null,
+                                "score": score,
+                                "tier": "semantic",
+                                "reasons": ["semantic fallback (cross-lingual)"],
+                            })
+                        })
+                        .collect();
+                    out["matches"] = json!(semantic_matches);
+                    out["confidence"] = json!("ranked");
+                    out["tier"] = json!("semantic");
+                    // Record the fallback in tiers_attempted for the audit
+                    // trail — a consumer reconciling which tiers ran sees it.
+                    if let Some(tiers) =
+                        out.get_mut("tiers_attempted").and_then(Value::as_array_mut)
+                    {
+                        tiers.push(json!("semantic"));
+                    }
+                    out["basis"] = json!(
+                        "lexical matching returned 0 results; semantic fallback via multilingual embeddings"
+                    );
+                }
+            }
+        }
         // P2·2: merge durable human notes onto matches — keyed by concept
         // norm or owner symbol name inside the match's file, so a human
         // correction surfaces exactly where the agent lands.
@@ -2085,7 +2264,8 @@ impl Service {
         let build_info = ensured.ok().flatten();
         let Some(store) = self.graph.as_ref() else {
             return Err(
-                "graph unavailable — no index to map. Run `pixel graph .` first".to_string(),
+                "graph unavailable — no index to map. Run `pixel rebuild-graph .` first"
+                    .to_string(),
             );
         };
         let files = store.files().map_err(|e| e.to_string())?;
@@ -2109,7 +2289,7 @@ impl Service {
             );
             let _ = writeln!(
                 md,
-                "# pixel map — {root_name}\n\n{} files · {} symbols",
+                "# pixel repo-map — {root_name}\n\n{} files · {} symbols",
                 grouped.len(),
                 symbol_total
             );
@@ -2148,7 +2328,7 @@ impl Service {
             if truncated {
                 let _ = writeln!(
                     md,
-                    "\n> truncated at {MAP_FILE_CAP} files — narrow with `pixel skeleton <file>`"
+                    "\n> truncated at {MAP_FILE_CAP} files — narrow with `pixel list-signatures <file>`"
                 );
             }
         }
@@ -2279,6 +2459,13 @@ fn fan_in_counts(
 /// test). Mutation and admin ops (publish/push/ping/…) are not listed: they
 /// report what they DID, not what exists, so completeness honesty does not
 /// apply the same way.
+/// Whether `targets` may add semantic hits: only when the lexical pass found
+/// nothing in P0/P1, and never when the caller asked for P0 only (a P1
+/// semantic hit would violate `max_tier`).
+fn semantic_fallback_wanted(has_p0_p1: bool, max_tier: Option<&str>) -> bool {
+    !has_p0_p1 && max_tier.is_none_or(|m| !matches!(m, "P0"))
+}
+
 pub const RETRIEVAL_OPS: &[&str] = &[
     "search",
     "resolve",
@@ -2291,6 +2478,7 @@ pub const RETRIEVAL_OPS: &[&str] = &[
     "symbol",
     "processes",
     "clusters",
+    "plan",
 ];
 
 fn is_retrieval_op(op_name: &str) -> bool {
@@ -2410,6 +2598,28 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
         basis.push_str(&caps.join("; "));
     }
 
+    // Static analysis (tree-sitter) cannot guarantee it found every call
+    // site: callbacks passed as arguments, dynamic dispatch, macro-generated
+    // calls, and eval are all invisible to it. This is an *extraction* limit
+    // — distinct from the *resolution* uncertainty (`lower_bound`) the
+    // envelope already tracks (same-name unresolved calls). Because
+    // extraction limits always apply, `closed_world` is never true: a
+    // "0 callers" answer means "no callers found", not "this symbol has no
+    // callers". This is Pixel's "I say when I don't know" value prop.
+    let extraction_limits = vec![
+        "callbacks passed as arguments (e.g. schema.plugin(fn), emitter.on('event', fn))"
+            .to_string(),
+        "dynamic dispatch (e.g. obj[methodName]())".to_string(),
+        "macro-generated calls".to_string(),
+        "eval / new Function".to_string(),
+    ];
+    if caps.is_empty() {
+        basis.push_str(
+            "; static analysis cannot guarantee completeness: tree-sitter may miss callbacks, \
+             dynamic dispatch, and macro-generated calls",
+        );
+    }
+
     // The one cheap staleness signal: a graph rebuilt for this very answer
     // is 0ms stale. Anything else is left unmeasured (None), never guessed.
     let staleness_ms = v
@@ -2427,11 +2637,14 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
         .map(String::from);
 
     let epistemics = Epistemics {
-        closed_world: caps.is_empty(),
+        // extraction_limits is never empty, so closed_world is always false:
+        // static analysis is never complete.
+        closed_world: caps.is_empty() && extraction_limits.is_empty(),
         lower_bound: !caps.is_empty(),
         basis,
         staleness_ms,
         confidence,
+        extraction_limits,
     };
     let warnings = caps
         .into_iter()
@@ -2637,6 +2850,7 @@ fn symbol_by_id(store: &GraphStore, id: i64) -> Option<SymbolRow> {
     dead_code,
     reason = "retained for the full-detail graph response shape while context uses compact edges"
 )]
+#[cfg_attr(test, mutants::skip)] // no caller: a mutation here is unobservable by design
 fn edges_by_kind(
     store: &GraphStore,
     edges: &[EdgeRow],
@@ -3136,7 +3350,7 @@ mod bridge {
         let returned_processes = v.len();
         let has_more = offset.saturating_add(returned_processes) < total_processes;
         Ok(serde_json::json!({
-            "processes": to_val(v),
+            "list-flows": to_val(v),
             "total_processes": total_processes,
             "returned_processes": returned_processes,
             "process_limit": PROCESS_LIMIT,
@@ -3169,7 +3383,7 @@ mod bridge {
         let returned_clusters = v.len();
         let has_more = offset.saturating_add(returned_clusters) < total_clusters;
         Ok(serde_json::json!({
-            "clusters": to_val(v),
+            "list-areas": to_val(v),
             "total_clusters": total_clusters,
             "returned_clusters": returned_clusters,
             "cluster_limit": CLUSTER_LIMIT,
@@ -3683,7 +3897,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `pixel skeleton <file>` must render every symbol's signature — kind +
+    /// `pixel list-signatures <file>` must render every symbol's signature — kind +
     /// sig — ordered by start_line, without pulling the file bodies in
     /// (that's what makes it ~10% of a Read). The lang is surfaced so the
     /// renderer can keep the `//` comment prefix mute per language.
@@ -3787,6 +4001,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// `plan` answers from the daemon's own graph: an explicit query or the
+    /// prompt's classification picks the queries, the answer names them, and
+    /// an unknown query is an error rather than an empty plan.
+    #[test]
+    fn plan_runs_the_requested_queries_over_the_daemon_graph() {
+        let root = tmpdir("plan-op");
+        std::fs::write(
+            root.join("app.ts"),
+            "export function used() { return 1; }\n\
+             export function orphan() { return 2; }\n\
+             export function main() { return used(); }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "plan fixture"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let plan = |svc: &mut Service, prompt: Option<&str>, query: Option<&str>| {
+            svc.handle(Request::Plan {
+                prompt: prompt.map(str::to_string),
+                query: query.map(str::to_string),
+                tag: None,
+                limit: None,
+            })
+        };
+        let dead = plan(&mut svc, None, Some("dead-code"));
+        assert!(dead.ok, "{:?}", dead.error);
+        assert_eq!(dead.data()["queries"], json!(["dead-code"]));
+        let findings = dead.data()["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0]["file"], "app.ts");
+        assert_eq!(findings[0]["line"], 2);
+        assert!(
+            findings[0]["label"].as_str().unwrap().contains("`orphan`"),
+            "{findings:?}"
+        );
+        assert_eq!(dead.op, "plan");
+        assert!(dead.epistemics.is_some() && dead.snapshot.is_some());
+
+        let classified = plan(&mut svc, Some("remove unused code"), None);
+        assert!(classified.ok, "{:?}", classified.error);
+        assert_eq!(classified.data()["queries"], json!(["dead-code"]));
+        assert_eq!(classified.data()["findings"], dead.data()["findings"]);
+
+        let unknown = plan(&mut svc, None, Some("everything"));
+        assert!(!unknown.ok);
+        assert!(
+            unknown
+                .error_message()
+                .contains("unknown query 'everything'"),
+            "{:?}",
+            unknown.error
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn ping_reports_daemon_protocol_version() {
         let root = tmpdir("protocol-version");
@@ -3806,9 +4077,14 @@ mod tests {
         std::fs::write(
             root.join("calls.ts"),
             "export function known() { return 1; }\n\
-             export function entry() { known(); missing(); missing(); }\n",
+             export function entry() { known(); missing(); missing(); }\n\
+             export function relay() { known(handler); }\n",
         )
         .unwrap();
+        // Two files define `handler` and calls.ts imports neither: the
+        // argument stays an unresolved reference.
+        std::fs::write(root.join("a.ts"), "export function handler() {}\n").unwrap();
+        std::fs::write(root.join("b.ts"), "export function handler() {}\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
         git(&root, &["commit", "-qm", "outgoing fixture"]);
@@ -3832,10 +4108,22 @@ mod tests {
                 .contains("2 unresolved outgoing call site(s)")
         );
 
+        // `relay` passes an unresolved callback on but invokes only `known`:
+        // the reference is not an outgoing call site the answer may miss.
+        let relay = svc.handle(Request::Uses {
+            uid_or_name: "relay".into(),
+            role: "callees".into(),
+            offset: None,
+        });
+        assert!(relay.ok);
+        assert_eq!(relay.data()["total_edges"], 1, "{:?}", relay.data());
+        assert_eq!(relay.data()["envelope"]["unresolved_outgoing"], 0);
+        assert!(!relay.epistemics.as_ref().unwrap().lower_bound);
+
         for (symbol, role, count) in [
             ("entry", "callers", 0),
             ("known", "callees", 0),
-            ("known", "callers", 1),
+            ("known", "callers", 2),
         ] {
             let response = svc.handle(Request::Uses {
                 uid_or_name: symbol.into(),
@@ -3845,7 +4133,10 @@ mod tests {
             assert!(response.ok);
             assert_eq!(response.data()["total_edges"], count);
             assert!(!response.epistemics.as_ref().unwrap().lower_bound);
-            assert!(response.epistemics.as_ref().unwrap().closed_world);
+            // closed_world is always false now: static analysis (tree-sitter)
+            // cannot guarantee completeness — callbacks, dynamic dispatch,
+            // and macro-generated calls are invisible to it.
+            assert!(!response.epistemics.as_ref().unwrap().closed_world);
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4267,6 +4558,22 @@ mod tests {
     /// `split_ident_words` alone does not split on `|`, spaces or punctuation,
     /// so a regex-alternation pattern stayed one token and every term
     /// frequency came out zero.
+    #[test]
+    fn semantic_fallback_only_when_lexical_pass_is_empty_and_p1_is_allowed() {
+        assert!(semantic_fallback_wanted(false, None));
+        assert!(semantic_fallback_wanted(false, Some("P1")));
+        assert!(semantic_fallback_wanted(false, Some("P2")));
+        assert!(
+            !semantic_fallback_wanted(false, Some("P0")),
+            "a P0-only caller must not receive P1 semantic hits"
+        );
+        assert!(
+            !semantic_fallback_wanted(true, None),
+            "lexical P0/P1 hits make the fallback redundant"
+        );
+        assert!(!semantic_fallback_wanted(true, Some("P0")));
+    }
+
     #[test]
     fn tokenize_words_splits_on_punctuation_and_case() {
         assert_eq!(
@@ -4874,6 +5181,15 @@ mod tests {
             ),
             ("processes", Request::Processes { offset: None }),
             ("clusters", Request::Clusters { offset: None }),
+            (
+                "plan",
+                Request::Plan {
+                    prompt: None,
+                    query: Some("dead-code".into()),
+                    tag: None,
+                    limit: None,
+                },
+            ),
         ];
 
         // The walk itself must cover the registry exactly — a new retrieval
@@ -4899,11 +5215,26 @@ mod tests {
                 !epistemics.basis.is_empty(),
                 "{name}: epistemics.basis must name the answer's source"
             );
-            // A response claiming closed_world must not simultaneously admit
-            // a lower bound, and vice versa.
-            assert_ne!(
-                epistemics.closed_world, epistemics.lower_bound,
-                "{name}: closed_world and lower_bound must be complementary here: {epistemics:?}"
+            // closed_world is always false: static analysis (tree-sitter)
+            // is never complete — callbacks, dynamic dispatch, and
+            // macro-generated calls are invisible to it. lower_bound still
+            // flags resolution uncertainty (same-name unresolved calls).
+            assert!(
+                !epistemics.closed_world,
+                "{name}: closed_world must always be false — static analysis is never complete: {epistemics:?}"
+            );
+            // The basis names the store the answer came from, per op: a
+            // reader of `search` must not be told "code graph".
+            let source = match name {
+                "search" => "text index",
+                "targets" | "resolve" => "text index + code graph",
+                "changes" => "code graph + working-tree diff",
+                _ => "code graph",
+            };
+            assert!(
+                epistemics.basis.starts_with(source),
+                "{name}: basis must open with {source:?}: {:?}",
+                epistemics.basis
             );
             let snapshot = resp
                 .snapshot

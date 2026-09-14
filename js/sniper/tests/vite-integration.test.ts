@@ -24,7 +24,7 @@ let project: string;
 let plugin: ReturnType<typeof sniperDevPlugin>;
 
 const sniper = (args: string[]) =>
-  spawnSync(binPath, ["sniper", ...args, "--json", "--repo", project], {
+  spawnSync(binPath, ["list-errors", ...args, "--json", "--repo", project], {
     env: process.env,
     encoding: "utf8",
     timeout: 30_000,

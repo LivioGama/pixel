@@ -66,7 +66,13 @@ const SOFT_LOOP_THRESHOLD: usize = 5;
 /// because re-running targets with a different task description is
 /// legitimate (task evolution). `index`, `daemon`, `install`, `doctor`
 /// are infrastructure commands, not retrieval.
-const GUARDED_COMMANDS: &[&str] = &["search", "resolve", "context", "impact", "changes"];
+const GUARDED_COMMANDS: &[&str] = &[
+    "search-content",
+    "find-code",
+    "pack-context",
+    "impact",
+    "what-changed",
+];
 
 /// Stable hash for call args (FNV-1a 64, hex, first 12 chars — same
 /// scheme as `targets_task_id`). This is NOT a cryptographic hash; it
@@ -188,11 +194,15 @@ pub enum CallGuardResult {
 /// the call in history. Call this at the start of each guarded command
 /// handler. If it returns `Warn`, print the message and still execute.
 ///
-/// `command` is the subcommand name ("search", "resolve", etc.).
+/// `command` is the subcommand name ("search-content", "find-code", etc.).
 /// `args` is the stringified arguments (pattern + paths for search,
 /// phrase + paths for resolve, etc.).
 /// `cwd` is the current working directory (used to find `.pixel/`).
 pub fn check_and_record(command: &str, args: &str, cwd: &Path) -> CallGuardResult {
+    // A history written before the command rename records `search`, and a
+    // caller may still pass an old name: both count as the current command,
+    // so a loop that straddles an upgrade is still one loop.
+    let command = pixel_proto::commands::current_name(command);
     if !GUARDED_COMMANDS.contains(&command) {
         return CallGuardResult::Allow;
     }
@@ -223,7 +233,7 @@ pub fn check_and_record(command: &str, args: &str, cwd: &Path) -> CallGuardResul
     let hard_count = calls
         .iter()
         .filter(mine)
-        .filter(|c| c.command == command && c.args_hash == ah)
+        .filter(|c| pixel_proto::commands::current_name(&c.command) == command && c.args_hash == ah)
         .count();
     if hard_count >= HARD_LOOP_THRESHOLD {
         let msg = format!(
@@ -246,7 +256,7 @@ pub fn check_and_record(command: &str, args: &str, cwd: &Path) -> CallGuardResul
     let soft_count = calls
         .iter()
         .filter(mine)
-        .filter(|c| c.command == command)
+        .filter(|c| pixel_proto::commands::current_name(&c.command) == command)
         .count();
     if soft_count >= SOFT_LOOP_THRESHOLD {
         let msg = format!(
@@ -316,12 +326,84 @@ mod tests {
         out
     }
 
+    fn seed_history(dir: &Path, entries: &[(&str, &str)]) {
+        let now = now_unix();
+        let calls: Vec<Value> = entries
+            .iter()
+            .map(|(command, args)| {
+                serde_json::json!({
+                    "command": command,
+                    "args_hash": args_hash(args),
+                    "timestamp": now,
+                    "session": "",
+                })
+            })
+            .collect();
+        std::fs::write(
+            dir.join(".pixel").join("calls.json"),
+            serde_json::json!({ "calls": calls }).to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn history_under_an_old_command_name_counts_toward_the_current_one() {
+        // Two identical `search` calls logged by a pre-rename binary, then
+        // the same query as `search-content`: that is the third identical
+        // call, a hard loop, not a first call.
+        let warning = |result: &CallGuardResult| match result {
+            CallGuardResult::Allow => None,
+            CallGuardResult::Warn(msg) => Some(msg.clone()),
+        };
+        let dir = temp_dir();
+        seed_history(&dir, &[("search", "foo ."), ("search", "foo .")]);
+        let hard = with_session(None, || check_and_record("search-content", "foo .", &dir));
+        let hard = warning(&hard);
+        assert!(
+            hard.as_deref()
+                .is_some_and(|msg| msg.contains("identical arguments")),
+            "old-name history must count: {hard:?}"
+        );
+
+        let dir2 = temp_dir();
+        seed_history(
+            &dir2,
+            &[
+                ("resolve", "a"),
+                ("resolve", "b"),
+                ("resolve", "c"),
+                ("resolve", "d"),
+                ("resolve", "e"),
+            ],
+        );
+        let soft = with_session(None, || check_and_record("find-code", "f", &dir2));
+        let soft = warning(&soft);
+        assert!(
+            soft.as_deref()
+                .is_some_and(|msg| msg.contains("prior calls in 10 minutes")),
+            "old-name history counts toward the soft threshold: {soft:?}"
+        );
+
+        // An old name passed in is guarded and recorded under the new name.
+        let dir3 = temp_dir();
+        let first = with_session(None, || check_and_record("context", "uid .", &dir3));
+        assert_eq!(warning(&first), None);
+        let saved = load_calls(&dir3.join(".pixel").join("calls.json"));
+        assert_eq!(saved.len(), 1, "an old guarded name is still guarded");
+        assert_eq!(saved[0].command, "pack-context");
+        for d in [dir, dir2, dir3] {
+            std::fs::remove_dir_all(&d).ok();
+        }
+    }
+
     #[test]
     fn allows_first_call() {
         let dir = temp_dir();
-        with_session(None, || match check_and_record("search", "foo .", &dir) {
-            CallGuardResult::Allow => {}
-            CallGuardResult::Warn(msg) => panic!("first call should be allowed: {msg}"),
+        with_session(None, || {
+            match check_and_record("search-content", "foo .", &dir) {
+                CallGuardResult::Allow => {}
+                CallGuardResult::Warn(msg) => panic!("first call should be allowed: {msg}"),
+            }
         });
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -334,9 +416,9 @@ mod tests {
         // a concurrent scoped test would otherwise move these calls into a
         // different bucket.
         with_session(None, || {
-            check_and_record("search", "foo .", &dir);
-            check_and_record("search", "foo .", &dir);
-            match check_and_record("search", "foo .", &dir) {
+            check_and_record("search-content", "foo .", &dir);
+            check_and_record("search-content", "foo .", &dir);
+            match check_and_record("search-content", "foo .", &dir) {
                 CallGuardResult::Warn(msg) => {
                     assert!(
                         msg.contains("identical arguments"),
@@ -355,9 +437,9 @@ mod tests {
         with_session(None, || {
             // Call 5 times with different args (threshold is 5).
             for i in 0..5 {
-                check_and_record("search", &format!("query{i} ."), &dir);
+                check_and_record("search-content", &format!("query{i} ."), &dir);
             }
-            match check_and_record("search", "another-query .", &dir) {
+            match check_and_record("search-content", "another-query .", &dir) {
                 CallGuardResult::Warn(msg) => {
                     assert!(
                         msg.contains("counts alone"),
@@ -376,10 +458,10 @@ mod tests {
         with_session(None, || {
             // 4 searches + 4 resolves — neither hits the soft threshold.
             for i in 0..4 {
-                check_and_record("search", &format!("q{i} ."), &dir);
-                check_and_record("resolve", &format!("p{i} ."), &dir);
+                check_and_record("search-content", &format!("q{i} ."), &dir);
+                check_and_record("find-code", &format!("p{i} ."), &dir);
             }
-            match check_and_record("search", "another .", &dir) {
+            match check_and_record("search-content", "another .", &dir) {
                 CallGuardResult::Allow => {}
                 CallGuardResult::Warn(msg) => {
                     panic!("5th search with mixed commands should be allowed: {msg}")
@@ -395,7 +477,7 @@ mod tests {
         with_session(None, || {
             // `targets` is not in GUARDED_COMMANDS — unlimited calls.
             for _ in 0..20 {
-                match check_and_record("targets", "fix the bug .", &dir) {
+                match check_and_record("scope-task", "fix the bug .", &dir) {
                     CallGuardResult::Allow => {}
                     CallGuardResult::Warn(msg) => panic!("targets should not be guarded: {msg}"),
                 }
@@ -408,9 +490,11 @@ mod tests {
     fn fails_open_without_pixel_dir() {
         let dir = std::env::temp_dir().join(format!("pixel-no-dotdir-{}", now_unix()));
         std::fs::create_dir_all(&dir).unwrap();
-        with_session(None, || match check_and_record("search", "foo .", &dir) {
-            CallGuardResult::Allow => {}
-            CallGuardResult::Warn(msg) => panic!("must fail open without .pixel/: {msg}"),
+        with_session(None, || {
+            match check_and_record("search-content", "foo .", &dir) {
+                CallGuardResult::Allow => {}
+                CallGuardResult::Warn(msg) => panic!("must fail open without .pixel/: {msg}"),
+            }
         });
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -537,7 +621,7 @@ mod tests {
         let path = dir.join(".pixel/calls.json");
         let calls: Vec<_> = (0..MAX_CALL_HISTORY + 100)
             .map(|i| CallEntry {
-                command: "search".into(),
+                command: "search-content".into(),
                 args_hash: args_hash(&i.to_string()),
                 timestamp: now_unix(),
                 session: String::new(),
@@ -546,7 +630,7 @@ mod tests {
         save_calls(&path, &calls);
         assert_eq!(load_calls(&path).len(), MAX_CALL_HISTORY);
         with_session(None, || {
-            match check_and_record("search", "new query", &dir) {
+            match check_and_record("search-content", "new query", &dir) {
                 CallGuardResult::Warn(message) => {
                     assert!(message.contains("Continuing retrieval"));
                     assert!(!message.contains("result will not change"));
@@ -567,7 +651,7 @@ mod tests {
         // Write a call from 20 minutes ago (past TTL).
         let old = serde_json::json!({
             "calls": [{
-                "command": "search",
+                "command": "search-content",
                 "args_hash": args_hash("old ."),
                 "timestamp": now_unix() - 1200,
             }]
@@ -575,9 +659,11 @@ mod tests {
         std::fs::write(&calls_path, old.to_string()).unwrap();
 
         // A new call should NOT trigger the hard loop (old entry pruned).
-        with_session(None, || match check_and_record("search", "old .", &dir) {
-            CallGuardResult::Allow => {}
-            CallGuardResult::Warn(msg) => panic!("expired entry must be pruned: {msg}"),
+        with_session(None, || {
+            match check_and_record("search-content", "old .", &dir) {
+                CallGuardResult::Allow => {}
+                CallGuardResult::Warn(msg) => panic!("expired entry must be pruned: {msg}"),
+            }
         });
         std::fs::remove_dir_all(&dir).ok();
     }

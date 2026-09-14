@@ -4,7 +4,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pixel_session::store::{Store, now_ms, project_key, store_directory, store_path};
+use pixel_session::store::{
+    Store, now_ms, project_key, resolve_project_root, store_directory, store_path,
+};
 use pixel_session::types::{
     ErrorInput, EventInput, EventKind, Frame, HttpContext, RunInput, Surface,
 };
@@ -342,5 +344,32 @@ fn two_handles_share_one_wal_database() {
     assert_eq!(
         b.get_error(from_a.id).unwrap().unwrap().message,
         "written by a"
+    );
+}
+
+#[test]
+fn resolve_project_root_climbs_to_the_git_toplevel_or_keeps_the_start() {
+    let outside = TempRoot::new();
+    let canonical = outside.path().canonicalize().unwrap();
+    assert_eq!(
+        resolve_project_root(outside.path()).unwrap(),
+        canonical,
+        "outside a repository the canonical start is the root"
+    );
+    assert!(resolve_project_root(&canonical.join("missing")).is_err());
+
+    let repo = TempRoot::new();
+    let status = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(repo.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let nested = repo.path().join("src").join("deep");
+    fs::create_dir_all(&nested).unwrap();
+    assert_eq!(
+        resolve_project_root(&nested).unwrap(),
+        repo.path().canonicalize().unwrap(),
+        "a subdirectory resolves to the repository root"
     );
 }

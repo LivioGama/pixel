@@ -1,6 +1,6 @@
 /**
  * `sniperDevPlugin()` — one import in any vite config wires every server-side
- * capture surface into the pixel sniper sink:
+ * capture surface into the pixel list-errors sink:
  *
  * - a `run` envelope on server start (pid, port, git HEAD, lockfile hash,
  *   .vite deps metadata hash);
@@ -15,7 +15,7 @@
  *
  * Every capture path is try/catch + reentrancy-guarded: the sink must never
  * break the dev server. Records ship serially through one child process at a
- * time (`pixel sniper report --json -`).
+ * time (`pixel list-errors report --json -`).
  */
 
 import { execFileSync } from "node:child_process";

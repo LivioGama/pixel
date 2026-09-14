@@ -1,4 +1,4 @@
-//! `pixel publish --message-file`: a multi-paragraph commit message from a
+//! `pixel commit --message-file`: a multi-paragraph commit message from a
 //! file (or stdin) lands in the commit verbatim, and `-m` and `-F` together
 //! are a usage error before any git state is touched.
 
@@ -45,7 +45,7 @@ fn publish_should_commit_the_file_body_when_message_file_is_given() {
     std::fs::write(&msg, MESSAGE).unwrap();
     let out = pixel_command()
         .current_dir(&repo)
-        .args(["publish", "--message-file"])
+        .args(["commit", "--message-file"])
         .arg(&msg)
         .args(["--files", "lib.rs", "--request-id", "publish-file-1"])
         .env("PIXEL_DAEMON_AUTO_START", "0")
@@ -63,7 +63,7 @@ fn publish_should_read_stdin_when_message_file_is_dash() {
     let mut child = pixel_command()
         .current_dir(&repo)
         .args([
-            "publish",
+            "commit",
             "-F",
             "-",
             "--files",
@@ -93,7 +93,7 @@ fn publish_should_refuse_both_message_flags_and_leave_head_alone() {
     std::fs::write(&msg, MESSAGE).unwrap();
     let out = pixel_command()
         .current_dir(&repo)
-        .args(["publish", "-m", "inline", "--message-file"])
+        .args(["commit", "-m", "inline", "--message-file"])
         .arg(&msg)
         .args(["--request-id", "publish-conflict-1"])
         .env("PIXEL_DAEMON_AUTO_START", "0")
@@ -108,7 +108,7 @@ fn publish_should_refuse_both_message_flags_and_leave_head_alone() {
     std::fs::write(&blank, "\n\n").unwrap();
     let out = pixel_command()
         .current_dir(&repo)
-        .args(["publish", "-F"])
+        .args(["commit", "-F"])
         .arg(&blank)
         .args(["--request-id", "publish-blank-1"])
         .env("PIXEL_DAEMON_AUTO_START", "0")

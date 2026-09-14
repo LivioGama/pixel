@@ -101,8 +101,12 @@ pub(crate) fn is_pixel_hook(command: &str) -> bool {
     }) {
         return true;
     }
+    // Entries written before the command rename say `pixel hook <verb>`;
+    // both spellings are pixel's and both must be recognised so an upgrade
+    // replaces the old entry instead of stacking a second one next to it.
     command
-        .rsplit_once(" hook ")
+        .rsplit_once(" run-hook ")
+        .or_else(|| command.rsplit_once(" hook "))
         .is_some_and(|(executable, verb)| {
             executable_name(executable).as_deref() == Some("pixel")
                 && [
@@ -436,7 +440,7 @@ fn configure(
         };
         pre.push(hook_group(
             format!(
-                "{} hook guard --provider {}{delegate}",
+                "{} run-hook guard --provider {}{delegate}",
                 quoted_executable(exe),
                 provider.name()
             ),
@@ -481,7 +485,7 @@ fn configure(
             ""
         };
         groups.push(hook_group(
-            format!("{} hook {verb}{provider_arg}", quoted_executable(exe)),
+            format!("{} run-hook {verb}{provider_arg}", quoted_executable(exe)),
             matcher,
         ));
     }
@@ -541,7 +545,7 @@ fn composed_backup_path(config_path: &Path) -> Result<PathBuf, String> {
 fn composed_codex_group(exe: &Path, backup: &Path) -> Value {
     hook_group(
         format!(
-            "{} hook composed-guard --provider codex --backup {}",
+            "{} run-hook composed-guard --provider codex --backup {}",
             quoted_executable(exe),
             quoted_executable(backup)
         ),
@@ -803,23 +807,25 @@ mod tests {
     #[test]
     fn routing_ownership_rejects_other_executables_and_command_mentions() {
         assert!(is_pixel_hook(
-            "'/tmp/Pixel tools/pixel' hook guard --provider claude"
-        ));
-        assert!(is_pixel_hook("'/tmp/Pixel'\\''s/pixel' hook prompt-submit"));
-        assert!(is_pixel_hook(
-            "'/tmp/Pixel'\\''s/pixel' hook prompt-submit --provider claude"
+            "'/tmp/Pixel tools/pixel' run-hook guard --provider claude"
         ));
         assert!(is_pixel_hook(
-            "'/tmp/Pixel'\\''s/pixel' hook post-compaction --provider claude"
+            "'/tmp/Pixel'\\''s/pixel' run-hook prompt-submit"
+        ));
+        assert!(is_pixel_hook(
+            "'/tmp/Pixel'\\''s/pixel' run-hook prompt-submit --provider claude"
+        ));
+        assert!(is_pixel_hook(
+            "'/tmp/Pixel'\\''s/pixel' run-hook post-compaction --provider claude"
         ));
         for foreign in [
             "other-pixel hook guard",
             "echo /tmp/pixel hook session-start",
             "echo ~/.claude/hooks/pixel-prompt-submit",
             "echo 'pixel hook guard'",
-            "'/tmp/pixel' hook session-start && security-check",
-            "'/tmp/pixel' hook guard --provider claude; security-check",
-            "'/tmp/pixel' hook prompt-submit > user-log",
+            "'/tmp/pixel' run-hook session-start && security-check",
+            "'/tmp/pixel' run-hook guard --provider claude; security-check",
+            "'/tmp/pixel' run-hook prompt-submit > user-log",
         ] {
             assert!(!is_pixel_hook(foreign), "{foreign}");
         }

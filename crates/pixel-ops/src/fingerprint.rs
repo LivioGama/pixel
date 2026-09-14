@@ -167,21 +167,7 @@ pub fn parse_porcelain_v2(output: &str) -> Vec<StatusChange> {
 /// only ever fingerprints paths already known to be in the change list;
 /// kept as a defensive fallback).
 pub fn status_change_for_path(root: &Path, path: &str) -> StatusChange {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "status",
-            "--porcelain=v2",
-            "-z",
-            "--untracked-files=all",
-            "--ignored=no",
-            "--",
-            path,
-        ])
-        .output();
-    if let Ok(out) = output {
-        let text = String::from_utf8_lossy(&out.stdout);
+    if let Ok(text) = pixel_git::GitRunner::new(root).status_porcelain_v2_path(path) {
         let changes = parse_porcelain_v2(&text);
         if let Some(found) = changes.into_iter().find(|c| c.path == path) {
             return found;

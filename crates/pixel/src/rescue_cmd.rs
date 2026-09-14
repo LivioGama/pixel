@@ -264,7 +264,7 @@ pub fn plan(
         .collect();
     let revert_cmd = rec_oids.iter().next().map(|oid| {
         let files: Vec<String> = target_paths.iter().map(|p| format!("--file {p}")).collect();
-        format!("pixel rescue --apply {oid} {} .", files.join(" "))
+        format!("pixel plan-rollback --apply {oid} {} .", files.join(" "))
     });
 
     Ok(json!({
@@ -340,7 +340,7 @@ pub fn apply(
     if opts.stash_first && !dirty_planned.is_empty() {
         let paths: Vec<String> = dirty_planned.iter().map(|s| (*s).clone()).collect();
         runner
-            .stash_push_paths("pixel rescue backup", &paths)
+            .stash_push_paths("pixel plan-rollback backup", &paths)
             .map_err(|e| e.to_string())?;
     }
 
@@ -353,7 +353,7 @@ pub fn apply(
             // was never completed, and saying so would be misleading.
             GitError::NonZeroExit { .. } => format!("{path} does not exist at {oid}: {e}"),
             GitError::OutputTooLarge { cap, .. } => format!(
-                "{path} at {oid} is larger than the {cap}-byte limit `rescue --apply` can \
+                "{path} at {oid} is larger than the {cap}-byte limit `plan-rollback --apply` can \
                  restore; it was not modified"
             ),
             GitError::Timeout { .. } => {

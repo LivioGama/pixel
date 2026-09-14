@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
+use crate::cache;
 use crate::delta::{DeltaState, delta_shard_path};
 use crate::gram::GramExtractor;
 use crate::index::{MAX_FILE_BYTES, SHARD_DIR, SHARD_FILE, SearchStats, read_regular_bounded};
@@ -235,6 +236,24 @@ impl IndexSet {
         root: &Path,
         extractor: Box<dyn GramExtractor>,
     ) -> Result<Self, IndexSetError> {
+        Self::open_or_build_impl(root, extractor, false)
+    }
+
+    /// Same as `open_or_build` but bypasses the shared shard cache. Used by
+    /// `pixel reindex` to force a rebuild — without this, a poisoned cache
+    /// entry would be relinked back and the reindex would be a no-op.
+    pub fn open_or_build_bypass_cache(
+        root: &Path,
+        extractor: Box<dyn GramExtractor>,
+    ) -> Result<Self, IndexSetError> {
+        Self::open_or_build_impl(root, extractor, true)
+    }
+
+    fn open_or_build_impl(
+        root: &Path,
+        extractor: Box<dyn GramExtractor>,
+        bypass_cache: bool,
+    ) -> Result<Self, IndexSetError> {
         let gpx_dir = root.join(SHARD_DIR);
         let base_path = gpx_dir.join(SHARD_FILE);
         let head = gitsync::rev_parse_head(root);
@@ -286,11 +305,45 @@ impl IndexSet {
                 // Invalidate stale delta state alongside a base rebuild.
                 std::fs::remove_file(delta_shard_path(&gpx_dir)).ok();
                 std::fs::remove_file(crate::delta::state_path(&gpx_dir)).ok();
+                let extractor_id = extractor.id();
+                // When bypassing the cache (reindex), also remove the cached
+                // entry so the rebuild produces fresh bytes, not a relink.
+                if bypass_cache && let Some(oid) = head.as_deref() {
+                    cache::remove_cached(oid, &extractor_id);
+                }
                 match &head {
                     Some(oid) => {
-                        let tracked = gitsync::ls_files(root);
-                        let shard =
-                            build_shard_from(root, &tracked, extractor.as_ref(), oid, &base_path)?;
+                        // Shared cache: a base shard for this commit + extractor
+                        // may already exist (built by another worktree). Try to
+                        // hardlink/copy it in before doing the expensive build.
+                        let cached = !bypass_cache
+                            && cache::try_link_from_cache(oid, &extractor_id, &base_path);
+                        let shard = if cached
+                            && let Ok(s) = Shard::open(&base_path)
+                            && s.extractor_id() == extractor_id
+                            && s.commit_oid() == Some(oid.as_str())
+                        {
+                            s
+                        } else {
+                            // Use `ls_tree` (commit tree), not `ls_files`
+                            // (worktree index) — the base shard must be a
+                            // pure function of (commit, extractor) so that
+                            // cached shards are safe to share across
+                            // worktrees with different index states.
+                            let tracked = gitsync::ls_tree(root, oid);
+                            let shard = build_shard_from(
+                                root,
+                                &tracked,
+                                extractor.as_ref(),
+                                oid,
+                                &base_path,
+                            )?;
+                            // Publish the freshly built shard into the shared
+                            // cache so other worktrees at this commit can reuse
+                            // it. Best-effort: never fails the build.
+                            cache::link_to_cache(&base_path, oid, &extractor_id);
+                            shard
+                        };
                         DeltaState {
                             base_oid: oid.clone(),
                             delta_oid: None,

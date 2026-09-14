@@ -107,7 +107,7 @@ fn save_flow(
 ) -> Result<Value, String> {
     if exists(name) {
         return Err(format!(
-            "flow '{}' already exists — use `pixel flow revise {}` to update it",
+            "flow '{}' already exists — use `pixel replay-flow revise {}` to update it",
             slugify(name),
             slugify(name)
         ));
@@ -389,6 +389,43 @@ mod tests {
             revised_unix: 1,
             revision: 1,
             proven: false,
+        }
+    }
+
+    /// A proven flow is only replaced through `revise`, which bumps the
+    /// revision: a second `save` under the same name must refuse, and its
+    /// error names the command the agent can run instead.
+    #[test]
+    fn save_flow_writes_a_new_flow_and_refuses_to_overwrite_it() {
+        let _guard = store::ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR;
+        // nothing else in this process reads it concurrently.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
+        }
+        let steps = tmp.path().join("steps.json");
+        std::fs::write(&steps, r#"[{"action":"snapshot"}]"#).unwrap();
+        let from_file = Some(steps);
+        let saved = save_flow("Login Flow", "Login", "", &[], &None, &from_file).unwrap();
+        assert_eq!(saved["saved"], true, "{saved}");
+        assert_eq!(saved["steps"], 1, "{saved}");
+        assert_eq!(saved["revision"], 1, "{saved}");
+        assert_eq!(load("Login Flow").unwrap().title, "Login");
+
+        let again = save_flow("Login Flow", "Other", "", &[], &None, &from_file).unwrap_err();
+        assert_eq!(
+            again,
+            "flow 'login-flow' already exists — use `pixel replay-flow revise login-flow` to update it"
+        );
+        assert_eq!(
+            load("Login Flow").unwrap().title,
+            "Login",
+            "not overwritten"
+        );
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
         }
     }
 

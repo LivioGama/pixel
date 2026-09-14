@@ -811,10 +811,10 @@ pixel bogus-subcommand .
             "# mine
 {MANAGED_BEGIN}
 ```bash
-pixel targets task
-pixel resolve x
-pixel rescue
-pixel reconcile
+pixel scope-task task
+pixel find-code x
+pixel plan-rollback
+pixel sync-branch
 pixel impact x
 ```
 {MANAGED_END}
@@ -908,7 +908,7 @@ fn uninstall_removes_managed_block_and_preserves_user_content() {
     );
 }
 
-/// After uninstall, Claude settings.json should have no pixel hook entries,
+/// After uninstall, Claude settings.json should have no pixel run-hook entries,
 /// and the hook scripts should be deleted. The new install no longer
 /// installs hooks or scripts, so the fixture manually creates them
 /// (modeling a leftover from a previous hook-based install) for uninstall
@@ -921,7 +921,7 @@ fn uninstall_removes_claude_hooks_and_scripts() {
     let hooks_dir = claude_dir.join("hooks");
     fs::create_dir_all(&hooks_dir).unwrap();
 
-    // Manually wire pixel hook entries into settings.json (install() no
+    // Manually wire pixel run-hook entries into settings.json (install() no
     // longer does this) — including the blocking guard, a session-start,
     // and a prompt-submit entry.
     let settings = claude_dir.join("settings.json");
@@ -965,7 +965,7 @@ fn uninstall_removes_claude_hooks_and_scripts() {
     };
     uninstall(&uninstall_opts).expect("uninstall");
 
-    // Settings should have no pixel hook references.
+    // Settings should have no pixel run-hook references.
     let settings_content = fs::read_to_string(&settings).unwrap_or_default();
     assert!(
         !settings_content.contains("pixel-targets-guard"),
@@ -1097,7 +1097,7 @@ fn uninstall_dry_run_does_not_modify() {
     );
 }
 
-/// Uninstall removes pixel hook entries from Codex hooks.json while
+/// Uninstall removes pixel run-hook entries from Codex hooks.json while
 /// preserving non-pixel entries.
 #[test]
 fn uninstall_removes_codex_hooks_preserving_others() {
@@ -2276,7 +2276,7 @@ fn doctor_flags_a_missing_or_stale_subagent_prompt() {
         pixel_install::doctor::CheckStatus::Green,
         "freshly installed sub-agent prompt must be green"
     );
-    fs::write(subagent_prompt_path(home), "pixel uses X --callers\n").unwrap();
+    fs::write(subagent_prompt_path(home), "pixel who-calls X --callers\n").unwrap();
     assert_eq!(
         check(home),
         pixel_install::doctor::CheckStatus::Red,
@@ -2589,4 +2589,237 @@ fn doctor_reds_a_block_that_disagrees_with_the_claude_code_found_now() {
             .contains("lack the sub-agent prompt flag"),
         "{upgraded:?}"
     );
+}
+
+/// Plugin-manifest surfaces (skills/, .cursor/rules/, …) are generated from
+/// `assets/pixel-agent-prompt.md` by `scripts/gen-plugin-assets.sh`. They must
+/// never drift: an edited prompt with stale plugin files silently ships an old
+/// protocol to every CLI that installs via plugin manifests.
+#[test]
+fn plugin_assets_are_in_sync() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    let script = repo.join("scripts").join("gen-plugin-assets.sh");
+    assert!(script.is_file(), "missing {}", script.display());
+    let out = std::process::Command::new("/bin/sh")
+        .arg(&script)
+        .arg("--check")
+        .output()
+        .expect("run gen-plugin-assets.sh --check");
+    assert!(
+        out.status.success(),
+        "plugin assets stale — run scripts/gen-plugin-assets.sh\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
+}
+
+/// A plugin root in a temp dir: the real hook script, the given context
+/// files, and a `bin/` holding a fake `pixel` whose `repo-state --help`
+/// exits with `repo_state_exit` (no `pixel` at all when `None`).
+#[cfg(unix)]
+fn plugin_root(context: &str, subagent: &str, repo_state_exit: Option<i32>) -> TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join("hooks")).unwrap();
+    fs::create_dir_all(dir.path().join("bin")).unwrap();
+    fs::copy(
+        repo_root().join("hooks/pixel-context.sh"),
+        dir.path().join("hooks/pixel-context.sh"),
+    )
+    .unwrap();
+    fs::write(dir.path().join("PIXEL.md"), context).unwrap();
+    fs::write(dir.path().join("PIXEL-SUBAGENT.md"), subagent).unwrap();
+    if let Some(code) = repo_state_exit {
+        let exe = dir.path().join("bin/pixel");
+        fs::write(
+            &exe,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] && echo 'pixel 0.1.0' && exit 0\n[ \"$1\" = repo-state ] && exit {code}\nexit 0\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    dir
+}
+
+/// Run the hook as a harness does (stdin JSON, one event argument) with a
+/// PATH of the fake `bin/` plus the system tools, and parse its one line.
+#[cfg(unix)]
+fn run_context_hook(root: &std::path::Path, event: &str) -> serde_json::Value {
+    use std::io::Write;
+    let mut child = std::process::Command::new("/bin/sh")
+        .arg(root.join("hooks/pixel-context.sh"))
+        .arg(event)
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", root.join("bin").display()),
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"hook_event_name\":\"SessionStart\"}")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(text.lines().count(), 1, "one JSON line: {text}");
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"))
+}
+
+/// The protocol reaches the model byte for byte, whatever it contains:
+/// quotes, backslashes, tabs and non-ASCII survive the JSON encoding, and a
+/// sub-agent gets the short sub-agent prompt, not the 18 KB one.
+#[cfg(unix)]
+#[test]
+fn context_hook_injects_the_prompt_for_its_event_verbatim() {
+    let context = "# Pixel \u{1F7E9}\n\n| `grep \"x\"` | `pixel search-content \"x\"` |\n\tpath\\to\\file\r\nend";
+    let root = plugin_root(context, "sub-agent prompt\n", Some(0));
+
+    let session = run_context_hook(root.path(), "SessionStart");
+    assert_eq!(
+        session["hookSpecificOutput"]["hookEventName"],
+        "SessionStart"
+    );
+    assert_eq!(session["hookSpecificOutput"]["additionalContext"], context);
+
+    let subagent = run_context_hook(root.path(), "SubagentStart");
+    assert_eq!(
+        subagent["hookSpecificOutput"]["hookEventName"],
+        "SubagentStart"
+    );
+    assert_eq!(
+        subagent["hookSpecificOutput"]["additionalContext"],
+        "sub-agent prompt"
+    );
+
+    let unknown = run_context_hook(root.path(), "Weird\"Event");
+    assert_eq!(
+        unknown["hookSpecificOutput"]["hookEventName"], "SessionStart",
+        "the event name in the JSON is never taken from the argument verbatim"
+    );
+}
+
+/// Without a usable binary the protocol is a list of failing commands: the
+/// hook says why it was not loaded instead, and never tells the agent to
+/// fetch an installer.
+#[cfg(unix)]
+#[test]
+fn context_hook_replaces_the_protocol_with_a_notice_when_pixel_cannot_run_it() {
+    let missing = plugin_root("PROTOCOL", "SUB", None);
+    let notice = run_context_hook(missing.path(), "SessionStart");
+    let text = notice["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(text.contains("`pixel` binary is not on PATH"), "{text}");
+    assert!(!text.contains("PROTOCOL"), "{text}");
+    assert!(!text.contains("curl"), "{text}");
+
+    let outdated = plugin_root("PROTOCOL", "SUB", Some(2));
+    let notice = run_context_hook(outdated.path(), "SubagentStart");
+    let text = notice["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        text.contains("installed pixel 0.1.0 does not accept"),
+        "{text}"
+    );
+    assert!(!text.contains("SUB"), "{text}");
+    assert_eq!(
+        notice["hookSpecificOutput"]["hookEventName"],
+        "SubagentStart"
+    );
+}
+
+/// Every manifest parses and every path it hands a harness exists in the
+/// repository: a renamed hook script or a moved skills directory breaks the
+/// plugin silently at install time, never in a build.
+#[test]
+fn plugin_manifests_parse_and_point_at_files_that_exist() {
+    let repo = repo_root();
+    let json = |rel: &str| -> serde_json::Value {
+        let text = fs::read_to_string(repo.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{rel}: {e}"))
+    };
+    let exists = |owner: &str, rel: &str| {
+        let rel = rel.trim_start_matches("./");
+        assert!(
+            repo.join(rel).exists(),
+            "{owner} names {rel}, which is not in the repository"
+        );
+    };
+    for rel in [
+        ".claude-plugin/plugin.json",
+        ".codex-plugin/plugin.json",
+        ".qoder-plugin/plugin.json",
+    ] {
+        let manifest = json(rel);
+        for field in ["skills", "hooks", "rules"] {
+            if let Some(path) = manifest[field].as_str() {
+                exists(rel, path);
+            }
+        }
+    }
+    for rel in [
+        ".claude-plugin/marketplace.json",
+        ".grok-plugin/marketplace.json",
+        ".agents/plugins/marketplace.json",
+    ] {
+        let plugins = json(rel)["plugins"].as_array().cloned().unwrap_or_default();
+        assert!(!plugins.is_empty(), "{rel} lists no plugin");
+        for plugin in plugins {
+            exists(rel, plugin["source"].as_str().unwrap());
+        }
+    }
+    exists(
+        "gemini-extension.json",
+        json("gemini-extension.json")["contextFileName"]
+            .as_str()
+            .unwrap(),
+    );
+    let package = json("package.json");
+    exists("package.json", package["main"].as_str().unwrap());
+    for entry in package["files"].as_array().unwrap() {
+        exists("package.json", entry.as_str().unwrap());
+    }
+    for entry in json("opencode.json")["plugin"].as_array().unwrap() {
+        exists("opencode.json", entry.as_str().unwrap());
+    }
+
+    let hooks = json("hooks/plugin-hooks.json");
+    let mut commands = 0;
+    for (event, matchers) in hooks["hooks"].as_object().unwrap() {
+        for matcher in matchers.as_array().unwrap() {
+            for hook in matcher["hooks"].as_array().unwrap() {
+                let command = hook["command"].as_str().unwrap();
+                commands += 1;
+                assert!(
+                    command.starts_with(
+                        "\"${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/hooks/pixel-context.sh\""
+                    ),
+                    "{event}: the script must resolve from the plugin root Claude Code and Codex set: {command}"
+                );
+                assert!(
+                    command.ends_with(&format!(" {event}")),
+                    "{event}: {command}"
+                );
+            }
+        }
+    }
+    assert_eq!(commands, 2, "SessionStart and SubagentStart");
+    exists("hooks/plugin-hooks.json", "hooks/pixel-context.sh");
 }

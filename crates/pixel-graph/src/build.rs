@@ -16,7 +16,8 @@ use xxhash_rust::xxh3::xxh3_64;
 use crate::extract::{FileExtraction, extract_file, lang_of};
 use crate::imports::resolve_import;
 use crate::resolve::{
-    FileCalls, PendingCall, reconsider_resolved_calls, resolve_all, resolve_calls,
+    FileCalls, FileReferences, PendingCall, PendingReference, reconsider_resolved_calls,
+    resolve_all, resolve_calls, resolve_references,
 };
 use crate::store::{EdgeKind, GraphStore, extract_crux};
 
@@ -57,6 +58,24 @@ type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
 /// `meta` key under which the build-time freshness signature is stored.
 pub const FRESHNESS_KEY: &str = "freshness";
+
+/// `meta` key under which a full build records [`EXTRACTOR_VERSION`].
+pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
+
+/// What extraction writes for an unchanged file. The freshness signature
+/// only hashes file contents, so a graph built by an older extractor looks
+/// fresh forever; a stored version other than this one makes it stale and
+/// forces a full rebuild. Bump it whenever an extractor or resolver change
+/// alters the rows an unchanged source produces.
+///
+/// 2: JSX component call edges; callback references only for functions the
+/// graph defines, member arguments only on a self receiver.
+pub const EXTRACTOR_VERSION: &str = "2";
+
+/// True iff the graph's rows were written by the current extractor.
+fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
+    Ok(store.meta_get(EXTRACTOR_VERSION_KEY)?.as_deref() == Some(EXTRACTOR_VERSION))
+}
 
 #[derive(Debug, Clone)]
 pub struct GraphStats {
@@ -265,12 +284,25 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
         sym_ids.push(ids);
         // Engine 1: concept pass alongside symbol extraction with O(1) content access.
         insert_concepts(&store, file_id, &e.rel, &e.content, &sym_ids[i], &lines)?;
+        // Plan pass: persist JSX elements for dead-interactive queries.
+        for jsx in &e.fx.jsx_elements {
+            store.insert_jsx_element(
+                file_id,
+                &jsx.tag,
+                jsx.has_handler,
+                &jsx.text_content,
+                jsx.start_line,
+                jsx.end_line,
+            )?;
+        }
         e.content.clear();
         e.content.shrink_to_fit();
     }
 
-    // Pass 2: imports (resolved against the full file list) + pending calls.
+    // Pass 2: imports (resolved against the full file list) + pending calls
+    // and references.
     let mut pending: Vec<FileCalls> = Vec::with_capacity(extracted.len());
+    let mut pending_refs: Vec<FileReferences> = Vec::with_capacity(extracted.len());
     for (i, e) in extracted.iter().enumerate() {
         let file_id = path_to_id[&e.rel];
         for imp in &e.fx.imports {
@@ -289,9 +321,24 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
                 })
                 .collect();
         pending.push(FileCalls { file_id, calls });
+        let references =
+            e.fx.references
+                .iter()
+                .map(|r| PendingReference {
+                    name: r.name.clone(),
+                    enclosing_symbol_id: r.enclosing_index.map(|ix| sym_ids[i][ix]),
+                    site_line: r.site_line,
+                    arg_of: r.arg_of.clone(),
+                })
+                .collect();
+        pending_refs.push(FileReferences {
+            file_id,
+            references,
+        });
     }
 
     resolve_calls(&store, &pending)?;
+    resolve_references(&store, &pending_refs)?;
 
     // Bind freshness to the exact bytes parsed above. If the source tree moved
     // during extraction/storage, publishing this graph as fresh would attach
@@ -304,6 +351,7 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
         )
         .into());
     }
+    store.meta_set(EXTRACTOR_VERSION_KEY, EXTRACTOR_VERSION)?;
     store.meta_set(FRESHNESS_KEY, &snapshot_signature)?;
 
     let (files, symbols, edges, unresolved) = store.counts()?;
@@ -394,13 +442,17 @@ impl TreeDelta {
 /// Compare `root`'s working tree with the graph at `db_path`. One walk
 /// (the same one `freshness_signature` makes) answers both "is it fresh"
 /// and "which files drifted". `Ok(None)` when the db carries no freshness
-/// signature (built before signatures existed, or interrupted): the caller
-/// cannot trust its rows and must rebuild.
+/// signature (built before signatures existed, or interrupted) or was
+/// written by another extractor version: the caller cannot trust its rows
+/// and must rebuild.
 pub fn tree_delta(root: &Path, db_path: &Path) -> Result<Option<TreeDelta>, BoxErr> {
     let store = GraphStore::open(db_path)?;
     let Some(stored) = store.meta_get(FRESHNESS_KEY)? else {
         return Ok(None);
     };
+    if !extractor_is_current(&store)? {
+        return Ok(None);
+    }
     let current = tree_hashes(root);
     let signature = signature_of(&current);
     let known: HashMap<String, String> = store
@@ -481,7 +533,7 @@ pub fn is_fresh(root: &Path, db_path: &Path) -> bool {
     let Ok(Some(stored)) = store.meta_get(FRESHNESS_KEY) else {
         return false;
     };
-    stored == freshness_signature(root)
+    extractor_is_current(&store).unwrap_or(false) && stored == freshness_signature(root)
 }
 
 /// Incrementally re-index a batch of files: preserve incoming call knowledge,
@@ -529,43 +581,47 @@ fn update_files_unsigned(
     for &(rel, removed) in files {
         let abs = root.join(rel);
 
-        // Demote incoming call edges (from OTHER files) into unresolved rows so
-        // they can re-link after the rebuild instead of being silently dropped.
-        // The receiver is preserved so receiver calls are never falsely promoted
-        // from Probable to Exact during re-resolution.
+        // Demote incoming call+reference edges (from OTHER files) into
+        // unresolved rows so they can re-link after the rebuild instead of
+        // being silently dropped. The receiver and kind are preserved so
+        // re-resolution produces the correct edge type (Calls vs References).
         if let Some(old) = store.file_by_path(rel)? {
             let old_syms = store.symbols_in_file(old.id)?;
-            let mut demoted: Vec<(i64, String, i64, u32, Option<String>)> = Vec::new();
+            let mut demoted: Vec<(i64, String, i64, u32, Option<String>, String)> = Vec::new();
             for sym in &old_syms {
-                for edge in store.edges_to(sym.id, Some(EdgeKind::Calls))? {
-                    let src_file: Option<i64> = store
-                        .conn()
-                        .query_row(
-                            "SELECT file_id FROM symbols WHERE id = ?1",
-                            rusqlite::params![edge.src_id],
-                            |r| r.get(0),
-                        )
-                        .ok();
-                    if let Some(src_file) = src_file
-                        && src_file != old.id
-                    {
-                        demoted.push((
-                            src_file,
-                            sym.name.clone(),
-                            edge.src_id,
-                            edge.site_line,
-                            edge.receiver.clone(),
-                        ));
+                for kind in [EdgeKind::Calls, EdgeKind::References] {
+                    for edge in store.edges_to(sym.id, Some(kind))? {
+                        let src_file: Option<i64> = store
+                            .conn()
+                            .query_row(
+                                "SELECT file_id FROM symbols WHERE id = ?1",
+                                rusqlite::params![edge.src_id],
+                                |r| r.get(0),
+                            )
+                            .ok();
+                        if let Some(src_file) = src_file
+                            && src_file != old.id
+                        {
+                            demoted.push((
+                                src_file,
+                                sym.name.clone(),
+                                edge.src_id,
+                                edge.site_line,
+                                edge.receiver.clone(),
+                                kind.as_str().to_string(),
+                            ));
+                        }
                     }
                 }
             }
-            for (src_file, name, src_id, site_line, receiver) in demoted {
+            for (src_file, name, src_id, site_line, receiver, kind) in demoted {
                 store.insert_unresolved_call(
                     src_file,
                     &name,
                     Some(src_id),
                     site_line,
                     receiver.as_deref(),
+                    &kind,
                 )?;
             }
         }
@@ -623,6 +679,16 @@ fn update_files_unsigned(
             store.set_symbol_crux(id, &crux)?;
         }
         insert_concepts(&store, file_id, rel, &content, &ids, &lines)?;
+        for jsx in &fx.jsx_elements {
+            store.insert_jsx_element(
+                file_id,
+                &jsx.tag,
+                jsx.has_handler,
+                &jsx.text_content,
+                jsx.start_line,
+                jsx.end_line,
+            )?;
+        }
         staged.push(Staged {
             rel: rel.to_string(),
             file_id,
@@ -637,8 +703,9 @@ fn update_files_unsigned(
     let all_paths: Vec<String> = files_now.iter().map(|f| f.path.clone()).collect();
     let path_to_id: HashMap<String, i64> = files_now.into_iter().map(|f| (f.path, f.id)).collect();
 
-    // Pass 2: imports + pending calls of the changed files.
+    // Pass 2: imports + pending calls/references of the changed files.
     let mut pending_calls: Vec<FileCalls> = Vec::with_capacity(staged.len());
+    let mut pending_refs: Vec<FileReferences> = Vec::with_capacity(staged.len());
     for st in &staged {
         for imp in &st.fx.imports {
             let resolved = resolve_import(&imp.spec, &st.rel, &all_paths)
@@ -659,6 +726,21 @@ fn update_files_unsigned(
         pending_calls.push(FileCalls {
             file_id: st.file_id,
             calls,
+        });
+        let references = st
+            .fx
+            .references
+            .iter()
+            .map(|r| PendingReference {
+                name: r.name.clone(),
+                enclosing_symbol_id: r.enclosing_index.map(|ix| st.symbol_ids[ix]),
+                site_line: r.site_line,
+                arg_of: r.arg_of.clone(),
+            })
+            .collect();
+        pending_refs.push(FileReferences {
+            file_id: st.file_id,
+            references,
         });
     }
 
@@ -691,6 +773,9 @@ fn update_files_unsigned(
 
     if !pending_calls.is_empty() {
         resolve_calls(&store, &pending_calls)?;
+    }
+    if !pending_refs.is_empty() {
+        resolve_references(&store, &pending_refs)?;
     }
 
     // Any changed definition can invalidate a previously unique target.
@@ -889,7 +974,7 @@ mod tests {
     /// same batch, and imports of UNCHANGED files that pointed at a file
     /// which did not exist yet, resolve once the batch lands. Without this
     /// the resolver's import tier never saw the new file and the caller
-    /// edge came out `Probable` or unresolved, unlike after `pixel graph`.
+    /// edge came out `Probable` or unresolved, unlike after `pixel rebuild-graph`.
     #[test]
     fn incremental_update_resolves_imports_to_files_added_in_the_batch() {
         let root = tmpdir("delta-imports");
@@ -1290,6 +1375,169 @@ mod tests {
         let envelope = store.envelope_for_name("target").unwrap();
         assert!(envelope.lower_bound);
         assert!(envelope.unresolved_same_name >= 1);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A graph written by an older extractor lacks the rows the current one
+    /// emits for the same bytes; content hashes alone call it fresh forever.
+    #[test]
+    fn graph_from_another_extractor_version_is_stale_until_rebuilt() {
+        let root = tmpdir("extractor-version");
+        std::fs::write(root.join("a.ts"), "export function a() { return 1; }\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        assert_eq!(
+            store.meta_get(EXTRACTOR_VERSION_KEY).unwrap().as_deref(),
+            Some(EXTRACTOR_VERSION)
+        );
+        assert!(is_fresh(&root, &db));
+        assert!(tree_delta(&root, &db).unwrap().is_some_and(|d| d.fresh));
+
+        store.meta_set(EXTRACTOR_VERSION_KEY, "1").unwrap();
+        assert!(!is_fresh(&root, &db), "an older extractor's graph is stale");
+        assert!(
+            tree_delta(&root, &db).unwrap().is_none(),
+            "no delta can repair rows the extractor never wrote: rebuild"
+        );
+        store
+            .conn()
+            .execute("DELETE FROM meta WHERE key = ?1", [EXTRACTOR_VERSION_KEY])
+            .unwrap();
+        assert!(!is_fresh(&root, &db), "an unversioned graph is stale");
+        assert!(tree_delta(&root, &db).unwrap().is_none());
+        drop(store);
+
+        build_graph(&root, &db).unwrap();
+        assert!(
+            is_fresh(&root, &db),
+            "a rebuild records the current version"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn reference_rows(store: &GraphStore) -> Vec<String> {
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT name FROM unresolved_calls WHERE kind = 'references' ORDER BY name")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// Only an argument that may be a callback leaves a trace: a plain value
+    /// (`value`, `user.name`) creates no edge to a same-named function and no
+    /// unresolved row, while a function the resolver cannot pick stays
+    /// counted in the envelope.
+    #[test]
+    fn value_arguments_leave_no_references_and_ambiguous_callbacks_stay_unresolved() {
+        let root = tmpdir("reference-values");
+        std::fs::write(
+            root.join("name.ts"),
+            "export function name() { return 1; }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("h1.ts"), "export function handler() {}\n").unwrap();
+        std::fs::write(root.join("h2.ts"), "export function handler() {}\n").unwrap();
+        std::fs::write(
+            root.join("entry.ts"),
+            "export function entry(value: any, user: any) {\n  consume(value, user.name, handler, render);\n}\n",
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+
+        let store = GraphStore::open(&db).unwrap();
+        let name = &store.symbols_by_name("name", 10).unwrap()[0];
+        assert!(
+            store
+                .edges_to(name.id, Some(EdgeKind::References))
+                .unwrap()
+                .is_empty(),
+            "`user.name` is data, not a reference to `name()`"
+        );
+        assert_eq!(reference_rows(&store), ["handler"]);
+        assert!(store.envelope_for_name("handler").unwrap().lower_bound);
+        assert!(!store.envelope_for_name("value").unwrap().lower_bound);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `<Button/>` compiles to a call of `Button`: the component a file
+    /// renders is a callee of the renderer, across an import.
+    #[test]
+    fn rendering_a_component_links_the_renderer_as_its_caller() {
+        let root = tmpdir("jsx-component-call");
+        std::fs::write(
+            root.join("Button.tsx"),
+            "export function Button() { return <button>ok</button>; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("App.tsx"),
+            "import { Button } from \"./Button\";\nexport function App() { return <div><Button /></div>; }\n",
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+
+        let store = GraphStore::open(&db).unwrap();
+        let button = &store.symbols_by_name("Button", 10).unwrap()[0];
+        let callers = store.edges_to(button.id, Some(EdgeKind::Calls)).unwrap();
+        assert_eq!(callers.len(), 1, "{callers:?}");
+        assert_eq!(callers[0].tier, Tier::Exact, "import-bound");
+        let app = &store.symbols_by_name("App", 10).unwrap()[0];
+        assert_eq!(callers[0].src_id, app.id);
+        assert!(!store.envelope_for_name("div").unwrap().lower_bound);
+        assert!(!store.envelope_for_name("button").unwrap().lower_bound);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `schema.plugin(tenantScopePlugin)` should create a `References` edge
+    /// from the enclosing symbol (`setup`) to the referenced symbol
+    /// (`tenantScopePlugin`), with `Tier::Probable`.
+    #[test]
+    fn callback_arg_creates_references_edge() {
+        let root = tmpdir("references-edge");
+        std::fs::write(
+            root.join("a.ts"),
+            "export function tenantScopePlugin(s: any) { return s; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("b.ts"),
+            "import { tenantScopePlugin } from \"./a\";\n\
+             export function setup(schema: any) {\n  \
+             schema.plugin(tenantScopePlugin);\n\
+             }\n",
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+
+        let store = GraphStore::open(&db).unwrap();
+        let plugin = &store.symbols_by_name("tenantScopePlugin", 10).unwrap()[0];
+        // A References edge should point to tenantScopePlugin from setup.
+        let ref_edges = store
+            .edges_to(plugin.id, Some(EdgeKind::References))
+            .unwrap();
+        assert_eq!(
+            ref_edges.len(),
+            1,
+            "exactly one References edge to tenantScopePlugin"
+        );
+        assert_eq!(ref_edges[0].tier, Tier::Probable);
+        // The source should be the `setup` symbol.
+        let setup = &store.symbols_by_name("setup", 10).unwrap()[0];
+        assert_eq!(ref_edges[0].src_id, setup.id);
+        // No Calls edge should exist (plugin is a method call on schema, not
+        // a direct call to tenantScopePlugin).
+        let call_edges = store.edges_to(plugin.id, Some(EdgeKind::Calls)).unwrap();
+        assert!(call_edges.is_empty(), "no Calls edge to tenantScopePlugin");
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }

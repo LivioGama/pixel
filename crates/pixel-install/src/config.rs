@@ -39,7 +39,7 @@ pub const PROMPT_SUBMIT_HOOK: &str = "pixel-prompt-submit";
 /// valid event name and is silently ignored if written into settings.json.
 pub const POST_COMPACTION_HOOK: &str = "pixel-post-compaction";
 
-/// Timeout in seconds for pixel hook entries written into agent configs.
+/// Timeout in seconds for pixel run-hook entries written into agent configs.
 /// The pixel binary is ~48MB; a cold start can take a few seconds on first
 /// invocation. Without an explicit timeout, harnesses like Codex apply a
 /// short default and SIGKILL the hook (exit 137), breaking the guard.
@@ -780,7 +780,7 @@ pub fn remove_guard_hook_entries(hooks: &mut serde_json::Map<String, serde_json:
         filtered = remove_hook_entries(&filtered, OLD_GUARD_HOOK);
         if filtered != existing {
             changed += 1;
-            if filtered.as_array().is_some_and(std::vec::Vec::is_empty) {
+            if filtered.as_array().is_some_and(Vec::is_empty) {
                 hooks.remove(&event);
             } else {
                 hooks.insert(event, filtered);
@@ -806,7 +806,7 @@ pub fn remove_flat_guard_hook_entries(
         filtered = remove_flat_hook_entries(&filtered, OLD_GUARD_HOOK);
         if filtered != existing {
             changed += 1;
-            if filtered.as_array().is_some_and(std::vec::Vec::is_empty) {
+            if filtered.as_array().is_some_and(Vec::is_empty) {
                 hooks.remove(&event);
             } else {
                 hooks.insert(event, filtered);
@@ -956,32 +956,40 @@ mod tests {
 
     #[test]
     fn merge_flat_hook_entry_replaces_the_pixel_entry_and_keeps_the_rest() {
-        let existing = serde_json::json!([flat("lint"), flat("pixel hook guard --old")]);
-        let merged = merge_flat_hook_entry(Some(&existing), "pixel hook", flat("pixel hook guard"));
-        assert_eq!(
-            merged,
-            serde_json::json!([flat("lint"), flat("pixel hook guard")])
+        let existing = serde_json::json!([flat("lint"), flat("pixel run-hook guard --old")]);
+        let merged = merge_flat_hook_entry(
+            Some(&existing),
+            "pixel run-hook",
+            flat("pixel run-hook guard"),
         );
         assert_eq!(
-            merge_flat_hook_entry(None, "pixel hook", flat("pixel hook guard")),
-            serde_json::json!([flat("pixel hook guard")])
+            merged,
+            serde_json::json!([flat("lint"), flat("pixel run-hook guard")])
+        );
+        assert_eq!(
+            merge_flat_hook_entry(None, "pixel run-hook", flat("pixel run-hook guard")),
+            serde_json::json!([flat("pixel run-hook guard")])
         );
         // A scalar entry is wrapped, not dropped.
         assert_eq!(
-            merge_flat_hook_entry(Some(&flat("lint")), "pixel hook", flat("pixel hook guard")),
-            serde_json::json!([flat("lint"), flat("pixel hook guard")])
+            merge_flat_hook_entry(
+                Some(&flat("lint")),
+                "pixel run-hook",
+                flat("pixel run-hook guard")
+            ),
+            serde_json::json!([flat("lint"), flat("pixel run-hook guard")])
         );
     }
 
     #[test]
     fn remove_flat_hook_entries_drops_only_the_marked_commands() {
-        let existing = serde_json::json!([flat("lint"), flat("pixel hook guard"), {"note": 1}]);
+        let existing = serde_json::json!([flat("lint"), flat("pixel run-hook guard"), {"note": 1}]);
         assert_eq!(
-            remove_flat_hook_entries(&existing, "pixel hook"),
+            remove_flat_hook_entries(&existing, "pixel run-hook"),
             serde_json::json!([flat("lint"), {"note": 1}])
         );
         let scalar = serde_json::json!("not an array");
-        assert_eq!(remove_flat_hook_entries(&scalar, "pixel hook"), scalar);
+        assert_eq!(remove_flat_hook_entries(&scalar, "pixel run-hook"), scalar);
     }
 
     #[test]
@@ -1015,20 +1023,20 @@ mod tests {
     #[test]
     fn hook_entry_matches_marker_looks_inside_the_nested_hooks_commands() {
         assert!(hook_entry_matches_marker(
-            &hook_entry("pixel hook guard"),
-            "pixel hook"
+            &hook_entry("pixel run-hook guard"),
+            "pixel run-hook"
         ));
         assert!(!hook_entry_matches_marker(
             &hook_entry("lint"),
-            "pixel hook"
+            "pixel run-hook"
         ));
         assert!(
-            !hook_entry_matches_marker(&flat("pixel hook guard"), "pixel hook"),
+            !hook_entry_matches_marker(&flat("pixel run-hook guard"), "pixel run-hook"),
             "flat entries have no nested hooks"
         );
         assert!(!hook_entry_matches_marker(
             &serde_json::json!({"hooks": "x"}),
-            "pixel hook"
+            "pixel run-hook"
         ));
     }
 }
