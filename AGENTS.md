@@ -43,6 +43,7 @@ and its supporting files; `.claude/skills` is a symlink to it.
 | Skill | Load when | Content |
 | --- | --- | --- |
 | `rust-guidelines/` | writing, refactoring or reviewing anything under `crates/` | Microsoft's Pragmatic Rust Guidelines (`M-*` ids): a workspace-specific checklist in `SKILL.md`, the full MIT-licensed text in `guidelines.txt` to grep by id, never to read whole |
+| `release/` | cutting a release or hotfix, bumping the version, tagging, or a failed Release run | the tag-to-tap procedure around `.github/workflows/release.yml`, and `prepare.sh`, which bumps every member, cuts the changelog, refreshes `Cargo.lock` and runs `check-release` |
 
 Rules are always-on for the files they name; a skill is read when its
 `description` matches the task. A tool without skill support reads

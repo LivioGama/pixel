@@ -391,9 +391,13 @@ naming the command or flag affected.
 
 ## Release (maintainers)
 
+The full procedure, with the checks after publication and the recovery from
+a failed run, is the `release` skill (`.agents/skills/release/SKILL.md`).
+Steps 1 to 3 are `.agents/skills/release/prepare.sh x.y.z`.
+
 1. Move the `Unreleased` entries under a new `## [x.y.z] - YYYY-MM-DD`.
-2. Bump `version` in `crates/pixel/Cargo.toml` and any crate that changed,
-   then `cargo build` so `Cargo.lock` follows.
+2. Bump `version` in every workspace member (they move in lockstep since
+   0.2.4), then `cargo update --workspace` so `Cargo.lock` follows.
 3. `pixel check-release x.y.z` must print `all checks passed`: it checks
    the three points above (the same command gates the release workflow
    before anything is built).
