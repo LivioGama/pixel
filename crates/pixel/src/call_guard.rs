@@ -199,10 +199,6 @@ pub enum CallGuardResult {
 /// phrase + paths for resolve, etc.).
 /// `cwd` is the current working directory (used to find `.pixel/`).
 pub fn check_and_record(command: &str, args: &str, cwd: &Path) -> CallGuardResult {
-    // A history written before the command rename records `search`, and a
-    // caller may still pass an old name: both count as the current command,
-    // so a loop that straddles an upgrade is still one loop.
-    let command = pixel_proto::commands::current_name(command);
     if !GUARDED_COMMANDS.contains(&command) {
         return CallGuardResult::Allow;
     }
@@ -233,7 +229,7 @@ pub fn check_and_record(command: &str, args: &str, cwd: &Path) -> CallGuardResul
     let hard_count = calls
         .iter()
         .filter(mine)
-        .filter(|c| pixel_proto::commands::current_name(&c.command) == command && c.args_hash == ah)
+        .filter(|c| c.command == command && c.args_hash == ah)
         .count();
     if hard_count >= HARD_LOOP_THRESHOLD {
         let msg = format!(
@@ -256,7 +252,7 @@ pub fn check_and_record(command: &str, args: &str, cwd: &Path) -> CallGuardResul
     let soft_count = calls
         .iter()
         .filter(mine)
-        .filter(|c| pixel_proto::commands::current_name(&c.command) == command)
+        .filter(|c| c.command == command)
         .count();
     if soft_count >= SOFT_LOOP_THRESHOLD {
         let msg = format!(

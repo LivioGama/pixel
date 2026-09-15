@@ -352,13 +352,9 @@ fn session_start_block_reports_the_history_index_phase_and_freshness() {
             "{command}: {capabilities:?}"
         );
     }
-    for (old, _) in pixel_proto::commands::RENAMED_COMMANDS {
-        assert!(!capabilities.contains(old), "{old}: {capabilities:?}");
+    for old in ["ready", "search", "symbol", "resolve", "publish", "ship"] {
+        assert!(!capabilities.contains(&old), "{old}: {capabilities:?}");
     }
-    assert!(
-        !capabilities.contains(&"migrate"),
-        "hidden commands stay hidden"
-    );
     let repo = &block["pixel"]["repo"];
     assert!(
         repo["facts_phase"].is_string(),

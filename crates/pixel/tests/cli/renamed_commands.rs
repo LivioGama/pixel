@@ -1,6 +1,6 @@
 //! After the clean-break rename, old command names and old protocol op tags are
 //! not accepted. These tests verify that the CLI rejects the pre-rename
-//! vocabulary and that `migrate` remains a hidden no-op.
+//! vocabulary.
 
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -90,28 +90,4 @@ fn current_command_names_work() {
         let out = pixel(&dir, &[name, "--help"], &[]);
         assert!(out.status.success(), "`{name}` must work: {out:?}");
     }
-}
-
-#[test]
-fn migrate_is_a_hidden_no_op_that_exits_zero() {
-    let dir = fixture("migrate");
-    std::fs::create_dir_all(dir.join(".gitpixel")).unwrap();
-    for args in [&["migrate"][..], &["migrate", ".", "--json"][..]] {
-        let out = pixel(&dir, args, &[("PIXEL_METRICS", "0")]);
-        assert_eq!(out.status.code(), Some(0), "{args:?}: {out:?}");
-        assert!(out.stdout.is_empty(), "{args:?} prints no result: {out:?}");
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains("'migrate' was removed and does nothing"),
-            "{args:?}: {out:?}"
-        );
-    }
-    assert!(
-        dir.join(".gitpixel").is_dir(),
-        "a no-op must not delete the legacy directory it used to remove"
-    );
-    let help = pixel(&dir, &["--help"], &[]);
-    assert!(
-        !String::from_utf8_lossy(&help.stdout).contains("migrate"),
-        "migrate stays out of --help"
-    );
 }

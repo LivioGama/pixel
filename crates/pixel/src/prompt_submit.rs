@@ -645,7 +645,7 @@ fn check_action_log_file(mut file: std::fs::File, cwd: &Path, cutoff: i64) -> bo
         if !cwd_matches(cwd, Path::new(log_cwd)) {
             continue;
         }
-        if COMPLETION_COMMANDS.contains(&pixel_proto::commands::current_name(command)) {
+        if COMPLETION_COMMANDS.contains(&command) {
             return true;
         }
     }

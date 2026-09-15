@@ -8,7 +8,6 @@
 //! one; this crate depends on nothing pixel-internal.
 
 pub mod budget;
-pub mod commands;
 pub mod envelope;
 pub mod epistemics;
 pub mod error;

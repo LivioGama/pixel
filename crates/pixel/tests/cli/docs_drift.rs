@@ -105,10 +105,9 @@ fn every_documented_pixel_command_exists() {
     );
 }
 
-/// Commands a runtime string tells the agent to run: `` `pixel <name>`` or
-/// `"pixel <name>` on a line of production code. Comments and everything
-/// from the first `#[cfg(test)]` on are skipped: tests name old spellings on
-/// purpose (alias and hook-compatibility fixtures).
+/// Commands a runtime string tells the agent to run: `` `pixel <name>`` in
+/// production code. Comments and everything from the first `#[cfg(test)]` on
+/// are skipped: tests name old spellings on purpose.
 fn runtime_command_mentions(source: &str) -> BTreeSet<String> {
     let production = source.split("#[cfg(test)]").next().unwrap_or_default();
     let code: String = production
@@ -116,15 +115,7 @@ fn runtime_command_mentions(source: &str) -> BTreeSet<String> {
         .filter(|l| !l.trim_start().starts_with("//"))
         .map(|l| format!("{l}\n"))
         .collect();
-    let mut out = referenced_commands(&code);
-    // A quoted `"pixel …` is a command only when it names one: "pixel is the
-    // engine" is prose, "pixel rescue --apply" is a pre-rename spelling.
-    out.extend(
-        referenced_commands(&code.replace("\"pixel ", "`pixel "))
-            .into_iter()
-            .filter(|name| pixel_proto::commands::renamed_to(name).is_some()),
-    );
-    out
+    referenced_commands(&code)
 }
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -230,21 +221,15 @@ fn rename_table_rows(text: &str) -> Vec<(String, String)> {
 }
 
 #[test]
-fn renamed_command_tables_list_exactly_the_accepted_aliases() {
-    // The README and the changelog tell users which old names still work;
-    // the CLI registers those aliases from `RENAMED_COMMANDS`. A table that
-    // drops a row or keeps a stale one sends a user to a name that fails.
-    let expected: Vec<(String, String)> = pixel_proto::commands::RENAMED_COMMANDS
-        .iter()
-        .map(|(old, new)| ((*old).to_string(), (*new).to_string()))
-        .collect();
+fn no_renamed_command_tables_in_readme_or_changelog() {
+    // The clean break is complete: old names are rejected, so no alias table
+    // should remain in README.md or CHANGELOG.md.
     let root = repo_root();
     for doc in ["README.md", "CHANGELOG.md"] {
         let text = std::fs::read_to_string(root.join(doc)).unwrap();
-        assert_eq!(
-            rename_table_rows(&text),
-            expected,
-            "{doc}: the `| Old name | New name |` table must match RENAMED_COMMANDS row for row"
+        assert!(
+            rename_table_rows(&text).is_empty(),
+            "{doc}: the `| Old name | New name |` alias table must be removed"
         );
     }
 }

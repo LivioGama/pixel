@@ -807,16 +807,6 @@ enum Command {
         #[arg(long)]
         shell: Option<String>,
     },
-    /// Removed: the legacy `.gitpixel/` migration. Hidden and kept only so a
-    /// script that still calls it exits 0 with a note instead of failing
-    /// with "unrecognized subcommand".
-    #[command(hide = true)]
-    Migrate {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
     /// Hook entrypoints (guard, session-start) invoked by Claude hooks.
     RunHook {
         #[command(subcommand)]
@@ -3603,42 +3593,6 @@ fn operation_path(matches: &clap::ArgMatches) -> Option<PathBuf> {
         .and_then(|mut paths| paths.next().cloned())
 }
 
-/// What `pixel migrate` prints now that the command does nothing.
-const MIGRATE_REMOVED_NOTE: &str = "note: 'migrate' was removed and does nothing; pixel no longer \
-     reads legacy .gitpixel/ state, so delete that directory by hand if it is still there";
-
-/// The pre-rename subcommand this invocation was spelled with, and its
-/// current name. Only the first word that is not an option names the
-/// command (`pixel prepare-repo ready` runs `prepare-repo` on a path called
-/// `ready`); `--metrics` is the one option taking a separate value before it.
-fn renamed_invocation(argv: &[String]) -> Option<(&str, &'static str)> {
-    let mut words = argv.iter().skip(1);
-    while let Some(word) = words.next() {
-        if word == "--metrics" {
-            words.next();
-        } else if !word.starts_with('-') {
-            return pixel_proto::commands::renamed_to(word).map(|new| (word.as_str(), new));
-        }
-    }
-    None
-}
-
-/// The one stderr line announcing that an old command name was used, or
-/// `None` when the name is current or live reporting is off. `live` is the
-/// metrics gate: `--metrics off`, `PIXEL_METRICS=0` and the protected
-/// streams (hooks, `search-like-rg`, the statusline) silence both alike, so
-/// the note never lands in a hook response or a byte-compatible rg output.
-fn rename_note(argv: &[String], live: bool) -> Option<String> {
-    if !live {
-        return None;
-    }
-    let (old, new) = renamed_invocation(argv)?;
-    Some(format!(
-        "note: '{old}' is now '{new}'; the old name stays accepted until {}\n",
-        pixel_proto::commands::ALIAS_REMOVAL_VERSION
-    ))
-}
-
 fn run() -> Result<(), String> {
     let started = std::time::Instant::now();
     let argv: Vec<String> = std::env::args().collect();
@@ -3667,9 +3621,6 @@ fn run() -> Result<(), String> {
     let live = !protected
         && cli.metrics != "off"
         && std::env::var_os("PIXEL_METRICS").is_none_or(|v| v != "0");
-    if let Some(note) = rename_note(&argv, live) {
-        eprint!("{note}");
-    }
     let root = discover_root(&path).or_else(|_| discover_root(Path::new(".")));
     operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
     // Compatibility fallback must exec the original before any logging changes
@@ -5051,10 +5002,6 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 &serde_json::to_value(&report).map_err(|e| e.to_string())?,
                 json,
             )
-        }
-        Command::Migrate { .. } => {
-            eprintln!("{MIGRATE_REMOVED_NOTE}");
-            Ok(())
         }
         Command::RunHook { cmd } => match cmd {
             HookCmd::Guard {
@@ -6797,92 +6744,5 @@ mod prompt_asset_parity {
         unsafe {
             std::env::remove_var(&name);
         }
-    }
-}
-
-#[cfg(test)]
-mod renamed_command_tests {
-    use super::{Cli, rename_note, renamed_invocation};
-    use clap::CommandFactory;
-    use std::collections::BTreeSet;
-
-    /// The full `Cli` definition overflows a 2 MiB test thread in debug
-    /// builds (the reason `validate_cli_syntax` runs on 4 MiB); build and
-    /// parse it on a thread sized the same way.
-    fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-        std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024)
-            .spawn(f)
-            .unwrap()
-            .join()
-            .unwrap()
-    }
-
-    fn argv(words: &[&str]) -> Vec<String> {
-        words.iter().map(ToString::to_string).collect()
-    }
-
-    #[test]
-    fn clap_aliases_are_empty_since_renames_are_complete() {
-        let registered = on_big_stack(|| {
-            let cli = Cli::command();
-            let mut registered = BTreeSet::new();
-            for sub in cli.get_subcommands() {
-                for alias in sub.get_all_aliases() {
-                    registered.insert((alias.to_string(), sub.get_name().to_string()));
-                }
-            }
-            registered
-        });
-        assert!(registered.is_empty(), "aliases: {registered:?}");
-        assert!(pixel_proto::commands::RENAMED_COMMANDS.is_empty());
-    }
-
-    #[test]
-    fn current_names_parse_directly() {
-        let name = |words: &'static [&'static str]| {
-            on_big_stack(move || {
-                Cli::command()
-                    .try_get_matches_from(words)
-                    .unwrap()
-                    .subcommand_name()
-                    .map(str::to_string)
-            })
-        };
-        assert_eq!(
-            name(&["pixel", "prepare-repo", "--no-daemon", "--json"]).as_deref(),
-            Some("prepare-repo")
-        );
-        assert_eq!(
-            name(&["pixel", "run-hook", "session-start"]).as_deref(),
-            Some("run-hook")
-        );
-    }
-
-    #[test]
-    fn renamed_invocation_always_none_after_clean_break() {
-        assert_eq!(renamed_invocation(&argv(&["pixel", "ready"])), None);
-        assert_eq!(
-            renamed_invocation(&argv(&["pixel", "--metrics", "off", "changes", "."])),
-            None,
-            "the value of --metrics is not the command"
-        );
-        assert_eq!(
-            renamed_invocation(&argv(&["pixel", "--metrics=off", "symbol", "x"])),
-            None
-        );
-        assert_eq!(renamed_invocation(&argv(&["pixel", "impact", "x"])), None);
-        assert_eq!(renamed_invocation(&argv(&["pixel", "--help"])), None);
-        assert_eq!(renamed_invocation(&argv(&["pixel"])), None);
-    }
-
-    #[test]
-    fn rename_note_always_none_after_clean_break() {
-        assert_eq!(
-            rename_note(&argv(&["pixel", "ready", "--json"]), true),
-            None
-        );
-        assert_eq!(rename_note(&argv(&["pixel", "ready"]), false), None);
-        assert_eq!(rename_note(&argv(&["pixel", "prepare-repo"]), true), None);
     }
 }
