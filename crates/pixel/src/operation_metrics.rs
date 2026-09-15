@@ -21,17 +21,30 @@ impl<W: Write> Write for Counted<W> {
     }
 }
 
+/// A reader that closed its end (`… | head -1`) is a success, the policy
+/// `write_stdout` applies to the capped JSON path; every other write failure
+/// keeps the ordinary `print!` contract.
+fn write_absorbing_closed_reader<W: Write>(
+    sink: &mut W,
+    args: std::fmt::Arguments<'_>,
+) -> io::Result<()> {
+    match sink.write_fmt(args) {
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
 pub fn print(args: std::fmt::Arguments<'_>) {
     // Retain the ordinary print! failure contract. Only successful writes count.
-    Counted(io::stdout().lock())
-        .write_fmt(args)
-        .expect("failed printing to stdout");
+    if let Err(error) = write_absorbing_closed_reader(&mut Counted(io::stdout().lock()), args) {
+        panic!("failed printing to stdout: {error}");
+    }
 }
 
 pub fn print_error(args: std::fmt::Arguments<'_>) {
-    Counted(io::stderr().lock())
-        .write_fmt(args)
-        .expect("failed printing to stderr");
+    if let Err(error) = write_absorbing_closed_reader(&mut Counted(io::stderr().lock()), args) {
+        panic!("failed printing to stderr: {error}");
+    }
 }
 
 #[derive(Default)]
@@ -191,6 +204,64 @@ pub fn evidence(command: &str, succeeded: bool) -> Option<WorkflowEvidence> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A sink that refuses every write with one fixed error kind.
+    struct Refusing(io::ErrorKind);
+
+    impl Write for Refusing {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            Err(self.0.into())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A sink that keeps what it is asked to print.
+    #[derive(Default)]
+    struct Recording(Vec<u8>);
+
+    impl Write for Recording {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_closed_reader_is_success_but_other_write_failures_survive() {
+        let closed = write_absorbing_closed_reader(
+            &mut Refusing(io::ErrorKind::BrokenPipe),
+            format_args!("line\n"),
+        );
+        assert!(
+            closed.is_ok(),
+            "a reader that closed its end is not a failed write: {closed:?}"
+        );
+
+        let failed = write_absorbing_closed_reader(
+            &mut Refusing(io::ErrorKind::WriteZero),
+            format_args!("line\n"),
+        );
+        assert_eq!(
+            failed
+                .expect_err("a real write failure must not be absorbed")
+                .kind(),
+            io::ErrorKind::WriteZero
+        );
+    }
+
+    #[test]
+    fn successful_writes_reach_the_sink_unchanged() {
+        let count = 7;
+        let mut sink = Recording::default();
+        write_absorbing_closed_reader(&mut sink, format_args!("counted {count}\n")).unwrap();
+        assert_eq!(sink.0, b"counted 7\n");
+    }
+
     #[test]
     fn metadata_is_distinct_bounded_and_never_extrapolated() {
         let mut e = Evidence {

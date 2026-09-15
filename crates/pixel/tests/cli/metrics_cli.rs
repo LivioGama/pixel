@@ -1,6 +1,7 @@
 //! Real CLI metrics boundaries: invocation-local accounting, never stream decoration.
 use std::collections::HashSet;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -818,4 +819,66 @@ fn daemon_reindex_reports_actual_nested_index_counts() {
     );
     assert!(String::from_utf8_lossy(&reindexed.stderr).contains(&expected));
     assert_eq!(metric_lines(&reindexed).len(), 1);
+}
+
+/// `pixel action-log . --limit N | head -1`: the reader closes the pipe while
+/// the process still has lines to write. That is a truncated read, not a
+/// failure — the counted `print!` path must absorb EPIPE instead of panicking
+/// with exit 101.
+#[test]
+fn closed_stdout_pipe_is_success_not_a_panic() {
+    /// More lines than any pipe buffer holds, so the process cannot finish
+    /// writing before the test closes the read end.
+    const SEEDED_LINES: usize = 4000;
+
+    let fixture = Fixture::new();
+    let log = fixture.0.join(".pixel/actions.jsonl");
+    fs::create_dir_all(log.parent().unwrap()).unwrap();
+    let seeded: String = (0..SEEDED_LINES)
+        .map(|n| {
+            format!(
+                "{}\n",
+                json!({
+                    "ts_ms": 1,
+                    "pid": 1,
+                    "command": "search-content",
+                    "args": format!("seed-{n} --path . --budget 4000"),
+                    "cwd": "/fixture",
+                    "outcome": "ok",
+                    "duration_ms": 1,
+                })
+            )
+        })
+        .collect();
+    fs::write(&log, seeded).unwrap();
+
+    let limit = SEEDED_LINES.to_string();
+    let mut child = fixture
+        .command()
+        .args(["action-log", ".", "--limit", limit.as_str()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // `| head -1`: keep the first line, then drop the read end.
+    let mut first_line = String::new();
+    {
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        reader.read_line(&mut first_line).unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+
+    assert!(
+        first_line.contains("search-content"),
+        "the first rendered line arrives before the reader closes: {first_line:?}"
+    );
+    assert!(
+        output.status.success(),
+        "a closed stdout reader is a success, not exit 101: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "EPIPE must not panic the process: {stderr}"
+    );
 }
