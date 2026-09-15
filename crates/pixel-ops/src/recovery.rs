@@ -264,6 +264,20 @@ mod tests {
         assert!(err.contains("corrupt"), "{err}");
     }
 
+    /// A non-NotFound IO error (e.g., the record path is a directory) must
+    /// fail closed, not be treated as an absent record.
+    #[test]
+    fn recovery_read_fails_on_non_notfound_io_error() {
+        let dir = tempdir().unwrap();
+        let store = PublishRecoveryStore::with_state_root(dir.path().to_path_buf());
+        let path = store.recovery_path("/test/repo", "ioerr-req");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let err = store.read("/test/repo", "ioerr-req").unwrap_err();
+        assert!(err.contains("GIT_FAILED"), "{err}");
+        assert!(err.contains("unreadable"), "{err}");
+    }
+
     #[test]
     fn recovery_has_pending() {
         let dir = tempdir().unwrap();

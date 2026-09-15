@@ -425,6 +425,65 @@ mod tests {
         assert!(err.contains("idempotency"));
     }
 
+    /// The NotFound guard in `read_existing` must not swallow other IO
+    /// errors: a directory at the record path is not "absent".
+    #[test]
+    fn read_existing_fails_on_non_notfound_io_error() {
+        let dir = tempdir().unwrap();
+        let j = make_journal(dir.path());
+        let path = j.record_path("repo-key", "req-ioerr");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let err = OperationJournal::read_existing(
+            &path,
+            "req-ioerr",
+            JournalOperation::Publish,
+            "repo-key",
+            "hash",
+        )
+        .unwrap_err();
+        assert!(err.contains("GIT_FAILED"), "{err}");
+        assert!(err.contains("unreadable"), "{err}");
+    }
+
+    /// A mismatch in only the operation is enough to be a conflict.
+    #[test]
+    fn read_existing_rejects_operation_mismatch_alone() {
+        let dir = tempdir().unwrap();
+        let j = make_journal(dir.path());
+        j.begin("req-op", JournalOperation::Publish, "repo-key", "hash")
+            .unwrap();
+        let path = j.record_path("repo-key", "req-op");
+        let err = OperationJournal::read_existing(
+            &path,
+            "req-op",
+            JournalOperation::Push,
+            "repo-key",
+            "hash",
+        )
+        .unwrap_err();
+        assert!(err.contains("idempotency"), "{err}");
+    }
+
+    /// A mismatch in only the input_hash is enough to be a conflict.
+    #[test]
+    fn read_existing_rejects_input_hash_mismatch_alone() {
+        let dir = tempdir().unwrap();
+        let j = make_journal(dir.path());
+        j.begin("req-hash", JournalOperation::Publish, "repo-key", "hash")
+            .unwrap();
+        let path = j.record_path("repo-key", "req-hash");
+        let err = OperationJournal::read_existing(
+            &path,
+            "req-hash",
+            JournalOperation::Publish,
+            "repo-key",
+            "other-hash",
+        )
+        .unwrap_err();
+        assert!(err.contains("idempotency"), "{err}");
+    }
+
     /// The creation race reports `Ok(false)`; when the path it lost to is
     /// not a readable record, the loser must fail rather than `Start`.
     #[test]
