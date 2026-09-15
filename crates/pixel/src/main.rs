@@ -1509,11 +1509,14 @@ fn try_daemon(root: &Path, req: &Request) -> Option<Response> {
 fn try_daemon_inner(root: &Path, req: &Request) -> Option<Response> {
     let sock = daemon::socket_path(root);
     let mut stream = UnixStream::connect(&sock).ok()?;
+    // The daemon drains its debounced watcher batch before serving a
+    // connection; on a cold or loaded host that drain can outlast a short
+    // probe timeout. 5s covers the drain without masking a dead daemon.
     stream
-        .set_read_timeout(Some(Duration::from_millis(1500)))
+        .set_read_timeout(Some(Duration::from_millis(5000)))
         .ok()?;
     stream
-        .set_write_timeout(Some(Duration::from_millis(1500)))
+        .set_write_timeout(Some(Duration::from_millis(5000)))
         .ok()?;
     let ping = roundtrip(&mut stream, &Request::Ping)?;
     if !ping.ok

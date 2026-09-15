@@ -14,7 +14,7 @@ import unittest
 # tool exists (or does not) symlinks these plus its chosen fakes into a private
 # bin dir, the way a busybox/Alpine image has sha256sum but no shasum. python3
 # is there for the `#!/usr/bin/env python3` of the fake curl and hash tools.
-SYSTEM_TOOLS = ("awk", "chmod", "cp", "mkdir", "mktemp", "mv", "python3", "rm", "tar")
+SYSTEM_TOOLS = ("awk", "chmod", "cp", "gzip", "mkdir", "mktemp", "mv", "python3", "rm", "tar")
 
 
 class InstallContract(unittest.TestCase):
