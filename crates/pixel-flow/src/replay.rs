@@ -477,6 +477,42 @@ mod tests {
     }
 
     #[test]
+    fn replay_conditional_numbers_and_indents_sub_steps() {
+        let flow = make_flow(
+            vec![FlowStep {
+                action: "conditional".into(),
+                rationale: Some("decide".into()),
+                condition: Some("ready".into()),
+                then: vec![
+                    FlowStep {
+                        action: "snapshot".into(),
+                        rationale: Some("then first".into()),
+                        ..Default::default()
+                    },
+                    FlowStep {
+                        action: "snapshot".into(),
+                        rationale: Some("then second".into()),
+                        ..Default::default()
+                    },
+                ],
+                otherwise: vec![FlowStep {
+                    action: "snapshot".into(),
+                    rationale: Some("else first".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            vec![],
+        );
+        let out = replay(&flow, &HashMap::new()).unwrap();
+        assert!(out.contains("# Step 1: decide"), "{out}");
+        // Sub-steps are numbered from 1 and indented two spaces per depth.
+        assert!(out.contains("  # Step 1: then first"), "{out}");
+        assert!(out.contains("  # Step 2: then second"), "{out}");
+        assert!(out.contains("  # Step 1: else first"), "{out}");
+    }
+
+    #[test]
     fn replay_template_substitution_in_url() {
         let flow = make_flow(
             vec![FlowStep {
