@@ -98,6 +98,22 @@ pub fn lang_of(path: &str) -> Option<&'static str> {
     }
 }
 
+/// Parse one file into a tree-sitter tree for the language its extension
+/// maps to. `None` on unsupported language or any parse/grammar failure.
+/// Shared by extraction and the rename verifier, which re-parses a file to
+/// confirm each candidate identifier's role before rewriting it.
+pub fn parse_file(path_rel: &str, content: &[u8]) -> Option<tree_sitter::Tree> {
+    let lang = lang_of(path_rel)?;
+    let language = language_for(lang)?;
+    std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let mut parser = Parser::new();
+        parser.set_language(&language).ok()?;
+        parser.parse(content, None)
+    }))
+    .ok()
+    .flatten()
+}
+
 /// Extract symbols/calls/imports from one file. `None` on unsupported
 /// language or any parse/grammar failure.
 pub fn extract_file(path_rel: &str, content: &[u8]) -> Option<FileExtraction> {

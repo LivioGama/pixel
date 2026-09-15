@@ -833,6 +833,13 @@ impl Service {
                 self.op_note(&action, file.as_deref(), target.as_deref(), note.as_deref())
             }
             Request::Map { markdown } => self.op_map(markdown),
+            Request::Rename {
+                name,
+                new_name,
+                file,
+                uid,
+                dry_run,
+            } => self.op_rename(&name, &new_name, file.as_deref(), uid.as_deref(), dry_run),
             Request::Plan {
                 prompt,
                 query,
@@ -1867,6 +1874,99 @@ impl Service {
                 "tombstones": s.tombstones,
             },
         }))
+    }
+
+    /// `pixel rename` — graph-driven, tree-sitter-verified identifier rename.
+    /// `uid` or `file` disambiguate a shared name; `dry_run` returns the same
+    /// verified edit set without touching files.
+    fn op_rename(
+        &mut self,
+        name: &str,
+        new_name: &str,
+        file: Option<&str>,
+        uid: Option<&str>,
+        dry_run: bool,
+    ) -> Result<Value, String> {
+        let built = self.ensure_graph()?;
+        let store = self.graph.as_ref().unwrap();
+        let files = file_map(store)?;
+        if !new_name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+            || !new_name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            return Err(format!(
+                "rename: {new_name:?} is not an identifier (letters, digits, `_`, non-digit first)"
+            ));
+        }
+
+        let sym = if let Some(uid) = uid {
+            store
+                .symbol_by_uid(uid)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("no symbol with uid {uid:?}"))?
+        } else {
+            let mut syms = store.symbols_by_name(name, 50).map_err(|e| e.to_string())?;
+            if let Some(file) = file {
+                let rel = normalize_file_arg(&self.root, file);
+                let file_row = store
+                    .file_by_path(&rel)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("no indexed file matching '{file}'"))?;
+                syms.retain(|s| s.file_id == file_row.id);
+            }
+            match syms.len() {
+                0 => {
+                    return Err(format!(
+                        "no symbol named {name:?}{}",
+                        file.map(|f| format!(" in {f}")).unwrap_or_default()
+                    ));
+                }
+                1 => syms.into_iter().next().unwrap(),
+                _ => {
+                    let mut out = candidates_value(store, &syms)?;
+                    out["hint"] =
+                        json!("ambiguous name; re-call with --file <path> or --uid <uid>");
+                    return Ok(out);
+                }
+            }
+        };
+
+        let plan = pixel_graph::rename::plan(store, &self.root, &sym, new_name)?;
+        let mut out = json!({
+            "symbol": symbol_json(&sym, &files),
+            "old_name": sym.name,
+            "new_name": new_name,
+            "dry_run": dry_run,
+            "edits": plan
+                .files
+                .iter()
+                .map(|(path, edits)| json!({
+                    "path": path,
+                    "edits": edits
+                        .iter()
+                        .map(|e| json!({
+                            "line": e.line,
+                            "kind": e.kind.as_str(),
+                        }))
+                        .collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>(),
+            "edit_count": plan.files.values().map(Vec::len).sum::<usize>(),
+            "skipped": plan.skipped,
+            "unclaimed_text": plan.unclaimed_text,
+        });
+        if !dry_run {
+            let written = pixel_graph::rename::apply(&self.root, &plan, &sym.name, new_name)?;
+            out["applied"] = json!(written);
+            // The store is now stale: the renamed files' rows no longer
+            // match disk. Drop the handle so the next op re-syncs via the
+            // tree delta instead of serving pre-rename spans.
+            self.graph = None;
+        }
+        merge_build_info(&mut out, built);
+        Ok(out)
     }
 
     /// Facts/history visibility for `op_status`: enough counters to tell a
