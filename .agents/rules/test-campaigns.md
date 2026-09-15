@@ -25,7 +25,7 @@ Always loaded: how to run the long gates without losing an afternoon.
   reached 34 GB and the run aborted on a full disk, leaving a mutated file
   behind. `df -h .` before a run; `target/debug/incremental`, `target/release`
   and `target/dev-release` are safe to delete between campaigns.
-- **Stacked PRs diff against their base**, not `develop`:
+- **Stacked PRs diff against their base**, not `main`:
   `cargo mutants --in-diff <(git diff <base-branch>)`. A lower PR fixed after
   review gets a follow-up commit pushed to its branch; the branches above
   keep their diff and the merge order stays bottom-up.

@@ -26,7 +26,7 @@ class GatesContract(unittest.TestCase):
         (self.repo / "src").mkdir()
         (self.repo / "src/lib.rs").write_text("pub fn a() {}\n")
         (self.repo / "README.md").write_text("readme\n")
-        self.git("init", "-q", "-b", "develop")
+        self.git("init", "-q", "-b", "main")
         self.git("add", ".")
         self.git("commit", "-qm", "base")
         self.git("switch", "-q", "-c", "feature")
@@ -138,8 +138,8 @@ class GatesContract(unittest.TestCase):
         self.assertIn("cargo clippy FAILED", result.stderr)
         self.assertEqual([line.split()[1] for line in self.invocations()], ["fmt", "clippy"])
 
-    def test_missing_develop_branch_fails_open(self):
-        self.git("branch", "-D", "develop")
+    def test_missing_main_branch_fails_open(self):
+        self.git("branch", "-D", "main")
         result = self.gates()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.invocations()), 3)

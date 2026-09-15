@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `install.sh` is published as an asset of every release, and the installer URL is now `https://github.com/LivioGama/pixel/releases/latest/download/install.sh` instead of `scripts/install.sh` on the `main` branch: `main` is now the only long-lived branch and can be ahead of the latest release, so the script is taken from the release it installs. The old `raw.githubusercontent.com/.../main/scripts/install.sh` URL keeps working, but serves the branch's copy. The release `smoke` job checks the new URL.
+
 ## [0.3.0] - 2026-09-15
 
 ### Added

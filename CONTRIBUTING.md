@@ -27,7 +27,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] The `Mutants` CI job reports no `MISSED` mutant on the pull request (see "Mutation testing"); a local run is optional.
 - [ ] `CHANGELOG.md` has an entry under `## [Unreleased]` (skip for pure refactors and CI/deps chores).
 - [ ] The commit message follows the Conventional Commits format below.
-- [ ] The branch was created from `develop` and the pull request targets `develop`, not `main`.
+- [ ] The branch was created from an up-to-date `main` and the pull request targets `main`.
 - [ ] No file under `.pixel/`, `target/`, `.claude/` (other than the `.claude/rules` and `.claude/skills` symlinks), `.codex/`, `.cursor/` is staged (they are gitignored; do not force-add).
 - [ ] If a command or op was added or renamed: `ARCHITECTURE.md` (its `## Command surface` table), `pixel --help` output, and the agent prompt in `crates/pixel-install/assets/pixel-agent-prompt.md` agree with each other. `cargo test -p pixel-cli --test cli docs_drift::` enforces both directions.
 - [ ] If `crates/` changed: the binary was rebuilt and reinstalled, and `pixel doctor .` is green (see "Local install loop").
@@ -112,7 +112,7 @@ check` needs the network for the advisory database and is not part of
 `scripts/gates.sh` runs the same commands (nextest when installed, `cargo
 test` otherwise) (plus `--mutants` for the
 mutation gate below) with two additions for a laptop: it exits 0 without
-compiling when neither the diff against `develop` nor the working tree
+compiling when neither the diff against `main` nor the working tree
 touches a Rust-affecting path (`*.rs`, `Cargo.*`, `build.rs`, `.cargo/`,
 toolchain and lint config), and it runs cargo under `nice` with
 `CARGO_BUILD_JOBS=-2` (two CPUs left free) and `RUST_TEST_THREADS` at half
@@ -127,7 +127,7 @@ gate; push and read its output rather than reproducing it locally (a
 locally, scope the run to the function:
 
 ```bash
-cargo mutants --in-diff <(git diff develop...HEAD) -F '<function name>'
+cargo mutants --in-diff <(git diff main...HEAD) -F '<function name>'
 ```
 
 Optional but recommended when the change touches the CLI surface, hooks, or
@@ -138,7 +138,7 @@ scripts/pixel-smoke-test.sh     # exercises the installed pixel (command -v pixe
 ```
 
 The `Cross-build` workflow (`.github/workflows/cross-build.yml`) builds the
-musl release lane on every push to `develop` and on pull requests
+musl release lane on every push to `main` and on pull requests
 that touch a Rust-affecting path (`crates/`, `Cargo.*`, `.cargo/`,
 `deny.toml`, the workflow itself); a docs, prompt or script PR skips it.
 To reproduce it locally:
@@ -188,9 +188,9 @@ is a behaviour no test can see. Configuration lives in
 ```bash
 cargo install --locked cargo-mutants        # or: cargo binstall cargo-mutants
 
-cargo mutants --in-diff <(git diff develop...HEAD) -F '<fn>'   # one finding from the CI job
+cargo mutants --in-diff <(git diff main...HEAD) -F '<fn>'   # one finding from the CI job
 cargo mutants -p pixel-proto                                    # one crate, full sweep (about a minute)
-cargo mutants --in-diff <(git diff develop...HEAD)              # what CI runs; hours on a laptop for a big PR
+cargo mutants --in-diff <(git diff main...HEAD)              # what CI runs; hours on a laptop for a big PR
 ```
 
 Read the summary line and `mutants.out/missed.txt`:
@@ -325,28 +325,33 @@ Pixel is dogfooded on itself. When an agent works in this repository:
   tool-local config; the rules themselves live in `.agents/rules/` and the
   skills in `.agents/skills/`.
 
-## Branches: base every change on `develop`
+## Branches: base every change on `main`
 
-`main` only receives releases. All feature, fix and docs work branches off
-`develop` and the pull request targets `develop`:
+`main` is the only long-lived branch, as in ripgrep or uv: every change
+branches off `main`, its pull request targets `main`, and a release is a tag
+on `main` (see the `release` skill). There is no `develop` and no hotfix
+branch; an urgent fix is the next patch release cut from `main`.
 
 ```bash
-git fetch upstream develop            # or origin, if you are not on a fork
-git switch -c <type>/<short-name> upstream/develop
+git fetch upstream main               # or origin, if you are not on a fork
+git switch -c <type>/<short-name> upstream/main
 # ... work, gates, commit ...
-gh pr create --base develop
+gh pr create --base main
 ```
 
 | Branch | Base | Merged into |
 | --- | --- | --- |
-| `feat/*`, `fix/*`, `docs/*`, `chore/*` | `develop` | `develop` |
-| `release-*` | `develop` | `main` (maintainers, then tagged) |
-| `hotfix-*` | `main` | `main`, then back into `develop` |
+| `feat/*`, `fix/*`, `docs/*`, `chore/*` | `main` | `main` |
+| `release-x.y.z` (maintainers: `prepare.sh`) | `main` | `main`, then `vx.y.z` is tagged on the merge |
 
-A pull request opened against `main` from any other branch is retargeted to
-`develop` automatically by `.github/workflows/route-prs-to-develop.yml`.
-Do not rely on it: a branch cut from `main` will lag `develop` and can
-conflict on `CHANGELOG.md`. Rebase onto `develop` before opening the PR.
+`main` can be ahead of the latest release. Users install releases (the
+Homebrew tap, the release assets, `install.sh` from
+`releases/latest/download`), never the branch.
+
+Until 0.3.0 the repository had a `develop` integration branch and `main`
+only received releases; their histories were joined at 0.3.0, so every
+earlier tag is an ancestor of `main` (except v0.2.4, whose commit was
+replayed).
 
 ## Commits and pull requests
 
@@ -424,7 +429,7 @@ the PR title and expect a slower review.
   contract test.
 - Documentation (README, ARCHITECTURE, agent prompt, `--help`) that no
   longer matches the code.
-- A pull request based on `main` instead of `develop`, or a branch that was not rebased onto `develop`.
+- A branch that was not rebased onto an up-to-date `main`.
 - Merge commits on a feature branch. History is linear; rebase instead.
 - Personal emails, hostnames, or paths in code or fixtures. Use
   `@example.com` and temp dirs.

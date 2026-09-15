@@ -3,10 +3,10 @@
 #
 #   scripts/gates.sh            # skip when nothing Rust-affecting changed
 #   scripts/gates.sh --force    # run even when nothing changed
-#   scripts/gates.sh --mutants  # also run cargo-mutants on the diff against develop
+#   scripts/gates.sh --mutants  # also run cargo-mutants on the diff against main
 #
 # Why a script instead of three commands:
-# - Skip-if-untouched: outside CI, when neither the diff against `develop` nor
+# - Skip-if-untouched: outside CI, when neither the diff against `main` nor
 #   the working tree touches a Rust-affecting path (*.rs, Cargo.*, build.rs,
 #   .cargo/, rust-toolchain*, rustfmt.toml, clippy.toml), the gates cannot
 #   change outcome, so the script exits 0 without compiling anything. A docs-
@@ -17,7 +17,7 @@
 #   integration tests each spawn a pixel binary plus git; eight at once is
 #   what pushed a 16 GB machine into swap). An explicit value in the
 #   environment always wins.
-# - Fail open: when git cannot answer (not a repo, no `develop`), the gates run.
+# - Fail open: when git cannot answer (not a repo, no `main`), the gates run.
 #
 # CI=1 (set by GitHub Actions) disables the skip and the nice/jobs defaults so
 # the workflow keeps running exactly the documented commands.
@@ -46,8 +46,8 @@ rust_affecting() {
 # Prints "run" when a gate could change outcome, "skip" when none can. Any
 # git failure prints "run" (fail open).
 gate_decision() {
-    base="$(git merge-base develop HEAD 2>/dev/null)" \
-        || base="$(git merge-base origin/develop HEAD 2>/dev/null)" \
+    base="$(git merge-base main HEAD 2>/dev/null)" \
+        || base="$(git merge-base origin/main HEAD 2>/dev/null)" \
         || { echo run; return; }
     committed="$(git diff --name-only "$base" HEAD 2>/dev/null)" || { echo run; return; }
     dirty="$(git status --porcelain --untracked-files=all 2>/dev/null | cut -c4-)" || { echo run; return; }
@@ -55,7 +55,7 @@ gate_decision() {
 }
 
 if [ "$FORCE" -eq 0 ] && [ -z "${CI:-}" ] && [ "$(gate_decision)" = skip ]; then
-    echo "gates.sh: no Rust-affecting change against develop or in the working tree; skipping (use --force to run)."
+    echo "gates.sh: no Rust-affecting change against main or in the working tree; skipping (use --force to run)."
     exit 0
 fi
 
@@ -96,7 +96,7 @@ fi
 
 if [ "$MUTANTS" -eq 1 ]; then
     diff_file="$(mktemp)"
-    git diff develop...HEAD > "$diff_file"
+    git diff main...HEAD > "$diff_file"
     step "cargo mutants (in diff)" cargo mutants --in-diff "$diff_file"
     rm -f "$diff_file"
 fi

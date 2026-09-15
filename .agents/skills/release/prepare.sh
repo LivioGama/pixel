@@ -13,10 +13,10 @@
 # 4. an empty `## [Unreleased]` is kept and `## [x.y.z] - DATE` is inserted
 #    under it, so the entries move to the release section untouched;
 # 5. `cargo update --workspace` refreshes Cargo.lock for the members only;
-# 6. the pull requests merged into develop since the last tag are listed, so
+# 6. the pull requests merged into main since the last tag are listed, so
 #    each user-visible one can be matched to a changelog entry by eye
 #    (entries carry no PR number), then the commits since the tag that no
-#    merged pull request contains (pushed straight to develop, so nobody filed
+#    merged pull request contains (pushed straight to main, so nobody filed
 #    an entry for them); skipped when `gh` is missing or offline;
 # 7. `pixel check-release` runs from the tree exactly as the Release
 #    workflow's verify job runs it, and its exit code is the script's.
@@ -98,13 +98,13 @@ echo "prepare.sh: $ENTRIES changelog entries released as $VERSION ($DATE); membe
 for m in $MEMBERS; do printf '  %s\n' "$m"; done
 echo
 
-# Highest version tag, not `git describe`: a release tag is not always an
-# ancestor of develop (v0.2.4's commit was replayed there), so describe
-# answers an older tag and the list reaches back a release too far.
+# Highest version tag, not `git describe`: v0.2.4's commit is not an
+# ancestor of main (it was replayed there before the history was unified), so
+# describe can answer an older tag and the list reaches back a release too far.
 LAST_TAG="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)"
 if [ -n "$LAST_TAG" ] && command -v gh >/dev/null 2>&1; then
     SINCE="$(git log -1 --format=%cI "$LAST_TAG")"
-    if PRS="$(gh pr list --state merged --base develop --search "merged:>$SINCE" --limit 200 \
+    if PRS="$(gh pr list --state merged --base main --search "merged:>$SINCE" --limit 200 \
         --json number,title,mergeCommit --jq '.[] | "\(.mergeCommit.oid) #\(.number) \(.title)"' 2>/dev/null)"; then
         # The search goes by date, and the tagged commit is usually the merge
         # of the previous prepare PR, committed a second before GitHub records
@@ -115,16 +115,16 @@ if [ -n "$LAST_TAG" ] && command -v gh >/dev/null 2>&1; then
             [ -n "$oid" ] || continue
             git merge-base --is-ancestor "$oid" "$LAST_TAG" 2>/dev/null || printf '  %s\n' "$pr"
         done)"
-        echo "pull requests merged into develop since $LAST_TAG; each user-visible one needs an entry under ## [$VERSION]:"
+        echo "pull requests merged into main since $LAST_TAG; each user-visible one needs an entry under ## [$VERSION]:"
         if [ -n "$UNRELEASED" ]; then printf '%s\n' "$UNRELEASED"; else echo "  (none)"; fi
     else
         echo "prepare.sh: could not list the pull requests merged since $LAST_TAG (gh offline or unauthenticated); check CHANGELOG.md against them by hand"
     fi
     echo
-    # A commit pushed straight to develop never appears above. The commits
-    # since the tag are taken by patch, not by date or ancestry: the tag is
-    # not an ancestor of develop (its commit is replayed there), and a commit
-    # authored before the tag can still be missing from it. The commits API
+    # A commit pushed straight to main never appears above. The commits
+    # since the tag are taken by patch, not by date or ancestry: an old tag
+    # need not be an ancestor of main (v0.2.4's commit was replayed), and a
+    # commit authored before the tag can still be missing from it. The commits API
     # lists the pull requests containing a commit, open ones included: only a
     # merged one counts.
     NWO="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"

@@ -2,7 +2,7 @@
 //!
 //! The rename gave every command a verb-first name and kept no alias, so
 //! every script, hook entry and agent prompt written against 0.2.x broke on
-//! the next build of `develop`. This table is the single list of those
+//! the next build of the integration branch. This table is the single list of those
 //! renames: the CLI registers each old name as a hidden clap alias (a test
 //! in `pixel-cli` fails if the two drift), and the surfaces that read a
 //! command name back as text (the action log, hook entries, the doctor's

@@ -1,6 +1,7 @@
 #!/bin/sh
 # pixel install script — downloads the latest release binary from GitHub.
-# Usage: curl -fsSL https://raw.githubusercontent.com/LivioGama/pixel/main/scripts/install.sh | sh
+# Usage: curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh
+# (published as an asset of every release; main may be ahead of the latest release)
 set -eu
 
 REPO="LivioGama/pixel"

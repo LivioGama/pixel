@@ -70,7 +70,7 @@ Pixel is local-first. Its index, graph, and optional history data live under `.p
 This repo carries native plugin manifests, so each agent CLI can install Pixel's protocol through its own plugin mechanism — no `pixel install` step. The `pixel` binary still has to be installed (see above); the plugin never installs it. Always-on delivery is a SessionStart/SubagentStart hook (`hooks/pixel-context.sh`) that injects the protocol as `additionalContext` (the short sub-agent prompt for sub-agents) — context only, it never blocks a tool call. When `pixel` is missing from PATH, or too old for the command names the protocol uses, the hook injects a one-paragraph notice instead.
 
 > [!NOTE]
-> The manifests live on `develop` and ship with the next release; the default branch `main`, which the commands below read, does not carry them yet.
+> The commands below read the default branch `main`, which can be ahead of the latest release. When the installed `pixel` is too old for the command names the protocol uses, the hook injects its notice instead of the protocol: update the binary.
 
 | Tool | Install |
 | --- | --- |
