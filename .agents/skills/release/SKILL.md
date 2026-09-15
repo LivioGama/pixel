@@ -69,17 +69,19 @@ pixel repo-state                                   # clean tree
 LAST=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)
 gh run list --branch develop -L 4                  # CI and Cross-build green on origin/develop's head
 git diff --quiet "$LAST" origin/main && echo "main holds $LAST, nothing unreleased"
+git merge-base --is-ancestor "$LAST" origin/main && echo "main carries $LAST's history"   # else: step 5's bridge
 git show origin/develop:CHANGELOG.md | grep -F "## [${LAST#v}]"   # the last release reached develop
 gh secret list | grep HOMEBREW_TAP_TOKEN
 ```
 
 - Pick the last tag by version sort, not `git describe`: a release tag is
   not always an ancestor of `develop` (v0.2.4's commit was replayed there).
-- `main` is never an ancestor of `develop`: release PRs are squash-merged
-  (0.2.1, 0.2.4). Compare trees, not ancestry. A `main` whose tree differs
-  from the last tag carries an unreleased hotfix; a `develop` without the last
-  release's changelog heading never got that hotfix merged back. Settle
-  either first.
+- `main` is not an ancestor of `develop`: it holds the merge commits that
+  brought each tag in (and, before 0.3.0, squashes). Compare trees for
+  content: a `main` whose tree differs from the last tag carries an
+  unreleased hotfix; a `develop` without the last release's changelog heading
+  never got that hotfix merged back. Settle either first. The last tag must
+  also be an ancestor of `main`; when it is not, step 5 starts with the bridge.
 - A red `Cross-build` on develop means the musl lane fails with `--locked`:
   the `build` job will fail the same way. A red `Dependency policy
   (cargo-deny)` blocks every PR, the prepare PR included: a RustSec advisory
@@ -203,37 +205,58 @@ fact above).
 
 ## 5. Bring `main` to the release
 
-`main` only receives releases and must hold the tagged tree. Release PRs are
-squash-merged, so `main` is never an ancestor of `develop` and a `develop` →
-`main` PR conflicts as soon as `main` holds an earlier squash (0.2.5's #117
-was `DIRTY`). Open the PR from a branch that starts at `main` and whose one
-commit sets the tree to the tag, whatever `develop` did since:
+`main` only receives releases and must hold the tagged tree, with the tag's
+history: merge the tag in with a merge commit, never a squash. A squash makes
+`main` a string of `release: x.y.z` commits disconnected from `develop`, so
+GitHub's file list and `git blame` on the default branch answer
+`release: 0.2.6 (#132)` for every file instead of the change that touched it,
+and a `develop` → `main` PR conflicts (0.2.5's #117 and #158 were `DIRTY`).
+0.2.4 to 0.3.0 were squashed that way.
+
+**Bridge (once, when step 1 found the last tag is not an ancestor of
+`main`).** A PR merge commit cannot repair the history: its first parent is
+`main`, whose tree already equals the tag, so history simplification keeps
+following the squashes. Push instead a merge commit whose first parent is
+the tag. It is a fast-forward of `main`, not a force-push, but a direct push
+to `main`: the user's go first.
 
 ```bash
 git fetch origin --tags
-git worktree add <scratch>/wt-main origin/main
-cd <scratch>/wt-main
-git switch -c release-x.y.z-main
-git read-tree -u --reset vx.y.z                        # index and worktree = the tag's tree
-git commit -m "release: x.y.z" -m "Brings main to the tree of vx.y.z (<sha>)."
-git diff --quiet vx.y.z HEAD && echo "tree == vx.y.z"
-git push -u origin release-x.y.z-main
-gh pr create --base main --head release-x.y.z-main --title "release: x.y.z" --body-file <body>
-cd - && git worktree remove <scratch>/wt-main
+LAST=vx.y.z                                            # the tag main's tree equals
+git diff --quiet "$LAST" origin/main && echo "tree == $LAST"
+B=$(git commit-tree "${LAST}^{tree}" -p "${LAST}^{commit}" -p origin/main \
+  -m "release: link main to the history of $LAST" \
+  -m "Same tree as main; first parent $LAST, so file history on main follows develop instead of the release squashes.")
+git merge-base --is-ancestor origin/main "$B" && echo "fast-forward"
+git push origin "$B:refs/heads/main"                   # ← the user's go first
+git merge-base --is-ancestor "$LAST" origin/main && echo "linked"
 ```
 
-Body: "Brings `main` to the tree of the `release: prepare x.y.z` commit
-(`<sha>`), tagged `vx.y.z`. Release notes: the `## [x.y.z] - DATE` section of
-CHANGELOG.md." plus the release run's outcome. The `release-` prefix keeps
+**Every release.** With the previous tag an ancestor of `main` and `main`'s
+tree equal to it, the previous tag is the merge base and the merge takes the
+new tag's side for every change: no conflict, no tree copy. Open the PR
+straight from the tag:
+
+```bash
+git fetch origin --tags
+git push origin "vx.y.z^{commit}:refs/heads/release-x.y.z-main"
+gh pr create --base main --head release-x.y.z-main --title "release: x.y.z" --body-file <body>
+```
+
+Body: "Brings `main` to `vx.y.z` (`<sha>`, the merge of the `release: prepare
+x.y.z` PR). Release notes: the `## [x.y.z] - DATE` section of CHANGELOG.md."
+plus the release run's outcome. The `release-` prefix keeps
 `route-prs-to-develop.yml` from retargeting it and skips the `Mutants` job,
 which on this PR would replay the whole release diff against `main`: every
 commit in it already passed the gate on its own PR into `develop`.
 
-Merge it squashed (0.2.1, 0.2.4, 0.2.5), then check the published state:
+Merge it with a merge commit (`--merge`, GitHub's "Create a merge commit"),
+then check the published state:
 
 ```bash
-gh pr merge <n> --squash --subject "release: x.y.z (#<n>)"
+gh pr merge <n> --merge --subject "release: x.y.z (#<n>)"
 git fetch origin && git diff --quiet vx.y.z origin/main && echo "main == vx.y.z"
+git merge-base --is-ancestor vx.y.z origin/main && echo "main carries vx.y.z's history"
 ```
 
 Nothing needs to run on `main` afterwards: its tree is the tag's, which the
@@ -260,7 +283,7 @@ gh release view $V --repo LivioGama/pixel --json isDraft,isPrerelease,body \
 gh release download $V --repo LivioGama/pixel
 ls                                                     # 3 .tar.gz, 3 .sha256, pixel.rb
 shasum -a 256 -c ./*.sha256                            # 3 × OK
-for f in ./*.sha256; do grep -c "$(awk '{print $1}' "$f")" pixel.rb; done   # 3 × 1: the formula carries the real hashes
+for f in ./*.sha256; do grep -c "$(awk '{print $1}' "$f")" pixel.rb; done   # darwin 2, each musl 1: the formula carries the real hashes (darwin is also the top-level url since #163)
 gh api repos/LivioGama/homebrew-tap/contents/Formula/pixel.rb --jq .content \
   | base64 -d | diff - pixel.rb && echo "tap == release formula"
 tar xzf pixel-$V-aarch64-apple-darwin.tar.gz
@@ -319,7 +342,8 @@ For a fix that cannot wait for `develop`'s content:
 
 1. `hotfix-x.y.z` from `origin/main`, the fix plus its `CHANGELOG.md` entry
    under Unreleased, then `prepare.sh x.y.z` and the gates as in step 3.
-2. PR into `main`; after the merge, tag `main`'s head (step 4) and verify
+2. PR into `main`, merged with a merge commit (`gh pr merge <n> --merge`,
+   as in step 5); after the merge, tag `main`'s head (step 4) and verify
    (step 6).
 3. Merge `main` back into `develop` with a PR. `CHANGELOG.md` conflicts: keep
    `develop`'s Unreleased entries, drop the hotfix entry from it (it now lives
