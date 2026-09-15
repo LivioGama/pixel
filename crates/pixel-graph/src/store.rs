@@ -174,6 +174,23 @@ pub struct SymbolRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportRow {
+    pub id: i64,
+    pub file_id: i64,
+    pub spec: String,
+    /// Named bindings pulled from `spec` (already split on the stored CSV).
+    pub bindings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnresolvedRow {
+    pub file_id: i64,
+    pub site_line: u32,
+    /// `"calls"` or `"references"`.
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EdgeRow {
     pub src_id: i64,
     pub dst_id: i64,
@@ -950,6 +967,45 @@ impl GraphStore {
                 },
             )
             .optional()?)
+    }
+
+    /// Import rows whose spec resolved to `resolved_file_id` — the files that
+    /// pull bindings out of that file. `rename` reads these to rewrite the
+    /// imported name at the `use`/`import` site.
+    pub fn imports_to_file(&self, resolved_file_id: i64) -> Result<Vec<ImportRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, file_id, spec, bindings FROM imports WHERE resolved_file_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![resolved_file_id], |r| {
+            Ok(ImportRow {
+                id: r.get(0)?,
+                file_id: r.get(1)?,
+                spec: r.get(2)?,
+                bindings: r
+                    .get::<_, String>(3)?
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect(),
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Unresolved call/reference sites whose callee text is `name` — the
+    /// ambiguous sites a rename must report rather than guess at.
+    pub fn unresolved_named(&self, name: &str) -> Result<Vec<UnresolvedRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT file_id, site_line, kind FROM unresolved_calls WHERE name = ?1 ORDER BY file_id, site_line",
+        )?;
+        let rows = stmt.query_map(params![name], |r| {
+            Ok(UnresolvedRow {
+                file_id: r.get(0)?,
+                site_line: r.get(1)?,
+                kind: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     pub fn file_by_id(&self, id: i64) -> Result<Option<FileRow>> {

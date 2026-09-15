@@ -84,6 +84,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md` or the bundled agent prompts
 | `pixel pack-context` | Budget-fitted context for a symbol uid |
 | `pixel impact` | Blast radius of a symbol (callers upstream / callees downstream) |
 | `pixel who-calls` | Direct callers or callees of a symbol |
+| `pixel rename` | IDE-style symbol rename: graph-resolved definition, call, reference, and import sites, each verified against a fresh tree-sitter parse before writing; unresolved same-name sites are reported, never guessed. `--dry-run` prints the edit set without touching files |
 | `pixel call-path` | Call path between two symbols |
 | `pixel list-flows` | Discovered execution flows |
 | `pixel list-areas` | Functional-area clusters |

@@ -344,6 +344,29 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Rename a symbol like an IDE refactor — graph-resolved call/reference
+    /// sites and import bindings, each verified against a fresh tree-sitter
+    /// parse before its bytes are touched. Unresolved same-name sites are
+    /// reported, never guessed.
+    Rename {
+        /// Symbol name to rename.
+        name: String,
+        /// New identifier.
+        new_name: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Disambiguate to the declaration in this file.
+        #[arg(long)]
+        file: Option<String>,
+        /// Disambiguate to this symbol uid (from `find-symbol`).
+        #[arg(long)]
+        uid: Option<String>,
+        /// Compute and print the verified edit set without writing.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Call path between two symbols.
     #[command(alias = "trace")]
     CallPath {
@@ -4574,6 +4597,80 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     }
                 }
                 envelope_note(d);
+                Some(output)
+            })?;
+            Ok(())
+        }
+        Command::Rename {
+            name,
+            new_name,
+            path,
+            file,
+            uid,
+            dry_run,
+            json,
+        } => {
+            let data = execute(
+                &path,
+                Request::Rename {
+                    name,
+                    new_name,
+                    file,
+                    uid,
+                    dry_run,
+                },
+                false,
+            )?;
+            finish_graph_cmd(data, json, |d| {
+                let mut output = String::new();
+                let old = d.get("old_name").and_then(Value::as_str).unwrap_or("?");
+                let new = d.get("new_name").and_then(Value::as_str).unwrap_or("?");
+                let count = d.get("edit_count").and_then(Value::as_u64).unwrap_or(0);
+                let verb = if d.get("dry_run").and_then(Value::as_bool) == Some(true) {
+                    "would rename"
+                } else {
+                    "renamed"
+                };
+                output.push_str(&format!("{verb} {old} → {new} ({count} sites)\n"));
+                for f in d.get("edits")?.as_array()? {
+                    let path = f.get("path").and_then(Value::as_str).unwrap_or("?");
+                    let kinds: Vec<String> = f
+                        .get("edits")
+                        .and_then(Value::as_array)
+                        .map(|es| {
+                            es.iter()
+                                .map(|e| {
+                                    format!(
+                                        "L{}:{}",
+                                        e.get("line").and_then(Value::as_u64).unwrap_or(0),
+                                        e.get("kind").and_then(Value::as_str).unwrap_or("?"),
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    output.push_str(&format!("  {path}  ({})\n", kinds.join(", ")));
+                }
+                for s in d.get("skipped")?.as_array()? {
+                    output.push_str(&format!(
+                        "  skipped {}:{} — {}\n",
+                        s.get("path").and_then(Value::as_str).unwrap_or("?"),
+                        s.get("line").and_then(Value::as_u64).unwrap_or(0),
+                        s.get("reason").and_then(Value::as_str).unwrap_or("?"),
+                    ));
+                }
+                if let Some(obj) = d.get("unclaimed_text").and_then(Value::as_object)
+                    && !obj.is_empty()
+                {
+                    let details: Vec<String> = obj
+                        .iter()
+                        .map(|(p, n)| format!("{p} ({})", n.as_u64().unwrap_or(0)))
+                        .collect();
+                    output.push_str(&format!(
+                        "  note: unclaimed occurrences of the old name remain: {}\n",
+                        details.join(", ")
+                    ));
+                }
                 Some(output)
             })?;
             Ok(())

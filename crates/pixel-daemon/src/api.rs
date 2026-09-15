@@ -833,6 +833,13 @@ impl Service {
                 self.op_note(&action, file.as_deref(), target.as_deref(), note.as_deref())
             }
             Request::Map { markdown } => self.op_map(markdown),
+            Request::Rename {
+                name,
+                new_name,
+                file,
+                uid,
+                dry_run,
+            } => self.op_rename(&name, &new_name, file.as_deref(), uid.as_deref(), dry_run),
             Request::Plan {
                 prompt,
                 query,
@@ -1867,6 +1874,99 @@ impl Service {
                 "tombstones": s.tombstones,
             },
         }))
+    }
+
+    /// `pixel rename` — graph-driven, tree-sitter-verified identifier rename.
+    /// `uid` or `file` disambiguate a shared name; `dry_run` returns the same
+    /// verified edit set without touching files.
+    fn op_rename(
+        &mut self,
+        name: &str,
+        new_name: &str,
+        file: Option<&str>,
+        uid: Option<&str>,
+        dry_run: bool,
+    ) -> Result<Value, String> {
+        let built = self.ensure_graph()?;
+        let store = self.graph.as_ref().unwrap();
+        let files = file_map(store)?;
+        if !new_name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+            || !new_name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            return Err(format!(
+                "rename: {new_name:?} is not an identifier (letters, digits, `_`, non-digit first)"
+            ));
+        }
+
+        let sym = if let Some(uid) = uid {
+            store
+                .symbol_by_uid(uid)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("no symbol with uid {uid:?}"))?
+        } else {
+            let mut syms = store.symbols_by_name(name, 50).map_err(|e| e.to_string())?;
+            if let Some(file) = file {
+                let rel = normalize_file_arg(&self.root, file);
+                let file_row = store
+                    .file_by_path(&rel)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("no indexed file matching '{file}'"))?;
+                syms.retain(|s| s.file_id == file_row.id);
+            }
+            match syms.len() {
+                0 => {
+                    return Err(format!(
+                        "no symbol named {name:?}{}",
+                        file.map(|f| format!(" in {f}")).unwrap_or_default()
+                    ));
+                }
+                1 => syms.into_iter().next().unwrap(),
+                _ => {
+                    let mut out = candidates_value(store, &syms)?;
+                    out["hint"] =
+                        json!("ambiguous name; re-call with --file <path> or --uid <uid>");
+                    return Ok(out);
+                }
+            }
+        };
+
+        let plan = pixel_graph::rename::plan(store, &self.root, &sym, new_name)?;
+        let mut out = json!({
+            "symbol": symbol_json(&sym, &files),
+            "old_name": sym.name,
+            "new_name": new_name,
+            "dry_run": dry_run,
+            "edits": plan
+                .files
+                .iter()
+                .map(|(path, edits)| json!({
+                    "path": path,
+                    "edits": edits
+                        .iter()
+                        .map(|e| json!({
+                            "line": e.line,
+                            "kind": e.kind.as_str(),
+                        }))
+                        .collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>(),
+            "edit_count": plan.files.values().map(Vec::len).sum::<usize>(),
+            "skipped": plan.skipped,
+            "unclaimed_text": plan.unclaimed_text,
+        });
+        if !dry_run {
+            let written = pixel_graph::rename::apply(&self.root, &plan, &sym.name, new_name)?;
+            out["applied"] = json!(written);
+            // The store is now stale: the renamed files' rows no longer
+            // match disk. Drop the handle so the next op re-syncs via the
+            // tree delta instead of serving pre-rename spans.
+            self.graph = None;
+        }
+        merge_build_info(&mut out, built);
+        Ok(out)
     }
 
     /// Facts/history visibility for `op_status`: enough counters to tell a
@@ -6177,5 +6277,154 @@ mod tests {
             vec!["tests/login_test.rs".to_string(), "login.rs".to_string()],
             "a phrase naming tests gates the penalty off, so the higher rrf wins"
         );
+    }
+
+    /// Rename fixture: a TS definition plus a caller that imports it.
+    fn rename_root(tag: &str) -> PathBuf {
+        let root = tmpdir(tag);
+        std::fs::write(
+            root.join("login.ts"),
+            "export function loginUser(name: string): boolean {\n    return name.length > 0;\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("caller.ts"),
+            "import { loginUser } from \"./login\";\nexport function go(): boolean {\n    return loginUser(\"x\");\n}\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        root
+    }
+
+    fn rename_req(name: &str, new_name: &str) -> Request {
+        Request::Rename {
+            name: name.to_string(),
+            new_name: new_name.to_string(),
+            file: None,
+            uid: None,
+            dry_run: false,
+        }
+    }
+
+    /// The happy path end to end through the service: dry-run plans without
+    /// writing, a real call rewrites the files and drops the cached graph.
+    #[test]
+    fn op_rename_dry_run_then_apply() {
+        let root = rename_root("rename-apply");
+        let mut svc = Service::open(&root).unwrap();
+        let before = std::fs::read_to_string(root.join("caller.ts")).unwrap();
+
+        let mut dry = rename_req("loginUser", "authenticate");
+        if let Request::Rename { dry_run, .. } = &mut dry {
+            *dry_run = true;
+        }
+        let resp = svc.handle(dry);
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.unwrap();
+        assert_eq!(result["dry_run"], json!(true));
+        assert!(result["edit_count"].as_u64().unwrap() >= 3);
+        assert_eq!(
+            std::fs::read_to_string(root.join("caller.ts")).unwrap(),
+            before,
+            "dry-run must not write"
+        );
+
+        let resp = svc.handle(rename_req("loginUser", "authenticate"));
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.unwrap();
+        assert_eq!(result["dry_run"], json!(false));
+        assert_eq!(result["applied"].as_array().unwrap().len(), 2);
+        let caller = std::fs::read_to_string(root.join("caller.ts")).unwrap();
+        assert!(caller.contains("import { authenticate }"), "{caller}");
+        assert!(caller.contains("return authenticate("), "{caller}");
+        // The graph handle was dropped: a follow-up symbol lookup sees the
+        // new name, not the pre-rename snapshot.
+        let sym = svc.handle(Request::Symbol {
+            name: "authenticate".to_string(),
+        });
+        assert!(sym.ok, "{sym:?}");
+        assert!(
+            !sym.result.unwrap()["symbols"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Identifier validation rejects names no grammar could emit.
+    #[test]
+    fn op_rename_rejects_non_identifiers() {
+        let root = rename_root("rename-ident");
+        let mut svc = Service::open(&root).unwrap();
+        for bad in ["9bad", "a-b", "has space", ""] {
+            let resp = svc.handle(rename_req("loginUser", bad));
+            assert!(!resp.ok, "{bad:?} must fail: {resp:?}");
+        }
+        // And nothing was written on any rejection.
+        assert!(
+            std::fs::read_to_string(root.join("caller.ts"))
+                .unwrap()
+                .contains("loginUser")
+        );
+    }
+
+    /// A shared name without disambiguation answers candidates; `--file`
+    /// picks the declaration in that file only.
+    #[test]
+    fn op_rename_ambiguity_and_file_disambiguation() {
+        let root = rename_root("rename-amb");
+        std::fs::write(
+            root.join("other.ts"),
+            "export function loginUser(id: number): boolean { return id > 0; }\n",
+        )
+        .unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "other"]);
+        let mut svc = Service::open(&root).unwrap();
+
+        let resp = svc.handle(rename_req("loginUser", "authenticate"));
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.unwrap();
+        assert!(result["candidates"].as_array().unwrap().len() >= 2);
+
+        let resp = svc.handle(Request::Rename {
+            name: "loginUser".to_string(),
+            new_name: "authenticate".to_string(),
+            file: Some("other.ts".to_string()),
+            uid: None,
+            dry_run: false,
+        });
+        assert!(resp.ok, "{resp:?}");
+        let other = std::fs::read_to_string(root.join("other.ts")).unwrap();
+        assert!(other.contains("function authenticate("), "{other}");
+        let login = std::fs::read_to_string(root.join("login.ts")).unwrap();
+        assert!(login.contains("function loginUser("), "{login}");
+    }
+
+    /// Renaming a name that is not in the graph is an error, not a no-op.
+    #[test]
+    fn op_rename_unknown_name_errors() {
+        let root = rename_root("rename-unknown");
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(rename_req("no_such_fn", "x"));
+        assert!(!resp.ok, "{resp:?}");
+        let resp = svc.handle(Request::Rename {
+            name: "loginUser".to_string(),
+            new_name: "x".to_string(),
+            file: Some("missing.ts".to_string()),
+            uid: None,
+            dry_run: false,
+        });
+        assert!(!resp.ok, "{resp:?}");
+        let resp = svc.handle(Request::Rename {
+            name: "loginUser".to_string(),
+            new_name: "x".to_string(),
+            file: None,
+            uid: Some("nope#1".to_string()),
+            dry_run: false,
+        });
+        assert!(!resp.ok, "{resp:?}");
     }
 }
