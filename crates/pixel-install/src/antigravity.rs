@@ -318,27 +318,29 @@ pub fn remove_antigravity(home: &Path, dry_run: bool) -> Result<InstallStep> {
 
     if h_path.is_file()
         && let Ok(text) = fs::read_to_string(&h_path)
-            && let Ok(mut v) = serde_json::from_str::<Value>(&text)
-            && let Some(obj) = v.as_object_mut()
-                && obj.remove("pixel-guard").is_some() {
-                    let _ = fs::write(
-                        &h_path,
-                        serde_json::to_string_pretty(&v).unwrap_or_default() + "\n",
-                    );
-                    removed_items.push("hooks.json entry");
-                }
+        && let Ok(mut v) = serde_json::from_str::<Value>(&text)
+        && let Some(obj) = v.as_object_mut()
+        && obj.remove("pixel-guard").is_some()
+    {
+        let _ = fs::write(
+            &h_path,
+            serde_json::to_string_pretty(&v).unwrap_or_default() + "\n",
+        );
+        removed_items.push("hooks.json entry");
+    }
 
     if cfg_path.is_file()
         && let Ok(text) = fs::read_to_string(&cfg_path)
-            && let Ok(mut v) = serde_json::from_str::<Value>(&text)
-            && let Some(plugins) = v.get_mut("plugins").and_then(Value::as_object_mut)
-                && plugins.remove("pixel").is_some() {
-                    let _ = fs::write(
-                        &cfg_path,
-                        serde_json::to_string_pretty(&v).unwrap_or_default() + "\n",
-                    );
-                    removed_items.push("config.json entry");
-                }
+        && let Ok(mut v) = serde_json::from_str::<Value>(&text)
+        && let Some(plugins) = v.get_mut("plugins").and_then(Value::as_object_mut)
+        && plugins.remove("pixel").is_some()
+    {
+        let _ = fs::write(
+            &cfg_path,
+            serde_json::to_string_pretty(&v).unwrap_or_default() + "\n",
+        );
+        removed_items.push("config.json entry");
+    }
 
     let summary = if removed_items.is_empty() {
         "no Antigravity integration found to remove".into()
