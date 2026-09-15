@@ -540,7 +540,50 @@ mod pi_prompt_content_tests {
 
         // An unreadable file must be an error, never "no file".
         let result = write_pi_prompt(&path);
-        assert!(result.is_err(), "expected error for unreadable path, got {result:?}");
+        assert!(
+            result.is_err(),
+            "expected error for unreadable path, got {result:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_whose_bytes_are_not_utf8_is_not_a_missing_file() {
+        use std::fs;
+
+        let dir =
+            std::env::temp_dir().join(format!("pixel-write-pi-non-utf8-{:x}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pi.md");
+        // The file is there but cannot be read as text: `read_to_string` fails
+        // with InvalidData while the byte-wise backup and the atomic write
+        // would both succeed, so "I could not read it" must not pass for "there
+        // is no file" — that would replace bytes the user owns.
+        let user_bytes = b"\xff\xfeanswer in French\n";
+        fs::write(&path, user_bytes).unwrap();
+
+        let result = write_pi_prompt(&path);
+
+        assert!(
+            result.is_err(),
+            "a prompt pixel cannot read as text must be an error, got {result:?}"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            user_bytes.as_slice(),
+            "the user's bytes must survive a failed read"
+        );
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("pixel-bak") || name.contains("pixel-tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a failed read must leave no backup and no temp file: {leftovers:?}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
