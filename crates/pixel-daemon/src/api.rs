@@ -3893,6 +3893,7 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pixel_graph::Tier;
     use std::path::PathBuf;
 
     fn tmpdir(tag: &str) -> PathBuf {
@@ -5506,6 +5507,117 @@ mod tests {
         // incremental size at 20 %, 2 001 is not.
         assert!(incremental_allowed(2_000, 10_000, 20));
         assert!(!incremental_allowed(2_001, 10_000, 20));
+    }
+
+    /// `impact`'s named caps must reach `derive_epistemics`: a report whose
+    /// symbol lists were cut at the cap is a lower-bound answer with a
+    /// `RESULT_CAPPED` warning, never a silently sampled one. A report with
+    /// nothing cut adds neither.
+    #[test]
+    fn impact_caps_reach_epistemics() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fid = store.replace_file("src/a.ts", "oid", "ts").unwrap();
+        let handler = store
+            .insert_symbol(
+                fid,
+                "src/a.ts#handler#function",
+                "handler",
+                "handler",
+                SymbolKind::Function,
+                1,
+                5,
+                "",
+            )
+            .unwrap();
+        // 25 distinct referrers against the 20-item cap: the report lists 20
+        // and names the cut with the real total.
+        for i in 0..25u32 {
+            let name = format!("caller{i}");
+            let src = store
+                .insert_symbol(
+                    fid,
+                    &format!("src/a.ts#{name}#function"),
+                    &name,
+                    &name,
+                    SymbolKind::Function,
+                    10 + i,
+                    12 + i,
+                    "",
+                )
+                .unwrap();
+            store
+                .insert_edge(&EdgeRow {
+                    src_id: src,
+                    dst_id: handler,
+                    kind: EdgeKind::References,
+                    tier: Tier::Probable,
+                    site_line: 11 + i,
+                    receiver: Some("on".to_string()),
+                })
+                .unwrap();
+        }
+        let other = store
+            .insert_symbol(
+                fid,
+                "src/a.ts#other#function",
+                "other",
+                "other",
+                SymbolKind::Function,
+                100,
+                105,
+                "",
+            )
+            .unwrap();
+        let single = store
+            .insert_symbol(
+                fid,
+                "src/a.ts#single#function",
+                "single",
+                "single",
+                SymbolKind::Function,
+                110,
+                115,
+                "",
+            )
+            .unwrap();
+        store
+            .insert_edge(&EdgeRow {
+                src_id: other,
+                dst_id: single,
+                kind: EdgeKind::References,
+                tier: Tier::Probable,
+                site_line: 106,
+                receiver: None,
+            })
+            .unwrap();
+
+        let cut = bridge::impact(&store, "src/a.ts#handler#function", "upstream", 3).unwrap();
+        assert_eq!(cut["truncated"].as_bool(), Some(true), "{cut}");
+        assert_eq!(cut["referenced_by_total"], 25, "{cut}");
+        assert_eq!(
+            cut["caps"],
+            json!(["referenced_by truncated at 20 of 25 referencing symbols"]),
+            "{cut}"
+        );
+        let (epistemics, warnings) = derive_epistemics("impact", &cut);
+        assert!(epistemics.lower_bound, "{epistemics:?}");
+        assert!(
+            epistemics.basis.contains("truncated at 20 of 25"),
+            "{epistemics:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.code == "RESULT_CAPPED"),
+            "{warnings:?}"
+        );
+
+        // Nothing cut: no cap, no warning, no lower-bound downgrade.
+        let plain = bridge::impact(&store, "src/a.ts#single#function", "upstream", 3).unwrap();
+        assert_eq!(plain["truncated"].as_bool(), Some(false), "{plain}");
+        assert_eq!(plain["referenced_by_total"], 1, "{plain}");
+        assert_eq!(plain["caps"], json!([]), "{plain}");
+        let (epistemics, warnings) = derive_epistemics("impact", &plain);
+        assert!(!epistemics.lower_bound, "{epistemics:?}");
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     /// Phase 3 item 2 — targets honesty: when the 500-match content probe
