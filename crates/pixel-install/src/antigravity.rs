@@ -408,4 +408,15 @@ mod tests {
         let h_val: Value = serde_json::from_str(&h_text).unwrap();
         assert!(h_val.get("pixel-guard").is_none());
     }
+
+    #[test]
+    fn plugin_dir_and_helpers_return_the_expected_paths() {
+        let home = Path::new("/home/user");
+        assert_eq!(
+            plugin_dir(home),
+            Path::new("/home/user/.gemini/config/plugins/pixel")
+        );
+        assert_eq!(hooks_path(home), Path::new("/home/user/.gemini/config/hooks.json"));
+        assert_eq!(config_path(home), Path::new("/home/user/.gemini/config/config.json"));
+    }
 }
