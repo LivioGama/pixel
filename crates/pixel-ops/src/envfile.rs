@@ -12,9 +12,12 @@
 //! 4. NEVER includes a value in any output, error message, or journal
 //!    record. Key NAMES only. This is a hard invariant with a sentinel
 //!    test in `tests/all/envfile.rs`.
+//! 5. Accepts only paths that resolve inside the repo root, and snapshot
+//!    ids matching `[A-Za-z0-9._-]{1,64}` — `--file /etc/hosts` and
+//!    `--snapshot ../x` are refused before anything is written.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -65,13 +68,50 @@ pub fn envfile(root: &Path, action: &EnvAction) -> Result<Value, String> {
 // Path + snapshot-store plumbing
 // ---------------------------------------------------------------------------
 
-/// Resolve a possibly-relative file argument against the repo root.
-fn resolve_file(root: &Path, file: &Path) -> PathBuf {
-    if file.is_absolute() {
+/// Resolve a possibly-relative file argument against the repo root, folding
+/// `.` and `..` lexically, and refuse a result that leaves `root`.
+///
+/// Without the check, `--file ../.zshrc` (or an absolute path outside the
+/// repo) is mutated in place and only the repo-local snapshot keeps a trace
+/// of the previous content.
+fn resolve_file(root: &Path, file: &Path) -> Result<PathBuf, String> {
+    let joined = if file.is_absolute() {
         file.to_path_buf()
     } else {
         root.join(file)
+    };
+    let mut resolved = PathBuf::new();
+    for comp in joined.components() {
+        if comp == Component::ParentDir {
+            // A `..` above the root pops nothing; it is caught by the
+            // containment test below instead of climbing further.
+            resolved.pop();
+        } else {
+            resolved.push(comp);
+        }
     }
+    if resolved.starts_with(root) {
+        Ok(resolved)
+    } else {
+        Err(format!(
+            "UNSUPPORTED_STATE: env file {} resolves outside the repo root {}",
+            file.display(),
+            root.display()
+        ))
+    }
+}
+
+/// Bytes a snapshot id may carry beyond ASCII alphanumerics — the
+/// `<utc-timestamp>[-n]` shape `take_snapshot` writes.
+const SNAPSHOT_ID_EXTRA: &[u8] = b"._-";
+
+/// Whether a caller-supplied snapshot id is a single path component of
+/// `[A-Za-z0-9._-]{1,64}`, as `snapshot.rs` validates its own tokens.
+fn is_snapshot_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || SNAPSHOT_ID_EXTRA.contains(&b))
 }
 
 /// Sanitize a file path into a single directory-name-safe component.
@@ -151,7 +191,7 @@ fn journal_append(root: &Path, file: &Path, action: &str, key: Option<&str>) -> 
     }
     let mut record = json!({
         "ts": utc_timestamp(),
-        "file": resolve_file(root, file).display().to_string(),
+        "file": resolve_file(root, file)?.display().to_string(),
         "action": action,
     });
     if let Some(k) = key {
@@ -328,7 +368,7 @@ fn set(
     {
         return Err(format!("invalid env key name: {key:?}"));
     }
-    let path = resolve_file(root, file);
+    let path = resolve_file(root, file)?;
     let exists = path.exists();
     if !exists && !create_file {
         return Err(format!(
@@ -404,7 +444,7 @@ fn set(
 }
 
 fn restore(root: &Path, file: &Path, snapshot: Option<&str>) -> Result<Value, String> {
-    let path = resolve_file(root, file);
+    let path = resolve_file(root, file)?;
     let dir = snapshot_dir_for(root, &path);
 
     // Resolve the restore TARGET first — before taking the pre-restore
@@ -412,6 +452,11 @@ fn restore(root: &Path, file: &Path, snapshot: Option<&str>) -> Result<Value, St
     // restores ping-pongs between states instead of no-oping.
     let target_id = match snapshot {
         Some(id) => {
+            if !is_snapshot_id(id) {
+                return Err(format!(
+                    "invalid snapshot id {id:?} (expected 1-64 characters of [A-Za-z0-9._-])"
+                ));
+            }
             let candidate = dir.join(id);
             if !candidate.exists() {
                 return Err(format!(
@@ -433,6 +478,7 @@ fn restore(root: &Path, file: &Path, snapshot: Option<&str>) -> Result<Value, St
                 })?
                 .filter_map(std::result::Result::ok)
                 .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|id| is_snapshot_id(id))
                 .collect();
             ids.sort();
             ids.pop().ok_or_else(|| {
@@ -467,12 +513,13 @@ fn restore(root: &Path, file: &Path, snapshot: Option<&str>) -> Result<Value, St
 }
 
 fn snapshots(root: &Path, file: &Path) -> Result<Value, String> {
-    let path = resolve_file(root, file);
+    let path = resolve_file(root, file)?;
     let dir = snapshot_dir_for(root, &path);
     let mut ids: Vec<String> = match fs::read_dir(&dir) {
         Ok(it) => it
             .filter_map(std::result::Result::ok)
             .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|id| is_snapshot_id(id))
             .collect(),
         Err(_) => Vec::new(),
     };
@@ -495,7 +542,7 @@ fn snapshots(root: &Path, file: &Path) -> Result<Value, String> {
 }
 
 fn check(root: &Path, file: &Path, require: &[String]) -> Result<Value, String> {
-    let path = resolve_file(root, file);
+    let path = resolve_file(root, file)?;
     let (file_exists, keys) = if path.exists() {
         (true, key_names(&read_env_text(&path)?))
     } else {
