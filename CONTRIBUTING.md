@@ -27,7 +27,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] The `Mutants` CI job reports no `MISSED` mutant on the pull request (see "Mutation testing"); a local run is optional.
 - [ ] `CHANGELOG.md` has an entry under `## [Unreleased]` (skip for pure refactors and CI/deps chores).
 - [ ] The commit message follows the Conventional Commits format below.
-- [ ] The branch was created from an up-to-date `main` and the pull request targets `main`.
+- [ ] The branch was created from an up-to-date `main` and the pull request targets `main` (a maintainer's maintenance-release branch instead starts from an up-to-date `origin/release/x.y` and its pull request targets `release/x.y`, so no unreleasable `main` commit rides along; see "Branches").
 - [ ] No file under `.pixel/`, `target/`, `.claude/` (other than the `.claude/rules` and `.claude/skills` symlinks), `.codex/`, `.cursor/` is staged (they are gitignored; do not force-add).
 - [ ] If a command or op was added or renamed: `ARCHITECTURE.md` (its `## Command surface` table), `pixel --help` output, and the agent prompt in `crates/pixel-install/assets/pixel-agent-prompt.md` agree with each other. `cargo test -p pixel-cli --test cli docs_drift::` enforces both directions.
 - [ ] If `crates/` changed: the binary was rebuilt and reinstalled, and `pixel doctor .` is green (see "Local install loop").
@@ -328,9 +328,14 @@ Pixel is dogfooded on itself. When an agent works in this repository:
 ## Branches: base every change on `main`
 
 `main` is the only long-lived branch: every change
-branches off `main`, its pull request targets `main`, and a release is a tag
-on `main` (see the `release` skill). There is no `develop` and no hotfix
-branch; an urgent fix is the next patch release cut from `main`.
+branches off `main`, its pull request targets `main` by default, and a
+release is a tag on `main` (see the `release` skill). There is no `develop`.
+An urgent fix is the next patch release cut from `main`, unless `main` holds
+work that must not ship yet. Even then the fix's pull request targets
+`main`; a maintainer then cherry-picks the merged fix into a
+maintenance-release pull request that targets a `release/x.y` branch cut
+from the line's last tag, and tags the patch on its merge (the `release`
+skill, "Patch release while `main` is not releasable").
 
 ```bash
 git fetch upstream main               # or origin, if you are not on a fork
@@ -343,6 +348,8 @@ gh pr create --base main
 | --- | --- | --- |
 | `feat/*`, `fix/*`, `docs/*`, `chore/*` | `main` | `main` |
 | `release-x.y.z` (maintainers: `prepare.sh`) | `main` | `main`, then `vx.y.z` is tagged on the merge |
+| `release/x.y` (maintainers, only when `main` is not releasable) | `vx.y.<last>` | never merged: the line's patch tags live on it |
+| `release-x.y.z` for a maintenance patch (cherry-picked fix + `prepare.sh`) | `release/x.y` | `release/x.y`, then `vx.y.z` is tagged on the merge |
 
 `main` can be ahead of the latest release. Users install releases (the
 Homebrew tap, the release assets, `install.sh` from
