@@ -569,13 +569,10 @@ fn collect_binding_names<'t>(node: Node<'t>, content: &[u8], name: &str, out: &m
 }
 
 /// `foo as bar` — `bar` is the alias the importer chose; it is a different
-/// name, not a reference to the renamed symbol. Grammar-neutral: the alias
-/// sits in the `alias` field or under an `alias`-kind clause.
+/// name, not a reference to the renamed symbol.
 fn is_alias_position(node: Node) -> bool {
-    node.parent().is_some_and(|p| {
-        p.child_by_field_name("alias") == Some(node)
-            || (p.kind().contains("alias") && p.named_children(&mut p.walk()).last() == Some(node))
-    })
+    node.parent()
+        .is_some_and(|p| p.child_by_field_name("alias") == Some(node))
 }
 
 /// Statement kinds that pull bindings from another file: `import`, `use`,
@@ -948,6 +945,15 @@ mod tests {
         let os = identifier_nodes_on_line(&tree, src, 1, "os");
         assert!(!os.is_empty());
         assert!(os.iter().all(|n| !is_alias_position(*n)));
+
+        // `from pkg import loginUser as auth` — `loginUser` is the first
+        // named child of `aliased_import`, not its last: it names the
+        // imported symbol, so it must NOT read as alias position.
+        let src = b"from pkg import loginUser as auth\n";
+        let tree = extract::parse_file("a.py", src).unwrap();
+        let all = identifier_nodes_on_line(&tree, src, 1, "loginUser");
+        assert_eq!(all.len(), 1);
+        assert!(!is_alias_position(all[0]));
     }
 
     /// `export { x } from "./m"` is an import-like binding site; a bare
