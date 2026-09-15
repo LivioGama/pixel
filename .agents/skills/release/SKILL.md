@@ -6,7 +6,10 @@ description: Cut a pixel release end to end — pick the version, prepare the re
 # Releasing pixel
 
 `main` is the only long-lived branch: every pull
-request merges into it, and a release is a tag on it.
+request merges into it, and a release is a tag on it. The one exception is a
+`release/x.y` maintenance branch, cut from the line's last tag only when a
+patch cannot wait for `main` to be releasable: see "Patch release while `main`
+is not releasable".
 
 The tag is the release. Pushing `vX.Y.Z` runs `.github/workflows/release.yml`,
 and nothing else gates it: CI does not run on tags. The workflow has four

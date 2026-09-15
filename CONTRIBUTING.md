@@ -329,8 +329,11 @@ Pixel is dogfooded on itself. When an agent works in this repository:
 
 `main` is the only long-lived branch: every change
 branches off `main`, its pull request targets `main`, and a release is a tag
-on `main` (see the `release` skill). There is no `develop` and no hotfix
-branch; an urgent fix is the next patch release cut from `main`.
+on `main` (see the `release` skill). There is no `develop`. An urgent fix is
+the next patch release cut from `main`, unless `main` holds work that must
+not ship yet: then a maintainer cherry-picks the fix onto a `release/x.y`
+branch cut from the line's last tag and tags the patch there (the `release`
+skill, "Patch release while `main` is not releasable").
 
 ```bash
 git fetch upstream main               # or origin, if you are not on a fork
@@ -343,6 +346,7 @@ gh pr create --base main
 | --- | --- | --- |
 | `feat/*`, `fix/*`, `docs/*`, `chore/*` | `main` | `main` |
 | `release-x.y.z` (maintainers: `prepare.sh`) | `main` | `main`, then `vx.y.z` is tagged on the merge |
+| `release/x.y` (maintainers, only when `main` is not releasable) | `vx.y.<last>` | nothing: `vx.y.z` is tagged on it, the fix is merged into `main` first |
 
 `main` can be ahead of the latest release. Users install releases (the
 Homebrew tap, the release assets, `install.sh` from
