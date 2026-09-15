@@ -21,10 +21,12 @@
 //!
 //! The pure scorer [`score_signals`] takes caller-supplied raw inputs so it
 //! is unit-testable without a git repo or a session store. The I/O
-//! convenience [`compute_signals`] gathers activity (from `history.db` when
-//! the caller supplies it, else a one-shot `git log --since=90.days
-//! --name-only` fallback), session events, and the error sink, then calls
-//! the pure scorer.
+//! convenience [`compute_signals`] gathers the activity map (from
+//! `history.db` when the caller supplies it, else a one-shot `git log
+//! --since=90.days --name-only` fallback) and takes the session events and the
+//! error-sink store from its caller: a caller that passes `session_store:
+//! None` and no events (as `pixel-daemon` does today) leaves both channels
+//! empty by construction — only the activity channel is live in production.
 
 use std::collections::{HashMap, HashSet};
 
@@ -130,6 +132,12 @@ pub struct SignalBundle {
     pub session_reasons: Vec<String>,
     /// Human-readable error-sink reasons ("matches live error #42").
     pub error_reasons: Vec<String>,
+    /// Named reason the git-log activity scan produced no map (git failure,
+    /// timeout, output cap), `None` when a scan ran or no scan reported one.
+    ///
+    /// "Unavailable" is not "clean repository": the caller must not read an
+    /// empty `activity` map as "no recent churn" without checking this.
+    pub activity_unavailable: Option<String>,
 }
 
 /// Errors from gathering signals.
@@ -284,15 +292,21 @@ pub fn score_signals(
         fan_in: normalize(&fan_in),
         session_reasons: session_reasons(session_events, opts.now_ms, opts.session_window_ms),
         error_reasons,
+        // `score_signals` is pure and runs no scan: only `compute_signals`
+        // can report an unavailable activity channel.
+        activity_unavailable: None,
     }
 }
 
 /// I/O convenience: gather activity (facts map when supplied, else a one-shot
 /// `git log --since=90.days --name-only` fallback), read the error sink from
-/// the session store, then delegate to [`score_signals`].
+/// the session store when one is supplied, then delegate to [`score_signals`].
 ///
 /// `activity_from_facts` is the `history.db.file_changes`-derived map once
 /// pixel-facts lands its API; until then pass `None` to use the git fallback.
+/// A failed or capped git-log scan still degrades to an empty activity map
+/// (no error), with the reason carried in
+/// [`SignalBundle::activity_unavailable`].
 #[allow(clippy::too_many_arguments)] // Coordinates independent signal sources; changing this public API would ripple to callers.
 pub fn compute_signals(
     runner: &GitRunner,
@@ -304,15 +318,18 @@ pub fn compute_signals(
     candidates: &[String],
     opts: &SignalOptions,
 ) -> Result<SignalBundle, SignalError> {
-    let activity_raw = match activity_from_facts {
-        Some(m) => m.clone(),
-        None => activity_from_git_log(runner, opts.now_ms, opts.activity_half_life_days),
+    let (activity_raw, activity_unavailable) = match activity_from_facts {
+        Some(m) => (m.clone(), None),
+        None => match activity_from_git_log(runner, opts.now_ms, opts.activity_half_life_days) {
+            Ok(m) => (m, None),
+            Err(e) => (HashMap::new(), Some(e.to_string())),
+        },
     };
     let error_records = match session_store {
         Some(store) => store.errors_since_ts(opts.now_ms - opts.session_window_ms, 200)?,
         None => Vec::new(),
     };
-    Ok(score_signals(
+    let mut bundle = score_signals(
         &activity_raw,
         dirty_paths,
         session_events,
@@ -320,12 +337,19 @@ pub fn compute_signals(
         fan_in_raw,
         candidates,
         opts,
-    ))
+    );
+    // Named, never silent: the reranker must not read a failed or capped
+    // scan as "this repository has no recent commits".
+    bundle.activity_unavailable = activity_unavailable;
+    Ok(bundle)
 }
 
 /// `Σ exp(-age_days/14)` per file over commits in the last 90 days, from a
-/// one-shot `git log --since=90.days --name-only --format=%x00%ct`. Empty on
-/// any git failure (graceful degradation outside a repo).
+/// one-shot `git log --since=90.days --name-only --format=%x00%ct`.
+///
+/// `Err` with the failing git call named (timeout, output cap, non-zero exit)
+/// when the scan could not run — a caller degrading to an empty activity map
+/// must report that reason rather than pass it off as a clean repository.
 ///
 /// The format string is prefixed with a NUL byte (`%x00`) as an unambiguous
 /// per-commit record separator. A naive `"\n\n"` split (matching git's
@@ -344,12 +368,9 @@ pub fn activity_from_git_log(
     runner: &GitRunner,
     now_ms: i64,
     half_life_days: f64,
-) -> HashMap<String, f64> {
+) -> Result<HashMap<String, f64>, SignalError> {
     let mut activity: HashMap<String, f64> = HashMap::new();
-    let Some(out) = runner.run_opt(&["log", "--since=90.days", "--name-only", "--format=%x00%ct"])
-    else {
-        return activity;
-    };
+    let out = runner.run(&["log", "--since=90.days", "--name-only", "--format=%x00%ct"])?;
     let text = String::from_utf8_lossy(&out);
     for block in text.split('\0') {
         let mut lines = block.lines().filter(|l| !l.trim().is_empty());
@@ -379,7 +400,7 @@ pub fn activity_from_git_log(
             }
         }
     }
-    activity
+    Ok(activity)
 }
 
 /// `Σ exp(-age_minutes/30)` over events ≤ `window_ms`, edits 2× reads.
@@ -714,7 +735,12 @@ mod tests {
             &opts,
         );
 
-        let out = crate::rerank::rerank(candidates, &signals, |_| 1.0);
+        let out = crate::rerank::rerank(
+            candidates,
+            &signals,
+            &crate::rerank::RerankWeights::from(&opts),
+            |_| 1.0,
+        );
         // auth (fan_in_norm 1.0) must outrank api (fan_in_norm ≈0.333):
         // auth's 10.0 * (1 + 0.2*1.0) beats api's 1.0 * (1 + 0.2*(1/3)).
         assert_eq!(out[0].path, "src/auth.rs");

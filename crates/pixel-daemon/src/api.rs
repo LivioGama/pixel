@@ -1183,10 +1183,10 @@ impl Service {
             &opts,
         );
         // Phase 1c: rerank within tiers via the Engine-3 reranker (first
-        // production call site). v1 = activity-only signals; session/error
-        // channels land in Phase 3. The per-path test penalty demotes test
-        // files only when the task does NOT mention tests/specs (a test file
-        // is a worse target for a non-test task).
+        // production call site). v1 = activity-only signals (the session and
+        // error-sink channels are not wired here). The per-path test penalty
+        // demotes test files only when the task does NOT mention tests/specs
+        // (a test file is a worse target for a non-test task).
         let target_paths: Vec<String> = report.targets.iter().map(|t| t.path.clone()).collect();
         let signals = self.engine_signals(&target_paths);
         // Per-path test penalty: demote a test file only when the task does
@@ -1205,7 +1205,13 @@ impl Service {
                 1.0
             }
         };
-        report.targets = pixel_rank::rerank::rerank_targets(report.targets, &signals, penalty);
+        // The formula reads the tunable coefficients instead of its own
+        // literals: the table `engine_signals` scored this bundle with
+        // (`SignalOptions::default()`; neither call site tunes the weights yet).
+        let weights =
+            engine::rerank::RerankWeights::from(&engine::signals::SignalOptions::default());
+        report.targets =
+            engine::rerank::rerank_targets(report.targets, &signals, &weights, penalty);
         // Cross-lingual semantic fallback: when lexical targeting returns 0
         // P0/P1 files (e.g. a French task against English code), embed the
         // query with the multilingual potion-code model and inject top-k
@@ -2395,11 +2401,14 @@ impl Service {
     }
 
     /// Engine-3 rerank signals shared by `op_resolve` and `op_targets`.
-    /// v1 = activity-only: git churn over the last 90 days (via the one-shot
-    /// `git log --name-only` fallback) plus the current dirty set. Session +
-    /// error-sink channels land in Phase 3. Deterministic for a fixed repo
-    /// state; degrades to an empty bundle on any git failure (the reranker
-    /// then applies only the per-path test penalty).
+    /// Activity-only: git churn over the last 90 days (via the one-shot
+    /// `git log --name-only` fallback) plus the current dirty set. The session
+    /// and error-sink channels are NOT wired here (`session_store: None`, no
+    /// events), so `session` and the error reasons stay empty for every
+    /// production caller. Deterministic for a fixed repo state; a failed or
+    /// capped activity scan degrades to an empty `activity` map whose reason
+    /// is named in `SignalBundle::activity_unavailable` (the reranker then
+    /// applies only the per-path test penalty).
     fn engine_signals(&self, candidates: &[String]) -> pixel_rank::signals::SignalBundle {
         use pixel_rank::signals::{SignalOptions, compute_signals};
         let runner = pixel_git::GitRunner::new(&self.root);
@@ -2764,9 +2773,9 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
 /// `Reranker` trait. pixel-graph cannot depend on pixel-rank (circular), so
 /// the daemon adapts `pixel_rank::rerank::rerank` into the trait here.
 ///
-/// v1 = activity-only signals (the bundle is passed through as-is; the daemon
-/// has no git/session signal source yet). Session + error-sink channels land
-/// in Phase 3.
+/// v1 = activity-only signals: the bundle is passed through as-is, and only
+/// the activity map of it is populated (`engine_signals` fills it from the
+/// git log; the session and error-sink channels are not wired).
 #[derive(Clone)]
 struct EngineReranker {
     /// Whether the resolve phrase mentions tests/specs — gates the per-path
@@ -2814,6 +2823,10 @@ impl pixel_graph::concept_resolve::Reranker for EngineReranker {
             fan_in: std::collections::HashMap::new(),
             session_reasons: signals.session_reasons.clone(),
             error_reasons: signals.error_reasons.clone(),
+            // `op_resolve` mirrors the activity maps out of the bundle
+            // `engine_signals` returned; pixel-graph's own bundle has no field
+            // for the git-log scan's availability, so it is not carried here.
+            activity_unavailable: None,
         };
         // Per-candidate test penalty: demote a test/spec file only when the
         // phrase itself is NOT about tests (per-path, via `is_test_path`).
@@ -2824,7 +2837,12 @@ impl pixel_graph::concept_resolve::Reranker for EngineReranker {
                 1.0
             }
         };
-        let reordered = pixel_rank::rerank::rerank(pr_candidates, &pr_signals, penalty);
+        let reordered = pixel_rank::rerank::rerank(
+            pr_candidates,
+            &pr_signals,
+            &pixel_rank::rerank::RerankWeights::from(&pixel_rank::signals::SignalOptions::default()),
+            penalty,
+        );
 
         // Restore the pixel-graph candidate shape (incl. `id`) by id — the
         // reranker only reorders, it never adds/removes candidates. Keying by
