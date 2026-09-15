@@ -5,7 +5,7 @@ description: Cut a pixel release end to end — pick the version, prepare the re
 
 # Releasing pixel
 
-`main` is the only long-lived branch (the ripgrep/uv model): every pull
+`main` is the only long-lived branch: every pull
 request merges into it, and a release is a tag on it.
 
 The tag is the release. Pushing `vX.Y.Z` runs `.github/workflows/release.yml`,

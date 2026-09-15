@@ -327,7 +327,7 @@ Pixel is dogfooded on itself. When an agent works in this repository:
 
 ## Branches: base every change on `main`
 
-`main` is the only long-lived branch, as in ripgrep or uv: every change
+`main` is the only long-lived branch: every change
 branches off `main`, its pull request targets `main`, and a release is a tag
 on `main` (see the `release` skill). There is no `develop` and no hotfix
 branch; an urgent fix is the next patch release cut from `main`.
