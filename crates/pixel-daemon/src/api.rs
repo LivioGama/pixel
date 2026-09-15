@@ -161,6 +161,13 @@ pub struct Service {
     root: PathBuf,
     index: IndexSet,
     graph: Option<GraphStore>,
+    /// Watcher-driven graph updates that failed (a locked db, an unreadable
+    /// row). Counted so `status` shows a daemon that is serving an index it
+    /// could not keep in sync.
+    graph_failures: FailureLog,
+    /// `notify` backend errors reported by the transport loop: a watcher
+    /// that stopped seeing changes leaves the same stale answers.
+    watcher_failures: FailureLog,
     /// Lazily opened on first `scope: "hybrid"` search; kept warm for the
     /// daemon's lifetime. `None` = not yet loaded (not tried, download in
     /// progress, or load failed transiently).
@@ -174,6 +181,37 @@ pub struct Service {
     embedder_download_started: bool,
 }
 
+/// Counts watcher-side failures and decides which ones are logged: the
+/// first, then every doubling (1, 2, 4, 8 …). A permanently broken graph.db
+/// or watch stays visible in `status` without one stderr line per filesystem
+/// event.
+#[derive(Debug, Default)]
+struct FailureLog {
+    failures: u64,
+}
+
+impl FailureLog {
+    /// Count one failure; `true` when this one is due a log line.
+    fn record(&mut self) -> bool {
+        self.failures += 1;
+        self.failures.is_power_of_two()
+    }
+
+    fn count(&self) -> u64 {
+        self.failures
+    }
+}
+
+/// Log one failure line. stderr diagnostics only, so it is skipped by the
+/// mutation gate: `FailureLog::record` holds the rate-limit decision and its
+/// unit test pins it.
+#[cfg_attr(test, mutants::skip)]
+fn note_failure(log: &mut FailureLog, what: &str) {
+    if log.record() {
+        eprintln!("pixel daemon: {what} ({} failure(s) this run)", log.count());
+    }
+}
+
 impl Service {
     /// Open (building layers if needed) the text index; graph db is lazy.
     pub fn open(root: &Path) -> Result<Self, ServeError> {
@@ -185,6 +223,8 @@ impl Service {
             root,
             index,
             graph: None,
+            graph_failures: FailureLog::default(),
+            watcher_failures: FailureLog::default(),
             embedder: None,
             embedder_unavailable: false,
             embedder_download_started: false,
@@ -201,12 +241,14 @@ impl Service {
             .join(GRAPH_DB_FILE)
     }
 
-    /// Watcher hook: refresh one file in index + graph (best effort).
+    /// Watcher hook: refresh one file in index + graph.
     pub fn refresh_file(&mut self, rel: &str) {
         self.index.refresh_file(rel);
         let db = self.graph_db_path();
         if db.exists() {
-            bridge::update_file(&self.root, &db, rel);
+            if let Err(error) = bridge::update_file(&self.root, &db, rel) {
+                self.note_graph_update_failure(rel, &error);
+            }
             // Drop the cached handle so the next read sees the update.
             self.graph = None;
         }
@@ -224,7 +266,7 @@ impl Service {
         }
     }
 
-    /// Watcher hook: refresh a batch of files in index + graph (best effort).
+    /// Watcher hook: refresh a batch of files in index + graph.
     pub fn refresh_files(&mut self, files: &[(&str, bool)]) {
         if files.is_empty() {
             return;
@@ -238,9 +280,32 @@ impl Service {
         }
         let db = self.graph_db_path();
         if db.exists() {
-            bridge::update_files(&self.root, &db, files);
+            if let Err(error) = bridge::update_files(&self.root, &db, files) {
+                self.note_graph_update_failure(
+                    &format!("batch of {} file(s) from {}", files.len(), files[0].0),
+                    &error,
+                );
+            }
             self.graph = None;
         }
+    }
+
+    /// Count a watcher-driven graph update that failed. The cached handle is
+    /// dropped either way, so the next graph op walks the tree and repairs
+    /// the drift — but the failure itself must not be invisible.
+    fn note_graph_update_failure(&mut self, rel: &str, error: &str) {
+        note_failure(
+            &mut self.graph_failures,
+            &format!("graph update failed for {rel}: {error}"),
+        );
+    }
+
+    /// Count a `notify` backend error reported by the transport loop.
+    pub(crate) fn note_watcher_error(&mut self, error: &str) {
+        note_failure(
+            &mut self.watcher_failures,
+            &format!("watcher error: {error}"),
+        );
     }
 
     /// Make sure `self.graph` is populated. Builds graph.db on first use;
@@ -1749,6 +1814,12 @@ impl Service {
                 "tombstones": s.tombstones,
             },
             "graph": graph,
+            "watcher": {
+                // Failures that used to be swallowed: a non-zero count here
+                // means answers may have been served from a stale index.
+                "graph_update_failures": self.graph_failures.count(),
+                "notify_errors": self.watcher_failures.count(),
+            },
             "facts": self.facts_visibility(),
         }))
     }
@@ -3301,12 +3372,16 @@ mod bridge {
         pixel_graph::build::apply_tree_delta(root, db, delta).map_err(es)
     }
 
-    pub fn update_file(root: &Path, db: &Path, rel: &str) {
-        let _ = pixel_graph::build::update_file(root, db, rel);
+    /// One file changed under the watcher: re-extract it into the graph.
+    /// The error is returned instead of dropped: a lost update serves a
+    /// stale index until the next graph op walks the tree.
+    pub fn update_file(root: &Path, db: &Path, rel: &str) -> Result<(), String> {
+        pixel_graph::build::update_file(root, db, rel).map_err(es)
     }
 
-    pub fn update_files(root: &Path, db: &Path, files: &[(&str, bool)]) {
-        let _ = pixel_graph::build::update_files(root, db, files);
+    /// The same for a debounced batch of watcher events.
+    pub fn update_files(root: &Path, db: &Path, files: &[(&str, bool)]) -> Result<(), String> {
+        pixel_graph::build::update_files(root, db, files).map_err(es)
     }
 
     pub fn impact(
@@ -5738,6 +5813,50 @@ mod tests {
         let caller = bundle.activity.get("caller.rs").copied().unwrap_or(0.0);
         assert!(login > 0.0, "{:?}", bundle.activity);
         assert!(login >= caller, "{:?}", bundle.activity);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A failure log speaks on the first failure and every doubling after
+    /// it, so a permanently broken watcher cannot write one line per event.
+    #[test]
+    fn failure_log_reports_one_line_per_doubling() {
+        let mut log = FailureLog::default();
+        assert_eq!(log.count(), 0);
+        let logged: Vec<bool> = (0..9).map(|_| log.record()).collect();
+        assert_eq!(
+            logged,
+            [true, true, false, true, false, false, false, true, false]
+        );
+        assert_eq!(log.count(), 9);
+    }
+
+    /// A graph update that fails under the watcher is counted and surfaced
+    /// in `status` instead of being dropped: the daemon serves a stale index
+    /// until the next tree walk, so the failure must be visible.
+    #[test]
+    fn failed_graph_update_is_counted_in_status() {
+        let root = tmpdir("watcher-failures");
+        std::fs::write(root.join("login.rs"), "pub fn login() -> bool { true }\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        // `.pixel/graph.db` exists but is not a database (it is a
+        // directory), so the update fails the way a locked or corrupt db
+        // does while `graph_db_path().exists()` stays true.
+        std::fs::create_dir_all(root.join(".pixel/graph.db")).unwrap();
+
+        let mut svc = Service::open(&root).unwrap();
+        svc.refresh_file("login.rs");
+        svc.refresh_files(&[("login.rs", false)]);
+        // Through the transport hook the daemon loop calls, so the counting
+        // path is covered end to end.
+        crate::daemon::Corpus::watcher_error(&mut svc, "queue overflow");
+
+        let status = svc.handle(Request::Status {});
+        assert!(status.ok, "{status:?}");
+        let data = status.into_data();
+        assert_eq!(data["watcher"]["graph_update_failures"], 2, "{data}");
+        assert_eq!(data["watcher"]["notify_errors"], 1, "{data}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

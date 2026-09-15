@@ -1,6 +1,12 @@
 //! Unix-socket NDJSON daemon: one JSON `Request` per line, one JSON
-//! `Response` line back. Single-threaded request handling (requests are
-//! fast); an accept thread and a notify watcher feed one mpsc channel.
+//! `Response` line back. Single-threaded request handling: an accept thread
+//! and a notify watcher feed one mpsc channel, so a long mutation (a
+//! `sync-branch` is several git commands of up to 120 s each) delays every
+//! other request on this root. The loop therefore drains the debounced
+//! watcher batch before it serves a connection: a request following a
+//! mutation never reads an index built before it. A worker thread owning the
+//! `Service` behind a `Mutex` would keep the queue moving during a mutation;
+//! until then the queue waits and the answers stay ordered and fresh.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -164,6 +170,10 @@ fn probe_ping(stream: &mut UnixStream) -> bool {
 enum Msg {
     Conn(UnixStream),
     Fs(notify::Event),
+    /// A `notify` callback error, forwarded to the loop (the single owner of
+    /// the corpus) so a watch that stopped reporting is counted and logged
+    /// instead of dropped on the callback thread.
+    WatcherError(String),
 }
 
 /// A corpus a daemon can serve: the repo `Service`, or the machine-wide
@@ -195,6 +205,13 @@ pub trait Corpus {
     /// Periodic maintenance, called every `sweep_interval` from the loop
     /// thread (default: nothing).
     fn sweep(&mut self) {}
+    /// The watcher backend reported an error: changes may have been missed,
+    /// so answers can be stale until the next event. The default logs it; a
+    /// corpus that reports health counts it too.
+    #[cfg_attr(test, mutants::skip)] // stderr diagnostics only
+    fn watcher_error(&mut self, error: &str) {
+        eprintln!("pixel daemon: watcher error: {error}");
+    }
 }
 
 impl Corpus for Service {
@@ -220,6 +237,10 @@ impl Corpus for Service {
         } else {
             self.refresh_file(&rel);
         }
+    }
+
+    fn watcher_error(&mut self, error: &str) {
+        self.note_watcher_error(error);
     }
 
     fn apply_changes(&mut self, changes: &[(PathBuf, bool)]) {
@@ -340,12 +361,18 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
         }
     });
 
-    // Watcher: raw notify events into the channel; debounced below.
+    // Watcher: raw notify events into the channel; debounced below. A
+    // backend error goes through the same channel: a watch that stopped
+    // reporting is exactly the failure that leaves the index stale, so it
+    // must not be dropped here.
     let tx_fs = tx.clone();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        if let Ok(ev) = res {
-            let _ = tx_fs.send(Msg::Fs(ev));
-        }
+        let msg = match res {
+            Ok(ev) => Msg::Fs(ev),
+            Err(error) => Msg::WatcherError(error.to_string()),
+        };
+        // The only send failure is a dropped receiver: the loop is exiting.
+        let _ = tx_fs.send(msg);
     })
     .map_err(|e| ServeError::Msg(format!("watcher init: {e}")))?;
     let watch_paths = service.watch_paths();
@@ -387,6 +414,10 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
         match rx.recv_timeout(timeout.max(Duration::from_millis(10))) {
             Ok(Msg::Conn(stream)) => {
                 last_activity = Instant::now();
+                // Apply the debounced batch before serving the connection:
+                // the debounce coalesces bursts between requests, it must
+                // not let a request read the index from before a mutation.
+                flush_pending(&mut service, &mut pending, &mut flush_at);
                 handle_conn(&mut service, stream, &mut shutdown);
             }
             Ok(Msg::Fs(ev)) => {
@@ -395,6 +426,7 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
                     flush_at = Some(Instant::now() + DEBOUNCE);
                 }
             }
+            Ok(Msg::WatcherError(error)) => service.watcher_error(&error),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -402,9 +434,7 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
         if let Some(at) = flush_at
             && Instant::now() >= at
         {
-            let batch: Vec<(PathBuf, bool)> = std::mem::take(&mut pending).into_iter().collect();
-            service.apply_changes(&batch);
-            flush_at = None;
+            flush_pending(&mut service, &mut pending, &mut flush_at);
         }
 
         if let (Some(at), Some(every)) = (next_sweep, sweep_every)
@@ -455,6 +485,22 @@ fn record_event(ev: &notify::Event, pending: &mut BTreeMap<PathBuf, bool>) {
         // A later create/modify wins over an earlier remove and vice versa.
         pending.insert(path.clone(), removed);
     }
+}
+
+/// Apply the debounced watcher batch now, when there is one. The loop calls
+/// this before every connection so a request following a mutation cannot
+/// read an index built before it, and again on the debounce timer.
+fn flush_pending(
+    service: &mut dyn Corpus,
+    pending: &mut BTreeMap<PathBuf, bool>,
+    flush_at: &mut Option<Instant>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let batch: Vec<(PathBuf, bool)> = std::mem::take(pending).into_iter().collect();
+    service.apply_changes(&batch);
+    *flush_at = None;
 }
 
 fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool) {
@@ -610,6 +656,27 @@ mod tests {
         sweeps: Arc<AtomicUsize>,
     }
 
+    /// A corpus that records the batches the loop hands it, so a test can
+    /// assert *when* the debounced watcher events are applied.
+    struct RecordingCorpus {
+        root: PathBuf,
+        batches: Arc<std::sync::Mutex<Vec<Vec<PathBuf>>>>,
+    }
+
+    impl Corpus for RecordingCorpus {
+        fn root(&self) -> &Path {
+            &self.root
+        }
+        fn handle(&mut self, _req: Request) -> Response {
+            failure_response("stub", "stub corpus")
+        }
+        fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+        fn apply_changes(&mut self, changes: &[(PathBuf, bool)]) {
+            let paths: Vec<PathBuf> = changes.iter().map(|(path, _)| path.clone()).collect();
+            self.batches.lock().unwrap().push(paths);
+        }
+    }
+
     impl Corpus for SweptCorpus {
         fn root(&self) -> &Path {
             &self.root
@@ -763,6 +830,42 @@ mod tests {
     fn default_corpus_has_no_sweep_interval() {
         let stub = StubCorpus(PathBuf::from("/nonexistent"));
         assert_eq!(stub.sweep_interval(), None);
+    }
+
+    /// The loop applies the pending watcher batch before it serves a
+    /// connection, not after: a request that follows a mutation must not
+    /// read the index from before it. Nothing is applied when no event
+    /// arrived, and the batch is consumed exactly once.
+    #[test]
+    fn pending_batch_is_applied_when_a_connection_arrives() {
+        let changed = PathBuf::from("/repo/src/edited.ts");
+        let batches = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut corpus = RecordingCorpus {
+            root: PathBuf::from("/repo"),
+            batches: Arc::clone(&batches),
+        };
+        let mut pending = BTreeMap::new();
+        let mut flush_at = None;
+
+        flush_pending(&mut corpus, &mut pending, &mut flush_at);
+        assert!(
+            batches.lock().unwrap().is_empty(),
+            "an empty batch must not reach the corpus"
+        );
+
+        pending.insert(changed.clone(), false);
+        flush_at = Some(Instant::now() + Duration::from_secs(60));
+        flush_pending(&mut corpus, &mut pending, &mut flush_at);
+        assert_eq!(
+            batches.lock().unwrap().as_slice(),
+            [vec![changed]],
+            "the pending event must be applied before the request is served"
+        );
+        assert!(
+            pending.is_empty(),
+            "the batch must be consumed, never applied twice"
+        );
+        assert_eq!(flush_at, None, "the debounce timer must not fire again");
     }
 
     /// A corpus without an interval is never swept, so a corpus without

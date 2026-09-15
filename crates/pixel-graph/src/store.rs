@@ -386,6 +386,13 @@ impl GraphStore {
         )?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // WAL serializes writers: a second writer (the daemon's watcher
+        // update behind a concurrent CLI rebuild) must wait for the first
+        // one to commit instead of failing with SQLITE_BUSY ("database is
+        // locked"). rusqlite already sets 5000 ms when it opens the
+        // connection; pinning the same budget pixel-facts uses keeps it
+        // explicit and independent of that default.
+        conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
         Ok(Self { conn })
@@ -1618,6 +1625,49 @@ mod tests {
             .unwrap();
         let _ = sid2;
         let _ = back;
+    }
+
+    /// WAL serializes writers, so a second connection must wait for the
+    /// first one's transaction to commit instead of failing on the spot
+    /// with SQLITE_BUSY: the daemon's graph update would otherwise die
+    /// whenever a CLI build holds the write lock. A timeout shorter than
+    /// the 300 ms the holder keeps the lock fails the write here.
+    #[test]
+    fn second_writer_waits_for_a_concurrent_transaction_to_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.db");
+
+        // The holder takes the write lock itself, then reports in: the
+        // signal is sent after the INSERT, so the lock is provably held
+        // when the main thread tries to write. It releases it 300 ms later.
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder_path = path.clone();
+        let holder = std::thread::spawn(move || {
+            let store = GraphStore::open(&holder_path).unwrap();
+            let tx = store.conn().unchecked_transaction().unwrap();
+            tx.execute("INSERT INTO meta (key, value) VALUES ('held', 'x')", [])
+                .unwrap();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            tx.commit().unwrap();
+        });
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("holder takes the write lock");
+
+        let second = GraphStore::open(&path).unwrap();
+        let result = second.meta_set("second", "y");
+        holder.join().unwrap();
+
+        assert!(
+            result.is_ok(),
+            "second writer must wait for the lock, not fail busy: {result:?}"
+        );
+        assert_eq!(
+            second.meta_get("second").unwrap().as_deref(),
+            Some("y"),
+            "the waiting writer's row must be committed"
+        );
     }
 
     #[test]
