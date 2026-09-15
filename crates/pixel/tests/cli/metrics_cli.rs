@@ -826,7 +826,11 @@ fn daemon_reindex_reports_actual_nested_index_counts() {
         value["index"]["delta_files"],
         value["index"]["overlay_files"]
     );
-    assert!(String::from_utf8_lossy(&reindexed.stderr).contains(&expected));
+    let stderr = String::from_utf8_lossy(&reindexed.stderr);
+    assert!(
+        stderr.contains(&expected),
+        "build-index must report the counts status --json reports: expected {expected:?} in {stderr:?}"
+    );
     assert_eq!(metric_lines(&reindexed).len(), 1);
 }
 
