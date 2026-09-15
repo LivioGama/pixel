@@ -5,9 +5,8 @@ description: Cut a pixel release end to end — pick the version, prepare the re
 
 # Releasing pixel
 
-`main` is the only long-lived branch (the ripgrep/uv model): every pull
-request merges into it, and a release is a tag on it. There is no branch to
-bring up to a release afterwards.
+`main` is the only long-lived branch: every pull
+request merges into it, and a release is a tag on it.
 
 The tag is the release. Pushing `vX.Y.Z` runs `.github/workflows/release.yml`,
 and nothing else gates it: CI does not run on tags. The workflow has four
@@ -45,13 +44,12 @@ the release, merge and tag") is the go for those steps; say each command in a
 progress line just before running it. Anything the ask did not name (deleting
 a tag, force-pushing, retagging) still waits for its own go.
 
-Commands use the post-rename names (`new-branch`, `repo-state`, `commit`);
-0.2.5 and later accept both spellings, a 0.2.4 binary only the old ones
-(`branch`, `inspect`, `publish`).
+Commands use the current names (`new-branch`, `repo-state`, `commit`). A
+`pixel` that rejects them predates 0.2.5: update it before releasing.
 
 ## The release record
 
-A release spans a 10-minute workflow, a PR and possibly a context reset.
+A release spans a workflow run, a PR and possibly a context reset.
 Keep its state in `release-x.y.z.md` in the session scratchpad, written at
 the start and updated after every step, so a resumed session reads it instead
 of reconstructing the release from `gh` output:
@@ -88,12 +86,11 @@ gh secret list | grep HOMEBREW_TAP_TOKEN
   joined), so `describe` can answer an older tag.
 - A red `Cross-build` on `main` means the musl lane fails with `--locked`:
   the `build` job will fail the same way. A red `Dependency policy
-  (cargo-deny)` blocks every PR, the prepare PR included: a RustSec advisory
-  published the same day (RUSTSEC-2026-0285 turned the branch red during
-  0.2.5) is a `chore(deps)` PR (`cargo update -p <crate>`) merged before
+  (cargo-deny)` blocks every PR, the prepare PR included: a fresh RustSec
+  advisory is a `chore(deps)` PR (`cargo update -p <crate>`) merged before
   step 3.
 - The local gates need room: a workspace build plus `target/debug/incremental`
-  filled the disk mid-gates during 0.2.5 (`No space left on device` from
+  can fill the disk mid-gates (`No space left on device` from
   `cargo nextest`). Check `df -h .` first; `target/debug`,
   `target/dev-release` and `target/release` are rebuildable, and
   `CARGO_INCREMENTAL=0` keeps a one-off gate run from growing the cache.
@@ -113,7 +110,7 @@ convention in this repo:
   act on — a removed command or flag with no alias, a changed JSON output or
   protocol field, a changed on-disk format under `.pixel/`, an install layout
   that `pixel install` does not migrate.
-- `1.0.0` also removes the hidden pre-rename aliases (the Unreleased `Changed`
+- `1.0.0` also removes the hidden pre-rename aliases (0.2.5's `Changed`
   entry promises it); do not cut it by accident.
 
 Propose the version with the one-line reason; the user decides. Start the
@@ -152,15 +149,12 @@ It must end with `release-check: all checks passed`. Then:
   with a user-visible effect, needs an entry under `## [x.y.z]`
   (CONTRIBUTING.md exempts pure refactors and CI/deps chores). Add the
   missing ones now, in the same commit. The commits listed as belonging to no
-  pull request are the ones nobody filed an entry for: 0.2.5's `pixel plan`,
-  plugin manifests, pi recall source and shard cache were all pushed straight
-  to the integration branch and reached the prepare commit with no `Added`
-  line. 0.3.0's #160, #161 and #163 had no entry either. Check whether a
-  feature already shipped with `git cat-file -e v<last>:<path>` before calling
-  it new.
+  pull request are the ones nobody filed an entry for: each user-visible one
+  needs an entry too. Check whether a feature already shipped with
+  `git cat-file -e v<last>:<path>` before calling it new.
 - **Release body.** Read the new `## [x.y.z]` section as a stranger: it is
   published verbatim. Merges leave duplicate `### Fixed`/`### Changed`
-  subsections in Unreleased (0.3.0 had two of each): fold them, and fix
+  subsections in Unreleased: fold them, and fix
   wording or subsection order now, not after the tag.
 - **Diff.** `pixel review-changes`: 17 `Cargo.toml` one-liners, `Cargo.lock`,
   `CHANGELOG.md`, the 7 plugin manifests. Anything else is a bug.
@@ -206,11 +200,10 @@ gh run list --workflow release.yml -L 1               # the run for vx.y.z
 gh run watch <run-id> --exit-status                   # run_in_background: true
 ```
 
-Pass run ids literally. The agent's command tool runs zsh, which does not
-split an unquoted `$var` into words: `set -- $ids` or `for x in $list` over
-a space-separated string sees one word, and a watcher built that way reports
-failures that never happened (0.2.5's first watch printed `exit=1` for two
-green runs).
+Pass run ids literally. Under zsh (Claude Code's command tool) an unquoted
+`$var` is not split into words: `set -- $ids` or `for x in $list` over a
+space-separated string sees one word, and a watcher built that way reports
+failures that never happened.
 
 About 12 minutes to the end of `smoke` (0.3.0: verify 5 min, builds 6 min,
 publish and smoke under a minute). A failed `build` on
@@ -237,8 +230,8 @@ gh release view $V --repo LivioGama/pixel --json isDraft,isPrerelease,isImmutabl
 gh release download $V --repo LivioGama/pixel
 ls                                                     # 3 .tar.gz, 3 .sha256, pixel.rb, install.sh
 shasum -a 256 -c ./*.sha256                            # 3 × OK
-for f in ./*.sha256; do grep -c "$(awk '{print $1}' "$f")" pixel.rb; done   # darwin 2, each musl 1: the formula carries the real hashes (darwin is also the top-level url since #163)
-git -C <repo> show "$V:scripts/install.sh" | diff - install.sh && echo "install.sh == tag's"
+for f in ./*.sha256; do grep -c "$(awk '{print $1}' "$f")" pixel.rb; done   # darwin 2, each musl 1: the formula carries the real hashes (darwin is also the formula's top-level url)
+git -C <repo> show "${V}:scripts/install.sh" | diff - install.sh && echo "install.sh == tag's"
 gh api repos/LivioGama/homebrew-tap/contents/Formula/pixel.rb --jq .content \
   | base64 -d | diff - pixel.rb && echo "tap == release formula"
 tar xzf pixel-$V-aarch64-apple-darwin.tar.gz
@@ -306,10 +299,3 @@ ship yet:
    install.sh as not checked when a newer line is already the latest release.
 4. On `main`, a follow-up PR adds the `## [x.y.z] - DATE` section with that
    entry, so the changelog on `main` records every release.
-
-## History
-
-Until 0.3.0, work merged into a `develop` branch and `main` only received
-releases, squash-merged from 0.2.4 on; the two histories were joined on `main`
-right after 0.3.0 by a commit whose first parent is `develop`. #158 and the
-sync-branch procedure this skill used to describe belong to that model.
