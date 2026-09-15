@@ -28,9 +28,9 @@ pub const GRAPH_DB_FILE: &str = "graph.db";
 /// to 7 with the Envelope v2 migration: the wire shape changed from
 /// `{ok, error, data}` to the full `Envelope` (`ok, op, protocol, requestId,
 /// snapshot, epistemics, budget, result, error, warnings`), gated by
-/// `pixel_proto::ENVELOPE_PROTOCOL_VERSION`. 10: the `plan` op, which a
-/// daemon of an older build rejects as an unknown variant.
-pub const PROTOCOL_VERSION: u64 = 10;
+/// `pixel_proto::ENVELOPE_PROTOCOL_VERSION`. 10: the `plan` op. 11: clean-break
+/// rename of protocol op tags (e.g. `search` -> `search-content`).
+pub const PROTOCOL_VERSION: u64 = 11;
 
 /// The potion model the daemon warms; the `potion.ok` marker carries the
 /// repo name so a stale v1 marker cannot pass for v2.
@@ -554,13 +554,13 @@ impl Service {
         // computed against.
         let attach_snapshot = matches!(
             op_name,
-            "inspect" | "review" | "diff" | "status" | "changes"
+            "repo-state" | "review-changes" | "diff" | "status" | "what-changed"
         ) || is_retrieval_op(op_name);
         // Only the ops whose job is to report the working tree carry the
         // dirty path list. Everything else gets `dirty_count`: a retrieval
         // answer needs to say WHICH tree state it was computed against, not
         // enumerate 15 000 untracked `vendor/bundle` paths on every call.
-        let full_dirty_list = matches!(op_name, "inspect" | "review");
+        let full_dirty_list = matches!(op_name, "repo-state" | "review-changes");
         match self.dispatch(req) {
             Ok(v) => {
                 let mut env = Envelope::success(op_name, v);
@@ -625,7 +625,7 @@ impl Service {
                 "recall ops are served by the recall daemon (`pixel recall daemon start`), not a repository daemon"
                     .to_string(),
             ),
-            Request::Search {
+            Request::SearchContent {
                 pattern,
                 json: _,
                 limit,
@@ -633,55 +633,55 @@ impl Service {
                 paths,
                 scope,
             } => self.op_search(&pattern, limit, offset, paths.as_deref(), scope.as_deref()),
-            Request::Targets { task, limit, max_tier, precision } => self.op_targets(&task, limit, max_tier.as_deref(), precision),
-            Request::Symbol { name } => self.op_symbol(&name),
-            Request::Skeleton { file } => self.op_skeleton(&file),
-            Request::Context { uid, budget_tokens } => self.op_context(&uid, budget_tokens),
+            Request::ScopeTask { task, limit, max_tier, precision } => self.op_targets(&task, limit, max_tier.as_deref(), precision),
+            Request::FindSymbol { name } => self.op_symbol(&name),
+            Request::ListSignatures { file } => self.op_skeleton(&file),
+            Request::PackContext { uid, budget_tokens } => self.op_context(&uid, budget_tokens),
             Request::Impact {
                 uid_or_name,
                 direction,
                 depth,
             } => self.op_impact(&uid_or_name, &direction, depth),
-            Request::Uses {
+            Request::WhoCalls {
                 uid_or_name,
                 role,
                 offset,
             } => self.op_uses(&uid_or_name, &role, offset),
-            Request::Trace { from, to } => self.op_trace(&from, &to),
-            Request::Processes { offset } => self.op_processes(offset),
-            Request::Clusters { offset } => self.op_clusters(offset),
-            Request::Changes {
+            Request::CallPath { from, to } => self.op_trace(&from, &to),
+            Request::ListFlows { offset } => self.op_processes(offset),
+            Request::ListAreas { offset } => self.op_clusters(offset),
+            Request::WhatChanged {
                 base,
                 offset,
                 include_tests,
             } => self.op_changes(base.as_deref(), offset, include_tests),
-            Request::Graph {} => self.op_graph(),
+            Request::RebuildGraph {} => self.op_graph(),
             Request::Status {} => self.op_status(),
             Request::Reindex {} => self.op_reindex(),
-            Request::Resolve { phrase, limit } => self.op_resolve(&phrase, limit),
-            Request::History { query, facet, limit } => {
+            Request::FindCode { phrase, limit } => self.op_resolve(&phrase, limit),
+            Request::SearchHistory { query, facet, limit } => {
                 self.op_history(&query, facet.as_deref(), limit)
             }
-            Request::Lifecycle { path, token } => self.op_lifecycle(path.as_deref(), token.as_deref()),
-            Request::Excavate { phrase, path, from, to, limit } => {
+            Request::FileHistory { path, token } => self.op_lifecycle(path.as_deref(), token.as_deref()),
+            Request::DigHistory { phrase, path, from, to, limit } => {
                 self.op_excavate(phrase.as_deref(), path.as_deref(), from.as_deref(), to.as_deref(), limit)
             }
-            Request::Reconcile { strategy, push, into, request_id } => {
+            Request::SyncBranch { strategy, push, into, request_id } => {
                 self.op_reconcile(strategy.as_deref(), push.as_deref(), into.as_deref(), request_id.as_deref())
             }
-            Request::Journal { kind, path, detail } => {
+            Request::RecordEvent { kind, path, detail } => {
                 self.op_journal(&kind, path.as_deref(), detail.as_deref())
             }
-            Request::Inspect { .. } => {
+            Request::RepoState { .. } => {
                 pixel_ops::inspect::inspect(&self.root)
             }
-            Request::Review { cursor, byte_cap } => {
+            Request::ReviewChanges { cursor, byte_cap } => {
                 pixel_ops::review::review(&self.root, cursor.as_deref(), byte_cap)
             }
             Request::Diff { from, to, paths, byte_cap } => {
                 pixel_ops::diff::diff(&self.root, &from, to.as_deref(), paths.as_deref(), byte_cap)
             }
-            Request::HistoryOp { ref_name, limit, detail, cursor, byte_cap } => {
+            Request::CommitHistory { ref_name, limit, detail, cursor, byte_cap } => {
                 pixel_ops::history::history(
                     &self.root,
                     ref_name.as_deref(),
@@ -691,7 +691,7 @@ impl Service {
                     byte_cap,
                 )
             }
-            Request::Publish {
+            Request::Commit {
                 message,
                 files,
                 expected_head,
@@ -724,7 +724,7 @@ impl Service {
                 };
                 pixel_ops::push::push(&self.root, &opts, None)
             }
-            Request::Ship {
+            Request::CommitAndPush {
                 message,
                 files,
                 remote,
@@ -733,7 +733,7 @@ impl Service {
             } => {
                 pixel_ops::ship::ship(&self.root, &message, &files, &remote, &refspec, &request_id)
             }
-            Request::BranchOp { name, from, request_id } => {
+            Request::NewBranch { name, from, request_id } => {
                 let opts = pixel_ops::branch::BranchOptions {
                     name,
                     from,
@@ -741,7 +741,7 @@ impl Service {
                 };
                 pixel_ops::branch::branch(&self.root, &opts)
             }
-            Request::Update {
+            Request::FastForward {
                 expected_head,
                 target_oid,
                 request_id,
@@ -753,13 +753,13 @@ impl Service {
                 };
                 pixel_ops::update::update(&self.root, &opts)
             }
-            Request::Sync { remote, refspec } => {
+            Request::Fetch { remote, refspec } => {
                 pixel_ops::sync::sync(&self.root, &remote, refspec.as_deref())
             }
             Request::Note { action, file, target, note } => {
                 self.op_note(&action, file.as_deref(), target.as_deref(), note.as_deref())
             }
-            Request::Map { markdown } => self.op_map(markdown),
+            Request::RepoMap { markdown } => self.op_map(markdown),
             Request::Plan {
                 prompt,
                 query,
@@ -2488,17 +2488,17 @@ fn semantic_leads(
 }
 
 pub const RETRIEVAL_OPS: &[&str] = &[
-    "search",
-    "resolve",
-    "targets",
+    "search-content",
+    "find-code",
+    "scope-task",
     "impact",
-    "uses",
-    "trace",
-    "changes",
-    "context",
-    "symbol",
-    "processes",
-    "clusters",
+    "who-calls",
+    "call-path",
+    "what-changed",
+    "pack-context",
+    "find-symbol",
+    "list-flows",
+    "list-areas",
     "plan",
 ];
 
@@ -2603,9 +2603,9 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
     }
 
     let source = match op_name {
-        "search" => "text index",
-        "targets" | "resolve" => "text index + code graph",
-        "changes" => "code graph + working-tree diff",
+        "search-content" => "text index",
+        "scope-task" | "find-code" => "text index + code graph",
+        "what-changed" => "code graph + working-tree diff",
         _ => "code graph",
     };
     let mut basis = String::from(source);
@@ -3096,7 +3096,7 @@ mod context_crux_coordinate_tests {
         let body = "pub fn check(flag: bool) -> i32 {\n    if flag {\n        return 1;\n    }\n    0\n}\n";
         let original = format!("{}{body}", "// padding\n".repeat(10));
         std::fs::write(root.join("sample.rs"), &original).unwrap();
-        let request = || Request::Context {
+        let request = || Request::PackContext {
             uid: "sample.rs#check#function".to_owned(),
             budget_tokens: Some(2000),
         };
@@ -3874,22 +3874,22 @@ mod tests {
         let reqs: Vec<Request> = vec![
             Request::Ping,
             Request::Status {},
-            Request::Graph {},
-            serde_json::from_value(json!({"op":"search","pattern":"login"})).unwrap(),
-            serde_json::from_value(json!({"op":"search","pattern":"("})).unwrap(),
-            serde_json::from_value(json!({"op":"symbol","name":"login"})).unwrap(),
-            serde_json::from_value(json!({"op":"symbol","name":"does_not_exist"})).unwrap(),
+            Request::RebuildGraph {},
+            serde_json::from_value(json!({"op":"search-content","pattern":"login"})).unwrap(),
+            serde_json::from_value(json!({"op":"search-content","pattern":"("})).unwrap(),
+            serde_json::from_value(json!({"op":"find-symbol","name":"login"})).unwrap(),
+            serde_json::from_value(json!({"op":"find-symbol","name":"does_not_exist"})).unwrap(),
             serde_json::from_value(
                 json!({"op":"impact","uid_or_name":"login","direction":"upstream"}),
             )
             .unwrap(),
-            serde_json::from_value(json!({"op":"context","uid":"nope"})).unwrap(),
-            serde_json::from_value(json!({"op":"skeleton","file":"login.rs"})).unwrap(),
-            serde_json::from_value(json!({"op":"targets","task":"fix login"})).unwrap(),
-            serde_json::from_value(json!({"op":"processes"})).unwrap(),
-            serde_json::from_value(json!({"op":"clusters"})).unwrap(),
-            serde_json::from_value(json!({"op":"inspect"})).unwrap(),
-            serde_json::from_value(json!({"op":"recall","action":"search"})).unwrap(),
+            serde_json::from_value(json!({"op":"pack-context","uid":"nope"})).unwrap(),
+            serde_json::from_value(json!({"op":"list-signatures","file":"login.rs"})).unwrap(),
+            serde_json::from_value(json!({"op":"scope-task","task":"fix login"})).unwrap(),
+            serde_json::from_value(json!({"op":"list-flows"})).unwrap(),
+            serde_json::from_value(json!({"op":"list-areas"})).unwrap(),
+            serde_json::from_value(json!({"op":"repo-state"})).unwrap(),
+            serde_json::from_value(json!({"op":"recall","action":"search-content"})).unwrap(),
         ];
         let mut saw_failure = false;
         for req in reqs {
@@ -3945,7 +3945,7 @@ mod tests {
         git(&root, &["commit", "-qm", "init"]);
 
         let mut svc = Service::open(&root).unwrap();
-        let resp = svc.handle(Request::Skeleton {
+        let resp = svc.handle(Request::ListSignatures {
             file: "mod.rs".into(),
         });
         assert!(resp.ok, "{resp:?}");
@@ -4111,7 +4111,7 @@ mod tests {
         git(&root, &["commit", "-qm", "outgoing fixture"]);
 
         let mut svc = Service::open(&root).unwrap();
-        let outgoing = svc.handle(Request::Uses {
+        let outgoing = svc.handle(Request::WhoCalls {
             uid_or_name: "entry".into(),
             role: "callees".into(),
             offset: None,
@@ -4131,7 +4131,7 @@ mod tests {
 
         // `relay` passes an unresolved callback on but invokes only `known`:
         // the reference is not an outgoing call site the answer may miss.
-        let relay = svc.handle(Request::Uses {
+        let relay = svc.handle(Request::WhoCalls {
             uid_or_name: "relay".into(),
             role: "callees".into(),
             offset: None,
@@ -4146,7 +4146,7 @@ mod tests {
             ("known", "callees", 0),
             ("known", "callers", 2),
         ] {
-            let response = svc.handle(Request::Uses {
+            let response = svc.handle(Request::WhoCalls {
                 uid_or_name: symbol.into(),
                 role: role.into(),
                 offset: None,
@@ -4177,12 +4177,12 @@ mod tests {
         git(&root, &["commit", "-qm", "calls"]);
 
         let mut svc = Service::open(&root).unwrap();
-        let first = svc.handle(Request::Uses {
+        let first = svc.handle(Request::WhoCalls {
             uid_or_name: "target".into(),
             role: "callers".into(),
             offset: Some(0),
         });
-        let second = svc.handle(Request::Uses {
+        let second = svc.handle(Request::WhoCalls {
             uid_or_name: "target".into(),
             role: "callers".into(),
             offset: Some(20),
@@ -4227,12 +4227,12 @@ mod tests {
         std::fs::write(root.join("changed.ts"), make_source(2)).unwrap();
 
         let mut svc = Service::open(&root).unwrap();
-        let first = svc.handle(Request::Changes {
+        let first = svc.handle(Request::WhatChanged {
             base: None,
             offset: Some(0),
             include_tests: false,
         });
-        let second = svc.handle(Request::Changes {
+        let second = svc.handle(Request::WhatChanged {
             base: None,
             offset: Some(20),
             include_tests: false,
@@ -4278,7 +4278,7 @@ mod tests {
 
         let mut svc = Service::open(&root).unwrap();
         // Find the uid for `alpha`.
-        let sym = svc.handle(Request::Symbol {
+        let sym = svc.handle(Request::FindSymbol {
             name: "alpha".into(),
         });
         assert!(sym.ok, "symbol lookup: {sym:?}");
@@ -4293,7 +4293,7 @@ mod tests {
             .to_string();
 
         // Request a tiny budget. The whole response must be bounded.
-        let resp = svc.handle(Request::Context {
+        let resp = svc.handle(Request::PackContext {
             uid: uid.clone(),
             budget_tokens: Some(50),
         });
@@ -4343,7 +4343,7 @@ mod tests {
         git(&root, &["commit", "-qm", "init"]);
 
         let mut svc = Service::open(&root).unwrap();
-        let sym = svc.handle(Request::Symbol {
+        let sym = svc.handle(Request::FindSymbol {
             name: "alpha".into(),
         });
         let uid = sym
@@ -4357,7 +4357,7 @@ mod tests {
             .to_string();
 
         // Budget 500: metadata and text together must fit the hard limit.
-        let resp = svc.handle(Request::Context {
+        let resp = svc.handle(Request::PackContext {
             uid: uid.clone(),
             budget_tokens: Some(500),
         });
@@ -4394,7 +4394,7 @@ mod tests {
 
         let mut svc = Service::open(&root).unwrap();
         // Broad pattern with no explicit limit: default limit applies.
-        let resp = svc.handle(Request::Search {
+        let resp = svc.handle(Request::SearchContent {
             paths: None,
             pattern: "commonBroadNeedle".into(),
             json: true,
@@ -4421,7 +4421,7 @@ mod tests {
             Some(100)
         );
         // Now request a tiny limit: must truncate.
-        let resp = svc.handle(Request::Search {
+        let resp = svc.handle(Request::SearchContent {
             paths: None,
             pattern: "commonBroadNeedle".into(),
             json: true,
@@ -4444,7 +4444,7 @@ mod tests {
         assert!(truncated, "truncated must be true when more matches exist");
         let first_page = matches.clone();
 
-        let resp = svc.handle(Request::Search {
+        let resp = svc.handle(Request::SearchContent {
             paths: None,
             pattern: "commonBroadNeedle".into(),
             json: true,
@@ -4498,7 +4498,7 @@ mod tests {
         let mut svc = Service::open(&root).unwrap();
 
         // Unranked: path/line order → caller.rs before login.rs (alphabetical).
-        let unranked = svc.handle(Request::Search {
+        let unranked = svc.handle(Request::SearchContent {
             paths: None,
             pattern: "login".into(),
             json: true,
@@ -4528,7 +4528,7 @@ mod tests {
 
         // Ranked: same hit set, but login.rs should rank first (filename +
         // symbol signal), ahead of caller.rs.
-        let ranked = svc.handle(Request::Search {
+        let ranked = svc.handle(Request::SearchContent {
             paths: None,
             pattern: "login".into(),
             json: true,
@@ -4879,7 +4879,7 @@ mod tests {
         git(&root, &["commit", "-qm", "init"]);
 
         let mut svc = Service::open(&root).unwrap();
-        let resp = svc.handle(Request::Search {
+        let resp = svc.handle(Request::SearchContent {
             paths: None,
             pattern: "needle".into(),
             json: true,
@@ -4934,7 +4934,7 @@ mod tests {
         let mut offset = Some(0usize);
         let mut pages = 0;
         while let Some(o) = offset {
-            let resp = svc.handle(Request::Search {
+            let resp = svc.handle(Request::SearchContent {
                 paths: None,
                 pattern: "banana".into(),
                 json: true,
@@ -5006,13 +5006,13 @@ mod tests {
         // Bug 2 describes.
         {
             let mut builder = Service::open(&root).unwrap();
-            let built = builder.handle(Request::Graph {});
+            let built = builder.handle(Request::RebuildGraph {});
             assert!(built.ok, "graph build: {:?}", built.error);
         }
 
         let mut svc = Service::open(&root).unwrap();
         let search = |svc: &mut Service| -> Vec<String> {
-            let resp = svc.handle(Request::Search {
+            let resp = svc.handle(Request::SearchContent {
                 paths: None,
                 pattern: "needle".into(),
                 json: true,
@@ -5041,7 +5041,7 @@ mod tests {
         );
 
         // Unrelated daemon activity that happens to populate `self.graph`.
-        let targets = svc.handle(Request::Targets {
+        let targets = svc.handle(Request::ScopeTask {
             task: "needle".into(),
             limit: Some(5),
             max_tier: None,
@@ -5073,7 +5073,7 @@ mod tests {
         git(&root, &["commit", "-qm", "init"]);
 
         let mut svc = Service::open(&root).unwrap();
-        let resp = svc.handle(Request::Search {
+        let resp = svc.handle(Request::SearchContent {
             paths: None,
             pattern: "needle".into(),
             json: true,
@@ -5087,7 +5087,7 @@ mod tests {
             Some(pixel_proto::ErrorCode::InvalidInput)
         );
 
-        let unranked = svc.handle(Request::Search {
+        let unranked = svc.handle(Request::SearchContent {
             paths: None,
             pattern: "needle".into(),
             json: true,
@@ -5101,7 +5101,7 @@ mod tests {
             unranked.error
         );
 
-        let upper = svc.handle(Request::Search {
+        let upper = svc.handle(Request::SearchContent {
             paths: None,
             pattern: "needle".into(),
             json: true,
@@ -5138,7 +5138,7 @@ mod tests {
         git(&root, &["commit", "-qm", "init"]);
 
         let mut svc = Service::open(&root).unwrap();
-        let resp = svc.handle(Request::Targets {
+        let resp = svc.handle(Request::ScopeTask {
             task: "gain ledger".into(),
             limit: Some(5),
             max_tier: None,
@@ -5186,7 +5186,7 @@ mod tests {
         git(&root, &["commit", "-qm", "init"]);
 
         let mut svc = Service::open(&root).unwrap();
-        let resp = svc.handle(Request::Search {
+        let resp = svc.handle(Request::SearchContent {
             paths: None,
             pattern: "gain ledger".into(),
             json: true,
@@ -5237,7 +5237,7 @@ mod tests {
 
         let mut svc = Service::open(&root).unwrap();
         let uid = {
-            let sym = svc.handle(Request::Symbol {
+            let sym = svc.handle(Request::FindSymbol {
                 name: "alpha".into(),
             });
             sym.data()["symbols"][0]["uid"]
@@ -5248,8 +5248,8 @@ mod tests {
 
         let requests: Vec<(&str, Request)> = vec![
             (
-                "search",
-                Request::Search {
+                "search-content",
+                Request::SearchContent {
                     pattern: "alpha".into(),
                     json: true,
                     limit: Some(10),
@@ -5259,15 +5259,15 @@ mod tests {
                 },
             ),
             (
-                "resolve",
-                Request::Resolve {
+                "find-code",
+                Request::FindCode {
                     phrase: "alpha".into(),
                     limit: Some(5),
                 },
             ),
             (
-                "targets",
-                Request::Targets {
+                "scope-task",
+                Request::ScopeTask {
                     task: "alpha beta".into(),
                     limit: Some(5),
                     max_tier: None,
@@ -5283,43 +5283,43 @@ mod tests {
                 },
             ),
             (
-                "uses",
-                Request::Uses {
+                "who-calls",
+                Request::WhoCalls {
                     uid_or_name: "alpha".into(),
                     role: "callers".into(),
                     offset: None,
                 },
             ),
             (
-                "trace",
-                Request::Trace {
+                "call-path",
+                Request::CallPath {
                     from: "beta".into(),
                     to: "alpha".into(),
                 },
             ),
             (
-                "changes",
-                Request::Changes {
+                "what-changed",
+                Request::WhatChanged {
                     base: None,
                     offset: None,
                     include_tests: false,
                 },
             ),
             (
-                "context",
-                Request::Context {
+                "pack-context",
+                Request::PackContext {
                     uid,
                     budget_tokens: Some(2000),
                 },
             ),
             (
-                "symbol",
-                Request::Symbol {
+                "find-symbol",
+                Request::FindSymbol {
                     name: "alpha".into(),
                 },
             ),
-            ("processes", Request::Processes { offset: None }),
-            ("clusters", Request::Clusters { offset: None }),
+            ("list-flows", Request::ListFlows { offset: None }),
+            ("list-areas", Request::ListAreas { offset: None }),
             (
                 "plan",
                 Request::Plan {
@@ -5365,9 +5365,9 @@ mod tests {
             // The basis names the store the answer came from, per op: a
             // reader of `search` must not be told "code graph".
             let source = match name {
-                "search" => "text index",
-                "targets" | "resolve" => "text index + code graph",
-                "changes" => "code graph + working-tree diff",
+                "search-content" => "text index",
+                "scope-task" | "find-code" => "text index + code graph",
+                "what-changed" => "code graph + working-tree diff",
                 _ => "code graph",
             };
             assert!(
@@ -5452,7 +5452,7 @@ mod tests {
         git(&root, &["commit", "-qm", "many"]);
 
         let mut svc = Service::open(&root).unwrap();
-        let resp = svc.handle(Request::Targets {
+        let resp = svc.handle(Request::ScopeTask {
             task: "needle probe".into(),
             limit: Some(20),
             max_tier: None,
@@ -5508,7 +5508,7 @@ mod tests {
         git(&root, &["commit", "-qm", "init"]);
 
         let mut svc = Service::open(&root).unwrap();
-        let resp = svc.handle(Request::Targets {
+        let resp = svc.handle(Request::ScopeTask {
             task: "auth handling".into(),
             limit: Some(10),
             max_tier: None,
@@ -5554,7 +5554,7 @@ mod tests {
         git(&root, &["commit", "-qm", "init"]);
 
         let mut svc = Service::open(&root).unwrap();
-        let resp = svc.handle(Request::Resolve {
+        let resp = svc.handle(Request::FindCode {
             phrase: "uniqueTargetFn".into(),
             limit: Some(5),
         });

@@ -176,7 +176,7 @@ fn assert_service_time_budget(
 fn bench_search_service_time(c: &mut Criterion) {
     let (_root, mut svc) = fixture_with_needle(50, "uniqueNeedle123");
 
-    let make_req = || Op::Search {
+    let make_req = || Op::SearchContent {
         pattern: "uniqueNeedle123".into(),
         json: false,
         limit: Some(10),
@@ -203,7 +203,7 @@ fn bench_search_service_time(c: &mut Criterion) {
 fn bench_targets_service_time(c: &mut Criterion) {
     let (_root, mut svc) = fixture_with_needle(50, "uniqueNeedle123");
 
-    let make_req = || Op::Targets {
+    let make_req = || Op::ScopeTask {
         task: "fix uniqueNeedle123".into(),
         limit: Some(20),
         max_tier: None,
@@ -233,7 +233,7 @@ fn bench_targets_service_time(c: &mut Criterion) {
 fn bench_ranked_search_service_time(c: &mut Criterion) {
     let (_root, mut svc) = fixture_with_needle(50, "uniqueNeedle123");
 
-    let make_req = || Op::Search {
+    let make_req = || Op::SearchContent {
         pattern: "uniqueNeedle123".into(),
         json: false,
         limit: Some(10),
@@ -316,7 +316,7 @@ fn gate_ping_service_time() {
 fn gate_search_service_time() {
     let (_root, mut svc) = fixture_with_needle(50, "uniqueNeedle123");
     let make_req = || {
-        Request::from(Op::Search {
+        Request::from(Op::SearchContent {
             pattern: "uniqueNeedle123".into(),
             json: false,
             limit: Some(10),
@@ -338,7 +338,7 @@ fn gate_search_service_time() {
 fn gate_ranked_search_service_time() {
     let (_root, mut svc) = fixture_with_needle(50, "uniqueNeedle123");
     let make_req = || {
-        Request::from(Op::Search {
+        Request::from(Op::SearchContent {
             pattern: "uniqueNeedle123".into(),
             json: false,
             limit: Some(10),
@@ -364,7 +364,7 @@ fn gate_ranked_search_service_time() {
 fn gate_targets_service_time() {
     let (_root, mut svc) = fixture_with_needle(50, "uniqueNeedle123");
     let make_req = || {
-        Request::from(Op::Targets {
+        Request::from(Op::ScopeTask {
             task: "fix uniqueNeedle123".into(),
             limit: Some(20),
             max_tier: None,

@@ -397,7 +397,7 @@ fn query_task_targets(socket: &Path, prompt: &str) -> Option<Value> {
     }
     let response = crate::roundtrip(
         &mut stream,
-        &pixel_daemon::Request::Targets {
+        &pixel_daemon::Request::ScopeTask {
             task: prompt.to_string(),
             limit: Some(TASK_TARGET_LIMIT),
             max_tier: None,
@@ -1012,7 +1012,7 @@ mod tests {
                     )
                 } else {
                     match request {
-                        pixel_daemon::Request::Targets {
+                        pixel_daemon::Request::ScopeTask {
                             task,
                             limit,
                             max_tier,
@@ -1283,12 +1283,12 @@ mod tests {
         let cutoff = 1_000_000;
         let cases: &[(&str, Vec<String>, bool)] = &[
             (
-                "recent publish here",
-                vec![entry(cutoff + 1, "publish", "/work/pixel", "ok")],
+                "recent commit here",
+                vec![entry(cutoff + 1, "commit", "/work/pixel", "ok")],
                 true,
             ),
             (
-                "commit-and-push, the current name of ship",
+                "commit-and-push",
                 vec![entry(cutoff + 1, "commit-and-push", "/work/pixel", "ok")],
                 true,
             ),
@@ -1304,22 +1304,22 @@ mod tests {
             ),
             (
                 "exactly at the cutoff",
-                vec![entry(cutoff, "ship", "/work/pixel", "ok")],
+                vec![entry(cutoff, "commit-and-push", "/work/pixel", "ok")],
                 true,
             ),
             (
                 "too old",
-                vec![entry(cutoff - 1, "publish", "/work/pixel", "ok")],
+                vec![entry(cutoff - 1, "commit", "/work/pixel", "ok")],
                 false,
             ),
             (
                 "failed",
-                vec![entry(cutoff + 1, "publish", "/work/pixel", "error")],
+                vec![entry(cutoff + 1, "commit", "/work/pixel", "error")],
                 false,
             ),
             (
                 "another project",
-                vec![entry(cutoff + 1, "publish", "/elsewhere", "ok")],
+                vec![entry(cutoff + 1, "commit", "/elsewhere", "ok")],
                 false,
             ),
             (
@@ -1329,14 +1329,14 @@ mod tests {
             ),
             (
                 "not a completion",
-                vec![entry(cutoff + 1, "search", "/work/pixel", "ok")],
+                vec![entry(cutoff + 1, "search-content", "/work/pixel", "ok")],
                 false,
             ),
             (
                 "old signal after a recent non-signal is not reached",
                 vec![
-                    entry(cutoff - 1, "publish", "/work/pixel", "ok"),
-                    entry(cutoff + 1, "search", "/work/pixel", "ok"),
+                    entry(cutoff - 1, "commit", "/work/pixel", "ok"),
+                    entry(cutoff + 1, "search-content", "/work/pixel", "ok"),
                 ],
                 false,
             ),
@@ -1369,10 +1369,10 @@ mod tests {
         let dir = scratch("action-log-tail");
         let cwd = Path::new("/work/pixel");
         let cutoff = 1_000_000;
-        let filler = entry(cutoff + 1, "search", "/work/pixel", "ok");
+        let filler = entry(cutoff + 1, "search-content", "/work/pixel", "ok");
         let per_line = filler.len() as u64 + 1;
         let lines_past_tail = (ACTION_LOG_TAIL_BYTES / per_line) + 2;
-        let mut lines = vec![entry(cutoff + 1, "publish", "/work/pixel", "ok")];
+        let mut lines = vec![entry(cutoff + 1, "commit", "/work/pixel", "ok")];
         lines.extend(std::iter::repeat_n(
             filler.clone(),
             lines_past_tail as usize,
@@ -1381,7 +1381,7 @@ mod tests {
             !check_action_log_file(action_log(&dir, &lines), cwd, cutoff),
             "a signal older than the tail window must not be read"
         );
-        lines.push(entry(cutoff + 1, "publish", "/work/pixel", "ok"));
+        lines.push(entry(cutoff + 1, "commit", "/work/pixel", "ok"));
         assert!(
             check_action_log_file(action_log(&dir, &lines), cwd, cutoff),
             "a signal in the tail is found in a large log"

@@ -329,7 +329,7 @@ pub fn reconcile_with_hooks(
     let state_root = state_root();
     let journal = OperationJournal::with_state_root(state_root.clone());
 
-    // The wire surface (pixel-proto's `Request::Reconcile` / pixel-daemon's
+    // The wire surface (pixel-proto's `Request::SyncBranch` / pixel-daemon's
     // `op_reconcile`) does not currently thread a client-supplied
     // `request_id` through — every real dispatch arrives here with
     // `opts.request_id == ""`, which `journal.begin` rejects outright

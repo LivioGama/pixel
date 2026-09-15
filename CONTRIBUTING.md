@@ -257,7 +257,7 @@ the shell you launch `claude` from is not the account's.
 and with 16 codegen units: same optimisation level, but an incremental
 rebuild after touching one crate takes seconds rather than a minute. Use
 plain `--release` only when you need the exact shipped profile. `pixel
-upgrade --build "<cargo command>"` runs the same loop for you and reads the
+self-update --build "<cargo command>"` runs the same loop for you and reads the
 binary from the profile named in that command.
 
 Skip this loop for changes limited to docs, prompts, or bench scripts.

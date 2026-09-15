@@ -48,7 +48,7 @@ fn fixture(tag: &str) -> std::path::PathBuf {
 
 fn run_targets(dir: &Path, task: &str) -> serde_json::Value {
     let mut svc = Service::open(dir).unwrap();
-    let resp = svc.handle(Request::Targets {
+    let resp = svc.handle(Request::ScopeTask {
         task: task.to_string(),
         limit: Some(10),
         max_tier: None,
@@ -122,7 +122,7 @@ fn targets_is_deterministic() {
 fn targets_rejects_empty_task() {
     let dir = fixture("empty");
     let mut svc = Service::open(&dir).unwrap();
-    let resp = svc.handle(Request::Targets {
+    let resp = svc.handle(Request::ScopeTask {
         task: "fix the code".to_string(),
         limit: None,
         max_tier: None,
@@ -167,7 +167,7 @@ fn targets_no_git_builds_graphless() {
     .unwrap();
 
     let mut svc = Service::open(&dir).unwrap();
-    let resp = svc.handle(Request::Targets {
+    let resp = svc.handle(Request::ScopeTask {
         task: "fix `login_user` auth flow".to_string(),
         limit: Some(10),
         max_tier: None,

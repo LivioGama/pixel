@@ -347,33 +347,35 @@ mod tests {
     }
 
     #[test]
-    fn history_under_an_old_command_name_counts_toward_the_current_one() {
-        // Two identical `search` calls logged by a pre-rename binary, then
-        // the same query as `search-content`: that is the third identical
-        // call, a hard loop, not a first call.
+    fn history_under_a_command_name_counts_toward_the_current_one() {
+        // Two identical `search-content` calls logged, then the same query:
+        // that is the third identical call, a hard loop, not a first call.
         let warning = |result: &CallGuardResult| match result {
             CallGuardResult::Allow => None,
             CallGuardResult::Warn(msg) => Some(msg.clone()),
         };
         let dir = temp_dir();
-        seed_history(&dir, &[("search", "foo ."), ("search", "foo .")]);
+        seed_history(
+            &dir,
+            &[("search-content", "foo ."), ("search-content", "foo .")],
+        );
         let hard = with_session(None, || check_and_record("search-content", "foo .", &dir));
         let hard = warning(&hard);
         assert!(
             hard.as_deref()
                 .is_some_and(|msg| msg.contains("identical arguments")),
-            "old-name history must count: {hard:?}"
+            "name history must count: {hard:?}"
         );
 
         let dir2 = temp_dir();
         seed_history(
             &dir2,
             &[
-                ("resolve", "a"),
-                ("resolve", "b"),
-                ("resolve", "c"),
-                ("resolve", "d"),
-                ("resolve", "e"),
+                ("find-code", "a"),
+                ("find-code", "b"),
+                ("find-code", "c"),
+                ("find-code", "d"),
+                ("find-code", "e"),
             ],
         );
         let soft = with_session(None, || check_and_record("find-code", "f", &dir2));
@@ -381,15 +383,15 @@ mod tests {
         assert!(
             soft.as_deref()
                 .is_some_and(|msg| msg.contains("prior calls in 10 minutes")),
-            "old-name history counts toward the soft threshold: {soft:?}"
+            "name history counts toward the soft threshold: {soft:?}"
         );
 
-        // An old name passed in is guarded and recorded under the new name.
+        // A new name passed in is guarded and recorded under the same name.
         let dir3 = temp_dir();
-        let first = with_session(None, || check_and_record("context", "uid .", &dir3));
+        let first = with_session(None, || check_and_record("pack-context", "uid .", &dir3));
         assert_eq!(warning(&first), None);
         let saved = load_calls(&dir3.join(".pixel").join("calls.json"));
-        assert_eq!(saved.len(), 1, "an old guarded name is still guarded");
+        assert_eq!(saved.len(), 1, "a guarded name is still guarded");
         assert_eq!(saved[0].command, "pack-context");
         for d in [dir, dir2, dir3] {
             std::fs::remove_dir_all(&d).ok();

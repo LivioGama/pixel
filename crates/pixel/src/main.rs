@@ -98,7 +98,6 @@ enum RoleArg {
 #[derive(Subcommand)]
 enum Command {
     /// Build (or rebuild) the text index for a directory tree.
-    #[command(alias = "index")]
     BuildIndex {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -114,7 +113,6 @@ enum Command {
     /// Search the indexed tree with a regex pattern. Accepts any number of
     /// paths (repo roots, subdirectories, or files) — ripgrep-style; the repo
     /// root is discovered automatically for each.
-    #[command(alias = "search")]
     SearchContent {
         pattern: String,
         /// Paths to search: repo roots, subdirectories, or files (any mix).
@@ -155,7 +153,6 @@ enum Command {
     },
     /// Native-output literal file search for automatic routing; unsupported
     /// inputs execute the original rg/grep command without modification.
-    #[command(alias = "search-compat")]
     SearchLikeRg {
         #[arg(value_enum)]
         tool: search_compat::SearchTool,
@@ -163,7 +160,6 @@ enum Command {
         args: Vec<String>,
     },
     /// Compile and execute one bounded deterministic retrieval recipe.
-    #[command(alias = "query")]
     RunRecipe {
         intent: String,
         #[arg(long, default_value = ".")]
@@ -183,7 +179,6 @@ enum Command {
     /// the answer is a ranked list, not a resolved certainty. First use
     /// downloads the embedding model into the shared recall model cache
     /// (once; subsequent calls are offline).
-    #[command(alias = "ask")]
     SearchMeaning {
         /// The natural-language question.
         question: String,
@@ -201,7 +196,6 @@ enum Command {
     /// Sniper target list: task description in, closed prioritized file list
     /// out (P0 = start here, P1 = likely, P2 = droppable). Writes the
     /// enforcement manifest .pixel/targets.json unless --no-manifest.
-    #[command(alias = "targets")]
     ScopeTask {
         /// Task/feature description (omit with --clear).
         task: Option<String>,
@@ -230,7 +224,6 @@ enum Command {
     /// recent versions with the likely-breaking commit flagged, recommend a
     /// last-known-good candidate. Plan only — nothing is written without
     /// --apply. Never resets; never touches the index or HEAD.
-    #[command(alias = "rescue")]
     PlanRollback {
         /// Problem description ("login was working before ...").
         problem: Option<String>,
@@ -259,7 +252,6 @@ enum Command {
         json: bool,
     },
     /// Look up symbols by name in the code graph.
-    #[command(alias = "symbol")]
     FindSymbol {
         name: String,
         #[arg(default_value = ".")]
@@ -268,7 +260,6 @@ enum Command {
         json: bool,
     },
     /// All signatures in a file — the skeleton view at ~10% of Read cost.
-    #[command(alias = "skeleton")]
     ListSignatures {
         file: String,
         #[arg(default_value = ".")]
@@ -297,7 +288,6 @@ enum Command {
     /// Structural repo map: every indexed file with its symbols. `--markdown`
     /// emits the exportable document form — the human-editable projection of
     /// the graph that `note` annotations key onto.
-    #[command(alias = "map")]
     RepoMap {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -308,7 +298,6 @@ enum Command {
         json: bool,
     },
     /// Budget-fitted context for a symbol uid.
-    #[command(alias = "context")]
     PackContext {
         uid: String,
         #[arg(default_value = ".")]
@@ -331,7 +320,6 @@ enum Command {
         json: bool,
     },
     /// Direct callers or callees of a symbol.
-    #[command(alias = "uses")]
     WhoCalls {
         uid_or_name: String,
         #[arg(default_value = ".")]
@@ -345,7 +333,6 @@ enum Command {
         json: bool,
     },
     /// Call path between two symbols.
-    #[command(alias = "trace")]
     CallPath {
         from: String,
         to: String,
@@ -355,7 +342,6 @@ enum Command {
         json: bool,
     },
     /// Discovered execution flows.
-    #[command(alias = "processes")]
     ListFlows {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -365,7 +351,6 @@ enum Command {
         json: bool,
     },
     /// Functional-area clusters.
-    #[command(alias = "clusters")]
     ListAreas {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -375,7 +360,6 @@ enum Command {
         json: bool,
     },
     /// Symbols/flows affected by working-tree changes.
-    #[command(alias = "changes")]
     WhatChanged {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -390,7 +374,6 @@ enum Command {
         json: bool,
     },
     /// Force (re)build of the code graph db.
-    #[command(alias = "graph")]
     RebuildGraph {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -408,7 +391,6 @@ enum Command {
         statusline: bool,
     },
     /// Make a repository ready for agent work: index, graph, and warm daemon.
-    #[command(alias = "ready")]
     PrepareRepo {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -419,7 +401,6 @@ enum Command {
         json: bool,
     },
     /// Show raw shard metadata (legacy).
-    #[command(alias = "stats")]
     IndexStats {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -435,7 +416,6 @@ enum Command {
         cmd: recall_cmd::RecallCmd,
     },
     /// One-look error capture: query the sniper error sink.
-    #[command(alias = "sniper")]
     ListErrors {
         #[command(subcommand)]
         cmd: sniper_cmd::SniperCmd,
@@ -444,7 +424,6 @@ enum Command {
     // M2 — safe git mutation ops (pixel-ops)
     // -----------------------------------------------------------------
     /// Show repo state: HEAD, branch, dirty files, fingerprints.
-    #[command(alias = "inspect")]
     RepoState {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -455,7 +434,6 @@ enum Command {
         json: bool,
     },
     /// Review working-tree changes (staged, unstaged, untracked, conflicted).
-    #[command(alias = "review")]
     ReviewChanges {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -469,7 +447,6 @@ enum Command {
         json: bool,
     },
     /// Commit history with detail levels and byte caps.
-    #[command(alias = "history")]
     CommitHistory {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -508,7 +485,6 @@ enum Command {
         json: bool,
     },
     /// Stage files, commit, and optionally push (crash-safe, idempotent).
-    #[command(alias = "publish")]
     Commit {
         /// Commit message. Use `--message-file` for a multi-paragraph body.
         #[arg(
@@ -559,7 +535,6 @@ enum Command {
         json: bool,
     },
     /// Publish + push in one op (commit then leased push).
-    #[command(alias = "ship")]
     CommitAndPush {
         /// Commit message. Use `--message-file` for a multi-paragraph body.
         #[arg(
@@ -596,7 +571,6 @@ enum Command {
         json: bool,
     },
     /// Create a new branch from HEAD (or --from <ref>).
-    #[command(alias = "branch")]
     NewBranch {
         name: String,
         #[arg(default_value = ".")]
@@ -611,7 +585,6 @@ enum Command {
         json: bool,
     },
     /// Fast-forward merge to a target OID (refuses non-ff + dirty intersection).
-    #[command(alias = "update")]
     FastForward {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -628,7 +601,6 @@ enum Command {
         json: bool,
     },
     /// Fetch from a remote (idempotent).
-    #[command(alias = "sync")]
     Fetch {
         remote: String,
         #[arg(default_value = ".")]
@@ -643,7 +615,6 @@ enum Command {
     // M3/M4 — engines (resolve, history, lifecycle, excavate, reconcile)
     // -----------------------------------------------------------------
     /// Engine 1: resolve a phrase to code via the concept index.
-    #[command(alias = "resolve")]
     FindCode {
         phrase: String,
         #[arg(default_value = ".")]
@@ -654,7 +625,6 @@ enum Command {
         json: bool,
     },
     /// M3: history-wide fact + diff search.
-    #[command(alias = "history-search")]
     SearchHistory {
         query: String,
         #[arg(default_value = ".")]
@@ -668,7 +638,6 @@ enum Command {
         json: bool,
     },
     /// Engine 2: lifecycle of a path or token.
-    #[command(alias = "lifecycle")]
     FileHistory {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -682,7 +651,6 @@ enum Command {
         json: bool,
     },
     /// Engine 2: history-wide discovery (rescue v2).
-    #[command(alias = "excavate")]
     DigHistory {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -713,7 +681,6 @@ enum Command {
         json: bool,
     },
     /// Engine 4: one-call deterministic branch sync.
-    #[command(alias = "reconcile")]
     SyncBranch {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -735,7 +702,6 @@ enum Command {
         json: bool,
     },
     /// M5: journal a session event (fire-and-forget).
-    #[command(alias = "journal")]
     RecordEvent {
         kind: String,
         #[arg(default_value = ".")]
@@ -790,7 +756,6 @@ enum Command {
     /// Cargo.lock is fresh for every workspace member, CHANGELOG.md has the
     /// `## [x.y.z]` heading and an empty Unreleased section. Exit 1 on any
     /// failed check.
-    #[command(alias = "release-check")]
     CheckRelease {
         /// The version or tag: `1.2.3`, `v1.2.3` or `refs/tags/v1.2.3`.
         version: String,
@@ -804,7 +769,6 @@ enum Command {
     /// Rebuild the binary, stop the daemon, copy the new binary to the
     /// install path, and optionally restart the daemon. Solves the
     /// "Text file busy" error when the daemon holds the binary open.
-    #[command(alias = "upgrade")]
     SelfUpdate {
         /// Cargo build command to run (default: `cargo build --release -p pixel-cli`).
         /// The built binary is read from `target/<profile>/pixel`, with the
@@ -854,13 +818,11 @@ enum Command {
         json: bool,
     },
     /// Hook entrypoints (guard, session-start) invoked by Claude hooks.
-    #[command(alias = "hook")]
     RunHook {
         #[command(subcommand)]
         cmd: HookCmd,
     },
     /// Inspect or reset Claude Code's local Pixel task-runtime packet.
-    #[command(alias = "task")]
     TaskState {
         #[command(subcommand)]
         cmd: TaskCmd,
@@ -868,7 +830,6 @@ enum Command {
     /// Self-assessment: pixel's own action log (what ran, what went wrong).
     /// Reads <path>/.pixel/actions.jsonl, written asynchronously by every
     /// pixel invocation.
-    #[command(alias = "log")]
     ActionLog {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -889,7 +850,6 @@ enum Command {
     /// fraction of the candidate pool the agent did NOT have to read. A
     /// measured counter to semble's '99% fewer tokens' claim — own numbers,
     /// same format.
-    #[command(alias = "savings")]
     TokenSavings {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -901,7 +861,6 @@ enum Command {
     },
     /// Squash every commit on the current branch since its base into ONE
     /// commit (crash-safe, backup-ref'd), optionally force-pushing with lease.
-    #[command(alias = "rewrite")]
     SquashBranch {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -932,7 +891,6 @@ enum Command {
         json: bool,
     },
     /// Per-region blame attribution: who introduced/owns each region of a file.
-    #[command(alias = "provenance")]
     WhoWrote {
         /// Repo-relative file to attribute.
         file: String,
@@ -953,7 +911,6 @@ enum Command {
     },
     /// One-call read-only branch inventory: ahead/behind, merged, stale,
     /// unpushed — the deterministic "did you push everything?" answer.
-    #[command(alias = "branches")]
     ListBranches {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -971,7 +928,6 @@ enum Command {
     },
     /// Additive-only, key-level .env mutations with snapshots and restore.
     /// Values are NEVER printed in any output.
-    #[command(alias = "env")]
     EditEnv {
         #[command(subcommand)]
         cmd: EnvCmd,
@@ -1006,7 +962,6 @@ enum Command {
     /// Save, retrieve, list, revise, and replay proven agent-browser paths
     /// (auth flows, config flows) so the agent follows a deterministic
     /// shortcut instead of re-discovering the UI from scratch every time.
-    #[command(alias = "flow")]
     ReplayFlow {
         #[command(subcommand)]
         cmd: FlowCmd,
@@ -2859,7 +2814,7 @@ fn run_search_one(
 ) -> Result<(), String> {
     let data = execute(
         root,
-        Request::Search {
+        Request::SearchContent {
             pattern: pattern.to_string(),
             json,
             limit,
@@ -3570,7 +3525,7 @@ fn compact_snapshot(data: &mut Value) {
 fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
     let root = discover_root(&path)?;
     let status = execute(&root, Request::Status {}, no_daemon)?;
-    let graph = execute(&root, Request::Graph {}, no_daemon)?;
+    let graph = execute(&root, Request::RebuildGraph {}, no_daemon)?;
     if !no_daemon {
         daemon_start(root.clone(), false, json)?;
     }
@@ -3932,7 +3887,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                 .join("targets.json");
             let data = execute(
                 &path,
-                Request::Targets {
+                Request::ScopeTask {
                     task: task.clone(),
                     limit,
                     max_tier: max_tier.clone(),
@@ -4003,7 +3958,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             let (target_paths, keywords) = if files.is_empty() {
                 let data = execute(
                     &path,
-                    Request::Targets {
+                    Request::ScopeTask {
                         task: problem.clone(),
                         limit: Some(10),
                         max_tier: None,
@@ -4093,7 +4048,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             Ok(())
         }
         Command::FindSymbol { name, path, json } => {
-            let data = execute(&path, Request::Symbol { name }, false)?;
+            let data = execute(&path, Request::FindSymbol { name }, false)?;
             finish_graph_cmd(data, json, |d| {
                 let syms = d.get("symbols")?.as_array()?;
                 let mut output = String::new();
@@ -4111,7 +4066,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             Ok(())
         }
         Command::ListSignatures { file, path, json } => {
-            let data = execute(&path, Request::Skeleton { file }, false)?;
+            let data = execute(&path, Request::ListSignatures { file }, false)?;
             finish_graph_cmd(data, json, |d| {
                 let syms = d.get("symbols")?.as_array()?;
                 let fname = d.get("file")?.as_str().unwrap_or("");
@@ -4195,7 +4150,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             markdown,
             json,
         } => {
-            let data = execute(&path, Request::Map { markdown }, false)?;
+            let data = execute(&path, Request::RepoMap { markdown }, false)?;
             operation_metrics::observe(&data);
             if json {
                 return print_data(&data, true);
@@ -4237,7 +4192,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
             let data = execute(
                 &path,
-                Request::Context {
+                Request::PackContext {
                     uid,
                     budget_tokens: budget,
                 },
@@ -4310,7 +4265,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             };
             let data = execute(
                 &path,
-                Request::Uses {
+                Request::WhoCalls {
                     uid_or_name,
                     role: role_s.to_string(),
                     offset: Some(offset),
@@ -4353,14 +4308,14 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             path,
             json,
         } => {
-            let data = execute(&path, Request::Trace { from, to }, false)?;
+            let data = execute(&path, Request::CallPath { from, to }, false)?;
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }
         Command::ListFlows { path, offset, json } => {
             let data = execute(
                 &path,
-                Request::Processes {
+                Request::ListFlows {
                     offset: Some(offset),
                 },
                 false,
@@ -4371,7 +4326,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         Command::ListAreas { path, offset, json } => {
             let data = execute(
                 &path,
-                Request::Clusters {
+                Request::ListAreas {
                     offset: Some(offset),
                 },
                 false,
@@ -4391,7 +4346,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
             let data = execute(
                 &path,
-                Request::Changes {
+                Request::WhatChanged {
                     base,
                     offset: Some(offset),
                     include_tests: tests,
@@ -4402,7 +4357,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             Ok(())
         }
         Command::RebuildGraph { path, json } => {
-            let v = execute(&path, Request::Graph {}, false)?;
+            let v = execute(&path, Request::RebuildGraph {}, false)?;
             eprintln!(
                 "graph built in {} ms -> {}",
                 v.get("elapsed_ms").and_then(Value::as_u64).unwrap_or(0),
@@ -4786,7 +4741,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             if call_guard_check("find-code", &format!("{phrase} {}", path.display())) {
                 return Err("circuit breaker: repeated resolve calls".to_string());
             }
-            let mut data = execute(&path, Request::Resolve { phrase, limit }, false)?;
+            let mut data = execute(&path, Request::FindCode { phrase, limit }, false)?;
             if let Ok(root) = discover_root(&path) {
                 enrich_resolve_matches_with_context(&mut data, &root);
             }
@@ -4805,7 +4760,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         } => {
             let data = execute(
                 &path,
-                Request::History {
+                Request::SearchHistory {
                     query,
                     facet: Some(facet),
                     limit,
@@ -4820,7 +4775,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             token,
             json,
         } => {
-            let data = execute(&path, Request::Lifecycle { path: file, token }, false)?;
+            let data = execute(&path, Request::FileHistory { path: file, token }, false)?;
             print_data(&data, json)
         }
         Command::DigHistory {
@@ -4839,7 +4794,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             }
             let data = execute(
                 &path,
-                Request::Excavate {
+                Request::DigHistory {
                     phrase,
                     path: file,
                     from,
@@ -4860,7 +4815,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         } => {
             let data = execute(
                 &path,
-                Request::Reconcile {
+                Request::SyncBranch {
                     strategy: Some(strategy),
                     push: Some(push),
                     into,
@@ -4879,7 +4834,7 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         } => {
             let data = execute(
                 &path,
-                Request::Journal {
+                Request::RecordEvent {
                     kind,
                     path: file,
                     detail,
@@ -5793,7 +5748,7 @@ fn run_query(
                 .trim_end_matches('`');
             execute(
                 &path,
-                Request::Resolve {
+                Request::FindCode {
                     phrase: phrase.into(),
                     limit: None,
                 },
@@ -5802,7 +5757,7 @@ fn run_query(
         }
         "targets" => execute(
             &path,
-            Request::Targets {
+            Request::ScopeTask {
                 task: intent.clone(),
                 limit: None,
                 max_tier: None,
@@ -5824,7 +5779,7 @@ fn run_query(
         }
         "excavate" => execute(
             &path,
-            Request::Excavate {
+            Request::DigHistory {
                 phrase: Some(intent.clone()),
                 path: None,
                 from: None,
@@ -5833,7 +5788,7 @@ fn run_query(
             },
             no_daemon,
         )?,
-        "inspect" => execute(&path, Request::Inspect { files: None }, no_daemon)?,
+        "inspect" => execute(&path, Request::RepoState { files: None }, no_daemon)?,
         _ => return Err(format!("unsupported query operation '{operation}'")),
     };
     result.evidence.push(evidence);
@@ -6868,10 +6823,7 @@ mod renamed_command_tests {
     }
 
     #[test]
-    fn clap_aliases_are_exactly_the_rename_table() {
-        // Every hidden alias the parser accepts must be a documented rename,
-        // and every documented rename must parse: a variant renamed again
-        // without updating the table fails here, not in a user's script.
+    fn clap_aliases_are_empty_since_renames_are_complete() {
         let registered = on_big_stack(|| {
             let cli = Cli::command();
             let mut registered = BTreeSet::new();
@@ -6882,15 +6834,12 @@ mod renamed_command_tests {
             }
             registered
         });
-        let table: BTreeSet<(String, String)> = pixel_proto::commands::RENAMED_COMMANDS
-            .iter()
-            .map(|(old, new)| ((*old).to_string(), (*new).to_string()))
-            .collect();
-        assert_eq!(registered, table);
+        assert!(registered.is_empty(), "aliases: {registered:?}");
+        assert!(pixel_proto::commands::RENAMED_COMMANDS.is_empty());
     }
 
     #[test]
-    fn an_old_name_parses_to_the_current_subcommand() {
+    fn current_names_parse_directly() {
         let name = |words: &'static [&'static str]| {
             on_big_stack(move || {
                 Cli::command()
@@ -6900,37 +6849,27 @@ mod renamed_command_tests {
                     .map(str::to_string)
             })
         };
-        // The action log and the metrics evidence key on this name, so an
-        // alias invocation is recorded exactly like the current spelling.
         assert_eq!(
-            name(&["pixel", "ready", "--no-daemon", "--json"]).as_deref(),
+            name(&["pixel", "prepare-repo", "--no-daemon", "--json"]).as_deref(),
             Some("prepare-repo")
         );
         assert_eq!(
-            name(&["pixel", "hook", "session-start"]).as_deref(),
+            name(&["pixel", "run-hook", "session-start"]).as_deref(),
             Some("run-hook")
         );
     }
 
     #[test]
-    fn renamed_invocation_reads_the_command_word_only() {
-        assert_eq!(
-            renamed_invocation(&argv(&["pixel", "ready"])),
-            Some(("ready", "prepare-repo"))
-        );
+    fn renamed_invocation_always_none_after_clean_break() {
+        assert_eq!(renamed_invocation(&argv(&["pixel", "ready"])), None);
         assert_eq!(
             renamed_invocation(&argv(&["pixel", "--metrics", "off", "changes", "."])),
-            Some(("changes", "what-changed")),
+            None,
             "the value of --metrics is not the command"
         );
         assert_eq!(
             renamed_invocation(&argv(&["pixel", "--metrics=off", "symbol", "x"])),
-            Some(("symbol", "find-symbol"))
-        );
-        assert_eq!(
-            renamed_invocation(&argv(&["pixel", "prepare-repo", "ready"])),
-            None,
-            "a path named like an old command is not a renamed invocation"
+            None
         );
         assert_eq!(renamed_invocation(&argv(&["pixel", "impact", "x"])), None);
         assert_eq!(renamed_invocation(&argv(&["pixel", "--help"])), None);
@@ -6938,10 +6877,10 @@ mod renamed_command_tests {
     }
 
     #[test]
-    fn rename_note_is_one_line_and_follows_the_metrics_gate() {
+    fn rename_note_always_none_after_clean_break() {
         assert_eq!(
-            rename_note(&argv(&["pixel", "ready", "--json"]), true).as_deref(),
-            Some("note: 'ready' is now 'prepare-repo'; the old name stays accepted until 1.0\n")
+            rename_note(&argv(&["pixel", "ready", "--json"]), true),
+            None
         );
         assert_eq!(rename_note(&argv(&["pixel", "ready"]), false), None);
         assert_eq!(rename_note(&argv(&["pixel", "prepare-repo"]), true), None);

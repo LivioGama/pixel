@@ -514,7 +514,13 @@ fn dry_run_leaves_pre_existing_files_byte_identical() {
 fn session_capabilities_registry_is_live_and_excludes_internal_ops() {
     let caps = pixel_proto::op::SESSION_CAPABILITIES;
     for expected in [
-        "search", "targets", "publish", "push", "ship", "resolve", "impact",
+        "search-content",
+        "scope-task",
+        "commit",
+        "push",
+        "commit-and-push",
+        "find-code",
+        "impact",
     ] {
         assert!(
             caps.contains(&expected),

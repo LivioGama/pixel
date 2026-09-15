@@ -183,7 +183,7 @@ fn runtime_command_mentions_skip_comments_and_tests() {
     ]
     .join("\n");
     let got: Vec<String> = runtime_command_mentions(&source).into_iter().collect();
-    assert_eq!(got, ["build-index", "rescue"]);
+    assert_eq!(got, ["build-index"]);
 }
 
 #[test]

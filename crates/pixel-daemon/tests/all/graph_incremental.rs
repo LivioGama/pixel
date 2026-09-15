@@ -70,7 +70,7 @@ fn fixture(tag: &str) -> PathBuf {
 /// Build index + graph once (the "valid `.pixel/` copy" a CI job restores).
 fn build_graph(dir: &Path) -> serde_json::Value {
     let mut svc = Service::open(dir).unwrap();
-    let resp = svc.handle(Request::Symbol {
+    let resp = svc.handle(Request::FindSymbol {
         name: "work".into(),
     });
     assert!(resp.ok, "{:?}", resp.error);
@@ -84,7 +84,7 @@ fn build_graph(dir: &Path) -> serde_json::Value {
 
 fn changes(dir: &Path) -> serde_json::Value {
     let mut svc = Service::open(dir).unwrap();
-    let resp = svc.handle(Request::Changes {
+    let resp = svc.handle(Request::WhatChanged {
         base: None,
         offset: None,
         include_tests: false,
@@ -95,7 +95,7 @@ fn changes(dir: &Path) -> serde_json::Value {
 
 fn symbol(dir: &Path, name: &str) -> serde_json::Value {
     let mut svc = Service::open(dir).unwrap();
-    let resp = svc.handle(Request::Symbol { name: name.into() });
+    let resp = svc.handle(Request::FindSymbol { name: name.into() });
     assert!(resp.ok, "{:?}", resp.error);
     resp.into_data()
 }

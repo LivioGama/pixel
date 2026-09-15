@@ -137,7 +137,7 @@ fn resolve_success_rate(svc: &mut Service, qrels: &[(&'static str, Vec<String>)]
         // `resolve` takes a phrase directly (concept-index engine), not a regex
         // alternation — pass the query string verbatim so the inputs match the
         // semantic ground-truth labels the qrels are labeled from.
-        let resp = svc.handle(Op::Resolve {
+        let resp = svc.handle(Op::FindCode {
             phrase: q.to_string(),
             limit: Some(10),
         });
@@ -192,7 +192,7 @@ fn run_ndcg(
         let mut seen = HashSet::new();
         let mut offset = 0;
         loop {
-            let resp = svc.handle(Op::Search {
+            let resp = svc.handle(Op::SearchContent {
                 pattern: pattern.clone(),
                 json: true,
                 limit: Some(50),
@@ -322,7 +322,7 @@ fn bench(c: &mut Criterion) {
     let (_temporary, root, mut svc) = graph_fixture();
     let suite = qrels(&root);
     // Warm up index + graph.
-    let _ = svc.handle(Op::Search {
+    let _ = svc.handle(Op::SearchContent {
         pattern: "concept resolve".into(),
         json: true,
         limit: Some(10),

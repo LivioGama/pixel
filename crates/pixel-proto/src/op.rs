@@ -28,7 +28,8 @@ pub enum Op {
         #[serde(default)]
         params: Value,
     },
-    Search {
+    #[serde(rename = "search-content")]
+    SearchContent {
         pattern: String,
         #[serde(default)]
         json: bool,
@@ -49,7 +50,8 @@ pub enum Op {
     },
     /// Sniper target list: task description in, closed prioritized file
     /// list (P0/P1/P2) out.
-    Targets {
+    #[serde(rename = "scope-task")]
+    ScopeTask {
         task: String,
         #[serde(default)]
         limit: Option<usize>,
@@ -58,14 +60,17 @@ pub enum Op {
         #[serde(default)]
         precision: bool,
     },
-    Symbol {
+    #[serde(rename = "find-symbol")]
+    FindSymbol {
         name: String,
     },
     /// All signatures in a file — the "list-signatures" view at ~10% of Read cost.
-    Skeleton {
+    #[serde(rename = "list-signatures")]
+    ListSignatures {
         file: String,
     },
-    Context {
+    #[serde(rename = "pack-context")]
+    PackContext {
         uid: String,
         #[serde(default)]
         budget_tokens: Option<usize>,
@@ -76,26 +81,31 @@ pub enum Op {
         #[serde(default)]
         depth: Option<u32>,
     },
-    Uses {
+    #[serde(rename = "who-calls")]
+    WhoCalls {
         uid_or_name: String,
         /// "callers" | "callees"
         role: String,
         #[serde(default)]
         offset: Option<usize>,
     },
-    Trace {
+    #[serde(rename = "call-path")]
+    CallPath {
         from: String,
         to: String,
     },
-    Processes {
+    #[serde(rename = "list-flows")]
+    ListFlows {
         #[serde(default)]
         offset: Option<usize>,
     },
-    Clusters {
+    #[serde(rename = "list-areas")]
+    ListAreas {
         #[serde(default)]
         offset: Option<usize>,
     },
-    Changes {
+    #[serde(rename = "what-changed")]
+    WhatChanged {
         #[serde(default)]
         base: Option<String>,
         #[serde(default)]
@@ -106,7 +116,8 @@ pub enum Op {
         #[serde(default)]
         include_tests: bool,
     },
-    Graph {},
+    #[serde(rename = "rebuild-graph")]
+    RebuildGraph {},
     Status {},
     /// Force a rebuild of the text index shard. Returns BuildStats.
     /// When sent to the daemon, the daemon's already-open Service does
@@ -116,14 +127,16 @@ pub enum Op {
     /// cascade-ranked match list (T0 exact-unique → T1 kind-directed → T2
     /// word intersection → T3 trigram), each tier short-circuiting, with
     /// explicit confidence.
-    Resolve {
+    #[serde(rename = "find-code")]
+    FindCode {
         phrase: String,
         #[serde(default)]
         limit: Option<usize>,
     },
     /// M3 / Engine 2: history-wide fact + diff search. `scope` selects
     /// "message" | "path" | "diff" | "all" (default "all").
-    History {
+    #[serde(rename = "search-history")]
+    SearchHistory {
         query: String,
         #[serde(default)]
         facet: Option<String>,
@@ -132,7 +145,8 @@ pub enum Op {
     },
     /// Engine 2: lifecycle of a path or token — first-seen, last-changed,
     /// removed-in, present-at-HEAD.
-    Lifecycle {
+    #[serde(rename = "file-history")]
+    FileHistory {
         #[serde(default)]
         path: Option<String>,
         #[serde(default)]
@@ -140,7 +154,8 @@ pub enum Op {
     },
     /// Engine 2: history-wide discovery ("dig-history"). `phrase` may be empty
     /// to list the ingest checkpoint/state only.
-    Excavate {
+    #[serde(rename = "dig-history")]
+    DigHistory {
         #[serde(default)]
         phrase: Option<String>,
         #[serde(default)]
@@ -154,7 +169,8 @@ pub enum Op {
     },
     /// Engine 4: one-call deterministic branch sync. `strategy` is
     /// "report" (default) or "rebase-if-clean" (explicit opt-in).
-    Reconcile {
+    #[serde(rename = "sync-branch")]
+    SyncBranch {
         #[serde(default)]
         strategy: Option<String>,
         #[serde(default)]
@@ -168,7 +184,8 @@ pub enum Op {
         request_id: Option<String>,
     },
     /// M5: journal a session event into the session db (fire-and-forget).
-    Journal {
+    #[serde(rename = "record-event")]
+    RecordEvent {
         kind: String,
         #[serde(default)]
         path: Option<String>,
@@ -177,13 +194,15 @@ pub enum Op {
     },
     // -- M2: git ops -----------------------------------------------------
     /// Repo state snapshot: HEAD, branch, dirty files, fingerprints.
-    Inspect {
+    #[serde(rename = "repo-state")]
+    RepoState {
         #[serde(default)]
         files: Option<Vec<String>>,
     },
     /// Show working-tree changes as structured items (staged, unstaged,
     /// untracked, conflicted).
-    Review {
+    #[serde(rename = "review-changes")]
+    ReviewChanges {
         #[serde(default)]
         cursor: Option<String>,
         #[serde(default)]
@@ -202,7 +221,8 @@ pub enum Op {
     /// Commit history (git log) with detail levels and byte caps. Named
     /// `HistoryOp` to avoid clashing with the M3 `History` (history-wide
     /// fact + diff search) variant.
-    HistoryOp {
+    #[serde(rename = "commit-history")]
+    CommitHistory {
         #[serde(default)]
         ref_name: Option<String>,
         #[serde(default)]
@@ -215,7 +235,8 @@ pub enum Op {
         byte_cap: Option<usize>,
     },
     /// Stage files, commit, and optionally push. Crash-safe via journal.
-    Publish {
+    #[serde(rename = "commit")]
+    Commit {
         message: String,
         files: Vec<String>,
         #[serde(default)]
@@ -235,7 +256,8 @@ pub enum Op {
         request_id: String,
     },
     /// Publish + push in one op (convenience wrapper).
-    Ship {
+    #[serde(rename = "commit-and-push")]
+    CommitAndPush {
         message: String,
         files: Vec<String>,
         remote: String,
@@ -244,20 +266,23 @@ pub enum Op {
     },
     /// Create a new branch from HEAD or a base ref. Named `BranchOp` to
     /// avoid clashing with any future `Branch` variant.
-    BranchOp {
+    #[serde(rename = "new-branch")]
+    NewBranch {
         name: String,
         #[serde(default)]
         from: Option<String>,
         request_id: String,
     },
     /// Fast-forward merge with expectedHead + targetOid.
-    Update {
+    #[serde(rename = "fast-forward")]
+    FastForward {
         expected_head: String,
         target_oid: String,
         request_id: String,
     },
     /// Explicit-refspec fetch (idempotent).
-    Sync {
+    #[serde(rename = "fetch")]
+    Fetch {
         remote: String,
         #[serde(default)]
         refspec: Option<String>,
@@ -280,7 +305,8 @@ pub enum Op {
     /// P2·2: structural repo map — every indexed file with its symbols.
     /// `markdown` emits the exportable document form (per-file headings +
     /// symbol bullets); otherwise a compact per-file outline.
-    Map {
+    #[serde(rename = "repo-map")]
+    RepoMap {
         #[serde(default)]
         markdown: bool,
     },
@@ -311,37 +337,37 @@ impl Op {
         match self {
             Op::Ping => "ping",
             Op::Recall { .. } => "recall",
-            Op::Search { .. } => "search",
-            Op::Targets { .. } => "targets",
-            Op::Symbol { .. } => "symbol",
-            Op::Skeleton { .. } => "skeleton",
-            Op::Context { .. } => "context",
+            Op::SearchContent { .. } => "search-content",
+            Op::ScopeTask { .. } => "scope-task",
+            Op::FindSymbol { .. } => "find-symbol",
+            Op::ListSignatures { .. } => "list-signatures",
+            Op::PackContext { .. } => "pack-context",
             Op::Impact { .. } => "impact",
-            Op::Uses { .. } => "uses",
-            Op::Trace { .. } => "trace",
-            Op::Processes { .. } => "processes",
-            Op::Clusters { .. } => "clusters",
-            Op::Changes { .. } => "changes",
-            Op::Graph {} => "graph",
+            Op::WhoCalls { .. } => "who-calls",
+            Op::CallPath { .. } => "call-path",
+            Op::ListFlows { .. } => "list-flows",
+            Op::ListAreas { .. } => "list-areas",
+            Op::WhatChanged { .. } => "what-changed",
+            Op::RebuildGraph {} => "rebuild-graph",
             Op::Status {} => "status",
-            Op::Resolve { .. } => "resolve",
-            Op::History { .. } => "history",
-            Op::Lifecycle { .. } => "lifecycle",
-            Op::Excavate { .. } => "excavate",
-            Op::Reconcile { .. } => "reconcile",
-            Op::Journal { .. } => "journal",
-            Op::Inspect { .. } => "inspect",
-            Op::Review { .. } => "review",
+            Op::FindCode { .. } => "find-code",
+            Op::SearchHistory { .. } => "search-history",
+            Op::FileHistory { .. } => "file-history",
+            Op::DigHistory { .. } => "dig-history",
+            Op::SyncBranch { .. } => "sync-branch",
+            Op::RecordEvent { .. } => "record-event",
+            Op::RepoState { .. } => "repo-state",
+            Op::ReviewChanges { .. } => "review-changes",
             Op::Diff { .. } => "diff",
-            Op::HistoryOp { .. } => "history_op",
-            Op::Publish { .. } => "publish",
+            Op::CommitHistory { .. } => "commit-history",
+            Op::Commit { .. } => "commit",
             Op::Push { .. } => "push",
-            Op::Ship { .. } => "ship",
-            Op::BranchOp { .. } => "branch_op",
-            Op::Update { .. } => "update",
-            Op::Sync { .. } => "sync",
+            Op::CommitAndPush { .. } => "commit-and-push",
+            Op::NewBranch { .. } => "new-branch",
+            Op::FastForward { .. } => "fast-forward",
+            Op::Fetch { .. } => "fetch",
             Op::Note { .. } => "note",
-            Op::Map { .. } => "map",
+            Op::RepoMap { .. } => "repo-map",
             Op::Plan { .. } => "plan",
             Op::Shutdown => "shutdown",
             Op::Reindex { .. } => "reindex",
@@ -363,37 +389,37 @@ impl Op {
 pub const SESSION_CAPABILITIES: &[&str] = &[
     "ping",
     "recall",
-    "search",
-    "targets",
-    "symbol",
-    "skeleton",
-    "context",
+    "search-content",
+    "scope-task",
+    "find-symbol",
+    "list-signatures",
+    "pack-context",
     "impact",
-    "uses",
-    "trace",
-    "processes",
-    "clusters",
-    "changes",
-    "graph",
+    "who-calls",
+    "call-path",
+    "list-flows",
+    "list-areas",
+    "what-changed",
+    "rebuild-graph",
     "status",
-    "resolve",
-    "history",
-    "lifecycle",
-    "excavate",
-    "reconcile",
-    "journal",
-    "inspect",
-    "review",
+    "find-code",
+    "search-history",
+    "file-history",
+    "dig-history",
+    "sync-branch",
+    "record-event",
+    "repo-state",
+    "review-changes",
     "diff",
-    "history_op",
-    "publish",
+    "commit-history",
+    "commit",
     "push",
-    "ship",
-    "branch_op",
-    "update",
-    "sync",
+    "commit-and-push",
+    "new-branch",
+    "fast-forward",
+    "fetch",
     "note",
-    "map",
+    "repo-map",
     "plan",
     "flow",
 ];
@@ -404,11 +430,11 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
 /// scenario-consistency check can compare the installed rule text against
 /// exactly what the binary injects.
 ///
-/// Must name every mandatory scenario: targets (mandatory first call,
+/// Must name every mandatory scenario: scope-task (mandatory first call,
 /// advisory fence — the guard warns on out-of-scope files rather than
-/// silently allowing drift), resolve, rescue/excavate, reconcile, and
-/// impact/changes (blast radius before edits).
-pub const SESSION_USAGE: &str = "pixel is the unified retrieval + git engine. Use `pixel <verb>` for search, resolve, targets, history, and safe git ops. Five mandatory scenarios: (1) `pixel scope-task \"<task>\"` — mandatory first call before the first file read (advisory fence: the guard warns on out-of-list files); (2) `pixel find-code \"<phrase>\"` before any free-text search; (3) `pixel plan-rollback`/`pixel dig-history` the moment code was working before; (4) `pixel sync-branch` for any branch sync; (5) `pixel impact <symbol>` before editing any symbol and `pixel what-changed` before any edit batch — measure the blast radius before edits.";
+/// silently allowing drift), find-code, plan-rollback/dig-history, sync-branch, and
+/// impact/what-changed (blast radius before edits).
+pub const SESSION_USAGE: &str = "pixel is the unified retrieval + git engine. Use `pixel <verb>` for search-content, find-code, scope-task, search-history, and safe git ops. Five mandatory scenarios: (1) `pixel scope-task \"<task>\"` — mandatory first call before the first file read (advisory fence: the guard warns on out-of-list files); (2) `pixel find-code \"<phrase>\"` before any free-text search; (3) `pixel plan-rollback`/`pixel dig-history` the moment code was working before; (4) `pixel sync-branch` for any branch sync; (5) `pixel impact <symbol>` before editing any symbol and `pixel what-changed` before any edit batch — measure the blast radius before edits.";
 
 #[cfg(test)]
 mod tests {
@@ -423,7 +449,7 @@ mod tests {
 
     #[test]
     fn search_serializes_with_snake_case_tag_and_fields() {
-        let op = Op::Search {
+        let op = Op::SearchContent {
             pattern: "fn main".into(),
             json: true,
             limit: Some(50),
@@ -435,7 +461,7 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "op": "search",
+                "op": "search-content",
                 "pattern": "fn main",
                 "json": true,
                 "limit": 50,
@@ -449,10 +475,10 @@ mod tests {
     #[test]
     fn targets_omits_defaulted_limit_on_deserialize() {
         let op: Op =
-            serde_json::from_value(json!({"op": "targets", "task": "fix the bug"})).unwrap();
+            serde_json::from_value(json!({"op": "scope-task", "task": "fix the bug"})).unwrap();
         assert_eq!(
             op,
-            Op::Targets {
+            Op::ScopeTask {
                 task: "fix the bug".into(),
                 limit: None,
                 max_tier: None,
@@ -476,8 +502,8 @@ mod tests {
     #[test]
     fn graph_and_status_serialize_as_empty_object_variants() {
         assert_eq!(
-            serde_json::to_value(Op::Graph {}).unwrap(),
-            json!({"op": "graph"})
+            serde_json::to_value(Op::RebuildGraph {}).unwrap(),
+            json!({"op": "rebuild-graph"})
         );
         assert_eq!(
             serde_json::to_value(Op::Status {}).unwrap(),
@@ -493,12 +519,12 @@ mod tests {
 
     #[test]
     fn resolve_round_trips() {
-        let op = Op::Resolve {
+        let op = Op::FindCode {
             phrase: "the form".into(),
             limit: Some(5),
         };
         let value = serde_json::to_value(&op).unwrap();
-        assert_eq!(value["op"], "resolve");
+        assert_eq!(value["op"], "find-code");
         assert_eq!(value["phrase"], "the form");
         assert_eq!(value["limit"], 5);
         let back: Op = serde_json::from_value(value).unwrap();
@@ -507,10 +533,10 @@ mod tests {
 
     #[test]
     fn reconcile_round_trips_with_defaults() {
-        let op: Op = serde_json::from_value(json!({"op": "reconcile"})).unwrap();
+        let op: Op = serde_json::from_value(json!({"op": "sync-branch"})).unwrap();
         assert_eq!(
             op,
-            Op::Reconcile {
+            Op::SyncBranch {
                 strategy: None,
                 push: None,
                 into: None,
@@ -521,13 +547,13 @@ mod tests {
 
     #[test]
     fn inspect_round_trips_with_defaults() {
-        let op: Op = serde_json::from_value(json!({"op": "inspect"})).unwrap();
-        assert_eq!(op, Op::Inspect { files: None });
+        let op: Op = serde_json::from_value(json!({"op": "repo-state"})).unwrap();
+        assert_eq!(op, Op::RepoState { files: None });
     }
 
     #[test]
     fn publish_round_trips() {
-        let op = Op::Publish {
+        let op = Op::Commit {
             message: "fix bug".into(),
             files: vec!["src/a.rs".into(), "src/b.rs".into()],
             expected_head: Some("abc123".into()),
@@ -536,7 +562,7 @@ mod tests {
             request_id: "req-1".into(),
         };
         let value = serde_json::to_value(&op).unwrap();
-        assert_eq!(value["op"], "publish");
+        assert_eq!(value["op"], "commit");
         assert_eq!(value["message"], "fix bug");
         assert_eq!(value["files"], json!(["src/a.rs", "src/b.rs"]));
         assert_eq!(value["expected_head"], "abc123");
@@ -549,13 +575,13 @@ mod tests {
 
     #[test]
     fn update_round_trips() {
-        let op = Op::Update {
+        let op = Op::FastForward {
             expected_head: "abc123".into(),
             target_oid: "def456".into(),
             request_id: "req-2".into(),
         };
         let value = serde_json::to_value(&op).unwrap();
-        assert_eq!(value["op"], "update");
+        assert_eq!(value["op"], "fast-forward");
         assert_eq!(value["expected_head"], "abc123");
         assert_eq!(value["target_oid"], "def456");
         assert_eq!(value["request_id"], "req-2");
@@ -578,7 +604,7 @@ mod tests {
                 "recall",
             ),
             (
-                Op::Search {
+                Op::SearchContent {
                     pattern: "".into(),
                     json: false,
                     limit: None,
@@ -586,25 +612,25 @@ mod tests {
                     paths: None,
                     scope: None,
                 },
-                "search",
+                "search-content",
             ),
             (
-                Op::Targets {
+                Op::ScopeTask {
                     task: "".into(),
                     limit: None,
                     max_tier: None,
                     precision: false,
                 },
-                "targets",
+                "scope-task",
             ),
-            (Op::Symbol { name: "".into() }, "symbol"),
-            (Op::Skeleton { file: "".into() }, "skeleton"),
+            (Op::FindSymbol { name: "".into() }, "find-symbol"),
+            (Op::ListSignatures { file: "".into() }, "list-signatures"),
             (
-                Op::Context {
+                Op::PackContext {
                     uid: "".into(),
                     budget_tokens: None,
                 },
-                "context",
+                "pack-context",
             ),
             (
                 Op::Impact {
@@ -615,88 +641,88 @@ mod tests {
                 "impact",
             ),
             (
-                Op::Uses {
+                Op::WhoCalls {
                     uid_or_name: "".into(),
                     role: "".into(),
                     offset: None,
                 },
-                "uses",
+                "who-calls",
             ),
             (
-                Op::Trace {
+                Op::CallPath {
                     from: "".into(),
                     to: "".into(),
                 },
-                "trace",
+                "call-path",
             ),
-            (Op::Processes { offset: None }, "processes"),
-            (Op::Clusters { offset: None }, "clusters"),
+            (Op::ListFlows { offset: None }, "list-flows"),
+            (Op::ListAreas { offset: None }, "list-areas"),
             (
-                Op::Changes {
+                Op::WhatChanged {
                     base: None,
                     offset: None,
                     include_tests: false,
                 },
-                "changes",
+                "what-changed",
             ),
-            (Op::Graph {}, "graph"),
+            (Op::RebuildGraph {}, "rebuild-graph"),
             (Op::Status {}, "status"),
             (
-                Op::Resolve {
+                Op::FindCode {
                     phrase: "".into(),
                     limit: None,
                 },
-                "resolve",
+                "find-code",
             ),
             (
-                Op::History {
+                Op::SearchHistory {
                     query: "".into(),
                     facet: None,
                     limit: None,
                 },
-                "history",
+                "search-history",
             ),
             (
-                Op::Lifecycle {
+                Op::FileHistory {
                     path: None,
                     token: None,
                 },
-                "lifecycle",
+                "file-history",
             ),
             (
-                Op::Excavate {
+                Op::DigHistory {
                     phrase: None,
                     path: None,
                     from: None,
                     to: None,
                     limit: None,
                 },
-                "excavate",
+                "dig-history",
             ),
             (
-                Op::Reconcile {
+                Op::SyncBranch {
                     strategy: None,
                     push: None,
                     into: None,
                     request_id: None,
                 },
-                "reconcile",
+                "sync-branch",
             ),
             (
-                Op::Journal {
+                Op::RecordEvent {
                     kind: "".into(),
                     path: None,
                     detail: None,
                 },
-                "journal",
+                "record-event",
             ),
-            (Op::Inspect { files: None }, "inspect"),
+            (Op::RepoState { files: None }, "repo-state"),
             (
-                Op::Review {
+                Op::ReviewChanges {
                     cursor: None,
                     byte_cap: None,
                 },
-                "review",
+                "review-changes",
             ),
             (
                 Op::Diff {
@@ -708,17 +734,17 @@ mod tests {
                 "diff",
             ),
             (
-                Op::HistoryOp {
+                Op::CommitHistory {
                     ref_name: None,
                     limit: None,
                     detail: None,
                     cursor: None,
                     byte_cap: None,
                 },
-                "history_op",
+                "commit-history",
             ),
             (
-                Op::Publish {
+                Op::Commit {
                     message: "".into(),
                     files: vec![],
                     expected_head: None,
@@ -726,7 +752,7 @@ mod tests {
                     amend: None,
                     request_id: "".into(),
                 },
-                "publish",
+                "commit",
             ),
             (
                 Op::Push {
@@ -738,37 +764,37 @@ mod tests {
                 "push",
             ),
             (
-                Op::Ship {
+                Op::CommitAndPush {
                     message: "".into(),
                     files: vec![],
                     remote: "".into(),
                     refspec: "".into(),
                     request_id: "".into(),
                 },
-                "ship",
+                "commit-and-push",
             ),
             (
-                Op::BranchOp {
+                Op::NewBranch {
                     name: "".into(),
                     from: None,
                     request_id: "".into(),
                 },
-                "branch_op",
+                "new-branch",
             ),
             (
-                Op::Update {
+                Op::FastForward {
                     expected_head: "".into(),
                     target_oid: "".into(),
                     request_id: "".into(),
                 },
-                "update",
+                "fast-forward",
             ),
             (
-                Op::Sync {
+                Op::Fetch {
                     remote: "".into(),
                     refspec: None,
                 },
-                "sync",
+                "fetch",
             ),
             (
                 Op::Plan {
@@ -815,37 +841,37 @@ mod tests {
         let all_real_ops: &[&str] = &[
             "ping",
             "recall",
-            "search",
-            "targets",
-            "symbol",
-            "skeleton",
-            "context",
+            "search-content",
+            "scope-task",
+            "find-symbol",
+            "list-signatures",
+            "pack-context",
             "impact",
-            "uses",
-            "trace",
-            "processes",
-            "clusters",
-            "changes",
-            "graph",
+            "who-calls",
+            "call-path",
+            "list-flows",
+            "list-areas",
+            "what-changed",
+            "rebuild-graph",
             "status",
-            "resolve",
-            "history",
-            "lifecycle",
-            "excavate",
-            "reconcile",
-            "journal",
-            "inspect",
-            "review",
+            "find-code",
+            "search-history",
+            "file-history",
+            "dig-history",
+            "sync-branch",
+            "record-event",
+            "repo-state",
+            "review-changes",
             "diff",
-            "history_op",
-            "publish",
+            "commit-history",
+            "commit",
             "push",
-            "ship",
-            "branch_op",
-            "update",
-            "sync",
+            "commit-and-push",
+            "new-branch",
+            "fast-forward",
+            "fetch",
             "note",
-            "map",
+            "repo-map",
             "plan",
             "flow",
             "shutdown",
