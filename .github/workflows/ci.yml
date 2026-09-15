@@ -2,11 +2,9 @@ name: CI
 
 on:
   push:
-    # develop is the integration branch (feature PRs are routed there). main
-    # is not built on push: it only receives a release PR whose tree is the
-    # tag's (already tested by the develop push and the release workflow's
-    # verify job) or a hotfix PR, whose own pull_request run below tests it.
-    branches: [develop]
+    # main is the only long-lived branch: every pull request merges into it
+    # and every release is a tag on it.
+    branches: [main]
   pull_request:
     # A pull request that only touches documentation no test reads -- prose
     # under docs/, the licence files, a Markdown file outside the list below
@@ -21,8 +19,8 @@ on:
     #     sections;
     #   - the generated plugin surfaces, which install_tests.rs compares
     #     against the prompts (scripts/gen-plugin-assets.sh --check).
-    # Add a path here when a test starts reading one. Develop pushes stay
-    # unfiltered so every merge commit there keeps a complete run. No branch
+    # Add a path here when a test starts reading one. Pushes to main stay
+    # unfiltered so every merge there keeps a complete run. No branch
     # rule requires this check today; if one is added, the excluded paths
     # need a twin workflow that reports success.
     paths:
@@ -54,8 +52,8 @@ on:
       - ".windsurf/**"
 
 # A new push to a pull request cancels the run still in flight for its
-# previous commit. Develop pushes are never cancelled so every
-# merge commit keeps a complete run.
+# previous commit. Pushes to main are never cancelled so every
+# merge keeps a complete run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -91,13 +89,13 @@ jobs:
           # One key for every job that builds the debug profile on Linux
           # (this one and mutants.yml), instead of the default per-job key.
           # The Mutants workflow only runs on pull_request, so it can never
-          # save under the develop/main rule below: without a shared key it
+          # save under the main rule below: without a shared key it
           # started from an empty cache on every PR.
           shared-key: linux-debug
-          # PRs read the cache but never write it: only develop/main
-          # merges refresh the shared entries, so one PR cannot thrash
+          # PRs read the cache but never write it: only merges into main
+          # refresh the shared entries, so one PR cannot thrash
           # or poison them. A failed build still saves what it compiled.
-          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Install system dependencies
@@ -193,7 +191,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: linux-msrv
-          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Install system dependencies

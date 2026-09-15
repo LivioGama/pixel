@@ -211,10 +211,15 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           body_path: release-notes.md
+          # install.sh ships with the release, not from a branch: main moves
+          # ahead of the latest release, and the documented one-liner reads
+          # releases/latest/download/install.sh, so it always runs the
+          # script of the release it installs.
           files: |
             artifacts/pixel-*.tar.gz
             artifacts/pixel-*.tar.gz.sha256
             pixel.rb
+            scripts/install.sh
 
       - name: Check out the Homebrew tap
         if: env.HOMEBREW_TAP_TOKEN != ''
@@ -270,13 +275,6 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          # The job never pushes: do not leave the token in .git/config.
-          persist-credentials: false
-          sparse-checkout: scripts/install.sh
-          sparse-checkout-cone-mode: false
-
       - name: Write the version check
         run: |
           cat > "$RUNNER_TEMP/check-version.sh" <<'EOF'
@@ -308,17 +306,19 @@ jobs:
           tar xzf "$ARCHIVE"
           "$RUNNER_TEMP/check-version.sh" "$DIR/pixel-${GITHUB_REF_NAME}-${{ matrix.target }}/bin/pixel" "release asset"
 
-      # The script from the tag, which is what main serves once the release
-      # PR merges. It resolves releases/latest, so it is only checked when
-      # this tag is the latest release (a hotfix on an older line is not).
-      - name: scripts/install.sh
+      # The documented one-liner, byte for byte: the install.sh asset of the
+      # latest release. Both the script and the binary it installs resolve
+      # releases/latest, so it is only checked when this tag is the latest
+      # release (a patch on an older line is not).
+      - name: install.sh (releases/latest/download)
         run: |
           LATEST="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
           if [ "$LATEST" != "$GITHUB_REF_NAME" ]; then
             echo "::notice::latest release is $LATEST, not $GITHUB_REF_NAME; install.sh not checked"
             exit 0
           fi
-          PIXEL_INSTALL_DIR="$RUNNER_TEMP/install-sh" sh scripts/install.sh
+          curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.sh" \
+            | PIXEL_INSTALL_DIR="$RUNNER_TEMP/install-sh" sh
           "$RUNNER_TEMP/check-version.sh" "$RUNNER_TEMP/install-sh/pixel" "install.sh"
 
       # Formula-wise the three targets are the same file; macOS is the one

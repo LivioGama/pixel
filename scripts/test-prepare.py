@@ -3,8 +3,8 @@
 
 Runs the real script inside a disposable workspace repository with stub
 `cargo` and `gh` on PATH. The stub `gh` answers `pr list` with the pull
-requests of the fixture, whatever the date search says (GitHub's own search
-returned the previous prepare PR), and applies the script's `--jq` expression
+requests of the fixture when they are asked for on `main`, whatever the date
+search says (GitHub's own search returned the previous prepare PR), and applies the script's `--jq` expression
 with the real `jq`, so the expression is exercised too.
 """
 
@@ -30,7 +30,10 @@ GH = """#!/usr/bin/env python3
 import json, os, subprocess, sys
 args = sys.argv[1:]
 if args[:2] == ["pr", "list"]:
-    prs = json.loads(open(os.environ["FIXTURE_PRS"]).read())
+    # Pull requests merge into main: a listing on any other base (the retired
+    # develop) finds none, so a script still asking for it lists nothing.
+    base = args[args.index("--base") + 1] if "--base" in args else None
+    prs = json.loads(open(os.environ["FIXTURE_PRS"]).read()) if base == "main" else []
     expr = args[args.index("--jq") + 1]
     out = subprocess.run(["jq", "-r", expr], input=json.dumps(prs),
                          capture_output=True, text=True, check=True)
@@ -75,7 +78,7 @@ class PrepareContract(unittest.TestCase):
         self.write("plugin.yaml", "name: a\nversion: 0.1.0\n")
         self.write("scripts/gen-plugin-assets.sh", "#!/bin/sh\n")
         self.write("CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n")
-        self.git("init", "-q", "-b", "develop")
+        self.git("init", "-q", "-b", "main")
         self.git("add", ".")
         self.git("commit", "-qm", "base")
 
@@ -92,12 +95,12 @@ class PrepareContract(unittest.TestCase):
         ).stdout.strip()
 
     def merge_pr(self, branch, rel):
-        """A pull request merged into develop with a merge commit."""
+        """A pull request merged into main with a merge commit."""
         self.git("switch", "-q", "-c", branch)
         self.write(rel, branch + "\n")
         self.git("add", ".")
         self.git("commit", "-qm", branch)
-        self.git("switch", "-q", "develop")
+        self.git("switch", "-q", "main")
         self.git("merge", "-q", "--no-ff", "-m", "Merge " + branch, branch)
         return self.git("rev-parse", "HEAD")
 
@@ -111,7 +114,7 @@ class PrepareContract(unittest.TestCase):
         )
 
     def listed(self, stdout):
-        head = "pull requests merged into develop since v0.1.0"
+        head = "pull requests merged into main since v0.1.0"
         lines = stdout.splitlines()
         start = next(i for i, line in enumerate(lines) if line.startswith(head)) + 1
         block = []

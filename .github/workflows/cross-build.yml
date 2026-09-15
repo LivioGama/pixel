@@ -4,15 +4,14 @@ name: Cross-build
 # --locked, model2vec only). The Test job's `cargo check` of that feature
 # set runs on glibc and cannot see a dependency that fails to link against
 # musl or a Cargo.lock that --locked rejects, so this is the only job that
-# proves a change still ships. It runs on every develop push and on the
-# pull requests that can change the outcome (a hotfix PR into main
-# included); a docs, prompt or script PR skips it. A push to main is not
-# rebuilt: the release workflow's build job builds the same lane from the
-# tag. No branch rule requires this check today; if one is added,
+# proves a change still ships. It runs on every push to main and on the
+# pull requests that can change the outcome; a docs, prompt or script PR
+# skips it. The release workflow's build job builds the same lane again
+# from the tag. No branch rule requires this check today; if one is added,
 # the excluded paths need a twin workflow that reports success.
 on:
   push:
-    branches: [develop]
+    branches: [main]
   pull_request:
     paths:
       - ".cargo/**"
@@ -63,10 +62,10 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          # PRs read the cache but never write it: only develop/main
-          # merges refresh the shared entries, so one PR cannot thrash
+          # PRs read the cache but never write it: only merges into main
+          # refresh the shared entries, so one PR cannot thrash
           # or poison them. A failed build still saves what it compiled.
-          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
           key: ${{ matrix.target }}
 

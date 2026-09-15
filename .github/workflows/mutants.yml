@@ -27,13 +27,6 @@ env:
 jobs:
   in-diff:
     name: Mutants in diff
-    # A release PR into main (head develop or release-*) carries only commits
-    # that already passed this job on their own PR into develop; its diff
-    # against main is the whole release (0.2.5's ran past 20 minutes and
-    # would have hit the 90-minute cap). Hotfix PRs into main stay gated.
-    if: >-
-      github.base_ref != 'main' ||
-      (github.head_ref != 'develop' && !startsWith(github.head_ref, 'release-'))
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -55,7 +48,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           # Same key as the CI test job: both build the Linux debug profile,
-          # and only that job (on develop/main pushes) writes the entry. This
+          # and only that job (on pushes to main) writes the entry. This
           # workflow runs on pull_request only, so `github.ref` is never a
           # branch and it can never save; read-only by construction.
           shared-key: linux-debug
