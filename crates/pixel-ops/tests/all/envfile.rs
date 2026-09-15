@@ -117,6 +117,91 @@ fn set_refuses_missing_file_without_create() {
 }
 
 #[test]
+fn set_refuses_a_file_outside_root_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    let outside = dir.path().join("escape.env");
+
+    // `..` climbing out of the root.
+    let err = envfile(
+        &root,
+        &EnvAction::Set {
+            file: "../escape.env".into(),
+            key: "A".into(),
+            value: SENTINEL.into(),
+            create_file: true,
+        },
+    )
+    .unwrap_err();
+    assert!(err.contains("UNSUPPORTED_STATE"), "unexpected error: {err}");
+    assert!(!err.contains(SENTINEL), "error message leaked a value");
+    assert!(!outside.exists(), "wrote outside the repo root");
+    assert!(
+        !root.join(".pixel").exists(),
+        "refused path still took a snapshot"
+    );
+
+    // An absolute path outside the root.
+    let err = envfile(
+        &root,
+        &EnvAction::Set {
+            file: outside.clone(),
+            key: "A".into(),
+            value: SENTINEL.into(),
+            create_file: true,
+        },
+    )
+    .unwrap_err();
+    assert!(err.contains("UNSUPPORTED_STATE"), "unexpected error: {err}");
+    assert!(!outside.exists(), "wrote outside the repo root");
+}
+
+#[test]
+fn set_accepts_an_absolute_file_inside_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, ".env", "A=1\n");
+
+    let result = envfile(
+        root,
+        &EnvAction::Set {
+            file: root.join(".env"),
+            key: "A".into(),
+            value: "2".into(),
+            create_file: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(result["file"], root.join(".env").display().to_string());
+    assert_eq!(read(root, ".env"), "A=2\n");
+}
+
+#[test]
+fn set_folds_dotdot_that_stays_inside_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, ".env", "A=1\n");
+
+    let result = envfile(
+        root,
+        &EnvAction::Set {
+            file: "sub/../.env".into(),
+            key: "A".into(),
+            value: "2".into(),
+            create_file: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(result["file"], root.join(".env").display().to_string());
+    assert_eq!(read(root, ".env"), "A=2\n");
+    assert!(
+        !root.join("sub/.env").exists(),
+        "wrote beside the real file"
+    );
+}
+
+#[test]
 fn snapshot_restore_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -245,6 +330,122 @@ fn restore_missing_snapshot_errors() {
     )
     .unwrap_err();
     assert!(err.contains("no snapshots"), "unexpected error: {err}");
+}
+
+/// A `--snapshot` id is a single path component of `[A-Za-z0-9._-]{1,64}`
+/// (the shape `take_snapshot` generates); anything else is refused before
+/// the id is joined to the snapshot dir, even when a file of that name
+/// exists there. The fixtures live in the per-file snapshot dir of `.env`
+/// (`.pixel/env-snapshots/env/`, `sanitize_rel`'s name for `.env`), or one
+/// level above it for the traversal case.
+#[test]
+fn restore_refuses_snapshot_ids_that_are_not_single_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, ".env", "A=1\n");
+    write(root, ".pixel/env-snapshots/x", "EVIL=1\n");
+    write(root, ".pixel/env-snapshots/env/with space", "EVIL=2\n");
+    write(
+        root,
+        &format!(".pixel/env-snapshots/env/{}", "a".repeat(65)),
+        "EVIL=3\n",
+    );
+
+    let invalid_ids = [
+        String::new(),
+        "../x".to_string(),
+        "with space".to_string(),
+        "a".repeat(65),
+    ];
+    for id in invalid_ids {
+        let err = envfile(
+            root,
+            &EnvAction::Restore {
+                file: ".env".into(),
+                snapshot: Some(id.clone()),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("invalid snapshot id"),
+            "id {id:?}: unexpected error: {err}"
+        );
+        assert_eq!(read(root, ".env"), "A=1\n", "id {id:?} restored anyway");
+    }
+}
+
+#[test]
+fn restore_accepts_a_snapshot_id_of_exactly_64_characters() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, ".env", "A=2\n");
+    let id = "a".repeat(64);
+    write(root, &format!(".pixel/env-snapshots/env/{id}"), "A=1\n");
+
+    let result = envfile(
+        root,
+        &EnvAction::Restore {
+            file: ".env".into(),
+            snapshot: Some(id.clone()),
+        },
+    )
+    .unwrap();
+    assert_eq!(result["restored_from"], id.as_str());
+    assert_eq!(read(root, ".env"), "A=1\n");
+}
+
+/// `snapshots` and the "latest" pick of `restore` consider only ids a
+/// `--snapshot` value could name, so a stray file in the snapshot dir is
+/// neither listed nor restored.
+#[test]
+fn snapshots_and_latest_restore_ignore_entries_that_are_not_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, ".env", "A=1\n");
+
+    // `set` snapshots the pre-set state (A=1).
+    envfile(
+        root,
+        &EnvAction::Set {
+            file: ".env".into(),
+            key: "A".into(),
+            value: "2".into(),
+            create_file: false,
+        },
+    )
+    .unwrap();
+    let snaps = envfile(
+        root,
+        &EnvAction::Snapshots {
+            file: ".env".into(),
+        },
+    )
+    .unwrap();
+    let real_id = snaps["snapshots"][0]["id"].as_str().unwrap().to_string();
+
+    // Sorts after the generated id (which starts with a digit): an
+    // unfiltered "latest" would pick it.
+    write(root, ".pixel/env-snapshots/env/zjunk name", "EVIL=1\n");
+
+    let snaps = envfile(
+        root,
+        &EnvAction::Snapshots {
+            file: ".env".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(snaps["snapshot_count"], 1, "listed a non-id entry: {snaps}");
+    assert_eq!(snaps["snapshots"][0]["id"], real_id.as_str());
+
+    envfile(
+        root,
+        &EnvAction::Restore {
+            file: ".env".into(),
+            snapshot: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(read(root, ".env"), "A=1\n");
 }
 
 #[test]
