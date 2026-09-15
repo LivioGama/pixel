@@ -1190,7 +1190,10 @@ mod routing_tests {
 
         // An unreadable shared file must be an error, never "empty".
         let result = remove_agent_prompt(home.path(), false);
-        assert!(result.is_err(), "expected error for unreadable pi file, got {result:?}");
+        assert!(
+            result.is_err(),
+            "expected error for unreadable pi file, got {result:?}"
+        );
     }
 
     fn make_private(path: &Path) {
