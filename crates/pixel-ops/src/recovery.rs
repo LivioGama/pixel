@@ -10,6 +10,9 @@
 //! never ran at all — so the safe behavior is always: restore the raw
 //! index bytes (and HEAD, if it moved) back to the pre-operation snapshot,
 //! delete the recovery record, and surface `GIT_FAILED` rather than guess.
+//! A record that exists but cannot be read is that same window with less
+//! information: [`PublishRecoveryStore::read`] returns `Err`, never `None`,
+//! so the caller refuses the retry instead of re-running the mutation.
 
 use std::path::{Path, PathBuf};
 
@@ -80,14 +83,43 @@ impl PublishRecoveryStore {
         Ok(())
     }
 
-    pub fn read(&self, repo_key: &str, request_id: &str) -> Option<PublishRecoveryState> {
+    /// Read the recovery record for `(repo_key, request_id)`.
+    ///
+    /// `Ok(None)` is reserved for a record that is genuinely absent — no
+    /// crash window. A record that exists but cannot be read or parsed
+    /// (truncated write, permissions, an unknown `schema_version`) is an
+    /// `Err`: the caller must never read "I cannot tell what this record
+    /// says" as "no crash happened" and re-run the mutation.
+    pub fn read(
+        &self,
+        repo_key: &str,
+        request_id: &str,
+    ) -> Result<Option<PublishRecoveryState>, String> {
         let path = self.recovery_path(repo_key, request_id);
-        let data = std::fs::read(&path).ok()?;
-        let state: PublishRecoveryState = serde_json::from_slice(&data).ok()?;
+        let data = match std::fs::read(&path) {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(format!(
+                    "GIT_FAILED: recovery record unreadable at {}: {e}",
+                    path.display()
+                ));
+            }
+        };
+        let state: PublishRecoveryState = serde_json::from_slice(&data).map_err(|e| {
+            format!(
+                "GIT_FAILED: recovery record corrupt at {}: {e}",
+                path.display()
+            )
+        })?;
         if state.schema_version != 1 {
-            return None;
+            return Err(format!(
+                "GIT_FAILED: recovery record has unknown schema_version {} at {}",
+                state.schema_version,
+                path.display()
+            ));
         }
-        Some(state)
+        Ok(Some(state))
     }
 
     pub fn remove(&self, repo_key: &str, request_id: &str) {
@@ -191,12 +223,45 @@ mod tests {
         let store = PublishRecoveryStore::with_state_root(dir.path().to_path_buf());
         let state = make_state(RecoveryPhase::Snapshotted);
         store.write(&state).unwrap();
-        let read = store.read("/test/repo", "test-req").unwrap();
+        let read = store
+            .read("/test/repo", "test-req")
+            .unwrap()
+            .expect("record present");
         assert_eq!(read.phase, RecoveryPhase::Snapshotted);
         assert_eq!(read.pre_head, Some("abc123".to_string()));
         assert_eq!(read.pre_index_hex, state.pre_index_hex);
         store.remove("/test/repo", "test-req");
-        assert!(store.read("/test/repo", "test-req").is_none());
+        assert!(store.read("/test/repo", "test-req").unwrap().is_none());
+    }
+
+    /// "Absent" and "I cannot tell what this record says" are different
+    /// answers: only the first one licenses a retry to run the mutation.
+    #[test]
+    fn recovery_read_separates_absent_from_unknown_schema() {
+        let dir = tempdir().unwrap();
+        let store = PublishRecoveryStore::with_state_root(dir.path().to_path_buf());
+        assert!(store.read("/test/repo", "missing").unwrap().is_none());
+
+        let mut bumped = make_state(RecoveryPhase::Snapshotted);
+        bumped.schema_version = 2;
+        store.write(&bumped).unwrap();
+        let err = store.read("/test/repo", "test-req").unwrap_err();
+        assert!(err.contains("GIT_FAILED"), "{err}");
+        assert!(err.contains("schema_version"), "{err}");
+    }
+
+    #[test]
+    fn recovery_read_reports_a_truncated_record() {
+        let dir = tempdir().unwrap();
+        let store = PublishRecoveryStore::with_state_root(dir.path().to_path_buf());
+        let state = make_state(RecoveryPhase::Snapshotted);
+        store.write(&state).unwrap();
+        let path = store.recovery_path("/test/repo", "test-req");
+        let full = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &full[..full.len() / 2]).unwrap();
+        let err = store.read("/test/repo", "test-req").unwrap_err();
+        assert!(err.contains("GIT_FAILED"), "{err}");
+        assert!(err.contains("corrupt"), "{err}");
     }
 
     #[test]

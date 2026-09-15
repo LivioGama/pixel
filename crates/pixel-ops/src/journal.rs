@@ -9,7 +9,7 @@
 //! Idempotency: (repoKey, requestId, inputHash) must be stable.
 //! Retention: 30 days / 1000 terminal records.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -136,30 +136,14 @@ impl OperationJournal {
         ensure_dir(&dir).map_err(|e| e.to_string())?;
         let path = self.record_path(repo_key, request_id);
 
-        // Check for existing record.
-        if let Ok(data) = std::fs::read(&path) {
-            let existing: JournalRecord = serde_json::from_slice(&data)
-                .map_err(|e| format!("corrupt journal record: {e}"))?;
-
-            // Idempotency check.
-            if existing.operation != operation
-                || existing.repo_key != repo_key
-                || existing.input_hash != input_hash
-            {
-                return Err(format!(
-                    "idempotency conflict: requestId {request_id} already used with different operation/input"
-                ));
-            }
-
-            return Ok(match existing.phase {
-                JournalPhase::Terminal => {
-                    BeginOutcome::Replay(existing.result.unwrap_or(serde_json::Value::Null))
-                }
-                phase => BeginOutcome::Resume {
-                    phase,
-                    result: existing.result,
-                },
-            });
+        // An existing record is the truth for this request: it is read,
+        // never overwritten, and a record that cannot be read is an error
+        // — falling through to the creation below would run the mutation a
+        // second time under the same request id.
+        if let Some(outcome) =
+            Self::read_existing(&path, request_id, operation, repo_key, input_hash)?
+        {
+            return Ok(outcome);
         }
 
         // No existing record — create one.
@@ -176,8 +160,72 @@ impl OperationJournal {
             result: None,
         };
         let json = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
-        write_new_durably(&path, &json).map_err(|e| e.to_string())?;
-        Ok(BeginOutcome::Start)
+        if write_new_durably(&path, &json).map_err(|e| e.to_string())? {
+            return Ok(BeginOutcome::Start);
+        }
+        // Lost the race with a concurrent writer: `write_new_durably`
+        // reports `Ok(false)` rather than clobbering the record the winner
+        // just created. That record — replay or resume — is the answer;
+        // `Start` here would run the mutation twice.
+        Self::read_existing(&path, request_id, operation, repo_key, input_hash)?.ok_or_else(|| {
+            format!(
+                "GIT_FAILED: journal record for request {request_id} is unreadable after a concurrent creation attempt at {}",
+                path.display()
+            )
+        })
+    }
+
+    /// Interpret the record already on disk for this request, if any:
+    /// replay a terminal result, resume from an intermediate phase, or
+    /// fail on an idempotency conflict.
+    ///
+    /// `Ok(None)` means the file is genuinely absent. A record that is
+    /// there but cannot be read or parsed is an error, never `None`:
+    /// starting the operation over a record it cannot read is how a retry
+    /// becomes a second mutation.
+    fn read_existing(
+        path: &Path,
+        request_id: &str,
+        operation: JournalOperation,
+        repo_key: &str,
+        input_hash: &str,
+    ) -> Result<Option<BeginOutcome>, String> {
+        let data = match std::fs::read(path) {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(format!(
+                    "GIT_FAILED: journal record unreadable at {}: {e}",
+                    path.display()
+                ));
+            }
+        };
+        let existing: JournalRecord = serde_json::from_slice(&data).map_err(|e| {
+            format!(
+                "GIT_FAILED: corrupt journal record at {}: {e}",
+                path.display()
+            )
+        })?;
+
+        // Idempotency check.
+        if existing.operation != operation
+            || existing.repo_key != repo_key
+            || existing.input_hash != input_hash
+        {
+            return Err(format!(
+                "idempotency conflict: requestId {request_id} already used with different operation/input"
+            ));
+        }
+
+        Ok(Some(match existing.phase {
+            JournalPhase::Terminal => {
+                BeginOutcome::Replay(existing.result.unwrap_or(serde_json::Value::Null))
+            }
+            phase => BeginOutcome::Resume {
+                phase,
+                result: existing.result,
+            },
+        }))
     }
 
     /// Transition to a new phase, optionally storing recovery metadata.
@@ -375,6 +423,67 @@ mod tests {
             .begin("req-4", JournalOperation::Push, "repo-key", "hash-b")
             .unwrap_err();
         assert!(err.contains("idempotency"));
+    }
+
+    /// The creation race reports `Ok(false)`; when the path it lost to is
+    /// not a readable record, the loser must fail rather than `Start`.
+    #[test]
+    fn a_lost_creation_race_without_a_readable_record_is_an_error() {
+        let dir = tempdir().unwrap();
+        let j = make_journal(dir.path());
+        let path = j.record_path("repo-key", "req-dangling");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // A dangling symlink: `read` sees `NotFound` (so `begin` tries to
+        // create the record), while `write_new_durably`'s hard link sees
+        // the path as taken (`AlreadyExists`) — the race, deterministically.
+        std::os::unix::fs::symlink(dir.path().join("gone.json"), &path).unwrap();
+        let err = j
+            .begin(
+                "req-dangling",
+                JournalOperation::Publish,
+                "repo-key",
+                "hash",
+            )
+            .unwrap_err();
+        assert!(err.contains("GIT_FAILED"), "{err}");
+    }
+
+    /// Two callers with the same request id: the one that loses the
+    /// creation race resumes the winner's record — never `Start`, which
+    /// would run the mutation a second time.
+    #[test]
+    fn race_loser_resumes_the_record_the_winner_created() {
+        let dir = tempdir().unwrap();
+        let j = make_journal(dir.path());
+        j.begin(
+            "req-race",
+            JournalOperation::Publish,
+            "repo-key",
+            "hash-race",
+        )
+        .unwrap();
+        j.transition("req-race", "repo-key", JournalPhase::IndexStaged, None)
+            .unwrap();
+
+        // Exactly what `begin` does once `write_new_durably` says the race
+        // was lost.
+        let path = j.record_path("repo-key", "req-race");
+        let outcome = OperationJournal::read_existing(
+            &path,
+            "req-race",
+            JournalOperation::Publish,
+            "repo-key",
+            "hash-race",
+        )
+        .unwrap()
+        .expect("the winner's record is on disk");
+        match outcome {
+            BeginOutcome::Resume { phase, result } => {
+                assert_eq!(phase, JournalPhase::IndexStaged);
+                assert!(result.is_none());
+            }
+            other => panic!("expected Resume, got {other:?}"),
+        }
     }
 
     #[test]

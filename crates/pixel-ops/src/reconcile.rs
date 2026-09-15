@@ -28,6 +28,7 @@ use pixel_git::GitRunner;
 use crate::durable::{sha256_hex, state_root};
 use crate::journal::{BeginOutcome, JournalOperation, OperationJournal};
 use crate::lock::RepositoryLock;
+use crate::repo::repo_identity;
 
 /// True if a rebase is currently in progress (`.git/rebase-merge/` or
 /// `.git/rebase-apply/` exists). Guards `rebase --abort` calls so they
@@ -311,11 +312,7 @@ pub fn reconcile_with_hooks(
     let push_mode = validate_push_mode(&opts.push)?;
 
     let runner = GitRunner::new(root);
-    let repo_key = root
-        .canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
-        .display()
-        .to_string();
+    let repo_key = repo_identity(root);
     // `into_target` participates in the replay-identity hash: the same
     // request_id with a different integration target must never replay a
     // cached result computed for another target (or for plain sync mode).
@@ -355,11 +352,8 @@ pub fn reconcile_with_hooks(
         return Ok(result);
     }
 
-    let mut lock = RepositoryLock::acquire_with_state_root(
-        &root.join(".git").display().to_string(),
-        &state_root,
-    )
-    .map_err(|_| "repository is busy".to_string())?;
+    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, &state_root)
+        .map_err(|_| "repository is busy".to_string())?;
 
     // Snapshot current state.
     let head = runner.rev_parse_head().ok_or("no HEAD")?;

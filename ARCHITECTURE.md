@@ -158,9 +158,9 @@ Machine-wide:
   (`errors-v1.sqlite` plus a `project.json` naming the root);
   `$PIXEL_SNIPER_STATE_ROOT` overrides the state root.
 - `~/.local/state/pixel/` (`$XDG_STATE_HOME/pixel`): `pixel-ops` crash-safety
-  state, keyed by a hash of the repository: `journals/`, `snapshots/` and
-  `locks/<hash>.lock/owner.json`. Guarded git mutations write nothing under
-  `.pixel/` except the two entries above.
+  state, keyed by a hash of the repository's canonical git common directory:
+  `journals/`, `snapshots/` and `locks/<hash>.lock/owner.json`. Guarded git
+  mutations write nothing under `.pixel/` except the two entries above.
 - Daemon socket and pid: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` on Linux
   (else `~/.cache/pixel/sockets/`), named
   `pixel-<xxh3 of canonical repo path>.sock`, `.pid` and `.lock`.
