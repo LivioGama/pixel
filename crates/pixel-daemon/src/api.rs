@@ -6335,7 +6335,7 @@ mod tests {
         assert!(resp.ok, "{resp:?}");
         let result = resp.result.unwrap();
         assert_eq!(result["dry_run"], json!(false));
-        assert!(result["applied"].as_array().unwrap().len() == 2);
+        assert_eq!(result["applied"].as_array().unwrap().len(), 2);
         let caller = std::fs::read_to_string(root.join("caller.ts")).unwrap();
         assert!(caller.contains("import { authenticate }"), "{caller}");
         assert!(caller.contains("return authenticate("), "{caller}");

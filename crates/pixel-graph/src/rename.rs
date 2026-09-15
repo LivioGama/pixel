@@ -585,21 +585,22 @@ fn is_import_stmt_kind(kind: &str) -> bool {
 /// ranges — comments, doc text, macro bodies. Byte-level and honest.
 fn count_unclaimed_text(content: &[u8], name: &str, edits: &[RenameEdit]) -> u32 {
     let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let needle = name.as_bytes();
     let mut count = 0u32;
-    let mut i = 0usize;
-    let n = name.as_bytes();
-    while i + n.len() <= content.len() {
-        if &content[i..i + n.len()] == n
+    // `windows` advances the offset itself: a mutated body cannot stall the
+    // scan, and a match at `i` cannot recur inside the same word (every
+    // later start in it is preceded by a word byte), so the skip the old
+    // hand-rolled index made was never load-bearing.
+    for (i, window) in content.windows(needle.len()).enumerate() {
+        let after = i + needle.len();
+        if window == needle
             && (i == 0 || !is_word(content[i - 1]))
-            && (i + n.len() == content.len() || !is_word(content[i + n.len()]))
+            && (after == content.len() || !is_word(content[after]))
             && !edits
                 .iter()
-                .any(|e| i >= e.start_byte && i + n.len() <= e.end_byte)
+                .any(|e| i >= e.start_byte && after <= e.end_byte)
         {
             count += 1;
-            i += n.len();
-        } else {
-            i += 1;
         }
     }
     count
@@ -714,8 +715,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A real graph built from source files: definition + a resolved call
-    /// + a named import + a comment decoy carrying the old name. The extra
+    /// A real graph built from source files: a definition, a resolved call,
+    /// a named import, and a comment decoy carrying the old name. The extra
     /// `unusedHelper` sibling proves the collision check keys on the NAME,
     /// not on the file merely having another symbol.
     fn fixture() -> (tempfile::TempDir, GraphStore) {
@@ -799,7 +800,7 @@ mod tests {
     /// two declarations; the plan must refuse.
     #[test]
     fn plan_rejects_a_name_that_collides_in_the_defining_file() {
-        let (dir, store) = fixture();
+        let (dir, _store) = fixture();
         std::fs::write(
             dir.path().join("src/login.ts"),
             "export function loginUser(name: string): boolean {\n    return name.length > 0;\n}\n\
@@ -1002,7 +1003,7 @@ mod tests {
         let picked = pick_callee(&arg);
         assert_eq!(picked, vec![arg[0]]);
         assert_eq!(pick_reference(&arg), vec![arg[0]]);
-        assert!(pick_reference(&bare).is_empty() == false); // `foo()` also reads as a use
+        assert!(!pick_reference(&bare).is_empty()); // `foo()` also reads as a use
     }
 
     /// A comment or string containing the name is never a candidate.
