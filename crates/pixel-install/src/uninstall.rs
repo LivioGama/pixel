@@ -115,6 +115,8 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
             &crate::codex_config::codex_home(&home, options.home.is_some()),
             dry_run,
         )?,
+        // 7c. Remove Antigravity plugin and hooks.
+        crate::antigravity::remove_antigravity(&home, dry_run)?,
         // 8. Remove the pixel binary.
         remove_binary(&binary_path, dry_run)?,
     ];

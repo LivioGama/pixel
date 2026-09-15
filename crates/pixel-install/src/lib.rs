@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+pub mod antigravity;
 pub mod codex_config;
 pub mod config;
 pub mod doctor;
