@@ -416,7 +416,13 @@ mod tests {
             plugin_dir(home),
             Path::new("/home/user/.gemini/config/plugins/pixel")
         );
-        assert_eq!(hooks_path(home), Path::new("/home/user/.gemini/config/hooks.json"));
-        assert_eq!(config_path(home), Path::new("/home/user/.gemini/config/config.json"));
+        assert_eq!(
+            hooks_path(home),
+            Path::new("/home/user/.gemini/config/hooks.json")
+        );
+        assert_eq!(
+            config_path(home),
+            Path::new("/home/user/.gemini/config/config.json")
+        );
     }
 }
