@@ -475,7 +475,7 @@ fn write_atomically(path: &Path, content: &str) -> Result<()> {
 
 #[cfg(test)]
 mod pi_prompt_content_tests {
-    use super::{AGENT_PROMPT_ASSET, managed_pi_content};
+    use super::{AGENT_PROMPT_ASSET, managed_pi_content, write_pi_prompt};
     use crate::config::{MANAGED_BEGIN, MANAGED_END};
 
     #[test]
@@ -514,6 +514,26 @@ mod pi_prompt_content_tests {
             wanted,
             "a managed file is left alone on the next install"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_pi_prompt_fails_when_path_is_unreadable() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("pixel-write-pi-{:x}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pi.md");
+        fs::write(&path, b"user text").unwrap();
+        // Remove read permission but keep write permission.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o200)).unwrap();
+
+        // An unreadable file must be an error, never "no file".
+        let result = write_pi_prompt(&path);
+        assert!(result.is_err(), "expected error for unreadable path, got {result:?}");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 
