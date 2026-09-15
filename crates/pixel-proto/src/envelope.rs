@@ -115,6 +115,13 @@ impl<T> Envelope<T> {
         }
     }
 
+    /// Attach the `requestId` of the request this envelope answers.
+    ///
+    /// No production path calls this: a write op takes its `request_id` as an
+    /// option and keys its journal/recovery records on it, but every response
+    /// is built with `Envelope::success`/`Envelope::failure`, so the envelope
+    /// field never reaches the wire. Its absence means "not reported", never
+    /// "no request id".
     pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request_id = Some(request_id.into());
         self
@@ -130,6 +137,14 @@ impl<T> Envelope<T> {
         self
     }
 
+    /// Attach the byte-cap bookkeeping of a response that ran into a cap.
+    ///
+    /// No production path calls this either: the caps that bite today report
+    /// themselves inside the op's own result (`search`'s `byte_cap` and
+    /// `next_offset`, `history`/`diff`/`review`'s `byte_cap`/`truncated`/
+    /// `next_cursor`, `plan`'s file cap) or as envelope `warnings`. A failure
+    /// envelope carries no budget at all — a cap never fails a command — so
+    /// its absence means "no cap information", never "no cap fired".
     pub fn with_budget(mut self, budget: BudgetInfo) -> Self {
         self.budget = Some(budget);
         self

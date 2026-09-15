@@ -10,6 +10,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::types::{Flow, FlowStep};
+use crate::vars::{resolve_value, substitute};
 
 /// Result of executing a flow.
 #[derive(Debug)]
@@ -24,7 +25,8 @@ pub struct ExecResult {
 /// Execute a flow by running agent-browser commands.
 ///
 /// `vars` is a map of `key=value` substitutions. Missing required vars
-/// produce an error.
+/// produce an error. A step `value_var` the caller did not pass falls back
+/// to the variable's declared default, then to a placeholder `{{var}}`.
 pub fn execute(flow: &Flow, vars: &HashMap<String, String>) -> ExecResult {
     execute_with(flow, vars, &mut AgentBrowser)
 }
@@ -120,7 +122,7 @@ pub(crate) fn execute_with(
 
     // Execute steps.
     for (i, step) in flow.steps.iter().enumerate() {
-        match exec_step(step, i + 1, vars, flow.tab.as_deref(), &mut log, 0, browser) {
+        match exec_step(step, i + 1, vars, flow, &mut log, 0, browser) {
             Ok(executed) => {
                 if executed {
                     steps_executed += 1;
@@ -232,7 +234,7 @@ fn exec_step(
     step: &FlowStep,
     num: usize,
     vars: &HashMap<String, String>,
-    flow_tab: Option<&str>,
+    flow: &Flow,
     log: &mut String,
     depth: usize,
     browser: &mut dyn Browser,
@@ -248,7 +250,7 @@ fn exec_step(
     }
 
     // Per-step tab switching.
-    let effective_tab = step.tab.as_deref().or(flow_tab);
+    let effective_tab = step.tab.as_deref().or(flow.tab.as_deref());
     if step.action != "switch_tab"
         && step.tab.is_some()
         && let Some(tab) = effective_tab
@@ -330,7 +332,7 @@ fn exec_step(
         }
         "fill" | "type" => {
             let target = substitute(step.ref_hint.as_deref().unwrap_or("input"), vars);
-            let value = resolve_value(step, vars);
+            let value = resolve_value(step, vars, &flow.vars);
 
             // Special case: if the ref_hint contains "Code character N of",
             // extract N and use the Nth character of user_code (without dash).
@@ -375,7 +377,7 @@ fn exec_step(
         }
         "select" => {
             let target = substitute(step.ref_hint.as_deref().unwrap_or("select"), vars);
-            let value = resolve_value(step, vars);
+            let value = resolve_value(step, vars, &flow.vars);
             let snapshot = browser
                 .run(&["snapshot", "-i"])
                 .map_err(|e| format!("snapshot before select failed: {e}"))?;
@@ -435,7 +437,7 @@ fn exec_step(
             };
             let mut any_executed = false;
             for (i, sub) in branch.iter().enumerate() {
-                match exec_step(sub, i + 1, vars, flow_tab, log, depth + 1, browser) {
+                match exec_step(sub, i + 1, vars, flow, log, depth + 1, browser) {
                     Ok(true) => any_executed = true,
                     Ok(false) => {}
                     Err(e) => return Err(e),
@@ -760,32 +762,6 @@ fn parse_wait_duration(s: &str) -> Duration {
         .map_or(Duration::from_secs(2), Duration::from_secs)
 }
 
-/// Resolve a step's value: `value_var` takes precedence, then `value`,
-/// then empty string.
-fn resolve_value(step: &FlowStep, vars: &HashMap<String, String>) -> String {
-    if let Some(ref var_name) = step.value_var {
-        if let Some(v) = vars.get(var_name) {
-            return v.clone();
-        }
-        // Fall back to default or placeholder.
-        return format!("{{{{{var_name}}}}}");
-    }
-    if let Some(ref v) = step.value {
-        return substitute(v, vars);
-    }
-    String::new()
-}
-
-/// Substitute `{{var}}` templates in a string.
-fn substitute(s: &str, vars: &HashMap<String, String>) -> String {
-    let mut result = s.to_string();
-    for (k, v) in vars {
-        let placeholder = format!("{{{{{k}}}}}");
-        result = result.replace(&placeholder, v);
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -921,7 +897,7 @@ mod tests {
         assert_eq!(parse_wait_duration("load"), Duration::from_secs(2));
     }
 
-    use crate::types::Flow;
+    use crate::types::{Flow, FlowVar};
     use std::collections::VecDeque;
 
     /// Scripted stand-in for agent-browser: every call is recorded, answers
@@ -975,8 +951,9 @@ mod tests {
     }
 
     fn run_step(step: &FlowStep, browser: &mut Scripted) -> (Result<bool, String>, String) {
+        let flow = flow_with(vec![]);
         let mut log = String::new();
-        let result = exec_step(step, 1, &HashMap::new(), None, &mut log, 0, browser);
+        let result = exec_step(step, 1, &HashMap::new(), &flow, &mut log, 0, browser);
         (result, log)
     }
 
@@ -1012,7 +989,7 @@ mod tests {
         };
         let mut log = String::new();
         let vars = HashMap::from([("p".to_string(), "login".to_string())]);
-        let r = exec_step(&s, 1, &vars, None, &mut log, 0, &mut b);
+        let r = exec_step(&s, 1, &vars, &flow_with(vec![]), &mut log, 0, &mut b);
         assert_eq!(r, Ok(true));
         assert_eq!(b.calls(), vec![vec!["open", "https://example.com/login"]]);
         assert_eq!(b.paused, vec![Duration::from_secs(3)]);
@@ -1148,7 +1125,7 @@ mod tests {
         };
         let vars = HashMap::from([("user_code".to_string(), "AB-CD".to_string())]);
         let mut log = String::new();
-        let r = exec_step(&s, 1, &vars, None, &mut log, 0, &mut b);
+        let r = exec_step(&s, 1, &vars, &flow_with(vec![]), &mut log, 0, &mut b);
         assert_eq!(r, Ok(true));
         assert_eq!(b.calls()[1], vec!["fill", "@e8", "C"]);
     }
@@ -1353,6 +1330,31 @@ mod tests {
         assert!(result.log.contains("closing tab t3"), "{}", result.log);
     }
 
+    /// A `required` var carrying a `default` is absent from the map on
+    /// purpose: the command must carry the default, never the literal
+    /// `{{account}}` placeholder the browser would type into the form.
+    #[test]
+    fn execute_required_var_with_default_uses_the_default() {
+        let flow = Flow {
+            vars: vec![FlowVar {
+                name: "account".into(),
+                description: "Account to select".into(),
+                required: true,
+                default: Some("west".into()),
+            }],
+            ..flow_with(vec![FlowStep {
+                ref_hint: Some("textbox matching 'Account'".into()),
+                value_var: Some("account".into()),
+                ..step("fill")
+            }])
+        };
+        let mut b = Scripted::new(vec![Ok("- textbox \"Account\" [ref=e5]\n")]);
+        let result = execute_with(&flow, &HashMap::new(), &mut b);
+        assert!(result.success, "{}", result.log);
+        assert_eq!(b.calls()[1], vec!["fill", "@e5", "west"]);
+        assert!(!result.log.contains("{{account}}"), "{}", result.log);
+    }
+
     #[test]
     fn execute_counts_executed_and_skipped_steps_and_stops_at_the_first_error() {
         let flow = flow_with(vec![step("snapshot"), step("teleport"), step("snapshot")]);
@@ -1466,28 +1468,6 @@ mod tests {
         let start = std::time::Instant::now();
         AgentBrowser.pause(Duration::from_millis(20));
         assert!(start.elapsed() >= Duration::from_millis(20));
-    }
-
-    #[test]
-    fn resolve_value_prefers_the_variable_then_the_literal_then_nothing() {
-        let vars = HashMap::from([("who".to_string(), "alice".to_string())]);
-        let by_var = FlowStep {
-            value_var: Some("who".into()),
-            value: Some("ignored".into()),
-            ..step("fill")
-        };
-        assert_eq!(resolve_value(&by_var, &vars), "alice");
-        let missing_var = FlowStep {
-            value_var: Some("token".into()),
-            ..step("fill")
-        };
-        assert_eq!(resolve_value(&missing_var, &vars), "{{token}}");
-        let literal = FlowStep {
-            value: Some("hi {{who}}".into()),
-            ..step("fill")
-        };
-        assert_eq!(resolve_value(&literal, &vars), "hi alice");
-        assert_eq!(resolve_value(&step("fill"), &vars), "");
     }
 
     #[test]

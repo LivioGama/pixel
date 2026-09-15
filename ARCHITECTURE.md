@@ -42,7 +42,7 @@ binary, and Pixel is deliberately a CLI plus hooks, not an MCP server.
 | `pixel-index` | Sparse n-gram (trigram) text index: gram extraction, window weighting, posting-list algebra, git-anchored base and delta shards, working-tree overlay, query planner, verification, and the `gitsync` helpers that read HEAD, branch, and porcelain status. | git |
 | `pixel-graph` | Code graph: tree-sitter extraction of symbols, imports, and call sites per file; import resolution; tiered call resolution with an epistemic envelope; and the analyses `impact`, `trace`, `process`, `cluster`, `changes`, `targets`. `store` owns the SQLite schema. | git, index |
 | `pixel-facts` | History-wide fact and diff ingest, search, lifecycle, and rescue discovery. Owns `history.db` plus trigram history segments, with a low-priority ingest thread that never blocks queries. Backs `excavate`, `lifecycle`, `history-search` and `rescue` discovery (`resolve` is the graph's concept index). | git, index |
-| `pixel-rank` | Fusion core for `targets` and ranked `search`: task text and signal inputs in, closed prioritized P0/P1/P2 file list out. The scoring is pure; `compute_signals` gathers its inputs itself (git log activity when facts have none, recent sniper errors). | graph, git, session |
+| `pixel-rank` | Fusion core for `targets` and ranked `search`: task text and signal inputs in, closed prioritized P0/P1/P2 file list out. The scoring is pure; `compute_signals` gathers the activity channel itself (git log churn when facts have none, and a failed or capped scan is reported as unavailable rather than as an empty map) and takes the session and error-sink channels from its caller — the daemon feeds neither of those. | graph, git, session |
 | `pixel-context` | Semantic compression of code-context items: layered renderings that fit a token budget instead of raw source dumps. | none |
 | `pixel-ops` | Safe git mutation infrastructure ported from usable-git: snapshot store, repository lock, operation journal, recovery keys. Implements `inspect`, `review`, `history`, `diff`, `publish`, `push`, `ship`, `branch`, `update`, `sync`, `reconcile`, `rewrite`, `provenance`, `branches`, `env`. | git |
 | `pixel-git` | The single git subprocess wrapper for the workspace. Replaced three earlier ad-hoc wrappers. Any crate that shells out to git goes through `GitRunner` (timeout, output cap, redacted stderr); `crates/pixel-git/tests/boundary.rs` fails the build on a `Command::new("git")` in any other crate's non-test code. | none |
@@ -84,6 +84,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md` or the bundled agent prompts
 | `pixel pack-context` | Budget-fitted context for a symbol uid |
 | `pixel impact` | Blast radius of a symbol (callers upstream / callees downstream) |
 | `pixel who-calls` | Direct callers or callees of a symbol |
+| `pixel rename` | IDE-style symbol rename: graph-resolved definition, call, reference, and import sites, each verified against a fresh tree-sitter parse before writing; unresolved same-name sites are reported, never guessed. `--dry-run` prints the edit set without touching files |
 | `pixel call-path` | Call path between two symbols |
 | `pixel list-flows` | Discovered execution flows |
 | `pixel list-areas` | Functional-area clusters |
@@ -158,9 +159,9 @@ Machine-wide:
   (`errors-v1.sqlite` plus a `project.json` naming the root);
   `$PIXEL_SNIPER_STATE_ROOT` overrides the state root.
 - `~/.local/state/pixel/` (`$XDG_STATE_HOME/pixel`): `pixel-ops` crash-safety
-  state, keyed by a hash of the repository: `journals/`, `snapshots/` and
-  `locks/<hash>.lock/owner.json`. Guarded git mutations write nothing under
-  `.pixel/` except the two entries above.
+  state, keyed by a hash of the repository's canonical git common directory:
+  `journals/`, `snapshots/` and `locks/<hash>.lock/owner.json`. Guarded git
+  mutations write nothing under `.pixel/` except the two entries above.
 - Daemon socket and pid: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` on Linux
   (else `~/.cache/pixel/sockets/`), named
   `pixel-<xxh3 of canonical repo path>.sock`, `.pid` and `.lock`.
@@ -199,6 +200,13 @@ The envelope:
 }
 ```
 
+`requestId` and `budget` are part of the schema but no response is built
+with them yet, so their absence means "not reported". The caps that bite
+today report themselves inside the op's own result (`byte_cap`,
+`truncated`, `next_cursor`, `next_offset`) or as envelope `warnings`.
+`error.code` is the code the daemon classified the message into; the
+variants no producer reaches are listed on `pixel_proto::ErrorCode`.
+
 Invariants enforced by `Service::handle`:
 
 - Success carries `result`, failure carries `error`. Never both.
@@ -230,8 +238,13 @@ in `pixel-proto` checks it.
 3. If the daemon path fails, the CLI opens `Service` in-process and calls
    `handle` directly. Both paths return the same `Envelope`.
 4. `unwrap_response` turns a failure envelope into an `Err(message)` that
-   `main` prints to stderr with exit code 1. For a success envelope it takes
-   `result` and folds `epistemics`, `snapshot`, and `warnings` into it
+   `main` prints to stderr with exit code 1. Under `--json` the CLI also
+   answers on stdout with the failure envelope (`ok: false`, `error.code`,
+   the same message) — classified by the daemon's `failure_response`, so a
+   CLI-side failure carries the same code as a daemon one — unless the
+   command owns stdout (`search-like-rg`, hooks, the statusline) or already
+   wrote part of an answer (`check-release --json`). For a success envelope it
+   takes `result` and folds `epistemics`, `snapshot`, and `warnings` into it
    without clobbering same-named keys the op emitted.
 5. `print_data` serializes the result. With `--json` it is compact on one
    line, otherwise pretty. A global 256 KB cap protects the agent's context
@@ -274,8 +287,9 @@ envelope talks to the daemon socket directly.
 ## Agent integration
 
 `pixel install` deliberately deploys the bundled `pixel-agent-prompt.md`, the
-short `pixel-subagent-prompt.md`, a managed shell function for Claude Code and a managed
-`developer_instructions` block for Codex. It
+short `pixel-subagent-prompt.md`, a managed shell function for Claude Code, a managed
+`developer_instructions` block for Codex and a managed block in Pi's
+`~/.pi/agent/APPEND_SYSTEM.md`. It
 preserves agent settings and rule files, and does not register provider hooks or
 activate routing. The shell functions pass the prompt on a subsequent launch
 through the loaded profile; already-running agents and direct executable launches
@@ -298,7 +312,10 @@ prompt as a TOML literal multi-line string between `<!-- pixel:managed:begin
 of a file the desktop app also owns keeps its layout, refusing to touch a file
 that does not parse, and keeping text outside the markers. `doctor`
 (`install.codex-config`) compares the block with the bundled prompt; `uninstall`
-removes the block, or the key when nothing else was in it.
+removes the block, or the key when nothing else was in it. Pi reads
+`~/.pi/agent/APPEND_SYSTEM.md` automatically; that file is shared the same way
+(markers, text outside them kept, `install.pi-prompt` in `doctor`, block — not
+the file — removed by `uninstall`), so a user's own pi instructions survive.
 
 Existing hook entry points remain implemented, separately from active installation:
 

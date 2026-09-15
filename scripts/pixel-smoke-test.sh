@@ -154,7 +154,7 @@ for c in d["checks"]:
 sys.exit(0 if d["ok"] else 1)' && ok "doctor: ok" || no "doctor" "not ok (non-green checks listed above; PIXEL_SHELL=<shell> if only install.shell-wrappers is red)"
 
 echo "=== 9. Install surface (what \`pixel install\` deploys, read through doctor) ==="
-for id in install.agent-prompt install.subagent-prompt install.shell-wrappers install.codex-config rule.parity rule.scenarios; do
+for id in install.agent-prompt install.subagent-prompt install.pi-prompt install.shell-wrappers install.codex-config rule.parity rule.scenarios; do
     st=$(json_field "$DOC" "next(c['status'] for c in d['checks'] if c['id']=='$id')")
     [ "$st" = green ] && ok "doctor $id green" || no "doctor $id" "status '${st:-missing}'"
 done

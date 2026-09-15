@@ -379,7 +379,7 @@ pub fn apply(
             let tmp_theirs = abs.with_extension("gpx-rescue-theirs");
             std::fs::write(&tmp_base, &base).map_err(|e| e.to_string())?;
             std::fs::write(&tmp_theirs, &content).map_err(|e| e.to_string())?;
-            let status = runner
+            let merged = runner
                 .merge_file_with_labels(
                     &abs,
                     &tmp_base,
@@ -388,13 +388,14 @@ pub fn apply(
                     "HEAD",
                     &format!("rescue:{}", &oid[..7.min(oid.len())]),
                 )
-                .map_err(|e| format!("spawn git merge-file: {e}"))?;
+                .map_err(|e| format!("running git merge-file: {e}"))?;
             std::fs::remove_file(&tmp_base).ok();
             std::fs::remove_file(&tmp_theirs).ok();
-            let code = status.code().unwrap_or(-1);
-            if code < 0 {
+            // A killed merge-file has no exit code at all, and a negative
+            // one is a real failure: neither is a conflict count.
+            let Some(code) = merged.code.filter(|code| *code >= 0) else {
                 return Err(format!("merge-file failed for {path}"));
-            }
+            };
             results.push(json!({
                 "path": path,
                 "action": "merged",

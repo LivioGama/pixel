@@ -57,6 +57,11 @@ pub struct ParsedSession {
 /// (SQLite databases, Gemini's single history file).
 pub struct ParseOutput {
     pub sessions: Vec<ParsedSession>,
+    /// Complete lines that were not valid JSON (a writer that crashed
+    /// mid-flush). Their bytes are consumed and never re-read, so this
+    /// count is the only trace they leave: an adapter must report it
+    /// instead of swallowing the record.
+    pub skipped_records: usize,
     /// Byte offset up to which complete lines were consumed — the resume
     /// point for the next `Appended` pass. A partial trailing line (record
     /// still being written) is never counted. SQLite sources report their

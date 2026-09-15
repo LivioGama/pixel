@@ -13,6 +13,7 @@ use pixel_git::GitRunner;
 use crate::durable::{sha256_hex, state_root};
 use crate::journal::{BeginOutcome, JournalOperation, JournalPhase, OperationJournal};
 use crate::lock::RepositoryLock;
+use crate::repo::repo_identity;
 
 #[derive(Debug, Clone)]
 pub struct PushOptions {
@@ -135,7 +136,7 @@ pub fn push_with_state(
     state_root: &Path,
 ) -> Result<Value, String> {
     let runner = GitRunner::new(root);
-    let repo_key = repo_key(root);
+    let repo_key = repo_identity(root);
     let input_hash = push_input_hash(opts);
 
     let journal = OperationJournal::with_state_root(state_root.to_path_buf());
@@ -155,7 +156,7 @@ pub fn push_with_state(
         BeginOutcome::Start => {}
     }
 
-    let mut lock = RepositoryLock::acquire_with_state_root(&common_dir(root), state_root)
+    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, state_root)
         .map_err(|_| "repository is busy".to_string())?;
 
     // Probe: journal:started
@@ -234,7 +235,7 @@ fn resume_push(
     phase: JournalPhase,
     runner: &GitRunner,
 ) -> Result<Value, String> {
-    let repo_key = repo_key(root);
+    let repo_key = repo_identity(root);
     match phase {
         JournalPhase::Started => {
             // Journal at "started" — no git mutation happened. Continue
@@ -291,10 +292,10 @@ fn continue_push_after_begin(
     journal: &OperationJournal,
     runner: &GitRunner,
 ) -> Result<Value, String> {
-    let repo_key = repo_key(root);
+    let repo_key = repo_identity(root);
     let state_root = state_root();
 
-    let mut lock = RepositoryLock::acquire_with_state_root(&common_dir(root), &state_root)
+    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, &state_root)
         .map_err(|_| "repository is busy".to_string())?;
 
     pixel_git::validate_ref(&opts.remote).map_err(|e| {
@@ -331,17 +332,6 @@ fn continue_push_after_begin(
     journal.complete(&opts.request_id, &repo_key, result.clone())?;
     lock.release();
     Ok(result)
-}
-
-fn repo_key(root: &Path) -> String {
-    root.canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
-        .display()
-        .to_string()
-}
-
-fn common_dir(root: &Path) -> String {
-    root.join(".git").display().to_string()
 }
 
 fn push_input_hash(opts: &PushOptions) -> String {

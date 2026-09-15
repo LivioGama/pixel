@@ -67,6 +67,20 @@ pub struct ImpactReport {
     /// Weaker evidence than `Calls`: "may be invoked", not "will break".
     /// Populated for the upstream direction; empty otherwise.
     pub referenced_by: Vec<ImpactItem>,
+    /// Distinct symbols referencing the target via `References` edges, counted
+    /// before the `MAX_REFERENCED_BY` cut: `referenced_by` lists at most the
+    /// cap, this is the honest total.
+    pub referenced_by_total: u64,
+    /// True when `referenced_by_total` exceeded `MAX_REFERENCED_BY`, so
+    /// `referenced_by` holds only the first `MAX_REFERENCED_BY` entries.
+    pub referenced_by_truncated: bool,
+    /// True when any list in this report was cut short: a per-depth bucket at
+    /// `limit_per_depth` or `referenced_by` at `MAX_REFERENCED_BY`.
+    /// `counts_by_depth` and `referenced_by_total` stay exact either way.
+    pub truncated: bool,
+    /// Named caps that fired, one per cut list, so a consumer can mirror them
+    /// as warnings instead of passing off a sampled list as complete.
+    pub caps: Vec<String>,
 }
 
 /// Fetch a symbol row by rowid via ad-hoc SQL (store exposes uid/name lookups only).
@@ -164,6 +178,9 @@ pub fn impact(
 
     let mut buckets: [Vec<ImpactItem>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     let mut counts: [u64; 3] = [0, 0, 0];
+    // A bucket refused an item at `limit_per_depth`. The count stays exact;
+    // only the listed subset is cut, and the cut is named below.
+    let mut bucket_truncated = [false; 3];
     let mut files: HashSet<i64> = HashSet::new();
     let mut proc_set: BTreeSet<String> = BTreeSet::new();
 
@@ -201,6 +218,8 @@ pub fn impact(
                         tier: e.tier.as_str().to_string(),
                         processes: procs,
                     });
+                } else {
+                    bucket_truncated[bucket] = true;
                 }
             }
             queue.push_back((nbr, d, e.tier));
@@ -216,13 +235,20 @@ pub fn impact(
     // buckets. Only meaningful for the upstream direction (who passes me
     // as a callback).
     let mut referenced_by: Vec<ImpactItem> = Vec::new();
+    let mut referenced_by_total: u64 = 0;
+    let mut referenced_by_truncated = false;
     if matches!(direction, Direction::Upstream) {
         let ref_edges = store.edges_to(target.id, Some(EdgeKind::References))?;
         // Dedupe by src_id — the same referrer at N call sites shouldn't
-        // produce N identical items.
+        // produce N identical items; the total counts each referrer once.
         let mut seen_src: std::collections::HashSet<i64> = std::collections::HashSet::new();
         for e in ref_edges {
-            if !seen_src.insert(e.src_id) || referenced_by.len() >= MAX_REFERENCED_BY {
+            if !seen_src.insert(e.src_id) {
+                continue;
+            }
+            referenced_by_total += 1;
+            if referenced_by.len() >= MAX_REFERENCED_BY {
+                referenced_by_truncated = true;
                 continue;
             }
             if let Some(sym) = symbol_by_id(store, e.src_id)? {
@@ -240,6 +266,23 @@ pub fn impact(
         }
     }
 
+    let mut caps: Vec<String> = Vec::new();
+    for (depth, cut) in bucket_truncated.iter().enumerate() {
+        if *cut {
+            caps.push(format!(
+                "depth-{} list truncated at {limit_per_depth} of {} symbols",
+                depth + 1,
+                counts[depth]
+            ));
+        }
+    }
+    if referenced_by_truncated {
+        caps.push(format!(
+            "referenced_by truncated at {MAX_REFERENCED_BY} of {referenced_by_total} referencing symbols"
+        ));
+    }
+    let truncated = !caps.is_empty();
+
     let d1 = counts[0];
     let nproc = affected_processes.len();
     let base = if d1 > 50 || nproc > 20 {
@@ -252,11 +295,10 @@ pub fn impact(
         0
     };
     let risk = risk_label(base, envelope.lower_bound);
-    let ref_suffix = if !referenced_by.is_empty() {
+    let ref_suffix = if referenced_by_total != 0 {
         format!(
-            "; referenced as callback in {} site{}",
-            referenced_by.len(),
-            if referenced_by.len() == 1 { "" } else { "s" }
+            "; referenced as callback in {referenced_by_total} site{}",
+            if referenced_by_total == 1 { "" } else { "s" }
         )
     } else {
         String::new()
@@ -296,6 +338,10 @@ pub fn impact(
         affected_processes,
         envelope,
         referenced_by,
+        referenced_by_total,
+        referenced_by_truncated,
+        truncated,
+        caps,
     })
 }
 
@@ -372,6 +418,19 @@ mod tests {
             .unwrap();
     }
 
+    fn reference(store: &GraphStore, src: i64, dst: i64) {
+        store
+            .insert_edge(&EdgeRow {
+                src_id: src,
+                dst_id: dst,
+                kind: EdgeKind::References,
+                tier: Tier::Probable,
+                site_line: 1,
+                receiver: Some("on".to_string()),
+            })
+            .unwrap();
+    }
+
     #[test]
     fn impact_buckets_envelope_and_trace() {
         let mut store = GraphStore::open_in_memory().unwrap();
@@ -404,6 +463,12 @@ mod tests {
         assert_eq!(report.envelope.unresolved_same_name, 1);
         // LOW bumped one level by lower-bound envelope
         assert_eq!(report.risk, "MEDIUM");
+        // Nothing was cut: no cap, no truncation marker, no callback suffix.
+        assert_eq!(report.referenced_by_total, 0);
+        assert!(!report.referenced_by_truncated);
+        assert!(!report.truncated);
+        assert!(report.caps.is_empty());
+        assert!(!report.summary.contains("referenced as callback"));
 
         // trace c -> a found through b
         let t = trace::trace(
@@ -450,11 +515,112 @@ mod tests {
         // No Calls callers.
         assert_eq!(report.counts_by_depth, [0, 0, 0]);
         assert!(report.d1_will_break.is_empty());
-        // But one referenced_by entry.
+        // But one referenced_by entry, and the total is that same count.
         assert_eq!(report.referenced_by.len(), 1);
         assert_eq!(report.referenced_by[0].name, "setup");
         assert_eq!(report.referenced_by[0].tier, "probable");
-        // Summary mentions the callback reference.
-        assert!(report.summary.contains("referenced as callback in 1 site"));
+        assert_eq!(report.referenced_by_total, 1);
+        assert!(!report.referenced_by_truncated);
+        assert!(!report.truncated);
+        assert!(report.caps.is_empty());
+        // Summary mentions the callback reference, singular.
+        assert!(report.summary.ends_with("referenced as callback in 1 site"));
+    }
+
+    /// 25 referencing symbols against a 20-item cap: the summary and
+    /// `referenced_by_total` report the real count, and the cut is named so
+    /// the answer is never passed off as complete.
+    #[test]
+    fn referenced_by_reports_the_total_when_cut() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fid = store.replace_file("src/a.ts", "oid", "ts").unwrap();
+        let handler = sym(&store, fid, "handler", 1, 5);
+        for i in 0..25u32 {
+            let name = format!("caller{i}");
+            let src = sym(&store, fid, &name, 10 + i, 12 + i);
+            reference(&store, src, handler);
+        }
+
+        let report = impact(
+            &store,
+            "src/a.ts#handler#function",
+            Direction::Upstream,
+            3,
+            100,
+        )
+        .unwrap();
+        assert_eq!(report.referenced_by_total, 25);
+        assert_eq!(report.referenced_by.len(), 20);
+        assert!(report.referenced_by_truncated);
+        assert!(report.truncated);
+        assert_eq!(
+            report.caps,
+            vec!["referenced_by truncated at 20 of 25 referencing symbols"]
+        );
+        assert!(
+            report
+                .summary
+                .contains("referenced as callback in 25 sites")
+        );
+    }
+
+    /// Exactly `MAX_REFERENCED_BY` referencing symbols: every one is listed,
+    /// so nothing was cut and the answer carries no cap or truncation marker.
+    #[test]
+    fn referenced_by_at_the_cap_is_not_truncated() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fid = store.replace_file("src/a.ts", "oid", "ts").unwrap();
+        let handler = sym(&store, fid, "handler", 1, 5);
+        for i in 0..MAX_REFERENCED_BY {
+            let name = format!("caller{i}");
+            let src = sym(&store, fid, &name, 10 + i as u32, 12 + i as u32);
+            reference(&store, src, handler);
+        }
+
+        let report = impact(
+            &store,
+            "src/a.ts#handler#function",
+            Direction::Upstream,
+            3,
+            100,
+        )
+        .unwrap();
+        assert_eq!(report.referenced_by_total, MAX_REFERENCED_BY as u64);
+        assert_eq!(report.referenced_by.len(), MAX_REFERENCED_BY);
+        assert!(!report.referenced_by_truncated);
+        assert!(!report.truncated);
+        assert!(report.caps.is_empty());
+        assert!(
+            report
+                .summary
+                .contains(&format!("in {MAX_REFERENCED_BY} sites"))
+        );
+    }
+
+    /// A per-depth bucket cut at `limit_per_depth` is named, and the exact
+    /// count stays in `counts_by_depth`; a bucket that exactly fills the
+    /// limit is not a cut.
+    #[test]
+    fn depth_bucket_cap_is_named_only_when_it_cuts() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fid = store.replace_file("src/a.ts", "oid", "ts").unwrap();
+        let a = sym(&store, fid, "alpha", 1, 5);
+        for i in 0..4u32 {
+            let name = format!("caller{i}");
+            let src = sym(&store, fid, &name, 10 + i, 12 + i);
+            call(&store, src, a);
+        }
+
+        let cut = impact(&store, "src/a.ts#alpha#function", Direction::Upstream, 3, 3).unwrap();
+        assert_eq!(cut.counts_by_depth, [4, 0, 0]);
+        assert_eq!(cut.d1_will_break.len(), 3);
+        assert!(cut.truncated);
+        assert_eq!(cut.caps, vec!["depth-1 list truncated at 3 of 4 symbols"]);
+
+        let exact = impact(&store, "src/a.ts#alpha#function", Direction::Upstream, 3, 4).unwrap();
+        assert_eq!(exact.counts_by_depth, [4, 0, 0]);
+        assert_eq!(exact.d1_will_break.len(), 4);
+        assert!(!exact.truncated);
+        assert!(exact.caps.is_empty());
     }
 }

@@ -10,7 +10,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use crate::support::{Scratch, pixel_command};
+use crate::support::{Scratch, fake_recall_daemon, pixel_command};
 
 const SESSION_ID: &str = "0123abcd-0000-4000-8000-000000000001";
 /// The human turn: the needle, then enough text that its full-turn block
@@ -26,6 +26,13 @@ struct Corpus {
 
 impl Corpus {
     fn new(tag: &str) -> Self {
+        Self::with_human_turn(tag, &format!("{NEEDLE}{}", TAIL.repeat(8)))
+    }
+
+    /// `new`'s fixture with the human turn text under the caller's control:
+    /// `new` sizes it for the context budget, the stdout-cap test needs one
+    /// far past the cap.
+    fn with_human_turn(tag: &str, text: &str) -> Self {
         let home = Scratch::for_test("recall-cli", tag);
         let slug = home.join(".claude/projects/-work-pixel");
         std::fs::create_dir_all(&slug).unwrap();
@@ -33,7 +40,7 @@ impl Corpus {
             serde_json::json!({
                 "type": "user", "cwd": "/work/pixel", "gitBranch": "develop",
                 "timestamp": "2025-10-09T08:53:20.000Z",
-                "message": {"content": [{"type": "text", "text": format!("{NEEDLE}{}", TAIL.repeat(8))}]},
+                "message": {"content": [{"type": "text", "text": text}]},
             })
             .to_string(),
             serde_json::json!({
@@ -67,6 +74,17 @@ impl Corpus {
         self.command().args(args).output().unwrap()
     }
 
+    /// `run` with extra environment variables: `PIXEL_OUTPUT_CAP_BYTES` is a
+    /// per-invocation setting, so a cap test cannot put it on the shared
+    /// command builder without changing every other test's output.
+    fn run_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
+        let mut cmd = self.command();
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        cmd.args(args).output().unwrap()
+    }
+
     fn stdout(&self, args: &[&str]) -> String {
         let out = self.run(args);
         assert!(out.status.success(), "pixel {args:?}: {out:?}");
@@ -76,6 +94,110 @@ impl Corpus {
     fn json(&self, args: &[&str]) -> Value {
         serde_json::from_str(&self.stdout(args)).unwrap_or_else(|e| panic!("{args:?}: {e}"))
     }
+}
+
+#[test]
+fn ask_groups_the_matching_session_from_the_lexical_channel() {
+    // No model here: `--lexical-only` answers from the corpus in-process, the
+    // path `ask` takes when no recall daemon is listening.
+    let corpus = Corpus::new("ask");
+    let out = corpus.json(&[
+        "recall",
+        "ask",
+        "streamed needle",
+        "--lexical-only",
+        "--json",
+    ]);
+    let groups = out["groups"].as_array().expect("groups");
+    assert_eq!(groups.len(), 1, "{out}");
+    assert_eq!(groups[0]["source_session_id"], SESSION_ID);
+    assert_eq!(groups[0]["matched_lexical"], true, "{out}");
+
+    let text = corpus.stdout(&["recall", "ask", "streamed needle", "--lexical-only"]);
+    assert!(text.starts_with("claude:0123abcd #"), "{text}");
+    assert!(text.contains("[lex]"), "{text}");
+    let miss = corpus.stdout(&["recall", "ask", "no-such-token-xyzzy", "--lexical-only"]);
+    assert!(miss.contains("no matching sessions"), "{miss}");
+}
+
+/// AR-01: the daemon probe must never open a repository `Service` on the
+/// corpus directory. `recall daemon status` used to go through the
+/// auto-starting `try_daemon`, which spawned `pixel daemon start
+/// <recall_dir> --foreground`: the socket was then held by a repo daemon that
+/// answers `Ping` and refuses `Recall`, and `Service::open` left
+/// `.pixel/base.shard` in the corpus. Auto-start is deliberately left enabled
+/// here — the probe must not depend on `PIXEL_DAEMON_AUTO_START=0`.
+#[test]
+fn daemon_status_never_starts_a_repo_service_on_the_corpus() {
+    let home = Scratch::for_test("recall-cli", "daemon-status");
+    let recall_dir = home.join("recall");
+    let out = Command::new(env!("CARGO_BIN_EXE_pixel"))
+        .env("HOME", home.as_ref() as &Path)
+        .env("PIXEL_RECALL_DIR", &recall_dir)
+        .current_dir(home.as_ref() as &Path)
+        .args(["recall", "daemon", "status"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("daemon not running"), "{stdout}");
+    assert!(
+        !recall_dir.join(".pixel/base.shard").exists(),
+        "a repo Service was opened on the corpus: {stdout}"
+    );
+}
+
+/// HO-08: a recall daemon that answers an op with an error is named on stderr
+/// and the answer still comes from the corpus in-process. A daemon with a
+/// corrupt vector store used to be indistinguishable from no daemon at all,
+/// so the op was silently redone (model load included) and the failure never
+/// reached the caller.
+#[test]
+fn search_names_a_failing_recall_daemon_then_answers_in_process() {
+    let corpus = Corpus::new("daemon-failure");
+    let recall_dir = corpus.home.join("recall");
+    let server = fake_recall_daemon(
+        &recall_dir,
+        pixel_daemon::api::failure_response("recall", "vector store is corrupt"),
+    );
+    let out = corpus.run(&["recall", "search", "streamed needle", "--json"]);
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("vector store is corrupt"), "{stderr}");
+    let value: Value = serde_json::from_slice(&out.stdout).expect("hits from the in-process path");
+    assert_eq!(value["hits"].as_array().map(Vec::len), Some(1), "{value}");
+    server.join().unwrap();
+    let _ = std::fs::remove_file(pixel_daemon::daemon::socket_path(&recall_dir));
+}
+
+/// `recall show --json` is a machine document and travels under the global
+/// stdout cap: at `PIXEL_OUTPUT_CAP_BYTES=4096` a 16 KiB turn must come out
+/// capped, still one JSON object, and marked `truncated` instead of dumping
+/// the whole turn; without the cap the same document is complete.
+#[test]
+fn show_json_is_capped_on_the_stdout_cap_and_complete_without_it() {
+    let turn = format!("{NEEDLE} {}", "retry noise ".repeat(1400));
+    let corpus = Corpus::with_human_turn("show-cap", &turn);
+    let args = ["recall", "show", "claude:0123abcd", "--json"];
+
+    let capped = corpus.run_with_env(&args, &[("PIXEL_OUTPUT_CAP_BYTES", "4096")]);
+    assert!(capped.status.success(), "{capped:?}");
+    assert!(
+        capped.stdout.len() <= 4097,
+        "the cap holds: {} bytes",
+        capped.stdout.len()
+    );
+    let value: Value = serde_json::from_slice(&capped.stdout).expect("one JSON document");
+    assert_eq!(value["truncated"], true, "{value}");
+    assert_eq!(value["cap_bytes"], 4096);
+    assert_eq!(value["session"]["source_session_id"], SESSION_ID);
+
+    let full = corpus.run_with_env(&args, &[("PIXEL_OUTPUT_CAP_BYTES", "0")]);
+    assert!(full.status.success(), "{full:?}");
+    let value: Value = serde_json::from_slice(&full.stdout).expect("one JSON document");
+    assert!(value["truncated"].is_null(), "not capped: {value}");
+    assert_eq!(value["turns"].as_array().map(Vec::len), Some(2), "{value}");
+    assert_eq!(value["turns"][0]["text"].as_str(), Some(turn.as_str()));
 }
 
 #[test]

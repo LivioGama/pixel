@@ -25,6 +25,7 @@ pub mod publish;
 pub mod push;
 pub mod reconcile;
 pub mod recovery;
+pub mod repo;
 pub mod review;
 pub mod rewrite;
 pub mod ship;
@@ -34,4 +35,5 @@ pub mod update;
 
 pub use journal::{BeginOutcome, JournalOperation, JournalPhase, JournalRecord, OperationJournal};
 pub use lock::{RepositoryBusyError, RepositoryLock};
+pub use repo::repo_identity;
 pub use snapshot::{SnapshotRecord, SnapshotStore, snapshot_token};

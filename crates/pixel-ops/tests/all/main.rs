@@ -4,9 +4,11 @@
 mod branches;
 mod crash_matrix;
 mod envfile;
+mod fail_closed;
 mod provenance;
 mod publish_property;
 mod reconcile_matrix;
+mod repo_identity;
 mod rewrite_matrix;
 
 /// One lock for every module that points `XDG_STATE_HOME` at a per-test

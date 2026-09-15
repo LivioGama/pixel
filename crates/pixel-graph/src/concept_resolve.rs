@@ -107,6 +107,18 @@ pub struct IndexState {
     pub concepts: u64,
     pub concepts_version: Option<String>,
     pub fresh: bool,
+    /// Identity of the concept rows a bounded T3 scan reads: a hash over the
+    /// first `TRIGRAM_SCAN_CAP` rows in the scan's own `norm, id` order,
+    /// rowids included. Not serialized; [`inputs_digest`] folds it in so a
+    /// reindex that moves that window without changing `concepts` still moves
+    /// the digest a caller caches on (a pure rowid move invalidates too, the
+    /// safe direction for a cache key).
+    #[serde(skip)]
+    pub concept_scan_identity: u64,
+    /// Mirror of [`IndexState::concept_scan_identity`] for the symbol
+    /// fallback window (`name, id` order, `SYMBOL_SCAN_CAP` rows).
+    #[serde(skip)]
+    pub symbol_scan_identity: u64,
 }
 
 /// The full resolve outcome.
@@ -450,7 +462,7 @@ pub fn resolve(
     // overlap, low confidence).
     if !norm.is_empty() {
         tiers_attempted.push(Tier::T3);
-        let (rows, capped) = trigram_fallback(store, &norm, candidate_limit)?;
+        let (rows, capped) = trigram_fallback(store, &norm, candidate_limit, TRIGRAM_SCAN_CAP)?;
         t3_capped = capped;
         if !rows.is_empty() {
             return finish(
@@ -474,7 +486,8 @@ pub fn resolve(
         // Match on the query's camelCase-split ident words (e.g. "handleLogin"
         // → ["handle", "login"]) so a single camelCase query can hit a symbol.
         let ident_words = symbol_words(phrase);
-        let (symbols, capped) = symbol_fallback(store, &ident_words, candidate_limit)?;
+        let (symbols, capped) =
+            symbol_fallback(store, &ident_words, candidate_limit, SYMBOL_SCAN_CAP)?;
         symbol_capped = capped;
         if !symbols.is_empty() {
             return finish_symbols(
@@ -1052,7 +1065,17 @@ fn symbol_name(store: &GraphStore, symbol_id: i64) -> Result<Option<String>, Sto
 /// with real trigram scoring is a correct, honest last-resort tier in the
 /// meantime — it just doesn't scale to a huge concept table the way an
 /// actual inverted trigram index would.
+///
+/// Callers pass the cap in, so tests can exercise the boundary with a small
+/// fixture (the production value is not reachable in one).
 const TRIGRAM_SCAN_CAP: u32 = 20_000;
+/// The order the T3 scan reads the concept table in, and the order
+/// [`concept_scan_identity`] hashes that same window in — one spelling for
+/// both, so the digest cannot see a different window than the scan reads.
+/// `ORDER BY` (never physical row order) is what makes the window a function
+/// of the indexed content: `replace_file` deletes and reinserts a file's
+/// concepts, so a physical `LIMIT` moved the boundary on every reindex.
+const CONCEPT_SCAN_ORDER: &str = "ORDER BY norm, id";
 /// Minimum overlap coefficient to accept a T3 candidate. A query that is a
 /// literal substring of the target scores 1.0 automatically (every trigram
 /// of a short query survives inside a longer superstring), so this floor
@@ -1087,16 +1110,19 @@ fn trigram_overlap(
 }
 
 /// T3: rank a bounded scan of concept rows by character-trigram overlap
-/// against `norm`. Falls back to the plain substring scan for queries under
-/// 3 chars (too short to form a single trigram, so overlap is meaningless).
+/// against `norm`. The scan reads `cap` rows in [`CONCEPT_SCAN_ORDER`], so
+/// the window is the same set of rows on every rebuild of identical content.
+/// Falls back to the plain substring scan for queries under 3 chars (too
+/// short to form a single trigram, so overlap is meaningless).
 ///
-/// The second return value is true when the scan HIT its row cap
-/// ([`TRIGRAM_SCAN_CAP`]): rows beyond the cap were never considered, so the
-/// result is a lower bound and the caller must surface that.
+/// The second return value is true when the scan HIT its row cap (`cap`):
+/// rows beyond it were never considered, so the result is a lower bound and
+/// the caller must surface that.
 fn trigram_fallback(
     store: &GraphStore,
     norm: &str,
     limit: u32,
+    cap: u32,
 ) -> Result<(Vec<ConceptRow>, bool), StoreError> {
     let query_grams = trigram_set(norm);
     if query_grams.is_empty() {
@@ -1106,12 +1132,14 @@ fn trigram_fallback(
         let capped = rows.len() as u32 >= limit;
         return Ok((rows, capped));
     }
-    let sql = "SELECT id, file_id, kind, raw, norm, detail, start_line, end_line, owner_symbol_id
-               FROM concepts LIMIT ?1";
-    let mut stmt = store.conn().prepare(sql)?;
+    let sql = format!(
+        "SELECT id, file_id, kind, raw, norm, detail, start_line, end_line, owner_symbol_id
+         FROM concepts {CONCEPT_SCAN_ORDER} LIMIT ?1"
+    );
+    let mut stmt = store.conn().prepare(&sql)?;
     let mut scanned: u32 = 0;
     let mut scored: Vec<(f64, ConceptRow)> = stmt
-        .query_map(params![TRIGRAM_SCAN_CAP], |r| {
+        .query_map(params![cap], |r| {
             Ok(ConceptRow {
                 id: r.get(0)?,
                 file_id: r.get(1)?,
@@ -1131,7 +1159,7 @@ fn trigram_fallback(
             (score >= TRIGRAM_MIN_OVERLAP).then_some((score, row))
         })
         .collect();
-    let capped = scanned >= TRIGRAM_SCAN_CAP;
+    let capped = scanned >= cap;
     scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
     scored.truncate(limit as usize);
     Ok((scored.into_iter().map(|(_, row)| row).collect(), capped))
@@ -1142,30 +1170,39 @@ fn trigram_fallback(
 // ---------------------------------------------------------------------------
 
 /// Bound on how many symbol rows the fallback scan will consider, mirroring
-/// [`TRIGRAM_SCAN_CAP`].
+/// [`TRIGRAM_SCAN_CAP`]; the caller passes it in for the same testability
+/// reason.
 const SYMBOL_SCAN_CAP: u32 = 20_000;
+/// The order the symbol fallback reads the `symbols` table in, and the order
+/// [`symbol_scan_identity`] hashes that same window in — one spelling for
+/// both, so the digest cannot see a different window than the scan reads.
+const SYMBOL_SCAN_ORDER: &str = "ORDER BY name, id";
 
 /// Symbol fallback: scan a bounded slice of the `symbols` table and keep rows
 /// whose camelCase-split name shares at least one ident word with the query's
 /// ident words, ranked by overlap ratio. This is the last tier before
-/// `unresolved`.
-/// The second return value is true when the scan HIT its row cap
-/// ([`SYMBOL_SCAN_CAP`]): symbols beyond the cap were never considered, so
-/// the result is a lower bound and the caller must surface that.
+/// `unresolved`; like T3 it reads `cap` rows in [`SYMBOL_SCAN_ORDER`], so a
+/// reindex cannot move the window.
+/// The second return value is true when the scan HIT its row cap (`cap`):
+/// symbols beyond it were never considered, so the result is a lower bound
+/// and the caller must surface that.
 fn symbol_fallback(
     store: &GraphStore,
     words: &[String],
     limit: u32,
+    cap: u32,
 ) -> Result<(Vec<SymbolRow>, bool), StoreError> {
     if words.is_empty() {
         return Ok((Vec::new(), false));
     }
-    let sql = "SELECT id, uid, file_id, name, qualified, kind, start_line, end_line, sig
-               FROM symbols LIMIT ?1";
-    let mut stmt = store.conn().prepare(sql)?;
+    let sql = format!(
+        "SELECT id, uid, file_id, name, qualified, kind, start_line, end_line, sig
+         FROM symbols {SYMBOL_SCAN_ORDER} LIMIT ?1"
+    );
+    let mut stmt = store.conn().prepare(&sql)?;
     let mut scanned: u32 = 0;
     let mut scored: Vec<(f64, SymbolRow)> = stmt
-        .query_map(params![SYMBOL_SCAN_CAP], |r| {
+        .query_map(params![cap], |r| {
             Ok(SymbolRow {
                 id: r.get(0)?,
                 uid: r.get(1)?,
@@ -1195,12 +1232,14 @@ fn symbol_fallback(
             }
         })
         .collect();
-    let capped = scanned >= SYMBOL_SCAN_CAP;
+    let capped = scanned >= cap;
     scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
     scored.truncate(limit as usize);
     Ok((scored.into_iter().map(|(_, row)| row).collect(), capped))
 }
 
+/// The response header plus the two scan-window identities [`inputs_digest`]
+/// folds in.
 fn index_state(store: &GraphStore) -> Result<IndexState, StoreError> {
     let concepts = store.concept_count()?;
     let concepts_version = store.concepts_version()?;
@@ -1208,12 +1247,51 @@ fn index_state(store: &GraphStore) -> Result<IndexState, StoreError> {
         concepts,
         concepts_version,
         fresh: concepts > 0,
+        concept_scan_identity: concept_scan_identity(store, TRIGRAM_SCAN_CAP)?,
+        symbol_scan_identity: symbol_scan_identity(store, SYMBOL_SCAN_CAP)?,
     })
 }
 
-/// `xxh3(phrase ‖ concepts_version ‖ concept_count)` — the digest every
-/// resolve response carries so a caller can detect when the underlying index
-/// changed.
+/// Hash the bounded window a fallback scan reads: the first `cap` rows
+/// `sql` returns, as `(rowid, text)` pairs in the query's own order. Folded
+/// into [`inputs_digest`] so the digest moves with the window.
+fn scan_window_identity(store: &GraphStore, sql: &str, cap: u32) -> Result<u64, StoreError> {
+    let mut stmt = store.conn().prepare(sql)?;
+    let rows = stmt.query_map(params![cap], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut buf = Vec::new();
+    for row in rows {
+        let (id, text) = row?;
+        buf.extend_from_slice(&id.to_le_bytes());
+        buf.extend_from_slice(text.as_bytes());
+        buf.push(0);
+    }
+    Ok(xxh3_64(&buf))
+}
+
+/// Identity of the concept window a T3 scan reads: `TRIGRAM_SCAN_CAP` rows
+/// in [`CONCEPT_SCAN_ORDER`].
+fn concept_scan_identity(store: &GraphStore, cap: u32) -> Result<u64, StoreError> {
+    let sql = format!("SELECT id, norm FROM concepts {CONCEPT_SCAN_ORDER} LIMIT ?1");
+    scan_window_identity(store, &sql, cap)
+}
+
+/// Identity of the symbol window the fallback scan reads: `SYMBOL_SCAN_CAP`
+/// rows in [`SYMBOL_SCAN_ORDER`].
+fn symbol_scan_identity(store: &GraphStore, cap: u32) -> Result<u64, StoreError> {
+    let sql = format!("SELECT id, name FROM symbols {SYMBOL_SCAN_ORDER} LIMIT ?1");
+    scan_window_identity(store, &sql, cap)
+}
+
+/// `xxh3(phrase ‖ concepts_version ‖ concept_count ‖ both scan-window
+/// identities)` — the digest every resolve response carries so a caller can
+/// detect when the underlying index changed.
+///
+/// The window identities are what keep that promise across a reindex: the
+/// bounded fallback scans read a window of the index, and `replace_file`
+/// deletes and reinserts a file's rows, so the window can move while the
+/// concept count stays put.
 fn inputs_digest(phrase: &str, state: &IndexState) -> u64 {
     let mut buf = Vec::new();
     buf.extend_from_slice(phrase.as_bytes());
@@ -1223,6 +1301,8 @@ fn inputs_digest(phrase: &str, state: &IndexState) -> u64 {
     }
     buf.push(0);
     buf.extend_from_slice(&state.concepts.to_le_bytes());
+    buf.extend_from_slice(&state.concept_scan_identity.to_le_bytes());
+    buf.extend_from_slice(&state.symbol_scan_identity.to_le_bytes());
     xxh3_64(&buf)
 }
 
@@ -1860,6 +1940,144 @@ mod tests {
         assert!(!is_status_code("042"));
         assert!(!is_status_code("99"));
         assert!(!is_status_code("4o4"));
+    }
+
+    // -----------------------------------------------------------------------
+    // bounded fallback scans: a content-defined window, not the physical order
+    // -----------------------------------------------------------------------
+
+    /// A capped T3 scan reads its rows in `norm, id` order, so a reindex that
+    /// moves a file's rowids to the end of the table (`replace_file` deletes
+    /// and reinserts them) must leave the matched window identical. The
+    /// pre-fix scan took the first `LIMIT` rows in physical order, so the
+    /// reindexed file fell out of the window and its match disappeared.
+    #[test]
+    fn capped_trigram_scan_keeps_the_same_window_when_a_reindex_moves_rowids() {
+        const CAP: u32 = 3;
+        let mut store = store();
+        let reindexed = add_file(&mut store, "src/reindexed.tsx");
+        let other = add_file(&mut store, "src/other.tsx");
+        // Insertion order is the physical order the cap cuts through, and the
+        // reindexed file's rows come first — the arrangement the cap used to
+        // be sensitive to.
+        for (file, norm) in [
+            (reindexed, "aaa"),
+            (reindexed, "email"),
+            (reindexed, "zzz1"),
+            (other, "bbbb"),
+            (other, "zzz2"),
+        ] {
+            store
+                .insert_concept(file, ConceptKind::String, norm, norm, "", 1, 1, None)
+                .unwrap();
+        }
+
+        let (before, capped_before) = trigram_fallback(&store, "mail", 8, CAP).unwrap();
+        assert!(capped_before, "the fixture must cross the cap: {before:?}");
+        let before_rows: Vec<(&str, i64, u32)> = before
+            .iter()
+            .map(|r| (r.norm.as_str(), r.file_id, r.start_line))
+            .collect();
+        assert_eq!(before_rows, vec![("email", reindexed, 1)], "{before:?}");
+
+        let file_id = store
+            .replace_file("src/reindexed.tsx", "blob2", "tsx")
+            .unwrap();
+        assert_eq!(file_id, reindexed, "a reindex keeps the file row");
+        for norm in ["aaa", "email", "zzz1"] {
+            store
+                .insert_concept(file_id, ConceptKind::String, norm, norm, "", 1, 1, None)
+                .unwrap();
+        }
+
+        let (after, capped_after) = trigram_fallback(&store, "mail", 8, CAP).unwrap();
+        assert!(capped_after, "the fixture must cross the cap: {after:?}");
+        let after_rows: Vec<(&str, i64, u32)> = after
+            .iter()
+            .map(|r| (r.norm.as_str(), r.file_id, r.start_line))
+            .collect();
+        assert_eq!(
+            after_rows, before_rows,
+            "a reindex must not move the scanned window"
+        );
+    }
+
+    /// The capped symbol scan reads its rows in `name, id` order for the same
+    /// reason: a reindex must not move the window, and with it the match set.
+    #[test]
+    fn capped_symbol_scan_keeps_the_same_window_when_a_reindex_moves_rowids() {
+        const CAP: u32 = 2;
+        let mut store = store();
+        let reindexed = add_file(&mut store, "src/reindexed.rs");
+        let other = add_file(&mut store, "src/other.rs");
+        for (file, uid, name) in [
+            (reindexed, "reindexed#alpha", "alpha"),
+            (reindexed, "reindexed#checkoutPage", "checkoutPage"),
+            (other, "other#zeta", "zeta"),
+            (other, "other#zetaTwo", "zetaTwo"),
+        ] {
+            store
+                .insert_symbol(file, uid, name, name, SymbolKind::Function, 1, 1, "()")
+                .unwrap();
+        }
+        let words = symbol_words("checkout page");
+
+        let (before, capped_before) = symbol_fallback(&store, &words, 8, CAP).unwrap();
+        assert!(capped_before, "the fixture must cross the cap: {before:?}");
+        let before_names: Vec<&str> = before.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(before_names, vec!["checkoutPage"], "{before:?}");
+
+        let file_id = store
+            .replace_file("src/reindexed.rs", "blob2", "rs")
+            .unwrap();
+        assert_eq!(file_id, reindexed, "a reindex keeps the file row");
+        for (uid, name) in [
+            ("reindexed#alpha", "alpha"),
+            ("reindexed#checkoutPage", "checkoutPage"),
+        ] {
+            store
+                .insert_symbol(file_id, uid, name, name, SymbolKind::Function, 1, 1, "()")
+                .unwrap();
+        }
+
+        let (after, capped_after) = symbol_fallback(&store, &words, 8, CAP).unwrap();
+        assert!(capped_after, "the fixture must cross the cap: {after:?}");
+        let after_names: Vec<&str> = after.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            after_names, before_names,
+            "a reindex must not move the scanned window"
+        );
+    }
+
+    /// The production cap reaches the scan: a T3 match sitting behind the
+    /// first row of the window is still found, which a cap collapsed to one
+    /// row (or none) would miss.
+    #[test]
+    fn resolve_finds_a_t3_match_behind_the_first_scanned_row() {
+        let mut store = store();
+        let first = add_file(&mut store, "src/first.rs");
+        let matching = add_file(&mut store, "src/matching.rs");
+        store
+            .insert_concept(first, ConceptKind::String, "alpha", "alpha", "", 1, 1, None)
+            .unwrap();
+        store
+            .insert_concept(
+                matching,
+                ConceptKind::String,
+                "email",
+                "email",
+                "",
+                1,
+                1,
+                None,
+            )
+            .unwrap();
+
+        let out = resolve(&store, "mail", &ResolveOptions::default()).unwrap();
+
+        assert_eq!(out.tier, Some(Tier::T3), "{out:?}");
+        assert_eq!(out.matches.len(), 1, "{out:?}");
+        assert_eq!(out.matches[0].path, "src/matching.rs", "{out:?}");
     }
 
     fn row(kind: ConceptKind, norm: &str) -> ConceptRow {

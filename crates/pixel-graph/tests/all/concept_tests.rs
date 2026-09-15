@@ -327,6 +327,129 @@ fn resolve_carries_index_state() {
 }
 
 // ---------------------------------------------------------------------------
+// inputs_digest: the "index changed" signal must survive a reindex that
+// leaves the concept count alone
+// ---------------------------------------------------------------------------
+
+/// `inputs_digest` is what a caller caches on to know the index moved, so a
+/// reindex that swaps the scanned content without changing the concept count
+/// must move it. `replace_file` deletes and reinserts a file's concepts, and
+/// the reinsert takes the rowid the delete just freed: neither the count nor
+/// the highest id changes, which is exactly what made the old digest blind.
+#[test]
+fn inputs_digest_moves_when_a_reindex_swaps_concepts_without_changing_the_count() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = GraphStore::open(&dir.path().join("graph.db")).expect("open graph store");
+    let a = store.replace_file("src/a.rs", "oid-a", "rs").unwrap();
+    let b = store.replace_file("src/b.rs", "oid-b", "rs").unwrap();
+    for (file, norm) in [(a, "submit form"), (b, "cancel order")] {
+        store
+            .insert_concept(file, ConceptKind::UiText, norm, norm, "", 1, 1, None)
+            .unwrap();
+    }
+
+    let before = resolve(&store, "submit form", &ResolveOptions::default()).expect("resolve");
+    let repeat = resolve(&store, "submit form", &ResolveOptions::default()).expect("resolve");
+    assert_eq!(
+        repeat.inputs_digest, before.inputs_digest,
+        "an untouched index must keep the digest stable"
+    );
+
+    store
+        .replace_file("src/b.rs", "oid-b2", "rs")
+        .expect("replace_file");
+    store
+        .insert_concept(
+            b,
+            ConceptKind::UiText,
+            "cancel invoice",
+            "cancel invoice",
+            "",
+            1,
+            1,
+            None,
+        )
+        .unwrap();
+    let after = resolve(&store, "submit form", &ResolveOptions::default()).expect("resolve");
+
+    let rowids: Vec<(i64, String)> = store
+        .conn()
+        .prepare("SELECT id, norm FROM concepts ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rowids,
+        vec![(1, "submit form".into()), (2, "cancel invoice".into())],
+        "the fixture must reuse the rowid so count and highest id stay put"
+    );
+    assert_eq!(
+        after.index_state.concepts, before.index_state.concepts,
+        "the reindex kept the concept count — the old digest could not tell"
+    );
+    assert_ne!(
+        after.inputs_digest, before.inputs_digest,
+        "a digest a caller caches on must move with the scanned content"
+    );
+}
+
+/// The symbol fallback scan is the digest's other bounded window: swapping
+/// the indexed symbols without changing their count must move the digest too,
+/// and the answer that a stale cache would have served must really differ.
+#[test]
+fn inputs_digest_moves_when_a_reindex_swaps_symbols_without_changing_the_count() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = GraphStore::open(&dir.path().join("graph.db")).expect("open graph store");
+    let a = store.replace_file("src/a.rs", "oid-a", "rs").unwrap();
+    let b = store.replace_file("src/b.rs", "oid-b", "rs").unwrap();
+    for (file, uid, name) in [
+        (a, "src/a.rs#alpha", "alpha"),
+        (b, "src/b.rs#checkoutPage", "checkoutPage"),
+    ] {
+        store
+            .insert_symbol(file, uid, name, name, SymbolKind::Function, 1, 1, "()")
+            .unwrap();
+    }
+
+    let before = resolve(&store, "checkout page", &ResolveOptions::default()).expect("resolve");
+    assert_eq!(before.tier, Some(Tier::Symbol), "{before:?}");
+
+    store
+        .replace_file("src/b.rs", "oid-b2", "rs")
+        .expect("replace_file");
+    store
+        .insert_symbol(
+            b,
+            "src/b.rs#checkoutForm",
+            "checkoutForm",
+            "checkoutForm",
+            SymbolKind::Function,
+            1,
+            1,
+            "()",
+        )
+        .unwrap();
+    let symbol_count: i64 = store
+        .conn()
+        .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(symbol_count, 2, "the reindex kept the symbol count");
+    let after = resolve(&store, "checkout page", &ResolveOptions::default()).expect("resolve");
+
+    assert_eq!(after.tier, Some(Tier::Symbol), "{after:?}");
+    assert_ne!(
+        after.matches[0].raw, before.matches[0].raw,
+        "the answer itself changed; a cache must not serve the old one"
+    );
+    assert_ne!(
+        after.inputs_digest, before.inputs_digest,
+        "the symbol fallback window is part of the digest"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // identifier-shaped query → symbol preference (the GUARD_MATCHER regression)
 // ---------------------------------------------------------------------------
 

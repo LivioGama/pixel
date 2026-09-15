@@ -9,10 +9,10 @@ use std::process::Command;
 
 use pixel_git::GitRunner;
 use pixel_rank::TargetFile;
-use pixel_rank::rerank::{RankedCandidate, rerank, rerank_targets};
+use pixel_rank::rerank::{RankedCandidate, RerankWeights, rerank, rerank_targets};
 use pixel_rank::signals::{
-    SessionEvent, SessionEventKind, SignalOptions, activity_from_git_log, inputs_digest,
-    score_signals, test_penalty_for,
+    SessionEvent, SessionEventKind, SignalOptions, activity_from_git_log, compute_signals,
+    inputs_digest, score_signals, test_penalty_for,
 };
 use pixel_session::types::{ErrorRecord, Surface};
 
@@ -88,6 +88,12 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// The rerank weights every production caller uses today: the PLAN.md table
+/// carried by `SignalOptions::default()`.
+fn plan_weights() -> RerankWeights {
+    RerankWeights::from(&SignalOptions::default())
+}
+
 fn error(id: i64, last_ts: i64, message: &str, http_url: Option<&str>) -> ErrorRecord {
     ErrorRecord {
         id,
@@ -134,7 +140,8 @@ fn activity_from_git_log_scores_recent_files_higher_than_stale_ones() {
 
     let runner = GitRunner::new(repo.path());
     let now = now_ms();
-    let activity = activity_from_git_log(&runner, now, 14.0);
+    let activity =
+        activity_from_git_log(&runner, now, 14.0).expect("a real repo's git log must be scanned");
 
     let hot = *activity.get("hot.txt").unwrap_or(&0.0);
     let warm = *activity.get("warm.txt").unwrap_or(&0.0);
@@ -172,13 +179,102 @@ fn activity_from_git_log_scores_recent_files_higher_than_stale_ones() {
 }
 
 #[test]
-fn activity_from_git_log_degrades_gracefully_outside_a_repo() {
+fn activity_from_git_log_should_name_a_failed_scan_instead_of_an_empty_map() {
+    // Outside a repo, `git log` exits non-zero. That is NOT "a repository
+    // with no recent commits": the scan must say so by name.
     let dir = tempfile::tempdir().unwrap();
     let runner = GitRunner::new(dir.path());
-    let activity = activity_from_git_log(&runner, now_ms(), 14.0);
+    let now = now_ms();
+    let err = activity_from_git_log(&runner, now, 14.0)
+        .expect_err("a failed git log must not be reported as an empty activity map");
     assert!(
-        activity.is_empty(),
-        "non-repo dir must yield empty activity map, got {activity:?}"
+        err.to_string().starts_with("git activity scan failed"),
+        "the reason must name the failed scan, got {err}"
+    );
+
+    // `compute_signals` still degrades to an empty activity channel outside a
+    // repo (the reranker keeps working on the other channels), and carries
+    // that reason so the caller can tell "unavailable" from "no churn".
+    let bundle = compute_signals(
+        &runner,
+        None,
+        &[],
+        None,
+        &[],
+        &HashMap::new(),
+        &["src/a.rs".to_string()],
+        &SignalOptions {
+            now_ms: now,
+            ..Default::default()
+        },
+    )
+    .expect("a failed activity scan degrades, it does not fail the whole call");
+    assert!(bundle.activity.is_empty());
+    let reason = bundle
+        .activity_unavailable
+        .expect("the degradation must be named, not silent");
+    assert!(reason.contains("git activity scan failed"), "got {reason}");
+}
+
+#[test]
+fn activity_from_git_log_should_name_a_capped_scan_instead_of_an_empty_map() {
+    // The 1 MiB default output cap (or the timeout) turns a legitimate
+    // repository into the same empty map a clean one yields. A capped scan is
+    // an unavailability, and must be reported as one.
+    let repo = GitFixture::new();
+    repo.commit_file_days_ago("hot.txt", "hot", 0);
+    let capped = GitRunner::new(repo.path()).with_max_output_bytes(Some(1));
+    let now = now_ms();
+    let err = activity_from_git_log(&capped, now, 14.0)
+        .expect_err("a capped git log must not be reported as an empty activity map");
+    assert!(
+        err.to_string().contains("exceeded output cap"),
+        "the reason must name the cap, got {err}"
+    );
+
+    let candidates = ["hot.txt".to_string()];
+    let opts = SignalOptions {
+        now_ms: now,
+        ..Default::default()
+    };
+    let bundle = compute_signals(
+        &capped,
+        None,
+        &[],
+        None,
+        &[],
+        &HashMap::new(),
+        &candidates,
+        &opts,
+    )
+    .expect("a capped activity scan degrades, it does not fail the whole call");
+    assert!(bundle.activity.is_empty(), "{bundle:?}");
+    let reason = bundle
+        .activity_unavailable
+        .expect("the capped scan must be named, not silent");
+    assert!(reason.contains("exceeded output cap"), "got {reason}");
+
+    // The same repository scanned without a cap scores hot.txt and reports no
+    // unavailability — the contrast the empty map alone cannot express.
+    let uncapped = GitRunner::new(repo.path());
+    let bundle = compute_signals(
+        &uncapped,
+        None,
+        &[],
+        None,
+        &[],
+        &HashMap::new(),
+        &candidates,
+        &opts,
+    )
+    .expect("an uncapped scan must succeed");
+    assert!(
+        bundle.activity.get("hot.txt").copied().unwrap_or(0.0) > 0.0,
+        "{bundle:?}"
+    );
+    assert!(
+        bundle.activity_unavailable.is_none(),
+        "a scan that ran is not unavailable: {bundle:?}"
     );
 }
 
@@ -413,9 +509,10 @@ fn rerank_never_lets_a_p2_candidate_outrank_any_p0_candidate() {
         fan_in: HashMap::new(),
         session_reasons: vec![],
         error_reasons: vec![],
+        activity_unavailable: None,
     };
 
-    let out = rerank(candidates, &signals, |_| 1.0);
+    let out = rerank(candidates, &signals, &plan_weights(), |_| 1.0);
 
     // Even though p2_hot's final score (100 * (1 + 0.15 + 0.35) = 150) is
     // enormously larger than p0_weak's (0.01), the output must still place
@@ -470,8 +567,9 @@ fn rerank_reorders_within_a_tier_by_amplified_score() {
         fan_in: HashMap::new(),
         session_reasons: vec![],
         error_reasons: vec![],
+        activity_unavailable: None,
     };
-    let out = rerank(candidates, &signals, |_| 1.0);
+    let out = rerank(candidates, &signals, &plan_weights(), |_| 1.0);
     assert_eq!(
         out[0].path, "src/b.rs",
         "b.rs's activity boost should move it ahead of tied a.rs"
@@ -507,8 +605,9 @@ fn rerank_targets_preserves_tier_non_promotion_on_target_file_shape() {
         fan_in: HashMap::new(),
         session_reasons: vec![],
         error_reasons: vec![],
+        activity_unavailable: None,
     };
-    let out = rerank_targets(targets, &signals, |_| 1.0);
+    let out = rerank_targets(targets, &signals, &plan_weights(), |_| 1.0);
     assert_eq!(
         out[0].tier, "P0",
         "P0 must still lead even though P2 has an amplified score"

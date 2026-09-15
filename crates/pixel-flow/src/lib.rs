@@ -12,6 +12,8 @@ pub mod replay;
 pub mod store;
 pub mod types;
 
+mod vars;
+
 pub use execute::{ExecResult, execute};
 pub use store::{delete, ensure_flow_dir, exists, flow_dir, list, load, save, slugify};
 pub use types::{Flow, FlowStep, FlowVar};

@@ -105,9 +105,18 @@ LAST_TAG="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)"
 if [ -n "$LAST_TAG" ] && command -v gh >/dev/null 2>&1; then
     SINCE="$(git log -1 --format=%cI "$LAST_TAG")"
     if PRS="$(gh pr list --state merged --base develop --search "merged:>$SINCE" --limit 200 \
-        --json number,title --jq '.[] | "  #\(.number) \(.title)"' 2>/dev/null)"; then
+        --json number,title,mergeCommit --jq '.[] | "\(.mergeCommit.oid) #\(.number) \(.title)"' 2>/dev/null)"; then
+        # The search goes by date, and the tagged commit is usually the merge
+        # of the previous prepare PR, committed a second before GitHub records
+        # its merged_at (v0.2.5: 16:39:14 vs 16:39:15), so that PR comes back.
+        # Keep only the pull requests whose merge commit the tag does not
+        # contain; one whose merge commit is not in this clone stays listed.
+        UNRELEASED="$(printf '%s\n' "$PRS" | while read -r oid pr; do
+            [ -n "$oid" ] || continue
+            git merge-base --is-ancestor "$oid" "$LAST_TAG" 2>/dev/null || printf '  %s\n' "$pr"
+        done)"
         echo "pull requests merged into develop since $LAST_TAG; each user-visible one needs an entry under ## [$VERSION]:"
-        if [ -n "$PRS" ]; then printf '%s\n' "$PRS"; else echo "  (none)"; fi
+        if [ -n "$UNRELEASED" ]; then printf '%s\n' "$UNRELEASED"; else echo "  (none)"; fi
     else
         echo "prepare.sh: could not list the pull requests merged since $LAST_TAG (gh offline or unauthenticated); check CHANGELOG.md against them by hand"
     fi

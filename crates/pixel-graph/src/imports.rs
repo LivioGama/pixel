@@ -60,6 +60,35 @@ fn first_suffix_match(all_files: &[String], suffix: &str) -> Option<String> {
     Some(first.clone())
 }
 
+/// Directory-suffix match used by the package imports (Go, Java wildcard):
+/// the first `ext` file inside the only directory whose path suffix is
+/// `suffix` (or that is `suffix` itself). Several files in one directory are
+/// one package and count as one candidate; a suffix shared by several
+/// directories names no single package, so it stays unresolved rather than
+/// follow directory traversal order.
+fn first_suffix_dir_match(all_files: &[String], suffix: &str, ext: &str) -> Option<String> {
+    let tail = format!("/{suffix}");
+    let mut dirs: Vec<&str> = Vec::new();
+    for f in all_files {
+        if !f.ends_with(ext) {
+            continue;
+        }
+        let dir = dir_of(f);
+        if dir == suffix || dir.ends_with(&tail) {
+            dirs.push(dir);
+        }
+    }
+    let first_dir = dirs.first()?;
+    if dirs.iter().any(|d| d != first_dir) {
+        return None;
+    }
+    all_files
+        .iter()
+        .filter(|f| f.ends_with(ext))
+        .find(|f| dir_of(f) == *first_dir)
+        .cloned()
+}
+
 // --- TS / JS --------------------------------------------------------------
 
 const JS_EXTS: [&str; 6] = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
@@ -201,22 +230,17 @@ fn resolve_python(spec: &str, importer_rel: &str, all_files: &[String]) -> Optio
 
 fn resolve_go(spec: &str, all_files: &[String]) -> Option<String> {
     // Match a directory whose path suffix equals the import path (or its
-    // trailing segments); return the first .go file in that directory.
+    // trailing segments); its first .go file stands for the package. A suffix
+    // shared by several directories names no single package (see
+    // `first_suffix_dir_match`).
     let segs: Vec<&str> = spec.split('/').filter(|s| !s.is_empty()).collect();
     if segs.is_empty() {
         return None;
     }
     for take in (1..=segs.len()).rev() {
         let suffix = segs[segs.len() - take..].join("/");
-        let hit = all_files.iter().find(|f| {
-            if !f.ends_with(".go") {
-                return false;
-            }
-            let dir = dir_of(f);
-            dir == suffix || dir.ends_with(&format!("/{suffix}"))
-        });
-        if let Some(f) = hit {
-            return Some(f.clone());
+        if let Some(f) = first_suffix_dir_match(all_files, &suffix, ".go") {
+            return Some(f);
         }
     }
     None
@@ -227,15 +251,7 @@ fn resolve_go(spec: &str, all_files: &[String]) -> Option<String> {
 fn resolve_java(spec: &str, all_files: &[String]) -> Option<String> {
     if let Some(pkg) = spec.strip_suffix(".*") {
         let dir_suffix = pkg.replace('.', "/");
-        return all_files
-            .iter()
-            .find(|f| {
-                f.ends_with(".java") && {
-                    let dir = dir_of(f);
-                    dir == dir_suffix || dir.ends_with(&format!("/{dir_suffix}"))
-                }
-            })
-            .cloned();
+        return first_suffix_dir_match(all_files, &dir_suffix, ".java");
     }
     let path = format!("{}.java", spec.replace('.', "/"));
     first_suffix_match(all_files, &path).or_else(|| {

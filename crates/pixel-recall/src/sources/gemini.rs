@@ -160,6 +160,7 @@ impl SourceAdapter for Adapter {
 
         Ok(ParseOutput {
             sessions,
+            skipped_records: 0,
             consumed_bytes: offset,
             cursor: None,
         })

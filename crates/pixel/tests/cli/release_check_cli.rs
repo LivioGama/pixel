@@ -121,6 +121,10 @@ fn stale_lock_fails_the_command_and_names_the_fix() {
 
     let json = pixel(&dir, &["check-release", "--json", "0.2.3"]);
     assert_eq!(json.status.code(), Some(1));
+    // The report IS the answer (`ok: false` inside it) and the exit status
+    // carries the failure, so stdout stays ONE document: the CLI appends a
+    // failure envelope only when a failing command wrote nothing
+    // (see `json_contract::failing_json_command_answers_with_a_failure_envelope`).
     let doc: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(doc["ok"], false);
     assert_eq!(doc["checks"][1]["ok"], false);

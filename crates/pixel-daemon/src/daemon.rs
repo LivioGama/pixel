@@ -1,9 +1,15 @@
 //! Unix-socket NDJSON daemon: one JSON `Request` per line, one JSON
-//! `Response` line back. Single-threaded request handling (requests are
-//! fast); an accept thread and a notify watcher feed one mpsc channel.
+//! `Response` line back. Single-threaded request handling: an accept thread
+//! and a notify watcher feed one mpsc channel, so a long mutation (a
+//! `sync-branch` is several git commands of up to 120 s each) delays every
+//! other request on this root. The loop therefore drains the debounced
+//! watcher batch before it serves a connection: a request following a
+//! mutation never reads an index built before it. A worker thread owning the
+//! `Service` behind a `Mutex` would keep the queue moving during a mutation;
+//! until then the queue waits and the answers stay ordered and fresh.
 
 use std::collections::BTreeMap;
-use std::io::{BufReader, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf};
@@ -122,9 +128,52 @@ pub fn pid_path(root: &Path) -> PathBuf {
     socket_path(root).with_extension("pid")
 }
 
+/// How long the [`ping_only`] probe waits for a connect and a reply. A warm
+/// daemon answers a `Ping` immediately; a socket that stays silent past this
+/// is not the fast path the caller was looking for.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Probe a daemon without ever starting one: connect to [`socket_path`] and
+/// send one `Ping`, `true` only when the daemon answers `ok`.
+///
+/// Deliberately not the CLI's auto-starting `try_daemon`: any root it is
+/// given gets a repository `Service` spawned for it, which is wrong for the
+/// machine-wide corpus (`recall_dir()`), where only the recall daemon may
+/// serve and `Service::open` leaves `.pixel/` artifacts inside the corpus.
+/// A caller that wants a daemon running starts it explicitly.
+pub fn ping_only(root: &Path) -> bool {
+    let Ok(mut stream) = UnixStream::connect(socket_path(root)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
+    probe_ping(&mut stream)
+}
+
+/// One `Ping` round trip on an already-connected stream: `true` only for an
+/// `ok` reply. Split from [`ping_only`] so tests drive the framing over a
+/// socket pair instead of a real daemon.
+fn probe_ping(stream: &mut UnixStream) -> bool {
+    // A unit variant: serialization cannot fail.
+    let mut line = serde_json::to_string(&Request::Ping).expect("Request::Ping serializes");
+    line.push('\n');
+    if stream.write_all(line.as_bytes()).is_err() {
+        return false;
+    }
+    let mut reply = String::new();
+    if BufReader::new(stream).read_line(&mut reply).is_err() {
+        return false;
+    }
+    serde_json::from_str::<Response>(&reply).is_ok_and(|r| r.ok)
+}
+
 enum Msg {
     Conn(UnixStream),
     Fs(notify::Event),
+    /// A `notify` callback error, forwarded to the loop (the single owner of
+    /// the corpus) so a watch that stopped reporting is counted and logged
+    /// instead of dropped on the callback thread.
+    WatcherError(String),
 }
 
 /// A corpus a daemon can serve: the repo `Service`, or the machine-wide
@@ -156,6 +205,13 @@ pub trait Corpus {
     /// Periodic maintenance, called every `sweep_interval` from the loop
     /// thread (default: nothing).
     fn sweep(&mut self) {}
+    /// The watcher backend reported an error: changes may have been missed,
+    /// so answers can be stale until the next event. The default logs it; a
+    /// corpus that reports health counts it too.
+    #[cfg_attr(test, mutants::skip)] // stderr diagnostics only
+    fn watcher_error(&mut self, error: &str) {
+        eprintln!("pixel daemon: watcher error: {error}");
+    }
 }
 
 impl Corpus for Service {
@@ -181,6 +237,10 @@ impl Corpus for Service {
         } else {
             self.refresh_file(&rel);
         }
+    }
+
+    fn watcher_error(&mut self, error: &str) {
+        self.note_watcher_error(error);
     }
 
     fn apply_changes(&mut self, changes: &[(PathBuf, bool)]) {
@@ -301,12 +361,18 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
         }
     });
 
-    // Watcher: raw notify events into the channel; debounced below.
+    // Watcher: raw notify events into the channel; debounced below. A
+    // backend error goes through the same channel: a watch that stopped
+    // reporting is exactly the failure that leaves the index stale, so it
+    // must not be dropped here.
     let tx_fs = tx.clone();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        if let Ok(ev) = res {
-            let _ = tx_fs.send(Msg::Fs(ev));
-        }
+        let msg = match res {
+            Ok(ev) => Msg::Fs(ev),
+            Err(error) => Msg::WatcherError(error.to_string()),
+        };
+        // The only send failure is a dropped receiver: the loop is exiting.
+        let _ = tx_fs.send(msg);
     })
     .map_err(|e| ServeError::Msg(format!("watcher init: {e}")))?;
     let watch_paths = service.watch_paths();
@@ -348,6 +414,10 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
         match rx.recv_timeout(timeout.max(Duration::from_millis(10))) {
             Ok(Msg::Conn(stream)) => {
                 last_activity = Instant::now();
+                // Apply the debounced batch before serving the connection:
+                // the debounce coalesces bursts between requests, it must
+                // not let a request read the index from before a mutation.
+                flush_pending(&mut service, &mut pending, &mut flush_at);
                 handle_conn(&mut service, stream, &mut shutdown);
             }
             Ok(Msg::Fs(ev)) => {
@@ -356,6 +426,7 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
                     flush_at = Some(Instant::now() + DEBOUNCE);
                 }
             }
+            Ok(Msg::WatcherError(error)) => service.watcher_error(&error),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -363,9 +434,7 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
         if let Some(at) = flush_at
             && Instant::now() >= at
         {
-            let batch: Vec<(PathBuf, bool)> = std::mem::take(&mut pending).into_iter().collect();
-            service.apply_changes(&batch);
-            flush_at = None;
+            flush_pending(&mut service, &mut pending, &mut flush_at);
         }
 
         if let (Some(at), Some(every)) = (next_sweep, sweep_every)
@@ -401,7 +470,25 @@ fn root_removed(root: &Path) -> bool {
     !root.is_dir()
 }
 
+/// Record one watcher event as a pending change, when it is one.
+///
+/// A read is not: `notify`'s inotify backend (the Linux one) reports an
+/// `Access` event for every open (IN_OPEN) and read-only close
+/// (IN_CLOSE_NOWRITE) of a watched file, so the daemon's own extraction pass
+/// — or any `cat`, editor or grep — would mark every file it read as
+/// changed, and the batch the loop applies before the next request would
+/// move the index counters for a repository nobody edited. Metadata-only
+/// events (a `chmod`, a `touch`) cannot change an answer either. Every event
+/// that can change content (create, modify data or name, remove) is still
+/// recorded.
 fn record_event(ev: &notify::Event, pending: &mut BTreeMap<PathBuf, bool>) {
+    if matches!(
+        ev.kind,
+        notify::EventKind::Access(_)
+            | notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
+    ) {
+        return;
+    }
     for path in &ev.paths {
         if path.components().any(|c| match c {
             Component::Normal(s) => IGNORED_DIRS.iter().any(|d| s == *d),
@@ -416,6 +503,22 @@ fn record_event(ev: &notify::Event, pending: &mut BTreeMap<PathBuf, bool>) {
         // A later create/modify wins over an earlier remove and vice versa.
         pending.insert(path.clone(), removed);
     }
+}
+
+/// Apply the debounced watcher batch now, when there is one. The loop calls
+/// this before every connection so a request following a mutation cannot
+/// read an index built before it, and again on the debounce timer.
+fn flush_pending(
+    service: &mut dyn Corpus,
+    pending: &mut BTreeMap<PathBuf, bool>,
+    flush_at: &mut Option<Instant>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let batch: Vec<(PathBuf, bool)> = std::mem::take(pending).into_iter().collect();
+    service.apply_changes(&batch);
+    *flush_at = None;
 }
 
 fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool) {
@@ -571,6 +674,27 @@ mod tests {
         sweeps: Arc<AtomicUsize>,
     }
 
+    /// A corpus that records the batches the loop hands it, so a test can
+    /// assert *when* the debounced watcher events are applied.
+    struct RecordingCorpus {
+        root: PathBuf,
+        batches: Arc<std::sync::Mutex<Vec<Vec<PathBuf>>>>,
+    }
+
+    impl Corpus for RecordingCorpus {
+        fn root(&self) -> &Path {
+            &self.root
+        }
+        fn handle(&mut self, _req: Request) -> Response {
+            failure_response("stub", "stub corpus")
+        }
+        fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+        fn apply_changes(&mut self, changes: &[(PathBuf, bool)]) {
+            let paths: Vec<PathBuf> = changes.iter().map(|(path, _)| path.clone()).collect();
+            self.batches.lock().unwrap().push(paths);
+        }
+    }
+
     impl Corpus for SweptCorpus {
         fn root(&self) -> &Path {
             &self.root
@@ -592,6 +716,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root.canonicalize().unwrap()
+    }
+
+    /// A socket pair carrying a canned reply: the probe's contract is the
+    /// reply's `ok` field, not the transport.
+    #[test]
+    fn probe_ping_is_true_only_for_an_ok_reply() {
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let ok = Response::success("ping", serde_json::json!({"pong": true}));
+        writeln!(server, "{}", serde_json::to_string(&ok).unwrap()).unwrap();
+        assert!(probe_ping(&mut client), "an ok reply is a live daemon");
+
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let failed = failure_response("ping", "not serving");
+        writeln!(server, "{}", serde_json::to_string(&failed).unwrap()).unwrap();
+        assert!(!probe_ping(&mut client), "a failure envelope is not");
+
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        writeln!(server, "not json").unwrap();
+        assert!(!probe_ping(&mut client), "garbage is not a live daemon");
+    }
+
+    /// The probe must be false for a root nobody serves, and true for one a
+    /// daemon listens on: the two halves a constant-returning mutant breaks.
+    #[test]
+    fn ping_only_sees_a_listening_daemon_and_nothing_else() {
+        let bare = scratch_root("probe-none");
+        assert!(!ping_only(&bare));
+
+        let root = scratch_root("probe-live");
+        let listener = UnixListener::bind(socket_path(&root)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            // Poll with a deadline: a probe that never connects must fail the
+            // assertion, not hang the suite.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        // A non-blocking listener hands back a non-blocking
+                        // socket on BSD: reset it, or the read races the
+                        // client's write instead of waiting for it.
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                        let mut line = String::new();
+                        let Ok(n) = BufReader::new(&stream).read_line(&mut line) else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        assert_eq!(
+                            serde_json::from_str::<Request>(&line).unwrap(),
+                            Request::Ping,
+                            "the probe sends a Ping"
+                        );
+                        let reply = Response::success("ping", serde_json::json!({"pong": true}));
+                        writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+                        return;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        assert!(ping_only(&root));
+        server.join().unwrap();
+        let _ = std::fs::remove_file(socket_path(&root));
     }
 
     fn shutdown(sock: &Path) {
@@ -655,6 +848,107 @@ mod tests {
     fn default_corpus_has_no_sweep_interval() {
         let stub = StubCorpus(PathBuf::from("/nonexistent"));
         assert_eq!(stub.sweep_interval(), None);
+    }
+
+    /// The loop applies the pending watcher batch before it serves a
+    /// connection, not after: a request that follows a mutation must not
+    /// read the index from before it. Nothing is applied when no event
+    /// arrived, and the batch is consumed exactly once.
+    #[test]
+    fn pending_batch_is_applied_when_a_connection_arrives() {
+        let changed = PathBuf::from("/repo/src/edited.ts");
+        let batches = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut corpus = RecordingCorpus {
+            root: PathBuf::from("/repo"),
+            batches: Arc::clone(&batches),
+        };
+        let mut pending = BTreeMap::new();
+        let mut flush_at = None;
+
+        flush_pending(&mut corpus, &mut pending, &mut flush_at);
+        assert!(
+            batches.lock().unwrap().is_empty(),
+            "an empty batch must not reach the corpus"
+        );
+
+        pending.insert(changed.clone(), false);
+        flush_at = Some(Instant::now() + Duration::from_secs(60));
+        flush_pending(&mut corpus, &mut pending, &mut flush_at);
+        assert_eq!(
+            batches.lock().unwrap().as_slice(),
+            [vec![changed]],
+            "the pending event must be applied before the request is served"
+        );
+        assert!(
+            pending.is_empty(),
+            "the batch must be consumed, never applied twice"
+        );
+        assert_eq!(flush_at, None, "the debounce timer must not fire again");
+    }
+
+    /// A read is not a change. `notify`'s inotify backend reports an
+    /// `Access` event for every open and read-only close of a watched file,
+    /// so the daemon's own extraction pass would mark every file it read as
+    /// changed and the batch the loop applies before the next request would
+    /// move the index counters for a repository nobody edited. Metadata-only
+    /// events cannot change an answer either, while every content event
+    /// still reaches the corpus.
+    #[test]
+    fn watcher_records_only_events_that_change_content() {
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind,
+        };
+
+        let root = scratch_root("content-events");
+        let file = root.join("login.rs");
+        std::fs::write(&file, "pub fn login() -> bool { true }\n").unwrap();
+        std::fs::create_dir_all(root.join(".pixel")).unwrap();
+        let ignored = root.join(".pixel/actions.jsonl");
+        std::fs::write(&ignored, "{}\n").unwrap();
+
+        for kind in [
+            notify::EventKind::Access(AccessKind::Open(AccessMode::Read)),
+            notify::EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            notify::EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+        ] {
+            let mut pending = BTreeMap::new();
+            record_event(
+                &notify::Event::new(kind).add_path(file.clone()),
+                &mut pending,
+            );
+            assert!(pending.is_empty(), "{kind:?} must not look like a change");
+        }
+
+        let mut pending = BTreeMap::new();
+        for kind in [
+            notify::EventKind::Create(CreateKind::File),
+            notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            notify::EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Any)),
+        ] {
+            record_event(
+                &notify::Event::new(kind).add_path(file.clone()),
+                &mut pending,
+            );
+            assert_eq!(pending.get(&file), Some(&false), "{kind:?} is a change");
+        }
+        record_event(
+            &notify::Event::new(notify::EventKind::Remove(notify::event::RemoveKind::File))
+                .add_path(file.clone()),
+            &mut pending,
+        );
+        assert_eq!(pending.get(&file), Some(&true), "a removal is a removal");
+        // The ignored-tree rule survives the content filter: `.pixel` state
+        // is the daemon's own churn, never a source change.
+        record_event(
+            &notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+                .add_path(ignored.clone()),
+            &mut pending,
+        );
+        assert!(
+            !pending.contains_key(&ignored),
+            ".pixel state is not a source change"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A corpus without an interval is never swept, so a corpus without
