@@ -350,16 +350,19 @@ fn is_identifier_named(node: Node, name: &str, content: &[u8]) -> bool {
     identifierish && node.utf8_text(content).is_ok_and(|t| t == name)
 }
 
+/// Node kinds whose interior is text, not code: comments and strings. An
+/// identifier inside one (`// foo`, an interpolated `"#{foo}"`) is prose,
+/// never a reference.
+fn is_text_kind(kind: &str) -> bool {
+    kind.contains("comment") || kind.contains("string") || kind == "interpreted_string_literal"
+}
+
 /// True when an ancestor is a comment or string — bytes that are text, not
 /// code, and must never be rewritten as a reference.
 fn in_text_node(node: Node) -> bool {
     let mut cur = node;
     loop {
-        let kind = cur.kind();
-        if kind.contains("comment")
-            || kind.contains("string")
-            || kind == "interpreted_string_literal"
-        {
+        if is_text_kind(cur.kind()) {
             return true;
         }
         match cur.parent() {
@@ -383,6 +386,11 @@ fn identifier_nodes_on_line<'t>(
     out
 }
 
+/// A node whose line span excludes `row` cannot contain a site on it.
+fn node_outside_row(node: Node, row: usize) -> bool {
+    node.start_position().row > row || node.end_position().row < row
+}
+
 fn collect_line_nodes<'t>(
     node: Node<'t>,
     content: &[u8],
@@ -390,8 +398,8 @@ fn collect_line_nodes<'t>(
     name: &str,
     out: &mut Vec<Node<'t>>,
 ) {
-    // Prune: a node whose line span excludes `row` cannot contain a site.
-    if node.start_position().row > row || node.end_position().row < row {
+    // Prune subtrees that cannot contain a site on `row`.
+    if node_outside_row(node, row) {
         return;
     }
     if is_identifier_named(node, name, content)
@@ -424,17 +432,7 @@ fn pick_definition<'t>(candidates: &[Node<'t>]) -> Vec<Node<'t>> {
     let decl_like: Vec<Node> = candidates
         .iter()
         .copied()
-        .filter(|n| {
-            n.parent().is_some_and(|p| {
-                let k = p.kind();
-                k.contains("declaration")
-                    || k.contains("definition")
-                    || k.contains("_item")
-                    || k.contains("declarator")
-                    || k.contains("spec")
-                    || k.contains("assignment")
-            })
-        })
+        .filter(|n| n.parent().is_some_and(|p| is_decl_parent_kind(p.kind())))
         .collect();
     if decl_like.len() == 1 {
         decl_like
@@ -463,6 +461,24 @@ fn pick_callee<'t>(candidates: &[Node<'t>]) -> Vec<Node<'t>> {
     Vec::new()
 }
 
+/// Parent kinds that declare a name: declarations, definitions, items,
+/// declarators, specs, assignments (`let x = …` has no `name` field — the
+/// fallback below needs this to find its identifier).
+fn is_decl_parent_kind(kind: &str) -> bool {
+    kind.contains("declaration")
+        || kind.contains("definition")
+        || kind.contains("_item")
+        || kind.contains("declarator")
+        || kind.contains("spec")
+        || kind.contains("assignment")
+}
+
+/// Parent kinds that wrap a call: `call_expression`, `method_invocation`,
+/// `macro_invocation`, …
+fn is_call_kind(kind: &str) -> bool {
+    kind.contains("call") || kind.contains("invocation")
+}
+
 fn is_callee_position(node: Node) -> bool {
     let Some(parent) = node.parent() else {
         return false;
@@ -480,21 +496,9 @@ fn is_callee_position(node: Node) -> bool {
             return true;
         }
     }
-    let pk = parent.kind();
-    if (pk.contains("call") || pk.contains("invocation")) && parent.named_child(0) == Some(node) {
-        return true;
-    }
-    // `recv.name(...)`: the field/property half of a member access whose
-    // own parent is the call's function.
-    if (pk.contains("member") || pk.contains("selector") || pk.contains("field_expression"))
-        && parent
-            .parent()
-            .is_some_and(|gp| gp.child_by_field_name("function") == Some(parent))
-        && parent.named_children(&mut parent.walk()).last() == Some(node)
-    {
-        return true;
-    }
-    false
+    // `foo(...)`, `foo!(...)`: the callee is the first named child of the
+    // call-shaped node when the grammar uses no named field for it.
+    is_call_kind(parent.kind()) && parent.named_child(0) == Some(node)
 }
 
 /// A passed-as-value reference: identifier in expression position that is
@@ -502,16 +506,13 @@ fn is_callee_position(node: Node) -> bool {
 /// Every same-named identifier on the asserted line in use position is a
 /// reference to the renamed symbol.
 fn pick_reference<'t>(candidates: &[Node<'t>]) -> Vec<Node<'t>> {
-    let refs: Vec<Node> = candidates
+    // Every use-position occurrence is a reference; the declaration's own
+    // `name` node is not (the Definition site already owns it).
+    candidates
         .iter()
         .copied()
         .filter(|n| !is_declaration_name(*n))
-        .collect();
-    if refs.len() == candidates.len() && !refs.is_empty() {
-        return refs;
-    }
-    // Mixed line (declaration + use of the same name): keep only uses.
-    refs
+        .collect()
 }
 
 fn is_declaration_name(node: Node) -> bool {
@@ -539,11 +540,9 @@ fn collect_import_nodes<'t>(
     name: &str,
     out: &mut Vec<Node<'t>>,
 ) {
-    let k = node.kind();
-    let is_import = k.contains("import")
-        || k == "use_declaration"
-        || k.contains("using_directive")
-        || (k == "export_statement" && node.utf8_text(content).is_ok_and(|t| t.contains("from")));
+    let is_import = is_import_stmt_kind(node.kind())
+        || (node.kind() == "export_statement"
+            && node.utf8_text(content).is_ok_and(|t| t.contains("from")));
     if is_import && node.utf8_text(content).is_ok_and(|t| t.contains(spec)) {
         // Within this statement, rewrite name-position identifiers matching
         // the old name; alias-position nodes (the `as X` target) keep the
@@ -570,12 +569,19 @@ fn collect_binding_names<'t>(node: Node<'t>, content: &[u8], name: &str, out: &m
 }
 
 /// `foo as bar` — `bar` is the alias the importer chose; it is a different
-/// name, not a reference to the renamed symbol.
+/// name, not a reference to the renamed symbol. Grammar-neutral: the alias
+/// sits in the `alias` field or under an `alias`-kind clause.
 fn is_alias_position(node: Node) -> bool {
     node.parent().is_some_and(|p| {
         p.child_by_field_name("alias") == Some(node)
             || (p.kind().contains("alias") && p.named_children(&mut p.walk()).last() == Some(node))
     })
+}
+
+/// Statement kinds that pull bindings from another file: `import`, `use`,
+/// `using`.
+fn is_import_stmt_kind(kind: &str) -> bool {
+    kind.contains("import") || kind == "use_declaration" || kind.contains("using_directive")
 }
 
 /// Whole-word occurrences of `name` in `content` outside the verified edit
@@ -709,5 +715,403 @@ mod tests {
         assert!(apply(&dir, &plan, "foo", "baz").is_err());
         assert_eq!(std::fs::read(dir.join("a.rs")).unwrap(), b"fn qux() {}\n");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A real graph built from source files: definition + a resolved call
+    /// + a named import + a comment decoy carrying the old name. The extra
+    /// `unusedHelper` sibling proves the collision check keys on the NAME,
+    /// not on the file merely having another symbol.
+    fn fixture() -> (tempfile::TempDir, GraphStore) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/login.ts"),
+            "export function loginUser(name: string): boolean {\n    return name.length > 0;\n}\n\
+             export function unusedHelper(): number { return 0; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/caller.ts"),
+            "import { loginUser } from \"./login\";\n\nexport function go(): boolean {\n    // loginUser is validated upstream\n    return loginUser(\"someone\");\n}\n",
+        )
+        .unwrap();
+        let db = dir.path().join("graph.db");
+        crate::build::build_graph(dir.path(), &db).unwrap();
+        (dir, GraphStore::open(&db).unwrap())
+    }
+
+    fn login_sym(store: &GraphStore) -> SymbolRow {
+        store
+            .symbols_by_name("loginUser", 10)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "loginUser")
+            .expect("loginUser must be in the fixture graph")
+    }
+
+    /// The plan the CLI test proved end-to-end, asserted at the engine
+    /// level: def + call + import edits, comment untouched and counted.
+    #[test]
+    fn plan_covers_definition_call_and_import_but_not_the_comment() {
+        let (dir, store) = fixture();
+        let sym = login_sym(&store);
+        let plan = plan(&store, dir.path(), &sym, "authenticate").unwrap();
+        let caller = plan.files.get("src/caller.ts").expect("caller edits");
+        assert!(
+            caller.iter().any(|e| e.kind == SiteKind::Import),
+            "{caller:?}"
+        );
+        assert!(
+            caller.iter().any(|e| e.kind == SiteKind::Call),
+            "{caller:?}"
+        );
+        let login = plan.files.get("src/login.ts").expect("def edits");
+        assert!(
+            login.iter().any(|e| e.kind == SiteKind::Definition),
+            "{login:?}"
+        );
+        // The comment occurrence is unclaimed text, not an edit.
+        let content = std::fs::read(dir.path().join("src/caller.ts")).unwrap();
+        assert!(
+            !caller
+                .iter()
+                .any(|e| &content[e.start_byte..e.end_byte] != b"loginUser"),
+            "every edit range must sit on the old name"
+        );
+        assert_eq!(plan.unclaimed_text.get("src/caller.ts"), Some(&1));
+        // login.ts holds only claimed occurrences — no unclaimed entry.
+        assert!(!plan.unclaimed_text.contains_key("src/login.ts"));
+
+        let written = apply(dir.path(), &plan, "loginUser", "authenticate").unwrap();
+        assert_eq!(written.len(), 2);
+        let after = std::fs::read(dir.path().join("src/caller.ts")).unwrap();
+        let after = String::from_utf8(after).unwrap();
+        assert!(after.contains("authenticate("), "{after}");
+        assert!(after.contains("import { authenticate }"), "{after}");
+        assert!(after.contains("// loginUser"), "{after}");
+    }
+
+    #[test]
+    fn plan_rejects_renaming_to_the_same_name() {
+        let (dir, store) = fixture();
+        let sym = login_sym(&store);
+        assert!(plan(&store, dir.path(), &sym, "loginUser").is_err());
+    }
+
+    /// A same-file sibling already named `new_name` would silently merge
+    /// two declarations; the plan must refuse.
+    #[test]
+    fn plan_rejects_a_name_that_collides_in_the_defining_file() {
+        let (dir, store) = fixture();
+        std::fs::write(
+            dir.path().join("src/login.ts"),
+            "export function loginUser(name: string): boolean {\n    return name.length > 0;\n}\n\
+             export function authenticate(): boolean { return false; }\n",
+        )
+        .unwrap();
+        let db = dir.path().join("graph.db");
+        crate::build::build_graph(dir.path(), &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let sym = login_sym(&store);
+        assert!(plan(&store, dir.path(), &sym, "authenticate").is_err());
+    }
+
+    #[test]
+    fn site_kind_names_are_stable() {
+        assert_eq!(SiteKind::Definition.as_str(), "definition");
+        assert_eq!(SiteKind::Call.as_str(), "call");
+        assert_eq!(SiteKind::Reference.as_str(), "reference");
+        assert_eq!(SiteKind::Import.as_str(), "import");
+    }
+
+    /// Kind predicates are the contract the per-grammar verification stands
+    /// on; they are asserted directly so a flipped connector cannot hide.
+    #[test]
+    fn kind_predicates() {
+        assert!(is_text_kind("comment"));
+        assert!(is_text_kind("block_comment"));
+        assert!(is_text_kind("string"));
+        assert!(is_text_kind("interpreted_string_literal"));
+        assert!(!is_text_kind("identifier"));
+        assert!(!is_text_kind("call_expression"));
+
+        assert!(is_decl_parent_kind("function_declaration"));
+        assert!(is_decl_parent_kind("let_declaration"));
+        assert!(is_decl_parent_kind("class_definition"));
+        assert!(is_decl_parent_kind("function_item"));
+        assert!(is_decl_parent_kind("variable_declarator"));
+        assert!(is_decl_parent_kind("type_spec"));
+        assert!(is_decl_parent_kind("assignment"));
+        assert!(!is_decl_parent_kind("call_expression"));
+        assert!(!is_decl_parent_kind("identifier"));
+
+        assert!(is_call_kind("call_expression"));
+        assert!(is_call_kind("method_invocation"));
+        assert!(is_call_kind("macro_invocation"));
+        assert!(!is_call_kind("identifier"));
+        assert!(!is_call_kind("member_expression"));
+
+        assert!(is_import_stmt_kind("import_statement"));
+        assert!(is_import_stmt_kind("use_declaration"));
+        assert!(is_import_stmt_kind("using_directive"));
+        assert!(!is_import_stmt_kind("export_statement"));
+        assert!(!is_import_stmt_kind("identifier"));
+    }
+
+    /// The line-span prune must fire for a node entirely above or below the
+    /// target row — both directions, not just both-at-once.
+    #[test]
+    fn outside_row_prunes_above_and_below() {
+        let src = b"fn a() {}\nfn b() {}\nfn c() {}\n";
+        let tree = extract::parse_file("a.rs", src).unwrap();
+        let root = tree.root_node();
+        let a = root.named_child(0).unwrap();
+        let c = root.named_child(2).unwrap();
+        assert!(node_outside_row(a, 1)); // row 1 (line 2): a is line 1
+        assert!(node_outside_row(c, 1));
+        assert!(!node_outside_row(a, 0));
+        assert!(!node_outside_row(root, 1));
+    }
+
+    /// An identifier interpolated into a string literal is still text.
+    #[test]
+    fn interpolation_inside_a_string_is_text() {
+        let src = b"name = 1\nx = f\"hi {name}\"\n";
+        let tree = extract::parse_file("a.py", src).unwrap();
+        // Line 2's interpolated `name` is inside a string — not a candidate.
+        assert!(identifier_nodes_on_line(&tree, src, 2, "name").is_empty());
+        assert_eq!(identifier_nodes_on_line(&tree, src, 1, "name").len(), 1);
+    }
+
+    /// A line with only a call has no definition — the field check must not
+    /// return the callee just because it is *some* node.
+    #[test]
+    fn definition_picker_ignores_call_sites() {
+        let src = b"foo();\nlet foo = 1;\n";
+        let tree = extract::parse_file("a.rs", src).unwrap();
+        let call_line = identifier_nodes_on_line(&tree, src, 1, "foo");
+        assert_eq!(call_line.len(), 1);
+        assert!(pick_definition(&call_line).is_empty());
+        // `let foo = 1` — let_declaration has no `name` field; the fallback
+        // still finds the declared identifier.
+        let let_line = identifier_nodes_on_line(&tree, src, 2, "foo");
+        assert_eq!(let_line.len(), 1);
+        assert_eq!(pick_definition(&let_line), let_line);
+    }
+
+    /// `foo!(...)`: the macro callee is the first named child of
+    /// `macro_invocation`, reached only through the call-kind branch.
+    #[test]
+    fn macro_invocation_callee_is_first_named_child() {
+        let src = b"foo!(x);\nfn main() {}\n";
+        let tree = extract::parse_file("a.rs", src).unwrap();
+        let cands = identifier_nodes_on_line(&tree, src, 1, "foo");
+        assert_eq!(cands.len(), 1);
+        assert!(is_callee_position(cands[0]));
+    }
+
+    /// The `name` field of a NON-declaration parent (an import specifier)
+    /// is not a declaration name.
+    #[test]
+    fn import_binding_is_not_a_declaration_name() {
+        let src = b"import { loginUser } from \"./login\";\n";
+        let tree = extract::parse_file("a.ts", src).unwrap();
+        let nodes = import_name_nodes(&tree, src, "./login", "loginUser");
+        assert_eq!(nodes.len(), 1);
+        assert!(!is_declaration_name(nodes[0]));
+        // And it IS a reference-position identifier.
+        assert_eq!(pick_reference(&nodes), nodes);
+    }
+
+    /// `import { other as loginUser }` — the alias carries the OLD name but
+    /// is the importer's local binding, not a reference to the symbol.
+    #[test]
+    fn alias_with_same_name_is_not_rewritten() {
+        let src = b"import { other as loginUser } from \"./login\";\n";
+        let tree = extract::parse_file("a.ts", src).unwrap();
+        assert!(import_name_nodes(&tree, src, "./login", "loginUser").is_empty());
+        // The alias node itself reports as alias position.
+        let tree2 = extract::parse_file("a.ts", src).unwrap();
+        let all = identifier_nodes_on_line(&tree2, src, 1, "loginUser");
+        assert_eq!(all.len(), 1);
+        assert!(is_alias_position(all[0]));
+
+        // `import m.n as alias`: the dotted module name is a child of the
+        // aliased_import but NOT its last named child — not the alias.
+        let src = b"import os.path as loginUser\n";
+        let tree = extract::parse_file("a.py", src).unwrap();
+        let all = identifier_nodes_on_line(&tree, src, 1, "loginUser");
+        assert_eq!(all.len(), 1);
+        assert!(is_alias_position(all[0]));
+        // `os.path` itself is in name position, never alias position.
+        let tree = extract::parse_file("a.py", src).unwrap();
+        let os = identifier_nodes_on_line(&tree, src, 1, "os");
+        assert!(!os.is_empty());
+        assert!(os.iter().all(|n| !is_alias_position(*n)));
+    }
+
+    /// `export { x } from "./m"` is an import-like binding site; a bare
+    /// `export { x }` re-exports a local and is not.
+    #[test]
+    fn reexport_from_is_an_import_site_bare_export_is_not() {
+        let src = b"export { loginUser } from \"./login\";\nexport { loginUser };\n";
+        let tree = extract::parse_file("a.ts", src).unwrap();
+        let nodes = import_name_nodes(&tree, src, "./login", "loginUser");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].start_position().row, 0);
+    }
+
+    /// Word-boundary counting at the exact end of content and inside a
+    /// doubled identifier.
+    #[test]
+    fn unclaimed_text_end_boundary_and_overlap() {
+        assert_eq!(count_unclaimed_text(b"x foo", "foo", &[]), 1);
+        let edits = vec![RenameEdit {
+            line: 1,
+            start_byte: 0,
+            end_byte: 3,
+            kind: SiteKind::Definition,
+        }];
+        // The second `foo` starts past the first's edit range — claimedness
+        // requires the occurrence to fit INSIDE an edit, not merely touch it.
+        assert_eq!(count_unclaimed_text(b"foo foo", "foo", &edits), 1);
+    }
+
+    /// Call-site position: `foo()` and `x.foo()` are callees, `map(foo)`
+    /// passes `foo` as a value, `// foo` is text.
+    #[test]
+    fn callee_and_reference_positions_differ() {
+        let src = b"function f() {\n    foo();\n    x.foo();\n    map(foo);\n    // foo\n}\n";
+        let tree = extract::parse_file("a.ts", src).unwrap();
+        let bare = identifier_nodes_on_line(&tree, src, 2, "foo");
+        assert_eq!(bare.len(), 1);
+        assert!(is_callee_position(bare[0]));
+        let member = identifier_nodes_on_line(&tree, src, 3, "foo");
+        assert_eq!(member.len(), 1, "only the field, not receiver x");
+        assert!(is_callee_position(member[0]));
+        let arg = identifier_nodes_on_line(&tree, src, 4, "foo");
+        assert_eq!(arg.len(), 1);
+        assert!(!is_callee_position(arg[0]));
+        assert!(identifier_nodes_on_line(&tree, src, 5, "foo").is_empty());
+        let picked = pick_callee(&arg);
+        assert_eq!(picked, vec![arg[0]]);
+        assert_eq!(pick_reference(&arg), vec![arg[0]]);
+        assert!(pick_reference(&bare).is_empty() == false); // `foo()` also reads as a use
+    }
+
+    /// A comment or string containing the name is never a candidate.
+    #[test]
+    fn comments_and_strings_are_not_identifiers() {
+        let src = b"// loginUser\nconst s = \"loginUser\";\nloginUser();\n";
+        let tree = extract::parse_file("a.ts", src).unwrap();
+        assert!(identifier_nodes_on_line(&tree, src, 1, "loginUser").is_empty());
+        assert!(identifier_nodes_on_line(&tree, src, 2, "loginUser").is_empty());
+        assert_eq!(
+            identifier_nodes_on_line(&tree, src, 3, "loginUser").len(),
+            1
+        );
+    }
+
+    /// `import { foo as bar }` — the binding name is rewritten, the alias
+    /// is the importer's local name and stays.
+    #[test]
+    fn import_alias_target_is_never_rewritten() {
+        let src = b"import { loginUser as auth } from \"./login\";\nimport { loginUser } from \"./login\";\n";
+        let tree = extract::parse_file("a.ts", src).unwrap();
+        let nodes = import_name_nodes(&tree, src, "./login", "loginUser");
+        assert_eq!(nodes.len(), 2);
+        // First statement: only the `name` side (`loginUser`), never `auth`.
+        assert_eq!(nodes[0].start_position().row, 0);
+        assert_eq!(nodes[1].start_position().row, 1);
+        for n in &nodes {
+            assert_eq!(n.utf8_text(src).unwrap(), "loginUser");
+            assert!(!is_alias_position(*n));
+        }
+    }
+
+    /// A statement importing a different spec must not produce edits.
+    #[test]
+    fn import_nodes_only_match_the_resolved_spec() {
+        let src = b"import { loginUser } from \"./other\";\n";
+        let tree = extract::parse_file("a.ts", src).unwrap();
+        assert!(import_name_nodes(&tree, src, "./login", "loginUser").is_empty());
+    }
+
+    /// The definition picker picks the `name` field of the declaration —
+    /// never a same-named call on the same line.
+    #[test]
+    fn definition_is_the_declarations_name_field() {
+        let src = b"export function loginUser(): boolean { return loginUser(); }\n";
+        let tree = extract::parse_file("a.ts", src).unwrap();
+        let cands = identifier_nodes_on_line(&tree, src, 1, "loginUser");
+        assert_eq!(cands.len(), 2);
+        let def = pick_definition(&cands);
+        assert_eq!(def.len(), 1);
+        assert!(is_declaration_name(def[0]));
+        assert!(!is_declaration_name(cands[1]));
+
+        // Rust `fn` items sit under `function_item` — a kind matching only
+        // the `_item` alternative, so a connector flip there is observable.
+        let src = b"fn loginUser() {}\n";
+        let tree = extract::parse_file("a.rs", src).unwrap();
+        let cands = identifier_nodes_on_line(&tree, src, 1, "loginUser");
+        assert_eq!(cands.len(), 1);
+        assert!(is_declaration_name(cands[0]));
+    }
+
+    /// Every `unresolved_calls` row carrying the old name lands in
+    /// `skipped` — reported, never guessed. And nothing the graph never
+    /// resolved produces an edit: only edges and imports nominate sites.
+    #[test]
+    fn unresolved_same_name_calls_are_reported_not_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/login.ts"),
+            "export function loginUser(): boolean { return true; }\n",
+        )
+        .unwrap();
+        // A call through an object the resolver cannot type — and one it
+        // can resolve by name (only one `loginUser` exists in the graph).
+        std::fs::write(
+            dir.path().join("src/dyn.ts"),
+            "declare const api: { loginUser(): boolean };\nexport function f() { return api.loginUser(); }\n",
+        )
+        .unwrap();
+        // A second same-named declaration makes the call unresolvable:
+        // the graph cannot tell which `loginUser` `api.loginUser()` means.
+        std::fs::write(
+            dir.path().join("src/other.ts"),
+            "export function loginUser(): number { return 1; }\n",
+        )
+        .unwrap();
+        let db = dir.path().join("graph.db");
+        crate::build::build_graph(dir.path(), &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let sym = login_sym(&store);
+        let unresolved = store.unresolved_named("loginUser").unwrap();
+        assert!(
+            !unresolved.is_empty(),
+            "the ambiguous call must leave an unresolved row"
+        );
+        let plan = plan(&store, dir.path(), &sym, "authenticate").unwrap();
+        for row in &unresolved {
+            assert!(
+                plan.skipped
+                    .iter()
+                    .any(|s| s.line == row.site_line && s.reason.contains(&row.kind)),
+                "unresolved {}:{} must be reported: {:?}",
+                row.file_id,
+                row.site_line,
+                plan.skipped
+            );
+        }
+        // And each verified edit's bytes still say the old name.
+        for (path, edits) in &plan.files {
+            let content = std::fs::read(dir.path().join(path)).unwrap();
+            for e in edits {
+                assert_eq!(&content[e.start_byte..e.end_byte], b"loginUser");
+            }
+        }
     }
 }

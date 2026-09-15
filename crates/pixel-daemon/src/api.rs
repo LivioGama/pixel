@@ -6278,4 +6278,153 @@ mod tests {
             "a phrase naming tests gates the penalty off, so the higher rrf wins"
         );
     }
+
+    /// Rename fixture: a TS definition plus a caller that imports it.
+    fn rename_root(tag: &str) -> PathBuf {
+        let root = tmpdir(tag);
+        std::fs::write(
+            root.join("login.ts"),
+            "export function loginUser(name: string): boolean {\n    return name.length > 0;\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("caller.ts"),
+            "import { loginUser } from \"./login\";\nexport function go(): boolean {\n    return loginUser(\"x\");\n}\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        root
+    }
+
+    fn rename_req(name: &str, new_name: &str) -> Request {
+        Request::Rename {
+            name: name.to_string(),
+            new_name: new_name.to_string(),
+            file: None,
+            uid: None,
+            dry_run: false,
+        }
+    }
+
+    /// The happy path end to end through the service: dry-run plans without
+    /// writing, a real call rewrites the files and drops the cached graph.
+    #[test]
+    fn op_rename_dry_run_then_apply() {
+        let root = rename_root("rename-apply");
+        let mut svc = Service::open(&root).unwrap();
+        let before = std::fs::read_to_string(root.join("caller.ts")).unwrap();
+
+        let mut dry = rename_req("loginUser", "authenticate");
+        if let Request::Rename { dry_run, .. } = &mut dry {
+            *dry_run = true;
+        }
+        let resp = svc.handle(dry);
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.unwrap();
+        assert_eq!(result["dry_run"], json!(true));
+        assert!(result["edit_count"].as_u64().unwrap() >= 3);
+        assert_eq!(
+            std::fs::read_to_string(root.join("caller.ts")).unwrap(),
+            before,
+            "dry-run must not write"
+        );
+
+        let resp = svc.handle(rename_req("loginUser", "authenticate"));
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.unwrap();
+        assert_eq!(result["dry_run"], json!(false));
+        assert!(result["applied"].as_array().unwrap().len() == 2);
+        let caller = std::fs::read_to_string(root.join("caller.ts")).unwrap();
+        assert!(caller.contains("import { authenticate }"), "{caller}");
+        assert!(caller.contains("return authenticate("), "{caller}");
+        // The graph handle was dropped: a follow-up symbol lookup sees the
+        // new name, not the pre-rename snapshot.
+        let sym = svc.handle(Request::Symbol {
+            name: "authenticate".to_string(),
+        });
+        assert!(sym.ok, "{sym:?}");
+        assert!(
+            !sym.result.unwrap()["symbols"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Identifier validation rejects names no grammar could emit.
+    #[test]
+    fn op_rename_rejects_non_identifiers() {
+        let root = rename_root("rename-ident");
+        let mut svc = Service::open(&root).unwrap();
+        for bad in ["9bad", "a-b", "has space", ""] {
+            let resp = svc.handle(rename_req("loginUser", bad));
+            assert!(!resp.ok, "{bad:?} must fail: {resp:?}");
+        }
+        // And nothing was written on any rejection.
+        assert!(
+            std::fs::read_to_string(root.join("caller.ts"))
+                .unwrap()
+                .contains("loginUser")
+        );
+    }
+
+    /// A shared name without disambiguation answers candidates; `--file`
+    /// picks the declaration in that file only.
+    #[test]
+    fn op_rename_ambiguity_and_file_disambiguation() {
+        let root = rename_root("rename-amb");
+        std::fs::write(
+            root.join("other.ts"),
+            "export function loginUser(id: number): boolean { return id > 0; }\n",
+        )
+        .unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "other"]);
+        let mut svc = Service::open(&root).unwrap();
+
+        let resp = svc.handle(rename_req("loginUser", "authenticate"));
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.unwrap();
+        assert!(result["candidates"].as_array().unwrap().len() >= 2);
+
+        let resp = svc.handle(Request::Rename {
+            name: "loginUser".to_string(),
+            new_name: "authenticate".to_string(),
+            file: Some("other.ts".to_string()),
+            uid: None,
+            dry_run: false,
+        });
+        assert!(resp.ok, "{resp:?}");
+        let other = std::fs::read_to_string(root.join("other.ts")).unwrap();
+        assert!(other.contains("function authenticate("), "{other}");
+        let login = std::fs::read_to_string(root.join("login.ts")).unwrap();
+        assert!(login.contains("function loginUser("), "{login}");
+    }
+
+    /// Renaming a name that is not in the graph is an error, not a no-op.
+    #[test]
+    fn op_rename_unknown_name_errors() {
+        let root = rename_root("rename-unknown");
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(rename_req("no_such_fn", "x"));
+        assert!(!resp.ok, "{resp:?}");
+        let resp = svc.handle(Request::Rename {
+            name: "loginUser".to_string(),
+            new_name: "x".to_string(),
+            file: Some("missing.ts".to_string()),
+            uid: None,
+            dry_run: false,
+        });
+        assert!(!resp.ok, "{resp:?}");
+        let resp = svc.handle(Request::Rename {
+            name: "loginUser".to_string(),
+            new_name: "x".to_string(),
+            file: None,
+            uid: Some("nope#1".to_string()),
+            dry_run: false,
+        });
+        assert!(!resp.ok, "{resp:?}");
+    }
 }

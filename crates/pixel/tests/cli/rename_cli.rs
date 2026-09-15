@@ -170,6 +170,34 @@ fn rename_reports_ambiguous_names_and_honors_file_disambiguation() {
 }
 
 #[test]
+fn rename_human_output_names_sites_skips_and_unclaimed_text() {
+    let fixture = Fixture::new();
+    let out = fixture.run(&["rename", "loginUser", "authenticate", "."]);
+    assert_success(&out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("renamed loginUser → authenticate"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("src/login.ts"), "{stdout}");
+    assert!(stdout.contains("src/caller.ts"), "{stdout}");
+    // Edit kinds are named, not blank: SiteKind::as_str feeds this column.
+    assert!(stdout.contains("definition"), "{stdout}");
+    assert!(stdout.contains("call"), "{stdout}");
+    assert!(stdout.contains("import"), "{stdout}");
+    // The comment decoy is reported as unclaimed text, not silently left.
+    assert!(stdout.contains("unclaimed"), "{stdout}");
+
+    // Dry-run says "would rename" instead — a different verb, not a flag echo.
+    let fixture2 = Fixture::new();
+    let out = fixture2.run(&["rename", "loginUser", "authenticate", ".", "--dry-run"]);
+    assert_success(&out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("would rename loginUser"), "{stdout}");
+    assert!(!stdout.contains("renamed loginUser →"), "{stdout}");
+}
+
+#[test]
 fn rename_rejects_an_invalid_new_name() {
     let fixture = Fixture::new();
     let out = fixture.run(&["rename", "loginUser", "9bad name", ".", "--json"]);
