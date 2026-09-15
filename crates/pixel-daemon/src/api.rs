@@ -3920,6 +3920,7 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
 mod tests {
     use super::*;
     use pixel_graph::Tier;
+    use pixel_graph::concept_resolve::{RankedCandidate, Reranker, SignalBundle};
     use std::path::PathBuf;
 
     fn tmpdir(tag: &str) -> PathBuf {
@@ -6076,5 +6077,105 @@ mod tests {
         assert_eq!(data["watcher"]["graph_update_failures"], 2, "{data}");
         assert_eq!(data["watcher"]["notify_errors"], 1, "{data}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The daemon adapter is the only wire between pixel-rank's Engine-3
+    /// reranker and pixel-graph's pluggable `Reranker` — `resolve` reaches it
+    /// through the trait object (invisible to the call graph), so nothing
+    /// else covers it. An adapter that returned an empty vec would leave
+    /// `resolve` reporting success with no matches at all; a no-op one would
+    /// leave the candidate order pre-rerank. Pinned here: every candidate
+    /// survives with its graph-side `id`/`tier`, and the order follows the
+    /// weights table the adapter reads live.
+    #[test]
+    fn engine_reranker_preserves_candidates_and_applies_live_weights() {
+        let signals = SignalBundle {
+            activity: HashMap::from([("hot.rs".to_string(), 1.0)]),
+            ..SignalBundle::default()
+        };
+        let candidates = vec![
+            RankedCandidate {
+                id: 11,
+                path: "cold.rs".into(),
+                rrf_score: 1.0,
+                tier: "P0".into(),
+            },
+            RankedCandidate {
+                id: 22,
+                path: "hot.rs".into(),
+                rrf_score: 1.0,
+                tier: "P0".into(),
+            },
+            RankedCandidate {
+                id: 33,
+                path: "cold.rs".into(),
+                rrf_score: 0.5,
+                tier: "P1".into(),
+            },
+        ];
+
+        let reranked = EngineReranker::new("tighten the login path").rerank(candidates, &signals);
+
+        let ids: Vec<u64> = reranked.iter().map(|c| c.id).collect();
+        assert_eq!(
+            ids,
+            vec![22, 11, 33],
+            "activity must lift hot.rs over an equal-rrf cold.rs, and a P1 candidate stays below \
+             P0 whatever its score: {reranked:?}"
+        );
+        assert_eq!(reranked[0].path, "hot.rs", "{reranked:?}");
+        assert_eq!(reranked[0].tier, "P0", "{reranked:?}");
+        assert_eq!(reranked[2].tier, "P1", "{reranked:?}");
+        // The score is the shared formula applied through the live weights
+        // table, not a constant that happens to sort the same way.
+        let weights =
+            pixel_rank::rerank::RerankWeights::from(&pixel_rank::signals::SignalOptions::default());
+        let expected = 1.0 * (1.0 + weights.activity * 1.0);
+        assert!(
+            (reranked[0].rrf_score - expected).abs() < 1e-9,
+            "expected 1.0 * (1 + activity_weight * 1.0) = {expected}, got {}",
+            reranked[0].rrf_score
+        );
+    }
+
+    /// The per-path test penalty is gated on the phrase: a task that is not
+    /// about tests demotes a test file (enough to fall below a production
+    /// file with a lower rrf), a task that names tests does not.
+    #[test]
+    fn engine_reranker_test_penalty_follows_the_phrase() {
+        let candidates = vec![
+            RankedCandidate {
+                id: 1,
+                path: "tests/login_test.rs".into(),
+                rrf_score: 1.2,
+                tier: "P0".into(),
+            },
+            RankedCandidate {
+                id: 2,
+                path: "login.rs".into(),
+                rrf_score: 1.0,
+                tier: "P0".into(),
+            },
+        ];
+        let paths = |reranked: Vec<RankedCandidate>| -> Vec<String> {
+            reranked.into_iter().map(|c| c.path).collect()
+        };
+
+        assert_eq!(
+            paths(
+                EngineReranker::new("tighten the login path")
+                    .rerank(candidates.clone(), &SignalBundle::default())
+            ),
+            vec!["login.rs".to_string(), "tests/login_test.rs".to_string()],
+            "1.2 * 0.7 = 0.84 must fall below 1.0 when the phrase is not about tests"
+        );
+        assert_eq!(
+            paths(
+                EngineReranker::new("tighten the login tests")
+                    .rerank(candidates, &SignalBundle::default())
+            ),
+            vec!["tests/login_test.rs".to_string(), "login.rs".to_string()],
+            "a phrase naming tests gates the penalty off, so the higher rrf wins"
+        );
     }
 }
