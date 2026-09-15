@@ -27,7 +27,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] The `Mutants` CI job reports no `MISSED` mutant on the pull request (see "Mutation testing"); a local run is optional.
 - [ ] `CHANGELOG.md` has an entry under `## [Unreleased]` (skip for pure refactors and CI/deps chores).
 - [ ] The commit message follows the Conventional Commits format below.
-- [ ] The branch was created from an up-to-date `main` and the pull request targets `main` (a maintainer's maintenance-release pull request targets `release/x.y` instead, see "Branches").
+- [ ] The branch was created from an up-to-date `main` and the pull request targets `main` (a maintainer's maintenance-release branch instead starts from an up-to-date `origin/release/x.y` and its pull request targets `release/x.y`, so no unreleasable `main` commit rides along; see "Branches").
 - [ ] No file under `.pixel/`, `target/`, `.claude/` (other than the `.claude/rules` and `.claude/skills` symlinks), `.codex/`, `.cursor/` is staged (they are gitignored; do not force-add).
 - [ ] If a command or op was added or renamed: `ARCHITECTURE.md` (its `## Command surface` table), `pixel --help` output, and the agent prompt in `crates/pixel-install/assets/pixel-agent-prompt.md` agree with each other. `cargo test -p pixel-cli --test cli docs_drift::` enforces both directions.
 - [ ] If `crates/` changed: the binary was rebuilt and reinstalled, and `pixel doctor .` is green (see "Local install loop").
