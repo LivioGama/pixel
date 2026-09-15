@@ -440,7 +440,11 @@ fn operation_error_precedes_metrics_and_preserves_failure() {
     let fixture = Fixture::new();
     let output = fixture.run(&["search-content", "(", ".", "--json", "--no-daemon"]);
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    // The failure is machine-readable on stdout (the envelope) and explicit on
+    // stderr (the diagnostic, then the metrics line).
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["ok"], false, "{output:?}");
+    assert_eq!(doc["error"]["code"], "INVALID_INPUT", "{doc}");
     let stderr = String::from_utf8(output.stderr.clone()).unwrap();
     let lines = metric_lines(&output);
     assert_eq!(lines.len(), 1);
@@ -451,7 +455,12 @@ fn operation_error_precedes_metrics_and_preserves_failure() {
     let events = fixture.events("search-content");
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["outcome"], "error");
-    assert_eq!(events[0]["metrics"]["output_bytes"], diagnostics.len());
+    // Rendered output covers both streams: the failure envelope on stdout and
+    // the diagnostic on stderr (the metrics line itself is not counted).
+    assert_eq!(
+        events[0]["metrics"]["output_bytes"],
+        (output.stdout.len() + diagnostics.len()) as u64
+    );
     assert!(events[0]["metrics"]["native_workflow_bytes"].is_null());
     assert_metric_identity(&lines[0], &events[0]);
 

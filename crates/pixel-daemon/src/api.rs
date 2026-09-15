@@ -108,41 +108,49 @@ pub use pixel_proto::Op as Request;
 /// struct is gone; `resp.data()` reads the envelope's `result` field.
 pub type Response = Envelope<Value>;
 
-/// Classify a daemon read-op error string into the best-fit `ErrorCode`.
+/// Classify an operation error string into the best-fit `ErrorCode`.
+///
 /// The message is always preserved verbatim in the envelope's `error.message`;
-/// the code is for programmatic handling.
+/// the code is for programmatic handling, so it is read from what the message
+/// already carries instead of being guessed from prose:
 ///
-/// Bug 6 fix: the previous version had 4 branches, 3 of which were dead code
-/// — no `Err(...)` path in this crate (or in the crates it wraps via
-/// `.map_err(|e| e.to_string())`) ever produces a message containing
-/// `"index"` + `"build"`/`"rebuild"`, `"not indexed"`/`"no index"`, or
-/// `"ambiguous"` (verified by grepping every `format!`/literal `Err` site in
-/// this workspace: `IndexBuilding`/`NotIndexed` are never surfaced as
-/// errors — `ensure_graph` builds lazily instead of failing when the graph
-/// is absent, and `IndexSet::open_or_build` does the same for the text
-/// index; the one "ambiguous" case, `resolve_symbol`'s multi-candidate
-/// result, is returned as `Ok(candidates_value(...))`, never an `Err`). So
-/// in practice every error fell through to `InvalidInput`, and a genuine
-/// not-found lookup (bad uid/name) was indistinguishable from a malformed
-/// request.
+/// - `pixel-ops` prefixes the messages it types itself with the code it means
+///   (`NON_FAST_FORWARD: merge-base … is not an ancestor of …`,
+///   `STALE_STATE: expected head …`, `REF_EXISTS: branch … already exists`,
+///   `GIT_FAILED: …`, `NETWORK_AMBIGUITY: …`, `UNSUPPORTED_STATE: …`), so a
+///   leading token that names an [`ErrorCode`] IS that code. The markers it
+///   writes that name no code (`REFUSED:`, `STALE_REMOTE:`,
+///   `FILE_NOT_TRACKED:`, `PROVENANCE_BAD_ARGS:`, …) stay unclassified.
+/// - the repository lock reports `repository is busy…`, and the lookups in
+///   this file report `no symbol named …` / `no symbol with uid …`.
 ///
-/// Fixed by routing the two *actually reachable* not-found message shapes
-/// (`resolve_symbol` and `op_context`, both in this file) to `NotFound`.
-/// Everything else — malformed regex, bad params, opaque messages
-/// forwarded from other crates — stays `InvalidInput`, which is the
-/// correct default for "the request itself was not satisfiable."
-///
-/// `IndexBuilding`/`NotIndexed`/`Ambiguous` remain defined in `ErrorCode`
-/// for ops that may legitimately need them later; this function just no
-/// longer pretends to reach them via string-sniffing when nothing produces
-/// a matching message today.
+/// Everything else — a malformed regex, a bad parameter, an opaque message
+/// forwarded from another crate — stays `InvalidInput`, the correct default
+/// for "the request itself was not satisfiable". The codes with no producer
+/// anywhere in the tree (listed on [`ErrorCode`]) are not pretended to be
+/// reachable: `IndexBuilding`/`NotIndexed` never surface because
+/// `ensure_graph` and `IndexSet::open_or_build` build lazily instead of
+/// failing, and the one ambiguous case (`resolve_symbol`'s multi-candidate
+/// result) is returned as `Ok(candidates_value(...))`, never an error.
 fn classify_error(msg: &str) -> ErrorCode {
+    if let Some(code) = code_named_in_prefix(msg) {
+        return code;
+    }
     let lower = msg.to_lowercase();
     if lower.starts_with("no symbol named") || lower.starts_with("no symbol with uid") {
         ErrorCode::NotFound
+    } else if lower.starts_with("repository is busy") {
+        ErrorCode::BusyRepository
     } else {
         ErrorCode::InvalidInput
     }
+}
+
+/// The code a message names in its leading `"<CODE>: …"` token, when that
+/// token is one of [`ErrorCode`]'s wire names.
+fn code_named_in_prefix(msg: &str) -> Option<ErrorCode> {
+    let (head, _) = msg.split_once(':')?;
+    serde_json::from_str(&format!("\"{}\"", head.trim())).ok()
 }
 
 /// Build a failure envelope from a plain error string (the shape `dispatch`
@@ -3922,6 +3930,86 @@ mod tests {
             .output()
             .unwrap();
         assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    /// The codes an agent acts on (`BUSY_REPOSITORY` → retry later,
+    /// `NON_FAST_FORWARD` → fetch and reconcile, `NOT_FOUND` → widen the
+    /// query) must be the ones the message actually names. Each entry below
+    /// is a message a real call site writes; the two unclassified markers
+    /// pin that a prefix naming no `ErrorCode` is not force-fitted to one.
+    #[test]
+    fn classify_error_reads_the_code_the_message_names() {
+        let cases: &[(&str, ErrorCode)] = &[
+            // pixel-ops prefixes the code it means.
+            (
+                "NON_FAST_FORWARD: merge-base is aaa, expected bbb to be an ancestor of ccc",
+                ErrorCode::NonFastForward,
+            ),
+            (
+                "STALE_STATE: expected head aaa, got Some(\"bbb\")",
+                ErrorCode::StaleState,
+            ),
+            (
+                "UNSUPPORTED_STATE: detached HEAD; --into requires a checked-out feature branch",
+                ErrorCode::UnsupportedState,
+            ),
+            (
+                "REF_EXISTS: branch 'fix/x' already exists",
+                ErrorCode::RefExists,
+            ),
+            (
+                "GIT_FAILED: crash detected at index_staged; cannot safely determine whether the commit ran to completion",
+                ErrorCode::GitFailed,
+            ),
+            (
+                "NETWORK_AMBIGUITY: push may have started, cannot safely retry",
+                ErrorCode::NetworkAmbiguity,
+            ),
+            // The repository lock and the lookups in this file.
+            (
+                "repository is busy (locked by another process)",
+                ErrorCode::BusyRepository,
+            ),
+            ("repository is busy", ErrorCode::BusyRepository),
+            ("no symbol named \"nope\"", ErrorCode::NotFound),
+            ("no symbol with uid \"#42\"", ErrorCode::NotFound),
+            // Markers that name no code, and messages that carry no code at all.
+            (
+                "REFUSED: main is the repository default branch; rewriting it is forbidden",
+                ErrorCode::InvalidInput,
+            ),
+            (
+                "STALE_REMOTE: leased push rejected — the remote no longer matches the pre-rewrite OID",
+                ErrorCode::InvalidInput,
+            ),
+            (
+                "unsupported search scope \"banana\"; supported values are \"code\"",
+                ErrorCode::InvalidInput,
+            ),
+            (
+                "bad path /nope: No such file or directory",
+                ErrorCode::InvalidInput,
+            ),
+        ];
+        for &(message, expected) in cases {
+            assert_eq!(classify_error(message), expected, "{message}");
+        }
+    }
+
+    /// A failure envelope must carry the classified code AND the message
+    /// verbatim — the message is what the user reads on stderr, the code is
+    /// what an agent switches on.
+    #[test]
+    fn failure_response_carries_the_code_and_the_message_verbatim() {
+        let message = "repository is busy (locked by another process)";
+        let resp = failure_response("publish", message);
+
+        assert!(!resp.ok);
+        assert_eq!(resp.op, "publish");
+        let error = resp.error.as_ref().unwrap();
+        assert_eq!(error.code, ErrorCode::BusyRepository);
+        assert_eq!(error.message, message);
+        assert_eq!(resp.validate(), Ok(()));
     }
 
     /// Every envelope the daemon emits must satisfy `Envelope::validate`,

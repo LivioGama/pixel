@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
 // Count rendered writes without changing descriptors, native streams, or TTY state.
 macro_rules! print {
@@ -38,7 +38,7 @@ mod task_plan;
 mod task_runtime;
 mod task_sandbox;
 mod task_scheduler;
-use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service};
+use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service, failure_response};
 use pixel_daemon::daemon;
 use pixel_index::index::{build, shard_path};
 use pixel_index::shard::Shard;
@@ -1642,11 +1642,60 @@ fn graph_build_notice(info: &Value) -> String {
 }
 
 fn write_stdout(text: &str) -> Result<(), String> {
-    match operation_metrics::Counted(std::io::stdout().lock()).write_all(text.as_bytes()) {
+    match operation_metrics::Stdout(std::io::stdout().lock()).write_all(text.as_bytes()) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(error) => Err(format!("write stdout: {error}")),
     }
+}
+
+/// Whether the parsed invocation asked for JSON on stdout. Read from the
+/// parsed matches, never from argv: `--json` is a flag only where a command
+/// declares it. The walk reaches the deepest subcommand so a nested command
+/// (`list-errors last --json`) answers for its own flag, and a command with no
+/// `json` argument reads as `false`.
+fn json_requested(matches: &ArgMatches) -> bool {
+    let mut deepest = matches;
+    while let Some((_, sub)) = deepest.subcommand() {
+        deepest = sub;
+    }
+    deepest
+        .try_get_one::<bool>("json")
+        .ok()
+        .flatten()
+        .copied()
+        .unwrap_or(false)
+}
+
+/// Write the `--json` failure envelope (`ok: false` + `error.code`) to stdout:
+/// the parsable counterpart of the `pixel: <reason>` line on stderr. `op`
+/// names the command the caller ran (the CLI's own label), not the daemon's
+/// wire op. Built through the daemon's own `failure_response`, so a CLI-side
+/// failure (a bad path, a refused flag combination) and a failure the daemon
+/// already classified answer with the same code, from the same classifier.
+///
+/// Best-effort by design: a closed or full stdout must never change the exit
+/// status. It bypasses `print_data`'s rendering cap on purpose — a truncated
+/// failure envelope would be invalid JSON, worse than no cap at all.
+fn write_failure_envelope(op: &str, message: &str) {
+    let envelope: Response = failure_response(op, message);
+    if let Ok(line) = serde_json::to_string(&envelope) {
+        let _ = write_stdout(&format!("{line}\n"));
+    }
+}
+
+/// Whether a failing command must answer with the failure envelope on stdout:
+/// `--json` was asked for, the command does not own stdout, and it has not
+/// answered yet. A command that owns stdout (`search-like-rg`'s passthrough,
+/// the provider hook contracts, the statusline, a foreground daemon) keeps it,
+/// and so does one that already wrote a document: `check-release --json`
+/// reports its own failures as a document and exits 1, where a second JSON
+/// line would break a reader that parses the stream as one answer.
+fn failure_envelope_wanted(matches: &ArgMatches, protected: bool) -> bool {
+    if protected || operation_metrics::stdout_bytes() > 0 {
+        return false;
+    }
+    json_requested(matches)
 }
 
 /// Global stdout byte cap for `print_data` — the last-chance safety net
@@ -3898,6 +3947,15 @@ fn run() -> Result<(), String> {
     };
     let result = run_command(cli.command, &logger);
     if let Err(error) = &result {
+        // The stdout contract under `--json`: a failing command answers with a
+        // parsable failure envelope carrying `error.code`, so an agent can
+        // tell NOT_FOUND (widen the query) from INVALID_INPUT (fix the call)
+        // without reading prose. Human mode is unchanged — stdout stays empty,
+        // the reason goes to stderr, the exit status stays 1 — and a command
+        // that owns stdout or already wrote part of an answer keeps it.
+        if failure_envelope_wanted(&matches, protected) {
+            write_failure_envelope(&command_label, error);
+        }
         // The diagnostic precedes the authoritative metrics line. Its failure
         // is best-effort and must never change the operation's result.
         let _ = operation_metrics::Counted(std::io::stderr().lock())
@@ -6467,6 +6525,32 @@ fn excavate_show(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// The `--json` failure envelope is decided from the parsed flag, not
+    /// from argv: `--json` counts only where the command declares it, and it
+    /// counts through a nested subcommand (`list-errors last --json`), whose
+    /// flag the top-level matches cannot see. Parsed on a thread with a 4 MiB
+    /// stack — the derived command tree overflows the 2 MiB a test thread
+    /// gets, the same reason `validate_cli_syntax` spawns one.
+    #[test]
+    fn json_requested_reads_the_deepest_subcommands_own_flag() {
+        fn parsed(argv: &[&str]) -> bool {
+            let argv: Vec<String> = argv.iter().map(ToString::to_string).collect();
+            std::thread::Builder::new()
+                .stack_size(4 * 1024 * 1024)
+                .spawn(move || json_requested(&Cli::command().get_matches_from(&argv)))
+                .unwrap()
+                .join()
+                .unwrap()
+        }
+
+        assert!(parsed(&["pixel", "status", ".", "--json"]));
+        assert!(parsed(&["pixel", "list-errors", "last", "--json"]));
+        assert!(!parsed(&["pixel", "status", "."]));
+        // A nested command with no `json` argument of its own: false, not a
+        // flag inherited from somewhere in argv.
+        assert!(!parsed(&["pixel", "daemon", "status", "."]));
+    }
 
     /// A `.pixel` holding only the global journal (no `base.shard`) — e.g.
     /// the `$HOME/.pixel` state dir — must NOT anchor root discovery, or

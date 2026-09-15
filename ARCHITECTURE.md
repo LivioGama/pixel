@@ -199,6 +199,13 @@ The envelope:
 }
 ```
 
+`requestId` and `budget` are part of the schema but no response is built
+with them yet, so their absence means "not reported". The caps that bite
+today report themselves inside the op's own result (`byte_cap`,
+`truncated`, `next_cursor`, `next_offset`) or as envelope `warnings`.
+`error.code` is the code the daemon classified the message into; the
+variants no producer reaches are listed on `pixel_proto::ErrorCode`.
+
 Invariants enforced by `Service::handle`:
 
 - Success carries `result`, failure carries `error`. Never both.
@@ -230,8 +237,13 @@ in `pixel-proto` checks it.
 3. If the daemon path fails, the CLI opens `Service` in-process and calls
    `handle` directly. Both paths return the same `Envelope`.
 4. `unwrap_response` turns a failure envelope into an `Err(message)` that
-   `main` prints to stderr with exit code 1. For a success envelope it takes
-   `result` and folds `epistemics`, `snapshot`, and `warnings` into it
+   `main` prints to stderr with exit code 1. Under `--json` the CLI also
+   answers on stdout with the failure envelope (`ok: false`, `error.code`,
+   the same message) — classified by the daemon's `failure_response`, so a
+   CLI-side failure carries the same code as a daemon one — unless the
+   command owns stdout (`search-like-rg`, hooks, the statusline) or already
+   wrote part of an answer (`check-release --json`). For a success envelope it
+   takes `result` and folds `epistemics`, `snapshot`, and `warnings` into it
    without clobbering same-named keys the op emitted.
 5. `print_data` serializes the result. With `--json` it is compact on one
    line, otherwise pretty. A global 256 KB cap protects the agent's context

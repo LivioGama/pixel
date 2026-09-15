@@ -9,11 +9,33 @@ use std::sync::Mutex;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 pub static OUTPUT_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Bytes this invocation rendered to **stdout** alone (`OUTPUT_BYTES` counts
+/// both streams): the answer bytes. The CLI asks [`stdout_bytes`] before it
+/// appends a failure envelope, because a command that already wrote part of
+/// its answer keeps stdout for it.
+pub static STDOUT_BYTES: AtomicU64 = AtomicU64::new(0);
 pub struct Counted<W>(pub W);
 impl<W: Write> Write for Counted<W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let n = self.0.write(bytes)?;
         OUTPUT_BYTES.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// A stdout write: counts as rendered output (`OUTPUT_BYTES`) and as answer
+/// bytes (`STDOUT_BYTES`). Every stdout path goes through this or
+/// [`print`], so "the command already wrote something" is one answer for
+/// both.
+pub struct Stdout<W>(pub W);
+impl<W: Write> Write for Stdout<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let n = self.0.write(bytes)?;
+        OUTPUT_BYTES.fetch_add(n as u64, Ordering::Relaxed);
+        STDOUT_BYTES.fetch_add(n as u64, Ordering::Relaxed);
         Ok(n)
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -36,7 +58,7 @@ fn write_absorbing_closed_reader<W: Write>(
 
 pub fn print(args: std::fmt::Arguments<'_>) {
     // Retain the ordinary print! failure contract. Only successful writes count.
-    if let Err(error) = write_absorbing_closed_reader(&mut Counted(io::stdout().lock()), args) {
+    if let Err(error) = write_absorbing_closed_reader(&mut Stdout(io::stdout().lock()), args) {
         panic!("failed printing to stdout: {error}");
     }
 }
@@ -59,6 +81,7 @@ static EVIDENCE: Mutex<Option<Evidence>> = Mutex::new(None);
 
 pub fn begin(root: &Path) {
     OUTPUT_BYTES.store(0, Ordering::Relaxed);
+    STDOUT_BYTES.store(0, Ordering::Relaxed);
     if let Ok(mut slot) = EVIDENCE.lock() {
         *slot = Some(Evidence {
             root: root.to_path_buf(),
@@ -69,6 +92,12 @@ pub fn begin(root: &Path) {
 
 pub fn output_bytes() -> u64 {
     OUTPUT_BYTES.load(Ordering::Relaxed)
+}
+
+/// Bytes rendered to stdout: `0` means this invocation has not answered yet
+/// on stdout, which is what decides whether a failure envelope is appended.
+pub fn stdout_bytes() -> u64 {
+    STDOUT_BYTES.load(Ordering::Relaxed)
 }
 
 pub fn unavailable() {

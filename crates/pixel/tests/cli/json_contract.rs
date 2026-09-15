@@ -6,8 +6,11 @@
 //! - stdout is JSON and nothing else: one document per line (a single
 //!   document for most commands, NDJSON for `search`), no prose, no notes;
 //! - human-facing notes (graph build announcements, caveats) go to stderr;
-//! - a failing command exits non-zero, writes the reason to stderr, and
-//!   leaves stdout empty, so a parser never sees a half answer.
+//! - a failing command exits non-zero and writes the reason to stderr. Under
+//!   `--json` stdout carries one failure envelope (`ok: false`, `error.code`,
+//!   the same reason) so a parser reads the code instead of the prose; in
+//!   human mode stdout stays empty, so a script that did not ask for JSON
+//!   never gets a document.
 //!
 //! Each command runs against the in-process service (`PIXEL_DAEMON_AUTO_START=0`)
 //! so the test does not depend on, or leave behind, a background daemon.
@@ -182,33 +185,71 @@ fn json_commands_emit_only_json_on_stdout() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A failure must be unambiguous to a parser: nothing on stdout, a reason
-/// on stderr, non-zero exit. A `null` or partial document on stdout would
-/// be read as an answer.
+/// A failure under `--json` answers with the failure envelope: `ok: false`,
+/// `error.code`, the same reason stderr carries, exit 1. The code is what an
+/// agent branches on — `NOT_FOUND` means "widen the query", `INVALID_INPUT`
+/// means "the call itself is wrong" — and it comes from the daemon's own
+/// classifier, the one that put a code on the wire for this message. Human
+/// mode is unchanged: same failure, no `--json`, stdout empty.
 #[test]
-fn failing_json_command_leaves_stdout_empty() {
+fn failing_json_command_answers_with_a_failure_envelope() {
     let dir = fixture("fail");
-    let out = pixel(
-        &dir,
-        &["find-symbol", "no_such_symbol_anywhere", ".", "--json"],
-    );
-    // `symbol` on an unknown name may answer with an empty candidate set or
-    // fail; either way stdout must be parseable and stderr must carry any
-    // failure. Force a definite failure with a malformed regex on search.
-    let _ = parse_stdout_lines(&out, "symbol unknown");
 
-    let out = pixel(&dir, &["search-content", "(", ".", "--json"]);
-    assert!(!out.status.success(), "malformed regex must fail");
-    assert!(
-        out.stdout.is_empty(),
-        "stdout must be empty on failure, got: {}",
-        String::from_utf8_lossy(&out.stdout)
-    );
+    // A name that resolves to nothing: `resolve_symbol` answers
+    // "no symbol named …", which classifies as NOT_FOUND.
+    let out = pixel(&dir, &["impact", "no_such_symbol_anywhere", ".", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let docs = parse_stdout_lines(&out, "impact unknown");
+    assert_eq!(docs.len(), 1, "{docs:?}");
+    assert_eq!(docs[0]["ok"], false, "{docs:?}");
+    assert_eq!(docs[0]["op"], "impact", "{docs:?}");
+    assert_eq!(docs[0]["error"]["code"], "NOT_FOUND", "{docs:?}");
+    let reason = docs[0]["error"]["message"]
+        .as_str()
+        .expect("failure envelope carries a message")
+        .to_string();
+    assert!(reason.contains("no_such_symbol_anywhere"), "{reason}");
     let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.starts_with("pixel: "), "{stderr}");
     assert!(
-        stderr.starts_with("pixel: "),
-        "stderr must carry the reason: {stderr}"
+        stderr.contains(&reason),
+        "stderr keeps the reason: {stderr}"
     );
+
+    // A malformed regex is the request's fault, not a missing thing: the
+    // envelope still answers, with the default code.
+    let out = pixel(&dir, &["search-content", "(", ".", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let docs = parse_stdout_lines(&out, "malformed regex");
+    assert_eq!(docs.len(), 1, "{docs:?}");
+    assert_eq!(docs[0]["ok"], false, "{docs:?}");
+    assert_eq!(docs[0]["error"]["code"], "INVALID_INPUT", "{docs:?}");
+
+    // Human mode is untouched by the contract change: the same two failures
+    // without `--json` keep stdout empty and the reason on stderr.
+    let out = pixel(&dir, &["impact", "no_such_symbol_anywhere", "."]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(&reason),
+        "{out:?}"
+    );
+    let out = pixel(&dir, &["search-content", "(", "."]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+
+    // A command that owns stdout keeps it: the statusline is read by a shell
+    // prompt, so a failure there must not become a JSON document. The same
+    // failure without `--statusline` answers with the envelope.
+    let missing = dir.join("not-a-repo").display().to_string();
+    let out = pixel(&dir, &["status", &missing, "--statusline", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    let out = pixel(&dir, &["status", &missing, "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let docs = parse_stdout_lines(&out, "status bad path");
+    assert_eq!(docs[0]["ok"], false, "{docs:?}");
+    assert_eq!(docs[0]["error"]["code"], "INVALID_INPUT", "{docs:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

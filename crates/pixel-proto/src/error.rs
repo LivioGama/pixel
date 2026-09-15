@@ -8,6 +8,29 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The `error.code` a failure envelope carries: programmatic handling for a
+/// caller that must decide what to do next (retry, fetch and reconcile,
+/// widen the query) instead of reading the message text.
+///
+/// A code a caller can receive today is one of the ten the daemon's
+/// classifier (`pixel_daemon::api::classify_error`) produces:
+///
+/// - `InvalidInput`, the default for anything unclassified;
+/// - `NotFound` (`no symbol named …`) and `BusyRepository` (`repository is
+///   busy…`), the two message shapes the daemon's own call sites write;
+/// - `NonFastForward`, `StaleState`, `UnsupportedState`, `RefExists`,
+///   `GitFailed` and `NetworkAmbiguity`, which `pixel-ops` names in the
+///   `"<CODE>: …"` prefix of the messages it types itself;
+/// - `InvariantViolation`, only from the daemon transport's serialize-failure
+///   fallback, which no operation reaches.
+///
+/// The other twelve variants are declared for operations that do not exist
+/// yet (`NothingToCommit`, `HookFailed`, `SigningFailed`, `IdentityMissing`,
+/// `AuthFailed`, `LeaseRejected`, `RecoveryConflict`, `InvalidRepository`,
+/// `InvalidPath`) or for states this codebase reaches another way without an
+/// error (`IndexBuilding` and `NotIndexed` build lazily, `Ambiguous` answers
+/// with a candidate set): no message classifies to them, so their absence
+/// carries no signal and a caller must not branch on them being possible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
