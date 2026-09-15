@@ -470,7 +470,25 @@ fn root_removed(root: &Path) -> bool {
     !root.is_dir()
 }
 
+/// Record one watcher event as a pending change, when it is one.
+///
+/// A read is not: `notify`'s inotify backend (the Linux one) reports an
+/// `Access` event for every open (IN_OPEN) and read-only close
+/// (IN_CLOSE_NOWRITE) of a watched file, so the daemon's own extraction pass
+/// — or any `cat`, editor or grep — would mark every file it read as
+/// changed, and the batch the loop applies before the next request would
+/// move the index counters for a repository nobody edited. Metadata-only
+/// events (a `chmod`, a `touch`) cannot change an answer either. Every event
+/// that can change content (create, modify data or name, remove) is still
+/// recorded.
 fn record_event(ev: &notify::Event, pending: &mut BTreeMap<PathBuf, bool>) {
+    if matches!(
+        ev.kind,
+        notify::EventKind::Access(_)
+            | notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
+    ) {
+        return;
+    }
     for path in &ev.paths {
         if path.components().any(|c| match c {
             Component::Normal(s) => IGNORED_DIRS.iter().any(|d| s == *d),
@@ -866,6 +884,71 @@ mod tests {
             "the batch must be consumed, never applied twice"
         );
         assert_eq!(flush_at, None, "the debounce timer must not fire again");
+    }
+
+    /// A read is not a change. `notify`'s inotify backend reports an
+    /// `Access` event for every open and read-only close of a watched file,
+    /// so the daemon's own extraction pass would mark every file it read as
+    /// changed and the batch the loop applies before the next request would
+    /// move the index counters for a repository nobody edited. Metadata-only
+    /// events cannot change an answer either, while every content event
+    /// still reaches the corpus.
+    #[test]
+    fn watcher_records_only_events_that_change_content() {
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind,
+        };
+
+        let root = scratch_root("content-events");
+        let file = root.join("login.rs");
+        std::fs::write(&file, "pub fn login() -> bool { true }\n").unwrap();
+        std::fs::create_dir_all(root.join(".pixel")).unwrap();
+        let ignored = root.join(".pixel/actions.jsonl");
+        std::fs::write(&ignored, "{}\n").unwrap();
+
+        for kind in [
+            notify::EventKind::Access(AccessKind::Open(AccessMode::Read)),
+            notify::EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            notify::EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+        ] {
+            let mut pending = BTreeMap::new();
+            record_event(
+                &notify::Event::new(kind).add_path(file.clone()),
+                &mut pending,
+            );
+            assert!(pending.is_empty(), "{kind:?} must not look like a change");
+        }
+
+        let mut pending = BTreeMap::new();
+        for kind in [
+            notify::EventKind::Create(CreateKind::File),
+            notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            notify::EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Any)),
+        ] {
+            record_event(
+                &notify::Event::new(kind).add_path(file.clone()),
+                &mut pending,
+            );
+            assert_eq!(pending.get(&file), Some(&false), "{kind:?} is a change");
+        }
+        record_event(
+            &notify::Event::new(notify::EventKind::Remove(notify::event::RemoveKind::File))
+                .add_path(file.clone()),
+            &mut pending,
+        );
+        assert_eq!(pending.get(&file), Some(&true), "a removal is a removal");
+        // The ignored-tree rule survives the content filter: `.pixel` state
+        // is the daemon's own churn, never a source change.
+        record_event(
+            &notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+                .add_path(ignored.clone()),
+            &mut pending,
+        );
+        assert!(
+            !pending.contains_key(&ignored),
+            ".pixel state is not a source change"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A corpus without an interval is never swept, so a corpus without
