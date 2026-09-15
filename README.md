@@ -40,21 +40,11 @@ The same repository questions, shown as realistic terminal work. These are workf
 ```bash
 brew tap LivioGama/tap
 brew install pixel
-pixel prepare-repo .       # optional warm-up
-pixel doctor .      # optional health check
-pixel install       # let your agent use Pixel
+pixel prepare-repo .   # optional warm-up
+pixel doctor .         # optional health check
 ```
 
-`pixel install` deploys the agent system prompt and wires it into the agents it knows:
-
-| Agent | How the prompt reaches it |
-| --- | --- |
-| Claude Code | a `claude` shell function adds `--append-system-prompt-file` (and the short sub-agent prompt in print mode) |
-| Codex | the `developer_instructions` key of `~/.codex/config.toml`, so every front end gets it |
-| Pi | `~/.pi/agent/APPEND_SYSTEM.md`, read automatically |
-
-> [!NOTE]
-> Any other agent (Cursor, Gemini CLI, Copilot, ...) is not wired by `pixel install` and will not know about Pixel on its own. Give it the same prompt through its own rules or system-prompt mechanism; see [Other agents and manual setup](#-other-agents-and-manual-setup).
+Then install Pixel in the agent CLI you actually use — see [Install](#install). The `pixel` binary must be on PATH; the plugin manifests never install it for you.
 
 | Need | Pixel command |
 | --- | --- |
@@ -65,48 +55,99 @@ pixel install       # let your agent use Pixel
 
 Pixel is local-first. Its index, graph, and optional history data live under `.pixel/`; it reports boundaries when results are capped, stale, or incomplete. Tests and code review remain necessary.
 
-### Plugin install (per-tool native)
+## Install
 
-This repo carries native plugin manifests, so each agent CLI can install Pixel's protocol through its own plugin mechanism — no `pixel install` step. The `pixel` binary still has to be installed (see above); the plugin never installs it. Always-on delivery is a SessionStart/SubagentStart hook (`hooks/pixel-context.sh`) that injects the protocol as `additionalContext` (the short sub-agent prompt for sub-agents) — context only, it never blocks a tool call. When `pixel` is missing from PATH, or too old for the command names the protocol uses, the hook injects a one-paragraph notice instead.
+Each agent CLI can install Pixel through its own native plugin mechanism — no `pixel install` step. The `pixel` binary still has to be on PATH; the plugin never installs it.
+
+Always-on delivery for Claude, Codex and similar plugin CLIs is a `SessionStart`/`SubagentStart` hook (`hooks/pixel-context.sh`) that injects `PIXEL.md` as `additionalContext` — context only, it never blocks a tool call. Devin uses `AGENTS.md` as an always-on rule plus the `/pixel:pixel` skill. For editors and other agents, copy the generated rule files or `PIXEL.md` directly. When `pixel` is missing from PATH, or too old for the command names the protocol uses, the surface stays silent instead of issuing commands that would fail.
 
 > [!NOTE]
-> The manifests live on `develop` and ship with the next release; the default branch `main`, which the commands below read, does not carry them yet.
+> Native plugin manifests live on `develop` and ship with the next release; the default branch `main` does not carry them yet.
 
-| Tool | Install |
+### Devin
+
+```bash
+devin plugins install github.com/LivioGama/pixel
+```
+
+Devin loads `AGENTS.md` as an always-on rule and exposes `/pixel:pixel` as a skill. Make sure `pixel` is on PATH and the repo is indexed (`pixel build-index`) before asking for pixel commands.
+
+### Claude Code
+
+```bash
+/plugin marketplace add LivioGama/pixel
+/plugin install pixel@pixel
+```
+
+Send the two `/plugin` commands as separate prompts. Claude Code also loads `.claude/rules` and `.claude/skills` from this checkout if you prefer a project-local setup.
+
+### Codex
+
+```bash
+codex plugin marketplace add LivioGama/pixel
+codex plugin add pixel@pixel
+```
+
+Run `codex`, open `/hooks`, review and trust the two lifecycle hooks, then start a new thread. This also covers the Codex desktop app after a restart.
+
+### GitHub Copilot CLI
+
+```bash
+copilot plugin marketplace add LivioGama/pixel
+copilot plugin install pixel@pixel
+```
+
+In an interactive Copilot CLI session you can use slash equivalents:
+
+```bash
+/plugin marketplace add LivioGama/pixel
+/plugin install pixel@pixel
+```
+
+### Gemini CLI
+
+```bash
+gemini extensions install https://github.com/LivioGama/pixel
+```
+
+### Pi
+
+```bash
+pi install git:github.com/LivioGama/pixel
+```
+
+### OpenCode
+
+Add to `opencode.json`:
+
+```json
+{ "plugin": ["@liviogama/pixel"] }
+```
+
+Or run from a checkout and point at the built-in `.opencode` surface:
+
+```json
+{ "plugin": ["./.opencode/plugins/pixel.mjs"] }
+```
+
+### Cursor, Windsurf, Kiro, Cline, Qoder
+
+Copy or vendor the generated rule into your project:
+
+| Tool | Copy this file |
 | --- | --- |
-| Claude Code | `/plugin marketplace add LivioGama/pixel` then `/plugin install pixel@pixel` |
-| Codex | `codex plugin marketplace add LivioGama/pixel` then `codex plugin add pixel@pixel` |
-| Copilot CLI | `copilot plugin marketplace add LivioGama/pixel` then `copilot plugin install pixel@pixel` |
-| Devin | Add `github.com/LivioGama/pixel` as a Devin plugin — it picks up `.devin-plugin/` + `.cursor/rules/pixel.mdc` |
-| Gemini CLI | `gemini extensions install https://github.com/LivioGama/pixel` |
-| Pi | `pi install git:github.com/LivioGama/pixel` |
-| OpenCode | `"plugin": ["@liviogama/pixel"]` in `opencode.json` (or `"./.opencode/plugins/pixel.mjs"` from a checkout) |
-| Cursor / Windsurf / Kiro / Cline / Qoder | Rules ship under `.cursor/rules/`, `.windsurf/rules/`, `.kiro/steering/`, `.clinerules/`, `.qoder/rules/` — copy or vendor into your project |
-| Anything else | `PIXEL.md` at the repo root is the plain-markdown protocol — paste it into whatever instruction surface the tool offers |
+| Cursor | `.cursor/rules/pixel.mdc` |
+| Windsurf | `.windsurf/rules/pixel.md` |
+| Kiro | `.kiro/steering/pixel.md` |
+| Cline | `.clinerules/pixel.md` |
+| Qoder | `.qoder/rules/pixel.md` |
 
-Generated surfaces (`skills/`, `PIXEL.md`, `PIXEL-SUBAGENT.md`, all rules files) come from the prompts in `crates/pixel-install/assets/` via `scripts/gen-plugin-assets.sh`; a test fails if they drift, and `pixel check-release` fails a release whose plugin manifests do not carry its version.
+### Anything else
 
-### 🔌 Other agents and manual setup
-
-Using an agent the installer does not cover, or prefer to control your own setup? Deploy the agent
-system prompt and wire it into your agent by hand — see
-[Manual Setup](docs/manual-setup.md). The prompt itself lives at
-[`crates/pixel-install/assets/pixel-agent-prompt.md`](crates/pixel-install/assets/pixel-agent-prompt.md)
-(~300 lines / ~4 000 tokens) and is the single source of truth: every agent, installed or manual, should read that exact text.
-
-> [!TIP]
-> It's large because Pixel replaces a wide range of native commands (`grep`, `rg`, `git log -S`, `git blame`, manual caller tracing) with a single indexed workflow — and the token cost is recovered in as little as one `pixel impact` call.
+[`PIXEL.md`](PIXEL.md) at the repo root is the plain-markdown protocol. Paste it into whatever instruction surface the agent offers. The single source of truth is [`crates/pixel-install/assets/pixel-agent-prompt.md`](crates/pixel-install/assets/pixel-agent-prompt.md); all generated surfaces are refreshed from it by `scripts/gen-plugin-assets.sh`.
 
 For architecture and the full command surface, see [ARCHITECTURE.md](ARCHITECTURE.md) and `pixel --help`.
-To build from source, run the gates, or open a pull request (with or without an AI agent), see [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## 🔁 Renamed commands
-
-Every subcommand got a verb-first name after 0.2.4 (for example `prepare-repo`
-instead of `ready`). The clean break is now complete: old CLI names and old
-protocol op tags are no longer accepted. Update scripts, hook entries and
-agent prompts to the current command names. `migrate` was removed: it now exits 0
-with a note and does nothing.
+To build from source, run the gates, or open a pull request, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 📝 License
 

@@ -8,11 +8,11 @@ checklist as the contract for your pull request.
 
 - Architecture, crate map, wire contract: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Security model and vulnerability reporting: [SECURITY.md](SECURITY.md)
-- Agent rules for this repo, whatever the tool: [AGENTS.md](AGENTS.md) (the
-  loops) and [`.agents/rules/`](.agents/rules/) (scoped rules: mutation-gate-proof
-  code, test hygiene, long campaigns, the lint idioms) and [`.agents/skills/`](.agents/skills/)
-  (on-demand knowledge: the Microsoft Pragmatic Rust Guidelines); `CLAUDE.md`, `.claude/rules`
-  and `.claude/skills` are symlinks to them
+- Agent rules for this repo: [CLAUDE.md](CLAUDE.md) (the loops) and
+  [`.agents/rules/`](.agents/rules/) (scoped rules: mutation-gate-proof code, test hygiene,
+  long campaigns, the lint idioms) and [`.agents/skills/`](.agents/skills/) (on-demand knowledge:
+  the Microsoft Pragmatic Rust Guidelines); `AGENTS.md` is the Pixel protocol shipped
+  with the Devin plugin and other Agent-Plugin installs
 - User-facing docs: [README.md](README.md), [docs/manual-setup.md](docs/manual-setup.md)
 
 ## Definition of done

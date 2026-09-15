@@ -173,22 +173,16 @@ cp crates/pixel-install/assets/pixel-agent-prompt.md ~/.pi/agent/APPEND_SYSTEM.m
 the full text of `~/.local/share/pixel/agent-prompt.md` wherever that tool
 reads always-on instructions: a rules file (`.cursor/rules`, `GEMINI.md`,
 `.github/copilot-instructions.md`), a system-prompt flag, or a global
-`AGENTS.md`. Copy the bundled prompt verbatim rather than a summary; it is
+`PIXEL.md` at the repo root. Copy the bundled prompt verbatim rather than a summary; it is
 the single source of truth, and `pixel doctor` checks the deployed copy
 against it. Re-copy it after each `pixel self-update`.
 
 ## Renamed commands
 
-If you wrote Pixel commands into your own instructions before the rename
-(a `CLAUDE.md`, a rules file, a CI script, a hand-wired hook such as
-`<pixel> hook session-start`), you do not have to rewrite them yet: each old
-name is a hidden alias of its new name until 1.0, and `pixel doctor` accepts
-rule text that still uses the old names. Update them when convenient, using
-the table in the [README](../README.md#-renamed-commands).
-
-An old name prints one `note:` line on stderr with the new name. It never
-touches stdout or `--json` output, and `--metrics off` or `PIXEL_METRICS=0`
-silence it together with the metrics line. Hook invocations stay silent.
+The rename was a clean break. Old CLI names and old protocol op tags are no
+longer accepted. Rewrite any `CLAUDE.md`, rules file, CI script, or hand-wired
+hook that still uses the old names to the current command names. `pixel doctor`
+will reject rule text that relies on old names.
 
 ## A note on prompt size
 
