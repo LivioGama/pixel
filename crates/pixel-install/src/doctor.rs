@@ -213,6 +213,22 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     ));
 
+    let exe_for_antigravity = exe.clone();
+    let home_for_antigravity = home.clone();
+    checks.push(check(
+        "install.antigravity",
+        move || -> std::result::Result<DoctorCheckDetail, String> {
+            let (summary, detail) = crate::antigravity::check_antigravity_install(
+                &home_for_antigravity,
+                &exe_for_antigravity,
+            )?;
+            Ok(DoctorCheckDetail {
+                summary,
+                detail: Some(detail),
+            })
+        },
+    ));
+
     let shell_override = options.shell.clone();
     let claude = install::probe_claude(options.claude_executable.as_deref());
     checks.push(check_status(

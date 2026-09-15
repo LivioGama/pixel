@@ -25,7 +25,7 @@ VERSION=$(grep -m1 '^version' "$ROOT/crates/pixel/Cargo.toml" | sed -E 's/.*"([^
 [ -f "$SUB_SRC" ] || { echo "missing $SUB_SRC" >&2; exit 1; }
 
 # Every derived file, relative to the output root.
-FILES="skills/pixel/SKILL.md .openclaw/skills/pixel/SKILL.md .cursor/rules/pixel.mdc
+FILES="skills/pixel/SKILL.md .agents/skills/pixel/SKILL.md .openclaw/skills/pixel/SKILL.md .cursor/rules/pixel.mdc
 .windsurf/rules/pixel.md .kiro/steering/pixel.md .qoder/rules/pixel.md .clinerules/pixel.md
 PIXEL.md PIXEL-SUBAGENT.md"
 
@@ -101,6 +101,7 @@ alwaysApply: true
 '
 
 write_file "skills/pixel/SKILL.md"            "$SKILL_FRONT"  "$SRC" yes
+write_file ".agents/skills/pixel/SKILL.md"    "$SKILL_FRONT"  "$SRC" yes
 write_file ".openclaw/skills/pixel/SKILL.md"  "$SKILL_FRONT"  "$SRC" yes
 write_file ".cursor/rules/pixel.mdc"          "$CURSOR_FRONT" "$SRC" yes
 write_file ".windsurf/rules/pixel.md"         ""              "$SRC" yes

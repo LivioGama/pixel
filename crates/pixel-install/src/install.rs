@@ -305,11 +305,20 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     let dry_run = options.dry_run;
     let claude = probe_claude(options.claude_executable.as_deref());
     let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
-    let steps = vec![
+    let mut steps = vec![
         deploy_agent_prompt(&home, dry_run)?,
         install_shell_wrappers(&home, options.shell.as_deref(), &claude, dry_run)?,
         crate::codex_config::install_developer_instructions(&codex_home, dry_run)?,
     ];
+    if crate::antigravity::antigravity_config_dir(&home).is_dir() {
+        steps.push(crate::antigravity::deploy_plugin_assets(
+            &home, &exe, dry_run,
+        )?);
+        steps.push(crate::antigravity::enable_plugin_in_config(&home, dry_run)?);
+        steps.push(crate::antigravity::install_global_hooks(
+            &home, &exe, dry_run,
+        )?);
+    }
 
     let green = steps
         .iter()
