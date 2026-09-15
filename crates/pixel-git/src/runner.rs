@@ -490,6 +490,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_command_that_closes_stdout_then_exits_still_succeeds() {
+        // The child-exit poll loop has its own timeout check; a child that
+        // closes fd 1 and then exits quickly must not be killed by that poll.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exec 1>&-; sleep 0.05"]);
+        let options = GitOptions {
+            timeout: Some(Duration::from_millis(500)),
+            max_output_bytes: None,
+        };
+        let result = execute(cmd, vec!["sh".into(), "-c".into()], &options);
+        assert!(result.is_ok(), "expected success, got {result:?}");
+    }
+
     /// A pipe that yields one chunk and then fails the way a closed or
     /// broken pipe does, instead of reporting EOF.
     struct FailingPipe {
