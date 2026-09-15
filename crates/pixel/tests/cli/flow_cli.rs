@@ -174,7 +174,19 @@ fn flow_execute_failure_is_nonzero_and_never_a_success_document() {
         !output.status.success(),
         "browser failure must fail CLI: {output:?}"
     );
-    assert!(output.stdout.is_empty(), "{output:?}");
+    // Under `--json` the answer is the failure envelope, never a success
+    // document: `ok: false` with the reason and no result, so a parser cannot
+    // read a failed execution as a completed one.
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("--json failure must be a JSON document ({e}): {output:?}"));
+    assert_eq!(doc["ok"], false, "{output:?}");
+    assert!(doc["result"].is_null(), "{output:?}");
+    assert!(
+        doc["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("flow execution failed")),
+        "{output:?}"
+    );
     assert!(!output.stderr.is_empty());
     assert!(fixture.0.join("calls").exists());
 }

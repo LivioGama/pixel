@@ -139,6 +139,7 @@ impl SourceAdapter for ClaudeAdapter {
         };
 
         let mut turns: Vec<UnifiedTurn> = Vec::new();
+        let mut skipped_records = 0usize;
         let mut offset = start;
         let mut line = String::new();
         loop {
@@ -155,6 +156,7 @@ impl SourceAdapter for ClaudeAdapter {
             let line_start = offset;
             offset += n as u64;
             let Ok(record) = serde_json::from_str::<Value>(&line) else {
+                skipped_records += 1;
                 continue;
             };
             extract_record(&record, line_start, n as u64, &mut session, &mut turns);
@@ -174,6 +176,7 @@ impl SourceAdapter for ClaudeAdapter {
             } else {
                 Vec::new()
             },
+            skipped_records,
             consumed_bytes: offset,
             cursor: None,
         })
@@ -409,5 +412,34 @@ mod tests {
             "on it\n\u{22ee}tool Bash {\"command\":\"cargo test\"}"
         );
         assert!(!turns[2].truncated);
+    }
+
+    /// A complete line that is not valid JSON (a writer that crashed
+    /// mid-flush) is consumed but counted: swallowing it would let a
+    /// transcript whose records never parse look perfectly healthy.
+    #[test]
+    fn parse_counts_a_malformed_line_without_losing_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s1.jsonl");
+        let record = json!({
+            "type": "user", "cwd": "/work/pixel",
+            "message": {"content": [{"type": "text", "text": "please fix the engine"}]}
+        })
+        .to_string();
+        let truncated = "{\"type\":\"user\",\"message\":{\"conte";
+        fs::write(&path, format!("{record}\n{truncated}\n{record}\n")).unwrap();
+
+        let unit = unit_for(path).unwrap();
+        let out = ClaudeAdapter::with_root(dir.path().to_path_buf())
+            .parse(&unit, Change::New, None)
+            .unwrap();
+
+        assert_eq!(out.skipped_records, 1);
+        assert_eq!(
+            out.consumed_bytes, unit.size,
+            "the malformed line's bytes are consumed, never re-read"
+        );
+        assert_eq!(out.sessions.len(), 1);
+        assert_eq!(out.sessions[0].turns.len(), 2, "both readable records land");
     }
 }

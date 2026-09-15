@@ -217,7 +217,9 @@ fn repeated_search_keeps_executing_and_reports_changed_file() {
             "attempt {attempt}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let row: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        // The first NDJSON line is the match; the last is the page metadata.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let row: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
         assert_eq!(
             row["text"],
             if attempt == 4 {

@@ -43,6 +43,7 @@ use pixel_git::GitRunner;
 use crate::durable::{sha256_hex, state_root};
 use crate::journal::{BeginOutcome, JournalOperation, JournalPhase, OperationJournal};
 use crate::lock::RepositoryLock;
+use crate::repo::repo_identity;
 
 /// Options for a rewrite (squash) operation.
 #[derive(Debug, Clone)]
@@ -84,7 +85,7 @@ pub fn rewrite_with_state(
     state_root: &Path,
 ) -> Result<Value, String> {
     let runner = GitRunner::new(root);
-    let repo_key = repo_key(root);
+    let repo_key = repo_identity(root);
     let input_hash = rewrite_input_hash(opts);
 
     let journal = OperationJournal::with_state_root(state_root.to_path_buf());
@@ -138,11 +139,11 @@ fn run_body(
     state_root: &Path,
     mut probe: Option<RewriteProbe>,
 ) -> Result<Value, String> {
-    let repo_key = repo_key(root);
+    let repo_key = repo_identity(root);
 
     pixel_git::validate_ref(&opts.remote).map_err(|e| e.to_string())?;
 
-    let mut lock = RepositoryLock::acquire_with_state_root(&common_dir(root), state_root)
+    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, state_root)
         .map_err(|_| "repository is busy".to_string())?;
 
     macro_rules! bail {
@@ -452,7 +453,7 @@ fn resume_rewrite(
     runner: &GitRunner,
     state_root: &Path,
 ) -> Result<Value, String> {
-    let repo_key = repo_key(root);
+    let repo_key = repo_identity(root);
     match phase {
         JournalPhase::Started => {
             // Crash before the mutation window opened (the backup ref may
@@ -623,17 +624,6 @@ fn rev_list_count(runner: &GitRunner, ranges: &[&str]) -> u64 {
         .run_opt(&args)
         .and_then(|o| String::from_utf8_lossy(&o).trim().parse::<u64>().ok())
         .unwrap_or(0)
-}
-
-fn repo_key(root: &Path) -> String {
-    root.canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
-        .display()
-        .to_string()
-}
-
-fn common_dir(root: &Path) -> String {
-    root.join(".git").display().to_string()
 }
 
 fn rewrite_input_hash(opts: &RewriteOptions) -> String {

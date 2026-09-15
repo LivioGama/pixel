@@ -147,6 +147,7 @@ impl SourceAdapter for Adapter {
 
         let ts = Some(unit.mtime_ms);
         let mut turns: Vec<UnifiedTurn> = Vec::new();
+        let mut skipped_records = 0usize;
         let mut offset = start;
         let mut line = String::new();
         loop {
@@ -163,6 +164,7 @@ impl SourceAdapter for Adapter {
             let line_start = offset;
             offset += n as u64;
             let Ok(record) = serde_json::from_str::<Value>(&line) else {
+                skipped_records += 1;
                 continue;
             };
             extract_record(&record, line_start, n as u64, ts, &mut turns);
@@ -179,6 +181,7 @@ impl SourceAdapter for Adapter {
             } else {
                 Vec::new()
             },
+            skipped_records,
             consumed_bytes: offset,
             cursor: None,
         })
@@ -368,5 +371,38 @@ mod tests {
             "renaming\n\u{22ee}tool edit_file {\"path\":\"a.rs\"}"
         );
         assert_eq!(turns[1].ts, None);
+    }
+
+    /// A complete line that is not valid JSON (a writer that crashed
+    /// mid-flush) is consumed but counted: swallowing it would let a
+    /// transcript whose records never parse look perfectly healthy.
+    #[test]
+    fn parse_counts_a_malformed_line_without_losing_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let conv = dir.path().join("conv-uuid");
+        fs::create_dir_all(&conv).unwrap();
+        let path = conv.join("0123abcd-0000-4000-8000-000000000001.jsonl");
+        let record = json!({
+            "role": "user",
+            "message": {"content": [
+                {"type": "text", "text": "<user_query>\nrename the flag\n</user_query>"}
+            ]}
+        })
+        .to_string();
+        let truncated = "{\"role\":\"user\",\"message\":{\"conte";
+        fs::write(&path, format!("{record}\n{truncated}\n{record}\n")).unwrap();
+
+        let unit = unit_for(path).unwrap();
+        let out = Adapter::new()
+            .parse(&unit, Change::New, None)
+            .expect("parse");
+
+        assert_eq!(out.skipped_records, 1);
+        assert_eq!(
+            out.consumed_bytes, unit.size,
+            "the malformed line's bytes are consumed, never re-read"
+        );
+        assert_eq!(out.sessions.len(), 1);
+        assert_eq!(out.sessions[0].turns.len(), 2, "both readable records land");
     }
 }

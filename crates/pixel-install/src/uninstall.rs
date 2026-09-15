@@ -7,6 +7,8 @@
 //!     and project-level .codex/hooks.json settings files
 //!   - pixel run-hook scripts from ~/.claude/hooks/
 //!   - the pi guard extension (~/.pi/agent/extensions/pixel-guard.ts)
+//!   - the pixel block from Pi's ~/.pi/agent/APPEND_SYSTEM.md (the rest of
+//!     that shared file is the user's and is kept)
 //!   - the pixel rule source file (~/.agent-config/rules/pixel.md)
 //!   - the pixel binary (~/.local/bin/pixel by default)
 //!
@@ -113,6 +115,8 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
             &crate::codex_config::codex_home(&home, options.home.is_some()),
             dry_run,
         )?,
+        // 7c. Remove Antigravity plugin and hooks.
+        crate::antigravity::remove_antigravity(&home, dry_run)?,
         // 8. Remove the pixel binary.
         remove_binary(&binary_path, dry_run)?,
     ];
@@ -846,7 +850,7 @@ fn remove_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let subagent_path = home
         .join(".local/share/pixel")
         .join(install::SUBAGENT_PROMPT_FILE);
-    let pi_path = home.join(".pi/agent/APPEND_SYSTEM.md");
+    let pi_path = home.join(install::PI_PROMPT_REL);
     let existed = path.is_file();
     if !existed && !subagent_path.is_file() && !pi_path.is_file() {
         return Ok(InstallStep {
@@ -856,18 +860,44 @@ fn remove_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
             detail: None,
         });
     }
+    // Pi's system-prompt file is shared: pixel owns the managed block inside
+    // it, not the file. Whatever the user keeps outside the markers survives,
+    // and the file is deleted only when the block was all it held.
+    let pi_original = match fs::read_to_string(&pi_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let pi_cleaned = pi_original
+        .contains(config::MANAGED_BEGIN)
+        .then(|| config::strip_managed_block(&pi_original));
+    let pi_removed = pi_cleaned
+        .as_deref()
+        .is_some_and(|cleaned| cleaned.trim().is_empty());
     if !dry_run {
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&subagent_path);
-        let _ = fs::remove_file(&pi_path);
+        if let Some(cleaned) = pi_cleaned.as_deref() {
+            if cleaned.trim().is_empty() {
+                let _ = config::backup_if_changing(&pi_path, cleaned.as_bytes())?;
+                fs::remove_file(&pi_path)?;
+            } else if cleaned != pi_original {
+                let _ = config::backup_if_changing(&pi_path, cleaned.as_bytes())?;
+                fs::write(&pi_path, cleaned)?;
+            }
+        }
     }
+    let summary = if pi_removed {
+        "removed agent-prompt.md, subagent-prompt.md and the pi prompt file"
+    } else if pi_cleaned.is_some() {
+        "removed agent-prompt.md and subagent-prompt.md, kept the text around the pixel block in APPEND_SYSTEM.md"
+    } else {
+        "removed agent-prompt.md and subagent-prompt.md"
+    };
     Ok(InstallStep {
         id: "agent-prompt".into(),
         status: CheckStatus::Green,
-        summary: install::dry_run_summary(
-            dry_run,
-            "removed agent-prompt.md and subagent-prompt.md",
-        ),
+        summary: install::dry_run_summary(dry_run, summary),
         detail: Some(format!(
             "path={} subagent={} pi={}",
             path.display(),
@@ -1144,6 +1174,26 @@ mod routing_tests {
             changed
         );
         assert!(codex.join(routing::CODEX_COMPOSED_BACKUP).is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_agent_prompt_fails_when_pi_file_is_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let pi_path = home.path().join(install::PI_PROMPT_REL);
+        fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+        fs::write(&pi_path, b"user note").unwrap();
+        // Remove read permission but keep write permission.
+        fs::set_permissions(&pi_path, fs::Permissions::from_mode(0o200)).unwrap();
+
+        // An unreadable shared file must be an error, never "empty".
+        let result = remove_agent_prompt(home.path(), false);
+        assert!(
+            result.is_err(),
+            "expected error for unreadable pi file, got {result:?}"
+        );
     }
 
     fn make_private(path: &Path) {

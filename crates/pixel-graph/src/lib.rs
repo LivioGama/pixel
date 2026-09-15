@@ -19,6 +19,7 @@ pub mod impact;
 pub mod imports;
 pub mod plan;
 pub mod process;
+pub mod rename;
 pub mod resolve;
 pub mod store;
 pub mod targets;

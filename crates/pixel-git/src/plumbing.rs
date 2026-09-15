@@ -10,7 +10,7 @@ use std::path::Path;
 
 use crate::error::GitError;
 use crate::ref_guard::{end_of_options, validate_ref};
-use crate::runner::{BLOB_MAX_OUTPUT_BYTES, ENUMERATION_MAX_OUTPUT_BYTES, GitRunner};
+use crate::runner::{BLOB_MAX_OUTPUT_BYTES, ENUMERATION_MAX_OUTPUT_BYTES, GitOutput, GitRunner};
 
 impl GitRunner {
     /// HEAD commit OID, truncated to 40 hex chars. `None` when not a git
@@ -374,10 +374,12 @@ impl GitRunner {
     }
 
     /// `git merge-file -L <label1> -L <label2> -L <label3> <current> <base> <other>`.
-    /// Returns the exit status: 0 = clean merge, positive = conflict count
-    /// (markers left in `current`), negative = real failure. Port of
-    /// `pixel-cli::rescue_cmd::apply`'s 3-way merge branch, including the
-    /// cosmetic `-L` diff3 labels.
+    /// Returns git's exit code as data: 0 = clean merge, positive = conflict
+    /// count (markers left in `current`), `None` = killed by a signal. Port
+    /// of `pixel-cli::rescue_cmd::apply`'s 3-way merge branch, including the
+    /// cosmetic `-L` diff3 labels. Goes through the runner's bounded
+    /// `merge-file` primitive, so the timeout and the output cap apply and
+    /// stderr is captured and redacted instead of inheriting the caller's.
     pub fn merge_file_with_labels(
         &self,
         current: &Path,
@@ -386,22 +388,13 @@ impl GitRunner {
         label_ours: &str,
         label_base: &str,
         label_theirs: &str,
-    ) -> Result<std::process::ExitStatus, GitError> {
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(self.root())
-            .arg("merge-file")
-            .arg("-L")
-            .arg(label_ours)
-            .arg("-L")
-            .arg(label_base)
-            .arg("-L")
-            .arg(label_theirs)
-            .arg(current)
-            .arg(base)
-            .arg(other)
-            .status()
-            .map_err(GitError::from)
+    ) -> Result<GitOutput, GitError> {
+        self.run_merge_file(
+            current,
+            base,
+            other,
+            Some([label_ours, label_base, label_theirs]),
+        )
     }
 }
 
@@ -790,6 +783,30 @@ mod tests {
             std::fs::read_to_string(root.join("b.txt")).unwrap(),
             "b-dirty"
         );
+    }
+
+    #[test]
+    fn merge_file_with_labels_reports_the_conflict_count_and_keeps_the_labels() {
+        let root = tmpdir("plumbing-mergelabels");
+        std::fs::write(root.join("current.txt"), "one-mine\ntwo\nthree\n").unwrap();
+        std::fs::write(root.join("base.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(root.join("other.txt"), "one-theirs\ntwo\nthree\n").unwrap();
+
+        let runner = GitRunner::new(&root);
+        let out = runner
+            .merge_file_with_labels(
+                &root.join("current.txt"),
+                &root.join("base.txt"),
+                &root.join("other.txt"),
+                "in-progress",
+                "HEAD",
+                "rescue:abc1234",
+            )
+            .expect("merge-file runs");
+        assert_eq!(out.code, Some(1), "one conflicting region: {out:?}");
+        let merged = std::fs::read_to_string(root.join("current.txt")).unwrap();
+        assert!(merged.contains("<<<<<<< in-progress"), "{merged}");
+        assert!(merged.contains(">>>>>>> rescue:abc1234"), "{merged}");
     }
 
     // -----------------------------------------------------------------

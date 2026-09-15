@@ -16,6 +16,10 @@
 //!     (never touching the worktree) and fails with `GIT_FAILED`, rather
 //!     than guessing by re-running `git add`/`git commit` (which is exactly
 //!     how a naive resume can silently discard a user's own staged work).
+//!     A record that exists but cannot be read is that same window with
+//!     less information: `PublishRecoveryStore::read` returns `Err`
+//!     (`GIT_FAILED`), never `None`, so the retry refuses instead of
+//!     re-running the mutation.
 //!
 //! Phase order for a fresh run (matches usable-git's crash matrix exactly):
 //!   journal:started → recovery:snapshotted → journal:index_staged →
@@ -34,6 +38,7 @@ use crate::fingerprint;
 use crate::journal::{BeginOutcome, JournalOperation, JournalPhase, OperationJournal};
 use crate::lock::RepositoryLock;
 use crate::recovery::{self, PublishRecoveryState, PublishRecoveryStore, RecoveryPhase};
+use crate::repo::repo_identity;
 
 /// Options for a publish operation.
 #[derive(Debug, Clone)]
@@ -68,7 +73,7 @@ pub fn publish_with_state(
     state_root: &Path,
 ) -> Result<Value, String> {
     let runner = GitRunner::new(root);
-    let repo_key = repo_key(root);
+    let repo_key = repo_identity(root);
     let input_hash = publish_input_hash(opts);
 
     let journal = OperationJournal::with_state_root(state_root.to_path_buf());
@@ -103,9 +108,9 @@ fn run_body(
     state_root: &Path,
     mut probe: Option<PublishProbe>,
 ) -> Result<Value, String> {
-    let repo_key = repo_key(root);
+    let repo_key = repo_identity(root);
 
-    let mut lock = RepositoryLock::acquire_with_state_root(&common_dir(root), state_root)
+    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, state_root)
         .map_err(|_| "repository is busy".to_string())?;
 
     // Probe: journal:started
@@ -305,26 +310,32 @@ fn resume_publish(
     runner: &GitRunner,
     state_root: &Path,
 ) -> Result<Value, String> {
-    let repo_key = repo_key(root);
+    let repo_key = repo_identity(root);
     let recovery_store = PublishRecoveryStore::with_state_root(state_root.to_path_buf());
 
     match phase {
         JournalPhase::Started => {
-            if let Some(state) = recovery_store.read(&repo_key, &opts.request_id) {
-                // A recovery record exists: we cannot prove whether `git
-                // add` (or, transitively, `git commit`) ran to completion
-                // before the crash. Restore the exact pre-operation
-                // snapshot and refuse to guess.
-                recovery::restore_snapshot(root, &state)?;
-                recovery_store.remove(&repo_key, &opts.request_id);
-                return Err(format!(
-                    "GIT_FAILED: crash detected mid-mutation at recovery phase {:?}; local state restored to the pre-operation snapshot",
-                    state.phase
-                ));
+            // An unreadable record (truncated write, permissions, an
+            // unknown schema) is NOT "no crash": `?` propagates the
+            // store's `GIT_FAILED`, and the operation is never replayed
+            // over a mutation the record cannot prove never ran.
+            match recovery_store.read(&repo_key, &opts.request_id)? {
+                Some(state) => {
+                    // A recovery record exists: we cannot prove whether
+                    // `git add` (or, transitively, `git commit`) ran to
+                    // completion before the crash. Restore the exact
+                    // pre-operation snapshot and refuse to guess.
+                    recovery::restore_snapshot(root, &state)?;
+                    recovery_store.remove(&repo_key, &opts.request_id);
+                    Err(format!(
+                        "GIT_FAILED: crash detected mid-mutation at recovery phase {:?}; local state restored to the pre-operation snapshot",
+                        state.phase
+                    ))
+                }
+                // No recovery record — the crash happened before anything
+                // durable was written. Safe to run the operation fresh.
+                None => run_body(root, opts, journal, runner, state_root, None),
             }
-            // No recovery record — the crash happened before anything
-            // durable was written. Safe to run the operation fresh.
-            run_body(root, opts, journal, runner, state_root, None)
         }
         JournalPhase::IndexStaged => {
             // The index was staged (and possibly committed) before the
@@ -334,7 +345,7 @@ fn resume_publish(
             // pattern that can silently discard the user's own staged
             // work if the reset sweeps away state a recovery snapshot
             // would have preserved.
-            if let Some(state) = recovery_store.read(&repo_key, &opts.request_id) {
+            if let Some(state) = recovery_store.read(&repo_key, &opts.request_id)? {
                 recovery::restore_snapshot(root, &state)?;
                 recovery_store.remove(&repo_key, &opts.request_id);
             }
@@ -369,17 +380,6 @@ fn resume_publish(
         }
         JournalPhase::RefUpdateStarted => Err("unexpected phase for publish".to_string()),
     }
-}
-
-fn repo_key(root: &Path) -> String {
-    root.canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
-        .display()
-        .to_string()
-}
-
-fn common_dir(root: &Path) -> String {
-    root.join(".git").display().to_string()
 }
 
 /// The subset of `files` that `git add -- <paths>` can act on: paths that
@@ -572,7 +572,7 @@ mod tests {
 
         let store = PublishRecoveryStore::with_state_root(state_dir.path().to_path_buf());
         assert!(
-            !store.has_pending(&repo_key(dir.path())),
+            !store.has_pending(&repo_identity(dir.path())),
             "recovery record must not linger after a successful publish",
         );
     }

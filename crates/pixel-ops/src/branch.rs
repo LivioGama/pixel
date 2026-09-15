@@ -15,6 +15,7 @@ use pixel_git::GitRunner;
 use crate::durable::sha256_hex;
 use crate::journal::{BeginOutcome, JournalOperation, OperationJournal};
 use crate::lock::RepositoryLock;
+use crate::repo::repo_identity;
 
 #[derive(Debug, Clone)]
 pub struct BranchOptions {
@@ -25,11 +26,7 @@ pub struct BranchOptions {
 
 pub fn branch(root: &Path, opts: &BranchOptions) -> Result<Value, String> {
     let runner = GitRunner::new(root);
-    let repo_key = root
-        .canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
-        .display()
-        .to_string();
+    let repo_key = repo_identity(root);
     let input_hash = sha256_hex(&format!(
         "{}\u{0}{}",
         opts.name,
@@ -49,11 +46,8 @@ pub fn branch(root: &Path, opts: &BranchOptions) -> Result<Value, String> {
         return Ok(result);
     }
 
-    let mut lock = RepositoryLock::acquire_with_state_root(
-        &root.join(".git").display().to_string(),
-        &state_root,
-    )
-    .map_err(|_| "repository is busy".to_string())?;
+    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, &state_root)
+        .map_err(|_| "repository is busy".to_string())?;
 
     // Validate branch name.
     pixel_git::validate_ref(&opts.name).map_err(|e| e.to_string())?;

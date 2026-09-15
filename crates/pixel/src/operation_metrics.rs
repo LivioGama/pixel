@@ -9,6 +9,11 @@ use std::sync::Mutex;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 pub static OUTPUT_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Bytes this invocation rendered to **stdout** alone (`OUTPUT_BYTES` counts
+/// both streams): the answer bytes. The CLI asks [`stdout_bytes`] before it
+/// appends a failure envelope, because a command that already wrote part of
+/// its answer keeps stdout for it.
+pub static STDOUT_BYTES: AtomicU64 = AtomicU64::new(0);
 pub struct Counted<W>(pub W);
 impl<W: Write> Write for Counted<W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -21,17 +26,47 @@ impl<W: Write> Write for Counted<W> {
     }
 }
 
+/// A stdout write: counts as rendered output (`OUTPUT_BYTES`) and as answer
+/// bytes (`STDOUT_BYTES`). Every stdout path goes through this or
+/// [`print`], so "the command already wrote something" is one answer for
+/// both.
+pub struct Stdout<W>(pub W);
+impl<W: Write> Write for Stdout<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let n = self.0.write(bytes)?;
+        OUTPUT_BYTES.fetch_add(n as u64, Ordering::Relaxed);
+        STDOUT_BYTES.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// A reader that closed its end (`… | head -1`) is a success, the policy
+/// `write_stdout` applies to the capped JSON path; every other write failure
+/// keeps the ordinary `print!` contract.
+fn write_absorbing_closed_reader<W: Write>(
+    sink: &mut W,
+    args: std::fmt::Arguments<'_>,
+) -> io::Result<()> {
+    match sink.write_fmt(args) {
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
 pub fn print(args: std::fmt::Arguments<'_>) {
     // Retain the ordinary print! failure contract. Only successful writes count.
-    Counted(io::stdout().lock())
-        .write_fmt(args)
-        .expect("failed printing to stdout");
+    if let Err(error) = write_absorbing_closed_reader(&mut Stdout(io::stdout().lock()), args) {
+        panic!("failed printing to stdout: {error}");
+    }
 }
 
 pub fn print_error(args: std::fmt::Arguments<'_>) {
-    Counted(io::stderr().lock())
-        .write_fmt(args)
-        .expect("failed printing to stderr");
+    if let Err(error) = write_absorbing_closed_reader(&mut Counted(io::stderr().lock()), args) {
+        panic!("failed printing to stderr: {error}");
+    }
 }
 
 #[derive(Default)]
@@ -46,6 +81,7 @@ static EVIDENCE: Mutex<Option<Evidence>> = Mutex::new(None);
 
 pub fn begin(root: &Path) {
     OUTPUT_BYTES.store(0, Ordering::Relaxed);
+    STDOUT_BYTES.store(0, Ordering::Relaxed);
     if let Ok(mut slot) = EVIDENCE.lock() {
         *slot = Some(Evidence {
             root: root.to_path_buf(),
@@ -56,6 +92,12 @@ pub fn begin(root: &Path) {
 
 pub fn output_bytes() -> u64 {
     OUTPUT_BYTES.load(Ordering::Relaxed)
+}
+
+/// Bytes rendered to stdout: `0` means this invocation has not answered yet
+/// on stdout, which is what decides whether a failure envelope is appended.
+pub fn stdout_bytes() -> u64 {
+    STDOUT_BYTES.load(Ordering::Relaxed)
 }
 
 pub fn unavailable() {
@@ -191,6 +233,64 @@ pub fn evidence(command: &str, succeeded: bool) -> Option<WorkflowEvidence> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A sink that refuses every write with one fixed error kind.
+    struct Refusing(io::ErrorKind);
+
+    impl Write for Refusing {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            Err(self.0.into())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A sink that keeps what it is asked to print.
+    #[derive(Default)]
+    struct Recording(Vec<u8>);
+
+    impl Write for Recording {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_closed_reader_is_success_but_other_write_failures_survive() {
+        let closed = write_absorbing_closed_reader(
+            &mut Refusing(io::ErrorKind::BrokenPipe),
+            format_args!("line\n"),
+        );
+        assert!(
+            closed.is_ok(),
+            "a reader that closed its end is not a failed write: {closed:?}"
+        );
+
+        let failed = write_absorbing_closed_reader(
+            &mut Refusing(io::ErrorKind::WriteZero),
+            format_args!("line\n"),
+        );
+        assert_eq!(
+            failed
+                .expect_err("a real write failure must not be absorbed")
+                .kind(),
+            io::ErrorKind::WriteZero
+        );
+    }
+
+    #[test]
+    fn successful_writes_reach_the_sink_unchanged() {
+        let count = 7;
+        let mut sink = Recording::default();
+        write_absorbing_closed_reader(&mut sink, format_args!("counted {count}\n")).unwrap();
+        assert_eq!(sink.0, b"counted 7\n");
+    }
+
     #[test]
     fn metadata_is_distinct_bounded_and_never_extrapolated() {
         let mut e = Evidence {

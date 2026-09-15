@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
 // Count rendered writes without changing descriptors, native streams, or TTY state.
 macro_rules! print {
@@ -38,7 +38,7 @@ mod task_plan;
 mod task_runtime;
 mod task_sandbox;
 mod task_scheduler;
-use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service};
+use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service, failure_response};
 use pixel_daemon::daemon;
 use pixel_index::index::{build, shard_path};
 use pixel_index::shard::Shard;
@@ -341,6 +341,29 @@ enum Command {
         /// Skip this many relationships for page-wise retrieval.
         #[arg(long, default_value_t = 0)]
         offset: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rename a symbol like an IDE refactor — graph-resolved call/reference
+    /// sites and import bindings, each verified against a fresh tree-sitter
+    /// parse before its bytes are touched. Unresolved same-name sites are
+    /// reported, never guessed.
+    Rename {
+        /// Symbol name to rename.
+        name: String,
+        /// New identifier.
+        new_name: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Disambiguate to the declaration in this file.
+        #[arg(long)]
+        file: Option<String>,
+        /// Disambiguate to this symbol uid (from `find-symbol`).
+        #[arg(long)]
+        uid: Option<String>,
+        /// Compute and print the verified edit set without writing.
+        #[arg(long)]
+        dry_run: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1509,11 +1532,14 @@ fn try_daemon(root: &Path, req: &Request) -> Option<Response> {
 fn try_daemon_inner(root: &Path, req: &Request) -> Option<Response> {
     let sock = daemon::socket_path(root);
     let mut stream = UnixStream::connect(&sock).ok()?;
+    // The daemon drains its debounced watcher batch before serving a
+    // connection; on a cold or loaded host that drain can outlast a short
+    // probe timeout. 5s covers the drain without masking a dead daemon.
     stream
-        .set_read_timeout(Some(Duration::from_millis(1500)))
+        .set_read_timeout(Some(Duration::from_millis(5000)))
         .ok()?;
     stream
-        .set_write_timeout(Some(Duration::from_millis(1500)))
+        .set_write_timeout(Some(Duration::from_millis(5000)))
         .ok()?;
     let ping = roundtrip(&mut stream, &Request::Ping)?;
     if !ping.ok
@@ -1642,11 +1668,60 @@ fn graph_build_notice(info: &Value) -> String {
 }
 
 fn write_stdout(text: &str) -> Result<(), String> {
-    match operation_metrics::Counted(std::io::stdout().lock()).write_all(text.as_bytes()) {
+    match operation_metrics::Stdout(std::io::stdout().lock()).write_all(text.as_bytes()) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(error) => Err(format!("write stdout: {error}")),
     }
+}
+
+/// Whether the parsed invocation asked for JSON on stdout. Read from the
+/// parsed matches, never from argv: `--json` is a flag only where a command
+/// declares it. The walk reaches the deepest subcommand so a nested command
+/// (`list-errors last --json`) answers for its own flag, and a command with no
+/// `json` argument reads as `false`.
+fn json_requested(matches: &ArgMatches) -> bool {
+    let mut deepest = matches;
+    while let Some((_, sub)) = deepest.subcommand() {
+        deepest = sub;
+    }
+    deepest
+        .try_get_one::<bool>("json")
+        .ok()
+        .flatten()
+        .copied()
+        .unwrap_or(false)
+}
+
+/// Write the `--json` failure envelope (`ok: false` + `error.code`) to stdout:
+/// the parsable counterpart of the `pixel: <reason>` line on stderr. `op`
+/// names the command the caller ran (the CLI's own label), not the daemon's
+/// wire op. Built through the daemon's own `failure_response`, so a CLI-side
+/// failure (a bad path, a refused flag combination) and a failure the daemon
+/// already classified answer with the same code, from the same classifier.
+///
+/// Best-effort by design: a closed or full stdout must never change the exit
+/// status. It bypasses `print_data`'s rendering cap on purpose — a truncated
+/// failure envelope would be invalid JSON, worse than no cap at all.
+fn write_failure_envelope(op: &str, message: &str) {
+    let envelope: Response = failure_response(op, message);
+    if let Ok(line) = serde_json::to_string(&envelope) {
+        let _ = write_stdout(&format!("{line}\n"));
+    }
+}
+
+/// Whether a failing command must answer with the failure envelope on stdout:
+/// `--json` was asked for, the command does not own stdout, and it has not
+/// answered yet. A command that owns stdout (`search-like-rg`'s passthrough,
+/// the provider hook contracts, the statusline, a foreground daemon) keeps it,
+/// and so does one that already wrote a document: `check-release --json`
+/// reports its own failures as a document and exits 1, where a second JSON
+/// line would break a reader that parses the stream as one answer.
+fn failure_envelope_wanted(matches: &ArgMatches, protected: bool) -> bool {
+    if protected || operation_metrics::stdout_bytes() > 0 {
+        return false;
+    }
+    json_requested(matches)
 }
 
 /// Global stdout byte cap for `print_data` — the last-chance safety net
@@ -2600,31 +2675,115 @@ fn extractor_for_shard(shard: &Shard) -> Result<Box<dyn GramExtractor>, String> 
     ))
 }
 
-fn print_search_matches(matches: &[Value], json: bool) -> Result<(), String> {
-    let mut output = String::with_capacity(matches.len() * 80);
-    for m in matches {
-        let path = m.get("path").and_then(Value::as_str).unwrap_or("");
-        let line = m.get("line").and_then(Value::as_u64).unwrap_or(0);
-        let text = m.get("text").and_then(Value::as_str).unwrap_or("");
-        let context = m.get("context").and_then(Value::as_str);
-        if json {
-            let mut entry = serde_json::json!({"path": path, "line": line, "text": text});
-            if let Some(ctx) = context {
-                entry["context"] = Value::String(ctx.to_string());
-            }
-            output.push_str(&entry.to_string());
-            output.push('\n');
-        } else if let Some(ctx) = context {
-            output.push_str(&format!("--- {path}:{line} ---\n{ctx}\n"));
-        } else {
-            output.push_str(&format!("{path}:{line}:{text}\n"));
+/// One stdout line for a `search` match: the compact object in `--json`
+/// mode (with `context` when the CLI enriched the match), else the
+/// `path:line:text` row — or the `--- path:line ---` block once the match
+/// carries surrounding lines.
+fn search_match_line(m: &Value, json: bool) -> String {
+    let path = m.get("path").and_then(Value::as_str).unwrap_or("");
+    let line = m.get("line").and_then(Value::as_u64).unwrap_or(0);
+    let text = m.get("text").and_then(Value::as_str).unwrap_or("");
+    let context = m.get("context").and_then(Value::as_str);
+    if json {
+        let mut entry = serde_json::json!({"path": path, "line": line, "text": text});
+        if let Some(ctx) = context {
+            entry["context"] = Value::String(ctx.to_string());
         }
+        format!("{entry}\n")
+    } else if let Some(ctx) = context {
+        format!("--- {path}:{line} ---\n{ctx}\n")
+    } else {
+        format!("{path}:{line}:{text}\n")
     }
-    match operation_metrics::Counted(std::io::stdout().lock()).write_all(output.as_bytes()) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(error) => Err(format!("write search results: {error}")),
+}
+
+/// The NDJSON line a `--json` search page ends with: the page state no match
+/// line carries, because a page cut by a cap is otherwise byte-for-byte a
+/// complete answer. `epistemics`/`warnings` are the envelope honesty fields
+/// [`unwrap_response`] folded into the response. Every key is always present
+/// (`null` for the absent ones), so the trailer's size is bounded by its
+/// values alone.
+fn search_meta(data: &Value, truncated: bool, next_offset: Option<u64>) -> Value {
+    json!({
+        "truncated": truncated,
+        "next_offset": next_offset,
+        "epistemics": data.get("epistemics").cloned().unwrap_or(Value::Null),
+        "warnings": data.get("warnings").cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// Whether one more `line` fits: what is already assembled plus the line plus
+/// the room reserved for the metadata line stays within `cap`. Equality fits
+/// — the cap is a ceiling, not a limit one byte under it.
+fn fits_before_cap(assembled: usize, line: usize, reserve: usize, cap: usize) -> bool {
+    assembled + line + reserve <= cap
+}
+
+/// What one `search` page wrote: `printed` match lines out of the daemon's
+/// page, whether the page is partial (`truncated`, whether the daemon's own
+/// caps or the stdout cap cut it), and whether the stdout cap — not the
+/// daemon — is what cut it, so the caller names the right cap on stderr.
+struct SearchPage {
+    printed: usize,
+    truncated: bool,
+    cap_fired: bool,
+}
+
+/// Print a `search` page and report what reached stdout.
+///
+/// `--json` output is NDJSON: one match per line, then the [`search_meta`]
+/// line, so no reader has to guess whether a short page is the whole answer.
+/// The global stdout cap is enforced here, during assembly: `--context` text
+/// is added by the CLI, after the daemon's own byte cap, so this is the last
+/// place that can hold one.
+fn print_search_matches(data: &Value, matches: &[Value], json: bool) -> Result<SearchPage, String> {
+    let cap = stdout_byte_cap();
+    let offset = data.get("offset").and_then(Value::as_u64).unwrap_or(0);
+    let daemon_truncated = data
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // Reserve the metadata line before the matches: it is what tells the
+    // caller the page is partial, so it must not be the part that falls off
+    // the cap. Reserve the longer of the two reachable trailers (partial and
+    // resumable, or complete) with the largest `next_offset` this page can
+    // end on, so the trailer stays inside the cap. A `cap` smaller than the
+    // trailer itself is the one case it exceeds — bounded, and preferable to
+    // hiding the page state.
+    let reserve = if json {
+        let resumable = search_meta(
+            data,
+            true,
+            Some(offset.saturating_add(matches.len() as u64)),
+        );
+        let complete = search_meta(data, false, None);
+        serialized_len(&resumable).max(serialized_len(&complete))
+    } else {
+        0
+    };
+    let mut output = String::with_capacity(matches.len() * 80);
+    let mut printed = 0;
+    let mut cap_fired = false;
+    for m in matches {
+        let line = search_match_line(m, json);
+        if !fits_before_cap(output.len(), line.len(), reserve, cap) {
+            cap_fired = true;
+            break;
+        }
+        output.push_str(&line);
+        printed += 1;
     }
+    let truncated = cap_fired || daemon_truncated;
+    if json {
+        let next_offset = truncated.then_some(offset.saturating_add(printed as u64));
+        output.push_str(&format!("{}\n", search_meta(data, truncated, next_offset)));
+    }
+    write_stdout(&output)?;
+    Ok(SearchPage {
+        printed,
+        truncated,
+        cap_fired,
+    })
 }
 
 /// Read surrounding lines from the file and attach as a `context` field.
@@ -2896,21 +3055,26 @@ fn run_search_one(
     } else {
         matches.to_vec()
     };
-    print_search_matches(&enriched, json)?;
+    let page = print_search_matches(&data, &enriched, json)?;
     // Warn the user when results were truncated so the default row cap
     // is never a surprise.
-    let truncated = data
-        .get("truncated")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let match_count = data.get("match_count").and_then(Value::as_u64).unwrap_or(0);
     let limit = data.get("limit").and_then(Value::as_u64).unwrap_or(0);
-    if truncated {
+    if page.cap_fired {
+        // The `--context` text is added on this side of the daemon's byte
+        // cap, so the stdout cap can be what cut this page: name that cap and
+        // the offset that resumes the page instead of the daemon's row cap.
         eprintln!(
-            "⚠ results truncated: returned {}; more matches exist (row limit {}, byte cap {} bytes). \
+            "⚠ results truncated at the {}-byte stdout cap (PIXEL_OUTPUT_CAP_BYTES): wrote {} of {match_count} matches. \
+             Narrow --context/--limit, or continue with --offset {}.",
+            stdout_byte_cap(),
+            page.printed,
+            offset.saturating_add(page.printed),
+        );
+    } else if page.truncated {
+        eprintln!(
+            "⚠ results truncated: returned {match_count}; more matches exist (row limit {limit}, byte cap {} bytes). \
              Continue with --offset {} or pass --limit to raise the row cap (maximum 10000).",
-            match_count,
-            limit,
             data.get("byte_cap").and_then(Value::as_u64).unwrap_or(0),
             data.get("next_offset").and_then(Value::as_u64).unwrap_or(0),
         );
@@ -2944,7 +3108,7 @@ fn run_search_one(
     // returned evidence only; no metadata sweeps or duplicate search events.
     operation_metrics::observe(&json!({
         "matches": enriched,
-        "truncated": truncated || offset > 0,
+        "truncated": page.truncated || offset > 0,
         "epistemics": data.get("epistemics"),
     }));
     Ok(())
@@ -2954,8 +3118,89 @@ fn run_search_one(
 // daemon management
 // ---------------------------------------------------------------------------
 
+/// Probe a daemon without starting one. Deliberately not `try_daemon`: that
+/// one auto-starts a repository `Service` for any root it is given, which
+/// turns a `status` or a `daemon start` check (the recall daemon's included)
+/// into a spurious service — with `.pixel/` artifacts — on that root.
 fn daemon_ping(root: &Path) -> bool {
-    try_daemon(root, &Request::Ping).is_some_and(|r| r.ok)
+    pixel_daemon::daemon::ping_only(root)
+}
+
+#[cfg(test)]
+mod daemon_ping_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::time::Instant;
+
+    fn scratch_root(tag: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("pixel-daemon-ping-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    /// Nothing listens: the probe is false and opens nothing — the repository
+    /// `Service` an auto-starting probe would open is what left `.pixel/`
+    /// inside `~/.local/share/pixel/recall`.
+    #[test]
+    fn daemon_ping_is_false_without_a_daemon() {
+        let root = scratch_root("idle");
+        assert!(!daemon_ping(&root));
+        assert!(
+            !root.join(pixel_index::index::SHARD_DIR).exists(),
+            "the probe must not open a Service on {}",
+            root.display()
+        );
+    }
+
+    /// A daemon answering `Ping` is what the probe reports: without this half,
+    /// a probe that always returned false would pass the idle test.
+    #[test]
+    fn daemon_ping_is_true_when_a_daemon_answers() {
+        let root = scratch_root("live");
+        let listener = UnixListener::bind(daemon::socket_path(&root)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            // Poll with a deadline: a probe that never connects must fail the
+            // assertion, not hang the suite.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        // A non-blocking listener hands back a non-blocking
+                        // socket on BSD: reset it, or the read races the
+                        // client's write instead of waiting for it.
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                        let mut line = String::new();
+                        let Ok(n) = BufReader::new(&stream).read_line(&mut line) else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        assert_eq!(
+                            serde_json::from_str::<Request>(&line).unwrap(),
+                            Request::Ping,
+                            "the probe asks with a Ping"
+                        );
+                        let reply = Response::success("ping", json!({"pong": true}));
+                        writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+                        return;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        assert!(daemon_ping(&root));
+        server.join().unwrap();
+        let _ = std::fs::remove_file(daemon::socket_path(&root));
+    }
 }
 
 fn daemon_start(path: PathBuf, foreground: bool, quiet: bool) -> Result<(), String> {
@@ -3728,6 +3973,15 @@ fn run() -> Result<(), String> {
     };
     let result = run_command(cli.command, &logger);
     if let Err(error) = &result {
+        // The stdout contract under `--json`: a failing command answers with a
+        // parsable failure envelope carrying `error.code`, so an agent can
+        // tell NOT_FOUND (widen the query) from INVALID_INPUT (fix the call)
+        // without reading prose. Human mode is unchanged — stdout stays empty,
+        // the reason goes to stderr, the exit status stays 1 — and a command
+        // that owns stdout or already wrote part of an answer keeps it.
+        if failure_envelope_wanted(&matches, protected) {
+            write_failure_envelope(&command_label, error);
+        }
         // The diagnostic precedes the authoritative metrics line. Its failure
         // is best-effort and must never change the operation's result.
         let _ = operation_metrics::Counted(std::io::stderr().lock())
@@ -4343,6 +4597,80 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     }
                 }
                 envelope_note(d);
+                Some(output)
+            })?;
+            Ok(())
+        }
+        Command::Rename {
+            name,
+            new_name,
+            path,
+            file,
+            uid,
+            dry_run,
+            json,
+        } => {
+            let data = execute(
+                &path,
+                Request::Rename {
+                    name,
+                    new_name,
+                    file,
+                    uid,
+                    dry_run,
+                },
+                false,
+            )?;
+            finish_graph_cmd(data, json, |d| {
+                let mut output = String::new();
+                let old = d.get("old_name").and_then(Value::as_str).unwrap_or("?");
+                let new = d.get("new_name").and_then(Value::as_str).unwrap_or("?");
+                let count = d.get("edit_count").and_then(Value::as_u64).unwrap_or(0);
+                let verb = if d.get("dry_run").and_then(Value::as_bool) == Some(true) {
+                    "would rename"
+                } else {
+                    "renamed"
+                };
+                output.push_str(&format!("{verb} {old} → {new} ({count} sites)\n"));
+                for f in d.get("edits")?.as_array()? {
+                    let path = f.get("path").and_then(Value::as_str).unwrap_or("?");
+                    let kinds: Vec<String> = f
+                        .get("edits")
+                        .and_then(Value::as_array)
+                        .map(|es| {
+                            es.iter()
+                                .map(|e| {
+                                    format!(
+                                        "L{}:{}",
+                                        e.get("line").and_then(Value::as_u64).unwrap_or(0),
+                                        e.get("kind").and_then(Value::as_str).unwrap_or("?"),
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    output.push_str(&format!("  {path}  ({})\n", kinds.join(", ")));
+                }
+                for s in d.get("skipped")?.as_array()? {
+                    output.push_str(&format!(
+                        "  skipped {}:{} — {}\n",
+                        s.get("path").and_then(Value::as_str).unwrap_or("?"),
+                        s.get("line").and_then(Value::as_u64).unwrap_or(0),
+                        s.get("reason").and_then(Value::as_str).unwrap_or("?"),
+                    ));
+                }
+                if let Some(obj) = d.get("unclaimed_text").and_then(Value::as_object)
+                    && !obj.is_empty()
+                {
+                    let details: Vec<String> = obj
+                        .iter()
+                        .map(|(p, n)| format!("{p} ({})", n.as_u64().unwrap_or(0)))
+                        .collect();
+                    output.push_str(&format!(
+                        "  note: unclaimed occurrences of the old name remain: {}\n",
+                        details.join(", ")
+                    ));
+                }
                 Some(output)
             })?;
             Ok(())
@@ -6298,6 +6626,32 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// The `--json` failure envelope is decided from the parsed flag, not
+    /// from argv: `--json` counts only where the command declares it, and it
+    /// counts through a nested subcommand (`list-errors last --json`), whose
+    /// flag the top-level matches cannot see. Parsed on a thread with a 4 MiB
+    /// stack — the derived command tree overflows the 2 MiB a test thread
+    /// gets, the same reason `validate_cli_syntax` spawns one.
+    #[test]
+    fn json_requested_reads_the_deepest_subcommands_own_flag() {
+        fn parsed(argv: &[&str]) -> bool {
+            let argv: Vec<String> = argv.iter().map(ToString::to_string).collect();
+            std::thread::Builder::new()
+                .stack_size(4 * 1024 * 1024)
+                .spawn(move || json_requested(&Cli::command().get_matches_from(&argv)))
+                .unwrap()
+                .join()
+                .unwrap()
+        }
+
+        assert!(parsed(&["pixel", "status", ".", "--json"]));
+        assert!(parsed(&["pixel", "list-errors", "last", "--json"]));
+        assert!(!parsed(&["pixel", "status", "."]));
+        // A nested command with no `json` argument of its own: false, not a
+        // flag inherited from somewhere in argv.
+        assert!(!parsed(&["pixel", "daemon", "status", "."]));
+    }
+
     /// A `.pixel` holding only the global journal (no `base.shard`) — e.g.
     /// the `$HOME/.pixel` state dir — must NOT anchor root discovery, or
     /// every gitless invocation below it re-roots to that ancestor and
@@ -6765,6 +7119,62 @@ mod tests {
         });
         enrich_resolve_matches_with_context(&mut data, Path::new("/tmp"));
         assert!(data["matches"][0].get("context").is_none());
+    }
+
+    /// The `--json` page trailer: the page state a match row cannot carry,
+    /// plus the envelope honesty fields, with every key always present so a
+    /// strict NDJSON reader can tell a partial page from a complete one.
+    #[test]
+    fn search_meta_carries_the_page_state_and_the_envelope_honesty() {
+        let data = serde_json::json!({
+            "offset": 0,
+            "epistemics": {"basis": "text index", "lower_bound": false},
+            "warnings": [{"code": "cap", "message": "row cap"}],
+        });
+        let resumable = search_meta(&data, true, Some(3));
+        assert_eq!(resumable["truncated"], true);
+        assert_eq!(resumable["next_offset"], 3);
+        assert_eq!(resumable["epistemics"]["basis"], "text index");
+        assert_eq!(resumable["warnings"][0]["code"], "cap");
+        let complete = search_meta(&data, false, None);
+        assert_eq!(complete["truncated"], false);
+        assert!(complete["next_offset"].is_null());
+        let bare = search_meta(&serde_json::json!({}), true, None);
+        assert!(bare["epistemics"].is_null());
+        assert!(bare["warnings"].is_null());
+    }
+
+    /// The stdout cap counts the reserved metadata line, and a line that ends
+    /// exactly on the cap still prints: the cut lands between lines, so a
+    /// reader never gets a half-written JSON row.
+    #[test]
+    fn a_match_line_that_ends_exactly_on_the_cap_still_fits() {
+        assert!(fits_before_cap(0, 10, 0, 10));
+        assert!(!fits_before_cap(0, 11, 0, 10));
+        assert!(fits_before_cap(4, 4, 2, 10));
+        assert!(!fits_before_cap(4, 5, 2, 10), "the reserved trailer counts");
+    }
+
+    /// Both renderings of one match: the JSON object agents parse, and the
+    /// human row or `--- path:line ---` context block.
+    #[test]
+    fn search_match_lines_render_the_json_and_human_forms() {
+        let plain = serde_json::json!({"path": "a.rs", "line": 3, "text": "x"});
+        assert_eq!(
+            search_match_line(&plain, true),
+            "{\"line\":3,\"path\":\"a.rs\",\"text\":\"x\"}\n"
+        );
+        assert_eq!(search_match_line(&plain, false), "a.rs:3:x\n");
+        let enriched =
+            serde_json::json!({"path": "a.rs", "line": 3, "text": "x", "context": ">> 3: x"});
+        assert_eq!(
+            search_match_line(&enriched, true),
+            "{\"context\":\">> 3: x\",\"line\":3,\"path\":\"a.rs\",\"text\":\"x\"}\n"
+        );
+        assert_eq!(
+            search_match_line(&enriched, false),
+            "--- a.rs:3 ---\n>> 3: x\n"
+        );
     }
 }
 

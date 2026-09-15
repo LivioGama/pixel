@@ -108,41 +108,49 @@ pub use pixel_proto::Op as Request;
 /// struct is gone; `resp.data()` reads the envelope's `result` field.
 pub type Response = Envelope<Value>;
 
-/// Classify a daemon read-op error string into the best-fit `ErrorCode`.
+/// Classify an operation error string into the best-fit `ErrorCode`.
+///
 /// The message is always preserved verbatim in the envelope's `error.message`;
-/// the code is for programmatic handling.
+/// the code is for programmatic handling, so it is read from what the message
+/// already carries instead of being guessed from prose:
 ///
-/// Bug 6 fix: the previous version had 4 branches, 3 of which were dead code
-/// — no `Err(...)` path in this crate (or in the crates it wraps via
-/// `.map_err(|e| e.to_string())`) ever produces a message containing
-/// `"index"` + `"build"`/`"rebuild"`, `"not indexed"`/`"no index"`, or
-/// `"ambiguous"` (verified by grepping every `format!`/literal `Err` site in
-/// this workspace: `IndexBuilding`/`NotIndexed` are never surfaced as
-/// errors — `ensure_graph` builds lazily instead of failing when the graph
-/// is absent, and `IndexSet::open_or_build` does the same for the text
-/// index; the one "ambiguous" case, `resolve_symbol`'s multi-candidate
-/// result, is returned as `Ok(candidates_value(...))`, never an `Err`). So
-/// in practice every error fell through to `InvalidInput`, and a genuine
-/// not-found lookup (bad uid/name) was indistinguishable from a malformed
-/// request.
+/// - `pixel-ops` prefixes the messages it types itself with the code it means
+///   (`NON_FAST_FORWARD: merge-base … is not an ancestor of …`,
+///   `STALE_STATE: expected head …`, `REF_EXISTS: branch … already exists`,
+///   `GIT_FAILED: …`, `NETWORK_AMBIGUITY: …`, `UNSUPPORTED_STATE: …`), so a
+///   leading token that names an [`ErrorCode`] IS that code. The markers it
+///   writes that name no code (`REFUSED:`, `STALE_REMOTE:`,
+///   `FILE_NOT_TRACKED:`, `PROVENANCE_BAD_ARGS:`, …) stay unclassified.
+/// - the repository lock reports `repository is busy…`, and the lookups in
+///   this file report `no symbol named …` / `no symbol with uid …`.
 ///
-/// Fixed by routing the two *actually reachable* not-found message shapes
-/// (`resolve_symbol` and `op_context`, both in this file) to `NotFound`.
-/// Everything else — malformed regex, bad params, opaque messages
-/// forwarded from other crates — stays `InvalidInput`, which is the
-/// correct default for "the request itself was not satisfiable."
-///
-/// `IndexBuilding`/`NotIndexed`/`Ambiguous` remain defined in `ErrorCode`
-/// for ops that may legitimately need them later; this function just no
-/// longer pretends to reach them via string-sniffing when nothing produces
-/// a matching message today.
+/// Everything else — a malformed regex, a bad parameter, an opaque message
+/// forwarded from another crate — stays `InvalidInput`, the correct default
+/// for "the request itself was not satisfiable". The codes with no producer
+/// anywhere in the tree (listed on [`ErrorCode`]) are not pretended to be
+/// reachable: `IndexBuilding`/`NotIndexed` never surface because
+/// `ensure_graph` and `IndexSet::open_or_build` build lazily instead of
+/// failing, and the one ambiguous case (`resolve_symbol`'s multi-candidate
+/// result) is returned as `Ok(candidates_value(...))`, never an error.
 fn classify_error(msg: &str) -> ErrorCode {
+    if let Some(code) = code_named_in_prefix(msg) {
+        return code;
+    }
     let lower = msg.to_lowercase();
     if lower.starts_with("no symbol named") || lower.starts_with("no symbol with uid") {
         ErrorCode::NotFound
+    } else if lower.starts_with("repository is busy") {
+        ErrorCode::BusyRepository
     } else {
         ErrorCode::InvalidInput
     }
+}
+
+/// The code a message names in its leading `"<CODE>: …"` token, when that
+/// token is one of [`ErrorCode`]'s wire names.
+fn code_named_in_prefix(msg: &str) -> Option<ErrorCode> {
+    let (head, _) = msg.split_once(':')?;
+    serde_json::from_str(&format!("\"{}\"", head.trim())).ok()
 }
 
 /// Build a failure envelope from a plain error string (the shape `dispatch`
@@ -161,6 +169,13 @@ pub struct Service {
     root: PathBuf,
     index: IndexSet,
     graph: Option<GraphStore>,
+    /// Watcher-driven graph updates that failed (a locked db, an unreadable
+    /// row). Counted so `status` shows a daemon that is serving an index it
+    /// could not keep in sync.
+    graph_failures: FailureLog,
+    /// `notify` backend errors reported by the transport loop: a watcher
+    /// that stopped seeing changes leaves the same stale answers.
+    watcher_failures: FailureLog,
     /// Lazily opened on first `scope: "hybrid"` search; kept warm for the
     /// daemon's lifetime. `None` = not yet loaded (not tried, download in
     /// progress, or load failed transiently).
@@ -174,6 +189,37 @@ pub struct Service {
     embedder_download_started: bool,
 }
 
+/// Counts watcher-side failures and decides which ones are logged: the
+/// first, then every doubling (1, 2, 4, 8 …). A permanently broken graph.db
+/// or watch stays visible in `status` without one stderr line per filesystem
+/// event.
+#[derive(Debug, Default)]
+struct FailureLog {
+    failures: u64,
+}
+
+impl FailureLog {
+    /// Count one failure; `true` when this one is due a log line.
+    fn record(&mut self) -> bool {
+        self.failures += 1;
+        self.failures.is_power_of_two()
+    }
+
+    fn count(&self) -> u64 {
+        self.failures
+    }
+}
+
+/// Log one failure line. stderr diagnostics only, so it is skipped by the
+/// mutation gate: `FailureLog::record` holds the rate-limit decision and its
+/// unit test pins it.
+#[cfg_attr(test, mutants::skip)]
+fn note_failure(log: &mut FailureLog, what: &str) {
+    if log.record() {
+        eprintln!("pixel daemon: {what} ({} failure(s) this run)", log.count());
+    }
+}
+
 impl Service {
     /// Open (building layers if needed) the text index; graph db is lazy.
     pub fn open(root: &Path) -> Result<Self, ServeError> {
@@ -185,6 +231,8 @@ impl Service {
             root,
             index,
             graph: None,
+            graph_failures: FailureLog::default(),
+            watcher_failures: FailureLog::default(),
             embedder: None,
             embedder_unavailable: false,
             embedder_download_started: false,
@@ -201,12 +249,14 @@ impl Service {
             .join(GRAPH_DB_FILE)
     }
 
-    /// Watcher hook: refresh one file in index + graph (best effort).
+    /// Watcher hook: refresh one file in index + graph.
     pub fn refresh_file(&mut self, rel: &str) {
         self.index.refresh_file(rel);
         let db = self.graph_db_path();
         if db.exists() {
-            bridge::update_file(&self.root, &db, rel);
+            if let Err(error) = bridge::update_file(&self.root, &db, rel) {
+                self.note_graph_update_failure(rel, &error);
+            }
             // Drop the cached handle so the next read sees the update.
             self.graph = None;
         }
@@ -224,7 +274,7 @@ impl Service {
         }
     }
 
-    /// Watcher hook: refresh a batch of files in index + graph (best effort).
+    /// Watcher hook: refresh a batch of files in index + graph.
     pub fn refresh_files(&mut self, files: &[(&str, bool)]) {
         if files.is_empty() {
             return;
@@ -238,9 +288,32 @@ impl Service {
         }
         let db = self.graph_db_path();
         if db.exists() {
-            bridge::update_files(&self.root, &db, files);
+            if let Err(error) = bridge::update_files(&self.root, &db, files) {
+                self.note_graph_update_failure(
+                    &format!("batch of {} file(s) from {}", files.len(), files[0].0),
+                    &error,
+                );
+            }
             self.graph = None;
         }
+    }
+
+    /// Count a watcher-driven graph update that failed. The cached handle is
+    /// dropped either way, so the next graph op walks the tree and repairs
+    /// the drift — but the failure itself must not be invisible.
+    fn note_graph_update_failure(&mut self, rel: &str, error: &str) {
+        note_failure(
+            &mut self.graph_failures,
+            &format!("graph update failed for {rel}: {error}"),
+        );
+    }
+
+    /// Count a `notify` backend error reported by the transport loop.
+    pub(crate) fn note_watcher_error(&mut self, error: &str) {
+        note_failure(
+            &mut self.watcher_failures,
+            &format!("watcher error: {error}"),
+        );
     }
 
     /// Make sure `self.graph` is populated. Builds graph.db on first use;
@@ -760,6 +833,13 @@ impl Service {
                 self.op_note(&action, file.as_deref(), target.as_deref(), note.as_deref())
             }
             Request::Map { markdown } => self.op_map(markdown),
+            Request::Rename {
+                name,
+                new_name,
+                file,
+                uid,
+                dry_run,
+            } => self.op_rename(&name, &new_name, file.as_deref(), uid.as_deref(), dry_run),
             Request::Plan {
                 prompt,
                 query,
@@ -1110,10 +1190,10 @@ impl Service {
             &opts,
         );
         // Phase 1c: rerank within tiers via the Engine-3 reranker (first
-        // production call site). v1 = activity-only signals; session/error
-        // channels land in Phase 3. The per-path test penalty demotes test
-        // files only when the task does NOT mention tests/specs (a test file
-        // is a worse target for a non-test task).
+        // production call site). v1 = activity-only signals (the session and
+        // error-sink channels are not wired here). The per-path test penalty
+        // demotes test files only when the task does NOT mention tests/specs
+        // (a test file is a worse target for a non-test task).
         let target_paths: Vec<String> = report.targets.iter().map(|t| t.path.clone()).collect();
         let signals = self.engine_signals(&target_paths);
         // Per-path test penalty: demote a test file only when the task does
@@ -1132,7 +1212,13 @@ impl Service {
                 1.0
             }
         };
-        report.targets = pixel_rank::rerank::rerank_targets(report.targets, &signals, penalty);
+        // The formula reads the tunable coefficients instead of its own
+        // literals: the table `engine_signals` scored this bundle with
+        // (`SignalOptions::default()`; neither call site tunes the weights yet).
+        let weights =
+            engine::rerank::RerankWeights::from(&engine::signals::SignalOptions::default());
+        report.targets =
+            engine::rerank::rerank_targets(report.targets, &signals, &weights, penalty);
         // Cross-lingual semantic fallback: when lexical targeting returns 0
         // P0/P1 files (e.g. a French task against English code), embed the
         // query with the multilingual potion-code model and inject top-k
@@ -1749,6 +1835,12 @@ impl Service {
                 "tombstones": s.tombstones,
             },
             "graph": graph,
+            "watcher": {
+                // Failures that used to be swallowed: a non-zero count here
+                // means answers may have been served from a stale index.
+                "graph_update_failures": self.graph_failures.count(),
+                "notify_errors": self.watcher_failures.count(),
+            },
             "facts": self.facts_visibility(),
         }))
     }
@@ -1782,6 +1874,99 @@ impl Service {
                 "tombstones": s.tombstones,
             },
         }))
+    }
+
+    /// `pixel rename` — graph-driven, tree-sitter-verified identifier rename.
+    /// `uid` or `file` disambiguate a shared name; `dry_run` returns the same
+    /// verified edit set without touching files.
+    fn op_rename(
+        &mut self,
+        name: &str,
+        new_name: &str,
+        file: Option<&str>,
+        uid: Option<&str>,
+        dry_run: bool,
+    ) -> Result<Value, String> {
+        let built = self.ensure_graph()?;
+        let store = self.graph.as_ref().unwrap();
+        let files = file_map(store)?;
+        if !new_name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+            || !new_name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            return Err(format!(
+                "rename: {new_name:?} is not an identifier (letters, digits, `_`, non-digit first)"
+            ));
+        }
+
+        let sym = if let Some(uid) = uid {
+            store
+                .symbol_by_uid(uid)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("no symbol with uid {uid:?}"))?
+        } else {
+            let mut syms = store.symbols_by_name(name, 50).map_err(|e| e.to_string())?;
+            if let Some(file) = file {
+                let rel = normalize_file_arg(&self.root, file);
+                let file_row = store
+                    .file_by_path(&rel)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("no indexed file matching '{file}'"))?;
+                syms.retain(|s| s.file_id == file_row.id);
+            }
+            match syms.len() {
+                0 => {
+                    return Err(format!(
+                        "no symbol named {name:?}{}",
+                        file.map(|f| format!(" in {f}")).unwrap_or_default()
+                    ));
+                }
+                1 => syms.into_iter().next().unwrap(),
+                _ => {
+                    let mut out = candidates_value(store, &syms)?;
+                    out["hint"] =
+                        json!("ambiguous name; re-call with --file <path> or --uid <uid>");
+                    return Ok(out);
+                }
+            }
+        };
+
+        let plan = pixel_graph::rename::plan(store, &self.root, &sym, new_name)?;
+        let mut out = json!({
+            "symbol": symbol_json(&sym, &files),
+            "old_name": sym.name,
+            "new_name": new_name,
+            "dry_run": dry_run,
+            "edits": plan
+                .files
+                .iter()
+                .map(|(path, edits)| json!({
+                    "path": path,
+                    "edits": edits
+                        .iter()
+                        .map(|e| json!({
+                            "line": e.line,
+                            "kind": e.kind.as_str(),
+                        }))
+                        .collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>(),
+            "edit_count": plan.files.values().map(Vec::len).sum::<usize>(),
+            "skipped": plan.skipped,
+            "unclaimed_text": plan.unclaimed_text,
+        });
+        if !dry_run {
+            let written = pixel_graph::rename::apply(&self.root, &plan, &sym.name, new_name)?;
+            out["applied"] = json!(written);
+            // The store is now stale: the renamed files' rows no longer
+            // match disk. Drop the handle so the next op re-syncs via the
+            // tree delta instead of serving pre-rename spans.
+            self.graph = None;
+        }
+        merge_build_info(&mut out, built);
+        Ok(out)
     }
 
     /// Facts/history visibility for `op_status`: enough counters to tell a
@@ -2316,11 +2501,14 @@ impl Service {
     }
 
     /// Engine-3 rerank signals shared by `op_resolve` and `op_targets`.
-    /// v1 = activity-only: git churn over the last 90 days (via the one-shot
-    /// `git log --name-only` fallback) plus the current dirty set. Session +
-    /// error-sink channels land in Phase 3. Deterministic for a fixed repo
-    /// state; degrades to an empty bundle on any git failure (the reranker
-    /// then applies only the per-path test penalty).
+    /// Activity-only: git churn over the last 90 days (via the one-shot
+    /// `git log --name-only` fallback) plus the current dirty set. The session
+    /// and error-sink channels are NOT wired here (`session_store: None`, no
+    /// events), so `session` and the error reasons stay empty for every
+    /// production caller. Deterministic for a fixed repo state; a failed or
+    /// capped activity scan degrades to an empty `activity` map whose reason
+    /// is named in `SignalBundle::activity_unavailable` (the reranker then
+    /// applies only the per-path test penalty).
     fn engine_signals(&self, candidates: &[String]) -> pixel_rank::signals::SignalBundle {
         use pixel_rank::signals::{SignalOptions, compute_signals};
         let runner = pixel_git::GitRunner::new(&self.root);
@@ -2685,9 +2873,9 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
 /// `Reranker` trait. pixel-graph cannot depend on pixel-rank (circular), so
 /// the daemon adapts `pixel_rank::rerank::rerank` into the trait here.
 ///
-/// v1 = activity-only signals (the bundle is passed through as-is; the daemon
-/// has no git/session signal source yet). Session + error-sink channels land
-/// in Phase 3.
+/// v1 = activity-only signals: the bundle is passed through as-is, and only
+/// the activity map of it is populated (`engine_signals` fills it from the
+/// git log; the session and error-sink channels are not wired).
 #[derive(Clone)]
 struct EngineReranker {
     /// Whether the resolve phrase mentions tests/specs — gates the per-path
@@ -2735,6 +2923,10 @@ impl pixel_graph::concept_resolve::Reranker for EngineReranker {
             fan_in: std::collections::HashMap::new(),
             session_reasons: signals.session_reasons.clone(),
             error_reasons: signals.error_reasons.clone(),
+            // `op_resolve` mirrors the activity maps out of the bundle
+            // `engine_signals` returned; pixel-graph's own bundle has no field
+            // for the git-log scan's availability, so it is not carried here.
+            activity_unavailable: None,
         };
         // Per-candidate test penalty: demote a test/spec file only when the
         // phrase itself is NOT about tests (per-path, via `is_test_path`).
@@ -2745,7 +2937,12 @@ impl pixel_graph::concept_resolve::Reranker for EngineReranker {
                 1.0
             }
         };
-        let reordered = pixel_rank::rerank::rerank(pr_candidates, &pr_signals, penalty);
+        let reordered = pixel_rank::rerank::rerank(
+            pr_candidates,
+            &pr_signals,
+            &pixel_rank::rerank::RerankWeights::from(&pixel_rank::signals::SignalOptions::default()),
+            penalty,
+        );
 
         // Restore the pixel-graph candidate shape (incl. `id`) by id — the
         // reranker only reorders, it never adds/removes candidates. Keying by
@@ -3301,12 +3498,16 @@ mod bridge {
         pixel_graph::build::apply_tree_delta(root, db, delta).map_err(es)
     }
 
-    pub fn update_file(root: &Path, db: &Path, rel: &str) {
-        let _ = pixel_graph::build::update_file(root, db, rel);
+    /// One file changed under the watcher: re-extract it into the graph.
+    /// The error is returned instead of dropped: a lost update serves a
+    /// stale index until the next graph op walks the tree.
+    pub fn update_file(root: &Path, db: &Path, rel: &str) -> Result<(), String> {
+        pixel_graph::build::update_file(root, db, rel).map_err(es)
     }
 
-    pub fn update_files(root: &Path, db: &Path, files: &[(&str, bool)]) {
-        let _ = pixel_graph::build::update_files(root, db, files);
+    /// The same for a debounced batch of watcher events.
+    pub fn update_files(root: &Path, db: &Path, files: &[(&str, bool)]) -> Result<(), String> {
+        pixel_graph::build::update_files(root, db, files).map_err(es)
     }
 
     pub fn impact(
@@ -3818,6 +4019,8 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pixel_graph::Tier;
+    use pixel_graph::concept_resolve::{RankedCandidate, Reranker, SignalBundle};
     use std::path::PathBuf;
 
     fn tmpdir(tag: &str) -> PathBuf {
@@ -3846,6 +4049,86 @@ mod tests {
             .output()
             .unwrap();
         assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    /// The codes an agent acts on (`BUSY_REPOSITORY` → retry later,
+    /// `NON_FAST_FORWARD` → fetch and reconcile, `NOT_FOUND` → widen the
+    /// query) must be the ones the message actually names. Each entry below
+    /// is a message a real call site writes; the two unclassified markers
+    /// pin that a prefix naming no `ErrorCode` is not force-fitted to one.
+    #[test]
+    fn classify_error_reads_the_code_the_message_names() {
+        let cases: &[(&str, ErrorCode)] = &[
+            // pixel-ops prefixes the code it means.
+            (
+                "NON_FAST_FORWARD: merge-base is aaa, expected bbb to be an ancestor of ccc",
+                ErrorCode::NonFastForward,
+            ),
+            (
+                "STALE_STATE: expected head aaa, got Some(\"bbb\")",
+                ErrorCode::StaleState,
+            ),
+            (
+                "UNSUPPORTED_STATE: detached HEAD; --into requires a checked-out feature branch",
+                ErrorCode::UnsupportedState,
+            ),
+            (
+                "REF_EXISTS: branch 'fix/x' already exists",
+                ErrorCode::RefExists,
+            ),
+            (
+                "GIT_FAILED: crash detected at index_staged; cannot safely determine whether the commit ran to completion",
+                ErrorCode::GitFailed,
+            ),
+            (
+                "NETWORK_AMBIGUITY: push may have started, cannot safely retry",
+                ErrorCode::NetworkAmbiguity,
+            ),
+            // The repository lock and the lookups in this file.
+            (
+                "repository is busy (locked by another process)",
+                ErrorCode::BusyRepository,
+            ),
+            ("repository is busy", ErrorCode::BusyRepository),
+            ("no symbol named \"nope\"", ErrorCode::NotFound),
+            ("no symbol with uid \"#42\"", ErrorCode::NotFound),
+            // Markers that name no code, and messages that carry no code at all.
+            (
+                "REFUSED: main is the repository default branch; rewriting it is forbidden",
+                ErrorCode::InvalidInput,
+            ),
+            (
+                "STALE_REMOTE: leased push rejected — the remote no longer matches the pre-rewrite OID",
+                ErrorCode::InvalidInput,
+            ),
+            (
+                "unsupported search scope \"banana\"; supported values are \"code\"",
+                ErrorCode::InvalidInput,
+            ),
+            (
+                "bad path /nope: No such file or directory",
+                ErrorCode::InvalidInput,
+            ),
+        ];
+        for &(message, expected) in cases {
+            assert_eq!(classify_error(message), expected, "{message}");
+        }
+    }
+
+    /// A failure envelope must carry the classified code AND the message
+    /// verbatim — the message is what the user reads on stderr, the code is
+    /// what an agent switches on.
+    #[test]
+    fn failure_response_carries_the_code_and_the_message_verbatim() {
+        let message = "repository is busy (locked by another process)";
+        let resp = failure_response("publish", message);
+
+        assert!(!resp.ok);
+        assert_eq!(resp.op, "publish");
+        let error = resp.error.as_ref().unwrap();
+        assert_eq!(error.code, ErrorCode::BusyRepository);
+        assert_eq!(error.message, message);
+        assert_eq!(resp.validate(), Ok(()));
     }
 
     /// Every envelope the daemon emits must satisfy `Envelope::validate`,
@@ -5433,6 +5716,117 @@ mod tests {
         assert!(!incremental_allowed(2_001, 10_000, 20));
     }
 
+    /// `impact`'s named caps must reach `derive_epistemics`: a report whose
+    /// symbol lists were cut at the cap is a lower-bound answer with a
+    /// `RESULT_CAPPED` warning, never a silently sampled one. A report with
+    /// nothing cut adds neither.
+    #[test]
+    fn impact_caps_reach_epistemics() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fid = store.replace_file("src/a.ts", "oid", "ts").unwrap();
+        let handler = store
+            .insert_symbol(
+                fid,
+                "src/a.ts#handler#function",
+                "handler",
+                "handler",
+                SymbolKind::Function,
+                1,
+                5,
+                "",
+            )
+            .unwrap();
+        // 25 distinct referrers against the 20-item cap: the report lists 20
+        // and names the cut with the real total.
+        for i in 0..25u32 {
+            let name = format!("caller{i}");
+            let src = store
+                .insert_symbol(
+                    fid,
+                    &format!("src/a.ts#{name}#function"),
+                    &name,
+                    &name,
+                    SymbolKind::Function,
+                    10 + i,
+                    12 + i,
+                    "",
+                )
+                .unwrap();
+            store
+                .insert_edge(&EdgeRow {
+                    src_id: src,
+                    dst_id: handler,
+                    kind: EdgeKind::References,
+                    tier: Tier::Probable,
+                    site_line: 11 + i,
+                    receiver: Some("on".to_string()),
+                })
+                .unwrap();
+        }
+        let other = store
+            .insert_symbol(
+                fid,
+                "src/a.ts#other#function",
+                "other",
+                "other",
+                SymbolKind::Function,
+                100,
+                105,
+                "",
+            )
+            .unwrap();
+        let single = store
+            .insert_symbol(
+                fid,
+                "src/a.ts#single#function",
+                "single",
+                "single",
+                SymbolKind::Function,
+                110,
+                115,
+                "",
+            )
+            .unwrap();
+        store
+            .insert_edge(&EdgeRow {
+                src_id: other,
+                dst_id: single,
+                kind: EdgeKind::References,
+                tier: Tier::Probable,
+                site_line: 106,
+                receiver: None,
+            })
+            .unwrap();
+
+        let cut = bridge::impact(&store, "src/a.ts#handler#function", "upstream", 3).unwrap();
+        assert_eq!(cut["truncated"].as_bool(), Some(true), "{cut}");
+        assert_eq!(cut["referenced_by_total"], 25, "{cut}");
+        assert_eq!(
+            cut["caps"],
+            json!(["referenced_by truncated at 20 of 25 referencing symbols"]),
+            "{cut}"
+        );
+        let (epistemics, warnings) = derive_epistemics("impact", &cut);
+        assert!(epistemics.lower_bound, "{epistemics:?}");
+        assert!(
+            epistemics.basis.contains("truncated at 20 of 25"),
+            "{epistemics:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.code == "RESULT_CAPPED"),
+            "{warnings:?}"
+        );
+
+        // Nothing cut: no cap, no warning, no lower-bound downgrade.
+        let plain = bridge::impact(&store, "src/a.ts#single#function", "upstream", 3).unwrap();
+        assert_eq!(plain["truncated"].as_bool(), Some(false), "{plain}");
+        assert_eq!(plain["referenced_by_total"], 1, "{plain}");
+        assert_eq!(plain["caps"], json!([]), "{plain}");
+        let (epistemics, warnings) = derive_epistemics("impact", &plain);
+        assert!(!epistemics.lower_bound, "{epistemics:?}");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
     /// Phase 3 item 2 — targets honesty: when the 500-match content probe
     /// cap fires for a keyword, the targets envelope must say lower_bound
     /// and NAME the cap; the "exhaustive" sentence must not be emitted.
@@ -5739,5 +6133,298 @@ mod tests {
         assert!(login > 0.0, "{:?}", bundle.activity);
         assert!(login >= caller, "{:?}", bundle.activity);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A failure log speaks on the first failure and every doubling after
+    /// it, so a permanently broken watcher cannot write one line per event.
+    #[test]
+    fn failure_log_reports_one_line_per_doubling() {
+        let mut log = FailureLog::default();
+        assert_eq!(log.count(), 0);
+        let logged: Vec<bool> = (0..9).map(|_| log.record()).collect();
+        assert_eq!(
+            logged,
+            [true, true, false, true, false, false, false, true, false]
+        );
+        assert_eq!(log.count(), 9);
+    }
+
+    /// A graph update that fails under the watcher is counted and surfaced
+    /// in `status` instead of being dropped: the daemon serves a stale index
+    /// until the next tree walk, so the failure must be visible.
+    #[test]
+    fn failed_graph_update_is_counted_in_status() {
+        let root = tmpdir("watcher-failures");
+        std::fs::write(root.join("login.rs"), "pub fn login() -> bool { true }\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        // `.pixel/graph.db` exists but is not a database (it is a
+        // directory), so the update fails the way a locked or corrupt db
+        // does while `graph_db_path().exists()` stays true.
+        std::fs::create_dir_all(root.join(".pixel/graph.db")).unwrap();
+
+        let mut svc = Service::open(&root).unwrap();
+        svc.refresh_file("login.rs");
+        svc.refresh_files(&[("login.rs", false)]);
+        // Through the transport hook the daemon loop calls, so the counting
+        // path is covered end to end.
+        crate::daemon::Corpus::watcher_error(&mut svc, "queue overflow");
+
+        let status = svc.handle(Request::Status {});
+        assert!(status.ok, "{status:?}");
+        let data = status.into_data();
+        assert_eq!(data["watcher"]["graph_update_failures"], 2, "{data}");
+        assert_eq!(data["watcher"]["notify_errors"], 1, "{data}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The daemon adapter is the only wire between pixel-rank's Engine-3
+    /// reranker and pixel-graph's pluggable `Reranker` — `resolve` reaches it
+    /// through the trait object (invisible to the call graph), so nothing
+    /// else covers it. An adapter that returned an empty vec would leave
+    /// `resolve` reporting success with no matches at all; a no-op one would
+    /// leave the candidate order pre-rerank. Pinned here: every candidate
+    /// survives with its graph-side `id`/`tier`, and the order follows the
+    /// weights table the adapter reads live.
+    #[test]
+    fn engine_reranker_preserves_candidates_and_applies_live_weights() {
+        let signals = SignalBundle {
+            activity: HashMap::from([("hot.rs".to_string(), 1.0)]),
+            ..SignalBundle::default()
+        };
+        let candidates = vec![
+            RankedCandidate {
+                id: 11,
+                path: "cold.rs".into(),
+                rrf_score: 1.0,
+                tier: "P0".into(),
+            },
+            RankedCandidate {
+                id: 22,
+                path: "hot.rs".into(),
+                rrf_score: 1.0,
+                tier: "P0".into(),
+            },
+            RankedCandidate {
+                id: 33,
+                path: "cold.rs".into(),
+                rrf_score: 0.5,
+                tier: "P1".into(),
+            },
+        ];
+
+        let reranked = EngineReranker::new("tighten the login path").rerank(candidates, &signals);
+
+        let ids: Vec<u64> = reranked.iter().map(|c| c.id).collect();
+        assert_eq!(
+            ids,
+            vec![22, 11, 33],
+            "activity must lift hot.rs over an equal-rrf cold.rs, and a P1 candidate stays below \
+             P0 whatever its score: {reranked:?}"
+        );
+        assert_eq!(reranked[0].path, "hot.rs", "{reranked:?}");
+        assert_eq!(reranked[0].tier, "P0", "{reranked:?}");
+        assert_eq!(reranked[2].tier, "P1", "{reranked:?}");
+        // The score is the shared formula applied through the live weights
+        // table, not a constant that happens to sort the same way.
+        let weights =
+            pixel_rank::rerank::RerankWeights::from(&pixel_rank::signals::SignalOptions::default());
+        let expected = 1.0 * (1.0 + weights.activity * 1.0);
+        assert!(
+            (reranked[0].rrf_score - expected).abs() < 1e-9,
+            "expected 1.0 * (1 + activity_weight * 1.0) = {expected}, got {}",
+            reranked[0].rrf_score
+        );
+    }
+
+    /// The per-path test penalty is gated on the phrase: a task that is not
+    /// about tests demotes a test file (enough to fall below a production
+    /// file with a lower rrf), a task that names tests does not.
+    #[test]
+    fn engine_reranker_test_penalty_follows_the_phrase() {
+        let candidates = vec![
+            RankedCandidate {
+                id: 1,
+                path: "tests/login_test.rs".into(),
+                rrf_score: 1.2,
+                tier: "P0".into(),
+            },
+            RankedCandidate {
+                id: 2,
+                path: "login.rs".into(),
+                rrf_score: 1.0,
+                tier: "P0".into(),
+            },
+        ];
+        let paths = |reranked: Vec<RankedCandidate>| -> Vec<String> {
+            reranked.into_iter().map(|c| c.path).collect()
+        };
+
+        assert_eq!(
+            paths(
+                EngineReranker::new("tighten the login path")
+                    .rerank(candidates.clone(), &SignalBundle::default())
+            ),
+            vec!["login.rs".to_string(), "tests/login_test.rs".to_string()],
+            "1.2 * 0.7 = 0.84 must fall below 1.0 when the phrase is not about tests"
+        );
+        assert_eq!(
+            paths(
+                EngineReranker::new("tighten the login tests")
+                    .rerank(candidates, &SignalBundle::default())
+            ),
+            vec!["tests/login_test.rs".to_string(), "login.rs".to_string()],
+            "a phrase naming tests gates the penalty off, so the higher rrf wins"
+        );
+    }
+
+    /// Rename fixture: a TS definition plus a caller that imports it.
+    fn rename_root(tag: &str) -> PathBuf {
+        let root = tmpdir(tag);
+        std::fs::write(
+            root.join("login.ts"),
+            "export function loginUser(name: string): boolean {\n    return name.length > 0;\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("caller.ts"),
+            "import { loginUser } from \"./login\";\nexport function go(): boolean {\n    return loginUser(\"x\");\n}\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        root
+    }
+
+    fn rename_req(name: &str, new_name: &str) -> Request {
+        Request::Rename {
+            name: name.to_string(),
+            new_name: new_name.to_string(),
+            file: None,
+            uid: None,
+            dry_run: false,
+        }
+    }
+
+    /// The happy path end to end through the service: dry-run plans without
+    /// writing, a real call rewrites the files and drops the cached graph.
+    #[test]
+    fn op_rename_dry_run_then_apply() {
+        let root = rename_root("rename-apply");
+        let mut svc = Service::open(&root).unwrap();
+        let before = std::fs::read_to_string(root.join("caller.ts")).unwrap();
+
+        let mut dry = rename_req("loginUser", "authenticate");
+        if let Request::Rename { dry_run, .. } = &mut dry {
+            *dry_run = true;
+        }
+        let resp = svc.handle(dry);
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.unwrap();
+        assert_eq!(result["dry_run"], json!(true));
+        assert!(result["edit_count"].as_u64().unwrap() >= 3);
+        assert_eq!(
+            std::fs::read_to_string(root.join("caller.ts")).unwrap(),
+            before,
+            "dry-run must not write"
+        );
+
+        let resp = svc.handle(rename_req("loginUser", "authenticate"));
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.unwrap();
+        assert_eq!(result["dry_run"], json!(false));
+        assert_eq!(result["applied"].as_array().unwrap().len(), 2);
+        let caller = std::fs::read_to_string(root.join("caller.ts")).unwrap();
+        assert!(caller.contains("import { authenticate }"), "{caller}");
+        assert!(caller.contains("return authenticate("), "{caller}");
+        // The graph handle was dropped: a follow-up symbol lookup sees the
+        // new name, not the pre-rename snapshot.
+        let sym = svc.handle(Request::Symbol {
+            name: "authenticate".to_string(),
+        });
+        assert!(sym.ok, "{sym:?}");
+        assert!(
+            !sym.result.unwrap()["symbols"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Identifier validation rejects names no grammar could emit.
+    #[test]
+    fn op_rename_rejects_non_identifiers() {
+        let root = rename_root("rename-ident");
+        let mut svc = Service::open(&root).unwrap();
+        for bad in ["9bad", "a-b", "has space", ""] {
+            let resp = svc.handle(rename_req("loginUser", bad));
+            assert!(!resp.ok, "{bad:?} must fail: {resp:?}");
+        }
+        // And nothing was written on any rejection.
+        assert!(
+            std::fs::read_to_string(root.join("caller.ts"))
+                .unwrap()
+                .contains("loginUser")
+        );
+    }
+
+    /// A shared name without disambiguation answers candidates; `--file`
+    /// picks the declaration in that file only.
+    #[test]
+    fn op_rename_ambiguity_and_file_disambiguation() {
+        let root = rename_root("rename-amb");
+        std::fs::write(
+            root.join("other.ts"),
+            "export function loginUser(id: number): boolean { return id > 0; }\n",
+        )
+        .unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "other"]);
+        let mut svc = Service::open(&root).unwrap();
+
+        let resp = svc.handle(rename_req("loginUser", "authenticate"));
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.unwrap();
+        assert!(result["candidates"].as_array().unwrap().len() >= 2);
+
+        let resp = svc.handle(Request::Rename {
+            name: "loginUser".to_string(),
+            new_name: "authenticate".to_string(),
+            file: Some("other.ts".to_string()),
+            uid: None,
+            dry_run: false,
+        });
+        assert!(resp.ok, "{resp:?}");
+        let other = std::fs::read_to_string(root.join("other.ts")).unwrap();
+        assert!(other.contains("function authenticate("), "{other}");
+        let login = std::fs::read_to_string(root.join("login.ts")).unwrap();
+        assert!(login.contains("function loginUser("), "{login}");
+    }
+
+    /// Renaming a name that is not in the graph is an error, not a no-op.
+    #[test]
+    fn op_rename_unknown_name_errors() {
+        let root = rename_root("rename-unknown");
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(rename_req("no_such_fn", "x"));
+        assert!(!resp.ok, "{resp:?}");
+        let resp = svc.handle(Request::Rename {
+            name: "loginUser".to_string(),
+            new_name: "x".to_string(),
+            file: Some("missing.ts".to_string()),
+            uid: None,
+            dry_run: false,
+        });
+        assert!(!resp.ok, "{resp:?}");
+        let resp = svc.handle(Request::Rename {
+            name: "loginUser".to_string(),
+            new_name: "x".to_string(),
+            file: None,
+            uid: Some("nope#1".to_string()),
+            dry_run: false,
+        });
+        assert!(!resp.ok, "{resp:?}");
     }
 }

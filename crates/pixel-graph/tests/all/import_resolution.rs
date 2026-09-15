@@ -25,6 +25,19 @@ fn ambiguous_suffix_imports_stay_unresolved_in_every_file_order() {
                 "apps/b/com/example/Util.java",
             ],
         ),
+        (
+            "example.com/acme/util",
+            "svc/caller/main.go",
+            ["svc/a/util/a.go", "svc/b/util/b.go"],
+        ),
+        (
+            "com.example.*",
+            "apps/caller/Main.java",
+            [
+                "apps/a/com/example/Util.java",
+                "apps/b/com/example/Util.java",
+            ],
+        ),
     ];
     for (specifier, importer, candidates) in cases {
         let mut files = paths(&candidates);
@@ -48,6 +61,16 @@ fn unique_suffix_imports_and_missing_imports_keep_their_behavior() {
             "apps/caller/Main.java",
             "apps/a/com/example/Util.java",
         ),
+        (
+            "example.com/acme/util",
+            "svc/caller/main.go",
+            "svc/a/util/a.go",
+        ),
+        (
+            "com.example.*",
+            "apps/caller/Main.java",
+            "apps/a/com/example/Util.java",
+        ),
     ];
     for (specifier, importer, candidate) in cases {
         assert_eq!(
@@ -55,6 +78,36 @@ fn unique_suffix_imports_and_missing_imports_keep_their_behavior() {
             Some(candidate.to_owned())
         );
         assert_eq!(resolve_import(specifier, importer, &[]), None);
+    }
+}
+
+#[test]
+fn several_files_in_one_package_directory_are_one_candidate() {
+    // A Go package and a Java package are directories: a second file in the
+    // same directory is the same package, not a competing answer, so the
+    // first one still stands for it.
+    let cases = [
+        (
+            "example.com/acme/util",
+            "svc/caller/main.go",
+            ["svc/a/util/util.go", "svc/a/util/parse.go"],
+            "svc/a/util/util.go",
+        ),
+        (
+            "com.example.*",
+            "apps/caller/Main.java",
+            [
+                "apps/a/com/example/Util.java",
+                "apps/a/com/example/Helper.java",
+            ],
+            "apps/a/com/example/Util.java",
+        ),
+    ];
+    for (specifier, importer, candidates, expected) in cases {
+        assert_eq!(
+            resolve_import(specifier, importer, &paths(&candidates)),
+            Some(expected.to_owned())
+        );
     }
 }
 
@@ -70,6 +123,18 @@ fn exact_and_relative_paths_do_not_lose_resolution_to_unrelated_suffixes() {
         ("pkg.util", "main.py", "pkg/util.py", "other/pkg/util.py"),
         (".util", "pkg/main.py", "pkg/util.py", "other/pkg/util.py"),
         ("./util", "src/main.ts", "src/util.ts", "other/src/util.ts"),
+        (
+            "example.com/acme/util",
+            "svc/caller/main.go",
+            "svc/a/util/a.go",
+            "svc/b/other/b.go",
+        ),
+        (
+            "com.example.*",
+            "apps/caller/Main.java",
+            "apps/a/com/example/Util.java",
+            "apps/b/other/Other.java",
+        ),
     ];
     for (specifier, importer, expected, other) in cases {
         assert_eq!(
@@ -99,6 +164,24 @@ fn graph_build_and_incremental_refresh_do_not_invent_ambiguous_import_edges() {
             "apps/caller/main.py",
             "from pkg.util import parse_python\ndef python_caller():\n    parse_python()\n",
         ),
+        ("svc/a/util/util.go", "package util\n\nfunc ParseGo() {}\n"),
+        ("svc/b/util/util.go", "package util\n\nfunc ParseGo() {}\n"),
+        (
+            "svc/caller/main.go",
+            "package main\n\nimport \"example.com/acme/util\"\n\nfunc go_caller() {\n\tutil.ParseGo()\n}\n",
+        ),
+        (
+            "apps/a/com/example/Util.java",
+            "package com.example;\n\npublic class Util {\n    public static void parse_java() {}\n}\n",
+        ),
+        (
+            "apps/b/com/example/Util.java",
+            "package com.example;\n\npublic class Util {\n    public static void parse_java() {}\n}\n",
+        ),
+        (
+            "apps/caller/Main.java",
+            "import com.example.*;\n\npublic class Main {\n    void java_caller() {\n        Util.parse_java();\n    }\n}\n",
+        ),
     ];
     for (path, body) in files {
         let path = root.path().join(path);
@@ -111,7 +194,12 @@ fn graph_build_and_incremental_refresh_do_not_invent_ambiguous_import_edges() {
 
     for incremental in [false, true] {
         if incremental {
-            for file in ["crates/caller/src/main.rs", "apps/caller/main.py"] {
+            for file in [
+                "crates/caller/src/main.rs",
+                "apps/caller/main.py",
+                "svc/caller/main.go",
+                "apps/caller/Main.java",
+            ] {
                 update_file(root.path(), &db, file).unwrap();
             }
         }
@@ -119,6 +207,8 @@ fn graph_build_and_incremental_refresh_do_not_invent_ambiguous_import_edges() {
         for (caller, callee, file) in [
             ("rust_caller", "parse_rust", "crates/caller/src/main.rs"),
             ("python_caller", "parse_python", "apps/caller/main.py"),
+            ("go_caller", "ParseGo", "svc/caller/main.go"),
+            ("java_caller", "parse_java", "apps/caller/Main.java"),
         ] {
             let caller = store.symbols_by_name(caller, 10).unwrap();
             assert_eq!(caller.len(), 1);

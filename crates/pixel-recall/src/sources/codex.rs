@@ -153,6 +153,7 @@ impl SourceAdapter for Adapter {
             apply_head_meta(&unit.path, &mut session, &mut meta_seen);
         }
         let mut offset = start;
+        let mut skipped_records = 0usize;
         let mut line = String::new();
         loop {
             line.clear();
@@ -168,6 +169,7 @@ impl SourceAdapter for Adapter {
             let line_start = offset;
             offset += n as u64;
             let Ok(record) = serde_json::from_str::<Value>(&line) else {
+                skipped_records += 1;
                 continue;
             };
             extract_record(
@@ -192,6 +194,7 @@ impl SourceAdapter for Adapter {
             } else {
                 Vec::new()
             },
+            skipped_records,
             consumed_bytes: offset,
             cursor: None,
         })
@@ -394,4 +397,52 @@ fn classify_codex_user(text: &str) -> IntentSource {
         }
     }
     classify_user_text(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A complete line that is not valid JSON (a writer that crashed
+    /// mid-flush) is consumed but counted: swallowing it would let a
+    /// transcript whose records never parse look perfectly healthy.
+    #[test]
+    fn parse_counts_a_malformed_line_without_losing_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-2026-08-08T10-00-00-sess-1.jsonl");
+        let meta = json!({
+            "timestamp": "2026-08-08T10:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": "sess-1", "cwd": "/work/app"}
+        })
+        .to_string();
+        let message = json!({
+            "timestamp": "2026-08-08T10:00:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "fix the login"}]
+            }
+        })
+        .to_string();
+        let truncated = "{\"timestamp\":\"2026-08-08T10:00:02.000Z\",\"paylo";
+        fs::write(
+            &path,
+            format!("{meta}\n{message}\n{truncated}\n{message}\n"),
+        )
+        .unwrap();
+
+        let unit = unit_for(path).unwrap();
+        let out = Adapter::new().parse(&unit, Change::New, None).unwrap();
+
+        assert_eq!(out.skipped_records, 1);
+        assert_eq!(
+            out.consumed_bytes, unit.size,
+            "the malformed line's bytes are consumed, never re-read"
+        );
+        assert_eq!(out.sessions.len(), 1);
+        assert_eq!(out.sessions[0].session.source_session_id, "sess-1");
+        assert_eq!(out.sessions[0].turns.len(), 2, "both readable records land");
+    }
 }

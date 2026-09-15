@@ -299,6 +299,22 @@ pub enum Op {
         #[serde(default)]
         limit: Option<usize>,
     },
+    /// IDE-style symbol rename: the graph drives the edit set (definition,
+    /// resolved call/reference sites, import bindings) and a tree-sitter
+    /// re-parse verifies every rewritten identifier is the symbol — sites
+    /// the graph could not resolve are reported, never guessed. `file` or
+    /// `uid` disambiguate a shared `name`; `dry_run` returns the edit plan
+    /// without writing.
+    Rename {
+        name: String,
+        new_name: String,
+        #[serde(default)]
+        file: Option<String>,
+        #[serde(default)]
+        uid: Option<String>,
+        #[serde(default)]
+        dry_run: bool,
+    },
     Shutdown,
 }
 
@@ -343,6 +359,7 @@ impl Op {
             Op::Note { .. } => "note",
             Op::Map { .. } => "map",
             Op::Plan { .. } => "plan",
+            Op::Rename { .. } => "rename",
             Op::Shutdown => "shutdown",
             Op::Reindex { .. } => "reindex",
         }
@@ -395,6 +412,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "note",
     "map",
     "plan",
+    "rename",
     "flow",
 ];
 
@@ -779,6 +797,16 @@ mod tests {
                 },
                 "plan",
             ),
+            (
+                Op::Rename {
+                    name: "".into(),
+                    new_name: "".into(),
+                    file: None,
+                    uid: None,
+                    dry_run: false,
+                },
+                "rename",
+            ),
             (Op::Shutdown, "shutdown"),
         ];
         for (op, expected) in cases {
@@ -848,6 +876,7 @@ mod tests {
             "map",
             "plan",
             "flow",
+            "rename",
             "shutdown",
         ];
         // Every advertised capability must be a real op.

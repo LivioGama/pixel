@@ -3,14 +3,15 @@
 use std::collections::HashMap;
 
 use crate::types::{Flow, FlowStep};
+use crate::vars::{resolve_value, substitute};
 
 /// Render a flow as a sequence of agent-browser commands with rationale
 /// comments and variable substitution. Returns the text for the agent to
 /// read and execute (or for `--dry-run` display).
 ///
 /// `vars` is a map of `key=value` substitutions. Missing required vars
-/// produce an error. Missing optional vars fall back to their default, or
-/// to a placeholder `{{var}}` if no default.
+/// produce an error. A step `value_var` the caller did not pass falls back
+/// to the variable's declared default, then to a placeholder `{{var}}`.
 pub fn replay(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, String> {
     // Validate required vars are present.
     for v in &flow.vars {
@@ -76,7 +77,7 @@ pub fn replay(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, Str
     }
 
     for (i, step) in flow.steps.iter().enumerate() {
-        render_step(&mut out, step, i + 1, vars, flow.tab.as_deref(), 0);
+        render_step(&mut out, step, i + 1, vars, flow, 0);
     }
 
     // Success signal (text-based).
@@ -119,7 +120,7 @@ fn render_step(
     step: &FlowStep,
     num: usize,
     vars: &HashMap<String, String>,
-    flow_tab: Option<&str>,
+    flow: &Flow,
     depth: usize,
 ) {
     let indent = "  ".repeat(depth);
@@ -138,7 +139,7 @@ fn render_step(
     // switch_tab command before the action. Falls back to the flow-level
     // default tab. Skip if the action itself is `switch_tab` (it emits its
     // own tab commands).
-    let effective_tab = step.tab.as_deref().or(flow_tab);
+    let effective_tab = step.tab.as_deref().or(flow.tab.as_deref());
     if step.action != "switch_tab"
         && let Some(tab) = effective_tab
         && step.tab.is_some()
@@ -183,7 +184,7 @@ fn render_step(
                 step.ref_hint.as_deref().unwrap_or("input"),
                 vars,
             ));
-            let value = resolve_value(step, vars);
+            let value = resolve_value(step, vars, &flow.vars);
             out.push_str(&format!(
                 "{indent}agent-browser --session comet snapshot -i   # find the actual @eN ref for: {target}\n"
             ));
@@ -200,7 +201,7 @@ fn render_step(
                 step.ref_hint.as_deref().unwrap_or("select"),
                 vars,
             ));
-            let value = resolve_value(step, vars);
+            let value = resolve_value(step, vars, &flow.vars);
             out.push_str(&format!(
                 "{indent}agent-browser --session comet snapshot -i   # find the actual @eN ref for: {target}\n"
             ));
@@ -244,13 +245,13 @@ fn render_step(
             if !step.then.is_empty() {
                 out.push_str(&format!("{indent}# → THEN:\n"));
                 for (i, sub) in step.then.iter().enumerate() {
-                    render_step(out, sub, i + 1, vars, flow_tab, depth + 1);
+                    render_step(out, sub, i + 1, vars, flow, depth + 1);
                 }
             }
             if !step.otherwise.is_empty() {
                 out.push_str(&format!("{indent}# → ELSE:\n"));
                 for (i, sub) in step.otherwise.iter().enumerate() {
-                    render_step(out, sub, i + 1, vars, flow_tab, depth + 1);
+                    render_step(out, sub, i + 1, vars, flow, depth + 1);
                 }
             }
         }
@@ -298,32 +299,6 @@ fn shell_content(value: &str) -> String {
 /// Keep explanatory data on its comment line, never as shell instructions.
 fn comment_text(value: &str) -> String {
     value.replace(['\n', '\r'], " ")
-}
-
-/// Resolve a step's value: `value_var` takes precedence, then `value`,
-/// then empty string.
-fn resolve_value(step: &FlowStep, vars: &HashMap<String, String>) -> String {
-    if let Some(ref var_name) = step.value_var {
-        if let Some(v) = vars.get(var_name) {
-            return v.clone();
-        }
-        // Fall back to default or placeholder.
-        return format!("{{{{{var_name}}}}}");
-    }
-    if let Some(ref v) = step.value {
-        return substitute(v, vars);
-    }
-    String::new()
-}
-
-/// Substitute `{{var}}` templates in a string.
-fn substitute(s: &str, vars: &HashMap<String, String>) -> String {
-    let mut result = s.to_string();
-    for (k, v) in vars {
-        let placeholder = format!("{{{{{k}}}}}");
-        result = result.replace(&placeholder, v);
-    }
-    result
 }
 
 #[cfg(test)]
@@ -472,6 +447,69 @@ mod tests {
         );
         let out = replay(&flow, &HashMap::new()).unwrap();
         assert!(out.contains("{{account}}"));
+    }
+
+    #[test]
+    fn replay_required_var_with_default_uses_the_default() {
+        let flow = make_flow(
+            vec![FlowStep {
+                action: "fill".into(),
+                ref_hint: Some("input[type=text]".into()),
+                value_var: Some("account".into()),
+                ..Default::default()
+            }],
+            vec![FlowVar {
+                name: "account".into(),
+                description: "Account".into(),
+                required: true,
+                default: Some("west".into()),
+            }],
+        );
+        let out = replay(&flow, &HashMap::new()).unwrap();
+        assert!(out.contains("\"west\""), "{out}");
+        assert!(!out.contains("{{account}}"), "{out}");
+
+        // An explicit --var still wins over the declared default.
+        let vars = HashMap::from([("account".to_string(), "east".to_string())]);
+        let out = replay(&flow, &vars).unwrap();
+        assert!(out.contains("\"east\""), "{out}");
+        assert!(!out.contains("west"), "{out}");
+    }
+
+    #[test]
+    fn replay_conditional_numbers_and_indents_sub_steps() {
+        let flow = make_flow(
+            vec![FlowStep {
+                action: "conditional".into(),
+                rationale: Some("decide".into()),
+                condition: Some("ready".into()),
+                then: vec![
+                    FlowStep {
+                        action: "snapshot".into(),
+                        rationale: Some("then first".into()),
+                        ..Default::default()
+                    },
+                    FlowStep {
+                        action: "snapshot".into(),
+                        rationale: Some("then second".into()),
+                        ..Default::default()
+                    },
+                ],
+                otherwise: vec![FlowStep {
+                    action: "snapshot".into(),
+                    rationale: Some("else first".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            vec![],
+        );
+        let out = replay(&flow, &HashMap::new()).unwrap();
+        assert!(out.contains("# Step 1: decide"), "{out}");
+        // Sub-steps are numbered from 1 and indented two spaces per depth.
+        assert!(out.contains("  # Step 1: then first"), "{out}");
+        assert!(out.contains("  # Step 2: then second"), "{out}");
+        assert!(out.contains("  # Step 1: else first"), "{out}");
     }
 
     #[test]

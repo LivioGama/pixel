@@ -8,14 +8,23 @@ on:
     # verify job) or a hotfix PR, whose own pull_request run below tests it.
     branches: [develop]
   pull_request:
-    # A pull request that only touches Markdown, docs/ or the licence files
-    # cannot change a test result, so it skips the two-and-a-half-minute
-    # run. Later patterns win: the negations drop the docs, then the last
-    # line puts the bundled agent prompts (crates/**/*.md, checked by the
-    # install tests) back in. Develop pushes stay unfiltered so every merge
-    # commit there keeps a complete run. No branch rule requires
-    # this check today; if one is added, the excluded paths need a twin
-    # workflow that reports success.
+    # A pull request that only touches documentation no test reads -- prose
+    # under docs/, the licence files, a Markdown file outside the list below
+    # -- cannot change a test result, so it skips the two-and-a-half-minute
+    # run. Later patterns win: the negations drop the docs first, then the
+    # re-includes put back what the suite actually reads:
+    #   - crates/**: the bundled agent prompts, checked by the install tests;
+    #   - the files crates/pixel/tests/cli/docs_drift.rs reads: it asserts
+    #     that every `pixel <command>` quoted there exists, that the README
+    #     and CHANGELOG rename tables match RENAMED_COMMANDS row for row, and
+    #     that the rule ids of the rust-guidelines skill head real guideline
+    #     sections;
+    #   - the generated plugin surfaces, which install_tests.rs compares
+    #     against the prompts (scripts/gen-plugin-assets.sh --check).
+    # Add a path here when a test starts reading one. Develop pushes stay
+    # unfiltered so every merge commit there keeps a complete run. No branch
+    # rule requires this check today; if one is added, the excluded paths
+    # need a twin workflow that reports success.
     paths:
       - "**"
       - "!**.md"
@@ -23,6 +32,26 @@ on:
       - "!LICENSE"
       - "!NOTICE"
       - "crates/**"
+      # docs_drift.rs:
+      - "README.md"
+      - "ARCHITECTURE.md"
+      - "CONTRIBUTING.md"
+      - "AGENTS.md"
+      - "CHANGELOG.md"
+      - "docs/manual-setup.md"
+      - ".agents/rules/**"
+      - ".agents/skills/rust-guidelines/**"
+      - "scripts/README.md"
+      - "js/sniper/README.md"
+      # gen-plugin-assets.sh --check:
+      - "PIXEL.md"
+      - "PIXEL-SUBAGENT.md"
+      - "skills/**"
+      - ".openclaw/**"
+      - ".clinerules/**"
+      - ".kiro/**"
+      - ".qoder/**"
+      - ".windsurf/**"
 
 # A new push to a pull request cancels the run still in flight for its
 # previous commit. Develop pushes are never cancelled so every
@@ -96,11 +125,26 @@ jobs:
       - name: Doctests
         run: cargo test --workspace --locked --doc
 
+      # `[[bench]]` targets are `harness = false`: criterion owns `main`, so
+      # nextest never runs them and the ranking assertions inside would gate
+      # nothing. `-- --test` runs the bench bodies once, without criterion's
+      # statistical sampling. Only the NDCG bench is gated here: m1_latency's
+      # `search_service_time` assertion is red today (median 78.6ms in the
+      # bench profile, 65.1ms in debug, against the M1 <1ms budget, while
+      # `ping_service_time` passes), so the step would fail on every pull
+      # request -- search latency is a perf fix of its own, not a CI-hygiene
+      # one.
+      - name: Ranking gates (NDCG@10, bench test mode)
+        run: cargo bench -p pixel-bench --bench ndcg_relevance --locked -- --test
+
       - name: Installer contracts (isolated release substitutes)
         run: python3 scripts/test-install.py
 
       - name: Local gate runner contract (stub cargo, disposable repo)
         run: python3 scripts/test-gates.py
+
+      - name: Release prepare contract (stub gh and cargo, disposable repo)
+        run: python3 scripts/test-prepare.py
 
       - name: Warnings-denied Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

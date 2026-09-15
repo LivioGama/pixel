@@ -1,6 +1,7 @@
 //! Real CLI metrics boundaries: invocation-local accounting, never stream decoration.
 use std::collections::HashSet;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -439,7 +440,11 @@ fn operation_error_precedes_metrics_and_preserves_failure() {
     let fixture = Fixture::new();
     let output = fixture.run(&["search-content", "(", ".", "--json", "--no-daemon"]);
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    // The failure is machine-readable on stdout (the envelope) and explicit on
+    // stderr (the diagnostic, then the metrics line).
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["ok"], false, "{output:?}");
+    assert_eq!(doc["error"]["code"], "INVALID_INPUT", "{doc}");
     let stderr = String::from_utf8(output.stderr.clone()).unwrap();
     let lines = metric_lines(&output);
     assert_eq!(lines.len(), 1);
@@ -450,7 +455,12 @@ fn operation_error_precedes_metrics_and_preserves_failure() {
     let events = fixture.events("search-content");
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["outcome"], "error");
-    assert_eq!(events[0]["metrics"]["output_bytes"], diagnostics.len());
+    // Rendered output covers both streams: the failure envelope on stdout and
+    // the diagnostic on stderr (the metrics line itself is not counted).
+    assert_eq!(
+        events[0]["metrics"]["output_bytes"],
+        (output.stdout.len() + diagnostics.len()) as u64
+    );
     assert!(events[0]["metrics"]["native_workflow_bytes"].is_null());
     assert_metric_identity(&lines[0], &events[0]);
 
@@ -816,6 +826,72 @@ fn daemon_reindex_reports_actual_nested_index_counts() {
         value["index"]["delta_files"],
         value["index"]["overlay_files"]
     );
-    assert!(String::from_utf8_lossy(&reindexed.stderr).contains(&expected));
+    let stderr = String::from_utf8_lossy(&reindexed.stderr);
+    assert!(
+        stderr.contains(&expected),
+        "build-index must report the counts status --json reports: expected {expected:?} in {stderr:?}"
+    );
     assert_eq!(metric_lines(&reindexed).len(), 1);
+}
+
+/// `pixel action-log . --limit N | head -1`: the reader closes the pipe while
+/// the process still has lines to write. That is a truncated read, not a
+/// failure — the counted `print!` path must absorb EPIPE instead of panicking
+/// with exit 101.
+#[test]
+fn closed_stdout_pipe_is_success_not_a_panic() {
+    /// More lines than any pipe buffer holds, so the process cannot finish
+    /// writing before the test closes the read end.
+    const SEEDED_LINES: usize = 4000;
+
+    let fixture = Fixture::new();
+    let log = fixture.0.join(".pixel/actions.jsonl");
+    fs::create_dir_all(log.parent().unwrap()).unwrap();
+    let seeded: String = (0..SEEDED_LINES)
+        .map(|n| {
+            format!(
+                "{}\n",
+                json!({
+                    "ts_ms": 1,
+                    "pid": 1,
+                    "command": "search-content",
+                    "args": format!("seed-{n} --path . --budget 4000"),
+                    "cwd": "/fixture",
+                    "outcome": "ok",
+                    "duration_ms": 1,
+                })
+            )
+        })
+        .collect();
+    fs::write(&log, seeded).unwrap();
+
+    let limit = SEEDED_LINES.to_string();
+    let mut child = fixture
+        .command()
+        .args(["action-log", ".", "--limit", limit.as_str()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // `| head -1`: keep the first line, then drop the read end.
+    let mut first_line = String::new();
+    {
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        reader.read_line(&mut first_line).unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+
+    assert!(
+        first_line.contains("search-content"),
+        "the first rendered line arrives before the reader closes: {first_line:?}"
+    );
+    assert!(
+        output.status.success(),
+        "a closed stdout reader is a success, not exit 101: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "EPIPE must not panic the process: {stderr}"
+    );
 }
