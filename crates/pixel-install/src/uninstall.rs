@@ -1174,6 +1174,23 @@ mod routing_tests {
         assert!(codex.join(routing::CODEX_COMPOSED_BACKUP).is_file());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn remove_agent_prompt_fails_when_pi_file_is_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let pi_path = home.path().join(install::PI_PROMPT_REL);
+        fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+        fs::write(&pi_path, b"user note").unwrap();
+        // Remove read permission but keep write permission.
+        fs::set_permissions(&pi_path, fs::Permissions::from_mode(0o200)).unwrap();
+
+        // An unreadable shared file must be an error, never "empty".
+        let result = remove_agent_prompt(home.path(), false);
+        assert!(result.is_err(), "expected error for unreadable pi file, got {result:?}");
+    }
+
     fn make_private(path: &Path) {
         #[cfg(unix)]
         {
