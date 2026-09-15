@@ -5,11 +5,11 @@ description: Cut a pixel release end to end — pick the version, prepare the re
 
 # Releasing pixel
 
-`main` is the only long-lived branch: every pull
-request merges into it, and a release is a tag on it. The one exception is a
-`release/x.y` maintenance branch, cut from the line's last tag only when a
-patch cannot wait for `main` to be releasable: see "Patch release while `main`
-is not releasable".
+`main` is the only long-lived branch: pull requests merge into it by
+default, and a release is a tag on it. The one exception is a patch that
+cannot wait for `main` to be releasable: the fix still merges into `main`,
+then a maintenance-release pull request targets a `release/x.y` branch cut
+from the line's last tag (see "Patch release while `main` is not releasable").
 
 The tag is the release. Pushing `vX.Y.Z` runs `.github/workflows/release.yml`,
 and nothing else gates it: CI does not run on tags. The workflow has four
@@ -294,10 +294,12 @@ the next patch with steps 1 to 5. Only when `main` holds work that must not
 ship yet:
 
 1. Merge the fix into `main` first, as any PR.
-2. `git switch -c release/x.y vx.y.<last>` (reuse the branch if the line has
-   one), `git cherry-pick -x <fix merge sha>` (`-m 1` for a merge commit),
-   add its `CHANGELOG.md` entry under Unreleased, then `prepare.sh x.y.z` and
-   the gates as in step 3; PR into `release/x.y`.
+2. Push `release/x.y` from `vx.y.<last>` if the line has none yet
+   (`git push origin vx.y.<last>^{commit}:refs/heads/release/x.y`). On a
+   `release-x.y.z` branch from `origin/release/x.y`,
+   `git cherry-pick -x <fix merge sha>` (`-m 1` for a merge commit), add its
+   `CHANGELOG.md` entry under Unreleased, then `prepare.sh x.y.z` and the
+   gates as in step 3; PR into `release/x.y`.
 3. Tag that PR's merge commit (step 4) and verify (step 5). `smoke` notices
    install.sh as not checked when a newer line is already the latest release.
 4. On `main`, a follow-up PR adds the `## [x.y.z] - DATE` section with that
