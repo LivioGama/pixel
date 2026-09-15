@@ -2,8 +2,9 @@
 //! store, ingests changes incrementally, keeps the embedding model warm,
 //! and serves `search` / `ask` over the standard daemon transport.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pixel_recall::ask::{ask, format_group};
 use pixel_recall::embed::{Embedder, open_default_embedder, run_backfill};
@@ -30,6 +31,10 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 /// anything older is either already ingested or will arrive through the
 /// watcher when its writer closes it.
 const SWEEP_WINDOW_MS: i64 = 21_600_000; // 6 h
+/// How often one agent's "skipped records" line may repeat. A transcript
+/// that stays unreadable must be visible in the log, not printed on every
+/// five-second sweep.
+const SKIPPED_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 use crate::api::{PROTOCOL_VERSION, Request, Response, ServeError, failure_response};
 use crate::daemon::Corpus;
@@ -42,12 +47,51 @@ pub struct RecallSource {
     pub adapter: Box<dyn SourceAdapter>,
 }
 
+/// The ingest log's rate limit: when each agent last got a skipped-records
+/// line.
+#[derive(Default)]
+struct IngestLog {
+    skipped_at: BTreeMap<String, Instant>,
+}
+
+impl IngestLog {
+    /// The line for one ingest pass, or `None` when the pass is quiet. A
+    /// pass that wrote sessions always speaks; a pass that only skipped
+    /// unreadable records speaks at most once per `SKIPPED_LOG_INTERVAL`,
+    /// because staying silent is how a corrupt transcript went unnoticed.
+    fn line(&mut self, report: &IngestReport, now: Instant) -> Option<String> {
+        if report.sessions_written > 0 {
+            return Some(format!(
+                "recall daemon: {} +{} sessions, +{} turns, {} skipped records",
+                report.agent, report.sessions_written, report.turns_written, report.skipped_records
+            ));
+        }
+        if report.skipped_records == 0 {
+            return None;
+        }
+        let due = self
+            .skipped_at
+            .get(&report.agent)
+            .is_none_or(|last| now.saturating_duration_since(*last) >= SKIPPED_LOG_INTERVAL);
+        if !due {
+            return None;
+        }
+        self.skipped_at.insert(report.agent.clone(), now);
+        Some(format!(
+            "recall daemon: {} wrote no session, skipped {} unreadable record(s) — the transcript is truncated or corrupt",
+            report.agent, report.skipped_records
+        ))
+    }
+}
+
 pub struct RecallService {
     root: PathBuf,
     store: RecallStore,
     segments_dir: PathBuf,
     vectors_dir: PathBuf,
     sources: Vec<RecallSource>,
+    /// Rate-limits the ingest log's skipped-records line, per agent.
+    ingest_log: IngestLog,
     /// Lazily opened on first ask; kept warm for the daemon's lifetime.
     embedder: Option<Box<dyn Embedder>>,
     embedder_unavailable: bool,
@@ -106,6 +150,7 @@ impl RecallService {
             segments_dir: pixel_recall::segments_dir(),
             vectors_dir: pixel_recall::vectors_dir(),
             sources: machine_sources(),
+            ingest_log: IngestLog::default(),
             embedder: None,
             embedder_unavailable: false,
         })
@@ -127,6 +172,7 @@ impl RecallService {
             segments_dir,
             vectors_dir,
             sources,
+            ingest_log: IngestLog::default(),
             embedder: None,
             embedder_unavailable: true,
         }
@@ -297,7 +343,7 @@ impl RecallService {
                 continue;
             }
             let report = ingest_source(&mut self.store, source.adapter.as_ref());
-            Self::log_ingest(source.adapter.agent(), report);
+            Self::log_ingest(&mut self.ingest_log, source.adapter.agent(), report);
         }
         self.after_ingest();
     }
@@ -319,20 +365,21 @@ impl RecallService {
                 now_ms,
                 SWEEP_WINDOW_MS,
             );
-            Self::log_ingest(source.adapter.agent(), report);
+            Self::log_ingest(&mut self.ingest_log, source.adapter.agent(), report);
         }
         self.after_ingest();
     }
 
     #[cfg_attr(test, mutants::skip)] // stderr diagnostics only
-    fn log_ingest(agent: &str, report: Result<IngestReport, pixel_recall::sources::IngestError>) {
+    fn log_ingest(
+        ingest_log: &mut IngestLog,
+        agent: &str,
+        report: Result<IngestReport, pixel_recall::sources::IngestError>,
+    ) {
         match report {
             Ok(report) => {
-                if report.sessions_written > 0 {
-                    eprintln!(
-                        "recall daemon: {} +{} sessions, +{} turns",
-                        report.agent, report.sessions_written, report.turns_written
-                    );
+                if let Some(line) = ingest_log.line(&report, Instant::now()) {
+                    eprintln!("{line}");
                 }
             }
             Err(e) => eprintln!("recall daemon: ingest {agent}: {e}"),
@@ -504,6 +551,11 @@ mod tests {
             f.set_modified(SystemTime::now() - age).unwrap();
         }
 
+        /// Replace the transcript's bytes (a writer that crashed mid-flush).
+        fn write_transcript(&self, text: &str) {
+            fs::write(&self.transcript, text).unwrap();
+        }
+
         fn turns(&self) -> i64 {
             self.service.store.total_turns().unwrap()
         }
@@ -652,5 +704,96 @@ mod tests {
     fn recall_service_sweeps_every_five_seconds() {
         let fx = Fixture::new("interval");
         assert_eq!(fx.service.sweep_interval(), Some(Duration::from_secs(5)));
+    }
+
+    /// A pass that only skipped unreadable records still produces a line:
+    /// silence is how a transcript whose records never parse stayed
+    /// invisible. A pass with nothing to report stays quiet.
+    #[test]
+    fn a_pass_that_only_skipped_records_still_produces_a_line() {
+        let mut log = IngestLog::default();
+        let now = Instant::now();
+        let report = |sessions: usize, skipped: usize| IngestReport {
+            agent: "claude".to_string(),
+            sessions_written: sessions,
+            turns_written: sessions,
+            skipped_records: skipped,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            log.line(&report(0, 1), now).as_deref(),
+            Some(
+                "recall daemon: claude wrote no session, skipped 1 unreadable record(s) — the transcript is truncated or corrupt"
+            ),
+            "skipped records must not be reported as a clean pass"
+        );
+        assert!(
+            log.line(&report(0, 0), now).is_none(),
+            "an untouched pass has nothing to say"
+        );
+        assert_eq!(
+            log.line(&report(1, 0), now).as_deref(),
+            Some("recall daemon: claude +1 sessions, +1 turns, 0 skipped records"),
+            "a written session still logs the pass"
+        );
+    }
+
+    /// The skipped-records line repeats at most once per
+    /// `SKIPPED_LOG_INTERVAL` and per agent: a file that stays unreadable
+    /// is reported without a line on every five-second sweep, and a held
+    /// back pass does not postpone the next one.
+    #[test]
+    fn the_skipped_line_repeats_only_after_the_interval() {
+        let mut log = IngestLog::default();
+        let report = |agent: &str| IngestReport {
+            agent: agent.to_string(),
+            skipped_records: 2,
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let interval = SKIPPED_LOG_INTERVAL;
+
+        assert!(log.line(&report("claude"), t0).is_some());
+        assert!(
+            log.line(&report("claude"), t0 + interval - Duration::from_millis(1))
+                .is_none(),
+            "inside the interval the line is held back"
+        );
+        let after = t0 + interval + Duration::from_secs(1);
+        assert!(
+            log.line(&report("claude"), after).is_some(),
+            "past the interval the line is due again"
+        );
+        assert!(
+            log.line(&report("claude"), after + interval).is_some(),
+            "exactly at the interval the line is due"
+        );
+        assert!(
+            log.line(&report("claude"), after + 3 * interval).is_some(),
+            "long past the interval the line is still due"
+        );
+        assert!(
+            log.line(&report("codex"), t0).is_some(),
+            "the limit is per agent, not global"
+        );
+    }
+
+    /// A transcript whose only record is truncated reaches the log: the
+    /// sweep parses it, the adapter counts the unreadable record, and the
+    /// daemon records a line. The old guard (`sessions_written > 0`) kept
+    /// that file invisible for every sweep.
+    #[test]
+    fn sweep_of_a_transcript_with_a_malformed_line_logs_a_skipped_line() {
+        let mut fx = Fixture::new("corrupt");
+        fx.write_transcript("{\"type\":\"user\",\"message\":{\"conte\n");
+
+        fx.service.sweep();
+
+        assert_eq!(fx.turns(), 0, "no readable record in the transcript");
+        assert!(
+            fx.service.ingest_log.skipped_at.contains_key("claude"),
+            "only a produced line records the agent, so a skipped record must have one"
+        );
     }
 }

@@ -14,6 +14,9 @@ pub struct IngestReport {
     pub units_unchanged: usize,
     pub sessions_written: usize,
     pub turns_written: usize,
+    /// Complete records the adapters could not parse (a truncated write).
+    /// Counted separately from `parse_errors`, which counts whole units.
+    pub skipped_records: usize,
     pub parse_errors: usize,
     pub elapsed_ms: u128,
 }
@@ -136,6 +139,7 @@ pub fn ingest_units(
                     report.sessions_written += 1;
                     report.turns_written += ps.turns.len();
                 }
+                report.skipped_records += parsed.skipped_records;
                 if parsed.sessions.is_empty() {
                     store.touch_state(agent, &unit.unit_key, &st)?;
                 }
@@ -178,6 +182,8 @@ mod tests {
         units: Vec<SourceUnit>,
         /// Units whose parse fails (a corrupt file).
         broken: Vec<String>,
+        /// Units whose parse reports an unreadable record (a truncated line).
+        skipped: Vec<String>,
         /// Units whose recorded prefix no longer matches (rewritten in place).
         prefix_changed: Vec<String>,
         parsed: RefCell<BTreeMap<String, Vec<Change>>>,
@@ -188,6 +194,7 @@ mod tests {
             Self {
                 units,
                 broken: Vec::new(),
+                skipped: Vec::new(),
                 prefix_changed: Vec::new(),
                 parsed: RefCell::new(BTreeMap::new()),
             }
@@ -251,6 +258,7 @@ mod tests {
                     session,
                     turns: vec![turn],
                 }],
+                skipped_records: usize::from(self.skipped.contains(&unit.unit_key)),
                 consumed_bytes: unit.size,
                 cursor: None,
             })
@@ -350,6 +358,19 @@ mod tests {
         let report = ingest_source(&mut store, &fake).unwrap();
         assert_eq!(report.units_rewritten, 1);
         assert_eq!(turn_texts(&store, "s-/a"), vec!["turn at 4"]);
+    }
+
+    /// A truncated record is counted, never swallowed: the unit still writes
+    /// its readable session, and the count reaches the report.
+    #[test]
+    fn a_skipped_record_is_counted_and_the_session_still_lands() {
+        let (_dir, mut store) = store();
+        let mut fake = Fake::new(vec![unit("/half", 10, NOW)]);
+        fake.skipped = vec!["/half".to_string()];
+        let report = ingest_source(&mut store, &fake).unwrap();
+        assert_eq!(report.skipped_records, 1);
+        assert_eq!((report.sessions_written, report.turns_written), (1, 1));
+        assert_eq!(turn_texts(&store, "s-/half"), vec!["turn at 10"]);
     }
 
     #[test]

@@ -176,6 +176,7 @@ impl SourceAdapter for Adapter {
             apply_head_meta(&unit.path, &mut session, &mut head);
         }
         let mut offset = start;
+        let mut skipped_records = 0usize;
         let mut line = String::new();
         loop {
             line.clear();
@@ -189,6 +190,7 @@ impl SourceAdapter for Adapter {
             let line_start = offset;
             offset += n as u64;
             let Ok(record) = serde_json::from_str::<Value>(&line) else {
+                skipped_records += 1;
                 continue;
             };
             extract_record(
@@ -213,6 +215,7 @@ impl SourceAdapter for Adapter {
             } else {
                 Vec::new()
             },
+            skipped_records,
             consumed_bytes: offset,
             cursor: None,
         })
@@ -530,6 +533,10 @@ mod tests {
         assert_eq!(
             out.consumed_bytes, complete,
             "the partial last line is left for the next pass"
+        );
+        assert_eq!(
+            out.skipped_records, 1,
+            "the `{{not json` line is consumed and counted, not swallowed"
         );
         assert_eq!(
             parsed.turns[1].source_byte_start,

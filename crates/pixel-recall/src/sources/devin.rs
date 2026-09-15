@@ -286,6 +286,7 @@ impl SourceAdapter for Adapter {
 
         Ok(ParseOutput {
             sessions,
+            skipped_records: 0,
             consumed_bytes: unit.size,
             cursor: new_cursor.map(|c| c.to_string()),
         })
