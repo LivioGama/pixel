@@ -25,8 +25,12 @@ Three facts shape everything below:
 - **The macOS binary is first compiled by the tag, and first run by
   `smoke`.** `ci.yml` and `cross-build.yml` run on `ubuntu-latest` only; a
   green `main` proves the musl lane, never `aarch64-apple-darwin`.
-- **A published tag is immutable.** Once `release` has run, users can install
-  it: never move, delete or reuse it; a fix ships as the next patch.
+- **A published release is immutable.** GitHub's release immutability is on:
+  once `release` has published, its assets cannot be added, replaced or
+  deleted, and its tag cannot move or be deleted while the release exists (a
+  deleted release's tag name cannot be reused). The `release tags: immutable`
+  ruleset also refuses deleting or moving any `v*` tag, with a bypass for the
+  Admin role only. A fix ships as the next patch.
 - **Users install releases, not `main`.** `install.sh` is a release asset
   (`releases/latest/download/install.sh`), so `main` may be ahead of the latest
   release, broken script included, without breaking an install.
@@ -35,8 +39,8 @@ Three facts shape everything below:
 
 Being asked to fix, merge or ship a change is not an authorization to
 release. A release starts on the user's explicit ask, and each outward step
-gets its own go: merging the prepare PR, pushing the tag, pushing to `main`,
-deleting a tag, replacing a release asset. An ask that names the steps ("do
+gets its own go: merging the prepare PR, pushing the tag, deleting a tag
+(an Admin bypass of the tag ruleset). An ask that names the steps ("do
 the release, merge and tag") is the go for those steps; say each command in a
 progress line just before running it. Anything the ask did not name (deleting
 a tag, force-pushing, retagging) still waits for its own go.
@@ -228,8 +232,8 @@ skipped, or predates the job (0.2.4 and older):
 
 ```bash
 V=vx.y.z; D=$(mktemp -d); cd "$D"
-gh release view $V --repo LivioGama/pixel --json isDraft,isPrerelease,body \
-  --jq '{isDraft, isPrerelease, body: .body[0:200]}'   # false, false, the changelog section (not "See [CHANGELOG.md]")
+gh release view $V --repo LivioGama/pixel --json isDraft,isPrerelease,isImmutable,body \
+  --jq '{isDraft, isPrerelease, isImmutable, body: .body[0:200]}'   # false, false, true, the changelog section (not "See [CHANGELOG.md]")
 gh release download $V --repo LivioGama/pixel
 ls                                                     # 3 .tar.gz, 3 .sha256, pixel.rb, install.sh
 shasum -a 256 -c ./*.sha256                            # 3 × OK
@@ -258,7 +262,7 @@ Report in this shape, and copy it into the record:
 Release vx.y.z: published and verified | NOT verified
 - run <url>: verify ✓, build ✓, release ✓, smoke ✓✓✓
 - smoke: asset ✓✓✓, install.sh ✓✓✓ | notice, brew ✓ | skipped
-- assets: 8, 3 checksums OK, formula hashes match, install.sh == tag's
+- assets: 8, 3 checksums OK, formula hashes match, install.sh == tag's, immutable
 - body: CHANGELOG ## [x.y.z] section
 - tap: Formula/pixel.rb == release pixel.rb (commit "pixel x.y.z")
 - binary: aarch64-apple-darwin prints pixel x.y.z, commit <sha> == tag
@@ -280,10 +284,10 @@ Then by how far the run got:
 
 | Where it failed | State | Do |
 | --- | --- | --- |
-| `verify` or `build` | tag pushed, nothing published | with the user's go, delete the tag (`git push origin :refs/tags/vx.y.z && git tag -d vx.y.z`) and re-tag the fixed commit. No release exists, so reusing the version is safe. A musl failure should have shown on `main`'s `Cross-build`: find out why it was green. |
-| `release`, before "Upload release assets" | nothing published | as above, or a rerun for infra |
-| `release`, tap steps only | GitHub release published, tap stale | infra: `gh run rerun <run-id> --failed` (the tap step exits 0 when the formula is already current). Otherwise copy the `pixel.rb` release asset into `Formula/pixel.rb` of `LivioGama/homebrew-tap` by hand, commit `pixel x.y.z`. |
-| `smoke`, install.sh only | binaries fine, the published script is broken | the script ships with the release: fix it on `main` through a PR, then either release the next patch or, with the user's go, replace only that asset from the fixed commit (`gh release upload vx.y.z scripts/install.sh --clobber`) |
+| `verify` or `build` | tag pushed, nothing published | with the user's go, delete the tag (`git push origin :refs/tags/vx.y.z && git tag -d vx.y.z`; the tag ruleset lets only an Admin do it) and re-tag the fixed commit. No release exists, so reusing the version is safe. A musl failure should have shown on `main`'s `Cross-build`: find out why it was green. |
+| `release`, before or during "Upload release assets" | nothing published (the action uploads into a draft and publishes last; a leftover draft is reused by a rerun) | as above, or a rerun for infra |
+| `release`, tap steps only | GitHub release published and immutable, tap stale | do not rerun the job: it replays "Upload release assets", which an immutable release refuses. Copy the `pixel.rb` release asset into `Formula/pixel.rb` of `LivioGama/homebrew-tap` by hand, commit `pixel x.y.z`. |
+| `smoke`, install.sh only | binaries fine, the published script is broken | the script ships with the release and cannot be replaced: fix it on `main` through a PR and release the next patch |
 | `smoke`, asset or brew, infra | unknown | `gh run rerun <run-id> --failed` reruns only the failed `smoke` jobs |
 | `smoke`, asset or brew, code (wrong version or commit, crash, `brew test` fails) — or any later report of a bad binary | users may have it | never move the tag: fix on `main`, release `x.y.z+1`, say in its changelog what was wrong with `x.y.z`. |
 
