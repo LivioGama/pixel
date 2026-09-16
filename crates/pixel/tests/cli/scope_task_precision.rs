@@ -12,7 +12,9 @@
 //!   - `recall@P0`     labels present in tier P0 (per case: |L∩P0| / |L|)
 //!   - `recall@P1`     labels present in P0 or P1
 //!   - `precision@P0`  P0 entries that are labels
-//!   - `precision@1`   the top-scored target is a label
+//!   - `precision@1`   the first target in report order is a label (the
+//!     report is tier-ordered, so this is the head a caller sees, not the
+//!     highest raw score)
 //!
 //! This is `#[ignore]`d: it needs the full git history (a shallow clone has
 //! neither the pinned commits nor their parents) and a few minutes of wall
@@ -224,14 +226,11 @@ fn evaluate(labels: &[&str], report: &Value) -> Row {
         .chain(&p1)
         .filter(|p| labels.contains(p.as_str()))
         .count();
+    // The report is already rank-ordered; take its head so a score tie (or a
+    // higher-scored P1 above a P0) cannot measure a different target than the
+    // one shown first.
     let best_is_label = targets
-        .iter()
-        .max_by(|a, b| {
-            a["score"]
-                .as_f64()
-                .unwrap_or(0.0)
-                .total_cmp(&b["score"].as_f64().unwrap_or(0.0))
-        })
+        .first()
         .and_then(|t| t["path"].as_str())
         .is_some_and(|path| labels.contains(path));
     Row {

@@ -535,6 +535,17 @@ impl GraphStore {
         Ok(())
     }
 
+    /// Record that `symbol_id` is an external module declaration (`mod foo;`):
+    /// it names another file rather than defining code in this one, so
+    /// `targets::symbol_hits` must not grant its file the exact-name bonus.
+    pub fn mark_module_decl(&self, symbol_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE symbols SET module_decl = 1 WHERE id = ?1",
+            params![symbol_id],
+        )?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn insert_symbol(
         &self,
@@ -1405,7 +1416,8 @@ CREATE TABLE IF NOT EXISTS symbols (
   start_line INTEGER NOT NULL,
   end_line INTEGER NOT NULL,
   sig TEXT NOT NULL DEFAULT '',
-  trait_impl INTEGER NOT NULL DEFAULT 0
+  trait_impl INTEGER NOT NULL DEFAULT 0,
+  module_decl INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id);
@@ -1547,6 +1559,20 @@ fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if !has_column("symbols", "module_decl")? {
+        conn.execute(
+            "ALTER TABLE symbols ADD COLUMN module_decl INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        // Graphs built before the inline/external distinction kept every
+        // `Module` row out of exact-name promotion; marking them as
+        // declarations keeps that behaviour until a rebuild re-extracts the
+        // real flag (the extractor version bump forces one).
+        conn.execute(
+            "UPDATE symbols SET module_decl = 1 WHERE kind = 'module'",
+            [],
+        )?;
+    }
     if !has_column("edges", "receiver")? {
         conn.execute("ALTER TABLE edges ADD COLUMN receiver TEXT", [])?;
     }
@@ -1607,6 +1633,44 @@ mod tests {
         assert_eq!(flag(1), 0);
         store.mark_trait_impl(1).unwrap();
         assert_eq!(flag(1), 1);
+    }
+
+    /// A graph.db written before `symbols.module_decl` existed opens with the
+    /// column added; module rows inherit the old exact-match exclusion (they
+    /// are marked as declarations) while other rows stay definitions, and
+    /// marking an external declaration sets the column.
+    #[test]
+    fn opening_an_older_graph_marks_module_rows_as_declarations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.db");
+        let old_schema = "CREATE TABLE symbols (id INTEGER PRIMARY KEY, uid TEXT NOT NULL UNIQUE, \
+             file_id INTEGER NOT NULL, name TEXT NOT NULL, qualified TEXT NOT NULL, \
+             kind TEXT NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, \
+             sig TEXT NOT NULL DEFAULT '');";
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(old_schema).unwrap();
+            conn.execute_batch(
+                "INSERT INTO symbols VALUES (1, 'lib.rs#search_compat#module', 1, \
+                 'search_compat', 'search_compat', 'module', 1, 1, 'mod search_compat;');\
+                 INSERT INTO symbols VALUES (2, 'lib.rs#run#function', 1, \
+                 'run', 'run', 'function', 3, 4, 'fn run()');",
+            )
+            .unwrap();
+        }
+        let store = GraphStore::open(&path).unwrap();
+        let flag = |id: i64| -> i64 {
+            store
+                .conn()
+                .query_row("SELECT module_decl FROM symbols WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(flag(1), 1, "a migrated module row keeps the old exclusion");
+        assert_eq!(flag(2), 0, "a migrated non-module row is a definition");
+        store.mark_module_decl(2).unwrap();
+        assert_eq!(flag(2), 1);
     }
 
     use super::*;

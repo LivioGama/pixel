@@ -72,7 +72,9 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// graph defines, member arguments only on a self receiver.
 /// 3: Rust trait-implementation methods are marked (`symbols.trait_impl`).
 /// 4: Rust enum variants are symbols (`SymbolKind::Variant`).
-pub const EXTRACTOR_VERSION: &str = "4";
+/// 5: Rust external module declarations are marked (`symbols.module_decl`),
+///    so `symbol_hits` can promote inline modules without promoting `mod foo;`.
+pub const EXTRACTOR_VERSION: &str = "5";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -266,6 +268,9 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
             )?;
             if s.trait_impl {
                 store.mark_trait_impl(id)?;
+            }
+            if s.module_decl {
+                store.mark_module_decl(id)?;
             }
             ids.push(id);
             lines.push((s.start_line, s.end_line));
@@ -669,6 +674,9 @@ fn update_files_unsigned(
             )?;
             if s.trait_impl {
                 store.mark_trait_impl(id)?;
+            }
+            if s.module_decl {
+                store.mark_module_decl(id)?;
             }
             ids.push(id);
             lines.push((s.start_line, s.end_line));
@@ -1422,6 +1430,38 @@ mod tests {
             is_fresh(&root, &db),
             "a rebuild records the current version"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An exact probe of a module name promotes the file that defines the
+    /// code, not the `mod foo;` naming it. The end-to-end build path must
+    /// write both directions of `symbols.module_decl`.
+    #[test]
+    fn build_marks_external_module_declarations_for_exact_probes() {
+        let root = tmpdir("module-decl");
+        std::fs::write(root.join("main.rs"), "mod search_compat;\n").unwrap();
+        std::fs::write(root.join("search_compat.rs"), "pub fn search_compat() {}\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+
+        let store = GraphStore::open(&db).unwrap();
+        let hits = crate::targets::symbol_hits(
+            &store,
+            &["search".into(), "compat".into()],
+            &["search_compat".into()],
+        )
+        .unwrap();
+        let declaring = hits.iter().find(|h| h.path == "main.rs").unwrap();
+        assert!(
+            !declaring.exact_name_hit,
+            "`mod search_compat;` only names the other file: {declaring:?}"
+        );
+        let defining = hits.iter().find(|h| h.path == "search_compat.rs").unwrap();
+        assert!(
+            defining.exact_name_hit,
+            "`fn search_compat` defines the exact name: {defining:?}"
+        );
+        drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
 
