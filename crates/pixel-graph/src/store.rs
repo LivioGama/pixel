@@ -43,6 +43,10 @@ pub enum SymbolKind {
     Class,
     Struct,
     Enum,
+    /// A member of an enum (`enum Command { SelfUpdate }`): a definition the
+    /// ident tier can hit exactly, carrying `Enum::Variant` as its qualified
+    /// name.
+    Variant,
     Trait,
     Interface,
     Const,
@@ -57,6 +61,7 @@ impl SymbolKind {
             SymbolKind::Class => "class",
             SymbolKind::Struct => "struct",
             SymbolKind::Enum => "enum",
+            SymbolKind::Variant => "variant",
             SymbolKind::Trait => "trait",
             SymbolKind::Interface => "interface",
             SymbolKind::Const => "const",
@@ -69,6 +74,7 @@ impl SymbolKind {
             "class" => SymbolKind::Class,
             "struct" => SymbolKind::Struct,
             "enum" => SymbolKind::Enum,
+            "variant" => SymbolKind::Variant,
             "trait" => SymbolKind::Trait,
             "interface" => SymbolKind::Interface,
             "const" => SymbolKind::Const,

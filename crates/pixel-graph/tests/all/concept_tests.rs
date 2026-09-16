@@ -4,6 +4,7 @@ use std::fs;
 
 use pixel_graph::concept::{ConceptKind, extract_concepts};
 use pixel_graph::concept_resolve::{Confidence, ResolveOptions, Tier, resolve};
+use pixel_graph::extract::extract_file;
 use pixel_graph::store::{GraphStore, SymbolKind};
 use tempfile::TempDir;
 
@@ -550,6 +551,67 @@ fn resolve_identifier_prefers_symbol_over_string_concept() {
     );
 }
 
+/// The real extractor emits `SymbolKind::Variant` rows, so an exact
+/// identifier-shaped query for an enum variant resolves through the ident
+/// tier to the definition line instead of the string concepts that mention
+/// the identifier (the `SelfUpdate` regression).
+#[test]
+fn resolve_identifier_finds_enum_variant_definitions() {
+    const RUST_ENUM: &str = r#"
+enum Command {
+    SelfUpdate { force: bool },
+    RepoState,
+    DryRun,
+    ListErrors(usize),
+}
+"#;
+    let dir = TempDir::new().expect("tempdir");
+    let db_path = dir.path().join("graph.db");
+    let mut store = GraphStore::open(&db_path).expect("open graph store");
+
+    let definition = "crates/pixel/src/main.rs";
+    let abs = dir.path().join(definition);
+    fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    fs::write(&abs, RUST_ENUM).unwrap();
+    let file_id = store.replace_file(definition, "oid-def", "rust").unwrap();
+    let extraction = extract_file(definition, RUST_ENUM.as_bytes()).expect("extract");
+    for s in &extraction.symbols {
+        let uid = format!("{}#{}#{}", definition, s.qualified, s.kind.as_str());
+        store
+            .insert_symbol(
+                file_id,
+                &uid,
+                &s.name,
+                &s.qualified,
+                s.kind,
+                s.start_line,
+                s.end_line,
+                &s.sig,
+            )
+            .unwrap();
+    }
+
+    // The noise that used to win: a string concept in another file that
+    // literally contains two of the variant identifiers.
+    let noisy = "crates/pixel/src/cli.rs";
+    let noisy_abs = dir.path().join(noisy);
+    fs::create_dir_all(noisy_abs.parent().unwrap()).unwrap();
+    let noisy_src = "fn f() { let _ = \"run SelfUpdate and RepoState\"; }\n";
+    fs::write(&noisy_abs, noisy_src).unwrap();
+    let noisy_id = store.replace_file(noisy, "oid-noise", "rust").unwrap();
+    let concepts = extract_concepts(noisy, noisy_src.as_bytes());
+    store.replace_concepts(noisy_id, &concepts).unwrap();
+
+    for variant in ["SelfUpdate", "RepoState", "DryRun", "ListErrors"] {
+        let out = resolve(&store, variant, &ResolveOptions::default()).expect("resolve");
+        assert_eq!(out.tier, Some(Tier::Ident), "{variant}");
+        assert_eq!(out.confidence, Confidence::Resolved, "{variant}");
+        let top = &out.matches[0];
+        assert_eq!(top.path, definition, "{variant}");
+        assert_eq!(top.symbol_kind.as_deref(), Some("variant"), "{variant}");
+    }
+}
+
 #[test]
 fn resolve_natural_language_phrase_still_uses_concepts() {
     // A natural-language phrase like "submit the form" should still go through
@@ -563,10 +625,19 @@ fn resolve_natural_language_phrase_still_uses_concepts() {
         outcome.confidence != Confidence::Unresolved,
         "should resolve 'submit the form' via concepts"
     );
+    assert!(
+        !outcome.matches.is_empty(),
+        "a non-symbol phrase keeps its concept results, never collapses to empty"
+    );
     // Should NOT be the symbol tier.
     assert!(
         outcome.tier != Some(Tier::Symbol),
         "natural-language phrase should not use symbol fallback, got tier={:?}",
         outcome.tier
+    );
+    assert_ne!(
+        outcome.tier,
+        Some(Tier::Ident),
+        "natural-language phrase must not take the identifier tier"
     );
 }

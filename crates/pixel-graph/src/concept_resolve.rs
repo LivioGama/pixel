@@ -1013,6 +1013,7 @@ fn symbol_kind_to_concept(kind: SymbolKind) -> ConceptKind {
         SymbolKind::Class
         | SymbolKind::Struct
         | SymbolKind::Enum
+        | SymbolKind::Variant
         | SymbolKind::Trait
         | SymbolKind::Interface
         | SymbolKind::Module => ConceptKind::Component,
