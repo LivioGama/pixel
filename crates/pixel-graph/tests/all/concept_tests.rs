@@ -608,6 +608,7 @@ enum Command {
         assert_eq!(out.confidence, Confidence::Resolved, "{variant}");
         let top = &out.matches[0];
         assert_eq!(top.path, definition, "{variant}");
+        assert_eq!(top.raw, variant, "{variant}");
         assert_eq!(top.symbol_kind.as_deref(), Some("variant"), "{variant}");
     }
 }
