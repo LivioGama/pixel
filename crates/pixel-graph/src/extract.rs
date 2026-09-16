@@ -793,7 +793,16 @@ fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
         }
         "enum_item" => {
             if let Some(name) = field_text(w, node, "name") {
-                w.push_symbol(name.clone(), name, SymbolKind::Enum, node);
+                w.push_symbol(name.clone(), name.clone(), SymbolKind::Enum, node);
+                // Qualify each variant as `Enum::Variant` for the subtree.
+                w.stack.push(name);
+                pushed = true;
+            }
+        }
+        "enum_variant" => {
+            if let Some(name) = field_text(w, node, "name") {
+                let q = w.qualify(&name, "::");
+                w.push_symbol(name, q, SymbolKind::Variant, node);
             }
         }
         "trait_item" => {
@@ -1705,6 +1714,45 @@ mod tests {
         assert!(!names.contains(&"top_level_test"));
         assert!(!names.contains(&"nested_test"));
         assert!(!names.contains(&"tests"));
+    }
+
+    /// Enum variants are definitions the ident tier must find. Before
+    /// `EXTRACTOR_VERSION` 4, `walk_rust` emitted only the enum, so an exact
+    /// query for `SelfUpdate` fell through to string-concept noise.
+    #[test]
+    fn rust_enum_variants_are_symbols() {
+        let source = br#"
+enum Command {
+    SelfUpdate { force: bool },
+    RepoState,
+    DryRun,
+    ListErrors(usize),
+}
+"#;
+        let extraction = extract_file("src/main.rs", source).unwrap();
+        let variants: Vec<(&str, &str)> = extraction
+            .symbols
+            .iter()
+            .filter(|s| s.kind.as_str() == "variant")
+            .map(|s| (s.name.as_str(), s.qualified.as_str()))
+            .collect();
+        assert_eq!(
+            variants,
+            [
+                ("SelfUpdate", "Command::SelfUpdate"),
+                ("RepoState", "Command::RepoState"),
+                ("DryRun", "Command::DryRun"),
+                ("ListErrors", "Command::ListErrors"),
+            ],
+            "every enum variant is a symbol qualified by its enum"
+        );
+        assert!(
+            extraction
+                .symbols
+                .iter()
+                .any(|s| s.kind == SymbolKind::Enum && s.qualified == "Command"),
+            "the enum itself stays a symbol"
+        );
     }
 
     #[test]

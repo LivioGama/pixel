@@ -71,7 +71,8 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// 2: JSX component call edges; callback references only for functions the
 /// graph defines, member arguments only on a self receiver.
 /// 3: Rust trait-implementation methods are marked (`symbols.trait_impl`).
-pub const EXTRACTOR_VERSION: &str = "3";
+/// 4: Rust enum variants are symbols (`SymbolKind::Variant`).
+pub const EXTRACTOR_VERSION: &str = "4";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
