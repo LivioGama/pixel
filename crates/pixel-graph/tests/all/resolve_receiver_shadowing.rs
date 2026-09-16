@@ -1,5 +1,7 @@
-//! Integration test for T0 receiver shadowing: a qualified call from a file
-//! whose own same-name function is the callee must not resolve to itself.
+//! Integration tests for the receiver rules: a qualified call from a file
+//! whose own same-name function is the callee must not resolve to itself,
+//! and a receiver path that names exactly one candidate's type
+//! (`x::Store::open`) may resolve to that candidate instead of the shadow.
 
 use std::fs;
 use std::path::Path;
@@ -7,7 +9,7 @@ use std::path::Path;
 use pixel_git::GitRunner;
 use pixel_graph::build::build_graph;
 use pixel_graph::plan::{PlanQuery, run_plan_queries};
-use pixel_graph::{EdgeKind, GraphStore, Tier};
+use pixel_graph::{EdgeKind, GraphStore, SymbolKind, Tier};
 
 /// Three Rust files: `crates/bridge/src/lib.rs` has the wrapper `f` (which
 /// calls `graph::build::f()`) and `g` (which calls the wrapper unqualified);
@@ -102,4 +104,201 @@ fn qualified_call_no_longer_links_the_callers_own_same_name_symbol() {
             .all(|f| f.file != "crates/graph/src/build.rs"),
         "the shadowed `f` must not be listed as dead: {findings:?}"
     );
+}
+
+/// The receiver relaxation: when a file holds the graph's only definition of
+/// a name and it is an inherent method, a value receiver links to it at
+/// `Probable` (never `Exact`). Before this, `w.push_call()` in
+/// `crates/pixel-graph/src/extract.rs` was invisible to `pixel impact`.
+#[test]
+fn sole_inherent_method_with_a_value_receiver_becomes_a_probable_edge() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("walk.rs"),
+        "struct Walker { calls: Vec<String> }\n\
+         impl Walker {\n\
+             fn push_call(&mut self, name: &str) {\n\
+                 self.calls.push(name.to_string());\n\
+             }\n\
+         }\n\
+         fn walk(w: &mut Walker, name: &str) {\n\
+             w.push_call(name);\n\
+         }\n",
+    )
+    .unwrap();
+    let db = root.path().join(".pixel/graph.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    build_graph(root.path(), &db).unwrap();
+    let store = GraphStore::open(&db).unwrap();
+
+    let push_call = store
+        .symbols_by_name("push_call", 10)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.kind == SymbolKind::Method)
+        .expect("Walker::push_call is extracted");
+    let callers = store.edges_to(push_call.id, Some(EdgeKind::Calls)).unwrap();
+    assert_eq!(callers.len(), 1, "`w.push_call(name)` links: {callers:?}");
+    assert_eq!(
+        callers[0].tier,
+        Tier::Probable,
+        "the receiver's type is unknown: never Exact"
+    );
+    let walk = store
+        .symbols_by_name("walk", 10)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.file_id == push_call.file_id)
+        .expect("free `walk` is extracted");
+    assert_eq!(callers[0].src_id, walk.id);
+    // The row moved out of `unresolved_calls`, so the name's envelope is no
+    // longer marked as a lower bound.
+    assert!(
+        !store.envelope_for_name("push_call").unwrap().lower_bound,
+        "no unresolved `push_call` site remains"
+    );
+}
+
+/// Precision guard: a trait-impl method with the same name does not relax.
+/// `path.clone()` is `Clone::clone` for a std type the graph never sees, so
+/// the file's own `impl Clone` must not attract the edge.
+#[test]
+fn trait_impl_method_with_a_value_receiver_stays_unresolved() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("clone.rs"),
+        "struct Boxed;\n\
+         impl Clone for Boxed {\n\
+             fn clone(&self) -> Self { Boxed }\n\
+         }\n\
+         fn dup(path: &std::path::Path) -> std::path::PathBuf {\n\
+             path.clone()\n\
+         }\n",
+    )
+    .unwrap();
+    let db = root.path().join(".pixel/graph.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    build_graph(root.path(), &db).unwrap();
+    let store = GraphStore::open(&db).unwrap();
+
+    let clone = store
+        .symbols_by_name("clone", 10)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.kind == SymbolKind::Method)
+        .expect("Boxed::clone is extracted");
+    assert!(
+        store
+            .edges_to(clone.id, Some(EdgeKind::Calls))
+            .unwrap()
+            .is_empty(),
+        "`path.clone()` must not link to the trait impl"
+    );
+    let envelope = store.envelope_for_name("clone").unwrap();
+    assert!(envelope.lower_bound);
+    assert_eq!(envelope.unresolved_same_name, 1);
+}
+
+/// The receiver-type tiebreak, end to end: `crate::store::Store::open()` in a
+/// file that also defines `Other::open` links to `Store::open` as `Probable`,
+/// not to the caller's own same-name method (the old shadow veto said
+/// Unresolved) and not to the wrong one.
+#[test]
+fn receiver_path_type_selects_the_right_constructor() {
+    let root = tempfile::tempdir().unwrap();
+    for (path, body) in [
+        (
+            "crates/store/src/lib.rs",
+            "pub struct Store;\n\
+             impl Store {\n\
+                 pub fn open() -> Store { Store }\n\
+             }\n",
+        ),
+        (
+            "crates/bridge/src/lib.rs",
+            "pub struct Other;\n\
+             impl Other {\n\
+                 pub fn open() -> Other { Other }\n\
+             }\n\
+             pub fn connect() -> crate::store::Store {\n\
+                 crate::store::Store::open()\n\
+             }\n",
+        ),
+    ] {
+        let path = root.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+    let db = root.path().join(".pixel/graph.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    build_graph(root.path(), &db).unwrap();
+    let store = GraphStore::open(&db).unwrap();
+
+    let opens = store.symbols_by_name("open", 10).unwrap();
+    assert_eq!(opens.len(), 2, "both constructors extracted: {opens:?}");
+    let store_open = opens
+        .iter()
+        .find(|s| s.uid.contains("Store::open"))
+        .unwrap();
+    let other_open = opens
+        .iter()
+        .find(|s| s.uid.contains("Other::open"))
+        .unwrap();
+    let connect = store.symbols_by_name("connect", 10).unwrap().remove(0);
+
+    let edges = store.edges_from(connect.id, Some(EdgeKind::Calls)).unwrap();
+    assert_eq!(edges.len(), 1, "one call site, one edge: {edges:?}");
+    assert_eq!(edges[0].dst_id, store_open.id, "targets Store::open");
+    assert_eq!(edges[0].tier, Tier::Probable);
+    assert!(
+        edges.iter().all(|e| e.dst_id != other_open.id),
+        "must not link the caller's own Other::open"
+    );
+    assert!(!store.envelope_for_name("open").unwrap().lower_bound);
+}
+
+/// Precision guard for the same tiebreak: two crates with a same-named type
+/// make the path ambiguous, so the call stays unresolved instead of picking
+/// one of them.
+#[test]
+fn two_same_named_types_keep_the_path_call_unresolved() {
+    let root = tempfile::tempdir().unwrap();
+    for path in ["crates/a/src/lib.rs", "crates/b/src/lib.rs"] {
+        let path = root.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            "pub struct Store;\n\
+             impl Store {\n\
+                 pub fn open() -> Store { Store }\n\
+             }\n",
+        )
+        .unwrap();
+    }
+    let path = root.path().join("crates/bridge/src/lib.rs");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        "pub fn connect() -> u32 {\n\
+             a::Store::open();\n\
+             0\n\
+         }\n",
+    )
+    .unwrap();
+    let db = root.path().join(".pixel/graph.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    build_graph(root.path(), &db).unwrap();
+    let store = GraphStore::open(&db).unwrap();
+
+    let connect = store.symbols_by_name("connect", 10).unwrap().remove(0);
+    assert!(
+        store
+            .edges_from(connect.id, Some(EdgeKind::Calls))
+            .unwrap()
+            .is_empty(),
+        "ambiguous `Store::open` must not fan out to a guess"
+    );
+    let envelope = store.envelope_for_name("open").unwrap();
+    assert!(envelope.lower_bound);
+    assert_eq!(envelope.unresolved_same_name, 1);
 }
