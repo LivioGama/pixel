@@ -530,6 +530,109 @@ fn big_untracked_tree_keeps_json_answers_structured() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `repo-state` is the Phase-1 freshness answer: the tracked-clean file list
+/// is the bulk of it on a clean tree and no consumer reads it. The default
+/// answer keeps the exact counts, `--files` keeps restricting them, and
+/// `--include-clean` keeps the full (capped) form reachable.
+#[test]
+fn repo_state_should_hide_the_clean_list_unless_include_clean_is_passed() {
+    let dir = fixture("repo-state-compact");
+    // 2 tracked-clean files (caller.rs, .gitignore), 1 dirty (login.rs).
+    std::fs::write(
+        dir.join("src/login.rs"),
+        "pub fn login_user(name: &str) -> bool {\n    name.is_empty()\n}\n",
+    )
+    .unwrap();
+
+    let out = pixel(&dir, &["repo-state", ".", "--json"]);
+    assert!(out.status.success(), "{out:?}");
+    let doc = &parse_stdout_lines(&out, "repo-state compact")[0];
+    assert!(doc.get("clean").is_none(), "compact answer: {doc}");
+    assert!(doc.get("clean_list_cap").is_none(), "compact answer: {doc}");
+    assert!(
+        doc.get("clean_list_truncated").is_none(),
+        "compact answer: {doc}"
+    );
+    assert_eq!(doc["clean_count"], 2, "{doc}");
+    assert_eq!(doc["dirty_count"], 1, "{doc}");
+    assert!(
+        doc["dirty"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["path"] == "src/login.rs"),
+        "the dirty list stays: {doc}"
+    );
+
+    // `--include-clean` restores the list, the cap and the truncation flag.
+    let out = pixel(&dir, &["repo-state", ".", "--json", "--include-clean"]);
+    assert!(out.status.success(), "{out:?}");
+    let doc = &parse_stdout_lines(&out, "repo-state --include-clean")[0];
+    let clean = doc["clean"].as_array().unwrap();
+    assert_eq!(clean.len(), 2, "{doc}");
+    assert!(clean.iter().any(|p| p == "src/caller.rs"), "{doc}");
+    assert_eq!(doc["clean_count"], 2);
+    assert_eq!(doc["clean_list_cap"], 200);
+    assert_eq!(doc["clean_list_truncated"], false);
+
+    // `--files` restricts both lists and both counts; the compact form keeps
+    // the filtered `clean_count` without the list.
+    let out = pixel(
+        &dir,
+        &[
+            "repo-state",
+            ".",
+            "--json",
+            "--files",
+            "src/login.rs",
+            "--files",
+            "src/caller.rs",
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let doc = &parse_stdout_lines(&out, "repo-state --files")[0];
+    assert!(doc.get("clean").is_none(), "{doc}");
+    assert_eq!(doc["clean_count"], 1, "{doc}");
+    assert_eq!(doc["dirty_count"], 1, "{doc}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `CLEAN_LIST_CAP` bounds the opt-in list: 200 of 201 paths, the exact
+/// `clean_count`, and the truncation flag naming the cut.
+#[test]
+fn repo_state_should_cap_the_include_clean_list_at_200_paths() {
+    let dir = Scratch::for_test("pixel-json-contract", "repo-state-clean-cap");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    for i in 0..201 {
+        std::fs::write(
+            dir.join(format!("src/f{i}.rs")),
+            format!("pub fn f{i}() -> u32 {{ {i} }}\n"),
+        )
+        .unwrap();
+    }
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "201 files"]);
+
+    let out = pixel(&dir, &["repo-state", ".", "--json", "--include-clean"]);
+    assert!(out.status.success(), "{out:?}");
+    let doc = &parse_stdout_lines(&out, "repo-state clean cap")[0];
+    assert_eq!(doc["clean_count"], 201, "{doc}");
+    assert_eq!(doc["clean_list_cap"], 200);
+    assert_eq!(doc["clean_list_truncated"], true);
+    assert_eq!(doc["clean"].as_array().map(Vec::len), Some(200));
+
+    // The default answer stays compact on the same tree.
+    let out = pixel(&dir, &["repo-state", ".", "--json"]);
+    assert!(out.status.success(), "{out:?}");
+    let doc = &parse_stdout_lines(&out, "repo-state clean cap compact")[0];
+    assert!(doc.get("clean").is_none(), "{doc}");
+    assert_eq!(doc["clean_count"], 201, "{doc}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// The statusline shows `indexed/total` commits only when the history index
 /// knows about commits: a repository without any must not print `0/0`.
 #[test]

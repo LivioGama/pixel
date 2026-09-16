@@ -467,6 +467,10 @@ enum Command {
     // M2 — safe git mutation ops (pixel-ops)
     // -----------------------------------------------------------------
     /// Show repo state: HEAD, branch, dirty files, fingerprints.
+    ///
+    /// The answer is compact: the exact `dirty_count`/`clean_count` and the
+    /// dirty files. The tracked-clean file list (200 paths, the bulk of the
+    /// answer on a clean tree) needs `--include-clean`.
     #[command(alias = "inspect")]
     RepoState {
         #[arg(default_value = ".")]
@@ -474,6 +478,9 @@ enum Command {
         /// Restrict the snapshot to these repo-relative paths.
         #[arg(long = "files")]
         files: Vec<String>,
+        /// Include the capped tracked-clean file list (default: count only).
+        #[arg(long)]
+        include_clean: bool,
         #[arg(long)]
         json: bool,
     },
@@ -2185,6 +2192,24 @@ mod render_data_tests {
         compact_snapshot(&mut bare);
         assert_eq!(bare, json!({"index": {}}));
     }
+
+    #[test]
+    fn compact_repo_state_drops_the_clean_list_and_keeps_the_count() {
+        let mut d = json!({"root": "/repo", "head": "abc", "branch": "main",
+            "dirty": [], "dirty_count": 0,
+            "clean": ["a", "b"], "clean_count": 2,
+            "clean_list_truncated": false, "clean_list_cap": 200});
+        compact_repo_state(&mut d);
+        assert!(d.get("clean").is_none(), "{d}");
+        assert!(d.get("clean_list_truncated").is_none(), "{d}");
+        assert!(d.get("clean_list_cap").is_none(), "{d}");
+        assert_eq!(d["clean_count"], 2);
+        assert_eq!(d["head"], "abc");
+        // A non-object (never produced today): no-op, no panic.
+        let mut bare = json!([]);
+        compact_repo_state(&mut bare);
+        assert_eq!(bare, json!([]));
+    }
 }
 
 /// Shared graph-command epilogue: candidates protocol + build announcement.
@@ -3875,6 +3900,20 @@ fn compact_snapshot(data: &mut Value) {
     }
 }
 
+/// Drop the tracked-clean file list from a `repo-state` answer.
+///
+/// On a clean tree the list is the bulk of the answer (200 of 351 paths,
+/// ~7 KB measured on this repository) and no consumer reads it: `repo-state`
+/// answers "HEAD + branch + dirty" and `clean_count` is what says how clean
+/// the rest of the tree is. `--include-clean` asks for the full, capped list.
+fn compact_repo_state(data: &mut Value) {
+    if let Some(obj) = data.as_object_mut() {
+        obj.remove("clean");
+        obj.remove("clean_list_cap");
+        obj.remove("clean_list_truncated");
+    }
+}
+
 /// Prepare every local GitPixel prerequisite in one deterministic operation.
 ///
 /// The JSON answer is deliberately compact — index counters, graph counters,
@@ -4987,7 +5026,12 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         // -------------------------------------------------------------
         // M2 — safe git mutation ops (pixel-ops)
         // -------------------------------------------------------------
-        Command::RepoState { path, files, json } => {
+        Command::RepoState {
+            path,
+            files,
+            include_clean,
+            json,
+        } => {
             let root = discover_root(&path)?;
             let mut data = pixel_ops::inspect::inspect(&root)?;
             if !files.is_empty() {
@@ -5012,6 +5056,9 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                         .and_then(Value::as_array)
                         .map_or(0, Vec::len)
                 );
+            }
+            if !include_clean {
+                compact_repo_state(&mut data);
             }
             print_data(&data, json)
         }
