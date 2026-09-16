@@ -14,6 +14,43 @@ use crate::ActionEvent;
 pub const ESTIMATOR_VERSION: &str = "workflow-v1";
 pub const TIME_ESTIMATOR_VERSION: &str = "sequential-v1";
 pub const DEFAULT_ROUND_TRIP_MS: u64 = 2000;
+
+/// Why a meaningful native-workflow comparison is absent from a record.
+/// Recorded when the metrics are built rather than inferred at render time,
+/// so a live line and its replay state the same reason. `None` with no
+/// evidence means the record predates this field, never "a baseline exists".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComparisonGap {
+    /// `native_commands` has no policy entry for this command.
+    NoPolicy,
+    /// The operation failed before returning evidence.
+    OperationFailed,
+    /// The rendered output cap hid the evidence from the caller.
+    OutputTruncated,
+    /// Evidence traversal exceeded its depth limit.
+    EvidenceDepthCapped,
+    /// The evidence accumulator was not initialized, or its lock failed.
+    Uninitialized,
+    /// No command or file-read steps: the sequential baseline is undefined.
+    ZeroStep,
+}
+
+impl ComparisonGap {
+    /// The clause the live line renders after `unavailable: `. Exhaustive so a
+    /// new gap cannot render as a silent absence.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NoPolicy => "no native-workflow baseline is defined for this command",
+            Self::OperationFailed => "the operation failed before returning evidence",
+            Self::OutputTruncated => "the rendered output cap hid the evidence",
+            Self::EvidenceDepthCapped => "evidence traversal exceeded its depth limit",
+            Self::Uninitialized => "evidence collection was not initialized",
+            Self::ZeroStep => "no command or file-read steps; the sequential baseline is undefined",
+        }
+    }
+}
+
 static INVOCATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn invocation_id() -> String {
@@ -106,6 +143,11 @@ pub struct OperationMetrics {
     pub estimator_version: String,
     pub native_workflow_bytes: Option<u64>,
     pub evidence: Option<WorkflowEvidence>,
+    /// Why no native-workflow comparison exists. `None` when one does, or on
+    /// a record written before this field; absence of a reason is rendered as
+    /// unrecorded, never as an explained gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison_gap: Option<ComparisonGap>,
     /// Missing in older records; never backfill an unrecorded time assumption.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_estimate: Option<WorkflowTimeEstimate>,
@@ -125,6 +167,7 @@ impl OperationMetrics {
                 WorkflowTimeEstimate::from_evidence(evidence, duration_us, DEFAULT_ROUND_TRIP_MS)
             }),
             evidence,
+            comparison_gap: None,
         }
     }
 
@@ -134,6 +177,14 @@ impl OperationMetrics {
         self.time_estimate = self.evidence.as_ref().and_then(|evidence| {
             WorkflowTimeEstimate::from_evidence(evidence, self.duration_us, round_trip_ms)
         });
+        self
+    }
+
+    /// Record why this operation has no native-workflow comparison. The gap
+    /// is consulted only when the evidence (and so the baseline) is absent;
+    /// evidence wins at render time.
+    pub fn with_comparison_gap(mut self, gap: ComparisonGap) -> Self {
+        self.comparison_gap = Some(gap);
         self
     }
 
@@ -213,66 +264,68 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
     // Line 1: identity header.
     let header = format!("🟩 pixel {command} ❀ {duration_ms:.1}ms ❀ #{short_id}");
 
+    let partial_tag = if metrics.partial() { ", partial" } else { "" };
+    let unavailable = format!("unavailable: {}", comparison_gap_reason(metrics));
+
     // Keep the estimate readable in terminal UIs that render block characters
     // as low-contrast progress tracks. A negative estimate is overhead, not
     // negative savings, so never express it as a misleading percentage.
-    let time_section = metrics.saved_time_ms().and_then(|saved_ms| {
-            let native_time_ms = saved_ms + duration_ms;
-            let partial_tag = if metrics.partial() { ", partial" } else { "" };
-            if native_time_ms > 0.0 {
-                if saved_ms > 0.0 {
-                    let pct = (saved_ms / native_time_ms * 100.0).round() as i64;
-                    Some(format!(
-                        "{pct}% faster, {duration_ms:.1}ms against ~{native_time_ms:.0}ms estimated{partial_tag}"
-                    ))
-                } else if saved_ms < 0.0 {
-                    Some(format!(
-                        "+{:.1}ms overhead, {duration_ms:.1}ms against ~{native_time_ms:.0}ms estimated{partial_tag}",
-                        -saved_ms
-                    ))
-                } else {
-                    Some(format!(
-                        "{duration_ms:.1}ms against ~{native_time_ms:.0}ms estimated · no estimated time saving{partial_tag}"
-                    ))
-                }
+    let time_section = if let Some(saved_ms) = metrics.saved_time_ms() {
+        let native_time_ms = saved_ms + duration_ms;
+        if native_time_ms > 0.0 {
+            if saved_ms > 0.0 {
+                let pct = (saved_ms / native_time_ms * 100.0).round() as i64;
+                format!(
+                    "{pct}% faster, {duration_ms:.1}ms against ~{native_time_ms:.0}ms estimated{partial_tag}"
+                )
+            } else if saved_ms < 0.0 {
+                format!(
+                    "+{:.1}ms overhead, {duration_ms:.1}ms against ~{native_time_ms:.0}ms estimated{partial_tag}",
+                    -saved_ms
+                )
             } else {
-                None
+                format!(
+                    "{duration_ms:.1}ms against ~{native_time_ms:.0}ms estimated · no estimated time saving{partial_tag}"
+                )
             }
-        });
+        } else {
+            // A one-step baseline (or a zero round-trip assumption) saves no
+            // round trip: say so instead of omitting the row.
+            format!("no estimated time saving (baseline has no saved round trip){partial_tag}")
+        }
+    } else {
+        unavailable.clone()
+    };
 
-    let token_section = metrics.native_workflow_bytes.and_then(|native_bytes| {
+    let token_section = if let Some(native_bytes) = metrics.native_workflow_bytes {
         let native_tok = native_bytes as f64 / 4.0;
-        let partial_tag = if metrics.partial() { ", partial" } else { "" };
         if native_tok > 0.0 {
             let saved_tok = native_tok - payload_tok;
             if saved_tok > 0.0 {
                 let pct = (saved_tok / native_tok * 100.0).round() as i64;
-                Some(format!(
-                    "estimated LLM context saved: ~{saved_tok:.0} tok ({pct}%){partial_tag}"
-                ))
+                format!("estimated LLM context saved: ~{saved_tok:.0} tok ({pct}%){partial_tag}")
             } else {
-                None
+                // The comparison exists, it is just not a saving: state the
+                // rendered volume against the baseline instead of dropping it.
+                format!(
+                    "no estimated context saving (rendered output meets the ~{native_tok:.0} tok baseline){partial_tag}"
+                )
             }
         } else {
-            None
+            format!("no estimated context saving (baseline is zero bytes){partial_tag}")
         }
-    });
+    } else {
+        unavailable
+    };
 
-    let mut rows = Vec::new();
-    if let Some(time_section) = time_section {
-        rows.push(format!("  ├─ ⏱ {time_section}"));
-    }
-    if let Some(token_section) = token_section {
-        rows.push(format!("  ├─ § {token_section}"));
-    }
+    let rows = [
+        format!("  ├─ ⏱ {time_section}"),
+        format!("  ├─ § {token_section}"),
+    ];
     let stem = "  │";
     let separator = "  └────────────────────────────────────────────────────────";
 
-    let mut line = if rows.is_empty() {
-        header
-    } else {
-        format!("{header}\n{stem}\n{}\n{stem}\n{separator}", rows.join("\n"))
-    };
+    let mut line = format!("{header}\n{stem}\n{}\n{stem}\n{separator}", rows.join("\n"));
     // Padding resolves the rare digit-boundary fixed-point oscillation without
     // lying about emitted overhead. Bound it when replaying malformed records.
     let padding = metrics
@@ -281,6 +334,26 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
         .min(64);
     line.extend(std::iter::repeat_n(' ', padding as usize));
     Some(line)
+}
+
+/// The clause after `unavailable: ` for a record with no comparison. The gap
+/// recorded at construction wins; a baseline that observed no command or
+/// file-read steps is the zero-step shape; a record older than the gap field
+/// says the reason was not recorded instead of presenting absence as
+/// unexplained.
+fn comparison_gap_reason(metrics: &OperationMetrics) -> &'static str {
+    if let Some(gap) = metrics.comparison_gap {
+        return gap.reason();
+    }
+    if metrics.evidence.as_ref().is_some_and(|evidence| {
+        evidence
+            .native_commands
+            .saturating_add(evidence.distinct_files)
+            == 0
+    }) {
+        return ComparisonGap::ZeroStep.reason();
+    }
+    "reason not recorded (record predates gap tracking)"
 }
 
 /// Summarize only finalized operation records. Duplicate invocation IDs count
@@ -864,5 +937,214 @@ mod tests {
         let empty = summarize_metrics(&[]);
         assert_eq!(empty["record_count"], 0);
         assert_eq!(empty["versions"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn every_comparison_gap_reason_is_distinct_and_states_its_cause() {
+        let gaps = [
+            ComparisonGap::NoPolicy,
+            ComparisonGap::OperationFailed,
+            ComparisonGap::OutputTruncated,
+            ComparisonGap::EvidenceDepthCapped,
+            ComparisonGap::Uninitialized,
+            ComparisonGap::ZeroStep,
+        ];
+        assert_eq!(
+            gaps.map(ComparisonGap::reason),
+            [
+                "no native-workflow baseline is defined for this command",
+                "the operation failed before returning evidence",
+                "the rendered output cap hid the evidence",
+                "evidence traversal exceeded its depth limit",
+                "evidence collection was not initialized",
+                "no command or file-read steps; the sequential baseline is undefined",
+            ]
+        );
+        let unique: std::collections::HashSet<&str> = gaps.iter().map(|gap| gap.reason()).collect();
+        assert_eq!(unique.len(), gaps.len());
+    }
+
+    #[test]
+    fn no_policy_gap_renders_both_unavailable_rows_and_no_saving() {
+        let metrics = OperationMetrics::new(Duration::from_millis(3), 100, None)
+            .with_comparison_gap(ComparisonGap::NoPolicy);
+        let event = ActionEvent::new("status", ".").with_metrics(metrics);
+        let line = format_metrics_line(&event).unwrap();
+        assert!(
+            line.contains(
+                "  ├─ ⏱ unavailable: no native-workflow baseline is defined for this command"
+            ),
+            "{line}"
+        );
+        assert!(
+            line.contains(
+                "  ├─ § unavailable: no native-workflow baseline is defined for this command"
+            ),
+            "{line}"
+        );
+        assert!(!line.contains("faster"), "{line}");
+        assert!(!line.contains("context saved"), "{line}");
+    }
+
+    #[test]
+    fn zero_step_evidence_is_unavailable_never_a_fabricated_saving() {
+        let metrics = OperationMetrics::new(
+            Duration::from_millis(3),
+            100,
+            Some(WorkflowEvidence::default()),
+        );
+        let event = ActionEvent::new("zero-step", "x").with_metrics(metrics);
+        let line = format_metrics_line(&event).unwrap();
+        assert!(
+            line.contains(
+                "  ├─ ⏱ unavailable: no command or file-read steps; the sequential baseline is undefined"
+            ),
+            "{line}"
+        );
+        assert!(
+            line.contains("  ├─ § no estimated context saving (baseline is zero bytes)"),
+            "{line}"
+        );
+        assert!(!line.contains("faster"), "{line}");
+        assert!(!line.contains("context saved"), "{line}");
+    }
+
+    #[test]
+    fn one_step_and_negative_token_baselines_state_why_they_are_not_savings() {
+        let metrics = OperationMetrics::new(
+            Duration::from_millis(12),
+            4096,
+            Some(WorkflowEvidence {
+                native_commands: 1,
+                ..Default::default()
+            }),
+        );
+        let event = ActionEvent::new("what-changed", ".").with_metrics(metrics);
+        let line = format_metrics_line(&event).unwrap();
+        assert!(
+            line.contains("  ├─ ⏱ no estimated time saving (baseline has no saved round trip)"),
+            "{line}"
+        );
+        assert!(
+            line.contains(
+                "  ├─ § no estimated context saving (rendered output meets the ~256 tok baseline)"
+            ),
+            "{line}"
+        );
+        assert!(!line.contains("context saved:"), "{line}");
+    }
+
+    #[test]
+    fn partial_coverage_is_retained_on_non_positive_rows() {
+        let metrics = OperationMetrics::new(
+            Duration::from_millis(12),
+            4096,
+            Some(WorkflowEvidence {
+                native_commands: 1,
+                partial: true,
+                ..Default::default()
+            }),
+        );
+        let event = ActionEvent::new("what-changed", ".").with_metrics(metrics);
+        let line = format_metrics_line(&event).unwrap();
+        assert!(
+            line.contains("no estimated time saving (baseline has no saved round trip), partial"),
+            "{line}"
+        );
+        assert!(
+            line.contains(
+                "no estimated context saving (rendered output meets the ~256 tok baseline), partial"
+            ),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn records_without_a_gap_field_say_the_reason_was_not_recorded() {
+        let old: OperationMetrics = serde_json::from_str(
+            r#"{"duration_us":3000,"output_bytes":100,"reporting_bytes":0,"estimator_version":"workflow-v1","native_workflow_bytes":null,"evidence":null}"#,
+        )
+        .unwrap();
+        assert!(old.comparison_gap.is_none());
+        let event = ActionEvent::new("legacy", "x").with_metrics(old);
+        let line = format_metrics_line(&event).unwrap();
+        assert!(
+            line.contains("unavailable: reason not recorded (record predates gap tracking)"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn saving_overhead_and_zero_rows_pin_their_exact_estimates() {
+        let line_for = |evidence: WorkflowEvidence, duration_ms: u64, output_bytes: u64| {
+            let event = ActionEvent::new("find-code", ".").with_metrics(OperationMetrics::new(
+                Duration::from_millis(duration_ms),
+                output_bytes,
+                Some(evidence),
+            ));
+            format_metrics_line(&event).unwrap()
+        };
+        let saving = line_for(
+            WorkflowEvidence {
+                distinct_files: 1,
+                native_commands: 1,
+                ..Default::default()
+            },
+            100,
+            0,
+        );
+        assert!(
+            saving.contains("  ├─ ⏱ 95% faster, 100.0ms against ~2000ms estimated"),
+            "{saving}"
+        );
+        assert!(
+            saving.contains("  ├─ § estimated LLM context saved: ~1280 tok (100%)"),
+            "{saving}"
+        );
+        let overhead = line_for(
+            WorkflowEvidence {
+                native_commands: 2,
+                ..Default::default()
+            },
+            5000,
+            0,
+        );
+        assert!(
+            overhead.contains("  ├─ ⏱ +3000.0ms overhead, 5000.0ms against ~2000ms estimated"),
+            "{overhead}"
+        );
+        let zero = line_for(
+            WorkflowEvidence {
+                native_commands: 2,
+                ..Default::default()
+            },
+            2000,
+            2048,
+        );
+        assert!(
+            zero.contains("  ├─ ⏱ 2000.0ms against ~2000ms estimated · no estimated time saving"),
+            "{zero}"
+        );
+        assert!(
+            zero.contains(
+                "  ├─ § no estimated context saving (rendered output meets the ~512 tok baseline)"
+            ),
+            "{zero}"
+        );
+    }
+
+    #[test]
+    fn comparison_gap_round_trips_and_absent_field_stays_unrecorded() {
+        let metrics = OperationMetrics::new(Duration::ZERO, 0, None)
+            .with_comparison_gap(ComparisonGap::OperationFailed);
+        let value = serde_json::to_value(&metrics).unwrap();
+        assert_eq!(value["comparison_gap"], "operation_failed");
+        let decoded: OperationMetrics = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.comparison_gap, Some(ComparisonGap::OperationFailed));
+        let absent: OperationMetrics = serde_json::from_str(
+            r#"{"duration_us":1,"output_bytes":0,"reporting_bytes":0,"estimator_version":"workflow-v1","native_workflow_bytes":null,"evidence":null}"#,
+        )
+        .unwrap();
+        assert_eq!(absent.comparison_gap, None);
     }
 }

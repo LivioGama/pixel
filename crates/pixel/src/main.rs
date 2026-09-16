@@ -4100,11 +4100,14 @@ fn run() -> Result<(), String> {
     let mut event = pixel_actionlog::ActionEvent::new(&command_label, argv[1..].join(" "))
         .with_result(&result, elapsed);
     if !protected {
-        let mut metrics = pixel_actionlog::OperationMetrics::new(
-            elapsed,
-            operation_metrics::output_bytes(),
-            operation_metrics::evidence(&command_label, result.is_ok()),
-        );
+        let output_bytes = operation_metrics::output_bytes();
+        let mut metrics = match operation_metrics::evidence(&command_label, result.is_ok()) {
+            Ok(evidence) => {
+                pixel_actionlog::OperationMetrics::new(elapsed, output_bytes, Some(evidence))
+            }
+            Err(gap) => pixel_actionlog::OperationMetrics::new(elapsed, output_bytes, None)
+                .with_comparison_gap(gap),
+        };
         // Optional policy input, never a measured LLM latency. Invalid or
         // non-Unicode values retain the versioned default without affecting
         // command success, diagnostics, or protected streams.
