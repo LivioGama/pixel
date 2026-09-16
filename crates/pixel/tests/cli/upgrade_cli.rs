@@ -28,10 +28,14 @@ impl Fixture {
             .join(pixel_daemon::socket_path(root).file_name().unwrap())
     }
 
+    /// The default upgrade: `--install-path` writes to the fixture's own
+    /// `installed/pixel`, nothing else is set.
     fn upgrade(&self) -> (Output, bool) {
         self.upgrade_with(&["--install-path"], &[self.0.join("installed/pixel")], None)
     }
 
+    /// Upgrade with extra CLI arguments, extra target paths and an optional
+    /// PATH override; no extra environment variables.
     fn upgrade_with(
         &self,
         extra: &[&str],
@@ -128,6 +132,8 @@ impl Drop for Fixture {
     }
 }
 
+/// Upgrading one repository stops only its own daemon: an unrelated
+/// repository's listener must never see a connection.
 #[test]
 fn upgrade_shutdown_is_scoped_to_selected_repository() {
     let fixture = Fixture::new("scoped");
@@ -164,6 +170,9 @@ fn upgrade_shutdown_is_scoped_to_selected_repository() {
     );
 }
 
+/// A daemon that accepts the request and then withholds the reply must not
+/// hold the upgrade: the client gives up on its own 1.5 s budget, reports
+/// the timeout, and never claims completion.
 #[test]
 fn upgrade_reports_unresponsive_daemon_without_claiming_completion() {
     let fixture = Fixture::new("timeout");
@@ -178,10 +187,20 @@ fn upgrade_reports_unresponsive_daemon_without_claiming_completion() {
         reader.read_line(&mut line).unwrap();
         // Real socket boundary: receive the request, then withhold a reply.
         // This read returns `Ok(0)` only when the client drops its end, i.e.
-        // when its own 1.5 s budget expired. A client that instead waits for
-        // the daemon to answer blocks here until the 8 s read timeout, and
-        // the boolean below says so. Measuring from the request rather than
-        // from spawn keeps the large child's startup out of the measurement.
+        // when its own 1.5 s budget expired; a client that instead waits for
+        // the daemon to answer times out here, and the boolean below says so.
+        // Measuring from the request rather than from spawn keeps the large
+        // child's startup out of the measurement.
+        //
+        // The 8 s above is sized for startup, before the request arrives; the
+        // give-up check gets its own deadline just above the client's budget
+        // (1.5 s plus 1 s of scheduling slack on a loaded runner). Waiting the
+        // full 8 s would accept a client that stayed connected for seconds as
+        // having given up on its own.
+        reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_millis(2500)))
+            .unwrap();
         let mut extra = String::new();
         let gave_up = matches!(reader.read_line(&mut extra), Ok(0));
         (line, gave_up)
@@ -192,7 +211,7 @@ fn upgrade_reports_unresponsive_daemon_without_claiming_completion() {
     assert!(!timed_out, "upgrade waited indefinitely: {output:?}");
     assert!(
         gave_up,
-        "upgrade kept waiting for the daemon instead of giving up on its own: {output:?}"
+        "upgrade did not drop the daemon connection within its own budget: {output:?}"
     );
     assert!(
         !output.status.success(),
