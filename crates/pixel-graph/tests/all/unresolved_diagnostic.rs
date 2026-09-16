@@ -218,7 +218,8 @@ fn unresolved_breakdown() {
             .prepare(
                 "SELECT u.name, u.file_id, f.path, u.site_line, u.receiver, u.kind, u.enclosing_symbol_id
                    FROM unresolved_calls u
-                   JOIN files f ON f.id = u.file_id",
+                   JOIN files f ON f.id = u.file_id
+                  ORDER BY f.path, u.site_line, u.name, u.id",
             )
             .expect("prepare");
         let rows = stmt

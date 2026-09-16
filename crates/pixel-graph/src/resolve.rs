@@ -16,11 +16,13 @@
 //! Two receiver-shaped tiebreaks extend the receiver rules, both capped at
 //! `Probable`. A receiver path whose last segment names the type of exactly
 //! one candidate (`pixel_git::GitRunner::new` ↔ `GitRunner::new`) links to
-//! it where the name tiers would otherwise stay unresolved or shadow-vetoed.
-//! And when every callable definition of the name sits in the caller's own
-//! file, the best one is an inherent method, and the receiver is a
-//! value/path (`w.push_call()`, `idx.decide()`), that sole candidate is
-//! returned — no other definition exists to shadow it.
+//! it where the name tiers would otherwise stay unresolved or shadow-vetoed;
+//! the receiver names the implementing type, so a trait-impl candidate counts
+//! here (`Options::default()`). And when the graph holds exactly one callable
+//! definition of the name, it sits in the caller's own file as an inherent
+//! method, and the receiver is a value/path (`w.push_call()`, `idx.decide()`),
+//! that sole candidate is returned — no other definition exists to shadow it,
+//! and a value receiver never names a trait implementor.
 //!
 //! A real receiver whose callee name is also defined in the caller's own file
 //! is otherwise `Unresolved`: T0 would link the call
@@ -236,21 +238,24 @@ impl ResolveIndex {
     ///   segment is the type of exactly one same-name candidate
     ///   (`pixel_git::GitRunner::new` → `GitRunner::new`). That candidate is
     ///   returned as `Probable` — the type identity is still a guess, but a
-    ///   better-evidenced one than the caller's own same-name symbol. Outside
-    ///   the shadow case it only fires where the name tiers refused
-    ///   (`Unresolved`), so an import-resolved `Exact` target is never
+    ///   better-evidenced one than the caller's own same-name symbol. A
+    ///   trait-impl candidate counts here: the receiver names the implementing
+    ///   type, so `Options::default()` can only call `Options`'s `Default`
+    ///   impl. Outside the shadow case it only fires where the name tiers
+    ///   refused (`Unresolved`), so an import-resolved `Exact` target is never
     ///   second-guessed.
-    /// - `sole-local-method`: when every callable definition of `name` in the
-    ///   graph sits in the caller's own file, the best of them is an inherent
-    ///   method, and the receiver text is a value/path rather than a chained
-    ///   expression, there is no competing definition T0 could shadow and no
-    ///   trait implementor the graph cannot see. The call gets that sole
-    ///   candidate as `Probable` — never `Exact`.
+    /// - `sole-local-method`: when the graph holds exactly one callable
+    ///   definition of `name`, it sits in the caller's own file, it is an
+    ///   inherent method, and the receiver text is a value/path rather than a
+    ///   chained expression, there is no competing definition T0 could shadow
+    ///   and no trait implementor the graph cannot see. The call gets that
+    ///   sole candidate as `Probable` — never `Exact`.
     ///
-    /// A same-file free function (`path.exists()`), a trait-impl method
-    /// (`x.clone()` next to `Box::clone`), a chained receiver
-    /// (`words.iter().count()`), and any name with a definition in another
-    /// file keep the shadow veto.
+    /// A same-file free function (`path.exists()`), a trait-impl method on a
+    /// value receiver (`x.clone()` next to `Box::clone`), a chained receiver
+    /// (`words.iter().count()`), two same-name methods in one file
+    /// (`A::walk` beside `B::walk`), and any name with a definition in
+    /// another file keep the shadow veto.
     pub fn decide(&self, caller_file_id: i64, name: &str, receiver: Option<&str>) -> Decision {
         if has_real_receiver(receiver) && self.defines_in_file(caller_file_id, name) {
             if let Some(r) = receiver
@@ -260,7 +265,7 @@ impl ResolveIndex {
             }
             if let Some(r) = receiver
                 && is_value_receiver(r)
-                && let Some(id) = self.sole_inherent_method_in(caller_file_id, name)
+                && let Some(id) = self.sole_inherent_method(name)
             {
                 return Decision::Probable(id);
             }
@@ -289,9 +294,13 @@ impl ResolveIndex {
 
     /// The sole callable candidate of `name` whose qualified name starts with
     /// the receiver path's last segment (`pixel_git::GitRunner` + `new` →
-    /// `GitRunner::new`). More than one match — two crates with a same-named
-    /// type — is ambiguous and returns `None`, as does a receiver that is not
-    /// a plain value/path (`get_store().open()`).
+    /// `GitRunner::new`). The receiver names the implementing type, so a
+    /// trait-impl candidate matches too: `Options::default()` can only call
+    /// `Options`'s `Default` impl, unlike `opts.default()`, which
+    /// `sole_inherent_method_in` refuses. More than one matching candidate —
+    /// the same type name in two files, or an inherent method beside a
+    /// trait-impl one — is ambiguous and returns `None`, as does a receiver
+    /// that is not a plain value/path (`get_store().open()`).
     fn qualified_match(&self, receiver: &str, name: &str) -> Option<i64> {
         if !is_value_receiver(receiver) {
             return None;
@@ -313,23 +322,19 @@ impl ResolveIndex {
         hit
     }
 
-    /// The symbol id of the sole callable definition of `name` when every
-    /// candidate lives in `caller_file_id` and the best of them is an
-    /// inherent method. `None` before that — a competing file, a free
-    /// function, or a trait-impl method all mean the receiver relaxation in
-    /// `decide` must not fire.
-    fn sole_inherent_method_in(&self, caller_file_id: i64, name: &str) -> Option<i64> {
-        let cands = self.by_name.get(name)?;
-        if cands
-            .iter()
-            .any(|c| c.file_id != caller_file_id || c.trait_impl)
-        {
+    /// The symbol id of the graph's sole callable definition of `name`, when
+    /// it is an inherent method. `None` when the name has no definition, or
+    /// when the one definition is a trait-impl method or a free function.
+    /// `decide` only calls this under the shadow veto — the name is already
+    /// known to be defined in the caller's own file — so the sole definition
+    /// is that file's. Two definitions (`A::walk` beside `B::walk`, a
+    /// competing file) never reach the single-candidate slice.
+    fn sole_inherent_method(&self, name: &str) -> Option<i64> {
+        let [candidate] = self.by_name.get(name)?.as_slice() else {
             return None;
-        }
-        let best = cands
-            .iter()
-            .min_by_key(|c| (kind_priority(c.kind), c.start_line, c.symbol_id))?;
-        (best.kind == SymbolKind::Method).then_some(best.symbol_id)
+        };
+        (!candidate.trait_impl && candidate.kind == SymbolKind::Method)
+            .then_some(candidate.symbol_id)
     }
 
     /// True iff `name` has a callable definition in `file_id` — the T0 case
@@ -831,18 +836,15 @@ mod tests {
     }
 
     #[test]
-    fn sole_method_picks_the_best_candidate_not_the_last_inserted() {
+    fn two_same_named_methods_in_one_file_keep_the_shadow_veto() {
         let (store, file) = local_only();
-        // Insert the later line first: `best` must order by line, not by
-        // insertion order.
+        // `A::walk` and `B::walk` are two candidates for an unknown receiver:
+        // either could be the callee, so neither is picked.
         let late = insert_at(&store, file, "walk", SymbolKind::Method, 9, false);
         let early = insert_at(&store, file, "walk", SymbolKind::Method, 4, false);
         assert_ne!(early, late);
         let idx = ResolveIndex::build(&store).unwrap();
-        assert_eq!(
-            idx.decide(file, "walk", Some("self_walker")),
-            Decision::Probable(early)
-        );
+        assert_eq!(idx.decide(file, "walk", Some("w")), Decision::Unresolved);
     }
 
     #[test]
@@ -954,6 +956,13 @@ mod tests {
             .unwrap()
     }
 
+    /// `insert_named` for a method declared in a trait impl.
+    fn insert_trait_named(store: &GraphStore, file_id: i64, ty: &str, name: &str) -> i64 {
+        let id = insert_named(store, file_id, ty, name);
+        store.mark_trait_impl(id).unwrap();
+        id
+    }
+
     #[test]
     fn receiver_path_type_matches_the_unique_qualified_candidate() {
         let (store, local, _remote, other_open, store_open) = two_opens();
@@ -975,6 +984,24 @@ mod tests {
         // `Other::open`, never guessed at the other one.
         assert_eq!(idx.decide(local, "open", Some("o")), Decision::Unresolved);
         assert_ne!(other_open, store_open);
+    }
+
+    #[test]
+    fn a_type_qualified_trait_method_links_to_the_implementor() {
+        let (store, file) = local_only();
+        let default = insert_trait_named(&store, file, "Options", "default");
+        let idx = ResolveIndex::build(&store).unwrap();
+        // `Options::default()` names the implementing type, so the trait impl
+        // is the only possible callee — unlike `opts.default()`, where the
+        // receiver's type (and therefore the implementor) is unknown.
+        assert_eq!(
+            idx.decide(file, "default", Some("Options")),
+            Decision::Probable(default)
+        );
+        assert_eq!(
+            idx.decide(file, "default", Some("opts")),
+            Decision::Unresolved
+        );
     }
 
     #[test]
