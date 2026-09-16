@@ -1055,6 +1055,9 @@ impl Service {
         let build_info = ensured.ok().flatten();
 
         let all_paths = self.index.paths();
+        // S6: explicit file paths named in the task, matched against the
+        // live tree before any lexical probe runs.
+        let path_hits = engine::path_rank(&all_paths, &query.path_tokens);
 
         // S3: per-keyword content match counts (capped probes keep this ms-scale).
         let mut content_hits: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
@@ -1181,6 +1184,7 @@ impl Service {
                 all_paths,
                 content_hits,
                 symbol_hits,
+                path_hits,
                 graph_neighbors,
                 cluster_neighbors,
                 graph_available,
@@ -4924,6 +4928,7 @@ mod tests {
             task: "t".to_string(),
             keywords: Vec::new(),
             exact_tokens: Vec::new(),
+            path_tokens: Vec::new(),
             targets,
             envelope,
             closed_world: "false".to_string(),

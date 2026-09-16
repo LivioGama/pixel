@@ -16,6 +16,7 @@ mod release_check_cli;
 mod rename_cli;
 mod renamed_commands;
 mod rescue_cli;
+mod scope_task_precision;
 mod search_compat_cli;
 mod support;
 mod targets_cli;

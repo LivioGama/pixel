@@ -116,3 +116,98 @@ fn targets_round_trip_manifest_and_clear() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The session example: "de-flake ... test in upgrade_cli.rs". The named
+/// test file must LEAD P0 even though `daemon`, `test` and `cli` match half
+/// the tree. The path signal boosts the named file; it must not be diluted
+/// by the generic tokens, and it must not demote the lexical targets either
+/// (they stay P1 — still visible, no longer primary).
+#[test]
+fn named_test_file_leads_p0_over_generic_token_matches() {
+    let dir = Scratch::for_test("gpx-targets-named-path", "upgrade");
+    let files: &[(&str, &str)] = &[
+        (
+            "crates/pixel/tests/cli/upgrade_cli.rs",
+            "fn upgrade_reports_unresponsive_daemon_without_claiming_completion() {\n    let _ = 1;\n}\n",
+        ),
+        (
+            "crates/pixel/tests/cli/support.rs",
+            "pub fn fake_recall_daemon() {}\npub fn assert_no_daemon() {}\n",
+        ),
+        (
+            "crates/pixel/tests/cli/main.rs",
+            "mod upgrade_cli;\nmod support;\n",
+        ),
+        (
+            "crates/pixel-daemon/src/daemon.rs",
+            "pub fn try_daemon_inner() {\n    let timeout_ms = 1500;\n}\n",
+        ),
+        (
+            "crates/pixel-facts/tests/all/facts_integration.rs",
+            "pub const TEST_WALL_CLOCK: u64 = 1;\n",
+        ),
+        (
+            "crates/pixel/src/main.rs",
+            "pub fn cli_daemon_command() {}\n",
+        ),
+    ];
+    for &(path, content) in files {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, content).unwrap();
+    }
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "fixture"]);
+
+    let out = gitpixel(
+        &dir,
+        &[
+            "scope-task",
+            "de-flake upgrade_reports_unresponsive_daemon_without_claiming_completion test in upgrade_cli.rs",
+            ".",
+            "--json",
+            "--no-manifest",
+        ],
+    );
+    assert!(out.status.success(), "scope-task failed: {out:?}");
+    let data: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // The path is lifted out of the keyword bag and reported as its own
+    // evidence — the token list and the reason both name it. This is what
+    // the baseline (which turned `upgrade_cli.rs` into the keyword `rs`)
+    // could not answer.
+    assert_eq!(
+        data["path_tokens"],
+        serde_json::json!(["upgrade_cli.rs"]),
+        "the named path must be lifted out of the keywords: {data}"
+    );
+    let targets = data["targets"].as_array().unwrap();
+    let named = targets
+        .iter()
+        .find(|t| t["path"] == "crates/pixel/tests/cli/upgrade_cli.rs")
+        .expect("the named test file must be a target");
+    assert!(
+        named["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "path match: upgrade_cli.rs"),
+        "the path must be its own evidence: {named}"
+    );
+    let p0: Vec<&str> = targets
+        .iter()
+        .filter(|t| t["tier"] == "P0")
+        .filter_map(|t| t["path"].as_str())
+        .collect();
+    assert!(
+        p0.contains(&"crates/pixel/tests/cli/upgrade_cli.rs"),
+        "P0 must contain the named test file: {p0:?}"
+    );
+    assert_eq!(
+        p0.first().copied(),
+        Some("crates/pixel/tests/cli/upgrade_cli.rs"),
+        "the named test file must lead P0: {p0:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

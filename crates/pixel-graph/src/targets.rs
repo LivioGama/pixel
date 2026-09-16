@@ -18,7 +18,10 @@ pub struct SymbolHit {
     pub symbols: Vec<(SymbolRow, String)>,
     /// Distinct task keywords matched anywhere in this file's symbol names.
     pub distinct_keywords: usize,
-    /// True when an exact token (backticked identifier) equals a symbol name.
+    /// True when an exact token (backticked identifier) equals the name of a
+    /// symbol that defines code. An external `mod foo;` names a file, so it
+    /// does not count: the declaring file is not where the module's code is.
+    /// An inline `mod foo { … }` defines code here, so it does count.
     pub exact_name_hit: bool,
 }
 
@@ -49,7 +52,7 @@ pub fn symbol_hits(
 
     let mut stmt = store.conn().prepare(
         "SELECT s.id, s.uid, s.file_id, s.name, s.qualified, s.kind,
-                s.start_line, s.end_line, s.sig, f.path
+                s.start_line, s.end_line, s.sig, f.path, s.module_decl
          FROM symbols s JOIN files f ON f.id = s.file_id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -66,14 +69,20 @@ pub fn symbol_hits(
                 sig: r.get(8)?,
             },
             r.get::<_, String>(9)?,
+            r.get::<_, bool>(10)?,
         ))
     })?;
 
     let mut by_path: BTreeMap<String, Acc> = BTreeMap::new();
 
     for row in rows {
-        let (sym, path) = row?;
-        let is_exact = exact.contains(sym.name.as_str());
+        let (sym, path, module_decl) = row?;
+        // An external module declaration (`mod foo;`) names a file rather
+        // than defining what is in it: an exact token matching it must not
+        // grant the declaring file the exact-name promotion. An inline
+        // `mod foo { … }` defines code here and keeps the promotion. Either
+        // form still counts as a plain keyword symbol hit below.
+        let is_exact = !module_decl && exact.contains(sym.name.as_str());
         let words = split_ident_words(&sym.name);
         let matched: Vec<&String> = words.iter().filter(|w| kw.contains(w.as_str())).collect();
         if matched.is_empty() && !is_exact {
@@ -355,6 +364,57 @@ mod tests {
         assert!(hits[0].exact_name_hit);
         assert_eq!(hits[0].distinct_keywords, 2);
         assert_eq!(hits[0].symbols.len(), 2);
+    }
+
+    #[test]
+    fn symbol_hits_exact_matches_inline_modules_but_not_external_declarations() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let main = store.replace_file("src/main.rs", "oid", "rs").unwrap();
+        let lib = store.replace_file("src/lib.rs", "oid", "rs").unwrap();
+        // `mod search_compat;` in main.rs names another file …
+        let decl = store
+            .insert_symbol(
+                main,
+                "src/main.rs#search_compat#module",
+                "search_compat",
+                "search_compat",
+                SymbolKind::Module,
+                1,
+                1,
+                "mod search_compat;",
+            )
+            .unwrap();
+        store.mark_module_decl(decl).unwrap();
+        // … while `mod search_compat { … }` in lib.rs defines code there.
+        store
+            .insert_symbol(
+                lib,
+                "src/lib.rs#search_compat#module",
+                "search_compat",
+                "search_compat",
+                SymbolKind::Module,
+                1,
+                10,
+                "mod search_compat {",
+            )
+            .unwrap();
+
+        let hits = symbol_hits(
+            &store,
+            &["search".into(), "compat".into()],
+            &["search_compat".into()],
+        )
+        .unwrap();
+        let declaring_file = hits.iter().find(|h| h.path == "src/main.rs").unwrap();
+        assert!(
+            !declaring_file.exact_name_hit,
+            "an external `mod` declaration must not exact-match: {declaring_file:?}"
+        );
+        let inline_file = hits.iter().find(|h| h.path == "src/lib.rs").unwrap();
+        assert!(
+            inline_file.exact_name_hit,
+            "an inline module defines the code an exact probe names: {inline_file:?}"
+        );
     }
 
     #[test]

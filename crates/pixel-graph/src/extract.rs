@@ -21,6 +21,11 @@ pub struct RawSymbol {
     /// A method of a trait implementation (`impl Display for X { fn fmt }`):
     /// called through the trait, so a missing direct caller proves nothing.
     pub trait_impl: bool,
+    /// An external Rust module declaration (`mod foo;`): it names the file
+    /// that holds the module's code instead of defining code in this one, so
+    /// an exact-name probe of `foo` must not promote the declaring file (see
+    /// `targets::symbol_hits`). Inline modules (`mod foo { … }`) are false.
+    pub module_decl: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -252,11 +257,29 @@ impl<'a> Walker<'a> {
     }
 
     fn push_symbol(&mut self, name: String, qualified: String, kind: SymbolKind, node: Node) {
+        self.push_symbol_full(name, qualified, kind, node, false);
+    }
+
+    /// An external `mod foo;` declaration: unlike every other symbol, it names
+    /// another file instead of defining code in this one.
+    fn push_module_decl(&mut self, name: String, node: Node) {
+        self.push_symbol_full(name.clone(), name, SymbolKind::Module, node, true);
+    }
+
+    fn push_symbol_full(
+        &mut self,
+        name: String,
+        qualified: String,
+        kind: SymbolKind,
+        node: Node,
+        module_decl: bool,
+    ) {
         if name.is_empty() {
             return;
         }
         self.symbols.push(RawSymbol {
             trait_impl: self.in_trait_impl && kind == SymbolKind::Method,
+            module_decl,
             sig: self.sig(node),
             start_line: line_start(node),
             end_line: line_end(node),
@@ -814,7 +837,13 @@ fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
         }
         "mod_item" => {
             if let Some(name) = field_text(w, node, "name") {
-                w.push_symbol(name.clone(), name, SymbolKind::Module, node);
+                // `mod foo;` names the file that holds the module's code;
+                // `mod foo { … }` defines it in this file.
+                if node.child_by_field_name("body").is_some() {
+                    w.push_symbol(name.clone(), name, SymbolKind::Module, node);
+                } else {
+                    w.push_module_decl(name, node);
+                }
             }
         }
         "const_item" | "static_item" => {
@@ -1639,6 +1668,7 @@ mod tests {
             end_line,
             sig: String::new(),
             trait_impl: false,
+            module_decl: false,
         }
     }
 
@@ -1714,6 +1744,35 @@ mod tests {
         assert!(!names.contains(&"top_level_test"));
         assert!(!names.contains(&"nested_test"));
         assert!(!names.contains(&"tests"));
+    }
+
+    /// `mod foo;` names the file that holds the module's code; `mod foo { … }`
+    /// defines it here. Only the first must not grant this file an exact-name
+    /// probe (see `targets::symbol_hits`).
+    #[test]
+    fn rust_module_declaration_distinguishes_external_from_inline() {
+        let source = br#"
+pub mod external;
+mod inline {
+    pub fn body() {}
+}
+"#;
+        let extraction = extract_file("src/lib.rs", source).unwrap();
+        let find = |name: &str| {
+            extraction
+                .symbols
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("module `{name}` is a symbol"))
+        };
+        assert!(
+            find("external").module_decl,
+            "`mod foo;` must be marked as naming another file"
+        );
+        assert!(
+            !find("inline").module_decl,
+            "`mod foo {{ … }}` defines code in this file"
+        );
     }
 
     /// Enum variants are definitions the ident tier must find. Before
