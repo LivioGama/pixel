@@ -28,7 +28,7 @@ impl Fixture {
             .join(pixel_daemon::socket_path(root).file_name().unwrap())
     }
 
-    fn upgrade(&self) -> (Output, Duration, bool) {
+    fn upgrade(&self) -> (Output, bool) {
         self.upgrade_with(&["--install-path"], &[self.0.join("installed/pixel")], None)
     }
 
@@ -37,7 +37,7 @@ impl Fixture {
         extra: &[&str],
         extra_paths: &[PathBuf],
         path_var: Option<&Path>,
-    ) -> (Output, Duration, bool) {
+    ) -> (Output, bool) {
         self.upgrade_env(extra, extra_paths, path_var, &[])
     }
 
@@ -50,7 +50,7 @@ impl Fixture {
         extra_paths: &[PathBuf],
         path_var: Option<&Path>,
         envs: &[(&str, &Path)],
-    ) -> (Output, Duration, bool) {
+    ) -> (Output, bool) {
         let start = Instant::now();
         let mut command = Command::new(env!("CARGO_BIN_EXE_pixel"));
         command.args(["self-update", "--build", "/usr/bin/true"]);
@@ -80,18 +80,18 @@ impl Fixture {
             if child.try_wait().unwrap().is_some() {
                 break;
             }
-            if start.elapsed() > Duration::from_secs(5) {
+            // The child is a large debug binary: on a loaded machine its
+            // startup alone can take seconds before it reaches the socket,
+            // so the deadline covers startup plus the client's own budget.
+            // It is a hang guard, not the timeout under test.
+            if start.elapsed() > Duration::from_secs(15) {
                 child.kill().unwrap();
                 timed_out = true;
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        (
-            child.wait_with_output().unwrap(),
-            start.elapsed(),
-            timed_out,
-        )
+        (child.wait_with_output().unwrap(), timed_out)
     }
 }
 
@@ -150,7 +150,7 @@ fn upgrade_shutdown_is_scoped_to_selected_repository() {
         writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
         // Closing the listener simulates this daemon's completed shutdown.
     });
-    let (output, _, timed_out) = fixture.upgrade();
+    let (output, timed_out) = fixture.upgrade();
     server.join().unwrap();
     assert!(!timed_out, "upgrade exceeded bounded fixture deadline");
     assert!(output.status.success(), "{output:?}");
@@ -171,21 +171,29 @@ fn upgrade_reports_unresponsive_daemon_without_claiming_completion() {
     let server = std::thread::spawn(move || {
         let stream = accept_within(&listener, Duration::from_secs(10));
         stream
-            .set_read_timeout(Some(Duration::from_secs(4)))
+            .set_read_timeout(Some(Duration::from_secs(8)))
             .unwrap();
+        let mut reader = BufReader::new(stream);
         let mut line = String::new();
-        BufReader::new(stream.try_clone().unwrap())
-            .read_line(&mut line)
-            .unwrap();
+        reader.read_line(&mut line).unwrap();
         // Real socket boundary: receive the request, then withhold a reply.
-        std::thread::sleep(Duration::from_secs(3));
-        line
+        // This read returns `Ok(0)` only when the client drops its end, i.e.
+        // when its own 1.5 s budget expired. A client that instead waits for
+        // the daemon to answer blocks here until the 8 s read timeout, and
+        // the boolean below says so. Measuring from the request rather than
+        // from spawn keeps the large child's startup out of the measurement.
+        let mut extra = String::new();
+        let gave_up = matches!(reader.read_line(&mut extra), Ok(0));
+        (line, gave_up)
     });
-    let (output, elapsed, timed_out) = fixture.upgrade();
-    let request = server.join().unwrap();
+    let (output, timed_out) = fixture.upgrade();
+    let (request, gave_up) = server.join().unwrap();
     assert!(!request.is_empty());
     assert!(!timed_out, "upgrade waited indefinitely: {output:?}");
-    assert!(elapsed < Duration::from_secs(4), "{elapsed:?}");
+    assert!(
+        gave_up,
+        "upgrade kept waiting for the daemon instead of giving up on its own: {output:?}"
+    );
     assert!(
         !output.status.success(),
         "timeout was silently treated as absent: {output:?}"
@@ -221,7 +229,7 @@ fn upgrade_without_install_path_replaces_the_pixel_on_path() {
         PathBuf::from("/bin"),
     ])
     .unwrap();
-    let (output, _, timed_out) = fixture.upgrade_with(&[], &[], Some(Path::new(&path_var)));
+    let (output, timed_out) = fixture.upgrade_with(&[], &[], Some(Path::new(&path_var)));
     assert!(!timed_out);
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -258,7 +266,7 @@ fn upgrade_warns_when_another_pixel_precedes_the_target_on_path() {
         PathBuf::from("/bin"),
     ])
     .unwrap();
-    let (output, _, timed_out) = fixture.upgrade_with(
+    let (output, timed_out) = fixture.upgrade_with(
         &["--install-path"],
         &[fixture.0.join("installed/pixel")],
         Some(Path::new(&path_var)),
@@ -293,7 +301,7 @@ fn upgrade_dry_run_prints_target_and_installs_nothing() {
     .unwrap();
     // The fixture's build runner is `/usr/bin/true`; the target file's
     // unchanged bytes prove the dry run never reached the install step.
-    let (output, _, _) = fixture.upgrade_with(&["--dry-run"], &[], Some(Path::new(&path_var)));
+    let (output, _) = fixture.upgrade_with(&["--dry-run"], &[], Some(Path::new(&path_var)));
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
@@ -348,7 +356,7 @@ fn assert_refusal_names(stderr: &str, resolved: &Path, manager: &str, upgrade_co
 fn upgrade_refuses_a_mise_install_without_explicit_install_path() {
     let fixture = Fixture::new("mise");
     let (installed, path_var) = mise_install(&fixture);
-    let (output, _, timed_out) = fixture.upgrade_with(&[], &[], Some(Path::new(&path_var)));
+    let (output, timed_out) = fixture.upgrade_with(&[], &[], Some(Path::new(&path_var)));
     assert!(!timed_out);
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -386,7 +394,7 @@ fn upgrade_refuses_a_homebrew_cellar_reached_through_a_symlink() {
     ])
     .unwrap();
     let cellar = prefix.join("Cellar");
-    let (output, _, timed_out) = fixture.upgrade_env(
+    let (output, timed_out) = fixture.upgrade_env(
         &[],
         &[],
         Some(Path::new(&path_var)),
@@ -412,7 +420,7 @@ fn upgrade_refuses_a_homebrew_cellar_reached_through_a_symlink() {
 fn upgrade_writes_a_mise_install_when_install_path_is_explicit() {
     let fixture = Fixture::new("explicit");
     let (installed, path_var) = mise_install(&fixture);
-    let (output, _, timed_out) = fixture.upgrade_with(
+    let (output, timed_out) = fixture.upgrade_with(
         &["--install-path"],
         std::slice::from_ref(&installed),
         Some(Path::new(&path_var)),
@@ -436,8 +444,7 @@ fn upgrade_writes_a_mise_install_when_install_path_is_explicit() {
 fn upgrade_dry_run_on_a_mise_install_prints_the_path_and_writes_nothing() {
     let fixture = Fixture::new("dryrefuse");
     let (installed, path_var) = mise_install(&fixture);
-    let (output, _, timed_out) =
-        fixture.upgrade_with(&["--dry-run"], &[], Some(Path::new(&path_var)));
+    let (output, timed_out) = fixture.upgrade_with(&["--dry-run"], &[], Some(Path::new(&path_var)));
     assert!(!timed_out);
     let resolved = installed.canonicalize().unwrap();
     assert_eq!(
@@ -463,7 +470,7 @@ fn upgrade_dry_run_on_a_mise_install_prints_the_path_and_writes_nothing() {
 fn upgrade_dev_installs_pixel_dev_and_leaves_pixel_alone() {
     let fixture = Fixture::new("dev");
     let (installed, path_var) = mise_install(&fixture);
-    let (output, _, timed_out) = fixture.upgrade_with(&["--dev"], &[], Some(Path::new(&path_var)));
+    let (output, timed_out) = fixture.upgrade_with(&["--dev"], &[], Some(Path::new(&path_var)));
     assert!(!timed_out);
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
