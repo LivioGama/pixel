@@ -78,6 +78,7 @@ const STOPWORDS: &[&str] = &[
     "must",
     "not",
     "but",
+    "without",
     "how",
     "what",
     "why",
@@ -450,8 +451,12 @@ pub fn expand_keywords(keywords: &[String], language: TaskLanguage) -> Vec<Strin
 #[derive(Debug, Clone, Default)]
 pub struct TaskQuery {
     /// Backticked/quoted identifiers taken verbatim: `` `login_user` `` →
-    /// exact symbol-name probe (case preserved).
+    /// exact symbol-name probe (case preserved). Unquoted `snake_case` words
+    /// are identifiers too and land here as well.
     pub exact_tokens: Vec<String>,
+    /// File paths named in the task (`upgrade_cli.rs`, `src/auth.rs`),
+    /// matched against the live tree by the path signal.
+    pub path_tokens: Vec<String>,
     /// Lowercased keywords, first-occurrence order, deduped, len ≥ 3 (or short tech keyword), ≤ 12.
     pub keywords: Vec<String>,
     /// True when the task contained MORE searchable keywords than
@@ -466,6 +471,88 @@ fn is_ident(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Extensions that mark a dotted token as a file path rather than an
+/// identifier or a sentence-ending abbreviation. Lowercase; compared
+/// case-insensitively.
+const PATH_EXTENSIONS: &[&str] = &[
+    "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rb", "go", "java", "kt", "kts", "swift",
+    "c", "h", "cc", "cpp", "cxx", "hpp", "cs", "php", "sh", "bash", "zsh", "fish", "sql", "toml",
+    "yaml", "yml", "json", "md", "vue", "svelte", "ex", "exs", "erl", "hs", "ml", "scala", "clj",
+    "lua", "pl", "dart", "zig", "nim",
+];
+
+/// True when `ext` names a source/config file extension.
+fn is_path_extension(ext: &str) -> bool {
+    let lower = ext.to_ascii_lowercase();
+    PATH_EXTENSIONS.contains(&lower.as_str())
+}
+
+/// The basename stem of a path token: the last `/`-component with its
+/// extension removed (`crates/a/b_login.rs` → `b_login`).
+fn path_stem(token: &str) -> &str {
+    let base = token.rsplit('/').next().unwrap_or(token);
+    base.rsplit_once('.').map_or(base, |(stem, _)| stem)
+}
+
+/// Validate a candidate run as a file path: it has a `.` whose suffix is a
+/// known source extension and a nonempty stem. Returns the token as written.
+fn path_token(run: &str) -> Option<String> {
+    let trimmed = run.trim_matches(|c| matches!(c, '.' | '/' | '-'));
+    let stem = path_stem(trimmed);
+    let ext = trimmed.rsplit_once('.').map(|(_, ext)| ext)?;
+    if stem.is_empty() || !is_path_extension(ext) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Split file paths out of the task text: every run of `[A-Za-z0-9_./-]`
+/// whose last `.`-suffix is a known source extension is recorded as a path
+/// token and replaced in the returned text by its basename stem, so the
+/// generic word pass contributes `upgrade`/`cli` but never the extension
+/// `rs` (a word in the filename of every Rust file, which would hand the
+/// whole tree a filename hit).
+fn extract_path_tokens(text: &str) -> (String, Vec<String>) {
+    fn is_run_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-')
+    }
+    // Scan boundaries first, rebuild in a second `for`: a hand-advanced
+    // index can spin forever on a mutated bound, and a hanging mutant costs
+    // the whole mutation timeout instead of failing an assertion.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut start: Option<usize> = None;
+    for (index, c) in text.char_indices() {
+        if is_run_char(c) {
+            if start.is_none() {
+                start = Some(index);
+            }
+        } else if let Some(run_start) = start.take() {
+            runs.push((run_start, index));
+        }
+    }
+    if let Some(run_start) = start {
+        runs.push((run_start, text.len()));
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut paths: Vec<String> = Vec::new();
+    let mut copied = 0usize;
+    for (run_start, run_end) in runs {
+        out.push_str(&text[copied..run_start]);
+        copied = run_end;
+        match path_token(&text[run_start..run_end]) {
+            Some(token) => {
+                if !paths.contains(&token) {
+                    paths.push(token.clone());
+                }
+                out.push_str(path_stem(&token));
+            }
+            None => out.push_str(&text[run_start..run_end]),
+        }
+    }
+    out.push_str(&text[copied..]);
+    (out, paths)
 }
 
 /// Fold diacritics to their ASCII base so accented characters don't act as
@@ -486,7 +573,11 @@ pub fn tokenize_task(task: &str) -> Result<TaskQuery, String> {
     // terms ("base de données" → "base de donnees") can match their
     // replacements in `normalize_task_compounds`.
     let normalized = normalize_task_compounds(&fold_diacritics(task));
-    let language = detect_language(&normalized);
+    // Paths are lifted out before the generic word pass: their extension is
+    // not a keyword (`rs` would match every Rust file's name) and their
+    // basename stem is the searchable part.
+    let (text, path_tokens) = extract_path_tokens(&normalized);
+    let language = detect_language(&text);
     let french_stopwords: &[&str] = match language {
         TaskLanguage::French => FRENCH_STOPWORDS,
         TaskLanguage::English => &[],
@@ -500,8 +591,17 @@ pub fn tokenize_task(task: &str) -> Result<TaskQuery, String> {
     let push_words = |text: &str,
                       keywords: &mut Vec<String>,
                       seen: &mut HashSet<String>,
-                      truncated: &mut bool| {
+                      truncated: &mut bool,
+                      exact_tokens: &mut Vec<String>| {
         for chunk in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+            // An underscore-joined word is a code identifier, not English
+            // (`cap_message`, `apply_change`): probe it as an exact symbol
+            // name even without backticks. CamelCase alone is not enough —
+            // ordinary capitalized words would exact-match symbols by
+            // accident.
+            if is_ident(chunk) && chunk.contains('_') && !exact_tokens.iter().any(|t| t == chunk) {
+                exact_tokens.push(chunk.to_string());
+            }
             for w in split_ident_words(chunk) {
                 let is_valid_len =
                     w.len() >= MIN_KEYWORD_LEN || SHORT_TECH_KEYWORDS.contains(&w.as_str());
@@ -526,7 +626,7 @@ pub fn tokenize_task(task: &str) -> Result<TaskQuery, String> {
     let mut rest = String::new();
     let mut cur = String::new();
     let mut quote: Option<char> = None;
-    for c in normalized.chars() {
+    for c in text.chars() {
         match quote {
             Some(q) if c == q => {
                 if is_ident(&cur) && !exact_tokens.contains(&cur) {
@@ -546,13 +646,20 @@ pub fn tokenize_task(task: &str) -> Result<TaskQuery, String> {
         rest.push(' ');
         rest.push_str(&cur);
     }
-    push_words(&rest, &mut keywords, &mut seen_kw, &mut keywords_truncated);
+    push_words(
+        &rest,
+        &mut keywords,
+        &mut seen_kw,
+        &mut keywords_truncated,
+        &mut exact_tokens,
+    );
 
     if exact_tokens.is_empty() && keywords.is_empty() {
         return Err("task description yields no searchable keywords".to_string());
     }
     Ok(TaskQuery {
         exact_tokens,
+        path_tokens,
         keywords,
         keywords_truncated,
         language,
@@ -598,6 +705,8 @@ pub struct SignalInputs {
     pub content_hits: BTreeMap<String, Vec<(String, u32)>>,
     /// Files defining keyword-matching symbols (graph S2), pre-ranked.
     pub symbol_hits: Vec<SymbolHit>,
+    /// Files matching a file path named in the task (S6): (path, token).
+    pub path_hits: Vec<(String, String)>,
     /// 1-hop graph neighbors of the lexical seeds: (path, reason).
     pub graph_neighbors: Vec<(String, String)>,
     /// Cluster co-members of the lexical seeds: (path, reason).
@@ -629,6 +738,7 @@ pub struct TargetsReport {
     pub task: String,
     pub keywords: Vec<String>,
     pub exact_tokens: Vec<String>,
+    pub path_tokens: Vec<String>,
     pub targets: Vec<TargetFile>,
     pub envelope: Value,
     pub closed_world: String,
@@ -644,6 +754,10 @@ pub const W_SYMBOL: f64 = 2.5;
 pub const W_CONTENT: f64 = 1.5;
 pub const W_GRAPH: f64 = 1.0;
 pub const W_CLUSTER: f64 = 0.5;
+/// Explicit file-path signal: a task that names `upgrade_cli.rs` outranks
+/// every lexical coincidence. Weighted above filename and symbol — the
+/// caller has already chosen the file.
+pub const W_PATH: f64 = 6.0;
 /// Semantic similarity channel (static embeddings). Weighted between
 /// content and symbol: semantic evidence is stronger than raw content
 /// density (it captures paraphrase/synonym matches the lexical channel
@@ -786,6 +900,57 @@ fn filename_rank(all_paths: &[String], keywords: &[String]) -> Vec<(String, Vec<
     }
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     scored.into_iter().map(|(_, p, m)| (p, m)).collect()
+}
+
+/// S6: rank the file universe against file paths named in the task.
+///
+/// Two match strengths, best first: the whole candidate path equals the
+/// token, or the candidate path ends with `/<token>` (a basename or a path
+/// suffix — a rooted path has no third case, since a token equal to a
+/// basename with no directory would be equal to the path). Matching is
+/// case-insensitive because a task may type a path in any case; ties stay
+/// path-ascending. Returns `(path, matched token)` deduped on path, best
+/// match kept.
+pub fn path_rank(all_paths: &[String], path_tokens: &[String]) -> Vec<(String, String)> {
+    let tokens: Vec<String> = path_tokens
+        .iter()
+        .map(|t| {
+            let t = t.trim_start_matches("./");
+            t.to_ascii_lowercase()
+        })
+        .collect();
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let mut best: BTreeMap<String, (u8, String)> = BTreeMap::new();
+    for path in all_paths {
+        let lower = path.to_ascii_lowercase();
+        for (token, original) in tokens.iter().zip(path_tokens) {
+            let class = if lower == *token {
+                0u8
+            } else if lower.ends_with(&format!("/{token}")) {
+                1
+            } else {
+                continue;
+            };
+            let entry = best
+                .entry(path.clone())
+                .or_insert((class, original.clone()));
+            if class < entry.0 {
+                *entry = (class, original.clone());
+            }
+        }
+    }
+    let mut out: Vec<(u8, String, String)> = best
+        .into_iter()
+        .map(|(path, (class, token))| (class, path, token))
+        .collect();
+    // Stable sort on the match class alone: `best` is a BTreeMap, so paths
+    // keep ascending order inside a class.
+    out.sort_by_key(|(class, _, _)| *class);
+    out.into_iter()
+        .map(|(_, path, token)| (path, token))
+        .collect()
 }
 
 /// Inverse document frequency for a keyword, computed deterministically over
@@ -942,9 +1107,14 @@ pub fn compute_targets(
     opts: &TargetsOptions,
 ) -> TargetsReport {
     /// Signal families (bitmask): S1 filename, S2 symbol, S3 content, S4
-    /// graph, S5 cluster. Lexical evidence is S1|S2|S3.
+    /// graph, S5 cluster. Lexical evidence is S1|S2|S3; S6 is an explicit
+    /// path named in the task — ranking evidence strong enough to be a P0 on
+    /// its own, but its own family.
     const LEXICAL_MASK: u8 = 0b111;
-    const S1S2_MASK: u8 = 0b011;
+    const PATH_MASK: u8 = 0b10_0000;
+    /// S1..S3 plus S6, written as one literal because the two masks are
+    /// disjoint and `|` and `^` would be indistinguishable to a test.
+    const PRIMARY_MASK: u8 = 0b10_0111;
     /// One fused candidate: RRF score, the signal families that hit it
     /// (bitmask S1..S5) and the evidence shown to the caller.
     #[derive(Default)]
@@ -954,6 +1124,7 @@ pub fn compute_targets(
         reasons: Vec<String>,
         symbols: Vec<Value>,
         exact_name_hit: bool,
+        path_hit: bool,
     }
     fn bump<'m>(
         fused: &'m mut HashMap<String, Entry>,
@@ -985,6 +1156,7 @@ pub fn compute_targets(
     let s3 = content_rank(&inputs.content_hits);
     let s4 = &inputs.graph_neighbors;
     let s5 = &inputs.cluster_neighbors;
+    let s6 = &inputs.path_hits;
 
     // Fuse.
     let mut fused: HashMap<String, Entry> = HashMap::new();
@@ -1024,6 +1196,11 @@ pub fn compute_targets(
         let e = bump(&mut fused, path, rank, W_CLUSTER, 16);
         e.reasons.push(reason.clone());
     }
+    for (rank, (path, token)) in s6.iter().enumerate() {
+        let e = bump(&mut fused, path, rank, W_PATH, PATH_MASK);
+        e.path_hit = true;
+        e.reasons.push(format!("path match: {token}"));
+    }
 
     // Exact-identifier definitions get a flat bonus: a backticked name that is
     // defined in the file is the strongest evidence a task can carry.
@@ -1052,12 +1229,14 @@ pub fn compute_targets(
             beyond_limit += 1;
             continue;
         }
-        let fams = e.families.count_ones();
-        let lexical = e.families & LEXICAL_MASK != 0;
-        let tier = if lexical
-            && p0 < P0_CAP.min(limit)
-            && (e.exact_name_hit || (fams >= 2 && e.families & S1S2_MASK != 0))
-        {
+        let lexical = e.families & PRIMARY_MASK != 0;
+        // Two LEXICAL families, not merely two families: a filename or
+        // symbol hit plus a graph neighbor is not enough to claim the file
+        // is primary. An explicit path named in the task is primary on its
+        // own; it boosts and promotes, but never hides other lexical targets.
+        let lexical_families = (e.families & LEXICAL_MASK).count_ones();
+        let p0_rule = e.path_hit || e.exact_name_hit || lexical_families >= 2;
+        let tier = if p0_rule && p0 < P0_CAP.min(limit) {
             p0 += 1;
             "P0"
         } else if lexical {
@@ -1229,6 +1408,7 @@ pub fn compute_targets(
         task: task.to_string(),
         keywords: query.keywords.clone(),
         exact_tokens: query.exact_tokens.clone(),
+        path_tokens: query.path_tokens.clone(),
         targets,
         envelope: json!({
             "lower_bound": lower_bound,
@@ -1433,6 +1613,172 @@ mod tests {
         assert!(tokenize_task("").is_err());
     }
 
+    /// A task that names a file must not turn the extension into a keyword:
+    /// `rs` is a word in the filename of every Rust file, so it would hand
+    /// the whole tree a filename hit.
+    #[test]
+    fn tokenize_lifts_file_paths_out_of_the_keywords() {
+        let q = tokenize_task(
+            "de-flake upgrade_reports_unresponsive_daemon_without_claiming_completion test in upgrade_cli.rs",
+        )
+        .unwrap();
+        assert_eq!(q.path_tokens, vec!["upgrade_cli.rs"]);
+        assert!(
+            q.keywords.contains(&"upgrade".to_string()),
+            "{:?}",
+            q.keywords
+        );
+        assert!(q.keywords.contains(&"cli".to_string()), "{:?}", q.keywords);
+        assert!(!q.keywords.contains(&"rs".to_string()), "{:?}", q.keywords);
+        // An underscore-joined blob is an identifier candidate, not a
+        // symbol name that exists — harmless, and the words still search.
+        assert!(
+            q.exact_tokens.contains(
+                &"upgrade_reports_unresponsive_daemon_without_claiming_completion".to_string()
+            ),
+            "{:?}",
+            q.exact_tokens
+        );
+    }
+
+    #[test]
+    fn tokenize_full_path_keeps_only_the_basename_stem() {
+        let q = tokenize_task("fix the timeout in crates/pixel/tests/cli/upgrade_cli.rs").unwrap();
+        assert_eq!(q.path_tokens, vec!["crates/pixel/tests/cli/upgrade_cli.rs"]);
+        assert_eq!(q.keywords, vec!["timeout", "upgrade", "cli"]);
+        // The basename stem is itself an underscore identifier.
+        assert_eq!(q.exact_tokens, vec!["upgrade_cli"]);
+    }
+
+    /// An unquoted `snake_case` word is a code identifier: the exact-name
+    /// probe must see it, because the task named the function itself.
+    #[test]
+    fn tokenize_unquoted_snake_identifier_is_exact() {
+        let q = tokenize_task("cap_message finds the boundary without a mutable loop").unwrap();
+        assert_eq!(q.exact_tokens, vec!["cap_message"]);
+        assert!(q.keywords.contains(&"cap".to_string()));
+        assert!(q.keywords.contains(&"message".to_string()));
+        assert!(
+            !q.keywords.contains(&"without".to_string()),
+            "{:?}",
+            q.keywords
+        );
+    }
+
+    #[test]
+    fn tokenize_records_each_named_path_once() {
+        let q = tokenize_task("touch guard.rs, then guard.rs again, and rename.rs").unwrap();
+        assert_eq!(q.path_tokens, vec!["guard.rs", "rename.rs"]);
+        assert!(
+            q.keywords.contains(&"rename".to_string()),
+            "{:?}",
+            q.keywords
+        );
+    }
+
+    #[test]
+    fn tokenize_leaves_unknown_dotted_words_alone() {
+        // `flake.lock` has a dot but no source extension: it is not a path,
+        // and both words stay in the keyword text.
+        let q = tokenize_task("bump the flake.lock pin to stable").unwrap();
+        assert!(q.path_tokens.is_empty(), "{:?}", q.path_tokens);
+        assert!(
+            q.keywords.contains(&"flake".to_string()),
+            "{:?}",
+            q.keywords
+        );
+        assert!(q.keywords.contains(&"lock".to_string()), "{:?}", q.keywords);
+        // A basename that is nothing but an extension (`x/.rs`) is not a
+        // path: the stem would be empty once the dot is removed.
+        let q = tokenize_task("remove the stale x/.rs entry").unwrap();
+        assert!(q.path_tokens.is_empty(), "{:?}", q.path_tokens);
+    }
+
+    #[test]
+    fn path_rank_full_suffix_and_basename_matches() {
+        let paths: Vec<String> = [
+            "aaa/main.rs",
+            "aaa/zzz.rs",
+            "build.rs",
+            "crates/other/src/upgrade_cli.rs",
+            "crates/pixel/build.rs",
+            "crates/pixel/src/main.rs",
+            "crates/pixel/tests/cli/other.rs",
+            "crates/pixel/tests/cli/upgrade_cli.rs",
+            "zzz.rs",
+        ]
+        .iter()
+        .map(|p| (*p).to_string())
+        .collect();
+        // Exact full-path match: one hit, classed first.
+        assert_eq!(
+            path_rank(&paths, &["crates/pixel/src/main.rs".to_string()]),
+            vec![(
+                "crates/pixel/src/main.rs".to_string(),
+                "crates/pixel/src/main.rs".to_string()
+            )]
+        );
+        // An exact match outranks a path-suffix match, whatever the path
+        // order: `zzz.rs` (whole path) before `aaa/main.rs` (suffix);
+        // `aaa/zzz.rs` is a suffix of `zzz.rs` and sorts inside the class.
+        assert_eq!(
+            path_rank(&paths, &["main.rs".to_string(), "zzz.rs".to_string()]),
+            vec![
+                ("zzz.rs".to_string(), "zzz.rs".to_string()),
+                ("aaa/main.rs".to_string(), "main.rs".to_string()),
+                ("aaa/zzz.rs".to_string(), "zzz.rs".to_string()),
+                (
+                    "crates/pixel/src/main.rs".to_string(),
+                    "main.rs".to_string()
+                ),
+            ]
+        );
+        // A later, stronger token upgrades the path's class: `aaa/zzz.rs`
+        // starts as a `zzz.rs` suffix (class 1) and becomes an exact match
+        // (class 0), so it sorts before `zzz.rs` (class 0, path asc).
+        assert_eq!(
+            path_rank(&paths, &["zzz.rs".to_string(), "aaa/zzz.rs".to_string()]),
+            vec![
+                ("aaa/zzz.rs".to_string(), "aaa/zzz.rs".to_string()),
+                ("zzz.rs".to_string(), "zzz.rs".to_string()),
+            ]
+        );
+        // A rooted path named by its basename: the root file equals the
+        // token, the nested one ends with `/<token>`.
+        assert_eq!(
+            path_rank(&paths, &["build.rs".to_string()]),
+            vec![
+                ("build.rs".to_string(), "build.rs".to_string()),
+                ("crates/pixel/build.rs".to_string(), "build.rs".to_string()),
+            ]
+        );
+        // A bare basename matches every file with that basename, path asc.
+        assert_eq!(
+            path_rank(&paths, &["upgrade_cli.rs".to_string()]),
+            vec![
+                (
+                    "crates/other/src/upgrade_cli.rs".to_string(),
+                    "upgrade_cli.rs".to_string()
+                ),
+                (
+                    "crates/pixel/tests/cli/upgrade_cli.rs".to_string(),
+                    "upgrade_cli.rs".to_string()
+                ),
+            ]
+        );
+        // On an equal-strength tie the first token keeps the reason.
+        let hits = path_rank(
+            &paths,
+            &["upgrade_cli.rs".to_string(), "UPGRADE_CLI.RS".to_string()],
+        );
+        assert_eq!(hits[0].1, "upgrade_cli.rs");
+        // `./` is a spelling of the same path; matching is case-insensitive
+        // and a token matching nothing yields no hit.
+        assert_eq!(path_rank(&paths, &["./build.rs".to_string()]).len(), 2);
+        assert_eq!(path_rank(&paths, &["UPGRADE_CLI.RS".to_string()]).len(), 2);
+        assert!(path_rank(&paths, &["nope.rs".to_string()]).is_empty());
+    }
+
     #[test]
     fn tokenize_technical_compounds_and_short_keywords() {
         let q_csharp = tokenize_task("add c# support").unwrap();
@@ -1476,6 +1822,7 @@ mod tests {
             keywords_truncated: false,
             language: TaskLanguage::English,
             exact_tokens: vec![],
+            path_tokens: vec![],
             keywords: vec!["login".into()],
         };
         let report = compute_targets("t", &q, inputs, &TargetsOptions::default());
@@ -1505,6 +1852,7 @@ mod tests {
             keywords_truncated: false,
             language: TaskLanguage::English,
             exact_tokens: vec![],
+            path_tokens: vec![],
             keywords: vec!["nothing".into()],
         };
         let report = compute_targets("t", &q, inputs, &TargetsOptions::default());
@@ -1546,6 +1894,7 @@ mod tests {
             keywords_truncated: false,
             language: TaskLanguage::English,
             exact_tokens: vec!["login_user".into()],
+            path_tokens: vec![],
             keywords: vec!["login".into(), "user".into()],
         };
         let report = compute_targets("t", &q, inputs, &TargetsOptions::default());
@@ -1568,6 +1917,141 @@ mod tests {
         assert_eq!(z.tier, "P2");
     }
 
+    /// An explicit path named in the task is primary, and it does not demote
+    /// another file with strong lexical evidence: both stay P0. A graph-only
+    /// neighbor stays peripheral.
+    #[test]
+    fn explicit_path_is_p0_without_demoting_lexical_targets() {
+        let mut content = BTreeMap::new();
+        content.insert(
+            "daemon".to_string(),
+            vec![("crates/pixel-daemon/src/daemon.rs".to_string(), 50u32)],
+        );
+        let inputs = SignalInputs {
+            all_paths: vec![
+                "crates/pixel/tests/cli/upgrade_cli.rs".into(),
+                "crates/pixel-daemon/src/daemon.rs".into(),
+                "crates/pixel/src/main.rs".into(),
+            ],
+            content_hits: content,
+            symbol_hits: vec![hit(
+                "crates/pixel-daemon/src/daemon.rs",
+                "run_daemon",
+                false,
+                2,
+            )],
+            graph_neighbors: vec![(
+                "crates/pixel/src/main.rs".into(),
+                "callee of `run_daemon`".into(),
+            )],
+            path_hits: vec![(
+                "crates/pixel/tests/cli/upgrade_cli.rs".into(),
+                "upgrade_cli.rs".into(),
+            )],
+            graph_available: true,
+            ..Default::default()
+        };
+        let q = TaskQuery {
+            keywords_truncated: false,
+            language: TaskLanguage::English,
+            exact_tokens: vec![],
+            path_tokens: vec!["upgrade_cli.rs".into()],
+            keywords: vec!["daemon".into()],
+        };
+        let report = compute_targets("t", &q, inputs, &TargetsOptions::default());
+        let tier = |path: &str| {
+            report
+                .targets
+                .iter()
+                .find(|t| t.path == path)
+                .unwrap()
+                .tier
+                .clone()
+        };
+        assert_eq!(tier("crates/pixel/tests/cli/upgrade_cli.rs"), "P0");
+        assert_eq!(tier("crates/pixel-daemon/src/daemon.rs"), "P0");
+        assert_eq!(tier("crates/pixel/src/main.rs"), "P2");
+        assert!(
+            report
+                .targets
+                .iter()
+                .find(|t| t.path.ends_with("upgrade_cli.rs"))
+                .unwrap()
+                .reasons
+                .iter()
+                .any(|r| r == "path match: upgrade_cli.rs")
+        );
+    }
+
+    /// A graph neighbor plus a filename coincidence is not primary evidence:
+    /// P0 needs two lexical families, not merely two families.
+    #[test]
+    fn filename_plus_graph_neighbor_is_p1_not_p0() {
+        let inputs = SignalInputs {
+            all_paths: vec!["src/daemon.rs".into(), "src/daemon_client.rs".into()],
+            symbol_hits: vec![hit("src/daemon.rs", "run_daemon", false, 1)],
+            graph_neighbors: vec![(
+                "src/daemon_client.rs".into(),
+                "callee of `run_daemon`".into(),
+            )],
+            graph_available: true,
+            ..Default::default()
+        };
+        let q = TaskQuery {
+            keywords_truncated: false,
+            language: TaskLanguage::English,
+            exact_tokens: vec![],
+            path_tokens: vec![],
+            keywords: vec!["daemon".into()],
+        };
+        let report = compute_targets("t", &q, inputs, &TargetsOptions::default());
+        let tier = |path: &str| {
+            report
+                .targets
+                .iter()
+                .find(|t| t.path == path)
+                .unwrap()
+                .tier
+                .clone()
+        };
+        assert_eq!(tier("src/daemon.rs"), "P0", "filename + symbol");
+        assert_eq!(tier("src/daemon_client.rs"), "P1", "filename + graph");
+    }
+
+    /// A path match past the P0 cap is still primary: P1, never the P2
+    /// bucket graph-only evidence falls into.
+    #[test]
+    fn path_hit_past_the_p0_cap_stays_p1() {
+        let path_hits: Vec<(String, String)> = (0..6)
+            .map(|i| (format!("src/named_{i}.rs"), format!("named_{i}.rs")))
+            .collect();
+        let inputs = SignalInputs {
+            all_paths: path_hits.iter().map(|(path, _)| path.clone()).collect(),
+            path_hits,
+            graph_available: true,
+            ..Default::default()
+        };
+        let q = TaskQuery {
+            keywords_truncated: false,
+            language: TaskLanguage::English,
+            exact_tokens: vec![],
+            path_tokens: vec![],
+            keywords: vec![],
+        };
+        let report = compute_targets("t", &q, inputs, &TargetsOptions::default());
+        let tier = |path: &str| {
+            report
+                .targets
+                .iter()
+                .find(|t| t.path == path)
+                .unwrap()
+                .tier
+                .clone()
+        };
+        assert_eq!(tier("src/named_0.rs"), "P0");
+        assert_eq!(tier("src/named_5.rs"), "P1");
+    }
+
     #[test]
     fn limit_is_hard_and_p2_capped() {
         let all: Vec<String> = (0..30).map(|i| format!("src/login_{i:02}.rs")).collect();
@@ -1584,6 +2068,7 @@ mod tests {
             keywords_truncated: false,
             language: TaskLanguage::English,
             exact_tokens: vec![],
+            path_tokens: vec![],
             keywords: vec!["login".into()],
         };
         let report = compute_targets(
@@ -1623,6 +2108,7 @@ mod tests {
             keywords_truncated: false,
             language: TaskLanguage::English,
             exact_tokens: vec![],
+            path_tokens: vec![],
             keywords: vec!["auth".into()],
         };
         let a = serde_json::to_string(&compute_targets("t", &q, mk(), &TargetsOptions::default()))
@@ -1643,6 +2129,7 @@ mod tests {
             keywords_truncated: false,
             language: TaskLanguage::English,
             exact_tokens: vec![],
+            path_tokens: vec![],
             keywords: vec!["login".into()],
         };
         let report = compute_targets("t", &q, inputs, &TargetsOptions::default());

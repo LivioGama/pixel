@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pixel repo-state` no longer prints the tracked-clean file list: on a clean tree the list was over 85% of the answer (200 of 351 paths, ~7 KB here) and no consumer read it. The answer keeps the exact `clean_count`, and `--include-clean` restores the capped list.
 - Updating is now guided on every surface a user hits: `pixel self-update` names the package manager's own command when it refuses a managed install (`mise upgrade pixel`, `brew update && brew upgrade LivioGama/tap/pixel`), the generated Homebrew formula prints `pixel install` and `pixel doctor .` as caveats after `brew upgrade`, and the README gains a per-channel "Updating" section.
 
+### Fixed
+- `pixel scope-task` no longer lets generic words and file extensions outrank the file a task names: a path-like token (`upgrade_cli.rs`, `crates/pixel-rank/src/lib.rs`) is lifted out of the keyword bag before tokenizing — `rs` used to become a keyword and match the filename of every Rust file — and matched against the tree as its own signal family (weight 6, so a `path match: …` reason), an unquoted `snake_case` word is probed as an exact name like a backticked one, `without` joins the stopwords, an exact token that only matches a `mod` declaration no longer counts as an exact-name hit on the declaring file, and a file whose only second family is a graph neighbor is no longer promoted to P0. The JSON answer now carries the lifted `path_tokens`. On the pinned 41-commit corpus (`crates/pixel/tests/cli/scope_task_precision.rs`, `--ignored`, ~2 min), recall@P0 rises 0.7317 → 0.8049 and precision@1 0.5122 → 0.6098, with no probe regressing, three going 0.00 → 1.00 and one 0.33 → 1.00; P0 precision rises 0.2244 → 0.2390 rather than being bought with recall.
+
 ## [0.3.1] - 2026-09-15
 
 ### Changed

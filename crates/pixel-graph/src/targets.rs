@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use rusqlite::params;
 
 use crate::impact::{file_path_by_id, split_ident_words, symbol_by_id};
-use crate::store::{Envelope, GraphStore, StoreError, SymbolRow};
+use crate::store::{Envelope, GraphStore, StoreError, SymbolKind, SymbolRow};
 
 /// A file that defines symbols whose split words intersect the task keywords.
 #[derive(Debug, Clone)]
@@ -18,7 +18,9 @@ pub struct SymbolHit {
     pub symbols: Vec<(SymbolRow, String)>,
     /// Distinct task keywords matched anywhere in this file's symbol names.
     pub distinct_keywords: usize,
-    /// True when an exact token (backticked identifier) equals a symbol name.
+    /// True when an exact token (backticked identifier) equals the name of a
+    /// symbol that defines code. A `mod foo;` declaration names a file, so it
+    /// does not count: the declaring file is not where the module's code is.
     pub exact_name_hit: bool,
 }
 
@@ -73,7 +75,11 @@ pub fn symbol_hits(
 
     for row in rows {
         let (sym, path) = row?;
-        let is_exact = exact.contains(sym.name.as_str());
+        // A module declaration (`mod foo;`) names a file rather than defining
+        // what is in it: an exact token matching it must not grant the
+        // declaring file the exact-name promotion. It still counts as a
+        // plain keyword symbol hit below.
+        let is_exact = sym.kind != SymbolKind::Module && exact.contains(sym.name.as_str());
         let words = split_ident_words(&sym.name);
         let matched: Vec<&String> = words.iter().filter(|w| kw.contains(w.as_str())).collect();
         if matched.is_empty() && !is_exact {
@@ -355,6 +361,45 @@ mod tests {
         assert!(hits[0].exact_name_hit);
         assert_eq!(hits[0].distinct_keywords, 2);
         assert_eq!(hits[0].symbols.len(), 2);
+    }
+
+    #[test]
+    fn symbol_hits_does_not_exact_match_module_declarations() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fa = store.replace_file("src/main.rs", "oid", "rs").unwrap();
+        let fb = store
+            .replace_file("src/search_compat.rs", "oid", "rs")
+            .unwrap();
+        store
+            .insert_symbol(
+                fa,
+                "src/main.rs#search_compat#module",
+                "search_compat",
+                "search_compat",
+                SymbolKind::Module,
+                1,
+                1,
+                "",
+            )
+            .unwrap();
+        sym(&store, fb, "src/search_compat.rs", "search_compat");
+
+        let hits = symbol_hits(
+            &store,
+            &["search".into(), "compat".into()],
+            &["search_compat".into()],
+        )
+        .unwrap();
+        let module_file = hits.iter().find(|h| h.path == "src/main.rs").unwrap();
+        assert!(
+            !module_file.exact_name_hit,
+            "a `mod` declaration must not exact-match: {module_file:?}"
+        );
+        let defining_file = hits
+            .iter()
+            .find(|h| h.path == "src/search_compat.rs")
+            .unwrap();
+        assert!(defining_file.exact_name_hit);
     }
 
     #[test]
