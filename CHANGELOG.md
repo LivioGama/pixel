@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `pixel repo-state` no longer prints the tracked-clean file list: on a clean tree the list was over 85% of the answer (200 of 351 paths, ~7 KB here) and no consumer read it. The answer keeps the exact `clean_count`, and `--include-clean` restores the capped list.
 - Updating is now guided on every surface a user hits: `pixel self-update` names the package manager's own command when it refuses a managed install (`mise upgrade pixel`, `brew update && brew upgrade LivioGama/tap/pixel`), the generated Homebrew formula prints `pixel install` and `pixel doctor .` as caveats after `brew upgrade`, and the README gains a per-channel "Updating" section.
 
 ## [0.3.1] - 2026-09-15
