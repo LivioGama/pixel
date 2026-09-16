@@ -324,12 +324,17 @@ fn mise_install(fixture: &Fixture) -> (PathBuf, std::ffi::OsString) {
 }
 
 /// Assert the refusal message gives the user what they need to act: the
-/// resolved path it would have written, the owner, and the three ways out.
-fn assert_refusal_names(stderr: &str, resolved: &Path, manager: &str) {
+/// resolved path it would have written, the owner, that manager's own
+/// upgrade command, and the three dev ways out.
+fn assert_refusal_names(stderr: &str, resolved: &Path, manager: &str, upgrade_command: &str) {
     let resolved = resolved.display().to_string();
     assert!(stderr.contains("refusing to install over"), "{stderr}");
     assert!(stderr.contains(&resolved), "names {resolved}: {stderr}");
     assert!(stderr.contains(manager), "names {manager}: {stderr}");
+    assert!(
+        stderr.contains(upgrade_command),
+        "names {upgrade_command}: {stderr}"
+    );
     for way_out in ["--dry-run", "--install-path", "--dev"] {
         assert!(stderr.contains(way_out), "proposes {way_out}: {stderr}");
     }
@@ -347,7 +352,12 @@ fn upgrade_refuses_a_mise_install_without_explicit_install_path() {
     assert!(!timed_out);
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_refusal_names(&stderr, &installed.canonicalize().unwrap(), "mise");
+    assert_refusal_names(
+        &stderr,
+        &installed.canonicalize().unwrap(),
+        "mise",
+        "mise upgrade pixel",
+    );
     assert!(!stderr.contains("Upgrade complete"), "{stderr}");
     assert_eq!(std::fs::read(&installed).unwrap(), b"mise 0.2.4 bytes\n");
     assert!(
@@ -385,7 +395,12 @@ fn upgrade_refuses_a_homebrew_cellar_reached_through_a_symlink() {
     assert!(!timed_out);
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_refusal_names(&stderr, &keg.canonicalize().unwrap(), "Homebrew");
+    assert_refusal_names(
+        &stderr,
+        &keg.canonicalize().unwrap(),
+        "Homebrew",
+        "brew update && brew upgrade LivioGama/tap/pixel",
+    );
     assert_eq!(std::fs::read(&keg).unwrap(), b"brew 0.2.4 bytes\n");
     assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
 }
@@ -430,7 +445,12 @@ fn upgrade_dry_run_on_a_mise_install_prints_the_path_and_writes_nothing() {
         resolved.display().to_string()
     );
     assert!(!output.status.success(), "{output:?}");
-    assert_refusal_names(&String::from_utf8_lossy(&output.stderr), &resolved, "mise");
+    assert_refusal_names(
+        &String::from_utf8_lossy(&output.stderr),
+        &resolved,
+        "mise",
+        "mise upgrade pixel",
+    );
     assert_eq!(std::fs::read(&installed).unwrap(), b"mise 0.2.4 bytes\n");
     assert!(!fixture.0.join("home/.local/bin").exists());
 }

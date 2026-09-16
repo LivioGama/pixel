@@ -185,6 +185,23 @@ jobs:
               bin.install "bin/pixel"
             end
 
+            # An upgrade replaces the binary only; the agent wiring it
+            # deployed lives in the user's home and is refreshed by
+            # running pixel install.
+            def caveats
+              <<~EOS
+                Homebrew upgrades replace the binary only. The agent prompt, shell
+                wrapper and per-agent config keys are written by "pixel install"
+                into your home, not by Homebrew, so they keep the old release's
+                text until refreshed:
+
+                  pixel install
+                  pixel doctor .
+
+                "pixel doctor" reports missing or stale wiring.
+              EOS
+            end
+
             test do
               assert_match version.to_s, shell_output("#{bin}/pixel --version")
             end

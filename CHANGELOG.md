@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Updating is now guided on every surface a user hits: `pixel self-update` names the package manager's own command when it refuses a managed install (`mise upgrade pixel`, `brew update && brew upgrade LivioGama/tap/pixel`), the generated Homebrew formula prints `pixel install` and `pixel doctor .` as caveats after `brew upgrade`, and the README gains a per-channel "Updating" section.
+
 ## [0.3.1] - 2026-09-15
 
 ### Changed

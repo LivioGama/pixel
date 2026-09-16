@@ -3277,10 +3277,37 @@ struct UpgradeTarget {
     explicit: bool,
 }
 
+/// The package manager that owns an install, and how to update it there.
+#[derive(Clone, Copy)]
+enum ManagedBy {
+    Mise,
+    Homebrew,
+}
+
+impl ManagedBy {
+    /// The manager's name, as the refusal message spells it.
+    fn name(self) -> &'static str {
+        match self {
+            ManagedBy::Mise => "mise",
+            ManagedBy::Homebrew => "Homebrew",
+        }
+    }
+
+    /// The command that updates an install this manager owns. `brew update`
+    /// comes first: with auto-update disabled, `brew upgrade` alone would
+    /// install the tap's stale formula.
+    fn upgrade_command(self) -> &'static str {
+        match self {
+            ManagedBy::Mise => "mise upgrade pixel",
+            ManagedBy::Homebrew => "brew update && brew upgrade LivioGama/tap/pixel",
+        }
+    }
+}
+
 /// A directory whose files a package manager installed and checksummed.
 struct ManagedRoot {
     root: PathBuf,
-    manager: &'static str,
+    manager: ManagedBy,
 }
 
 /// The install trees `pixel upgrade` must not write into on its own:
@@ -3296,24 +3323,24 @@ fn package_manager_roots(
 ) -> Vec<ManagedRoot> {
     let mut roots = vec![ManagedRoot {
         root: home.join(".local/share/mise/installs"),
-        manager: "mise",
+        manager: ManagedBy::Mise,
     }];
     if let Some(dir) = mise_data_dir.filter(|d| !d.is_empty()) {
         roots.push(ManagedRoot {
             root: Path::new(dir).join("installs"),
-            manager: "mise",
+            manager: ManagedBy::Mise,
         });
     }
     for cellar in ["/opt/homebrew/Cellar", "/usr/local/Cellar"] {
         roots.push(ManagedRoot {
             root: PathBuf::from(cellar),
-            manager: "Homebrew",
+            manager: ManagedBy::Homebrew,
         });
     }
     if let Some(cellar) = homebrew_cellar.filter(|c| !c.is_empty()) {
         roots.push(ManagedRoot {
             root: PathBuf::from(cellar),
-            manager: "Homebrew",
+            manager: ManagedBy::Homebrew,
         });
     }
     for managed in &mut roots {
@@ -3331,8 +3358,9 @@ fn package_manager_roots(
 /// a dirty `target/dev-release` build while mise still listed 0.2.4 (mise
 /// checks the checksum at install time only), and nothing said so. The
 /// path is resolved first, so a symlink into a Cellar (`/opt/homebrew/bin/
-/// pixel`) is refused like the Cellar file itself. `--install-path` is the
-/// user's decision and is never refused.
+/// pixel`) is refused like the Cellar file itself. The refusal names the
+/// manager's own upgrade command, and `--install-path` is the user's
+/// decision and is never refused.
 fn upgrade_target_refusal(target: &UpgradeTarget, roots: &[ManagedRoot]) -> Option<String> {
     if target.explicit {
         return None;
@@ -3345,13 +3373,14 @@ fn upgrade_target_refusal(target: &UpgradeTarget, roots: &[ManagedRoot]) -> Opti
     Some(format!(
         "refusing to install over {resolved} ({source}): it lies under {root}, which {manager} \
          installed; overwriting it would leave {manager} listing a version that is no longer \
-         there. Run `pixel self-update --dry-run` to see where an upgrade lands, pass \
-         `--install-path {resolved}` to write there anyway, or `--dev` to install a side build \
-         at ~/.local/bin/pixel-dev.",
+         there. Update it with `{command}` instead. Run `pixel self-update --dry-run` to see \
+         where an upgrade lands, pass `--install-path {resolved}` to write there anyway, or \
+         `--dev` to install a side build at ~/.local/bin/pixel-dev.",
         resolved = resolved.display(),
         source = target.source,
         root = owner.root.display(),
-        manager = owner.manager,
+        manager = owner.manager.name(),
+        command = owner.manager.upgrade_command(),
     ))
 }
 
@@ -3671,7 +3700,10 @@ mod upgrade_target_tests {
     }
 
     fn roots_of(roots: &[ManagedRoot]) -> Vec<(PathBuf, &'static str)> {
-        roots.iter().map(|r| (r.root.clone(), r.manager)).collect()
+        roots
+            .iter()
+            .map(|r| (r.root.clone(), r.manager.name()))
+            .collect()
     }
 
     /// The trees a bare upgrade must not write into: mise's default and
@@ -3724,13 +3756,17 @@ mod upgrade_target_tests {
         let keg = touch(&cellar.join("pixel/1.0/bin/pixel"));
         let roots = vec![ManagedRoot {
             root: cellar.canonicalize().unwrap(),
-            manager: "Homebrew",
+            manager: ManagedBy::Homebrew,
         }];
 
         let reason = upgrade_target_refusal(&target(keg.clone(), false), &roots).unwrap();
         assert!(reason.contains(&keg.display().to_string()), "{reason}");
         assert!(reason.contains("(running binary)"), "{reason}");
         assert!(reason.contains("Homebrew"), "{reason}");
+        assert!(
+            reason.contains("brew update && brew upgrade LivioGama/tap/pixel"),
+            "{reason}"
+        );
 
         let link = d.join("bin/pixel");
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
@@ -3748,6 +3784,39 @@ mod upgrade_target_tests {
         // is compared as given.
         let missing = cellar.canonicalize().unwrap().join("new/pixel");
         assert!(upgrade_target_refusal(&target(missing, false), &roots).is_some());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Each manager's refusal names its own update command: a mise or
+    /// Homebrew install is updated through its package manager, not by
+    /// `pixel self-update`, and that command is the actionable half of the
+    /// refusal.
+    #[test]
+    fn refusal_names_the_owning_managers_update_command() {
+        let d = sandbox("manager-command");
+        let mise_root = d.join("Mise");
+        let mise_keg = touch(&mise_root.join("pixel/1.0/bin/pixel"));
+        let cellar = d.join("Cellar");
+        let brew_keg = touch(&cellar.join("pixel/1.0/bin/pixel"));
+        let roots = vec![
+            ManagedRoot {
+                root: mise_root.canonicalize().unwrap(),
+                manager: ManagedBy::Mise,
+            },
+            ManagedRoot {
+                root: cellar.canonicalize().unwrap(),
+                manager: ManagedBy::Homebrew,
+            },
+        ];
+
+        let reason = upgrade_target_refusal(&target(mise_keg, false), &roots).unwrap();
+        assert!(reason.contains("mise upgrade pixel"), "{reason}");
+
+        let reason = upgrade_target_refusal(&target(brew_keg, false), &roots).unwrap();
+        assert!(
+            reason.contains("brew update && brew upgrade LivioGama/tap/pixel"),
+            "{reason}"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -65,6 +65,28 @@ pixel install       # let your agent use Pixel
 
 Pixel is local-first. Its index, graph, and optional history data live under `.pixel/`; it reports boundaries when results are capped, stale, or incomplete. Tests and code review remain necessary.
 
+### ⬆️ Updating
+
+Upgrading replaces the binary only. The agent prompt, shell wrapper and
+per-agent config keys are written by `pixel install` into your home — they
+are yours, not the package manager's — so they keep the old release's text
+until you refresh them. `pixel doctor .` reports the wiring as missing or
+stale until you do.
+
+| Installed with | Upgrade the binary |
+| --- | --- |
+| Homebrew | `brew update && brew upgrade LivioGama/tap/pixel` |
+| mise | `mise upgrade pixel` |
+| `install.sh` | `curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh \| sh` |
+| Source checkout | `pixel self-update` rebuilds and reinstalls the running binary; it refuses to write into a Homebrew Cellar or a mise install |
+
+Then, whatever the channel, refresh the wiring and check it:
+
+```bash
+pixel install
+pixel doctor .
+```
+
 ### Plugin install (per-tool native)
 
 This repo carries native plugin manifests, so each agent CLI can install Pixel's protocol through its own plugin mechanism — no `pixel install` step. The `pixel` binary still has to be installed (see above); the plugin never installs it. Always-on delivery is a SessionStart/SubagentStart hook (`hooks/pixel-context.sh`) that injects the protocol as `additionalContext` (the short sub-agent prompt for sub-agents) — context only, it never blocks a tool call. When `pixel` is missing from PATH, or too old for the command names the protocol uses, the hook injects a one-paragraph notice instead.
