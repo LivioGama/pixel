@@ -114,7 +114,7 @@ Using an agent the installer does not cover, or prefer to control your own setup
 system prompt and wire it into your agent by hand — see
 [Manual Setup](docs/manual-setup.md). The prompt itself lives at
 [`crates/pixel-install/assets/pixel-agent-prompt.md`](crates/pixel-install/assets/pixel-agent-prompt.md)
-(~270 lines / ~3 950 tokens) and is the single source of truth: every agent, installed or manual, should read that exact text.
+(~275 lines / ~4 150 tokens) and is the single source of truth: every agent, installed or manual, should read that exact text.
 
 > [!TIP]
 > It's large because Pixel replaces a wide range of native commands (`grep`, `rg`, `git log -S`, `git blame`, manual caller tracing) with a single indexed workflow — and the token cost is recovered in as little as one `pixel impact` call.
