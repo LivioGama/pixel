@@ -13,8 +13,19 @@
 //! receiver is `self`/`Self`/`this` (or absent) keep the normal tier, since
 //! those resolve against the enclosing type's own methods.
 //!
+//! Two receiver-shaped tiebreaks extend the receiver rules, both capped at
+//! `Probable`. A receiver path whose last segment names the type of exactly
+//! one candidate (`pixel_git::GitRunner::new` ↔ `GitRunner::new`) links to
+//! it where the name tiers would otherwise stay unresolved or shadow-vetoed;
+//! the receiver names the implementing type, so a trait-impl candidate counts
+//! here (`Options::default()`). And when the graph holds exactly one callable
+//! definition of the name, it sits in the caller's own file as an inherent
+//! method, and the receiver is a value/path (`w.push_call()`, `idx.decide()`),
+//! that sole candidate is returned — no other definition exists to shadow it,
+//! and a value receiver never names a trait implementor.
+//!
 //! A real receiver whose callee name is also defined in the caller's own file
-//! is `Unresolved` instead: T0 would link the qualified call
+//! is otherwise `Unresolved`: T0 would link the call
 //! (`pixel_graph::build::build_graph` inside `api.rs`) to the caller's own
 //! same-name symbol — a shadow, not the callee. The unresolved row keeps the
 //! envelope honest (`lower_bound`, `unresolved_same_name`) instead of an edge
@@ -93,11 +104,19 @@ struct Candidate {
     symbol_id: i64,
     kind: SymbolKind,
     start_line: u32,
+    /// Method declared in a trait impl, so an implementor (or a std type the
+    /// graph never sees) may be the real callee. Excluded from the receiver
+    /// relaxation below.
+    trait_impl: bool,
 }
 
 /// Symbol-name index + import graph snapshot used for tier decisions.
 pub struct ResolveIndex {
     by_name: HashMap<String, Vec<Candidate>>,
+    /// symbol_id → qualified name, for the type-qualified receiver tiebreak
+    /// (`pixel_git::GitRunner` + `new` ↔ `GitRunner::new`). Kept beside the
+    /// `Copy` candidate rows so the tier code stays copy-based.
+    qualified_of: HashMap<i64, String>,
     /// file_id → set of imported file_ids (for file-level fallback).
     imports_of: HashMap<i64, HashSet<i64>>,
     /// (file_id, binding_name) → set of imported file_ids. When non-empty,
@@ -135,9 +154,11 @@ impl ResolveIndex {
     pub fn build(store: &GraphStore) -> Result<Self, StoreError> {
         let conn = store.conn();
         let mut by_name: HashMap<String, Vec<Candidate>> = HashMap::new();
+        let mut qualified_of: HashMap<i64, String> = HashMap::new();
         {
-            let mut stmt =
-                conn.prepare("SELECT name, file_id, id, kind, start_line FROM symbols")?;
+            let mut stmt = conn.prepare(
+                "SELECT name, file_id, id, kind, start_line, trait_impl, qualified FROM symbols",
+            )?;
             let rows = stmt.query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -146,12 +167,15 @@ impl ResolveIndex {
                         symbol_id: r.get(2)?,
                         kind: SymbolKind::parse(&r.get::<_, String>(3)?),
                         start_line: r.get(4)?,
+                        trait_impl: r.get(5)?,
                     },
+                    r.get::<_, String>(6)?,
                 ))
             })?;
             for row in rows {
-                let (name, cand) = row?;
+                let (name, cand, qualified) = row?;
                 if callable(cand.kind) {
+                    qualified_of.insert(cand.symbol_id, qualified);
                     by_name.entry(name).or_default().push(cand);
                 }
             }
@@ -189,6 +213,7 @@ impl ResolveIndex {
         }
         Ok(Self {
             by_name,
+            qualified_of,
             imports_of,
             import_bindings,
         })
@@ -204,22 +229,112 @@ impl ResolveIndex {
     /// a real receiver (not `self`/`Self`/`this`) caps the result at
     /// `Probable` because the receiver's type is unknown to the resolver.
     /// A real receiver whose name is also defined in the caller's own file is
-    /// `Unresolved`: T0 would otherwise point the qualified call at the
-    /// caller's same-name symbol (the shadow) instead of the named module's.
+    /// `Unresolved`: T0 would otherwise point the call at the caller's
+    /// same-name symbol (the shadow) instead of the receiver's own callee.
+    ///
+    /// Two receiver-shaped exceptions fire before that veto:
+    ///
+    /// - `receiver-type-match`: the receiver is a value/path whose last
+    ///   segment is the type of exactly one same-name candidate
+    ///   (`pixel_git::GitRunner::new` → `GitRunner::new`). That candidate is
+    ///   returned as `Probable` — the type identity is still a guess, but a
+    ///   better-evidenced one than the caller's own same-name symbol. A
+    ///   trait-impl candidate counts here: the receiver names the implementing
+    ///   type, so `Options::default()` can only call `Options`'s `Default`
+    ///   impl. Outside the shadow case it only fires where the name tiers
+    ///   refused (`Unresolved`), so an import-resolved `Exact` target is never
+    ///   second-guessed.
+    /// - `sole-local-method`: when the graph holds exactly one callable
+    ///   definition of `name`, it sits in the caller's own file, it is an
+    ///   inherent method, and the receiver text is a value/path rather than a
+    ///   chained expression, there is no competing definition T0 could shadow
+    ///   and no trait implementor the graph cannot see. The call gets that
+    ///   sole candidate as `Probable` — never `Exact`.
+    ///
+    /// A same-file free function (`path.exists()`), a trait-impl method on a
+    /// value receiver (`x.clone()` next to `Box::clone`), a chained receiver
+    /// (`words.iter().count()`), two same-name methods in one file
+    /// (`A::walk` beside `B::walk`), and any name with a definition in
+    /// another file keep the shadow veto.
     pub fn decide(&self, caller_file_id: i64, name: &str, receiver: Option<&str>) -> Decision {
         if has_real_receiver(receiver) && self.defines_in_file(caller_file_id, name) {
+            if let Some(r) = receiver
+                && let Some(id) = self.qualified_match(r, name)
+            {
+                return Decision::Probable(id);
+            }
+            if let Some(r) = receiver
+                && is_value_receiver(r)
+                && let Some(id) = self.sole_inherent_method(name)
+            {
+                return Decision::Probable(id);
+            }
             return Decision::Unresolved;
         }
         let raw = self.decide_raw(caller_file_id, name);
-        if matches!(raw, Decision::Exact(_)) && has_real_receiver(receiver) {
-            // Downgrade: a non-self receiver means we cannot confirm the
-            // callee is the same definition the receiver's type resolves to.
-            return match raw {
-                Decision::Exact(id) => Decision::Probable(id),
-                _ => raw,
-            };
+        if has_real_receiver(receiver) {
+            if let Decision::Exact(id) = raw {
+                // Downgrade: a non-self receiver means we cannot confirm the
+                // callee is the same definition the receiver's type resolves
+                // to.
+                return Decision::Probable(id);
+            }
+            // The name tiers refused (several files define the name); the
+            // receiver still names a type the graph knows, so that candidate
+            // is better evidence than nothing.
+            if matches!(raw, Decision::Unresolved)
+                && let Some(r) = receiver
+                && let Some(id) = self.qualified_match(r, name)
+            {
+                return Decision::Probable(id);
+            }
         }
         raw
+    }
+
+    /// The sole callable candidate of `name` whose qualified name starts with
+    /// the receiver path's last segment (`pixel_git::GitRunner` + `new` →
+    /// `GitRunner::new`). The receiver names the implementing type, so a
+    /// trait-impl candidate matches too: `Options::default()` can only call
+    /// `Options`'s `Default` impl, unlike `opts.default()`, which
+    /// `sole_inherent_method_in` refuses. More than one matching candidate —
+    /// the same type name in two files, or an inherent method beside a
+    /// trait-impl one — is ambiguous and returns `None`, as does a receiver
+    /// that is not a plain value/path (`get_store().open()`).
+    fn qualified_match(&self, receiver: &str, name: &str) -> Option<i64> {
+        if !is_value_receiver(receiver) {
+            return None;
+        }
+        let segment = receiver.trim().rsplit("::").next()?;
+        let prefix = format!("{segment}::");
+        let mut hit: Option<i64> = None;
+        for cand in self.by_name.get(name)? {
+            let Some(qualified) = self.qualified_of.get(&cand.symbol_id) else {
+                continue;
+            };
+            if qualified.starts_with(&prefix) {
+                if hit.is_some() {
+                    return None;
+                }
+                hit = Some(cand.symbol_id);
+            }
+        }
+        hit
+    }
+
+    /// The symbol id of the graph's sole callable definition of `name`, when
+    /// it is an inherent method. `None` when the name has no definition, or
+    /// when the one definition is a trait-impl method or a free function.
+    /// `decide` only calls this under the shadow veto — the name is already
+    /// known to be defined in the caller's own file — so the sole definition
+    /// is that file's. Two definitions (`A::walk` beside `B::walk`, a
+    /// competing file) never reach the single-candidate slice.
+    fn sole_inherent_method(&self, name: &str) -> Option<i64> {
+        let [candidate] = self.by_name.get(name)?.as_slice() else {
+            return None;
+        };
+        (!candidate.trait_impl && candidate.kind == SymbolKind::Method)
+            .then_some(candidate.symbol_id)
     }
 
     /// True iff `name` has a callable definition in `file_id` — the T0 case
@@ -297,6 +412,25 @@ fn has_real_receiver(receiver: Option<&str>) -> bool {
                 )
         }
     }
+}
+
+/// True iff `receiver` is a plain identifier (`w`, `idx`, `Walker`) or a
+/// `::`-separated path (`crate::store`). A chained expression
+/// (`words.iter().filter(..)`) names a value produced elsewhere, so the
+/// sole-local-method relaxation in `decide` must not treat it as that file's
+/// method call.
+fn is_value_receiver(receiver: &str) -> bool {
+    let r = receiver.trim();
+    !r.is_empty() && r.split("::").all(is_plain_ident)
+}
+
+fn is_plain_ident(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Resolve the given in-memory pending calls, writing edges / unresolved
@@ -644,6 +778,295 @@ mod tests {
         assert_eq!(
             idx.decide(caller_file, "g", Some("x")),
             Decision::Probable(remote_g)
+        );
+    }
+
+    /// Single-file store for the sole-local-method relaxation: `src/local.rs`
+    /// is the only file, so every name defined there has exactly one file.
+    fn local_only() -> (GraphStore, i64) {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let file = store.replace_file("src/local.rs", "oid", "rust").unwrap();
+        (store, file)
+    }
+
+    /// Insert a symbol with an explicit kind and trait-impl flag; `line`
+    /// disambiguates duplicate names in one file (the uid is per line).
+    fn insert_at(
+        store: &GraphStore,
+        file_id: i64,
+        name: &str,
+        kind: SymbolKind,
+        line: u32,
+        trait_impl: bool,
+    ) -> i64 {
+        let id = store
+            .insert_symbol(
+                file_id,
+                &format!("f{file_id}#{name}#{line}"),
+                name,
+                name,
+                kind,
+                line,
+                line + 1,
+                "",
+            )
+            .unwrap();
+        if trait_impl {
+            store.mark_trait_impl(id).unwrap();
+        }
+        id
+    }
+
+    #[test]
+    fn sole_inherent_method_resolves_a_value_receiver_at_probable_never_exact() {
+        let (store, file) = local_only();
+        let method = insert_at(&store, file, "push_call", SymbolKind::Method, 2, false);
+        let idx = ResolveIndex::build(&store).unwrap();
+        // `w.push_call()`: the only definition of the name is this file's
+        // method, so the shadow veto relaxes to the sole candidate — capped
+        // at Probable, since the receiver's type is still unknown.
+        assert_eq!(
+            idx.decide(file, "push_call", Some("w")),
+            Decision::Probable(method)
+        );
+        assert_eq!(
+            idx.decide(file, "push_call", Some("crate::extract")),
+            Decision::Probable(method)
+        );
+    }
+
+    #[test]
+    fn two_same_named_methods_in_one_file_keep_the_shadow_veto() {
+        let (store, file) = local_only();
+        // `A::walk` and `B::walk` are two candidates for an unknown receiver:
+        // either could be the callee, so neither is picked.
+        let late = insert_at(&store, file, "walk", SymbolKind::Method, 9, false);
+        let early = insert_at(&store, file, "walk", SymbolKind::Method, 4, false);
+        assert_ne!(early, late);
+        let idx = ResolveIndex::build(&store).unwrap();
+        assert_eq!(idx.decide(file, "walk", Some("w")), Decision::Unresolved);
+    }
+
+    #[test]
+    fn a_free_function_with_a_receiver_keeps_the_shadow_veto() {
+        let (store, file) = local_only();
+        insert_at(&store, file, "exists", SymbolKind::Function, 2, false);
+        let idx = ResolveIndex::build(&store).unwrap();
+        // `path.exists()` is `Path::exists`, not this file's free `fn
+        // exists`: a function has no receiver, so the call cannot target it.
+        assert_eq!(
+            idx.decide(file, "exists", Some("path")),
+            Decision::Unresolved
+        );
+    }
+
+    #[test]
+    fn a_trait_impl_method_keeps_the_shadow_veto() {
+        let (store, file) = local_only();
+        insert_at(&store, file, "clone", SymbolKind::Method, 2, true);
+        let idx = ResolveIndex::build(&store).unwrap();
+        // `path.clone()` is `Clone::clone` for a std type the graph never
+        // sees; the file's `Box::clone` is not evidence the call targets it.
+        assert_eq!(
+            idx.decide(file, "clone", Some("path")),
+            Decision::Unresolved
+        );
+    }
+
+    #[test]
+    fn a_trait_impl_among_several_local_candidates_keeps_the_shadow_veto() {
+        let (store, file) = local_only();
+        insert_at(&store, file, "dims", SymbolKind::Method, 2, false);
+        insert_at(&store, file, "dims", SymbolKind::Method, 8, true);
+        let idx = ResolveIndex::build(&store).unwrap();
+        // The inherent `dims` cannot be told apart from the trait impl's
+        // `dims` on an unknown receiver, so the call stays unresolved.
+        assert_eq!(
+            idx.decide(file, "dims", Some("embedder")),
+            Decision::Unresolved
+        );
+    }
+
+    #[test]
+    fn a_chained_receiver_keeps_the_shadow_veto() {
+        let (store, file) = local_only();
+        insert_at(&store, file, "count", SymbolKind::Method, 2, false);
+        let idx = ResolveIndex::build(&store).unwrap();
+        // `words.iter().filter(..).count()` is `Iterator::count`, not the
+        // file's own method: the receiver is an expression, not a value.
+        assert_eq!(
+            idx.decide(file, "count", Some("words.iter().filter(..)")),
+            Decision::Unresolved
+        );
+    }
+
+    #[test]
+    fn a_second_file_definition_keeps_the_shadow_veto() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let local = store.replace_file("src/local.rs", "oid", "rust").unwrap();
+        let remote = store.replace_file("src/remote.rs", "oid", "rust").unwrap();
+        insert_at(&store, local, "run", SymbolKind::Method, 2, false);
+        insert_at(&store, remote, "run", SymbolKind::Method, 2, false);
+        let idx = ResolveIndex::build(&store).unwrap();
+        // `x.run()` with a competing definition elsewhere is ambiguous, so
+        // the shadow veto stays (the cited `graph::build::f()` regression).
+        assert_eq!(idx.decide(local, "run", Some("x")), Decision::Unresolved);
+    }
+
+    #[test]
+    fn value_receiver_shapes() {
+        assert!(is_value_receiver("w"));
+        assert!(is_value_receiver("a1"));
+        assert!(is_value_receiver("_private"));
+        assert!(is_value_receiver("Store"));
+        assert!(is_value_receiver("crate::store"));
+        assert!(is_value_receiver("  idx  "));
+        assert!(!is_value_receiver("m.path"));
+        assert!(!is_value_receiver("words.iter().filter(..)"));
+        assert!(!is_value_receiver("response[\"text\"]"));
+        assert!(!is_value_receiver(""));
+        assert!(!is_value_receiver("1bad"));
+    }
+
+    /// Two files, each with its own `open`: `src/local.rs` has `Other::open`
+    /// (the caller's file) and `src/remote.rs` has `Store::open`.
+    fn two_opens() -> (GraphStore, i64, i64, i64, i64) {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let local = store.replace_file("src/local.rs", "oid", "rust").unwrap();
+        let remote = store.replace_file("src/remote.rs", "oid", "rust").unwrap();
+        let other_open = insert_named(&store, local, "Other", "open");
+        let store_open = insert_named(&store, remote, "Store", "open");
+        (store, local, remote, other_open, store_open)
+    }
+
+    /// Insert an inherent method `Type::name` whose qualified name carries the
+    /// type, mirroring what the extractor writes for an `impl` block.
+    fn insert_named(store: &GraphStore, file_id: i64, ty: &str, name: &str) -> i64 {
+        store
+            .insert_symbol(
+                file_id,
+                &format!("f{file_id}#{ty}::{name}#method"),
+                name,
+                &format!("{ty}::{name}"),
+                SymbolKind::Method,
+                1,
+                3,
+                "",
+            )
+            .unwrap()
+    }
+
+    /// `insert_named` for a method declared in a trait impl.
+    fn insert_trait_named(store: &GraphStore, file_id: i64, ty: &str, name: &str) -> i64 {
+        let id = insert_named(store, file_id, ty, name);
+        store.mark_trait_impl(id).unwrap();
+        id
+    }
+
+    #[test]
+    fn receiver_path_type_matches_the_unique_qualified_candidate() {
+        let (store, local, _remote, other_open, store_open) = two_opens();
+        let idx = ResolveIndex::build(&store).unwrap();
+        // `pixel_git::GitRunner::new`-shaped: the receiver names `Store`, so
+        // the call links to `Store::open` even though the caller's own file
+        // defines `Other::open` (which the shadow veto would otherwise
+        // refuse to resolve at all).
+        assert_eq!(
+            idx.decide(local, "open", Some("pixel_remote::Store")),
+            Decision::Probable(store_open)
+        );
+        // A single-segment receiver does the same.
+        assert_eq!(
+            idx.decide(local, "open", Some("Store")),
+            Decision::Probable(store_open)
+        );
+        // Without the type path the call stays shadowed to the local
+        // `Other::open`, never guessed at the other one.
+        assert_eq!(idx.decide(local, "open", Some("o")), Decision::Unresolved);
+        assert_ne!(other_open, store_open);
+    }
+
+    #[test]
+    fn a_type_qualified_trait_method_links_to_the_implementor() {
+        let (store, file) = local_only();
+        let default = insert_trait_named(&store, file, "Options", "default");
+        let idx = ResolveIndex::build(&store).unwrap();
+        // `Options::default()` names the implementing type, so the trait impl
+        // is the only possible callee — unlike `opts.default()`, where the
+        // receiver's type (and therefore the implementor) is unknown.
+        assert_eq!(
+            idx.decide(file, "default", Some("Options")),
+            Decision::Probable(default)
+        );
+        assert_eq!(
+            idx.decide(file, "default", Some("opts")),
+            Decision::Unresolved
+        );
+    }
+
+    #[test]
+    fn two_same_named_types_make_the_path_match_ambiguous() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let a = store.replace_file("src/a.rs", "oid", "rust").unwrap();
+        let b = store.replace_file("src/b.rs", "oid", "rust").unwrap();
+        insert_named(&store, a, "Store", "open");
+        insert_named(&store, b, "Store", "open");
+        let idx = ResolveIndex::build(&store).unwrap();
+        // `x::Store::open` with two `Store::open` candidates is ambiguous:
+        // no edge, no fan-out.
+        assert_eq!(
+            idx.decide(a, "open", Some("x::Store")),
+            Decision::Unresolved
+        );
+    }
+
+    #[test]
+    fn path_prefix_must_be_the_whole_type_segment() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let a = store.replace_file("src/a.rs", "oid", "rust").unwrap();
+        let b = store.replace_file("src/b.rs", "oid", "rust").unwrap();
+        insert_named(&store, a, "WalkerHelper", "walk");
+        insert_named(&store, b, "Other", "walk");
+        let idx = ResolveIndex::build(&store).unwrap();
+        // `Walker` is a prefix of `WalkerHelper` but not the type: no match,
+        // and the two-file ambiguity keeps the call unresolved.
+        assert_eq!(idx.decide(a, "walk", Some("Walker")), Decision::Unresolved);
+    }
+
+    #[test]
+    fn a_chained_receiver_never_path_matches() {
+        let (store, local, _remote, _other_open, _store_open) = two_opens();
+        let idx = ResolveIndex::build(&store).unwrap();
+        // `get_store().open()` is not a receiver path even though the text
+        // ends in `::Store`: the expression is a call, not a name.
+        assert_eq!(idx.qualified_match("get_store()::Store", "open"), None);
+        // The same call therefore falls through to the shadow veto (the
+        // caller's file defines `Other::open`).
+        assert_eq!(
+            idx.decide(local, "open", Some("get_store()::Store")),
+            Decision::Unresolved
+        );
+    }
+
+    #[test]
+    fn an_import_resolved_exact_target_is_not_second_guessed_by_a_path() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let local = store.replace_file("src/local.rs", "oid", "rust").unwrap();
+        let a = store.replace_file("src/a.rs", "oid", "rust").unwrap();
+        let b = store.replace_file("src/b.rs", "oid", "rust").unwrap();
+        let a_open = insert_named(&store, a, "A", "open");
+        insert_named(&store, b, "B", "open");
+        // `local.rs` imports the binding `open` from `a.rs`; T1 resolves
+        // `open()` to `A::open` as Exact. A receiver naming `B` must not
+        // swap that for a Probable guess at `B::open`.
+        store
+            .insert_import(local, "crate::a::open", Some(a), &["open".to_string()])
+            .unwrap();
+        let idx = ResolveIndex::build(&store).unwrap();
+        assert_eq!(
+            idx.decide(local, "open", Some("B")),
+            Decision::Probable(a_open),
+            "Exact(A::open) downgraded to Probable, never swapped for B::open"
         );
     }
 }

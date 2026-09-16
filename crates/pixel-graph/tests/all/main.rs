@@ -6,3 +6,4 @@ mod concept_engine1_audit;
 mod concept_tests;
 mod import_resolution;
 mod resolve_receiver_shadowing;
+mod unresolved_diagnostic;

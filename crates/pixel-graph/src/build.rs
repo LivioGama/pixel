@@ -74,7 +74,10 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// 4: Rust enum variants are symbols (`SymbolKind::Variant`).
 /// 5: Rust external module declarations are marked (`symbols.module_decl`),
 ///    so `symbol_hits` can promote inline modules without promoting `mod foo;`.
-pub const EXTRACTOR_VERSION: &str = "5";
+/// 6: the resolver relaxes the receiver-shadow veto for a sole same-file
+///    inherent method (`w.push_call()`), turning those rows into Probable
+///    edges for unchanged sources.
+pub const EXTRACTOR_VERSION: &str = "6";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
