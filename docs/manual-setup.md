@@ -192,7 +192,7 @@ silence it together with the metrics line. Hook invocations stay silent.
 
 ## A note on prompt size
 
-The system prompt is ~300 lines (~4 000 tokens). That is deliberate.
+The system prompt is ~270 lines (~3 950 tokens). That is deliberate.
 
 Pixel plays a central role: it replaces `grep`, `rg`, `git log -S`, `git blame`,
 manual caller tracing, and exploratory file reading with a single indexed,
