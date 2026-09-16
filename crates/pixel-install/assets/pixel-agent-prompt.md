@@ -63,9 +63,9 @@ regex misses an exact name, `pixel search-meaning` for a conceptual question.
 | `git diff <ref>` | `pixel diff <ref>` — symbol-aware structured diff |
 | `git log --oneline -20` | `pixel commit-history` — bounded with byte caps |
 | `git branch -a -vv` | `pixel list-branches` — ahead/behind/merged/stale/unpushed |
-| `git add . && git commit -m "msg"` | `pixel commit -m "msg" --request-id "id"` — crash-safe and idempotent, like every `--request-id` op |
-| `git commit -F msg.txt` | `pixel commit -F msg.txt --request-id "id"` — multi-paragraph message from a file (`-` = stdin) |
-| `git add . && git commit && git push` | `pixel commit-and-push -m "msg" --request-id "id" origin HEAD` — one op |
+| `git add . && git commit -m "msg"` | `pixel commit --files <f>... -m "msg" --request-id "id"` — stages only the reviewed files; crash-safe and idempotent like every `--request-id` op |
+| `git commit -F msg.txt` | `pixel commit --files <f>... -F msg.txt --request-id "id"` — multi-paragraph message from a file (`-` = stdin) |
+| `git add . && git commit && git push` | `pixel commit-and-push --files <f>... -m "msg" --request-id "id" origin HEAD` — one op; push only with authorization |
 | `git pull --rebase` | `pixel sync-branch` — deterministic branch sync |
 | `git checkout -b name` | `pixel new-branch name --request-id "id"` — from HEAD or `--from` |
 | `git merge --ff-only` | `pixel fast-forward --target-oid <oid> --expected-head <head> --request-id "id"` — refuses non-ff and dirty |
@@ -124,22 +124,23 @@ Rules that keep recall honest:
 
 ## MANDATORY WORKFLOW
 
-Every task MUST follow this sequence. Skipping steps is a failure mode.
+Every task MUST follow this sequence; a step commented `only when` or `opt-in`
+runs only when its condition holds. Skipping a required step is a failure mode.
 
 ```bash
 pixel status                             # 1 orient: index + graph freshness
 pixel repo-state                         # 1 orient: HEAD, branch, dirty files
 pixel scope-task "task description"      # 2 target: P0 start here, P1 likely, P2 droppable
 pixel plan "fix all clickable elements"  # 2 target: todo list for a multi-file task
-pixel search-content "key pattern"       # 3 discover: regex first
-pixel find-code "symbol_name"            # 3 discover: exact name when regex misses
-pixel search-meaning "how does X work?"  # 3 discover: conceptual question
+pixel search-content "key pattern"       # 3 discover: regex first, always
+pixel find-code "symbol_name"            # 3 discover: only when the regex misses an exact name
+pixel search-meaning "how does X work?"  # 3 discover: only when the question is conceptual
 pixel impact "symbol_to_edit"            # 4 impact: blast radius, before any edit
 pixel what-changed                       # 5 dedup: what is already different
                                          # 6 edit with native tools
 pixel review-changes                     # 7 review the working tree
-pixel commit -m "type: description" --request-id "unique-request-id"        # 8 commit
-pixel commit-and-push -m "msg" --request-id "unique-request-id" origin HEAD # 8 commit + push
+pixel commit --files <f>... -m "type: description" --request-id "unique-request-id"  # 8 opt-in: only when the user asked to commit
+pixel commit-and-push --files <f>... -m "msg" --request-id "unique-request-id" origin HEAD  # 8 opt-in: commit + separately authorized push
 ```
 
 Rough cost per phase: 800, 500, 1500, 500, 300, —, 500, 200 tokens.
@@ -157,6 +158,10 @@ Rough cost per phase: 800, 500, 1500, 500, 300, —, 500, 200 tokens.
   `pixel what-changed`, review what was done before editing.
 - **6.** Edit with native tools (`sed`, file writes) — Pixel is read-only for
   code content.
+- **8 is opt-in.** Never commit or push unless asked: `pixel commit` only on an
+  explicit commit request, `pixel commit-and-push` (or `pixel push`) only with
+  separate authorization. `--files <f>` (repeat per file) stages exactly the
+  reviewed change set; without it `pixel commit` stages the whole working tree.
 
 ## NEVER
 
@@ -225,7 +230,10 @@ wrapped in `pixel` — when the job is:
 - **a pipeline**: `grep foo | sort | uniq` — Pixel cannot sit in a pipeline.
 - **a non-indexed directory**: when `pixel status` shows no index, fall back to
   native tools and run `pixel build-index .` to build one.
-- **binary or large files**: Pixel indexes source code only.
+- **files outside the index**: `pixel search-content` covers regular non-binary
+  files up to 4 MiB that are not git-ignored — ignored paths, binary files and
+  files over 4 MiB are not searched. If a search must include those, use native
+  `grep`.
 - **replace or in-place editing**: `sed`, `perl -i` — Pixel is read-only.
 - **interactive git**: `git rebase -i`, `git stash`.
 - **network operations**: `git clone`, `git remote` — not Pixel's domain.
