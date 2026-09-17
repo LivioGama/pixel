@@ -1,6 +1,6 @@
 //! CLI measurement adapter for pixel-actionlog. No descriptor redirection,
 //! comparison subprocesses, source reads, or changes to terminal detection.
-use pixel_actionlog::WorkflowEvidence;
+use pixel_actionlog::{ComparisonGap, WorkflowEvidence};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -75,7 +75,7 @@ struct Evidence {
     files: HashSet<PathBuf>,
     relationships: HashSet<String>,
     partial: bool,
-    unavailable: bool,
+    gap: Option<ComparisonGap>,
 }
 static EVIDENCE: Mutex<Option<Evidence>> = Mutex::new(None);
 
@@ -104,13 +104,13 @@ pub fn unavailable() {
     if let Ok(mut slot) = EVIDENCE.lock()
         && let Some(e) = slot.as_mut()
     {
-        e.unavailable = true;
+        e.gap = Some(ComparisonGap::OutputTruncated);
     }
 }
 
 fn collect(value: &Value, evidence: &mut Evidence, depth: usize) {
     if depth > 48 {
-        evidence.unavailable = true;
+        evidence.gap = Some(ComparisonGap::EvidenceDepthCapped);
         return;
     }
     match value {
@@ -175,7 +175,7 @@ fn native_commands(command: &str) -> Option<u64> {
         | "pack-context" | "list-signatures" | "repo-map" | "scope-task" | "who-calls"
         | "impact" | "call-path" | "what-changed" | "list-areas" | "list-flows"
         | "commit-history" | "search-history" | "dig-history" | "file-history" | "who-wrote"
-        | "diff" | "list-branches" | "fetch" | "new-branch" | "fast-forward" => Some(1),
+        | "diff" | "list-branches" | "fetch" | "new-branch" | "fast-forward" | "push" => Some(1),
         "repo-state" | "review-changes" | "commit" => Some(3),
         "commit-and-push" => Some(4),
         // Recovery/task/flow/reconcile depend on the actual guarded plan; do not
@@ -184,15 +184,17 @@ fn native_commands(command: &str) -> Option<u64> {
     }
 }
 
-pub fn evidence(command: &str, succeeded: bool) -> Option<WorkflowEvidence> {
+pub fn evidence(command: &str, succeeded: bool) -> Result<WorkflowEvidence, ComparisonGap> {
     if !succeeded {
-        return None;
+        return Err(ComparisonGap::OperationFailed);
     }
-    let commands = native_commands(command)?;
-    let slot = EVIDENCE.lock().ok()?;
-    let e = slot.as_ref()?;
-    if e.unavailable {
-        return None;
+    let Some(commands) = native_commands(command) else {
+        return Err(ComparisonGap::NoPolicy);
+    };
+    let slot = EVIDENCE.lock().map_err(|_| ComparisonGap::Uninitialized)?;
+    let e = slot.as_ref().ok_or(ComparisonGap::Uninitialized)?;
+    if let Some(gap) = e.gap {
+        return Err(gap);
     }
     let reads_evidence = matches!(
         command,
@@ -212,7 +214,7 @@ pub fn evidence(command: &str, succeeded: bool) -> Option<WorkflowEvidence> {
             | "list-areas"
             | "list-flows"
     );
-    Some(WorkflowEvidence {
+    Ok(WorkflowEvidence {
         distinct_files: if reads_evidence {
             e.files.len() as u64
         } else {
@@ -307,8 +309,55 @@ mod tests {
         assert_eq!(e.files.len(), 2);
         assert_eq!(e.relationships.len(), 1);
         assert!(e.partial);
-        assert!(!e.unavailable);
+        assert!(e.gap.is_none());
         assert_eq!(native_commands("commit"), Some(3));
+        assert_eq!(native_commands("push"), Some(1));
+        assert_eq!(native_commands("status"), None);
         assert_eq!(native_commands("task-state"), None);
+    }
+
+    fn nested_value(depth: usize) -> serde_json::Value {
+        let mut value = json!({"path": "src/leaf.rs"});
+        for _ in 0..depth {
+            value = json!({"nested": value});
+        }
+        value
+    }
+
+    #[test]
+    fn evidence_state_machine_reports_gaps_and_counts() {
+        // One test owns the process-wide slot, so its first probe runs against
+        // the initial `None` however the harness orders the suite.
+        assert_eq!(
+            evidence("search-content", true),
+            Err(ComparisonGap::Uninitialized)
+        );
+        begin(Path::new("/fixture"));
+        unavailable();
+        assert_eq!(
+            evidence("search-content", true),
+            Err(ComparisonGap::OutputTruncated)
+        );
+        begin(Path::new("/fixture"));
+        observe(&json!({"matches": [{"path": "src/a.rs"}], "truncated": false}));
+        let ok = evidence("search-content", true).unwrap();
+        assert_eq!(ok.distinct_files, 1);
+        assert_eq!(ok.native_commands, 1);
+        assert!(!ok.partial);
+        assert_eq!(evidence("status", true), Err(ComparisonGap::NoPolicy));
+        assert_eq!(
+            evidence("search-content", false),
+            Err(ComparisonGap::OperationFailed)
+        );
+        begin(Path::new("/fixture"));
+        observe(&nested_value(48));
+        let ok = evidence("find-code", true).unwrap();
+        assert_eq!(ok.distinct_files, 1);
+        begin(Path::new("/fixture"));
+        observe(&nested_value(49));
+        assert_eq!(
+            evidence("find-code", true),
+            Err(ComparisonGap::EvidenceDepthCapped)
+        );
     }
 }

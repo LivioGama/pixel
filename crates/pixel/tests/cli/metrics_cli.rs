@@ -895,3 +895,113 @@ fn closed_stdout_pipe_is_success_not_a_panic() {
         "EPIPE must not panic the process: {stderr}"
     );
 }
+
+/// The live line is the only place a reader learns why a comparison is
+/// missing; a silent omission is indistinguishable from accounting dropping
+/// the op. Pin the reason rows for a command with no policy baseline, a
+/// one-step baseline, and evidence the render cap refused to count.
+#[test]
+fn live_blocks_state_every_absent_comparison_and_keep_json_stdout_clean() {
+    let fixture = Fixture::new();
+
+    let status = fixture.run(&["status", ".", "--json"]);
+    assert_success(&status);
+    serde_json::from_slice::<Value>(&status.stdout).unwrap();
+    assert!(!String::from_utf8_lossy(&status.stdout).contains("🟩 pixel "));
+    let block = &metric_lines(&status)[0];
+    assert!(
+        block.contains("├─ ⏱ unavailable: no native-workflow baseline is defined for this command"),
+        "{block}"
+    );
+    assert!(
+        block.contains("├─ § unavailable: no native-workflow baseline is defined for this command"),
+        "{block}"
+    );
+    let event = fixture.events("status").pop().unwrap();
+    assert_eq!(event["metrics"]["comparison_gap"], "no_policy");
+    assert!(event["metrics"]["native_workflow_bytes"].is_null());
+    assert!(event["metrics"]["time_estimate"].is_null());
+
+    let history = fixture.run(&["commit-history", ".", "--limit", "1", "--json"]);
+    assert_success(&history);
+    serde_json::from_slice::<Value>(&history.stdout).unwrap();
+    let block = &metric_lines(&history)[0];
+    assert!(
+        block.contains("├─ ⏱ no estimated time saving (baseline has no saved round trip)"),
+        "{block}"
+    );
+    assert!(
+        block.contains("├─ § estimated LLM context saved:"),
+        "{block}"
+    );
+    let event = fixture.events("commit-history").pop().unwrap();
+    assert_eq!(event["metrics"]["time_estimate"]["sequential_steps"], 1);
+    assert!(event["metrics"]["comparison_gap"].is_null());
+
+    let capped = fixture
+        .command()
+        .args(["repo-map", ".", "--json"])
+        .env("PIXEL_OUTPUT_CAP_BYTES", "1")
+        .output()
+        .unwrap();
+    assert_success(&capped);
+    let block = &metric_lines(&capped)[0];
+    assert!(
+        block.contains("├─ ⏱ unavailable: the rendered output cap hid the evidence"),
+        "{block}"
+    );
+    assert!(
+        block.contains("├─ § unavailable: the rendered output cap hid the evidence"),
+        "{block}"
+    );
+    let event = fixture.events("repo-map").pop().unwrap();
+    assert_eq!(event["metrics"]["comparison_gap"], "output_truncated");
+    assert!(event["metrics"]["native_workflow_bytes"].is_null());
+}
+
+/// `push` now carries the one-command baseline it replaces (`git push`), so a
+/// removed policy entry is a visible regression in both the live line and the
+/// record, not a silently empty table row.
+#[test]
+fn push_baseline_replaces_git_push_and_states_the_single_step_time_gap() {
+    let fixture = Fixture::new();
+    let remote = fixture.0.join("remote.git");
+    let initialized = Command::new("git")
+        .args(["init", "-q", "--bare"])
+        .arg(&remote)
+        .status()
+        .unwrap();
+    assert!(initialized.success());
+    let added = Command::new("git")
+        .args(["remote", "add", "origin"])
+        .arg(&remote)
+        .current_dir(&fixture.0)
+        .status()
+        .unwrap();
+    assert!(added.success());
+    let output = fixture.run(&[
+        "push",
+        "origin",
+        "HEAD",
+        "--request-id",
+        "metrics-push-golden",
+        "--json",
+    ]);
+    assert_success(&output);
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["pushed"], true, "{document}");
+    let block = &metric_lines(&output)[0];
+    assert!(
+        block.contains("├─ ⏱ no estimated time saving (baseline has no saved round trip)"),
+        "{block}"
+    );
+    assert!(
+        block.contains("├─ § estimated LLM context saved:"),
+        "{block}"
+    );
+    let event = fixture.events("push").pop().unwrap();
+    assert_eq!(event["metrics"]["evidence"]["native_commands"], 1);
+    assert_eq!(event["metrics"]["native_workflow_bytes"], 1024);
+    assert_eq!(event["metrics"]["time_estimate"]["sequential_steps"], 1);
+    assert!(event["metrics"]["comparison_gap"].is_null());
+}

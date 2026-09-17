@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 mod metrics;
 pub use metrics::{
-    OperationMetrics, WorkflowEvidence, WorkflowTimeEstimate, format_metrics_line,
+    ComparisonGap, OperationMetrics, WorkflowEvidence, WorkflowTimeEstimate, format_metrics_line,
     summarize_metrics,
 };
 
