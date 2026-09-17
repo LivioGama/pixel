@@ -17,8 +17,11 @@ pub const DEFAULT_ROUND_TRIP_MS: u64 = 2000;
 
 /// Why a meaningful native-workflow comparison is absent from a record.
 /// Recorded when the metrics are built rather than inferred at render time,
-/// so a live line and its replay state the same reason. `None` with no
-/// evidence means the record predates this field, never "a baseline exists".
+/// so a live line and its replay state the same reason — except
+/// [`Self::ZeroStep`], which is inferred from the recorded evidence at render
+/// time (deterministically, so a replay states the same cause). `None` with
+/// no evidence means the record predates this field, never "a baseline
+/// exists".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComparisonGap {
@@ -33,6 +36,8 @@ pub enum ComparisonGap {
     /// The evidence accumulator was not initialized, or its lock failed.
     Uninitialized,
     /// No command or file-read steps: the sequential baseline is undefined.
+    /// Never serialized in `comparison_gap`: the renderer infers it from
+    /// zero-step evidence instead.
     ZeroStep,
 }
 
@@ -143,8 +148,9 @@ pub struct OperationMetrics {
     pub estimator_version: String,
     pub native_workflow_bytes: Option<u64>,
     pub evidence: Option<WorkflowEvidence>,
-    /// Why no native-workflow comparison exists. `None` when one does, or on
-    /// a record written before this field; absence of a reason is rendered as
+    /// Why no native-workflow comparison exists. `None` when one does, on a
+    /// record written before this field, or on zero-step evidence, whose
+    /// reason the renderer infers; any other absence is rendered as
     /// unrecorded, never as an explained gap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comparison_gap: Option<ComparisonGap>,
@@ -308,7 +314,7 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
                 // The comparison exists, it is just not a saving: state the
                 // rendered volume against the baseline instead of dropping it.
                 format!(
-                    "no estimated context saving (rendered output meets the ~{native_tok:.0} tok baseline){partial_tag}"
+                    "no estimated context saving (rendered output meets or exceeds the ~{native_tok:.0} tok baseline){partial_tag}"
                 )
             }
         } else {
@@ -1027,7 +1033,7 @@ mod tests {
         );
         assert!(
             line.contains(
-                "  ├─ § no estimated context saving (rendered output meets the ~256 tok baseline)"
+                "  ├─ § no estimated context saving (rendered output meets or exceeds the ~256 tok baseline)"
             ),
             "{line}"
         );
@@ -1053,7 +1059,7 @@ mod tests {
         );
         assert!(
             line.contains(
-                "no estimated context saving (rendered output meets the ~256 tok baseline), partial"
+                "no estimated context saving (rendered output meets or exceeds the ~256 tok baseline), partial"
             ),
             "{line}"
         );
@@ -1127,7 +1133,7 @@ mod tests {
         );
         assert!(
             zero.contains(
-                "  ├─ § no estimated context saving (rendered output meets the ~512 tok baseline)"
+                "  ├─ § no estimated context saving (rendered output meets or exceeds the ~512 tok baseline)"
             ),
             "{zero}"
         );

@@ -383,7 +383,9 @@ A missing comparison is never a silently dropped row: it renders
 `unavailable: <reason>` (no policy baseline, failed operation, a render-cap or
 depth-cap refusal, an uninitialized accumulator, or a zero-step baseline), and
 a baseline that saves nothing renders `no estimated … saving`. The reason is
-recorded as `comparison_gap` so a replay of the record states the same cause.
+recorded as `comparison_gap` — a zero-step baseline is the one inferred from
+the recorded evidence at render time — so a replay of the record states the
+same cause.
 
 Ordinary CLI boundaries emit an authoritative metrics line on stderr after the
 result/error without changing JSON stdout. `--metrics=off` and `PIXEL_METRICS=0`
