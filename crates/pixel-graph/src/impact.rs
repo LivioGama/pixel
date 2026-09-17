@@ -52,8 +52,13 @@ pub struct ImpactItem {
 pub struct ImpactReport {
     pub target: String,
     pub direction: String,
-    /// "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"
+    /// "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | "UNKNOWN"
     pub risk: String,
+    /// Present only when `risk` is `UNKNOWN`: why the verdict is withheld.
+    /// Omitted on every ranked verdict, so an absent field means "no caveat",
+    /// never "a caveat was dropped".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_note: Option<String>,
     pub summary: String,
     pub d1_will_break: Vec<ImpactItem>,
     pub d2_likely_affected: Vec<ImpactItem>,
@@ -153,6 +158,17 @@ fn risk_label(mut level: u8, lower_bound: bool) -> String {
     }
     .to_string()
 }
+
+/// Risk reported when an upstream walk resolved no caller at all. Not a rung
+/// below `LOW`: `LOW` is a claim about how much a change disturbs, and an
+/// empty caller set is equally consistent with "unused" and with "reached
+/// only through a reference class the index does not record", so no rank is
+/// defensible.
+const RISK_UNKNOWN: &str = "UNKNOWN";
+
+/// The `risk_note` that accompanies `RISK_UNKNOWN`: both readings of an empty
+/// caller set, and the check that separates them.
+const NO_CALLER_NOTE: &str = "no caller was found: the symbol is either unused or reached only through a reference class the index does not record (dynamic dispatch, a callback passed as an argument, property access) — confirm with a text search before treating it as safe to change";
 
 /// Cap on `referenced_by` items, like the main BFS buckets: an unbounded
 /// list is noise.
@@ -294,7 +310,18 @@ pub fn impact(
     } else {
         0
     };
-    let risk = risk_label(base, envelope.lower_bound);
+    // An upstream walk that resolved no caller cannot rank the change: an
+    // empty caller set is as consistent with "unused" as with "reached only
+    // through a reference class the index does not record", so ranking it
+    // `LOW` would turn "found nothing" into "safe to change". Upstream only:
+    // an empty downstream walk answers what the symbol calls, and zero there
+    // is a fact about the code rather than a claim about risk.
+    let no_caller = matches!(direction, Direction::Upstream) && d1 == 0;
+    let (risk, risk_note) = if no_caller {
+        (RISK_UNKNOWN.to_string(), Some(NO_CALLER_NOTE.to_string()))
+    } else {
+        (risk_label(base, envelope.lower_bound), None)
+    };
     let ref_suffix = if referenced_by_total != 0 {
         format!(
             "; referenced as callback in {referenced_by_total} site{}",
@@ -329,6 +356,7 @@ pub fn impact(
         target: target.uid,
         direction: direction.as_str().to_string(),
         risk,
+        risk_note,
         summary,
         d1_will_break,
         d2_likely_affected,
@@ -516,6 +544,15 @@ mod tests {
         assert_eq!(report.counts_by_depth, [0, 0, 0]);
         assert!(report.d1_will_break.is_empty());
         // But one referenced_by entry, and the total is that same count.
+        // No Calls callers, so the walk resolved nothing: the verdict is
+        // withheld rather than ranked, and the note says which check
+        // separates "unused" from "unreachable by the index". A callback
+        // registration is not a caller, so `referenced_by` does not turn the
+        // empty caller set back into a ranked answer.
+        assert_eq!(report.risk, "UNKNOWN");
+        let note = report.risk_note.as_ref().expect("UNKNOWN carries a note");
+        assert!(note.contains("no caller was found"), "{note}");
+        assert!(note.contains("text search"), "{note}");
         assert_eq!(report.referenced_by.len(), 1);
         assert_eq!(report.referenced_by[0].name, "setup");
         assert_eq!(report.referenced_by[0].tier, "probable");
@@ -622,5 +659,84 @@ mod tests {
         assert_eq!(exact.d1_will_break.len(), 4);
         assert!(!exact.truncated);
         assert!(exact.caps.is_empty());
+    }
+
+    /// An upstream walk that resolved no caller ranks nothing: the answer is
+    /// `UNKNOWN` plus the note naming both readings of an empty caller set,
+    /// never a `LOW` that reads as "safe to change".
+    #[test]
+    fn upstream_walk_without_a_caller_reports_unknown() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fid = store.replace_file("src/a.ts", "oid", "ts").unwrap();
+        sym(&store, fid, "leaf", 1, 5);
+
+        let report = impact(
+            &store,
+            "src/a.ts#leaf#function",
+            Direction::Upstream,
+            3,
+            100,
+        )
+        .unwrap();
+        assert_eq!(report.counts_by_depth, [0, 0, 0]);
+        assert_eq!(report.risk, "UNKNOWN");
+        // The wire contract agents read: the verdict and the note that
+        // explains it, both in the serialized form.
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["risk"], "UNKNOWN");
+        let note = json["risk_note"].as_str().expect("UNKNOWN carries a note");
+        assert!(note.contains("no caller was found"), "{note}");
+        assert!(note.contains("text search"), "{note}");
+        assert!(
+            report.summary.contains("risk UNKNOWN"),
+            "{}",
+            report.summary
+        );
+    }
+
+    /// Downstream is unaffected: an empty callee set answers what the symbol
+    /// calls, which is a fact about the code and not a claim about safety.
+    #[test]
+    fn downstream_walk_without_a_callee_stays_ranked() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fid = store.replace_file("src/a.ts", "oid", "ts").unwrap();
+        sym(&store, fid, "leaf", 1, 5);
+
+        let report = impact(
+            &store,
+            "src/a.ts#leaf#function",
+            Direction::Downstream,
+            3,
+            100,
+        )
+        .unwrap();
+        assert_eq!(report.risk, "LOW");
+        // Absent, not null: an absent field can only mean "no caveat".
+        assert!(report.risk_note.is_none());
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("risk_note").is_none(), "{json}");
+    }
+
+    /// One resolved caller is enough to rank again, and a ranked verdict
+    /// carries no note.
+    #[test]
+    fn a_single_caller_keeps_the_ranked_verdict() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fid = store.replace_file("src/a.ts", "oid", "ts").unwrap();
+        let a = sym(&store, fid, "alpha", 1, 5);
+        let b = sym(&store, fid, "beta", 10, 15);
+        call(&store, b, a);
+
+        let report = impact(
+            &store,
+            "src/a.ts#alpha#function",
+            Direction::Upstream,
+            3,
+            100,
+        )
+        .unwrap();
+        assert_eq!(report.counts_by_depth, [1, 0, 0]);
+        assert_eq!(report.risk, "LOW");
+        assert!(report.risk_note.is_none());
     }
 }
