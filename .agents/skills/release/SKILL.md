@@ -104,7 +104,7 @@ gh secret list | grep HOMEBREW_TAP_TOKEN
 
 ## 2. Pick the version
 
-Read `## [Unreleased]` in `CHANGELOG.md` and the last tag. Pre-1.0
+Read `changelog.d/` in the repository root and the last tag. Pre-1.0
 convention in this repo:
 
 - **patch** (`0.2.4` → `0.2.5`): fixes, additions, renames that keep the old
@@ -129,14 +129,17 @@ pixel new-branch release-x.y.z --from origin/main --request-id "release-x.y.z-br
 ```
 
 `prepare.sh` refuses before writing when the tag or the `## [x.y.z]` heading
-already exists or Unreleased is empty. Otherwise it:
+already exists, `changelog.d/` holds no fragment, or `## [Unreleased]` still
+carries a bullet of its own. Otherwise it:
 
 1. sets `[package] version` to `x.y.z` in **every** workspace member
    (lockstep, as 0.2.4 did), and `version` in every plugin manifest
    (`pixel_release::PLUGIN_MANIFESTS`), then regenerates the plugin prompt
    surfaces with `scripts/gen-plugin-assets.sh`: Claude Code and Codex deliver
    a plugin update only when its version changes;
-2. inserts `## [x.y.z] - DATE` under a kept, now empty `## [Unreleased]`;
+2. folds the fragments into a new `## [x.y.z] - DATE` under a kept, now empty
+   `## [Unreleased]`, grouped by section in the order the headings have always
+   used, and deletes the fragments;
 3. runs `cargo update --workspace` so `Cargo.lock` follows;
 4. lists the pull requests merged into `main` since the last tag, then
    the commits since the tag that belong to no merged pull request (a push
@@ -147,20 +150,22 @@ already exists or Unreleased is empty. Otherwise it:
 
 It must end with `release-check: all checks passed`. Then:
 
-- **Changelog completeness.** Changelog entries carry no PR number, so match
-  the listed PRs by hand: every `feat`, `fix` and `perf` PR, and any other
-  with a user-visible effect, needs an entry under `## [x.y.z]`
-  (CONTRIBUTING.md exempts pure refactors and CI/deps chores). Add the
-  missing ones now, in the same commit. The commits listed as belonging to no
-  pull request are the ones nobody filed an entry for: each user-visible one
-  needs an entry too. Check whether a feature already shipped with
-  `git cat-file -e v<last>:<path>` before calling it new.
+- **Changelog completeness.** Every `feat`, `fix` and `perf` pull request
+  merged since the last tag, and any other with a user-visible effect, needs an
+  entry (CONTRIBUTING.md exempts pure refactors and CI/deps chores). The run
+  lists the fragments it released above the pull requests, and a fragment named
+  after its pull request matches one line to one, so an entry nobody wrote
+  shows as a pull request with no fragment. Write the missing one straight into
+  the new `## [x.y.z]` section, in the same commit: re-running `prepare.sh`
+  would refuse the heading it has already written. The commits listed as
+  belonging to no pull request are the ones nobody filed an entry for: each
+  user-visible one needs an entry too. Check whether a feature already shipped
+  with `git cat-file -e v<last>:<path>` before calling it new.
 - **Release body.** Read the new `## [x.y.z]` section as a stranger: it is
-  published verbatim. Merges leave duplicate `### Fixed`/`### Changed`
-  subsections in Unreleased: fold them, and fix
-  wording or subsection order now, not after the tag.
+  published verbatim. Fix wording or section order now, not after the tag.
 - **Diff.** `pixel review-changes`: 17 `Cargo.toml` one-liners, `Cargo.lock`,
-  `CHANGELOG.md`, the 7 plugin manifests. Anything else is a bug.
+  `CHANGELOG.md`, the deleted `changelog.d/*.md` fragments, the 7 plugin
+  manifests. Anything else is a bug.
 - **Gates.** `GIT_CONFIG_GLOBAL=/dev/null scripts/gates.sh --force` (fmt,
   clippy, tests). Without `GIT_CONFIG_GLOBAL`, a developer's global git
   config fails tests that CI passes (`blame.ignoreRevsFile`,
@@ -298,7 +303,7 @@ ship yet:
    (`git push origin vx.y.<last>^{commit}:refs/heads/release/x.y`). On a
    `release-x.y.z` branch from `origin/release/x.y`,
    `git cherry-pick -x <fix merge sha>` (`-m 1` for a merge commit), add its
-   `CHANGELOG.md` entry under Unreleased, then `prepare.sh x.y.z` and the
+   `changelog.d/<slug>.<section>.md` fragment, then `prepare.sh x.y.z` and the
    gates as in step 3; PR into `release/x.y`.
 3. Tag that PR's merge commit (step 4) and verify (step 5). `smoke` notices
    install.sh as not checked when a newer line is already the latest release.

@@ -25,7 +25,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] `cargo deny check` exits 0 (skip when `Cargo.lock` did not change); a new exception in `deny.toml` carries its reason.
 - [ ] New behaviour has a test that fails if the behaviour is removed.
 - [ ] The `Mutants` CI job reports no `MISSED` mutant on the pull request (see "Mutation testing"); a local run is optional.
-- [ ] `CHANGELOG.md` has an entry under `## [Unreleased]` (skip for pure refactors and CI/deps chores).
+- [ ] A `changelog.d/<slug>.<section>.md` fragment carries the entry (skip for pure refactors and CI/deps chores).
 - [ ] The commit message follows the Conventional Commits format below.
 - [ ] The branch was created from an up-to-date `main` and the pull request targets `main` (a maintainer's maintenance-release branch instead starts from an up-to-date `origin/release/x.y` and its pull request targets `release/x.y`, so no unreleasable `main` commit rides along; see "Branches").
 - [ ] No file under `.pixel/`, `target/`, `.claude/` (other than the `.claude/rules` and `.claude/skills` symlinks), `.codex/`, `.cursor/` is staged (they are gitignored; do not force-add).
@@ -289,7 +289,8 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full map. The short version:
    mirrored as a warning.
 4. Wire the clap subcommand in `crates/pixel/src/main.rs`.
 5. Add a CLI integration test for the JSON contract.
-6. Update `ARCHITECTURE.md`, the agent prompt asset, and `CHANGELOG.md`.
+6. Update `ARCHITECTURE.md`, the agent prompt asset, and add a
+   `changelog.d/<slug>.<section>.md` fragment.
 
 ## Working on this repo with an AI agent
 
@@ -389,17 +390,36 @@ Pull request body, in this order:
 3. **How it was verified**: paste the gate commands you ran and their
    result. State explicitly what was *not* run (for example the musl
    cross-build or the smoke test).
-4. **Docs touched**: `CHANGELOG.md`, `ARCHITECTURE.md`, agent prompt, README.
+4. **Docs touched**: `changelog.d/`, `ARCHITECTURE.md`, agent prompt, README.
 
 Keep PRs to one concern. A change over roughly 400 lines of diff or mixing
 concerns should be split into a stack of PRs.
 
 ## Changelog
 
-`CHANGELOG.md` follows Keep a Changelog. Add your line under
-`## [Unreleased]` in the right subsection (`Added`, `Changed`, `Fixed`,
-`Security`, `Removed`). One line per user-visible change, past tense,
-naming the command or flag affected.
+`CHANGELOG.md` follows Keep a Changelog. Entries do not live in it until a
+release cuts them there: you write one file per entry under `changelog.d/`,
+e.g. `changelog.d/184-rank-gate-tolerance.fixed.md`.
+
+The name is `<slug>.<section>.md`, the section naming the heading the entry is
+filed under — `added`, `changed`, `deprecated`, `removed`, `fixed` or
+`security`. The slug is free; start it with the pull request number when the
+number is known, so the release can match entries to pull requests. The file
+holds the entry's text and nothing else: one line, past tense, naming the
+command or flag affected, without the leading `-`. A second file is a second
+entry.
+
+One file per entry is what keeps two open pull requests off the same lines of
+`CHANGELOG.md`. It also stops an entry written on a branch cut before a release
+from landing silently inside that release's section: a merge that puts a new
+bullet under a released heading is a conflict the author has to resolve, while
+a fragment of a later branch is simply not part of the cut.
+
+`prepare.sh` folds the fragments into the release section at tag time, grouped
+by section, and deletes them. `prepare.sh --check` validates the directory
+without writing, and a CI test runs it on every pull request, so a mistyped
+section fails the pull request that wrote it rather than the release that would
+have to tag it.
 
 ## Release (maintainers)
 
@@ -407,7 +427,8 @@ The full procedure, with the checks after publication and the recovery from
 a failed run, is the `release` skill (`.agents/skills/release/SKILL.md`).
 Steps 1 to 3 are `.agents/skills/release/prepare.sh x.y.z`.
 
-1. Move the `Unreleased` entries under a new `## [x.y.z] - YYYY-MM-DD`.
+1. Fold the `changelog.d/` fragments into a new `## [x.y.z] - YYYY-MM-DD`
+   under a kept, empty `## [Unreleased]`, and delete them.
 2. Bump `version` in every workspace member (they move in lockstep since
    0.2.4), then `cargo update --workspace` so `Cargo.lock` follows.
 3. `pixel check-release x.y.z` must print `all checks passed`: it checks
