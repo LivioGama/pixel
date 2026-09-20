@@ -239,6 +239,18 @@ fn run_ndcg(
 /// relativize them against the workspace root so they compare against the
 /// qrels' `crates/pixel-graph/src/<name>` form. Same query strings as the
 /// lexical lane → identical inputs, isolated channel effect.
+///
+/// The per-probe guard is a *presence* check, not the `k`-truncated score the
+/// lexical lane gates on. `ask` retrieves the whole corpus here, so a labelled
+/// file below `k` is the channel reporting the file at rank 11 -- not the "no
+/// relevant evidence" a score of 0 stands for. Gating on the truncation made
+/// this lane a boundary tripwire: `"imports dependency resolved graph edge"`
+/// puts `imports.rs` 10th of the 16 corpus files, and 26 lines of code with no
+/// test and no comment in *any* file of the subtree evict it to 11th, so
+/// ordinary development in `crates/pixel-graph` failed a gate about ranking
+/// quality. How *high* the channel ranks a relevant file is what NDCG measures
+/// and what the lane's mean gates on; the per-probe rank is printed, so a
+/// probe sliding toward the boundary is visible in the run before it gates.
 fn run_ndcg_ask(root: &std::path::Path, qrels: &[(&'static str, Vec<String>)], k: usize) -> f64 {
     let subtree = root.join("crates/pixel-graph/src");
     let mut sum = 0.0;
@@ -259,7 +271,23 @@ fn run_ndcg_ask(root: &std::path::Path, qrels: &[(&'static str, Vec<String>)], k
             })
             .collect();
         let score = ndcg_at_k(&order, &rel_set, k);
-        validate_query_score(score, None).unwrap_or_else(|err| panic!("ask query {q:?}: {err}"));
+        let rank = order
+            .iter()
+            .position(|path| rel_set.contains(path))
+            .map_or(usize::MAX, |position| position + 1);
+        eprintln!(
+            "ask query={q:?} rank={} ndcg@{k}={score}",
+            if rank == usize::MAX {
+                "unretrieved".to_string()
+            } else {
+                rank.to_string()
+            }
+        );
+        // Presence, not position: the score at the lane's own result limit is
+        // > 0 exactly when the channel returned the labelled file at all.
+        let retrieved = ndcg_at_k(&order, &rel_set, order.len());
+        validate_query_score(retrieved, None)
+            .unwrap_or_else(|err| panic!("ask query {q:?} rank={rank}: {err}"));
         sum += score;
     }
     sum / qrels.len() as f64
