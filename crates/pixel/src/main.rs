@@ -39,6 +39,7 @@ mod task_plan;
 mod task_runtime;
 mod task_sandbox;
 mod task_scheduler;
+mod web_search;
 use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service, failure_response};
 use pixel_daemon::daemon;
 use pixel_index::index::{build, shard_path};
@@ -474,6 +475,16 @@ enum Command {
     ListErrors {
         #[command(subcommand)]
         cmd: sniper_cmd::SniperCmd,
+    },
+    /// Deterministic web lookup for terms the index cannot know — the
+    /// refine step of a gated `pixel plan`. No LLM, no daemon.
+    WebSearch {
+        /// The term or question to resolve.
+        query: String,
+        #[arg(long, default_value_t = web_search::DEFAULT_LIMIT)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
     },
     // -----------------------------------------------------------------
     // M2 — safe git mutation ops (pixel-ops)
@@ -5128,6 +5139,9 @@ fn run_command(
         },
         Command::Recall { cmd } => recall_cmd::run_recall(cmd),
         Command::ListErrors { cmd } => sniper_cmd::run_sniper(cmd),
+        Command::WebSearch { query, limit, json } => {
+            web_search::run(web_search::WebSearchOptions { query, limit, json })
+        }
         // -------------------------------------------------------------
         // M2 — safe git mutation ops (pixel-ops)
         // -------------------------------------------------------------

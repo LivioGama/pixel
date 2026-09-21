@@ -114,6 +114,21 @@ impl GitRunner {
             .run_opt(&["show", end_of_options(), &spec])
     }
 
+    /// The staged version of `rel` (`git show :<rel>`) — the "old" side of a
+    /// plain `git diff`, which compares the working tree against the index
+    /// rather than against a commit. `None` when the path is not in the
+    /// index (untracked, or added in the working tree only) or git failed.
+    ///
+    /// [`GitRunner::show_blob`] cannot serve this: it validates its `oid`
+    /// with `validate_ref`, which refuses the empty left-hand side the
+    /// `:<path>` spec needs. The spec still goes after `--end-of-options`,
+    /// so a path opening on a dash cannot be read as a flag.
+    pub fn show_index_blob(&self, rel: &str) -> Option<Vec<u8>> {
+        let spec = format!(":{rel}");
+        self.with_max_output_bytes(Some(BLOB_MAX_OUTPUT_BYTES))
+            .run_opt(&["show", end_of_options(), &spec])
+    }
+
     /// All files in commit `oid`'s tree (`git ls-tree -r --name-only -z`).
     /// Returns the commit's file universe, not the working-tree index —
     /// staged additions/deletions don't affect this list. Used to build
@@ -662,6 +677,44 @@ mod tests {
 
         let size = runner.blob_size(&head, "f.txt").expect("blob size");
         assert_eq!(size, 10);
+    }
+
+    /// The index version, which is the base side of a plain `git diff`. It
+    /// has to be the staged bytes and not HEAD's: change detection reads a
+    /// deleted symbol out of it, and HEAD would answer for a state the
+    /// diff never compared against.
+    #[test]
+    fn show_index_blob_reads_the_staged_bytes() {
+        let root = tmpdir("plumbing-index-blob");
+        init_repo(&root);
+        std::fs::write(root.join("f.txt"), b"committed\n").unwrap();
+        git(&root, &["add", "f.txt"]);
+        git(&root, &["commit", "-q", "-m", "add f"]);
+        std::fs::write(root.join("f.txt"), b"staged\n").unwrap();
+        git(&root, &["add", "f.txt"]);
+        // A third version that is only in the working tree, so each of the
+        // three states is distinguishable.
+        std::fs::write(root.join("f.txt"), b"working\n").unwrap();
+        let runner = GitRunner::new(&root);
+
+        assert_eq!(runner.show_index_blob("f.txt").unwrap(), b"staged\n");
+        let head = runner.rev_parse_head().unwrap();
+        assert_eq!(runner.show_blob(&head, "f.txt").unwrap(), b"committed\n");
+
+        // Never in the index: untracked, and a path that does not exist.
+        std::fs::write(root.join("untracked.txt"), b"u\n").unwrap();
+        assert!(runner.show_index_blob("untracked.txt").is_none());
+        assert!(runner.show_index_blob("nope.txt").is_none());
+    }
+
+    #[test]
+    fn show_index_blob_rejects_a_path_that_reads_as_a_flag() {
+        let root = tmpdir("plumbing-index-inject");
+        init_repo(&root);
+        let runner = GitRunner::new(&root);
+        // `--end-of-options` keeps this a path, so git fails to find it
+        // rather than acting on it.
+        assert!(runner.show_index_blob("--upload-pack=/bin/sh").is_none());
     }
 
     #[test]

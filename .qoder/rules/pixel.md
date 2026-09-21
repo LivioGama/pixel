@@ -57,6 +57,7 @@ regex misses an exact name, `pixel search-meaning` for a conceptual question.
 | "what modules exist?" | `pixel list-areas` — functional-area clusters |
 | "what are the execution flows?" | `pixel list-flows` — discovered flows |
 | a todo list for a multi-file bug | `pixel plan "fix all clickable elements"` — AST + graph findings, no LLM |
+| a term the index cannot know ("what is JEV?") | `pixel web-search "<term>"` — deterministic fetch, no LLM, no daemon |
 
 ### History — replaces `git log -S`, `git log --grep`, `git blame`
 
@@ -164,6 +165,24 @@ Rough cost per phase: 800, 500, 1500, 500, 300, —, 500, 200 tokens.
   queries (dead interactive elements, dead code, hotspots, concept matches,
   recent changes) and ranks findings with file, line and severity — run it before
   phase 3 when the task spans several files or needs a structured checklist.
+
+  `pixel plan` is deterministic: it cannot resolve terms that live outside the
+  index. Refinement is **gated, never default** — spend tokens on it only when
+  a cheap signal fires:
+
+  - **Signal** — the plan came back `unresolved`/empty, or the prompt names a
+    term the index cannot know (an acronym, product, project codename, external
+    standard — e.g. `pixel plan "implement the gap to do like JEV"`). Confirm
+    cheaply first: if `pixel find-code "<term>"` and `pixel search-meaning
+    "<term>"` both miss, the term is external.
+  - **Refine** — resolve the term once, at minimum cost: `pixel web-search
+    "<term>"` (deterministic, no LLM — SearXNG when `PIXEL_WEB_SEARCH_URL`
+    is set, else DuckDuckGo/Wikipedia fallbacks). If it returns
+    `unresolved` or the term is private (in-house codename), ask the user
+    one clarifying question. Then re-run `pixel plan` with the resolved
+    wording — never hand-write a replacement checklist.
+  - **No signal** — use the emitted checklist as-is. Re-drafting a sound
+    deterministic plan with an LLM wastes tokens and defeats its purpose.
 - **4 is a hard rule.** NEVER edit a function, struct or method without running
   `pixel impact` first: editing blind is the most common way to break upstream
   callers you never saw. Read its `epistemics` object (see below) before treating

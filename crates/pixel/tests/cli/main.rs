@@ -25,3 +25,4 @@ mod uninstall_cli;
 #[cfg(unix)]
 mod upgrade_cli;
 mod version_cli;
+mod web_search_cli;
