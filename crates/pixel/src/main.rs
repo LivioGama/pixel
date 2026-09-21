@@ -24,6 +24,7 @@ macro_rules! eprintln {
     ($($arg:tt)*) => { crate::operation_metrics::print_error(format_args!("{}\n", format_args!($($arg)*))) };
 }
 mod call_guard;
+mod classify;
 mod claude_controller;
 mod guard;
 mod operation_metrics;
@@ -463,6 +464,26 @@ enum Command {
     ListErrors {
         #[command(subcommand)]
         cmd: sniper_cmd::SniperCmd,
+    },
+    /// Zero-shot decision over a bounded label set: embed the text and each
+    /// option's criterion, cosine → fixed-temperature softmax. The
+    /// probability distribution a Jev-class decision model returns, computed
+    /// deterministically with no LLM. `--jsonl` serves one decision per
+    /// stdin line with the model resident.
+    Classify {
+        /// The state/question text (omit with --jsonl).
+        text: Option<String>,
+        /// Candidate labels (repeatable or comma-separated).
+        #[arg(long, value_delimiter = ',', required_unless_present = "jsonl")]
+        label: Vec<String>,
+        /// Criterion text per label: --criterion label="description".
+        #[arg(long)]
+        criterion: Vec<String>,
+        /// Serve mode: JSONL spec lines on stdin, one result per line.
+        #[arg(long)]
+        jsonl: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Deterministic web lookup for terms the index cannot know — the
     /// refine step of a gated `pixel plan`. No LLM, no daemon.
@@ -5037,6 +5058,19 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         },
         Command::Recall { cmd } => recall_cmd::run_recall(cmd),
         Command::ListErrors { cmd } => sniper_cmd::run_sniper(cmd),
+        Command::Classify {
+            text,
+            label,
+            criterion,
+            jsonl,
+            json,
+        } => classify::run(classify::ClassifyOptions {
+            text,
+            labels: label,
+            criteria: criterion,
+            jsonl,
+            json,
+        }),
         Command::WebSearch { query, limit, json } => {
             web_search::run(web_search::WebSearchOptions { query, limit, json })
         }
