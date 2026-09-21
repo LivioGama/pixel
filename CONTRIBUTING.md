@@ -444,6 +444,23 @@ An entry is written to be scanned in a released section, not read as a note:
   twelve bullets of 0.4.0 ran 264 to 1265 bytes with a median of 715, against
   171 to 498 for the 19 entries of mise v2026.8.2.
 
+### The release's highlights
+
+The narrative belongs to the release, not to each of its entries. An optional
+`changelog.d/_highlights.md` carries it: a lead paragraph saying what the
+release is about, then a `### Highlights` list of two or three bullets for the
+changes a reader should not miss. `prepare.sh` folds it in above the sections,
+so the GitHub release body — which `release.yml` cuts from the version heading
+to the next `## ` — opens on it.
+
+It is the one underscore-named file `changelog.d/` takes, and it is not an
+entry: no section in its name, no scope prefix, no 500-byte aim. `###` and
+below are its to use; a `#` or `##` heading would end the section the release
+body is cut from, so `prepare.sh` refuses one, along with a file over 2000
+bytes (mise v2026.8.2's own lead plus highlights is 1275). A release of three
+fixes needs no chapeau: the file is optional, and the cut deletes it with the
+fragments.
+
 One file per entry is what keeps two open pull requests off the same lines of
 `CHANGELOG.md`. It also stops an entry written on a branch cut before a release
 from landing silently inside that release's section: a merge that puts a new

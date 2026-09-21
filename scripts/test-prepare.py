@@ -209,6 +209,50 @@ class PrepareContract(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("\n- **thing:** first line\n  continued here\n", self.changelog())
 
+    def test_the_highlights_lead_the_released_section(self):
+        """The release narrative, once per release instead of once per entry.
+
+        With nowhere to put "what this release is about", every entry carries
+        a sentence of it: that is how 0.4.0 reached a median bullet of 715
+        bytes. It goes above the sections because release.yml cuts the GitHub
+        release body from the version heading to the next `## `, so the body
+        opens on it.
+        """
+        self.write("changelog.d/_highlights.md",
+                   "This release is about the changelog.\n\n### Highlights\n- one thing.\n")
+        self.write("changelog.d/12-thing.fixed.md", "**thing:** thing\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "fragments")
+
+        result = self.prepare()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "## [0.2.0] - 2026-02-01\n\nThis release is about the changelog.\n"
+            "\n### Highlights\n- one thing.\n\n### Fixed\n- **thing:** thing\n",
+            self.changelog(),
+        )
+        # It is consumed by the cut like any fragment: left behind, it would
+        # lead the next release with the previous release's narrative.
+        self.assertEqual(self.fragments(), [])
+        self.assertIn("led by changelog.d/_highlights.md", result.stdout)
+
+    def test_the_highlights_are_not_counted_as_an_entry(self):
+        """A chapeau is not a changelog entry: alone, there is nothing to release.
+
+        Counted as one, it would let a release be cut whose section holds a
+        narrative and no bullet -- and be filed under a section its name does
+        not have.
+        """
+        self.write("changelog.d/_highlights.md", "Only a narrative.\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "highlights only")
+
+        result = self.prepare()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("changelog.d/ holds no fragment", result.stderr)
+
     def test_a_fragment_without_a_known_section_is_refused(self):
         self.write("changelog.d/12-thing.fized.md", "**thing:** thing\n")
         self.git("add", ".")
@@ -502,6 +546,87 @@ class FragmentContract(unittest.TestCase):
         result = self.run_check(root)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("no pull request referenced", result.stderr)
+
+    def test_check_reports_the_highlights_next_to_the_entries(self):
+        root = self.make_repo({
+            "_highlights.md": "A narrative.\n",
+            "12-thing.fixed.md": "**thing:** it no longer breaks.\n",
+        })
+        result = self.run_check(root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("1 fragment(s) under changelog.d/ plus _highlights.md", result.stdout)
+
+    def test_check_refuses_a_misspelt_highlights_file(self):
+        """Skipping it silently would drop the chapeau from its own release.
+
+        `_highlights.md` is the one underscore name the directory takes, so
+        anything else with that prefix is a typo of it, not a new convention.
+        """
+        root = self.make_repo({
+            "_highlight.md": "A narrative.\n",
+            "12-thing.fixed.md": "**thing:** it no longer breaks.\n",
+        })
+        result = self.run_check(root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("the only underscore-named file changelog.d/ takes is _highlights.md",
+                      result.stderr)
+
+    def test_check_refuses_a_heading_that_would_end_the_release_body(self):
+        """release.yml cuts the body from `## [x.y.z]` to the next `## `.
+
+        A `##` heading inside the chapeau truncates the release notes there,
+        dropping every section under it -- the entries included.
+        """
+        for heading in ("## Highlights", "# Highlights"):
+            with self.subTest(heading=heading):
+                root = self.make_repo({
+                    "_highlights.md": "A narrative.\n\n" + heading + "\n- one thing.\n",
+                    "12-thing.fixed.md": "**thing:** it no longer breaks.\n",
+                })
+                result = self.run_check(root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("use `###` and below", result.stderr)
+
+    def test_check_accepts_a_third_level_heading_in_the_highlights(self):
+        root = self.make_repo({
+            "_highlights.md": "A narrative.\n\n### Highlights\n- one thing.\n",
+            "12-thing.fixed.md": "**thing:** it no longer breaks.\n",
+        })
+        result = self.run_check(root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_check_refuses_highlights_over_the_cap(self):
+        """The cap is what stops the prose moving from the entries into here."""
+        root = self.make_repo({
+            "_highlights.md": "x" * 2001 + "\n",
+            "12-thing.fixed.md": "**thing:** it no longer breaks.\n",
+        })
+        result = self.run_check(root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("2001 bytes, over the 2000 cap", result.stderr)
+
+    def test_check_refuses_an_empty_highlights_file(self):
+        """Absent is a valid release; present and empty is a forgotten one."""
+        root = self.make_repo({
+            "_highlights.md": "\n",
+            "12-thing.fixed.md": "**thing:** it no longer breaks.\n",
+        })
+        result = self.run_check(root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("_highlights.md is empty", result.stderr)
+
+    def test_the_highlights_are_not_held_to_the_entry_style(self):
+        """It is a paragraph, not a bullet: no scope prefix, no 500-byte aim."""
+        root = self.make_repo({
+            "_highlights.md": "A narrative of " + "x" * 600 + ".\n",
+            "12-thing.fixed.md": "**thing:** it no longer breaks.\n",
+        })
+        result = self.run_check(root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # Seen, and held to its own limits rather than the entry's.
+        self.assertIn("plus _highlights.md", result.stdout)
+        self.assertNotIn("open the entry with the scope", result.stderr)
+        self.assertNotIn("the style aims at", result.stderr)
 
     def test_check_does_not_report_unreleased_empty_without_looking(self):
         """The success message claims something; it has to have checked it.
