@@ -59,6 +59,18 @@ type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 /// `meta` key under which the build-time freshness signature is stored.
 pub const FRESHNESS_KEY: &str = "freshness";
 
+/// The value an incremental update stores under [`FRESHNESS_KEY`] when it
+/// committed rows it could not sign. It is not a hexadecimal string, so it
+/// never equals a tree's signature: `is_fresh` says stale and `tree_delta`
+/// computes the drift from the per-row content hashes and repairs it
+/// incrementally. Deleting the key instead would make `tree_delta` return
+/// `None` ("built before signatures existed"), which the daemon answers
+/// with a full rebuild. Leaving the previous signature in place is not an
+/// option either: if the tree moved back to the state that signature
+/// describes (A, rows written for B, A again before signing), the stale
+/// rows would pass as fresh.
+pub const FRESHNESS_WITHHELD: &str = "withheld";
+
 /// `meta` key under which a full build records [`EXTRACTOR_VERSION`].
 pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 
@@ -527,7 +539,7 @@ pub fn apply_tree_delta(root: &Path, db_path: &Path, delta: &TreeDelta) -> Resul
         root,
         db_path,
         &files,
-        |store| {
+        |store, _batch| {
             for (rel, hash) in &delta.changed {
                 let stored = store.file_by_path(rel)?.map(|f| f.blob_oid);
                 // A changed file that extraction dropped (unparseable, vanished)
@@ -573,9 +585,12 @@ pub enum Publication {
     /// The rows and the signature that describes them were committed together;
     /// the graph is fresh for the tree the update saw.
     Signed,
-    /// The rows were committed (or there was nothing to commit) but no
-    /// signature: the tree drifted from what the store holds, so the stored
-    /// signature stays stale and the next graph open walks the tree again.
+    /// The rows were committed but no signature describes them: the tree
+    /// drifted from what the store holds. The stored signature is replaced
+    /// by [`FRESHNESS_WITHHELD`] so the graph reads as stale whatever the
+    /// tree looks like now, and the next graph open repairs it from the
+    /// per-row hashes. An empty batch also lands here, without touching the
+    /// signature: nothing changed.
     Withheld,
 }
 
@@ -611,14 +626,14 @@ fn update_files_probed(
         root,
         db_path,
         files,
-        |store| {
+        |store, batch| {
             let walk = tree_hashes(root);
             let known: HashMap<String, String> = store
                 .files()?
                 .into_iter()
                 .map(|f| (f.path, f.blob_oid))
                 .collect();
-            Ok(rows_match_tree(&known, &walk, files).then(|| signature_of(&walk)))
+            Ok(rows_match_tree(&known, &walk, batch).then(|| signature_of(&walk)))
         },
         probe,
     )
@@ -648,30 +663,56 @@ fn rows_match_tree(
     every_walked_file_matches && known.keys().all(|path| walked.contains(path.as_str()))
 }
 
+/// One final action per path, in order of first appearance, the last
+/// occurrence winning: a debounced watcher batch can carry `a.ts` as edited
+/// and then removed (or the reverse), and the store must end in the state of
+/// the last event, with the file's imports and calls staged once. Feeding
+/// the raw batch to `write_rows` would apply both, and the signing check
+/// would still count the path as re-extracted after its row was removed.
+fn final_actions<'a>(files: &[(&'a str, bool)]) -> Vec<(&'a str, bool)> {
+    let mut position: HashMap<&str, usize> = HashMap::with_capacity(files.len());
+    let mut out: Vec<(&'a str, bool)> = Vec::with_capacity(files.len());
+    for &(rel, removed) in files {
+        match position.get(rel) {
+            Some(&at) => out[at].1 = removed,
+            None => {
+                position.insert(rel, out.len());
+                out.push((rel, removed));
+            }
+        }
+    }
+    out
+}
+
 /// The one write transaction behind [`update_files`] and [`apply_tree_delta`]:
-/// open the store, `BEGIN IMMEDIATE`, write the rows for `files`, run `probe`
-/// (a test seam), ask `sign` which signature (if any) describes the rows now,
-/// write it under [`FRESHNESS_KEY`], `COMMIT`. An error anywhere returns
-/// before the commit and the dropped connection rolls everything back, so
-/// another connection never observes new rows under the old signature.
+/// open the store, `BEGIN IMMEDIATE`, write the rows for the batch (one final
+/// action per path, see [`final_actions`]), run `probe` (a test seam), ask
+/// `sign` which signature (if any) describes the rows now, write it under
+/// [`FRESHNESS_KEY`], or [`FRESHNESS_WITHHELD`] when there is none, `COMMIT`.
+/// An error anywhere returns before the commit and the dropped connection
+/// rolls everything back, so another connection never observes new rows
+/// under the old signature, and rows that did commit are never left under
+/// a signature that may still match the tree.
 fn update_files_in_one_transaction(
     root: &Path,
     db_path: &Path,
     files: &[(&str, bool)],
-    sign: impl FnOnce(&GraphStore) -> Result<Option<String>, BoxErr>,
+    sign: impl FnOnce(&GraphStore, &[(&str, bool)]) -> Result<Option<String>, BoxErr>,
     probe: &mut dyn FnMut(),
 ) -> Result<Publication, BoxErr> {
     if files.is_empty() {
         return Ok(Publication::Withheld);
     }
+    let batch = final_actions(files);
     let mut store = GraphStore::open(db_path)?;
     store.begin_write()?;
-    write_rows(root, &mut store, files)?;
+    write_rows(root, &mut store, &batch)?;
     probe();
-    let signature = sign(&store)?;
-    if let Some(signature) = &signature {
-        store.meta_set(FRESHNESS_KEY, signature)?;
-    }
+    let signature = sign(&store, &batch)?;
+    store.meta_set(
+        FRESHNESS_KEY,
+        signature.as_deref().unwrap_or(FRESHNESS_WITHHELD),
+    )?;
     store.commit_write()?;
     Ok(if signature.is_some() {
         Publication::Signed
@@ -1258,6 +1299,16 @@ mod tests {
             !is_fresh(&root, &db),
             "signature must not have been published"
         );
+        assert_eq!(
+            stored_signature(&GraphStore::open(&db).unwrap()),
+            FRESHNESS_WITHHELD,
+            "the previous signature is invalidated, not kept"
+        );
+        let repair = tree_delta(&root, &db).unwrap();
+        assert!(
+            repair.is_some_and(|d| !d.fresh),
+            "an invalidated signature keeps the incremental repair path"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1351,10 +1402,11 @@ mod tests {
             hash_of(v2),
             "the rows for the bytes that were parsed still land"
         );
+        assert_ne!(stored_signature(&store), old_signature);
         assert_eq!(
             stored_signature(&store),
-            old_signature,
-            "the stored signature is left stale, never set to the walked tree"
+            FRESHNESS_WITHHELD,
+            "the stored signature is invalidated, never set to the walked tree"
         );
         drop(store);
         assert!(!is_fresh(&root, &db));
@@ -1496,6 +1548,132 @@ mod tests {
             rows_match_tree(&HashMap::new(), &[], &[]),
             "an empty store matches an empty tree"
         );
+    }
+
+    /// A debounced batch may carry one path several times; only its last
+    /// event describes the file's final state. First appearance keeps the
+    /// order (imports resolve in batch order), the last occurrence wins.
+    #[test]
+    fn final_actions_keeps_one_action_per_path_with_the_last_occurrence_winning() {
+        assert_eq!(
+            final_actions(&[("a.ts", false), ("b.ts", false), ("a.ts", true)]),
+            [("a.ts", true), ("b.ts", false)]
+        );
+        assert_eq!(
+            final_actions(&[("a.ts", true), ("a.ts", false)]),
+            [("a.ts", false)]
+        );
+        assert_eq!(final_actions(&[("a.ts", false)]), [("a.ts", false)]);
+        assert_eq!(final_actions(&[]), Vec::<(&str, bool)>::new());
+    }
+
+    /// Edited then removed in one batch while the file is in fact still on
+    /// disk (the removal event was stale): the store must end without the
+    /// row, and the signing check must see a walked file with no row that
+    /// was NOT re-extracted, hence withhold. Applying both events and
+    /// counting the path as re-extracted would sign a graph missing a file
+    /// the tree has.
+    #[test]
+    fn repeated_path_update_then_remove_ends_removed_and_withholds_while_the_file_exists() {
+        let root = tmpdir("batch-update-remove");
+        std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
+        std::fs::write(root.join("b.ts"), "export function beta() { return 1 }\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        std::fs::write(root.join("a.ts"), "export function alpha() { return 2 }\n").unwrap();
+
+        let published = update_files(&root, &db, &[("a.ts", false), ("a.ts", true)]).unwrap();
+        assert_eq!(published, Publication::Withheld);
+        let store = GraphStore::open(&db).unwrap();
+        assert!(
+            store.file_by_path("a.ts").unwrap().is_none(),
+            "the last event (removal) decides the row"
+        );
+        assert_eq!(stored_signature(&store), FRESHNESS_WITHHELD);
+        drop(store);
+        assert!(!is_fresh(&root, &db));
+        // The repair re-extracts the file the tree still has.
+        let delta = tree_delta(&root, &db).unwrap().unwrap();
+        let changed: Vec<&str> = delta.changed.iter().map(|(rel, _)| rel.as_str()).collect();
+        assert_eq!(changed, ["a.ts"]);
+        apply_tree_delta(&root, &db, &delta).unwrap();
+        assert!(is_fresh(&root, &db));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Removed then edited in one batch (the file was recreated): the last
+    /// event wins, the row is present under the new bytes, and the update
+    /// signs because the store holds exactly the tree.
+    #[test]
+    fn repeated_path_remove_then_update_ends_re_extracted_and_signs() {
+        let root = tmpdir("batch-remove-update");
+        std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let v2 = b"export function alpha() { return 2 }\n";
+        std::fs::write(root.join("a.ts"), v2).unwrap();
+
+        let published = update_files(&root, &db, &[("a.ts", true), ("a.ts", false)]).unwrap();
+        assert_eq!(published, Publication::Signed);
+        assert_eq!(
+            stored_hash(&GraphStore::open(&db).unwrap(), "a.ts"),
+            hash_of(v2)
+        );
+        assert!(is_fresh(&root, &db));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ABA: tree A is signed, rows are written for B, the tree is back to A
+    /// before the signing walk. The update is withheld, but had the previous
+    /// signature (A) been kept, `is_fresh` would accept rows B for tree A.
+    /// The sentinel makes the graph stale, and stale through the incremental
+    /// path: `tree_delta` still yields a delta (not `None`, which would cost
+    /// a full rebuild) naming the file whose row disagrees with the tree.
+    #[test]
+    fn withheld_update_invalidates_the_previous_signature_so_an_aba_tree_is_not_fresh() {
+        let root = tmpdir("aba");
+        let a = b"export function alpha() { return 1 }\n";
+        let b = b"export function alpha() { return 2 }\n";
+        std::fs::write(root.join("a.ts"), a).unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let signature_a = stored_signature(&GraphStore::open(&db).unwrap());
+
+        std::fs::write(root.join("a.ts"), b).unwrap();
+        let published = update_files_probed(&root, &db, &[("a.ts", false)], &mut || {
+            // Back to A before the walk that would sign.
+            std::fs::write(root.join("a.ts"), a).unwrap();
+        })
+        .unwrap();
+        assert_eq!(published, Publication::Withheld);
+        let store = GraphStore::open(&db).unwrap();
+        assert_eq!(stored_hash(&store, "a.ts"), hash_of(b), "rows hold B");
+        assert_ne!(
+            stored_signature(&store),
+            signature_a,
+            "keeping signature A would pass rows B off as fresh for tree A"
+        );
+        drop(store);
+        assert_eq!(
+            freshness_signature(&root),
+            signature_a,
+            "the tree is A again"
+        );
+        assert!(!is_fresh(&root, &db));
+
+        let delta = tree_delta(&root, &db)
+            .unwrap()
+            .expect("stale, not unsigned");
+        assert!(!delta.fresh);
+        let changed: Vec<&str> = delta.changed.iter().map(|(rel, _)| rel.as_str()).collect();
+        assert_eq!(changed, ["a.ts"]);
+        apply_tree_delta(&root, &db, &delta).unwrap();
+        assert!(is_fresh(&root, &db));
+        assert_eq!(
+            stored_hash(&GraphStore::open(&db).unwrap(), "a.ts"),
+            hash_of(a)
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Regression: an existing graph.db must be detected as stale when a
