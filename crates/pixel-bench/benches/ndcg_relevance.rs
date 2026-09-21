@@ -133,12 +133,12 @@ fn success_at_k(ranking: &[String], relevant: &HashSet<String>, k: usize) -> f64
 ///
 /// The per-probe guard is a rank gate ([`RESOLVE_RANK_GATE`]), not the
 /// success@1 the lane reports. Gating each probe on rank 1 made this lane the
-/// tripwire the `ask` lane above was already corrected for: the top of this
-/// corpus is a near-tie, and adding one ordinarily-named method to a file
-/// reorders a probe without any ranking quality having changed. Whether the
-/// cascade *answers* the task is what the gate asks; how often it answers
-/// first is what the reported mean measures, and every probe's rank is
-/// printed so a file sliding toward the gate is visible before it fires.
+/// tripwire the `ask` lane above was already corrected for: writing a scoped
+/// query correctly put a new file at the top of a probe while the labelled
+/// answer's own score never moved (the measurement is with the constant).
+/// Whether the cascade *answers* the task is what the gate asks; how often it
+/// answers first is what the reported mean measures, and every probe's rank
+/// is printed so a file sliding toward the gate is visible before it fires.
 fn resolve_success_rate(svc: &mut Service, qrels: &[(&'static str, Vec<String>)]) -> f64 {
     let mut sum = 0.0;
     for (q, relevant) in qrels {

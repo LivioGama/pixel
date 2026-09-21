@@ -58,13 +58,28 @@ pub fn validate_query_score(score: f64, baseline: Option<f64>) -> Result<(), Str
 /// Deepest rank at which the resolve lane still counts a task as answered.
 ///
 /// The lane used to require rank 1 from every probe, which reads as the
-/// stronger claim and is in fact an unmeasurable one: on this corpus the top
-/// scores sit inside a band the metric cannot resolve, so which file wins is
-/// decided by differences no ranking quality argument can defend. Adding one
-/// method named after what it returns was enough to reorder a probe, the same
-/// class of accident the `ask` lane was corrected for — there, 26 lines with
-/// no test and no comment in any file of the subtree pushed a labelled file
-/// from rank 10 to 11 and failed a gate about ranking quality.
+/// stronger claim and is in fact one this corpus cannot support. Measured on
+/// `crates/pixel-graph/src` while PR #206 was in flight, for the query
+/// "trace path between symbols":
+///
+/// - on `main`: `trace.rs` 0.5200, and `store.rs` is not a candidate at all;
+/// - with #206: `store.rs` 0.5375, `trace.rs` 0.5200, two files at 0.5000.
+///
+/// `trace.rs` never moved. What happened is that `store.rs` entered the
+/// candidate set above it, and that took two things at once. The scope
+/// filter's SQL literal names `path` beside `symbols`, which is what makes
+/// the file a candidate — revert the literal alone and `store.rs` drops out
+/// of the ranking. The `symbols` token in the enclosing function's name then
+/// lifts it from 0.5000 to 0.5375 — rename that function alone and `store.rs`
+/// stays, at rank 3, below the labelled answer.
+///
+/// Neither half is avoidable by any reasonable choice of API: a scope filter
+/// must name the `path` column, and the method carrying it must speak of
+/// symbols. The lane was failing pull requests for writing the query
+/// correctly — the same class of accident the `ask` lane was corrected for,
+/// where 26 lines with no test and no comment in any file of the subtree
+/// pushed a labelled file from rank 10 to 11 and failed a gate about ranking
+/// quality.
 ///
 /// What is gated instead: the labelled file is retrieved, and it is near the
 /// top. Three of a seventeen-file corpus is a claim the measurement supports;
@@ -175,10 +190,11 @@ mod relevance_tests {
     }
 
     /// The case that reached CI, and the reason the lane no longer requires
-    /// rank 1: `store.rs` scored 0.5375 against `trace.rs` at 0.5200 on the
-    /// query "trace path between symbols", so 0.0175 decided which file the
-    /// probe called the answer. What must still fail is the labelled file
-    /// leaving the top of the ranking altogether.
+    /// rank 1: `store.rs` entered the ranking at 0.5375 over `trace.rs` at
+    /// 0.5200 on the query "trace path between symbols", so 0.0175 decided
+    /// which file the probe called the answer — and the labelled file had not
+    /// moved at all. What must still fail is that file leaving the top of the
+    /// ranking altogether.
     #[test]
     fn a_near_tie_passes_while_a_real_slide_still_fails() {
         let relevant = labels(&["trace.rs"]);
