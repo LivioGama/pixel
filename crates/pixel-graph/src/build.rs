@@ -19,7 +19,7 @@ use crate::resolve::{
     FileCalls, FileReferences, PendingCall, PendingReference, reconsider_resolved_calls,
     resolve_all, resolve_calls, resolve_references,
 };
-use crate::store::{EdgeKind, GraphStore, extract_crux};
+use crate::store::{EdgeKind, GraphStore, StoreError, extract_crux};
 
 /// Extract concepts for a file and insert them, linking each to the smallest
 /// enclosing symbol (by line range) when one exists. `symbol_ids` are the ids
@@ -153,8 +153,53 @@ const DEFAULT_GRAPH_MAX_FILES: usize = 50_000;
 /// The build-time file cap in force, as an evaluation reports it: `None`
 /// when the environment lifted it, so "the cap was hit" is never claimed
 /// where no cap applies.
+///
+/// This reads the *current* environment, so it is only correct at build
+/// time. An evaluation must ask [`stored_graph_file_cap`] what the loaded
+/// graph was actually built under.
 pub fn graph_file_cap() -> Option<usize> {
     graph_max_files().filter(|&n| n != usize::MAX)
+}
+
+/// Meta key: the file cap that was in force when the graph was last built
+/// in full.
+pub const GRAPH_FILE_CAP_KEY: &str = "graph_file_cap";
+
+/// The [`GRAPH_FILE_CAP_KEY`] value recording that no cap applied, kept
+/// distinct from a missing key: "the walk was unbounded" is a fact the
+/// build knows, while a missing key only means nobody recorded one.
+const GRAPH_FILE_CAP_NONE: &str = "none";
+
+/// The file cap the loaded graph was actually built under, `None` when the
+/// build walked the tree unbounded.
+///
+/// An evaluation must use this rather than [`graph_file_cap`]: the cap
+/// lives in the environment, and a daemon restarted with a different
+/// `PIXEL_GRAPH_MAX_FILES` would otherwise describe the loaded graph with a
+/// ceiling that never applied to it. That drift runs both ways, and the
+/// dangerous direction is a cap *raised* after a truncated build: the
+/// indexed count then falls below the new ceiling and the coverage flag
+/// reports `false` for a walk that did stop at a cap, narrowing a published
+/// limit instead of widening it.
+///
+/// A graph written before this key existed reports the built-in default
+/// rather than today's environment. Both are guesses about a build nobody
+/// recorded, but the constant cannot drift between build and evaluation,
+/// and the next full build replaces it with the truth.
+pub fn stored_graph_file_cap(store: &GraphStore) -> Result<Option<usize>, StoreError> {
+    match store.meta_get(GRAPH_FILE_CAP_KEY)? {
+        Some(value) if value == GRAPH_FILE_CAP_NONE => Ok(None),
+        Some(value) => Ok(value
+            .parse::<usize>()
+            .ok()
+            .or(Some(DEFAULT_GRAPH_MAX_FILES))),
+        None => Ok(Some(DEFAULT_GRAPH_MAX_FILES)),
+    }
+}
+
+/// [`GRAPH_FILE_CAP_KEY`]'s value for the cap a build ran under.
+fn graph_file_cap_value(cap: Option<usize>) -> String {
+    cap.map_or_else(|| GRAPH_FILE_CAP_NONE.to_string(), |n| n.to_string())
 }
 
 fn graph_max_files() -> Option<usize> {
@@ -384,6 +429,10 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
         .into());
     }
     store.meta_set(EXTRACTOR_VERSION_KEY, EXTRACTOR_VERSION)?;
+    // Before the signature on purpose: a crash between the two leaves the
+    // graph unsigned, and an unsigned graph is refused rather than read, so
+    // no evaluation can see a cap that belongs to a half-written build.
+    store.meta_set(GRAPH_FILE_CAP_KEY, &graph_file_cap_value(graph_file_cap()))?;
     store.meta_set(FRESHNESS_KEY, &snapshot_signature)?;
 
     let (files, symbols, edges, unresolved) = store.counts()?;
@@ -2266,5 +2315,69 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The cap a build ran under must survive the process that built it.
+    ///
+    /// It lives in the environment, and the graph outlives the daemon, so
+    /// an evaluation that re-read the environment would describe a stored
+    /// graph with a ceiling that never applied to it.
+    #[test]
+    fn a_full_build_should_record_the_file_cap_it_ran_under() {
+        let root = tmpdir("records-file-cap");
+        std::fs::write(root.join("a.ts"), "export function target() {}\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+
+        let store = GraphStore::open(&db).unwrap();
+        assert_eq!(
+            stored_graph_file_cap(&store).unwrap(),
+            graph_file_cap(),
+            "the published graph must carry the cap the walk actually used"
+        );
+        assert!(
+            store.meta_get(GRAPH_FILE_CAP_KEY).unwrap().is_some(),
+            "the key must be written, not merely defaulted to on read"
+        );
+    }
+
+    /// "No cap applied" is a fact the build knows; a missing key is not.
+    #[test]
+    fn a_recorded_cap_should_be_read_back_including_its_disabled_state() {
+        let root = tmpdir("read-file-cap");
+        std::fs::write(root.join("a.ts"), "export function target() {}\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+
+        store.meta_set(GRAPH_FILE_CAP_KEY, "none").unwrap();
+        assert_eq!(
+            stored_graph_file_cap(&store).unwrap(),
+            None,
+            "an unbounded walk has no ceiling to report"
+        );
+
+        store.meta_set(GRAPH_FILE_CAP_KEY, "7").unwrap();
+        assert_eq!(stored_graph_file_cap(&store).unwrap(), Some(7));
+
+        // A graph written before the key existed, and one whose value no
+        // longer parses, both fall back to the built-in default rather than
+        // to whatever this process's environment happens to say.
+        for unusable in ["", "not-a-number"] {
+            store.meta_set(GRAPH_FILE_CAP_KEY, unusable).unwrap();
+            assert_eq!(
+                stored_graph_file_cap(&store).unwrap(),
+                Some(DEFAULT_GRAPH_MAX_FILES),
+                "`{unusable}` must not be read as a cap"
+            );
+        }
+    }
+
+    /// The two spellings the key uses, pinned so a reader and a writer
+    /// cannot drift apart on what "no cap" looks like.
+    #[test]
+    fn the_recorded_cap_value_should_spell_a_disabled_cap_distinctly() {
+        assert_eq!(graph_file_cap_value(None), "none");
+        assert_eq!(graph_file_cap_value(Some(50_000)), "50000");
     }
 }

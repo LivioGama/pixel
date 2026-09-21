@@ -1842,7 +1842,16 @@ impl Service {
         }
 
         let caps = evaluate_caps(&evaluation);
-        let file_cap_hit = self.graph_file_cap_hit(pixel_graph::build::graph_file_cap());
+        // The cap the loaded graph was built under, not the one this
+        // process happens to have in its environment: a daemon restarted
+        // with a different `PIXEL_GRAPH_MAX_FILES` must not describe an
+        // older graph with a ceiling that never applied to it.
+        let built_cap = {
+            let store = self.graph.as_ref().expect("opened above");
+            pixel_graph::build::stored_graph_file_cap(store)
+                .map_err(|error| format!("evaluate: {error}"))?
+        };
+        let file_cap_hit = self.graph_file_cap_hit(built_cap);
         let store = self.graph.as_ref().expect("opened above");
         let envelope = evaluate::envelope(
             store,

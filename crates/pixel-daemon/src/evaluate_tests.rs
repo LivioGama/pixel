@@ -840,3 +840,49 @@ fn a_scope_should_not_capture_a_sibling_whose_name_merely_starts_the_same() {
         other => panic!("`--in src` covers both copies and must be ambiguous: {other:?}"),
     }
 }
+
+/// The cap an evaluation reports is the one the graph was built under.
+///
+/// The cap lives in the environment and the graph outlives the process that
+/// built it, so a daemon restarted with a different `PIXEL_GRAPH_MAX_FILES`
+/// would otherwise describe a stored graph with a ceiling that never
+/// applied to it — and a cap raised after a truncated build would report
+/// `false` for a walk that did stop at one, narrowing a published limit
+/// instead of widening it.
+#[test]
+fn the_reported_file_cap_should_be_the_one_the_graph_was_built_under() {
+    let dir = fixture("stored-cap");
+    let db = graph_db(&dir);
+    // What a build under a ceiling this tree certainly reached would have
+    // recorded. Nothing in this process's environment says so.
+    GraphStore::open(&db)
+        .unwrap()
+        .meta_set(pixel_graph::build::GRAPH_FILE_CAP_KEY, "1")
+        .unwrap();
+
+    let mut svc = Service::open(&dir).unwrap();
+    let envelope = evaluate(&mut svc, request("work", "helper"));
+    assert!(
+        envelope.coverage.graph_file_cap_hit,
+        "the stored cap decides the flag, not the environment: {:?}",
+        envelope.coverage
+    );
+}
+
+/// And a graph built without a cap never claims one was hit.
+#[test]
+fn a_graph_built_without_a_cap_should_never_report_one_hit() {
+    let dir = fixture("stored-cap-none");
+    GraphStore::open(&graph_db(&dir))
+        .unwrap()
+        .meta_set(pixel_graph::build::GRAPH_FILE_CAP_KEY, "none")
+        .unwrap();
+
+    let mut svc = Service::open(&dir).unwrap();
+    let envelope = evaluate(&mut svc, request("work", "helper"));
+    assert!(
+        !envelope.coverage.graph_file_cap_hit,
+        "an unbounded walk has no ceiling to hit: {:?}",
+        envelope.coverage
+    );
+}
