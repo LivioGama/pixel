@@ -72,18 +72,18 @@ test. 15 queries per corpus, median of 3 reps after a discarded warm-up.
 
 | Corpus | Arm | n | r@1 | r@5 | r@10 | p50 | bytes |
 |---|---|---|---|---|---|---|---|
-| Rust (pixel) | semble | 15 | **0.73** | **1.00** | **1.00** | **650 ms** | 7 853 |
-| | pixel `search-meaning` | 15 | 0.67 | 0.87 | 0.87 | 1 045 ms | **2 254** |
-| | pixel `find-code` | 15 | 0.00 | 0.00 | 0.00 | 218 ms | 3 141 |
-| TypeScript (GitNexus) | semble | 15 | **0.27** | **0.93** | **1.00** | 3 000 ms | 9 047 |
-| | pixel `search-meaning` | 15 | 0.13 | 0.20 | 0.20 | 5 614 ms | **2 400** |
-| | pixel `find-code` | 15 | 0.00 | 0.00 | 0.00 | **474 ms** | 2 755 |
-| Ruby (dd-trace-rb) | semble | 15 | 0.60 | **0.80** | **0.93** | 1 257 ms | 7 873 |
-| | pixel `search-meaning` | 15 | 0.60 | 0.73 | 0.73 | 2 320 ms | **2 382** |
-| | pixel `find-code` | 15 | 0.00 | 0.00 | 0.00 | 240 ms | 15 657 |
-| **All** | **semble** | **45** | **0.53** | **0.91** | **0.98** | 1 636 ms | 8 257 |
-| | **pixel `search-meaning`** | **45** | 0.47 | 0.60 | 0.60 | 2 993 ms | **2 345** |
-| | **pixel `find-code`** | **45** | 0.00 | 0.00 | 0.00 | **311 ms** | 7 184 |
+| Rust (pixel) | semble | 15 | 0.67 | **1.00** | **1.00** | **606 ms** | 8 009 |
+| | pixel `search-meaning` | 15 | **0.87** | **1.00** | **1.00** | 1 019 ms | **2 231** |
+| | pixel `find-code` | 15 | 0.00 | 0.07 | 0.07 | 225 ms | 3 353 |
+| TypeScript (GitNexus) | semble | 15 | **0.73** | **1.00** | **1.00** | 3 046 ms | 10 730 |
+| | pixel `search-meaning` | 15 | 0.20 | 0.20 | 0.27 | 5 413 ms | **2 439** |
+| | pixel `find-code` | 15 | 0.00 | 0.00 | 0.00 | **592 ms** | 2 826 |
+| Ruby (dd-trace-rb) | semble | 15 | **0.53** | **0.87** | **1.00** | 1 410 ms | 7 788 |
+| | pixel `search-meaning` | 15 | 0.33 | 0.80 | 0.80 | 2 390 ms | **2 392** |
+| | pixel `find-code` | 15 | 0.00 | 0.07 | 0.07 | 270 ms | 27 919 |
+| **All** | **semble** | **45** | **0.64** | **0.96** | **1.00** | 1 688 ms | 8 842 |
+| | **pixel `search-meaning`** | **45** | 0.47 | 0.67 | 0.69 | 2 941 ms | **2 354** |
+| | **pixel `find-code`** | **45** | 0.00 | 0.04 | 0.04 | **362 ms** | 11 366 |
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="charts/retrieval-recall-dark.svg">
@@ -92,28 +92,29 @@ test. 15 queries per corpus, median of 3 reps after a discarded warm-up.
 
 Readings:
 
-- **semble wins, clearly and on every corpus.** r@10 0.98 vs 0.60 is not a
-  margin that more reps would close. It is a purpose-built retrieval model doing
-  the job it was built for, against a general tool's secondary engine.
-- **pixel's TypeScript result is the bad one**: r@10 of 0.20. On the same corpus
-  where its *graph* answers every blast-radius query completely
-  ([vs-gitnexus.md](vs-gitnexus.md)), its semantic search finds the right file
-  one time in five.
-- **semble is also faster** end to end (1 636 ms vs 2 993 ms p50), despite being
+- **semble wins overall, but not everywhere.** r@10 1.00 against 0.69 across the
+  45 queries. It is a purpose-built retrieval model doing the job it was built
+  for, against a general tool's secondary engine, and the aggregate says so.
+- **On Rust the two are level, and pixel ranks better.** Both reach r@10 1.00,
+  and `search-meaning` puts the right file **first** more often than semble does
+  (r@1 0.87 vs 0.67). Whatever is wrong below is not wrong everywhere.
+- **pixel's TypeScript result is the bad one**: r@10 of 0.27 against semble's
+  1.00. On the same corpus where its *graph* answers every blast-radius query
+  completely ([vs-gitnexus.md](vs-gitnexus.md)), its semantic search finds the
+  right file roughly one time in four.
+- **semble is also faster** end to end (1 688 ms vs 2 941 ms p50), despite being
   Python against a Rust binary.
-- **pixel's one win is answer size**: 2 345 bytes vs 8 257, 3.5× smaller, on
+- **pixel's one win is answer size**: 2 354 bytes vs 8 842, 3.8× smaller, on
   every corpus. `pixel token-savings` exists in part as a counter to semble's
   "99% fewer tokens" claim; on *bytes per answer* that counter holds. On
   *whether the answer contains the file you wanted*, it does not.
-- **`find-code` scores 0.00 everywhere, and that is the wrong question for it.**
-  It is a concept/phrase index built for strings that occur in code, not prose
+- **`find-code` scores 0.04, and that is the wrong question for it.** It is a
+  concept/phrase index built for strings that occur in code, not prose
   descriptions. It is reported anyway: reporting only `search-meaning` would be
   picking pixel's better engine per query, which is the selective quoting this
-  whole exercise exists to avoid. Its parser was verified working (it returned
-  1–8 files per case, just never the right one), so 0.00 is a result, not a bug.
-- One query out of 45 was answered by no arm
-  (`lib/datadog/tracing/sampling/matcher.rb`, "Returns true the trace should
-  conforms this rule") — a doc comment too generic to identify its file.
+  whole exercise exists to avoid. Its parser was verified working — it returns
+  files on nearly every query, almost never the right one — so this is a result,
+  not a bug.
 
 ## Repo map — stacklit vs pixel, 4 repos
 
@@ -124,18 +125,23 @@ map navigates by directory ([`bench-map.py`](../../scripts/bench-vs/bench-map.py
 
 | Repo | Artifact | Tokens | file-cov | dir-cov |
 |---|---|---|---|---|
-| pixel (239 src) | `stacklit derive` | **369** | 0.008 | **0.682** |
-| | `pixel list-areas` | 2 445 | 0.000 | 0.494 |
-| | `pixel repo-map --markdown` | 91 799 | 1.000 | 1.000 |
-| alonetone (448) | `stacklit derive` | **538** | 0.000 | **1.000** |
-| | `pixel list-areas` | 2 363 | 0.000 | 0.319 |
-| | `pixel repo-map --markdown` | 35 160 | 1.000 | 1.000 |
+| pixel (247 src) | `stacklit derive` | **372** | 0.008 | **0.692** |
+| | `pixel list-areas` | 2 392 | 0.000 | 0.243 |
+| | `pixel repo-map --markdown` | 279 479 | 1.000 | 1.000 |
+| alonetone (448) | `stacklit derive` | **538** | 0.000 | **0.998** |
+| | `pixel list-areas` | 2 363 | 0.000 | 0.306 |
+| | `pixel repo-map --markdown` | 35 160 | 1.000 | 0.998 |
 | dd-trace-rb (2 072) | `stacklit derive` | 3 105 | 0.001 | **0.389** |
 | | `pixel list-areas` | **2 469** | 0.000 | 0.204 |
-| | `pixel repo-map --markdown` | 186 221 | 0.926 | 0.951 |
+| | `pixel repo-map --markdown` | 186 221 | 0.926 | 0.938 |
 | GitNexus (3 808) | `stacklit derive` | 2 521 | 0.000 | 0.111 |
 | | `pixel list-areas` | 2 659 | 0.000 | **0.244** |
-| | `pixel repo-map --markdown` | 179 676 | 0.457 | 0.460 |
+| | `pixel repo-map --markdown` | 179 676 | 0.457 | 0.459 |
+
+Directory coverage is matched on complete path components, and a root-level file
+counts only when the map names the root: a plain substring test credited any map
+containing a full stop with every root-level file, and let `lib/core` match
+inside `lib/core_extra`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="charts/map-cost-coverage-dark.svg">
@@ -143,9 +149,9 @@ map navigates by directory ([`bench-map.py`](../../scripts/bench-vs/bench-map.py
 </picture>
 
 - **stacklit beats `pixel list-areas` on 3 of 4 repos**, and on the two small
-  ones it is not close: 369 tokens for 68 % directory coverage against 2 445
-  tokens for 49 %. pixel wins only on GitNexus (0.244 vs 0.111).
-- **stacklit's "~250 tokens" claim holds only on small repos.** 369 and 538 are
+  ones it is not close: 372 tokens for 69 % directory coverage against 2 392
+  tokens for 24 %. pixel wins only on GitNexus (0.244 vs 0.111).
+- **stacklit's "~250 tokens" claim holds only on small repos.** 372 and 538 are
   near it; dd-trace-rb and GitNexus produce 3 105 and 2 521 — an order of
   magnitude above the headline, and in the same range as `list-areas`. Stated as
   an observation about scaling, not a criticism of the tool.
@@ -183,6 +189,9 @@ agent.
 - Whether an agent given only stacklit's map can actually complete a task — the
   coverage proxy measures what the map *names*, not what it *enables*.
 - n is 15 per corpus and one machine, one day.
+- The pixel corpus is this repository, which grew by the benchmark's own files
+  while the campaign ran (239 → 247 source files). Its `repo-map` figure moved
+  with it; treat that row as a moving target rather than a fixed property.
 
 Figures on this page are generated by
 [`make-charts.py`](../../scripts/bench-vs/make-charts.py) directly from the raw
@@ -191,6 +200,8 @@ rows below, so a chart cannot drift from the measurement it illustrates.
 ## Raw data
 
 - [`vs-tools/raw/summary-retrieval.txt`](vs-tools/raw/summary-retrieval.txt), [`summary-map.txt`](vs-tools/raw/summary-map.txt)
-- [`vs-tools/raw/`](vs-tools/raw/) — every case, every rep
+- [`vs-tools/raw/`](vs-tools/raw/) — one row per case and arm: the ranked
+  verdict, every timed repetition, the median, the answer size, the exit
+  codes and the arm order that case ran in
 - [`vs-tools/cases/`](vs-tools/cases/) — the query sets, regenerable
 - [`vs-tools/raw/environment.txt`](vs-tools/raw/environment.txt) — versions, commits, contamination control

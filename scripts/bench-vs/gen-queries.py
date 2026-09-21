@@ -13,6 +13,7 @@ the query. What remains is prose about behaviour. A case is kept only when at
 least MIN_WORDS words survive, and at most one case is taken per file so the set
 does not cluster on whichever file happens to be the best documented.
 """
+import ast
 import json
 import os
 import re
@@ -31,8 +32,10 @@ LANGS = {
                            r"(?:function|class|interface|const|type)\s+(\w+)"},
     "ruby": {"exts": (".rb",), "comment": r"^\s*#\s?(.*)$",
              "decl": r"^\s*(?:def\s+(?:self\.)?|class\s+|module\s+)(\w+)"},
-    "python": {"exts": (".py",), "comment": r'^\s*(?:"""|\'\'\')?\s*(.*?)\s*(?:"""|\'\'\')?$',
-               "decl": r"^\s*(?:async\s+)?(?:def|class)\s+(\w+)"},
+    # Python is handled by `python_cases` below, not by the line scanner: a
+    # regex for a docstring matches every line of the file, which made the
+    # scanner `continue` past every declaration and emit no cases at all.
+    "python": {"exts": (".py",), "comment": None, "decl": None},
 }
 
 WORD = re.compile(r"[A-Za-z]{3,}")
@@ -46,6 +49,41 @@ def ident_words(name):
     return {w.lower() for w in out if len(w) >= 3}
 
 
+def python_cases(rel, source):
+    """Docstrings via the AST, which is the only way to know one IS a docstring."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        doc = ast.get_docstring(node)
+        if not doc:
+            continue
+        banned = ident_words(node.name) | ident_words(Path(rel).stem)
+        words = [w for w in WORD.findall(doc) if w.lower() not in banned]
+        if MIN_WORDS <= len(words) <= MAX_WORDS:
+            return {"query": " ".join(words[:MAX_WORDS]), "truth_file": rel,
+                    "symbol": node.name, "lang": "python"}
+    return None
+
+
+def spread(cases, limit):
+    """Evenly spaced indices across the WHOLE candidate list.
+
+    The previous `cases[::len//limit]` collapsed to a stride of 1 whenever the
+    candidate count was under twice the limit, which silently took the first
+    `limit` path-sorted cases and biased the corpus toward early directories.
+    """
+    if len(cases) <= limit:
+        return cases
+    if limit == 1:
+        return cases[:1]
+    idx = sorted({round(i * (len(cases) - 1) / (limit - 1)) for i in range(limit)})
+    return [cases[i] for i in idx]
+
+
 def main():
     repo = Path(sys.argv[1]).resolve()
     lang = sys.argv[2]
@@ -53,7 +91,8 @@ def main():
     exclude = set(sys.argv[4].split(",")) if len(sys.argv) > 4 else set()
 
     spec = LANGS[lang]
-    com_re, decl_re = re.compile(spec["comment"]), re.compile(spec["decl"])
+    com_re = re.compile(spec["comment"]) if spec["comment"] else None
+    decl_re = re.compile(spec["decl"]) if spec["decl"] else None
     rels = [r for r in subprocess.run(["git", "ls-files"], cwd=repo,
                                       capture_output=True, text=True).stdout.splitlines()
             if r.endswith(spec["exts"])
@@ -64,6 +103,11 @@ def main():
         try:
             lines = (repo / rel).read_text(errors="replace").splitlines()
         except OSError:
+            continue
+        if lang == "python":
+            c = python_cases(rel, "\n".join(lines))
+            if c:
+                cases.append(c)
             continue
         buf = []
         for line in lines:
@@ -86,10 +130,9 @@ def main():
     # strided slice so cases are spread across the tree rather than clustered
     # in whichever directory sorts first.
     cases.sort(key=lambda c: c["truth_file"])
-    step = max(1, len(cases) // limit)
-    json.dump(cases[::step][:limit], sys.stdout, indent=2)
-    print(f"{len(cases)} candidates -> {min(limit, len(cases[::step]))} cases",
-          file=sys.stderr)
+    picked = spread(cases, limit)
+    json.dump(picked, sys.stdout, indent=2)
+    print(f"{len(cases)} candidates -> {len(picked)} cases", file=sys.stderr)
 
 
 if __name__ == "__main__":

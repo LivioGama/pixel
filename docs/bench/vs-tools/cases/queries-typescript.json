@@ -6,87 +6,87 @@
     "lang": "typescript"
   },
   {
-    "query": "tanuki mark SVG path data from simple logo the tanuki fox head registered trademark Inc use here only indicate source repo integration API compatible with react LucideProps",
-    "truth_file": "gitnexus-web/src/lib/lucide-icons.tsx",
-    "symbol": "Gitlab",
+    "query": "Canonical the registry path The display name ambiguous across duplicate names repoPath the normalized field and path the legacy list endpoint field",
+    "truth_file": "gitnexus-web/src/services/backend-client.ts",
+    "symbol": "repoIdentity",
     "lang": "typescript"
   },
   {
-    "query": "Cosine over normalized embeddings bounded any threshold above this accepts every row and silently disables the relevance filter Values over the are clamped rather than passed through",
-    "truth_file": "gitnexus/src/core/embeddings/config.ts",
-    "symbol": "VECTOR_MAX_DISTANCE_CEILING",
+    "query": "Stable link readConfig malformed readConfig throws plain not link HttpEmbeddingError for malformed GITNEXUS EMBEDDING GITNEXUS EMBEDDING REQUEST because config mistake not endpoint failure the CLI recognizes this link isHttpEmbeddingDimsError and prints clean config message instead raw stack dump Each var names itself the message points the operator the variable they actually set not sibling See",
+    "truth_file": "gitnexus/src/core/embeddings/http-client.ts",
+    "symbol": "dimsEnvErrorLead",
     "lang": "typescript"
   },
   {
-    "query": "Well known standard library that can appear form some projects use quotes for",
-    "truth_file": "gitnexus/src/core/group/extractors/include-extractor.ts",
-    "symbol": "SYSTEM_HEADERS",
+    "query": "True repoPath beneath member prefix yaml Empty missing matches every param exact When set requires exact equality match descendant repos",
+    "truth_file": "gitnexus/src/core/group/group-path-utils.ts",
+    "symbol": "repoInSubgroup",
     "lang": "typescript"
   },
   {
-    "query": "Nodes that open lexical for block local declarations compound statement one the for loops open for their loop variable",
-    "truth_file": "gitnexus/src/core/ingestion/cfg/visitors/c-cpp-harvest.ts",
-    "symbol": "SCOPE_TYPES",
+    "query": "Expression statement node that break basic block everything else coalesces expression statement the expr wrapper the EXPRESSIONS inside are unwrapped link visitStmt",
+    "truth_file": "gitnexus/src/core/ingestion/cfg/visitors/rust.ts",
+    "symbol": "CONTROL_FLOW_TYPES",
     "lang": "typescript"
   },
   {
-    "query": "class body ancestor the body object issue members are addressed statically through the enclosing class TAG they are marked static",
-    "truth_file": "gitnexus/src/core/ingestion/field-extractors/configs/jvm.ts",
-    "symbol": "isInsideKotlinCompanion",
+    "query": "Build the post resolution hook shared language adapters Language adapters retain syntax capture type normalization use site rules and side channel ownership this function owns framework semantics only",
+    "truth_file": "gitnexus/src/core/ingestion/frameworks/spring/di-metadata.ts",
+    "symbol": "createSpringDiMetadataAttacher",
     "lang": "typescript"
   },
   {
-    "query": "Declared used gate suffix fallback resolution BCL usings System Threading Tasks can match coincidentally named local file",
-    "truth_file": "gitnexus/src/core/ingestion/language-config.ts",
-    "symbol": "CSharpNamespaceEvidence",
+    "query": "Return the from argType paramType returns for exact match for integral promotion for standard for nullptr bool for user defined for ellipsis Infinity for mismatch",
+    "truth_file": "gitnexus/src/core/ingestion/languages/cpp/conversion-rank.ts",
+    "symbol": "cppConversionRank",
     "lang": "typescript"
   },
   {
-    "query": "function like node nested local functions shouldn leak this from outer class inner closure",
-    "truth_file": "gitnexus/src/core/ingestion/languages/csharp/receiver-binding.ts",
-    "symbol": "findEnclosingTypeDeclaration",
+    "query": "one import specifier the file names null wildcard answers with every file the package type import answers with one file Anything the workspace does not declare answers null",
+    "truth_file": "gitnexus/src/core/ingestion/languages/java/module-resolution.ts",
+    "symbol": "resolveJavaModule",
     "lang": "typescript"
   },
   {
-    "query": "method the this member can only dispatched through the class name set Parallels the language linkage side channel pattern but uses WeakSet because the mark per def per name keying needed Eliminates the cast and mutate pattern the previous marker implementation required removes any serialization survival risk surface and keeps the specific metadata off the shared SymbolDefinition type",
-    "truth_file": "gitnexus/src/core/ingestion/languages/kotlin/owners.ts",
-    "symbol": "KOTLIN_STATIC_DEFS",
+    "query": "Select the nearest manifest directory that owns fromFile Walking ancestors makes lookup path depth independent how many sibling Gemfiles monorepo contains",
+    "truth_file": "gitnexus/src/core/ingestion/languages/ruby/resolution-config.ts",
+    "symbol": "findRubyResolutionScope",
     "lang": "typescript"
   },
   {
-    "query": "use statements inside function body should attach function not module the innermost Function attach there",
-    "truth_file": "gitnexus/src/core/ingestion/languages/rust/simple-hooks.ts",
-    "symbol": "rustImportOwningScope",
+    "query": "the inside method node handling pointer reference return types where the nested inside pointer reference",
+    "truth_file": "gitnexus/src/core/ingestion/method-extractors/configs/c-cpp.ts",
+    "symbol": "findFunctionDeclarator",
     "lang": "typescript"
   },
   {
-    "query": "from function item function signature item Both use field containing identifier",
-    "truth_file": "gitnexus/src/core/ingestion/method-extractors/configs/rust.ts",
-    "symbol": "extractRustMethodName",
+    "query": "wrapper from route handler file Detects patterns like export const POST withA withB withC handler Returns object with the wrapper function names outermost first and the HTTP method they were captured from undefined found",
+    "truth_file": "gitnexus/src/core/ingestion/route-extractors/middleware.ts",
+    "symbol": "extractMiddlewareChain",
     "lang": "typescript"
   },
   {
-    "query": "Join with its optional prefix into normalized leading slash URL used the node identity Collapses duplicate slashes and strips trailing ones empty result degrades",
-    "truth_file": "gitnexus/src/core/ingestion/route-extractors/route-path.ts",
-    "symbol": "normalizeExtractedRoutePath",
+    "query": "the local name module member from file parsedImports Only named alias namespace kinds bind matcher visible local names importedName default collapses module handle",
+    "truth_file": "gitnexus/src/core/ingestion/taint/match.ts",
+    "symbol": "buildTaintImportIndex",
     "lang": "typescript"
   },
   {
-    "query": "Absolute cap the encoded byte length KTD comfortably holds hops realistic identifiers far beyond the default hop cap while bounding the persisted column even maxHops unlimited",
-    "truth_file": "gitnexus/src/core/ingestion/taint/path-codec.ts",
-    "symbol": "TAINT_REASON_MAX_BYTES",
+    "query": "extraction has const declarations namespace file scope and global variables const MAX SIZE define MAX SIZE value tree sitter uses const declaration namespace program scope expression statement containing assignment expression for variables",
+    "truth_file": "gitnexus/src/core/ingestion/variable-extractors/configs/php.ts",
+    "symbol": "phpVariableConfig",
     "lang": "typescript"
   },
   {
-    "query": "extraction does not have true top level variables pre top level statements local declaration statement can appear program scope Class scoped fields are handled the field extractor",
-    "truth_file": "gitnexus/src/core/ingestion/variable-extractors/configs/csharp.ts",
-    "symbol": "csharpVariableConfig",
+    "query": "Absolute path the published tree pkg This module compiles pkg dist core and runs from pkg src core under tsx both sit two directories below the package Shared grammar loaders and the FTS artifact resolver cannot drift",
+    "truth_file": "gitnexus/src/core/vendor-root.ts",
+    "symbol": "VENDOR_ROOT",
     "lang": "typescript"
   },
   {
-    "query": "The index represents the resolved repo handle already knows lastCommit and indexedAt are always recorded handle branch best effort plain analyze stamps the checked out branch but detached HEAD non git folder legacy index that never recorded one leaves absent run analyze branchLabel existingMeta branch",
-    "truth_file": "gitnexus/src/core/staleness-status.ts",
-    "symbol": "IndexedRef",
+    "query": "Collapse duplicate live deserialized into pool mutating place object identity shared SymbolDefinition Maps preserved Required after deserialize ParsedFile shards does not recreate the JSON reviver cross shard string and skipping regresses retained heap measured interned JSON",
+    "truth_file": "gitnexus/src/storage/v8-sidecar.ts",
+    "symbol": "internGraphStrings",
     "lang": "typescript"
   }
 ]

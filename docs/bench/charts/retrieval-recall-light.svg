@@ -20,22 +20,24 @@
 <text x="48" y="108.0" text-anchor="end" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="11" fill="#898781">1.00</text>
 <rect x="118.0" y="104.0" width="34.0" height="232.0" rx="4" fill="#2a78d6"/>
 <text x="135.0" y="98.0" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">1.00</text>
-<rect x="154.0" y="134.2" width="34.0" height="201.8" rx="4" fill="#eb6834"/>
-<text x="171.0" y="128.2" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">0.87</text>
-<text x="207.0" y="330.0" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">0.00</text>
+<rect x="154.0" y="104.0" width="34.0" height="232.0" rx="4" fill="#eb6834"/>
+<text x="171.0" y="98.0" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">1.00</text>
+<rect x="190.0" y="319.8" width="34.0" height="16.2" rx="4" fill="#1baf7a"/>
+<text x="207.0" y="313.8" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">0.07</text>
 <text x="171.0" y="356" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="12" fill="#0b0b0b">Rust</text>
 <rect x="344.0" y="104.0" width="34.0" height="232.0" rx="4" fill="#2a78d6"/>
 <text x="361.0" y="98.0" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">1.00</text>
-<rect x="380.0" y="289.6" width="34.0" height="46.4" rx="4" fill="#eb6834"/>
-<text x="397.0" y="283.6" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">0.20</text>
+<rect x="380.0" y="273.4" width="34.0" height="62.6" rx="4" fill="#eb6834"/>
+<text x="397.0" y="267.4" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">0.27</text>
 <text x="433.0" y="330.0" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">0.00</text>
 <text x="397.0" y="356" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="12" fill="#0b0b0b">TypeScript</text>
-<rect x="570.0" y="120.2" width="34.0" height="215.8" rx="4" fill="#2a78d6"/>
-<text x="587.0" y="114.2" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">0.93</text>
-<rect x="606.0" y="166.6" width="34.0" height="169.4" rx="4" fill="#eb6834"/>
-<text x="623.0" y="160.6" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">0.73</text>
-<text x="659.0" y="330.0" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">0.00</text>
+<rect x="570.0" y="104.0" width="34.0" height="232.0" rx="4" fill="#2a78d6"/>
+<text x="587.0" y="98.0" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">1.00</text>
+<rect x="606.0" y="150.4" width="34.0" height="185.6" rx="4" fill="#eb6834"/>
+<text x="623.0" y="144.4" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">0.80</text>
+<rect x="642.0" y="319.8" width="34.0" height="16.2" rx="4" fill="#1baf7a"/>
+<text x="659.0" y="313.8" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="10.5" fill="#52514e">0.07</text>
 <text x="623.0" y="356" text-anchor="middle" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="12" fill="#0b0b0b">Ruby</text>
 <line x1="58" y1="336" x2="736" y2="336" stroke="#c3c2b7" stroke-width="1"/>
-<text x="24" y="382" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="11" fill="#898781">semble wins every corpus. find-code is a phrase index, shown at 0.00 rather than dropped.</text>
+<text x="24" y="382" font-family="system-ui,-apple-system,'Segoe UI',sans-serif" font-size="11" fill="#898781">semble leads overall; Rust is a tie. find-code is a phrase index, reported rather than dropped.</text>
 </svg>

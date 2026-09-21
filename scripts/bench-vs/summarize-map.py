@@ -23,6 +23,10 @@ def main():
         d = json.load(open(p))
         for key, label in ARMS:
             a = d[key]
+            if a.get("rc", 0) != 0 or a.get("generate_rc", 0) != 0:
+                print(f"{d['repo'][:14]:14s} {label:26s} {'FAILED':>8s} "
+                      f"rc={a.get('rc')} generate_rc={a.get('generate_rc')}")
+                continue
             print(f"{d['repo'][:14]:14s} {label:26s} {a['approx_tokens']:8d} "
                   f"{a['path_coverage']:9.3f} {a['dir_coverage']:8.3f} "
                   f"{a['source_files']:10d}")

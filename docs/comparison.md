@@ -73,14 +73,16 @@ These are measured, on the same corpora, with the same harnesses.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/retrieval-recall-dark.svg">
-  <img alt="Recall@10 on doc-comment queries: semble 1.00 Rust, 1.00 TypeScript, 0.93 Ruby; pixel search-meaning 0.87, 0.20, 0.73; pixel find-code 0.00 on all three." src="bench/charts/retrieval-recall-light.svg">
+  <img alt="Recall@10 on doc-comment queries: semble 1.00 on Rust, TypeScript and Ruby; pixel search-meaning 1.00, 0.27, 0.80; pixel find-code 0.07, 0.00, 0.07." src="bench/charts/retrieval-recall-light.svg">
 </picture>
 
-**Semantic search: semble is better, and not marginally.** Over 45
-doc-comment-derived queries across Rust, TypeScript and Ruby, semble found the
-right file in its top 10 in 98 % of cases against pixel's 60 %, and was ~1.8×
-faster. On TypeScript pixel managed 20 %. If natural-language code search is
-your main need, install semble.
+**Semantic search: semble is better overall.** Over 45 doc-comment-derived
+queries across Rust, TypeScript and Ruby, semble found the right file in its top
+10 in 100 % of cases against pixel's 69 %, and was ~1.7× faster. The gap is not
+uniform: on Rust the two tie at 100 %, and pixel actually ranks the right file
+first more often (87 % vs 67 %); on TypeScript pixel manages 27 %. If
+natural-language search across mixed languages is your main need, install
+semble.
 ([measurement](bench/vs-landscape.md#natural-language-retrieval--semble-vs-pixel-45-queries))
 
 <picture>
@@ -88,8 +90,8 @@ your main need, install semble.
   <img alt="Repo map cost versus directory coverage across four repos: stacklit sits cheaper and higher on three of them, pixel list-areas higher only on GitNexus." src="bench/charts/map-cost-coverage-light.svg">
 </picture>
 
-**Compact repo map: stacklit is better on most repos.** 369 tokens for 68 % of
-pixel's own directories, against `pixel list-areas` at 2 445 tokens for 49 %. It
+**Compact repo map: stacklit is better on most repos.** 372 tokens for 69 % of
+pixel's own directories, against `pixel list-areas` at 2 392 tokens for 24 %. It
 wins 3 of 4 repos. (Its "~250 tokens" headline holds on small repos only — 2.5–3.1k
 on the larger two.) ([measurement](bench/vs-landscape.md#repo-map--stacklit-vs-pixel-4-repos))
 

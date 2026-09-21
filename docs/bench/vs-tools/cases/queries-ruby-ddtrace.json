@@ -6,87 +6,87 @@
     "lang": "ruby"
   },
   {
-    "query": "Converts complex schema payloads into and compresses them into base encoded string the payload worth compressing See https github com DataDog trace pull issuecomment",
-    "truth_file": "lib/datadog/appsec/compressed_json.rb",
-    "symbol": "CompressedJson",
+    "query": "Request bound providing threat detection interface Activated the start request see Contrib Rack RequestMiddleware and shared across all instrumentations within that request lifecycle Accumulates security events metrics and state needed for coordinated threat detection api private",
+    "truth_file": "lib/datadog/appsec/context.rb",
+    "symbol": "Context",
     "lang": "ruby"
   },
   {
-    "query": "NOTE Handling Encoding UndefinedConversionError added quick fix the issue between Ruby encoded strings and libddwaf produced events and now under investigation",
-    "truth_file": "lib/datadog/appsec/event.rb",
-    "symbol": "json_parse",
+    "query": "class responsible for exporting WAF and RASP call metrics",
+    "truth_file": "lib/datadog/appsec/metrics/exporter.rb",
+    "symbol": "Exporter",
     "lang": "ruby"
   },
   {
-    "query": "Hot swaps with new This operation acquires the lock ensure there concurrent modification the",
-    "truth_file": "lib/datadog/core/configuration/components.rb",
-    "symbol": "reconfigure_sampler",
+    "query": "Global configuration for the Datadog library public api standard disable Metrics BlockLength",
+    "truth_file": "lib/datadog/core/configuration/settings.rb",
+    "symbol": "Settings",
     "lang": "ruby"
   },
   {
-    "query": "Checks resource specified size can conforms with the current limit Implementations this method are not guaranteed side effect free return Boolean whether resource conforms with the current limit",
-    "truth_file": "lib/datadog/core/rate_limiter.rb",
-    "symbol": "allow",
+    "query": "Telemetry entry point coordinates sending telemetry events various points application lifecycle api private",
+    "truth_file": "lib/datadog/core/telemetry/component.rb",
+    "symbol": "Component",
     "lang": "ruby"
   },
   {
-    "query": "Helper methods for parsing string values into Numeric",
-    "truth_file": "lib/datadog/core/utils/duration.rb",
-    "symbol": "Duration",
+    "query": "TODO close only needed because Datadog Core Configuration Components directly manipulates the lifecycle statsd instances This should avoided prevents this class from ensuring correct resource decommission its internal dependencies",
+    "truth_file": "lib/datadog/core/workers/runtime_metrics.rb",
+    "symbol": "stop",
     "lang": "ruby"
   },
   {
-    "query": "Provides interface expected the core subsystem receive specific configuration order apply act the configuration need the state stored under Component Thus this module forwards actual configuration application the ProbeManager associated with the global Component api private",
-    "truth_file": "lib/datadog/di/remote.rb",
-    "symbol": "Remote",
+    "query": "This class for exposure events that evicts random and keeps track the number dropped events WARNING This class does not work intended JRuby",
+    "truth_file": "lib/datadog/open_feature/exposures/buffer.rb",
+    "symbol": "Buffer",
     "lang": "ruby"
   },
   {
-    "query": "Keeps OpenTelemetry spans sync with the Datadog execution context Also responsible for flushing spans when their are finished",
-    "truth_file": "lib/datadog/opentelemetry/sdk/span_processor.rb",
+    "query": "Used report profiling data Datadog Methods prefixed with native are implemented",
+    "truth_file": "lib/datadog/profiling/http_transport.rb",
+    "symbol": "HttpTransport",
+    "lang": "ruby"
+  },
+  {
+    "query": "DefaultContextProvider that retrieves all contexts from the current fiber local storage suitable for synchronous programming see https ruby doc org core Thread html method Thread attributes are fiber local",
+    "truth_file": "lib/datadog/tracing/context_provider.rb",
+    "symbol": "DefaultContextProvider",
+    "lang": "ruby"
+  },
+  {
+    "query": "Extensions for instrumentation added the base library AutoInstrumentation enables all integration",
+    "truth_file": "lib/datadog/tracing/contrib/auto_instrument.rb",
+    "symbol": "AutoInstrument",
+    "lang": "ruby"
+  },
+  {
+    "query": "The DatadogInterceptor implements the tracing strategy for gRPC side endpoints This middleware component will inject trace context information into gRPC metadata prior sending the request the server",
+    "truth_file": "lib/datadog/tracing/contrib/grpc/datadog_interceptor/client.rb",
+    "symbol": "Client",
+    "lang": "ruby"
+  },
+  {
+    "query": "for Racecar events Note they share the same process method and before trace method",
+    "truth_file": "lib/datadog/tracing/contrib/racecar/event.rb",
+    "symbol": "ClassMethods",
+    "lang": "ruby"
+  },
+  {
+    "query": "Common functionality used both client side and server side tracers",
+    "truth_file": "lib/datadog/tracing/contrib/sidekiq/utils.rb",
+    "symbol": "Utils",
+    "lang": "ruby"
+  },
+  {
+    "query": "This executes the configured operation for each Datadog Tracing Datadog Tracing TraceSegment public api",
+    "truth_file": "lib/datadog/tracing/pipeline/span_processor.rb",
     "symbol": "SpanProcessor",
     "lang": "ruby"
   },
   {
-    "query": "facade that adds config gated trace method Wraps any customer provided default and delegates standard methods The trace method sub debug level that unless TRACE DEBUG set avoiding overhead for high frequency log sites per module filtering dedup checks api private",
-    "truth_file": "lib/datadog/symbol_database/logger.rb",
-    "symbol": "Logger",
-    "lang": "ruby"
-  },
-  {
-    "query": "ActionView integration constants public api Changing resource names tag names environment variables creates breaking changes",
-    "truth_file": "lib/datadog/tracing/contrib/action_view/ext.rb",
-    "symbol": "Ext",
-    "lang": "ruby"
-  },
-  {
-    "query": "Matches Strings and Regexps against object objects and Procs against plain objects",
-    "truth_file": "lib/datadog/tracing/contrib/configuration/resolvers/pattern_resolver.rb",
-    "symbol": "PatternResolver",
-    "lang": "ruby"
-  },
-  {
-    "query": "don want trace our own call the API they use net http TODO don want this kind soft check HTTP requests Remove this when transport implements its own skip tracing mechanism",
-    "truth_file": "lib/datadog/tracing/contrib/http/circuit_breaker.rb",
-    "symbol": "internal_request",
-    "lang": "ruby"
-  },
-  {
-    "query": "Retrieves the spent upstream proxy for the current Rack This captures the delay introduced but such proxy before the made the Ruby process",
-    "truth_file": "lib/datadog/tracing/contrib/rack/request_queue.rb",
-    "symbol": "QueueTime",
-    "lang": "ruby"
-  },
-  {
-    "query": "used for automatically tagging configured headers and handle request span",
-    "truth_file": "lib/datadog/tracing/contrib/sinatra/tracer_middleware.rb",
-    "symbol": "TracerMiddleware",
-    "lang": "ruby"
-  },
-  {
-    "query": "Returns true the trace should conforms this rule false otherwise param TraceOperation trace return Boolean",
-    "truth_file": "lib/datadog/tracing/sampling/matcher.rb",
-    "symbol": "match",
+    "query": "The Datadog gets its docstring overwritten almost every file the repo due comments the the file typed true from vendor files Copyright Not Datadog This ensures that only the provided lib datadog used documentation for the Datadog For non documentation this can solved removing duplicate class documentation But for tricky common leave general comments and directives the first lines file",
+    "truth_file": "yard/extensions.rb",
+    "symbol": "EnsureTopLevelModuleCommentConsistency",
     "lang": "ruby"
   }
 ]

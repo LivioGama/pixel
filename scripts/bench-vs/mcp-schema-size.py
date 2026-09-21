@@ -11,18 +11,43 @@ not a tokenizer count.
 
 Usage: mcp-schema-size.py <label> -- <command> [args...]
 """
+
 import json
+import os
+import selectors
 import subprocess
 import sys
 import time
 
+# Overridable so the deadline path itself can be tested cheaply.
+TIMEOUT_S = float(os.environ.get("MCP_TIMEOUT_S", 90))
 
-def main():
-    label = sys.argv[1]
-    cmd = sys.argv[sys.argv.index("--") + 1:]
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                         stderr=subprocess.DEVNULL, text=True, bufsize=1)
 
+def read_line(stream, deadline):
+    """One line, or None once the deadline passes.
+
+    `readline()` blocks with no way out: the old loop checked its deadline only
+    after a complete line came back, so a server that held stdout open without
+    writing a newline pinned the benchmark indefinitely and never reached the
+    kill. Waiting on the file descriptor first makes the deadline real.
+    """
+    sel = selectors.DefaultSelector()
+    sel.register(stream, selectors.EVENT_READ)
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            if not sel.select(timeout=min(remaining, 1.0)):
+                continue
+            line = stream.readline()
+            return line or None      # empty string means EOF
+    finally:
+        sel.close()
+
+
+def handshake(p, deadline):
+    """initialize -> notifications/initialized -> tools/list."""
     def send(obj):
         p.stdin.write(json.dumps(obj) + "\n")
         p.stdin.flush()
@@ -30,26 +55,44 @@ def main():
     send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
           "params": {"protocolVersion": "2024-11-05", "capabilities": {},
                      "clientInfo": {"name": "bench", "version": "1"}}})
-    p.stdout.readline()
+    if read_line(p.stdout, deadline) is None:
+        return None
     send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
     send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
-
-    tools, deadline = None, time.time() + 90
-    while time.time() < deadline:
-        line = p.stdout.readline()
-        if not line:
-            break
+    while True:
+        line = read_line(p.stdout, deadline)
+        if line is None:
+            return None
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
             continue           # servers that print a banner before the protocol
         if msg.get("id") == 2:
-            tools = msg.get("result", {}).get("tools")
-            break
-    p.kill()
+            return msg.get("result", {}).get("tools")
+
+
+def main():
+    label = sys.argv[1]
+    cmd = sys.argv[sys.argv.index("--") + 1:]
+    deadline = time.monotonic() + TIMEOUT_S
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    try:
+        tools = handshake(p, deadline)
+    finally:
+        # A server that opens stdout and never writes a newline would otherwise
+        # hang the benchmark forever, and killing without waiting leaves a
+        # zombie that outlives this process.
+        p.terminate()
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
 
     if tools is None:
-        print(json.dumps({"label": label, "error": "no tools/list response"}))
+        print(json.dumps({"label": label, "error": "no tools/list response "
+                          f"within {TIMEOUT_S}s"}))
         sys.exit(1)
 
     payload = json.dumps(tools)

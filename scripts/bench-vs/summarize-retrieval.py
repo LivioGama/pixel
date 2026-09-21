@@ -18,6 +18,14 @@ def main():
     per_corpus, allrows = [], []
     for p in sys.argv[1:]:
         rows = json.load(open(p))
+        failed = [(r["truth_file"], a) for r in rows for a in ARMS
+                  if r.get(f"{a}_failed_reps")]
+        if failed:
+            print(f"WARNING: {len(failed)} arm-case pair(s) had a failed "
+                  f"invocation in {Path(p).name}; they score 0 by construction "
+                  f"and are listed below.", file=sys.stderr)
+            for f, a in failed:
+                print(f"  {a:22s} {f}", file=sys.stderr)
         allrows += rows
         per_corpus.append((Path(p).stem.replace("retrieval-", ""), rows))
 

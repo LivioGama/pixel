@@ -6,6 +6,10 @@ scored on whether the file that comment documents appears in its top-k ranked
 FILES, after de-duplicating repeated hits in the same file. recall@1/5/10, plus
 what the answer cost in bytes and wall clock.
 
+Arm order is rotated per query and recorded, a failed invocation is reported as
+such rather than scored as a miss, and every timed repetition is kept alongside
+the median.
+
 `gitnexus query` is deliberately absent: it returns execution flows, not a
 ranked file list, so scoring it here would measure it on a question it does not
 claim to answer. Its retrieval path is `context`/`impact`, benchmarked
@@ -83,26 +87,41 @@ def main():
     cases = json.load(open(sys.argv[2]))
     semble_bin = sys.argv[3]
     rows = []
-    for c in cases:
+    for ci, c in enumerate(cases):
         q, truth = c["query"], c["truth_file"]
-        row = {"truth_file": truth, "symbol": c["symbol"], "query": q}
-        for tool, cmd, parse in (
+        arms = [
             ("semble", [semble_bin, "search", q, str(repo), "--top-k", str(TOPK),
                         "--format", "json"], semble_files),
             ("pixel_search_meaning", ["pixel", "search-meaning", q,
                                       "--metrics", "off"], meaning_files),
             ("pixel_find_code", ["pixel", "find-code", q, "--metrics", "off"],
              findcode_files),
-        ):
-            times, out, rc = [], b"", 0
+        ]
+        # Rotate which arm goes first. A discarded warm-up does not cancel
+        # order effects BETWEEN arms -- page cache, CPU clock and thermal state
+        # all carry over from whichever ran before -- so a fixed order would
+        # hand the same systematic advantage to the same arm on every query.
+        # The order actually used is recorded with the measurements.
+        arms = arms[ci % len(arms):] + arms[:ci % len(arms)]
+        row = {"truth_file": truth, "symbol": c["symbol"], "query": q,
+               "arm_order": [a[0] for a in arms]}
+        for tool, cmd, parse in arms:
+            times, out, rc, rcs = [], b"", 0, []
             for i in range(REPS + 1):
                 ms, out, rc = run(cmd, repo)
+                rcs.append(rc)
                 if i:
                     times.append(ms)
-            files = parse(out, repo)
+            # A non-zero exit is a failed measurement, not a zero score: parsing
+            # whatever a crashed run left on stdout would publish a miss the tool
+            # never had a chance to answer.
+            failed = [r for r in rcs if r != 0]
+            files = [] if failed else parse(out, repo)
             times.sort()
             rank = files.index(truth) + 1 if truth in files else None
             row.update({
+                f"{tool}_failed_reps": len(failed),
+                f"{tool}_ms_reps": [round(t, 1) for t in times],
                 f"{tool}_rank": rank,
                 f"{tool}_r1": int(rank == 1) if rank else 0,
                 f"{tool}_r5": int(bool(rank) and rank <= 5),

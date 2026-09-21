@@ -237,7 +237,7 @@ def main():
              ("pixel find-code", "s3", fic)],
             "Natural-language search: right file in the top 10",
             "recall@10 on 45 queries built from each repo's own doc comments — higher is better",
-            "semble wins every corpus. find-code is a phrase index, shown at 0.00 rather than dropped."),
+            "semble leads overall; Rust is a tie. find-code is a phrase index, reported rather than dropped."),
         "map-cost-coverage": lambda t: scatter(
             t,
             [("stacklit derive", "s1",
@@ -248,7 +248,7 @@ def main():
                 maps[r]["pixel_list_areas"]["dir_coverage"]) for r in maps])],
             "Repo map: what it costs vs how much it names",
             "up and to the LEFT is better — cheaper map, more of the tree reachable",
-            "stacklit wins 3 of 4 repos. pixel repo-map (35k–186k tokens) is off this scale by design.",
+            "stacklit wins 3 of 4 repos. pixel repo-map (35k–279k tokens) is off this scale by design.",
             3400, "tokens carried", "share of source directories named"),
     }
 

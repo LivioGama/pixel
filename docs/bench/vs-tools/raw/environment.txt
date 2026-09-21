@@ -1,4 +1,7 @@
-date: 2026-09-21T12:39:01Z
+date: 2026-09-21T12:39:01Z (first run)
+re-run: 2026-09-21T13:47:03Z — query sets regenerated after the sampler was fixed to span the
+  whole candidate list, arm order rotated per query, exit codes enforced,
+  directory coverage matched on complete path components
 machine: Darwin 25.6.0 arm64 / Apple M2 / 16 GiB
 
 pixel:    pixel 0.4.0 @ 13d62ba

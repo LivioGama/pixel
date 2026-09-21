@@ -243,7 +243,10 @@ one day.
 ## Raw data
 
 - [`raw/summary.txt`](vs-gitnexus/raw/summary.txt) — aggregate + per-case head-to-head
-- [`raw/impact-*.json`](vs-gitnexus/raw/) — every rep, every case
+- [`raw/impact-*.json`](vs-gitnexus/raw/) — one row per case and tool: the
+  files reported at each depth, recall and precision, the median and fastest
+  of the timed repetitions, and the answer size. The individual repetitions
+  are summarised, not retained
 - [`raw/changes-rust.json`](vs-gitnexus/raw/changes-rust.json), [`raw/path-rust.json`](vs-gitnexus/raw/path-rust.json)
 - [`raw/environment.txt`](vs-gitnexus/raw/environment.txt) — machine, versions, corpus commits
 - [`cases/`](vs-gitnexus/cases/) — the ground-truth fixtures, regenerable
