@@ -1,0 +1,21 @@
+corpus           arm                      n    r@1    r@5   r@10   p50 ms    bytes
+----------------------------------------------------------------------------------
+ruby-ddtrace     semble                  15   0.60   0.80   0.93     1257     7873
+ruby-ddtrace     pixel search-meaning    15   0.60   0.73   0.73     2320     2382
+ruby-ddtrace     pixel find-code         15   0.00   0.00   0.00      240    15657
+
+rust             semble                  15   0.73   1.00   1.00      650     7853
+rust             pixel search-meaning    15   0.67   0.87   0.87     1045     2254
+rust             pixel find-code         15   0.00   0.00   0.00      218     3141
+
+typescript       semble                  15   0.27   0.93   1.00     3000     9047
+typescript       pixel search-meaning    15   0.13   0.20   0.20     5614     2400
+typescript       pixel find-code         15   0.00   0.00   0.00      474     2755
+
+----------------------------------------------------------------------------------
+ALL              semble                  45   0.53   0.91   0.98     1636     8257
+ALL              pixel search-meaning    45   0.47   0.60   0.60     2993     2345
+ALL              pixel find-code         45   0.00   0.00   0.00      311     7184
+
+Cases no arm found (query too generic to be answerable):
+  lib/datadog/tracing/sampling/matcher.rb                    Returns true the trace should conforms this rule f

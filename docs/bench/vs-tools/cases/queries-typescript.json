@@ -1,0 +1,92 @@
+[
+  {
+    "query": "Test only clear all registered breakers Tests must call this beforeEach prevent state from leaking across test cases",
+    "truth_file": "gitnexus-shared/src/integrations/circuit-breaker.ts",
+    "symbol": "__resetBreakerRegistry__",
+    "lang": "typescript"
+  },
+  {
+    "query": "tanuki mark SVG path data from simple logo the tanuki fox head registered trademark Inc use here only indicate source repo integration API compatible with react LucideProps",
+    "truth_file": "gitnexus-web/src/lib/lucide-icons.tsx",
+    "symbol": "Gitlab",
+    "lang": "typescript"
+  },
+  {
+    "query": "Cosine over normalized embeddings bounded any threshold above this accepts every row and silently disables the relevance filter Values over the are clamped rather than passed through",
+    "truth_file": "gitnexus/src/core/embeddings/config.ts",
+    "symbol": "VECTOR_MAX_DISTANCE_CEILING",
+    "lang": "typescript"
+  },
+  {
+    "query": "Well known standard library that can appear form some projects use quotes for",
+    "truth_file": "gitnexus/src/core/group/extractors/include-extractor.ts",
+    "symbol": "SYSTEM_HEADERS",
+    "lang": "typescript"
+  },
+  {
+    "query": "Nodes that open lexical for block local declarations compound statement one the for loops open for their loop variable",
+    "truth_file": "gitnexus/src/core/ingestion/cfg/visitors/c-cpp-harvest.ts",
+    "symbol": "SCOPE_TYPES",
+    "lang": "typescript"
+  },
+  {
+    "query": "class body ancestor the body object issue members are addressed statically through the enclosing class TAG they are marked static",
+    "truth_file": "gitnexus/src/core/ingestion/field-extractors/configs/jvm.ts",
+    "symbol": "isInsideKotlinCompanion",
+    "lang": "typescript"
+  },
+  {
+    "query": "Declared used gate suffix fallback resolution BCL usings System Threading Tasks can match coincidentally named local file",
+    "truth_file": "gitnexus/src/core/ingestion/language-config.ts",
+    "symbol": "CSharpNamespaceEvidence",
+    "lang": "typescript"
+  },
+  {
+    "query": "function like node nested local functions shouldn leak this from outer class inner closure",
+    "truth_file": "gitnexus/src/core/ingestion/languages/csharp/receiver-binding.ts",
+    "symbol": "findEnclosingTypeDeclaration",
+    "lang": "typescript"
+  },
+  {
+    "query": "method the this member can only dispatched through the class name set Parallels the language linkage side channel pattern but uses WeakSet because the mark per def per name keying needed Eliminates the cast and mutate pattern the previous marker implementation required removes any serialization survival risk surface and keeps the specific metadata off the shared SymbolDefinition type",
+    "truth_file": "gitnexus/src/core/ingestion/languages/kotlin/owners.ts",
+    "symbol": "KOTLIN_STATIC_DEFS",
+    "lang": "typescript"
+  },
+  {
+    "query": "use statements inside function body should attach function not module the innermost Function attach there",
+    "truth_file": "gitnexus/src/core/ingestion/languages/rust/simple-hooks.ts",
+    "symbol": "rustImportOwningScope",
+    "lang": "typescript"
+  },
+  {
+    "query": "from function item function signature item Both use field containing identifier",
+    "truth_file": "gitnexus/src/core/ingestion/method-extractors/configs/rust.ts",
+    "symbol": "extractRustMethodName",
+    "lang": "typescript"
+  },
+  {
+    "query": "Join with its optional prefix into normalized leading slash URL used the node identity Collapses duplicate slashes and strips trailing ones empty result degrades",
+    "truth_file": "gitnexus/src/core/ingestion/route-extractors/route-path.ts",
+    "symbol": "normalizeExtractedRoutePath",
+    "lang": "typescript"
+  },
+  {
+    "query": "Absolute cap the encoded byte length KTD comfortably holds hops realistic identifiers far beyond the default hop cap while bounding the persisted column even maxHops unlimited",
+    "truth_file": "gitnexus/src/core/ingestion/taint/path-codec.ts",
+    "symbol": "TAINT_REASON_MAX_BYTES",
+    "lang": "typescript"
+  },
+  {
+    "query": "extraction does not have true top level variables pre top level statements local declaration statement can appear program scope Class scoped fields are handled the field extractor",
+    "truth_file": "gitnexus/src/core/ingestion/variable-extractors/configs/csharp.ts",
+    "symbol": "csharpVariableConfig",
+    "lang": "typescript"
+  },
+  {
+    "query": "The index represents the resolved repo handle already knows lastCommit and indexedAt are always recorded handle branch best effort plain analyze stamps the checked out branch but detached HEAD non git folder legacy index that never recorded one leaves absent run analyze branchLabel existingMeta branch",
+    "truth_file": "gitnexus/src/core/staleness-status.ts",
+    "symbol": "IndexedRef",
+    "lang": "typescript"
+  }
+]

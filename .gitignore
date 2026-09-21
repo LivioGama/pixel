@@ -30,3 +30,10 @@ docs/pixel-line-ascii.ppm
 
 # cargo-mutants scratch output
 /mutants.out*
+# Artifacts the competitor tools write into this tree when scripts/bench-vs runs
+# them here. pixel's indexer honours .gitignore but NOT .git/info/exclude, so
+# without these lines its own search results fill up with the benchmark's leftovers.
+.gitnexus/
+stacklit.json
+stacklit.html
+DEPENDENCIES.md

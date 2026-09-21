@@ -1,0 +1,92 @@
+[
+  {
+    "query": "Attach retrieval volume token metric can derived snippet chars actually returned pool chars the caller would have had read without retrieval Returns self for chaining",
+    "truth_file": "crates/pixel-actionlog/src/lib.rs",
+    "symbol": "with_savings",
+    "lang": "rust"
+  },
+  {
+    "query": "One transcript store the daemon serves the directory whose changes mean new transcript content and the adapter that parses",
+    "truth_file": "crates/pixel-daemon/src/recall_service.rs",
+    "symbol": "RecallSource",
+    "lang": "rust"
+  },
+  {
+    "query": "Render flow sequence agent browser commands with rationale comments and variable substitution Returns the text for the agent read and execute for dry run display vars map key value substitutions Missing required vars produce error step value var the caller did not pass falls back the variable declared default then placeholder var",
+    "truth_file": "crates/pixel-flow/src/replay.rs",
+    "symbol": "replay",
+    "lang": "rust"
+  },
+  {
+    "query": "Extract for file and them linking each the smallest enclosing symbol line range when one exists symbol ids are the ids the file symbols start line order",
+    "truth_file": "crates/pixel-graph/src/build.rs",
+    "symbol": "insert_concepts",
+    "lang": "rust"
+  },
+  {
+    "query": "The pixel invocation runs the explicit query when given else the ones its prompt classifies",
+    "truth_file": "crates/pixel-graph/src/plan.rs",
+    "symbol": "plan_queries",
+    "lang": "rust"
+  },
+  {
+    "query": "The seam that keeps the sparse bet reversible TrigramExtractor implements the same trait and the Phase benchmark gate picks the default Everything downstream shards planner only sees this trait",
+    "truth_file": "crates/pixel-index/src/gram.rs",
+    "symbol": "GramExtractor",
+    "lang": "rust"
+  },
+  {
+    "query": "one appending matches out display path what gets reported typically repo relative",
+    "truth_file": "crates/pixel-index/src/verify.rs",
+    "symbol": "search_file",
+    "lang": "rust"
+  },
+  {
+    "query": "local adoption without ever overwriting user change made after install New sidecars carry managed pre tool use comparison byte for byte the JSON value layer Early compositions did not record that field deliberately strict legacy signature permits their recovery only when the current array exactly one unfiltered command pointing this own sidecar",
+    "truth_file": "crates/pixel-install/src/uninstall.rs",
+    "symbol": "restore_project_codex_composed_guard",
+    "lang": "rust"
+  },
+  {
+    "query": "for the repo identified common directory typically the git path Returns RepositoryBusyError another live process holds the",
+    "truth_file": "crates/pixel-ops/src/lock.rs",
+    "symbol": "acquire",
+    "lang": "rust"
+  },
+  {
+    "query": "detection refs remotes remote HEAD symbolic ref first then init defaultBranch config None when neither resolves",
+    "truth_file": "crates/pixel-ops/src/rewrite.rs",
+    "symbol": "detect_default_branch",
+    "lang": "rust"
+  },
+  {
+    "query": "Convenience TargetFile list from compute within tiers preserving the TargetFile shape Returns the reordered list",
+    "truth_file": "crates/pixel-rank/src/rerank.rs",
+    "symbol": "rerank_targets",
+    "lang": "rust"
+  },
+  {
+    "query": "Corpus root PIXEL else local share pixel Falls back the legacy local share gitpixel path already exists migration compat Created demand with owner only permissions this directory concentrates every transcript the machine",
+    "truth_file": "crates/pixel-recall/src/lib.rs",
+    "symbol": "recall_dir",
+    "lang": "rust"
+  },
+  {
+    "query": "Stat SQLite database file into single SourceUnit Missing file source not installed this machine",
+    "truth_file": "crates/pixel-recall/src/sources/opencode.rs",
+    "symbol": "db_unit",
+    "lang": "rust"
+  },
+  {
+    "query": "Tests that ran and neither failed errored nor were skipped",
+    "truth_file": "crates/pixel-session/src/parsers/minitest.rs",
+    "symbol": "passed",
+    "lang": "rust"
+  },
+  {
+    "query": "Run repo args None when missing fails repo not repository",
+    "truth_file": "crates/pixel/build.rs",
+    "symbol": "git",
+    "lang": "rust"
+  }
+]

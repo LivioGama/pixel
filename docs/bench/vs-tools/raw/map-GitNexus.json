@@ -1,0 +1,37 @@
+{
+  "repo": "GitNexus",
+  "stacklit": {
+    "generate_ms": 84295,
+    "derive_ms": 8,
+    "rc": 0,
+    "bytes": 10086,
+    "approx_tokens": 2521,
+    "source_files": 3808,
+    "named_by_path": 1,
+    "path_coverage": 0.0003,
+    "dir_named": 424,
+    "dir_coverage": 0.1113
+  },
+  "pixel_repo_map": {
+    "ms": 100,
+    "rc": 0,
+    "bytes": 718704,
+    "approx_tokens": 179676,
+    "source_files": 3808,
+    "named_by_path": 1740,
+    "path_coverage": 0.4569,
+    "dir_named": 1750,
+    "dir_coverage": 0.4596
+  },
+  "pixel_list_areas": {
+    "ms": 686,
+    "rc": 0,
+    "bytes": 10639,
+    "approx_tokens": 2659,
+    "source_files": 3808,
+    "named_by_path": 0,
+    "path_coverage": 0.0,
+    "dir_named": 929,
+    "dir_coverage": 0.244
+  }
+}
