@@ -30,3 +30,11 @@ docs/pixel-line-ascii.ppm
 
 # cargo-mutants scratch output
 /mutants.out*
+# Artifacts the competitor tools write into this tree when scripts/bench-vs runs
+# them here. Ignoring them is necessary but not sufficient: pixel's overlay picks up
+# files created since the last full build whatever git's ignore rules say, so run
+# `pixel build-index` after a bench run to evict them.
+.gitnexus/
+stacklit.json
+stacklit.html
+DEPENDENCIES.md

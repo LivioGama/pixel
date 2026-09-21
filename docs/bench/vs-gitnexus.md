@@ -4,7 +4,7 @@ Measured 2026-09-21 on an Apple M2 / 16 GiB / Darwin 25.6.0, pixel 0.4.0
 (`5c9b4ad`) against GitNexus 1.6.12 (`737634705`, rebuilt from source with
 `npm run build` before the run). Full environment, corpus commits and raw rows:
 [`vs-gitnexus/raw/`](vs-gitnexus/raw/). Reproduce with the scripts in
-[`scripts/vs-gitnexus/`](../../scripts/vs-gitnexus/).
+[`scripts/bench-vs/`](../../scripts/bench-vs/).
 
 Same house rule as [`measured-performance.md`](measured-performance.md): every
 number here is a measurement, losses are printed in the same voice as wins, and
@@ -53,7 +53,7 @@ git-history and repo-operations surface GitNexus does not implement.
 ## Blast radius (`impact` / `impact`) — 29 cases, 4 repos, 3 languages
 
 Ground truth is mechanical and re-derivable
-([`gen-truth.py`](../../scripts/vs-gitnexus/gen-truth.py)): for a symbol with
+([`gen-truth.py`](../../scripts/bench-vs/gen-truth.py)): for a symbol with
 exactly one definition, the truth set is the files containing a call site of it.
 Both tools are scored at **depth 1** with the same scorer — the layer whose
 expected answer is a fact about the source rather than about a graph.
@@ -73,6 +73,11 @@ Precision is a mean over the **16** cases whose truth set is complete, not all
 routinely omit, so they are a strict subset of the real call sites: a tool that
 correctly returns a paren-less caller would be scored as imprecise for being
 right. Recall tolerates a subset of truth, precision does not.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="charts/impact-recall-dark.svg">
+  <img alt="Blast radius recall at depth 1 by corpus, pixel against GitNexus." src="charts/impact-recall-light.svg">
+</picture>
 
 Readings, in order of how much weight they carry:
 
@@ -125,7 +130,7 @@ user-facing comparison claims Ruby parity.
 
 The harness edits three known functions across three crates, so the changed-symbol
 set is constructed rather than inferred, then reverts them in a `finally` block
-([`bench-changes.py`](../../scripts/vs-gitnexus/bench-changes.py)).
+([`bench-changes.py`](../../scripts/bench-vs/bench-changes.py)).
 
 | | recall | p50 | bytes |
 |---|---|---|---|
@@ -141,7 +146,7 @@ format gap is a CLI-surface difference, not a capability one.
 
 Pairs whose call site was located in the source and recorded in the case file,
 so "a path exists" is a fact about the code
-([`gen-path-cases.py`](../../scripts/vs-gitnexus/gen-path-cases.py)).
+([`gen-path-cases.py`](../../scripts/bench-vs/gen-path-cases.py)).
 
 | Outcome | pixel | GitNexus |
 |---|---|---|
@@ -238,7 +243,10 @@ one day.
 ## Raw data
 
 - [`raw/summary.txt`](vs-gitnexus/raw/summary.txt) — aggregate + per-case head-to-head
-- [`raw/impact-*.json`](vs-gitnexus/raw/) — every rep, every case
+- [`raw/impact-*.json`](vs-gitnexus/raw/) — one row per case and tool: the
+  files reported at each depth, recall and precision, the median and fastest
+  of the timed repetitions, and the answer size. The individual repetitions
+  are summarised, not retained
 - [`raw/changes-rust.json`](vs-gitnexus/raw/changes-rust.json), [`raw/path-rust.json`](vs-gitnexus/raw/path-rust.json)
 - [`raw/environment.txt`](vs-gitnexus/raw/environment.txt) — machine, versions, corpus commits
 - [`cases/`](vs-gitnexus/cases/) — the ground-truth fixtures, regenerable
