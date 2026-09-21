@@ -20,10 +20,14 @@ module belongs to the gate.
 
 from pathlib import Path
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parent.parent
 CONFIG = REPO / ".cargo/mutants.toml"
+GATE = REPO / "scripts/mutants-gate.py"
 
 #: A bench: the dedicated crate, or a `benches/` directory in any crate.
 BENCH = re.compile(r"^crates/pixel-bench/|(^|/)benches/")
@@ -129,6 +133,95 @@ class MutantsConfigContract(unittest.TestCase):
         self.assertTrue(double.match("build.rs"))
         self.assertTrue(to_regex("crates/pixel-bench/**").match("crates/pixel-bench/a/b.rs"))
         self.assertFalse(to_regex("crates/pixel-bench/**").match("crates/pixel/a.rs"))
+
+
+class MutantsGateReport(unittest.TestCase):
+    """Contract of scripts/mutants-gate.py.
+
+    The defect it answers: `cargo mutants --in-diff` exits 0 when it produced
+    no mutants, so a pull request whose every file is excluded shows a green
+    mutation gate over code nothing mutated. #203 did exactly that -- green in
+    56 s, `No files were found with the provided path: mutants.out`. The
+    report has to separate "0 missed out of N tested" from "0 tested".
+    """
+
+    def run_gate(self, diff: str, listing: str, *extra: str):
+        with tempfile.TemporaryDirectory(prefix="pixel-mutants-gate-") as tmp:
+            root = Path(tmp)
+            (root / "pr.diff").write_text(diff)
+            (root / "list.txt").write_text(listing)
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(GATE),
+                    "--diff",
+                    str(root / "pr.diff"),
+                    "--list",
+                    str(root / "list.txt"),
+                    *extra,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    @staticmethod
+    def diff_touching(*paths: str) -> str:
+        return "".join(f"--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-a\n+b\n" for p in paths)
+
+    MUTANT_LINE = (
+        "crates/pixel-graph/src/build.rs:407:5: replace tree_hashes -> "
+        "Vec<(String, u64)> with vec![]\n"
+    )
+
+    def test_a_diff_that_produced_mutants_is_reported_as_tested(self):
+        result = self.run_gate(
+            self.diff_touching("crates/pixel-graph/src/build.rs"),
+            self.MUTANT_LINE * 10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("**mutants tested:** 10", result.stdout)
+        self.assertIn("`tested`", result.stdout)
+        self.assertNotIn("::warning", result.stdout)
+
+    def test_rust_changed_with_zero_mutants_is_reported_as_vacuous(self):
+        """The #203 shape: the gate is green and proves nothing."""
+        result = self.run_gate(
+            self.diff_touching("crates/pixel-graph/src/build.rs"), ""
+        )
+        self.assertIn("**mutants tested:** 0", result.stdout)
+        self.assertIn("`vacuous`", result.stdout)
+        self.assertIn("proves nothing", result.stdout)
+        self.assertIn("crates/pixel-graph/src/build.rs", result.stdout)
+        self.assertIn("::warning title=Mutation gate tested nothing::", result.stdout)
+        self.assertEqual(result.returncode, 0, "warns by default, never blocks")
+
+    def test_the_vacuous_case_can_be_made_a_hard_failure(self):
+        result = self.run_gate(
+            self.diff_touching("crates/pixel-graph/src/build.rs"),
+            "",
+            "--fail-on-vacuous",
+        )
+        self.assertEqual(result.returncode, 1)
+
+    def test_a_diff_with_no_mutable_rust_owes_no_mutants(self):
+        """Docs, benches and crate-root build scripts must not be flagged."""
+        for paths in (
+            ("README.md", "docs/bench/tree-delta.md"),
+            ("crates/pixel-bench/benches/tree_delta.rs",),
+            ("crates/pixel/build.rs",),
+            ("Cargo.toml", "changelog.d/204-x.fixed.md"),
+        ):
+            with self.subTest(paths=paths):
+                result = self.run_gate(self.diff_touching(*paths), "")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("`not-applicable`", result.stdout)
+                self.assertNotIn("::warning", result.stdout)
+
+    def test_a_deleted_file_is_not_counted_as_changed_rust(self):
+        deletion = "--- a/crates/pixel-graph/src/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n"
+        result = self.run_gate(deletion, "")
+        self.assertIn("`not-applicable`", result.stdout)
 
 
 if __name__ == "__main__":

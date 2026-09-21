@@ -85,6 +85,13 @@ jobs:
       # and the build is where a 60-mutant run spends most of its time).
       # Dependencies are never built incrementally, so the restored cache
       # stays valid.
+      # Listed before the run because `cargo mutants` exits 0 both when every
+      # mutant was caught and when it produced none at all, and the run's own
+      # output cannot tell those apart after the fact. `--list` builds
+      # nothing, so this costs seconds.
+      - name: List the mutants the diff produces
+        run: cargo mutants --list --in-diff pr.diff > mutants-list.txt
+
       - name: Run mutants in the diff
         # The explicit shell adds pipefail: `tee` must not mask the exit code.
         shell: bash
@@ -93,6 +100,20 @@ jobs:
         run: >
           cargo mutants -vV -C --locked --no-shuffle --in-place --in-diff pr.diff
           -- --all-targets 2>&1 | tee results.txt
+
+      # A green job is not the same claim as "this diff was gated": a diff
+      # whose every file is excluded produces no mutants, exits 0 and uploads
+      # no mutants.out, which reads as a pass over untested code. This step
+      # states the tested count outright and annotates the pull request when
+      # mutable Rust changed and nothing came out of it. Pass
+      # --fail-on-vacuous to turn that annotation into a red check; it is left
+      # off because a comment-only edit to a Rust file legitimately produces
+      # no mutants and should not block a pull request.
+      - name: Report what the gate actually tested
+        if: always()
+        run: >
+          python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt
+          --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Post job summary
         if: always()
