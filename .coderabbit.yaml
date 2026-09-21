@@ -64,8 +64,10 @@ reviews:
     - path: "crates/**/*.rs"
       instructions: |
         The CI gates are `cargo clippy --workspace --all-targets -- -D warnings`
-        with the lint table in the root Cargo.toml, `cargo test --workspace`,
-        and `cargo mutants --in-diff` (the Mutants job fails the PR on any
+        with the lint table in the root Cargo.toml, `cargo nextest run
+        --workspace --profile ci` plus `cargo test --workspace --doc`
+        (`cargo test --workspace` is the equivalent local gate), and
+        `cargo mutants --in-diff` (the Mutants job fails the PR on any
         surviving mutant). Review against them:
         - Every function the diff touches needs a test that fails when its
           logic is mutated (a replaced operator, a flipped comparison, a
@@ -313,5 +315,6 @@ knowledge_base:
         applyTo: "crates/**/*.rs"
       - files: ".agents/skills/rust-guidelines/SKILL.md"
         applyTo: "crates/**/*.rs"
+      # Both rules are always-on in AGENTS.md's table.
       - files: ".agents/rules/test-campaigns.md,.agents/rules/release.md"
-        applyTo: ".github/workflows/**,.agents/skills/release/**"
+        applyTo: "**"
