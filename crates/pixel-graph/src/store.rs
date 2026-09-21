@@ -1112,45 +1112,36 @@ impl GraphStore {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// The symbols named `name` whose file lies inside `scope`, capped at
-    /// `limit`.
+    /// Rows for `name` restricted to `scope`, capped at `limit`.
     ///
-    /// The scope is applied in the query, before the cap: filtering a capped
-    /// page in the caller would make the cap decide which scoped symbols
-    /// exist. A name with more than `limit` homonyms outside the scope would
-    /// then resolve to nothing, or — worse — to a single row that only looks
-    /// unique because the others never came back.
+    /// The restriction belongs in the query, ahead of the cap. Applied
+    /// afterwards it would narrow an already-truncated page, so a common
+    /// name could come back empty, or — worse — with one row that only
+    /// looks unique because its rivals never left the database.
     ///
-    /// `scope` matches the directory itself and everything under it, never a
-    /// sibling whose name merely starts with the same letters: `src/foo`
-    /// selects `src/foo` and `src/foo/x.ts`, never `src/foobar.ts`.
+    /// `scope` is a directory: it covers itself and its descendants, never
+    /// a sibling that merely shares a leading substring (`src/foo` covers
+    /// `src/foo/x.ts`, not `src/foobar.ts`).
     pub fn symbols_by_name_in_scope(
         &self,
         name: &str,
         scope: &str,
         limit: u32,
     ) -> Result<Vec<SymbolRow>> {
+        // A subquery rather than a join, so the column list stays exactly
+        // the one every other read uses: a join would need each column
+        // qualified, and a hand-qualified copy is a second list to keep in
+        // step with `row_to_symbol`.
         let sql = format!(
-            "SELECT {} FROM symbols s JOIN files f ON f.id = s.file_id \
-             WHERE s.name = ?1 \
-               AND (f.path = ?2 OR substr(f.path, 1, length(?2) + 1) = ?2 || '/') \
-             ORDER BY s.kind, s.uid LIMIT ?3",
-            Self::qualified_symbol_cols("s")
+            "SELECT {} FROM symbols WHERE name = ?1 AND file_id IN \
+               (SELECT id FROM files \
+                 WHERE path = ?2 OR substr(path, 1, length(?2) + 1) = ?2 || '/') \
+             ORDER BY kind, uid LIMIT ?3",
+            Self::SYMBOL_COLS
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![name, scope, limit], Self::row_to_symbol)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
-    }
-
-    /// [`Self::SYMBOL_COLS`] qualified with a table alias, so a join reads
-    /// the same columns [`Self::row_to_symbol`] expects and in the same
-    /// order; deriving it keeps the two from drifting apart.
-    fn qualified_symbol_cols(alias: &str) -> String {
-        Self::SYMBOL_COLS
-            .split(", ")
-            .map(|column| format!("{alias}.{column}"))
-            .collect::<Vec<_>>()
-            .join(", ")
     }
 
     pub fn symbols_in_file(&self, file_id: i64) -> Result<Vec<SymbolRow>> {
