@@ -372,6 +372,35 @@ class FragmentContract(unittest.TestCase):
         self.assertIn("well formed", result.stdout)
         self.assertIn("## [Unreleased] empty", result.stdout)
 
+    def test_check_accepts_the_empty_directory_a_release_leaves_behind(self):
+        """A release pull request is the one that empties changelog.d/.
+
+        The cut deletes every fragment, so the commit `--check` runs on has an
+        empty directory. While the no-fragment refusal sat above the `--check`
+        return it failed that pull request -- the release of 0.4.0 went red on
+        its own preparation -- and the only way to green it was to stop cutting
+        the release or to write a fragment nobody had an entry for.
+        """
+        root = self.make_repo({})
+        result = self.run_check(root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("well formed", result.stdout)
+        self.assertIn("## [Unreleased] empty", result.stdout)
+
+    def test_the_cut_still_refuses_the_empty_directory_check_accepts(self):
+        """`--check` accepting it must not make the cut accept it too.
+
+        Tagging a version whose changelog section would be empty is the thing
+        the refusal exists for; only the validator had to stop sharing it.
+        """
+        root = self.make_repo({})
+        result = subprocess.run(
+            ["sh", str(PREPARE), "9.9.9"],
+            cwd=root, capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("changelog.d/ holds no fragment", result.stderr)
+
     def test_check_writes_nothing(self):
         before = {p: p.read_bytes() for p in sorted(self.ROOT.glob("changelog.d/*.md"))}
         self.run_check(self.ROOT)

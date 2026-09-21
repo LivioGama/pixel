@@ -133,10 +133,6 @@ for fragment in changelog.d/*.md; do
         exit 1
     fi
 done
-if [ "$FRAGMENT_COUNT" -eq 0 ]; then
-    echo "prepare.sh: changelog.d/ holds no fragment; write one entry per user-visible change as changelog.d/<slug>.<section>.md" >&2
-    exit 1
-fi
 
 # An entry written straight into CHANGELOG.md would be released only by
 # accident: the cut below takes its text from the fragments and leaves the file
@@ -154,9 +150,23 @@ if [ "$STRAY" -ne 0 ]; then
     exit 1
 fi
 
+# An empty changelog.d/ is well formed: it is the state every release leaves
+# behind, and the release pull request that leaves it there runs --check on
+# every push like any other pull request. Only the cut below needs a fragment,
+# so its refusal moved under this return; above it, --check failed the release
+# pull request of every version, 0.4.0 included.
 if [ "$CHECK" -eq 1 ]; then
-    echo "prepare.sh: $FRAGMENT_COUNT fragment(s) under changelog.d/, all well formed, ## [Unreleased] empty"
+    if [ "$FRAGMENT_COUNT" -eq 0 ]; then
+        echo "prepare.sh: changelog.d/ is empty, which is well formed between a release and the next entry; ## [Unreleased] empty"
+    else
+        echo "prepare.sh: $FRAGMENT_COUNT fragment(s) under changelog.d/, all well formed, ## [Unreleased] empty"
+    fi
     exit 0
+fi
+
+if [ "$FRAGMENT_COUNT" -eq 0 ]; then
+    echo "prepare.sh: changelog.d/ holds no fragment; write one entry per user-visible change as changelog.d/<slug>.<section>.md" >&2
+    exit 1
 fi
 
 MEMBERS="$(sed -n '/^members *= *\[/,/\]/p' Cargo.toml | grep -o '"[^"]*"' | tr -d '"')"
