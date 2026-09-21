@@ -50,7 +50,7 @@ use pixel_graph::build::{
     EXTRACTOR_VERSION_KEY, FRESHNESS_KEY, FRESHNESS_WITHHELD, freshness_signature,
 };
 use pixel_graph::predicate;
-use pixel_graph::store::{GraphStore, SymbolRow};
+use pixel_graph::store::{GraphStore, StoreError, SymbolRow};
 use pixel_proto::evaluate as wire;
 
 /// How many symbols sharing a name are looked up, and therefore how many
@@ -123,6 +123,33 @@ pub struct Args {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Halt(pub wire::Reason);
 
+/// Why a step of the evaluation produced no value.
+///
+/// The two arms are not interchangeable, and collapsing them is the bug
+/// this type exists to prevent. A [`Self::Halt`] is an answer: the store
+/// was read and the thing asked about is absent, which the envelope
+/// reports at exit 0. A [`Self::Store`] is a technical failure: the store
+/// could not be read at all, which exits 3. Reporting the second as the
+/// first would publish "no such symbol" on behalf of a database that never
+/// answered — an absence the caller would take as fact.
+#[derive(Debug)]
+pub enum Failure {
+    Halt(Halt),
+    Store(StoreError),
+}
+
+impl From<StoreError> for Failure {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<Halt> for Failure {
+    fn from(halt: Halt) -> Self {
+        Self::Halt(halt)
+    }
+}
+
 /// Resolve one `--from`/`--to` argument to a symbol row.
 ///
 /// A `#` makes it a uid: looked up verbatim, never ranked, and a uid that
@@ -135,36 +162,31 @@ pub fn resolve_argument(
     argument: &str,
     value: &str,
     scope: Option<&str>,
-) -> Result<SymbolRow, Halt> {
+) -> Result<SymbolRow, Failure> {
+    let not_found = || {
+        Failure::Halt(Halt(wire::Reason::SymbolNotFound {
+            argument: argument.to_string(),
+        }))
+    };
     if value.contains('#') {
-        return match store.symbol_by_uid(value) {
-            Ok(Some(row)) => Ok(row),
-            Ok(None) | Err(_) => Err(Halt(wire::Reason::SymbolNotFound {
-                argument: argument.to_string(),
-            })),
-        };
+        return store.symbol_by_uid(value)?.ok_or_else(not_found);
     }
-    let rows = store
-        .symbols_by_name(value, NAME_LOOKUP_LIMIT)
-        .unwrap_or_default();
+    // The scope belongs in the query, not in a filter over its result: see
+    // [`GraphStore::symbols_by_name_in_scope`] for why capping first would
+    // let the cap invent both absences and false unique matches.
     let rows = match scope {
-        None => rows,
+        None => store.symbols_by_name(value, NAME_LOOKUP_LIMIT)?,
         Some(prefix) => {
-            let prefix = normalize_scope(prefix);
-            rows.into_iter()
-                .filter(|row| path_of(store, row).is_some_and(|p| p.starts_with(&prefix)))
-                .collect()
+            store.symbols_by_name_in_scope(value, &normalize_scope(prefix), NAME_LOOKUP_LIMIT)?
         }
     };
     match rows.len() {
-        0 => Err(Halt(wire::Reason::SymbolNotFound {
-            argument: argument.to_string(),
-        })),
+        0 => Err(not_found()),
         1 => Ok(rows.into_iter().next().expect("length checked")),
-        _ => Err(Halt(wire::Reason::AmbiguousSymbol {
+        _ => Err(Failure::Halt(Halt(wire::Reason::AmbiguousSymbol {
             argument: argument.to_string(),
             candidates: candidates(store, &rows),
-        })),
+        }))),
     }
 }
 
@@ -175,6 +197,7 @@ fn normalize_scope(prefix: &str) -> String {
         .replace('\\', "/")
         .trim_start_matches("./")
         .trim_start_matches('/')
+        .trim_end_matches('/')
         .to_string()
 }
 
@@ -216,20 +239,15 @@ pub struct Identity {
 /// can be attributed to, and both are repaired by a refresh, so both are
 /// [`wire::Reason::GraphStale`] rather than `SnapshotChanged`: nothing
 /// changed under us, the stored state is simply not answerable.
-pub fn identity(store: &GraphStore) -> Result<Identity, Halt> {
-    let signature = store
-        .meta_get(FRESHNESS_KEY)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+pub fn identity(store: &GraphStore) -> Result<Identity, Failure> {
+    // A store that cannot be read is not a stale graph: withholding the
+    // signature is a statement the writer makes deliberately, and a failed
+    // read is not that statement.
+    let signature = store.meta_get(FRESHNESS_KEY)?.unwrap_or_default();
     if signature.is_empty() || signature == FRESHNESS_WITHHELD {
-        return Err(Halt(wire::Reason::GraphStale));
+        return Err(Failure::Halt(Halt(wire::Reason::GraphStale)));
     }
-    let extractor_version = store
-        .meta_get(EXTRACTOR_VERSION_KEY)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let extractor_version = store.meta_get(EXTRACTOR_VERSION_KEY)?.unwrap_or_default();
     Ok(Identity {
         signature,
         extractor_version,

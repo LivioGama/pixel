@@ -1778,7 +1778,11 @@ impl Service {
         // other.
         let identity = match evaluate::identity(store) {
             Ok(identity) => identity,
-            Err(evaluate::Halt(reason)) => {
+            // A store that could not be read is a technical failure, not an
+            // absence: it leaves as `Err` and exits 3 rather than being
+            // published as a reason the caller would read as an answer.
+            Err(evaluate::Failure::Store(error)) => return Err(format!("evaluate: {error}")),
+            Err(evaluate::Failure::Halt(evaluate::Halt(reason))) => {
                 let halted = evaluate::halted(reason, None, &args, false, epistemics(Vec::new()));
                 return serde_json::to_value(wire::Output::Evaluation(Box::new(halted)))
                     .map_err(|e| e.to_string());
@@ -1793,7 +1797,8 @@ impl Service {
                 });
         let (from, to) = match resolved {
             Ok(pair) => pair,
-            Err(evaluate::Halt(reason)) => {
+            Err(evaluate::Failure::Store(error)) => return Err(format!("evaluate: {error}")),
+            Err(evaluate::Failure::Halt(evaluate::Halt(reason))) => {
                 let halted =
                     evaluate::halted(reason, Some(&identity), &args, true, epistemics(Vec::new()));
                 return serde_json::to_value(wire::Output::Evaluation(Box::new(halted)))

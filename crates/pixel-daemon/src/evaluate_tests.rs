@@ -687,3 +687,156 @@ fn every_envelope_should_publish_the_extraction_blind_spots() {
         envelope.coverage.extraction_limits
     );
 }
+
+/// The database path of a fixture, for the tests that must reach past the
+/// service to the store it reads.
+fn graph_db(dir: &Path) -> PathBuf {
+    Service::open(dir).unwrap().graph_db_path()
+}
+
+/// Replace a table with one of an unusable shape, through a connection of
+/// its own, so an already-open store's next read fails the way a corrupted
+/// or half-migrated database makes it fail.
+fn break_table(db: &Path, table: &str) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.execute(&format!("DROP TABLE {table}"), []).unwrap();
+    conn.execute(&format!("CREATE TABLE {table} (unusable INTEGER)"), [])
+        .unwrap();
+}
+
+fn path_of_row(store: &GraphStore, row: &pixel_graph::store::SymbolRow) -> String {
+    store
+        .file_by_id(row.file_id)
+        .unwrap()
+        .expect("the resolved symbol must belong to a file")
+        .path
+}
+
+/// A store that cannot answer is not a symbol that does not exist.
+///
+/// Both are "no row came back", and collapsing them publishes
+/// `symbol_not_found` — a statement about the code — on behalf of a
+/// database that never answered. The caller would take it as fact and stop
+/// looking. A technical failure leaves as an error and exits 3.
+#[test]
+fn a_store_that_cannot_answer_should_fail_rather_than_report_a_missing_symbol() {
+    let dir = fixture("store-error");
+    let db = graph_db(&dir);
+    // Opened while the database is healthy, then broken underneath it:
+    // dropping the table outright would only have the store recreate an
+    // empty one on open, which answers "no such symbol" truthfully, and a
+    // store opened on a mangled schema fails at open rather than at the
+    // read this test is about.
+    let store = GraphStore::open(&db).unwrap();
+    break_table(&db, "symbols");
+
+    // Both resolution paths: a uid is looked up verbatim, a bare name is
+    // ranked, and each has its own query to fail.
+    for value in ["helper", "src/util.ts#helper#function"] {
+        match evaluate::resolve_argument(&store, "--from", value, None) {
+            Err(evaluate::Failure::Store(_)) => {}
+            other => panic!("a broken store must not answer `{value}` with an absence: {other:?}"),
+        }
+    }
+}
+
+/// The same for the snapshot identity: a failed read is not a stale graph.
+///
+/// `graph_stale` says the writer withheld its signature, which is a
+/// deliberate statement. A database that could not be read made no
+/// statement at all.
+#[test]
+fn an_unreadable_identity_should_fail_rather_than_report_a_stale_graph() {
+    let dir = fixture("identity-error");
+    let db = graph_db(&dir);
+    let store = GraphStore::open(&db).unwrap();
+    break_table(&db, "meta");
+
+    match evaluate::identity(&store) {
+        Err(evaluate::Failure::Store(_)) => {}
+        other => panic!("an unreadable store must not be published as stale: {other:?}"),
+    }
+}
+
+/// The scope must be part of the question, not a filter over its answer.
+///
+/// With the scope applied after the store's cap, a name with more homonyms
+/// than the cap resolves from a page that may hold none of the scoped ones:
+/// the answer becomes `symbol_not_found` for a symbol that plainly exists,
+/// and — worse — a single scoped row inside the page looks unique while
+/// others sit beyond it, so the evaluation answers about the wrong symbol
+/// while claiming exactness.
+#[test]
+fn a_name_with_more_homonyms_than_the_cap_should_still_resolve_inside_its_scope() {
+    let dir = fixture("scope-before-cap");
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    // `lib/` sorts before `src/`, so these fill the capped page and push
+    // the one that matters out of it.
+    for i in 0..(evaluate::CANDIDATE_CAP + 5) {
+        std::fs::write(
+            dir.join(format!("lib/h{i:03}.ts")),
+            "export function helper(y: number): number { return y }\n",
+        )
+        .unwrap();
+    }
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "many helpers"]);
+    build_graph(&dir);
+
+    let store = GraphStore::open(&graph_db(&dir)).unwrap();
+    let row = evaluate::resolve_argument(&store, "--to", "helper", Some("src"))
+        .expect("the single `helper` under src/ must resolve however many exist elsewhere");
+    assert_eq!(
+        path_of_row(&store, &row),
+        "src/util.ts",
+        "the scope must select the symbol, not whichever ones the cap let through"
+    );
+}
+
+/// A scope is a directory, not a string prefix.
+///
+/// `--in src/foo` must not reach into `src/foobar.ts`: that sibling is a
+/// different directory that merely starts with the same letters, and
+/// pulling it in turns a unique match into a spurious ambiguity — or, in
+/// the other direction, silently widens what an answer is about.
+#[test]
+fn a_scope_should_not_capture_a_sibling_whose_name_merely_starts_the_same() {
+    let dir = fixture("scope-boundary");
+    std::fs::create_dir_all(dir.join("src/foo")).unwrap();
+    std::fs::write(
+        dir.join("src/foo/x.ts"),
+        "export function scoped(): number { return 1 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/foobar.ts"),
+        "export function scoped(): number { return 2 }\n",
+    )
+    .unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "sibling directory"]);
+    build_graph(&dir);
+
+    let store = GraphStore::open(&graph_db(&dir)).unwrap();
+    // Both spellings, because the doc comment promises they are the same
+    // scope; the directory itself and what is under it, nothing beside it.
+    for scope in ["src/foo", "src/foo/"] {
+        let row = evaluate::resolve_argument(&store, "--from", "scoped", Some(scope))
+            .unwrap_or_else(|e| panic!("`--in {scope}` must resolve to the one under it: {e:?}"));
+        assert_eq!(
+            path_of_row(&store, &row),
+            "src/foo/x.ts",
+            "`--in {scope}` must not reach into src/foobar.ts"
+        );
+    }
+
+    // The sibling is still findable, so the boundary narrowed the scope
+    // rather than losing the file.
+    match evaluate::resolve_argument(&store, "--from", "scoped", Some("src")) {
+        Err(evaluate::Failure::Halt(evaluate::Halt(wire::Reason::AmbiguousSymbol {
+            candidates,
+            ..
+        }))) => assert_eq!(candidates.len(), 2, "both copies live under src/"),
+        other => panic!("`--in src` covers both copies and must be ambiguous: {other:?}"),
+    }
+}
