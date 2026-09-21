@@ -10,8 +10,8 @@ seconds and would have caught the case beside it.
   headSha,displayTitle,event` — the job names are identical across pull
   requests, so a green run proves nothing until its head is yours. A run was
   quoted as "my branch merged with #207" while it belonged to an unrelated
-  `pixel classify` pull request, and the conclusion drawn from it ("the gate
-  passes now, nothing to do") was false.
+  pull request — one adding a `classify` command, still in review — and the
+  conclusion drawn from it ("the gate passes now, nothing to do") was false.
 - **Report the number, never the colour.** "Mutants is green" is not a
   result; "107 tested, 79 caught, 28 unviable, 0 missed, verdict `tested`"
   is. A gate can pass having tested nothing at all — `scripts/mutants-gate.py`
