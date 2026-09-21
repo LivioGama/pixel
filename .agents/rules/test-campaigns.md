@@ -14,10 +14,13 @@ Always loaded: how to run the long gates without losing an afternoon.
   count that will not fit the 90-minute CI job means the PR must be split by
   file, never by weakening the gate.
 - **Count against the merge base, with three dots.** `git diff
-  origin/main...HEAD`, never `git diff origin/main`: the two-dot form adds
-  everything `main` gained since you branched, so you mutate code you did not
-  write and the count comes back inflated — 113 where the PR owed 103, ten of
-  them in a file another pull request had just rewritten.
+  origin/main...HEAD` diffs the merge base against HEAD — what the branch
+  changed. `git diff origin/main..HEAD` diffs the two commits and adds
+  everything `main` gained since you branched; `git diff origin/main`, with
+  no second revision, compares `main` to the working tree instead, so it adds
+  uncommitted edits on top. Either of the last two has you mutating code you
+  did not write: 113 mutants where the PR owed 103, ten of them in a file
+  another pull request had just rewritten.
 - **`--in-diff` compares the diff to the working tree, not to HEAD.** With an
   uncommitted edit it prints `Diff content doesn't match source file` and
   lists zero mutants, which reads like good news. Commit first, then write

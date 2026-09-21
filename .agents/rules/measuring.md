@@ -19,10 +19,16 @@ seconds and would have caught the case beside it.
   `vacuous`. The count is the only part of a green check that carries
   information.
 - **Quote the command beside the number.** A count nobody can re-derive is a
-  rumour. `git diff origin/main...HEAD` (three dots, the merge base) and
-  `git diff origin/main` (two dots) differ by every commit the base gained
-  since you branched: the two-dot form silently mutates other people's code
-  and inflates the count, which reads as extra diligence.
+  rumour, and three forms that read alike answer three different questions.
+  `git diff origin/main...HEAD` (three dots) diffs the merge base against
+  HEAD: what this branch changed, which is what a pull request owes.
+  `git diff origin/main..HEAD` (two dots) diffs the two commits, so it also
+  carries everything `main` gained since you branched. `git diff origin/main`
+  (one revision, no range) diffs `main` against the **working tree**,
+  uncommitted edits included. The last two put other people's code under
+  mutation — 113 mutants where the pull request owed 103, ten of them in a
+  file another pull request had just rewritten — and a count that is too high
+  reads as extra diligence, so nothing questions it.
 - **An ablation changes one input, and you say which.** Renaming a function
   also moves the tokens of its name; folding a method into another moves its
   name instead of removing it. Both were reported as "the name is not the
