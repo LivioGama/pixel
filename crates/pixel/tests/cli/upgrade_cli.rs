@@ -137,7 +137,8 @@ impl Drop for Fixture {
 #[test]
 fn upgrade_shutdown_is_scoped_to_selected_repository() {
     let fixture = Fixture::new("scoped");
-    let selected = UnixListener::bind(fixture.socket(&fixture.0)).unwrap();
+    let selected_socket = fixture.socket(&fixture.0);
+    let selected = UnixListener::bind(&selected_socket).unwrap();
     let unrelated = UnixListener::bind(fixture.socket(&fixture.0.join("other"))).unwrap();
     unrelated.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
@@ -154,7 +155,11 @@ fn upgrade_shutdown_is_scoped_to_selected_repository() {
         let response =
             pixel_proto::Envelope::success("shutdown", serde_json::json!({"stopping": true}));
         writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
-        // Closing the listener simulates this daemon's completed shutdown.
+        // A real daemon's shutdown unlinks its socket; removing the file is
+        // what `upgrade_daemon_socket_stopped` watches for.
+        drop(stream);
+        drop(selected);
+        std::fs::remove_file(selected_socket).unwrap();
     });
     let (output, timed_out) = fixture.upgrade();
     server.join().unwrap();
