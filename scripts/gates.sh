@@ -8,9 +8,12 @@
 # Why a script instead of three commands:
 # - Skip-if-untouched: outside CI, when neither the diff against `main` nor
 #   the working tree touches a Rust-affecting path (*.rs, Cargo.*, build.rs,
-#   .cargo/, rust-toolchain*, rustfmt.toml, clippy.toml), the gates cannot
-#   change outcome, so the script exits 0 without compiling anything. A docs-
-#   only turn costs seconds, not a workspace build.
+#   .cargo/, rust-toolchain*, rustfmt.toml, clippy.toml), the CARGO gates
+#   cannot change outcome, so the script stops without compiling anything. A
+#   docs-only turn costs seconds, not a workspace build. The release prepare
+#   contract is not a cargo gate and runs either way: it compiles nothing, and
+#   a change to prepare.sh or to its own test must not need --force to be
+#   checked.
 # - Laptop safety: every cargo invocation runs under `nice` and with
 #   CARGO_BUILD_JOBS defaulting to ncpu-2 (two cores stay free, peak rustc
 #   memory drops with the job count) and RUST_TEST_THREADS to ncpu/2 (the
@@ -29,7 +32,7 @@ for arg in "$@"; do
     case "$arg" in
         --force) FORCE=1 ;;
         --mutants) MUTANTS=1 ;;
-        -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "gates.sh: unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
@@ -54,11 +57,6 @@ gate_decision() {
     if printf '%s\n%s\n' "$committed" "$dirty" | rust_affecting; then echo run; else echo skip; fi
 }
 
-if [ "$FORCE" -eq 0 ] && [ -z "${CI:-}" ] && [ "$(gate_decision)" = skip ]; then
-    echo "gates.sh: no Rust-affecting change against main or in the working tree; skipping (use --force to run)."
-    exit 0
-fi
-
 if [ -z "${CI:-}" ]; then
     ncpu="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
     # Negative CARGO_BUILD_JOBS means "ncpu + value" (cargo ≥ 1.66).
@@ -82,6 +80,25 @@ step() {
         exit "$code"
     fi
 }
+
+# The two script contracts CI runs as their own jobs. test-prepare.py stubs gh
+# and cargo in a disposable repository and also runs `prepare.sh --check`
+# against this tree, so it catches a fragment named for a section that does not
+# exist, an entry left under ## [Unreleased], and a --check that refuses the
+# tree release preparation produces; test-gates.py is this script's own
+# contract. Neither compiles anything (~6 s together), which is why they run
+# above the cargo skip rather than under it: none of the paths they cover is
+# Rust-affecting, so under the skip a change to prepare.sh, to this file or to
+# either test would still have needed --force to be checked. 0.4.0's release
+# pull request went red twice on gates no local run could reach.
+step "release prepare contract" python3 scripts/test-prepare.py
+step "gate runner contract" python3 scripts/test-gates.py
+
+if [ "$FORCE" -eq 0 ] && [ -z "${CI:-}" ] && [ "$(gate_decision)" = skip ]; then
+    echo
+    echo "gates.sh: no Rust-affecting change against main or in the working tree; skipping the cargo gates (use --force to run them)."
+    exit 0
+fi
 
 step "cargo fmt --check" cargo fmt --all -- --check
 step "cargo clippy" cargo clippy --workspace --all-targets -- -D warnings
