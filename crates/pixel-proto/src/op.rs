@@ -830,6 +830,19 @@ mod tests {
                 "plan",
             ),
             (
+                Op::Evaluate {
+                    from: String::new(),
+                    to: String::new(),
+                    traversal: None,
+                    tiers: None,
+                    max_depth: None,
+                    time_budget_ms: None,
+                    scope: None,
+                    at_snapshot: false,
+                },
+                "evaluate",
+            ),
+            (
                 Op::Rename {
                     name: "".into(),
                     new_name: "".into(),
