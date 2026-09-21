@@ -395,6 +395,19 @@ Pull request body, in this order:
 Keep PRs to one concern. A change over roughly 400 lines of diff or mixing
 concerns should be split into a stack of PRs.
 
+CodeRabbit reviews pull requests into `main` and `release/x.y`, except
+drafts, Dependabot bumps and titles containing `WIP` or `DO NOT MERGE`. Its
+configuration is [`.coderabbit.yaml`](.coderabbit.yaml) at the root: which
+paths are reviewed, the path-specific instructions that restate the rules
+above for the reviewer, the guideline files it applies (this file,
+`.agents/rules/`, the rust-guidelines skill) and the pre-merge checks, all
+warnings: Conventional Commits title, description, verification evidence in
+the body (the gate commands and what was not run), and a `changelog.d/`
+fragment for a `feat`/`fix` touching `crates/`. The file is read from the
+branch under review, so a change to it is exercised by the pull request that
+carries it. Answer or explicitly decline each of its findings before
+requesting a human review.
+
 ## Changelog
 
 `CHANGELOG.md` follows Keep a Changelog. Entries do not live in it until a
