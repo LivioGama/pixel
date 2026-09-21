@@ -150,6 +150,13 @@ fn rel_path(root: &Path, path: &Path) -> Option<String> {
 /// but stops a runaway walk on a mis-rooted or huge directory.
 const DEFAULT_GRAPH_MAX_FILES: usize = 50_000;
 
+/// The build-time file cap in force, as an evaluation reports it: `None`
+/// when the environment lifted it, so "the cap was hit" is never claimed
+/// where no cap applies.
+pub fn graph_file_cap() -> Option<usize> {
+    graph_max_files().filter(|&n| n != usize::MAX)
+}
+
 fn graph_max_files() -> Option<usize> {
     match std::env::var("PIXEL_GRAPH_MAX_FILES") {
         Ok(v) => v
@@ -159,6 +166,64 @@ fn graph_max_files() -> Option<usize> {
             .or(Some(usize::MAX)),
         Err(_) => Some(DEFAULT_GRAPH_MAX_FILES),
     }
+}
+
+/// Why the build would not hold a path, or that it would. The variants are
+/// ordered as `collect_files` applies its filters: a file is judged on the
+/// first gate it fails, so an unsupported extension is never reported as
+/// oversized and a binary is never reported as generated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Indexability {
+    /// The walk would collect it and extraction would accept it.
+    Indexable,
+    /// No grammar for this extension (`lang_of` is `None`).
+    UnsupportedLanguage,
+    /// Not on disk, or not a regular file (a symlink, a directory, or a
+    /// path that changed identity between the two stats).
+    Absent,
+    /// Over `MAX_FILE_BYTES`.
+    TooLarge,
+    /// A NUL byte within the first `BINARY_SNIFF_BYTES`.
+    Binary,
+    /// A generated or minified blob, which `extract_file` refuses.
+    Generated,
+}
+
+/// Judge one repo-relative path against the build's own file policy by
+/// reading it, so a caller can say *why* a changed file carries no symbols
+/// instead of reporting one undifferentiated "not indexed".
+///
+/// It answers about the file on disk now, never about the graph: a path this
+/// returns `Indexable` for may still be missing from the store (built before
+/// the file appeared, or dropped at the file cap), which is the caller's
+/// distinction to make.
+pub fn indexability(root: &Path, rel: &str) -> Indexability {
+    if lang_of(rel).is_none() {
+        return Indexability::UnsupportedLanguage;
+    }
+    let path = root.join(rel);
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return Indexability::Absent;
+    };
+    if !meta.file_type().is_file() {
+        return Indexability::Absent;
+    }
+    if meta.len() > MAX_FILE_BYTES {
+        return Indexability::TooLarge;
+    }
+    // Re-reads through the same guarded reader the build uses, so a file
+    // that grows past the cap or stops being a regular file between the
+    // stat and the read is judged exactly as the build would judge it.
+    let Some(content) = read_source_file(&path) else {
+        return Indexability::Absent;
+    };
+    if is_binary(&content) {
+        return Indexability::Binary;
+    }
+    if crate::extract::is_generated_blob(&content) {
+        return Indexability::Generated;
+    }
+    Indexability::Indexable
 }
 
 /// Walk `root` collecting supported source files (skips .git, .pixel,
@@ -1029,6 +1094,96 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// The cap change detection and `evaluate` report. `None` must mean
+    /// "no cap applies", never "there is one and I lost it": a file absent
+    /// from the graph is blamed on the cap only when one was in force.
+    #[test]
+    fn graph_file_cap_is_the_build_default_unless_the_environment_lifts_it() {
+        assert!(
+            std::env::var("PIXEL_GRAPH_MAX_FILES").is_err(),
+            "no test in this binary may set PIXEL_GRAPH_MAX_FILES: it is \
+             process-global and this assertion is what keeps the default \
+             below meaningful"
+        );
+        assert_eq!(graph_file_cap(), Some(DEFAULT_GRAPH_MAX_FILES));
+        // The two agree while a cap applies; they part only at `usize::MAX`,
+        // which is how `PIXEL_GRAPH_MAX_FILES=0` spells "no cap".
+        assert_eq!(graph_file_cap(), graph_max_files());
+        assert_eq!(Some(usize::MAX).filter(|&n| n != usize::MAX), None);
+    }
+
+    /// `indexability` is what names the motif of a changed file the graph
+    /// does not hold, so it must answer with the build's own gates, in the
+    /// build's own order: a wrong reason here is a wrong published motif.
+    #[test]
+    fn indexability_names_the_gate_a_file_fails() {
+        let root = tmpdir("indexability");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), b"fn alpha() -> u32 { 1 }\n").unwrap();
+        // Rust-looking content under an extension with no grammar: judged on
+        // the extension, before anything is read.
+        std::fs::write(root.join("notes.txt"), b"fn looks_like_rust() {}\n").unwrap();
+        std::fs::write(root.join("src/blob.rs"), b"fn x() {}\n\0\0binary\n").unwrap();
+        let oversize = usize::try_from(MAX_FILE_BYTES).unwrap() + 1;
+        std::fs::write(root.join("src/huge.rs"), vec![b'/'; oversize]).unwrap();
+        // Exactly at the cap: the build reads it, so this must not be
+        // refused. A newline every 64 bytes keeps it off the
+        // generated-blob threshold, which is a mean bytes-per-line.
+        let at_cap = usize::try_from(MAX_FILE_BYTES).unwrap();
+        let mut exact: Vec<u8> = (0..at_cap)
+            .map(|i| if i % 64 == 63 { b'\n' } else { b'/' })
+            .collect();
+        exact[at_cap - 1] = b'\n';
+        std::fs::write(root.join("src/exact.rs"), &exact).unwrap();
+        // A minified bundle: over GENERATED_MIN_BYTES, on one line.
+        let minified = format!("var x=\"{}\";\n", "0".repeat(70_000));
+        std::fs::write(root.join("src/bundle.js"), minified).unwrap();
+        std::os::unix::fs::symlink(root.join("src/a.rs"), root.join("src/link.rs")).unwrap();
+
+        assert_eq!(indexability(&root, "src/a.rs"), Indexability::Indexable);
+        assert_eq!(
+            indexability(&root, "notes.txt"),
+            Indexability::UnsupportedLanguage
+        );
+        assert_eq!(indexability(&root, "src/blob.rs"), Indexability::Binary);
+        assert_eq!(indexability(&root, "src/huge.rs"), Indexability::TooLarge);
+        assert_eq!(
+            indexability(&root, "src/exact.rs"),
+            Indexability::Indexable,
+            "a file of exactly MAX_FILE_BYTES is within the cap, not over it"
+        );
+        assert_eq!(
+            indexability(&root, "src/bundle.js"),
+            Indexability::Generated
+        );
+        // A symlink is never indexed, and neither is a path that is not
+        // there at all — a deletion asks about the second one.
+        assert_eq!(indexability(&root, "src/link.rs"), Indexability::Absent);
+        assert_eq!(indexability(&root, "src/gone.rs"), Indexability::Absent);
+        // A directory reached through a supported-looking name.
+        std::fs::create_dir_all(root.join("pkg.rs")).unwrap();
+        assert_eq!(indexability(&root, "pkg.rs"), Indexability::Absent);
+
+        // The verdicts match what the walk actually collects.
+        let collected: Vec<String> = collect_files(&root).into_iter().map(|(r, _)| r).collect();
+        for kept in ["src/a.rs", "src/exact.rs"] {
+            assert!(collected.contains(&kept.to_string()), "{collected:?}");
+        }
+        for skipped in [
+            "notes.txt",
+            "src/blob.rs",
+            "src/huge.rs",
+            "src/link.rs",
+            "pkg.rs",
+        ] {
+            assert!(
+                !collected.contains(&skipped.to_string()),
+                "{skipped} is collected but indexability refuses it"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
