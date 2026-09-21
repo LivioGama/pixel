@@ -61,6 +61,7 @@ pixel install       # let your agent use Pixel
 | Find text, a symbol, or a concept | `pixel search-content`, `pixel find-code`, `pixel search-meaning` |
 | Scope work and see risk | `pixel scope-task`, `pixel impact`, `pixel what-changed` |
 | Recover prior code or history | `pixel dig-history`, `pixel search-history`, `pixel plan-rollback` |
+| Resolve a term the index cannot know | `pixel web-search` — deterministic fetch (SearXNG via `PIXEL_WEB_SEARCH_URL`, else DuckDuckGo/Wikipedia), no LLM |
 | Review or safely publish | `pixel repo-state`, `pixel review-changes`, `pixel sync-branch`, `pixel commit` |
 
 Pixel is local-first. Its index, graph, and optional history data live under `.pixel/`; it reports boundaries when results are capped, stale, or incomplete. Tests and code review remain necessary.

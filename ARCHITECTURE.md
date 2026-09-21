@@ -96,6 +96,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md` or the bundled agent prompts
 | `pixel daemon` | Manage the per-root background daemon |
 | `pixel recall` | Search and browse LLM CLI transcripts (machine-wide corpus) |
 | `pixel list-errors` | One-look error capture: query the sniper error sink |
+| `pixel web-search` | Deterministic web lookup for terms the index cannot know — the refine step of a gated `pixel plan`. SearXNG via `PIXEL_WEB_SEARCH_URL`, else DuckDuckGo/Wikipedia fallbacks. No LLM, no daemon |
 | `pixel repo-state` | Show repo state: HEAD, branch, dirty files, fingerprints; `--include-clean` adds the capped tracked-clean list |
 | `pixel review-changes` | Review working-tree changes (staged, unstaged, untracked, conflicted) |
 | `pixel commit-history` | Commit history with detail levels and byte caps |
