@@ -43,6 +43,7 @@ regex misses an exact name, `pixel search-meaning` for a conceptual question.
 | "what modules exist?" | `pixel list-areas` — functional-area clusters |
 | "what are the execution flows?" | `pixel list-flows` — discovered flows |
 | a todo list for a multi-file bug | `pixel plan "fix all clickable elements"` — AST + graph findings, no LLM |
+| a term the index cannot know ("what is JEV?") | `pixel web-search "<term>"` — deterministic fetch, no LLM, no daemon |
 
 ### History — replaces `git log -S`, `git log --grep`, `git blame`
 
@@ -160,10 +161,12 @@ Rough cost per phase: 800, 500, 1500, 500, 300, —, 500, 200 tokens.
     standard — e.g. `pixel plan "implement the gap to do like JEV"`). Confirm
     cheaply first: if `pixel find-code "<term>"` and `pixel search-meaning
     "<term>"` both miss, the term is external.
-  - **Refine** — resolve the term once, at minimum cost: a single web
-    search, or one clarifying question to the user when the term is
-    private (in-house codename, not searchable). Then re-run `pixel plan`
-    with the resolved wording — never hand-write a replacement checklist.
+  - **Refine** — resolve the term once, at minimum cost: `pixel web-search
+    "<term>"` (deterministic, no LLM — SearXNG when `PIXEL_WEB_SEARCH_URL`
+    is set, else DuckDuckGo/Wikipedia fallbacks). If it returns
+    `unresolved` or the term is private (in-house codename), ask the user
+    one clarifying question. Then re-run `pixel plan` with the resolved
+    wording — never hand-write a replacement checklist.
   - **No signal** — use the emitted checklist as-is. Re-drafting a sound
     deterministic plan with an LLM wastes tokens and defeats its purpose.
 - **4 is a hard rule.** NEVER edit a function, struct or method without running
