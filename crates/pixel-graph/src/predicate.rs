@@ -425,7 +425,7 @@ pub fn evaluate(
     sources.dedup();
     let target_set: HashSet<i64> = req.targets.iter().copied().collect();
 
-    let mut names: Vec<String> = Vec::with_capacity(sources.len() + target_set.len());
+    let mut names: Vec<String> = Vec::new();
     for id in sources.iter().chain(req.targets.iter()) {
         names.push(required_symbol(store, *id)?.name);
     }
@@ -1355,6 +1355,24 @@ mod tests {
         assert_eq!(ev.coverage.unresolved_same_name_sites, 2);
         assert_eq!(ev.coverage.depth_cap, 64);
         assert_eq!(ev.coverage.time_budget_ms, 60_000);
+    }
+
+    #[test]
+    fn coverage_should_count_a_name_shared_by_a_source_and_a_target_once() {
+        // Source 0 is also the target: its name `f0` appears twice in the
+        // names list, and its three unresolved sites must be counted once.
+        let fx = fixture(2);
+        for line in [4, 5, 6] {
+            fx.store
+                .insert_unresolved_call(fx.files[1], "f0", Some(fx.ids[1]), line, None, "calls")
+                .unwrap();
+        }
+        let ev = fx.eval(&[0], &[0], Traversal::Callees);
+        assert_eq!(ev.status, Status::Established);
+        assert_eq!(
+            ev.coverage.unresolved_same_name_sites, 3,
+            "a name shared by a source and a target is counted once, not per occurrence"
+        );
     }
 
     #[test]
