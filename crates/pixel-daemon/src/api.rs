@@ -3506,12 +3506,16 @@ mod bridge {
     /// The error is returned instead of dropped: a lost update serves a
     /// stale index until the next graph op walks the tree.
     pub fn update_file(root: &Path, db: &Path, rel: &str) -> Result<(), String> {
-        pixel_graph::build::update_file(root, db, rel).map_err(es)
+        pixel_graph::build::update_file(root, db, rel)
+            .map(|_| ())
+            .map_err(es)
     }
 
     /// The same for a debounced batch of watcher events.
     pub fn update_files(root: &Path, db: &Path, files: &[(&str, bool)]) -> Result<(), String> {
-        pixel_graph::build::update_files(root, db, files).map_err(es)
+        pixel_graph::build::update_files(root, db, files)
+            .map(|_| ())
+            .map_err(es)
     }
 
     pub fn impact(
