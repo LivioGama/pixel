@@ -349,7 +349,45 @@ only `full_before_and_after` and `before_only` — no witness-only variant
 Stack note: CodeRabbit does not review a pull request whose base is
 another feature branch ("reviews are disabled for this base branch"), so a
 stacked PR is only reviewed once the branch below merges and GitHub
-retargets it to `main`. Merge bottom-up and re-read the review then.
+retargets it to `main`. Merge bottom-up and re-read the review then. #202
+was retargeted by hand and merged before that happened, so it never got a
+CodeRabbit pass; #203 was merged without a rebase, so its 10 mutants never
+ran either. Both are on the p9 list.
+
+PR 3 (`pixel_daemon::evaluate` + `evaluate_cmd`, PR #206) carries the op,
+the resolution, the snapshot checks and the CLI. Read against this note:
+faithful. The ordering that matters, verified in `op_evaluate_probed`:
+gate (whole-tree `tree_delta`) → identity from one handle → resolution →
+**test seam** → traversal → after-check (`freshness_signature` over the
+whole tree compared to the identity's signature). `envelope` hardcodes
+`working_tree_matches: true` because it is only reachable once both checks
+passed; the failure path goes through `halted`, which takes the flag.
+
+Four deviations, each deliberate:
+
+1. **`symbol_outside_index` is never produced.** The build records no
+   per-file reason for a file's absence, so the cause cannot be verified,
+   and this contract reserves that reason for a known cause. Those cases
+   answer `symbol_not_found`. To make it real, extraction would have to
+   record why it dropped a file.
+2. **`TierSelection` lives in `pixel-daemon`, not `pixel-proto`.** The
+   contract crate has `Tier` but no selection type; widening #202 was not
+   worth it. Move it if a second caller appears.
+3. **`coverage.files_excluded_by_size` is 0 meaning "none observed"**, not
+   "none exist" — counting them needs a second whole-tree walk, doubling
+   the command's cost. `graph_file_cap_hit` is derived conservatively and
+   can only over-report, which widens a stated limit rather than narrowing
+   it. This is the weakest honesty claim in the implementation; the
+   absence summary names "files beyond caps" unconditionally, so no
+   published sentence depends on the counter.
+4. **Drift is repaired, not refused, below the threshold.** `evaluate_gate`
+   applies an incremental update when the drift fits
+   `PIXEL_GRAPH_INCREMENTAL_MAX_PCT` (**default 20**) and answers
+   `graph_stale` only above it, or when the graph carries no usable
+   signature. So a refusal needs more than a fifth of the indexed files to
+   have moved — a branch switch or a large pull, not an ordinary edit. On a
+   test fixture of four files one edit is enough, which is why the daemon
+   tests exercise that path constantly; on a real repository they do not.
 
 ```
 pixel evaluate path --from <uid|name> --to <uid|name>
