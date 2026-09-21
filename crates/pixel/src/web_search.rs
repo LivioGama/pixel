@@ -20,6 +20,9 @@ use std::time::Duration;
 pub const DEFAULT_LIMIT: usize = 8;
 /// Per-provider fetch cap: a slow endpoint must not stall the refine step.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Response body cap: a misconfigured endpoint must not exhaust memory.
+/// Search payloads are small; 1 MiB is far past any legitimate page.
+const BODY_CAP_BYTES: u64 = 1_048_576;
 /// Snippet cap: enough to resolve a term, never a page dump.
 const SNIPPET_CAP_CHARS: usize = 280;
 /// Environment variable naming a SearXNG base URL (`https://host`, no path).
@@ -83,28 +86,49 @@ fn render(query: &str, hits: &[Hit]) -> String {
     out
 }
 
-#[cfg_attr(test, mutants::skip)] // printing adapter; logic lives in `marker`/`render` and is tested
+/// The result document: `hits` plus the epistemics/snapshot envelope every
+/// op emits. `confidence` mirrors the marker — `resolved` when the chain
+/// answered, `unresolved` when no provider had anything to say.
+fn document(query: &str, limit: usize, hits: &[Hit]) -> Value {
+    let engines: Vec<&str> = {
+        let mut seen = std::collections::BTreeSet::new();
+        hits.iter()
+            .map(|h| h.engine)
+            .filter(|e| seen.insert(*e))
+            .collect()
+    };
+    json!({
+        "query": query,
+        "marker": marker(hits),
+        "hits": hits.iter().map(|h| json!({
+            "title": h.title,
+            "url": h.url,
+            "snippet": h.snippet,
+            "engine": h.engine,
+        })).collect::<Vec<_>>(),
+        "epistemics": {
+            "closed_world": false,
+            "lower_bound": true,
+            "basis": "web search",
+            "confidence": marker(hits),
+        },
+        "snapshot": {
+            "providers": engines,
+            "limit": limit,
+        },
+    })
+}
+
+#[cfg_attr(test, mutants::skip)] // printing adapter; logic lives in `document`/`render` and is tested
 pub fn run(opts: WebSearchOptions) -> Result<(), String> {
     let hits = search_with(&opts.query, opts.limit, searxng_base().as_deref(), &fetch);
     if opts.json {
-        let payload = json!({
-            "query": opts.query,
-            "marker": marker(&hits),
-            "hits": hits.iter().map(|h| json!({
-                "title": h.title,
-                "url": h.url,
-                "snippet": h.snippet,
-                "engine": h.engine,
-            })).collect::<Vec<_>>(),
-        });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?
-        );
+        // `print_data` enforces PIXEL_OUTPUT_CAP_BYTES and broken-pipe
+        // handling — the standard bounded output path.
+        crate::print_data(&document(&opts.query, opts.limit, &hits), true)
     } else {
-        print!("{}", render(&opts.query, &hits));
+        crate::write_stdout(&render(&opts.query, &hits))
     }
-    Ok(())
 }
 
 /// The provider chain over a fetch seam: tests inject canned bodies.
@@ -161,6 +185,8 @@ fn fetch(url: &str) -> Result<String, String> {
         .map_err(|e| format!("web-search fetch {url}: {e}"))?;
     response
         .body_mut()
+        .with_config()
+        .limit(BODY_CAP_BYTES)
         .read_to_string()
         .map_err(|e| format!("web-search read {url}: {e}"))
 }
@@ -312,7 +338,10 @@ fn clip_len(text: &str, cap: usize) -> String {
     if text.chars().count() <= cap {
         return text;
     }
-    let mut s: String = text.chars().take(cap).collect();
+    if cap == 0 {
+        return String::new();
+    }
+    let mut s: String = text.chars().take(cap - 1).collect();
     s.push('…');
     s
 }
@@ -407,9 +436,14 @@ mod tests {
         let long = "x".repeat(SNIPPET_CAP_CHARS + 10);
         let clipped = clip(&long);
         assert!(clipped.ends_with('…'));
-        assert_eq!(clipped.chars().count(), SNIPPET_CAP_CHARS + 1);
+        assert_eq!(
+            clipped.chars().count(),
+            SNIPPET_CAP_CHARS,
+            "the ellipsis lives inside the cap"
+        );
         let exact = "y".repeat(SNIPPET_CAP_CHARS);
         assert_eq!(clip(&exact).chars().count(), SNIPPET_CAP_CHARS);
+        assert_eq!(clip_len("anything", 0), "");
     }
 
     #[test]
@@ -475,6 +509,48 @@ mod tests {
             render("jev", &[]),
             "unresolved: no web results for \"jev\"\n"
         );
+    }
+
+    #[test]
+    fn document_carries_marker_epistemics_and_provider_snapshot() {
+        let hits = vec![
+            Hit {
+                title: "a".into(),
+                url: "https://a.test".into(),
+                snippet: String::new(),
+                engine: "searxng",
+            },
+            Hit {
+                title: "b".into(),
+                url: "https://b.test".into(),
+                snippet: String::new(),
+                engine: "searxng",
+            },
+            Hit {
+                title: "c".into(),
+                url: "https://c.test".into(),
+                snippet: String::new(),
+                engine: "wikipedia",
+            },
+        ];
+        let doc = document("jev", 8, &hits);
+        assert_eq!(doc["marker"], "complete");
+        assert_eq!(doc["hits"].as_array().unwrap().len(), 3);
+        assert_eq!(doc["epistemics"]["closed_world"], false);
+        assert_eq!(doc["epistemics"]["lower_bound"], true);
+        assert_eq!(doc["epistemics"]["basis"], "web search");
+        assert_eq!(doc["epistemics"]["confidence"], "complete");
+        // Providers are deduplicated and sorted: searxng before wikipedia.
+        assert_eq!(
+            doc["snapshot"]["providers"],
+            json!(["searxng", "wikipedia"])
+        );
+        assert_eq!(doc["snapshot"]["limit"], 8);
+
+        let empty = document("jev", 8, &[]);
+        assert_eq!(empty["marker"], "unresolved");
+        assert_eq!(empty["epistemics"]["confidence"], "unresolved");
+        assert_eq!(empty["snapshot"]["providers"], json!([]));
     }
 
     #[test]

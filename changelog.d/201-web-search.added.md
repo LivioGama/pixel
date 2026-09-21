@@ -1,0 +1,1 @@
+**cli:** `pixel web-search "<term>"` — deterministic web retrieval for the plan-refinement gate, no LLM and no daemon. Provider chain: SearXNG (`PIXEL_WEB_SEARCH_URL`), then DuckDuckGo Instant Answer and Wikipedia OpenSearch fallbacks; bounded hits with `complete`/`unresolved` markers, `--limit`, `--json`. ([#201](https://github.com/LivioGama/pixel/pull/201))
