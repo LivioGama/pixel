@@ -23,6 +23,16 @@ class GatesContract(unittest.TestCase):
         self.repo = self.root / "repo"
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy(GATES, self.repo / "scripts/gates.sh")
+        # gates.sh runs the repository's script contracts before the cargo
+        # gates. Stub them here: this fixture asserts that gates.sh invokes
+        # them and honours their exit code, not what the real ones check.
+        self.prepare_log = self.root / "contracts.log"
+        for name in ("test-prepare.py", "test-gates.py"):
+            (self.repo / "scripts" / name).write_text(
+                "import os, sys\n"
+                f"open(os.environ['CONTRACT_LOG'], 'a').write('{name}\\n')\n"
+                "sys.exit(int(os.environ.get('FAIL_CONTRACT', '0')))\n"
+            )
         (self.repo / "src").mkdir()
         (self.repo / "src/lib.rs").write_text("pub fn a() {}\n")
         (self.repo / "README.md").write_text("readme\n")
@@ -49,6 +59,7 @@ class GatesContract(unittest.TestCase):
         self.env.update({
             "PATH": str(fake) + os.pathsep + os.environ["PATH"],
             "GATES_LOG": str(self.log),
+            "CONTRACT_LOG": str(self.prepare_log),
             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
         })
@@ -69,6 +80,11 @@ class GatesContract(unittest.TestCase):
     def invocations(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
 
+    def contracts(self):
+        if not self.prepare_log.exists():
+            return []
+        return self.prepare_log.read_text().splitlines()
+
     def test_docs_only_change_skips_every_cargo_invocation(self):
         (self.repo / "README.md").write_text("edited\n")
         self.git("commit", "-qam", "docs")
@@ -76,6 +92,30 @@ class GatesContract(unittest.TestCase):
         result = self.gates()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("skipping", result.stdout)
+        self.assertEqual(self.invocations(), [])
+
+    def test_the_script_contracts_run_even_when_the_cargo_gates_are_skipped(self):
+        """prepare.sh and gates.sh are not Rust-affecting paths.
+
+        Under the skip, a change to either -- or to their tests -- would have
+        needed --force to be checked, which is how 0.4.0's release pull
+        request went red on a CI gate no local run could reach. They compile
+        nothing, so they run above the skip and a docs-only turn still costs
+        under a second.
+        """
+        (self.repo / "README.md").write_text("edited\n")
+        self.git("commit", "-qam", "docs")
+        result = self.gates()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.contracts(), ["test-prepare.py", "test-gates.py"])
+        self.assertEqual(self.invocations(), [])
+
+    def test_a_red_script_contract_stops_the_run_before_any_cargo_gate(self):
+        """The step has to be able to fail, or it gates nothing."""
+        (self.repo / "src/lib.rs").write_text("pub fn b() {}\n")
+        result = self.gates(FAIL_CONTRACT="3")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("release prepare contract FAILED", result.stderr)
         self.assertEqual(self.invocations(), [])
 
     def test_rust_change_runs_the_three_gates_in_order_with_safe_defaults(self):
