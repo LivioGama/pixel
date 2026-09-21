@@ -1,1 +1,0 @@
-`pixel repo-state` no longer prints the tracked-clean file list: on a clean tree the list was over 85% of the answer (200 of 351 paths, ~7 KB here) and no consumer read it. The answer keeps the exact `clean_count`, and `--include-clean` restores the capped list.
