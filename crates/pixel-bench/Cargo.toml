@@ -14,6 +14,7 @@ pixel-index = { path = "../pixel-index" }
 [dev-dependencies]
 criterion = { workspace = true }
 pixel-daemon = { path = "../pixel-daemon" }
+pixel-graph = { path = "../pixel-graph" }
 pixel-proto = { path = "../pixel-proto" }
 pixel-recall = { path = "../pixel-recall" }
 tempfile = "3"
@@ -28,4 +29,8 @@ harness = false
 
 [[bench]]
 name = "ndcg_relevance"
+harness = false
+
+[[bench]]
+name = "tree_delta"
 harness = false
