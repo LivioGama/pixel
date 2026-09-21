@@ -74,6 +74,11 @@ routinely omit, so they are a strict subset of the real call sites: a tool that
 correctly returns a paren-less caller would be scored as imprecise for being
 right. Recall tolerates a subset of truth, precision does not.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="charts/impact-recall-dark.svg">
+  <img alt="Blast radius recall at depth 1 by corpus, pixel against GitNexus." src="charts/impact-recall-light.svg">
+</picture>
+
 Readings, in order of how much weight they carry:
 
 - **Recall overall is a tie** (0.86 vs 0.84 over 29 cases). Anyone quoting the

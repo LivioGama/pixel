@@ -38,6 +38,11 @@ before any benchmark on this page.
 
 ## Where pixel wins
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench/charts/impact-recall-dark.svg">
+  <img alt="Blast radius recall at depth 1 by corpus: pixel 1.00 on Rust and TypeScript, 0.90 and 0.56 on the two Ruby repos; GitNexus 0.87, 0.88, 1.00, 0.68." src="bench/charts/impact-recall-light.svg">
+</picture>
+
 **Blast radius on Rust and TypeScript.** Across 29 hand-verifiable cases, pixel
 returned every true caller on both languages (recall 1.00 / 1.00) against
 GitNexus' 0.87 / 0.88 — including on GitNexus' own TypeScript codebase.
@@ -66,6 +71,11 @@ announced the problem.
 
 These are measured, on the same corpora, with the same harnesses.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench/charts/retrieval-recall-dark.svg">
+  <img alt="Recall@10 on doc-comment queries: semble 1.00 Rust, 1.00 TypeScript, 0.93 Ruby; pixel search-meaning 0.87, 0.20, 0.73; pixel find-code 0.00 on all three." src="bench/charts/retrieval-recall-light.svg">
+</picture>
+
 **Semantic search: semble is better, and not marginally.** Over 45
 doc-comment-derived queries across Rust, TypeScript and Ruby, semble found the
 right file in its top 10 in 98 % of cases against pixel's 60 %, and was ~1.8×
@@ -73,10 +83,20 @@ faster. On TypeScript pixel managed 20 %. If natural-language code search is
 your main need, install semble.
 ([measurement](bench/vs-landscape.md#natural-language-retrieval--semble-vs-pixel-45-queries))
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench/charts/map-cost-coverage-dark.svg">
+  <img alt="Repo map cost versus directory coverage across four repos: stacklit sits cheaper and higher on three of them, pixel list-areas higher only on GitNexus." src="bench/charts/map-cost-coverage-light.svg">
+</picture>
+
 **Compact repo map: stacklit is better on most repos.** 369 tokens for 68 % of
 pixel's own directories, against `pixel list-areas` at 2 445 tokens for 49 %. It
 wins 3 of 4 repos. (Its "~250 tokens" headline holds on small repos only — 2.5–3.1k
 on the larger two.) ([measurement](bench/vs-landscape.md#repo-map--stacklit-vs-pixel-4-repos))
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench/charts/context-tax-dark.svg">
+  <img alt="Always-on context cost: GitNexus 19700 tokens, pixel 4160, semble 980, stacklit 420." src="bench/charts/context-tax-light.svg">
+</picture>
 
 **Context cost: pixel is the lightest only against GitNexus.** ~4 160 always-on
 tokens vs GitNexus' ~19 700 is a 4.7× win — but semble costs ~980 and stacklit
