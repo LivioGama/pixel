@@ -31,18 +31,34 @@ fn tmpdir(tag: &str) -> PathBuf {
     d
 }
 
+/// Drive the fixture's git through [`pixel_git::GitRunner`], the bounded
+/// primitive the whole workspace goes through.
+///
+/// Spawning the binary directly would be the obvious thing here, and the
+/// boundary test in `pixel-git` would reject it: this file lives under
+/// `src/` (it is `#[path]`-included into `api`'s test module), and that
+/// scanner only exempts a test region opened in the same file — it also
+/// matches on text, so the spawn it forbids must not appear even in a
+/// comment. Going through the runner is the right answer anyway: the
+/// fixture inherits the timeout and the output cap instead of being one
+/// more place a stuck `git` can hang the suite.
+///
+/// `GIT_CONFIG_GLOBAL` is pinned away from the developer's own config so a
+/// local `commit.gpgsign` or hook cannot fail the fixture.
 fn git(dir: &Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git {args:?}: {out:?}");
+    let out = pixel_git::GitRunner::new(dir)
+        .run_output(
+            args,
+            &[
+                ("GIT_AUTHOR_NAME", "t"),
+                ("GIT_AUTHOR_EMAIL", "t@t"),
+                ("GIT_COMMITTER_NAME", "t"),
+                ("GIT_COMMITTER_EMAIL", "t@t"),
+                ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ],
+        )
+        .unwrap_or_else(|error| panic!("git {args:?}: {error}"));
+    assert!(out.success(), "git {args:?}: {}", out.stderr);
 }
 
 /// `work` calls `helper`; `lonely` calls nothing. `spare.ts` is there so a
