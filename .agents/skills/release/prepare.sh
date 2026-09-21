@@ -10,7 +10,8 @@
 #    `## [x.y.z]` heading yet;
 # 2. `changelog.d/` holds at least one fragment, every fragment is a
 #    `<slug>.<section>.md` with a section from SECTIONS and a first line that
-#    carries the entry, and `## [Unreleased]` carries no `- ` entry;
+#    carries the entry, opens on its scope and fits HARD_LIMIT, and
+#    `## [Unreleased]` carries no `- ` entry;
 # 3. every workspace member's `[package] version` is set to x.y.z (the
 #    members move in lockstep, as 0.2.4 did);
 # 4. the fragments are folded into a new `## [x.y.z] - DATE` under a kept,
@@ -37,6 +38,23 @@ usage() { sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; }
 # number when the number is known, so step 6 can be matched by eye. Emitted in
 # this order, which is the order the headings have always appeared in.
 SECTIONS="added changed deprecated removed fixed security"
+
+# The shape of an entry, gated here because a rule only in CONTRIBUTING.md is a
+# rule the release finds out about. `**<scope>:** ` first: the scope is what
+# makes a released section scannable, and the 0.4.0 cut, written without one,
+# has to be read line by line to find the command a bullet is about. Then the
+# length. The entry states what changed and what it means for a user; why that
+# design and not another is the pull request's job, and the link in the entry is
+# what carries the reader there. Measured against a project that does this well
+# (mise v2026.8.2: 19 entries, 171 to 498 bytes), 0.4.0 ran 264 to 1265
+# with a median of 715, and the fragment open at the time was 1428 in a single
+# paragraph. SOFT_LIMIT is that project's observed ceiling, so a warning means
+# "longer than anyone else's longest"; HARD_LIMIT is what refuses the essay
+# while leaving room for an entry that genuinely carries a before/after
+# measurement.
+SCOPE_PATTERN='^\*\*[a-z][a-z0-9 ,.-]*:\*\* [^[:space:]]'
+SOFT_LIMIT=500
+HARD_LIMIT=900
 
 VERSION=""
 DATE="$(date +%Y-%m-%d)"
@@ -109,6 +127,7 @@ fragment_section() {
 # is why the existence test is what says whether a fragment is there at all.
 FRAGMENTS=""
 FRAGMENT_COUNT=0
+WARNINGS=""
 for fragment in changelog.d/*.md; do
     [ -e "$fragment" ] || continue
     FRAGMENT_COUNT=$((FRAGMENT_COUNT + 1))
@@ -132,7 +151,35 @@ for fragment in changelog.d/*.md; do
         echo "prepare.sh: $fragment starts with a blank line; its first line is the entry" >&2
         exit 1
     fi
+    if ! head -n 1 "$fragment" | grep -Eq "$SCOPE_PATTERN"; then
+        echo "prepare.sh: $fragment: open the entry with the scope it changes, \`**graph:** the entry\`, as the commit subject's scope does" >&2
+        exit 1
+    fi
+    # The entry's own bytes: the newlines a wrapped fragment carries are the
+    # file's, not the prose's, and the cut reflows them under the bullet. Bytes
+    # and not characters because `wc -m` is locale-dependent where `wc -c` is
+    # not, and an entry close enough to the cap for a multi-byte dash to decide
+    # it is an entry to cut anyway.
+    LENGTH="$(tr -d '\n' < "$fragment" | wc -c | tr -d ' ')"
+    if [ "$LENGTH" -gt "$HARD_LIMIT" ]; then
+        echo "prepare.sh: $fragment: $LENGTH bytes, over the $HARD_LIMIT cap; state the change and what it means for a user, and leave the reasoning to the pull request the entry links" >&2
+        exit 1
+    fi
+    if [ "$LENGTH" -gt "$SOFT_LIMIT" ]; then
+        WARNINGS="${WARNINGS}${WARNINGS:+
+}  $fragment: $LENGTH bytes, over the $SOFT_LIMIT the style aims at"
+    fi
+    # The reader of a short entry needs somewhere to go for the rest. The link
+    # is in the text, or derivable by eye from a slug that opens on the number.
+    if ! grep -Eq '#[0-9]+' "$fragment" && ! printf '%s' "${fragment##*/}" | grep -Eq '^[0-9]+-'; then
+        WARNINGS="${WARNINGS}${WARNINGS:+
+}  $fragment: no pull request referenced; link it in the entry, or name the number first in the slug"
+    fi
 done
+if [ -n "$WARNINGS" ]; then
+    echo "prepare.sh: entries that do not fit the style (not a refusal):" >&2
+    printf '%s\n' "$WARNINGS" >&2
+fi
 
 # An entry written straight into CHANGELOG.md would be released only by
 # accident: the cut below takes its text from the fragments and leaves the file

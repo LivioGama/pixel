@@ -130,9 +130,13 @@ reviews:
         One file per entry, named `<slug>.<section>.md` where the section is
         one of `added`, `changed`, `deprecated`, `removed`, `fixed`,
         `security`; the slug should start with the pull request number when
-        known. The file holds a single line in the past tense naming the
-        command or flag affected, without a leading `-`. Nothing is written
-        to CHANGELOG.md outside a release commit.
+        known. The entry is `**<scope>:** <what changed and what it means for
+        a user>. ([#n](url))`, without a leading `-`: the scope first, then
+        the change, then the pull request link. Flag an entry with no scope
+        prefix, over 500 bytes, or whose prose argues for a design choice
+        instead of stating the change -- that argument belongs in the pull
+        request description the entry links. Nothing is written to
+        CHANGELOG.md outside a release commit.
     - path: "CHANGELOG.md"
       instructions: |
         Only a `release: prepare x.y.z` commit edits this file, by folding
@@ -255,7 +259,8 @@ reviews:
           `perf` or `release`, or when the diff adds or modifies a file
           matching `changelog.d/*.<section>.md` whose section is one of
           added, changed, deprecated, removed, fixed, security and whose
-          content is a single line without a leading `-`.
+          content opens on `**<scope>:** `, carries no leading `-`, and fits
+          500 bytes.
           Fail when the title type is `feat` or `fix`, the diff touches a
           file under `crates/`, and no such fragment is present, or when a
           fragment uses a section outside the list above, or when a pull

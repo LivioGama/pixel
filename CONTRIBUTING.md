@@ -25,7 +25,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] `cargo deny check` exits 0 (skip when `Cargo.lock` did not change); a new exception in `deny.toml` carries its reason.
 - [ ] New behaviour has a test that fails if the behaviour is removed.
 - [ ] The `Mutants` CI job reports no `MISSED` mutant on the pull request (see "Mutation testing"); a local run is optional.
-- [ ] A `changelog.d/<slug>.<section>.md` fragment carries the entry (skip for pure refactors and CI/deps chores).
+- [ ] A `changelog.d/<slug>.<section>.md` fragment carries the entry, opening on its scope (`**graph:** …`) and under 500 bytes (skip for pure refactors and CI/deps chores); `prepare.sh --check` refuses a missing scope or an entry over 900.
 - [ ] The commit message follows the Conventional Commits format below.
 - [ ] The branch was created from an up-to-date `main` and the pull request targets `main` (a maintainer's maintenance-release branch instead starts from an up-to-date `origin/release/x.y` and its pull request targets `release/x.y`, so no unreleasable `main` commit rides along; see "Branches").
 - [ ] No file under `.pixel/`, `target/`, `.claude/` (other than the `.claude/rules` and `.claude/skills` symlinks), `.codex/`, `.cursor/` is staged (they are gitignored; do not force-add).
@@ -418,9 +418,31 @@ The name is `<slug>.<section>.md`, the section naming the heading the entry is
 filed under — `added`, `changed`, `deprecated`, `removed`, `fixed` or
 `security`. The slug is free; start it with the pull request number when the
 number is known, so the release can match entries to pull requests. The file
-holds the entry's text and nothing else: one line, past tense, naming the
-command or flag affected, without the leading `-`. A second file is a second
-entry.
+holds the entry's text and nothing else, without the leading `-`. A second
+file is a second entry.
+
+An entry is written to be scanned in a released section, not read as a note:
+
+```
+**<scope>:** <what changed, and what it means for a user>. ([#<n>](<pull request url>))
+```
+
+- **The scope comes first**, the same area the commit subject scopes — `graph`,
+  `daemon`, `install`, `recall`. `**graph, daemon:**` when the change lands in
+  both. It is what lets a reader find the bullet about the command they use
+  without reading the eleven others; `prepare.sh` refuses a fragment without
+  one.
+- **Then the change and its effect**, naming the command or flag affected. One
+  before/after measurement earns its place; the second does not.
+- **Then the pull request link.** Why this design and not another, how a
+  threshold was calibrated, what else was measured: all of it belongs to the
+  pull request, and the link is what carries the reader there. `prepare.sh`
+  warns when neither the text nor the slug references a pull request.
+- **500 bytes is the target, 900 the hard cap.** `prepare.sh --check` warns
+  over the first and refuses over the second, so an entry that has turned into
+  an engineering note fails the pull request that wrote it. For scale, the
+  twelve bullets of 0.4.0 ran 264 to 1265 bytes with a median of 715, against
+  171 to 498 for the 19 entries of mise v2026.8.2.
 
 One file per entry is what keeps two open pull requests off the same lines of
 `CHANGELOG.md`. It also stops an entry written on a branch cut before a release
@@ -431,8 +453,8 @@ a fragment of a later branch is simply not part of the cut.
 `prepare.sh` folds the fragments into the release section at tag time, grouped
 by section, and deletes them. `prepare.sh --check` validates the directory
 without writing, and a CI test runs it on every pull request, so a mistyped
-section fails the pull request that wrote it rather than the release that would
-have to tag it.
+section or an entry that does not fit the style above fails the pull request
+that wrote it rather than the release that would have to tag it.
 
 ## Release (maintainers)
 

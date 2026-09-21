@@ -135,7 +135,7 @@ class PrepareContract(unittest.TestCase):
         released = self.merge_pr("release-0.1.0", "released.txt")
         self.git("tag", "-a", "v0.1.0", "-m", "v0.1.0", released)
         fixed = self.merge_pr("fix-thing", "fixed.txt")
-        self.write("changelog.d/12-fix-thing.fixed.md", "thing\n")
+        self.write("changelog.d/12-fix-thing.fixed.md", "**thing:** thing\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment")
         self.prs.write_text(json.dumps([
@@ -153,7 +153,7 @@ class PrepareContract(unittest.TestCase):
     def test_nothing_unreleased_says_none(self):
         released = self.merge_pr("release-0.1.0", "released.txt")
         self.git("tag", "-a", "v0.1.0", "-m", "v0.1.0", released)
-        self.write("changelog.d/11-thing.fixed.md", "thing\n")
+        self.write("changelog.d/11-thing.fixed.md", "**thing:** thing\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment")
         self.prs.write_text(json.dumps([
@@ -167,9 +167,9 @@ class PrepareContract(unittest.TestCase):
 
     def test_the_fragments_become_the_release_section_by_section(self):
         """One fragment per entry, filed under the heading its name names."""
-        self.write("changelog.d/12-add-a-flag.added.md", "`pixel thing --flag` is new.\n")
-        self.write("changelog.d/13-fix-a-thing.fixed.md", "`pixel thing` no longer breaks.\n")
-        self.write("changelog.d/14-change-a-thing.changed.md", "`pixel thing` says less.\n")
+        self.write("changelog.d/12-add-a-flag.added.md", "**thing:** `pixel thing --flag` is new.\n")
+        self.write("changelog.d/13-fix-a-thing.fixed.md", "**thing:** `pixel thing` no longer breaks.\n")
+        self.write("changelog.d/14-change-a-thing.changed.md", "**thing:** `pixel thing` says less.\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragments")
 
@@ -185,9 +185,9 @@ class PrepareContract(unittest.TestCase):
             [line for line in changelog.splitlines() if line.startswith("### ")],
             ["### Added", "### Changed", "### Fixed"],
         )
-        for entry in ["- `pixel thing --flag` is new.",
-                      "- `pixel thing` says less.",
-                      "- `pixel thing` no longer breaks."]:
+        for entry in ["- **thing:** `pixel thing --flag` is new.",
+                      "- **thing:** `pixel thing` says less.",
+                      "- **thing:** `pixel thing` no longer breaks."]:
             self.assertIn(entry + "\n", changelog)
         # The released entries leave the fragments behind them.
         self.assertEqual(self.fragments(), [])
@@ -200,17 +200,17 @@ class PrepareContract(unittest.TestCase):
 
     def test_a_long_entry_keeps_every_line(self):
         """A wrapped entry keeps its continuation lines, indented under the bullet."""
-        self.write("changelog.d/12-long.fixed.md", "first line\ncontinued here\n")
+        self.write("changelog.d/12-long.fixed.md", "**thing:** first line\ncontinued here\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment")
 
         result = self.prepare()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("\n- first line\n  continued here\n", self.changelog())
+        self.assertIn("\n- **thing:** first line\n  continued here\n", self.changelog())
 
     def test_a_fragment_without_a_known_section_is_refused(self):
-        self.write("changelog.d/12-thing.fized.md", "thing\n")
+        self.write("changelog.d/12-thing.fized.md", "**thing:** thing\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment")
 
@@ -221,7 +221,7 @@ class PrepareContract(unittest.TestCase):
         self.assertIn("fixed", result.stderr)
 
     def test_a_nameless_fragment_is_refused(self):
-        self.write("changelog.d/12-thing.md", "thing\n")
+        self.write("changelog.d/12-thing.md", "**thing:** thing\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment")
 
@@ -268,7 +268,7 @@ class PrepareContract(unittest.TestCase):
         self.assertIn("starts with a blank line", result.stderr)
 
     def test_an_entry_left_under_unreleased_is_refused(self):
-        self.write("changelog.d/12-thing.fixed.md", "thing\n")
+        self.write("changelog.d/12-thing.fixed.md", "**thing:** thing\n")
         self.write("CHANGELOG.md",
                    "# Changelog\n\n## [Unreleased]\n\n### Fixed\n- written straight into the file\n\n## [0.1.0] - 2026-01-01\n")
         self.git("add", ".")
@@ -291,7 +291,7 @@ class PrepareContract(unittest.TestCase):
         self.assertIn("changelog.d/ holds no fragment", result.stderr)
 
     def test_a_version_check_still_runs_before_the_fragments_are_touched(self):
-        self.write("changelog.d/12-thing.fixed.md", "thing\n")
+        self.write("changelog.d/12-thing.fixed.md", "**thing:** thing\n")
         self.write("CHANGELOG.md",
                    "# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2026-01-02\n\n## [0.1.0] - 2026-01-01\n")
         self.git("add", ".")
@@ -312,11 +312,11 @@ class PrepareContract(unittest.TestCase):
         conflict, and a rebase does the same -- so the entry is published in a
         release it was never part of. A fragment is simply not in the cut.
         """
-        self.write("changelog.d/12-shipped.fixed.md", "shipped before the cut\n")
+        self.write("changelog.d/12-shipped.fixed.md", "**thing:** shipped before the cut\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment to release")
         self.git("switch", "-q", "-c", "in-flight")
-        self.write("changelog.d/13-later.fixed.md", "for the release after this one\n")
+        self.write("changelog.d/13-later.fixed.md", "**thing:** for the release after this one\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fragment for the next release")
 
@@ -410,7 +410,7 @@ class FragmentContract(unittest.TestCase):
         )
 
     def test_check_refuses_a_repository_whose_fragments_are_misnamed(self):
-        root = self.make_repo({"thing.fized.md": "thing\n"})
+        root = self.make_repo({"thing.fized.md": "**thing:** thing\n"})
         result = self.run_check(root)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("name it <slug>.<section>.md", result.stderr)
@@ -421,6 +421,88 @@ class FragmentContract(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("is empty", result.stderr)
 
+    def entry(self, length, prefix="**thing:** ", suffix=" (#12)"):
+        """An entry of exactly `length` bytes, scope and link included."""
+        body = "x" * (length - len(prefix) - len(suffix))
+        return prefix + body + suffix + "\n"
+
+    def test_check_refuses_an_entry_that_does_not_open_on_its_scope(self):
+        """The scope is what makes a released section scannable.
+
+        0.4.0 shipped twelve bullets with none, so finding the entry about a
+        given command means reading every one of them to the first backtick.
+        """
+        root = self.make_repo({"12-thing.fixed.md": "`pixel thing` no longer breaks.\n"})
+        result = self.run_check(root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("open the entry with the scope it changes", result.stderr)
+        self.assertIn("**graph:**", result.stderr)
+
+    def test_check_accepts_a_scope_naming_more_than_one_area(self):
+        """A change landing in two places still has one scope line."""
+        root = self.make_repo({"12-thing.fixed.md": "**graph, daemon:** it no longer breaks. (#12)\n"})
+        result = self.run_check(root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_check_refuses_an_entry_over_the_cap(self):
+        """The cap is the whole point: the reasoning belongs to the pull request.
+
+        The fragment this gate was written for ran 1428 bytes in one paragraph,
+        most of it arguing for the threshold it picked -- an argument the pull
+        request already carried, and that a reader of the changelog is not
+        looking for.
+        """
+        root = self.make_repo({"12-thing.fixed.md": self.entry(901)})
+        result = self.run_check(root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("901 bytes, over the 900 cap", result.stderr)
+        self.assertIn("leave the reasoning to the pull request", result.stderr)
+
+    def test_the_cap_measures_the_entry_and_not_its_first_line(self):
+        """A wrapped fragment is one entry; the cut reflows it under one bullet.
+
+        Measuring the first line alone would let the same prose through by
+        pressing the return key.
+        """
+        wrapped = self.entry(901).replace("xxxxxxxxxx", "xxxxx\nxxxxx", 1)
+        self.assertIn("\n", wrapped.strip())
+        root = self.make_repo({"12-thing.fixed.md": wrapped})
+        result = self.run_check(root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("over the 900 cap", result.stderr)
+
+    def test_an_entry_over_the_style_length_warns_without_refusing(self):
+        """Between the two limits the entry ships, and the author is told.
+
+        A hard cap alone would make 900 bytes the target; the warning is what
+        keeps 500 the one, without refusing the entry that genuinely carries a
+        before/after measurement.
+        """
+        root = self.make_repo({"12-thing.fixed.md": self.entry(501)})
+        result = self.run_check(root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("501 bytes, over the 500", result.stderr)
+        self.assertIn("not a refusal", result.stderr)
+        self.assertIn("well formed", result.stdout)
+
+    def test_an_entry_referencing_no_pull_request_warns(self):
+        """A short entry needs somewhere to send the reader for the rest.
+
+        Cutting the reasoning out of the entry is only an improvement while the
+        reasoning is still reachable.
+        """
+        root = self.make_repo({"thing.fixed.md": "**thing:** it no longer breaks.\n"})
+        result = self.run_check(root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("no pull request referenced", result.stderr)
+
+    def test_a_number_first_in_the_slug_references_the_pull_request(self):
+        """The convention the directory already had counts as the reference."""
+        root = self.make_repo({"12-thing.fixed.md": "**thing:** it no longer breaks.\n"})
+        result = self.run_check(root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("no pull request referenced", result.stderr)
+
     def test_check_does_not_report_unreleased_empty_without_looking(self):
         """The success message claims something; it has to have checked it.
 
@@ -428,7 +510,7 @@ class FragmentContract(unittest.TestCase):
         release preparation refuses was reported as well formed.
         """
         root = self.make_repo(
-            {"12-thing.fixed.md": "thing\n"},
+            {"12-thing.fixed.md": "**thing:** thing\n"},
             changelog="# Changelog\n\n## [Unreleased]\n\n### Fixed\n- stray\n\n## [0.1.0] - 2026-01-01\n",
         )
         result = self.run_check(root)
