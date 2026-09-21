@@ -1,0 +1,1 @@
+Incremental graph updates (the daemon watcher batch and the drift delta applied on open) now write their rows and the freshness signature in one SQLite transaction, and the watcher path withholds the signature when any file drifted while it ran, so a cold open never serves stale symbols as fresh.

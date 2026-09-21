@@ -437,13 +437,32 @@ impl GraphStore {
         &mut self.conn
     }
 
+    /// Open one write transaction on this connection (`BEGIN IMMEDIATE`, so
+    /// a concurrent writer waits at the start instead of failing at commit).
+    /// The write methods below open savepoints, which nest inside it; with no
+    /// enclosing transaction a savepoint is its own transaction, so callers
+    /// that never call this keep their per-call atomicity. An error before
+    /// [`Self::commit_write`] rolls back when the connection drops: nothing
+    /// written inside is visible to another connection until the commit.
+    pub fn begin_write(&self) -> Result<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        Ok(())
+    }
+
+    /// Commit the transaction opened by [`Self::begin_write`]. Everything
+    /// written since becomes visible to other connections at once.
+    pub fn commit_write(&self) -> Result<()> {
+        self.conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
     // --- write path (extract/resolve/build own these) ---
 
     /// Insert-or-replace a file row; deletes the file's symbols, imports,
     /// outgoing edges and unresolved calls (incoming edges from other files
     /// are the caller's responsibility to re-resolve). Returns file id.
     pub fn replace_file(&mut self, path: &str, blob_oid: &str, lang: &str) -> Result<i64> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.savepoint()?;
         let existing: Option<i64> = tx
             .query_row("SELECT id FROM files WHERE path = ?1", params![path], |r| {
                 r.get(0)
@@ -491,7 +510,7 @@ impl GraphStore {
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.savepoint()?;
         if let Some(id) = tx
             .query_row("SELECT id FROM files WHERE path = ?1", params![path], |r| {
                 r.get::<_, i64>(0)
@@ -774,7 +793,7 @@ impl GraphStore {
         file_id: i64,
         concepts: &[crate::concept::RawConcept],
     ) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.savepoint()?;
         tx.execute(
             "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
             params![file_id],
