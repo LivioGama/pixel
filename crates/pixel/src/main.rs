@@ -3933,6 +3933,21 @@ fn upgrade_daemon_request(root: &Path, req: &Request) -> Result<Option<Response>
     })
 }
 
+/// A daemon that accepted shutdown is stopped only after it unlinks its own
+/// repository socket. Pinging during that teardown can be accepted by the
+/// listener after the serving loop has exited, then time out without a reply.
+fn upgrade_daemon_socket_stopped(root: &Path) -> Result<bool, String> {
+    let socket = daemon::socket_path(root);
+    match std::fs::symlink_metadata(&socket) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(format!(
+            "installed binary, but could not inspect daemon socket {}: {error}",
+            socket.display()
+        )),
+    }
+}
+
 fn daemon_status(path: PathBuf) -> Result<(), String> {
     if daemon_ping(&path) {
         write_stdout(&format!(
@@ -5616,7 +5631,7 @@ fn run_command(
                 }
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
                 loop {
-                    if upgrade_daemon_request(&repo_path, &Request::Ping)?.is_none() {
+                    if upgrade_daemon_socket_stopped(&repo_path)? {
                         break;
                     }
                     if std::time::Instant::now() >= deadline {

@@ -787,16 +787,23 @@ mod tests {
         let _ = std::fs::remove_file(socket_path(&root));
     }
 
-    fn shutdown(sock: &Path) {
-        let Ok(mut stream) = UnixStream::connect(sock) else {
-            return;
-        };
+    fn shutdown(sock: &Path) -> Result<Response, String> {
+        let mut stream = UnixStream::connect(sock).map_err(|error| error.to_string())?;
+        stream
+            .set_read_timeout(Some(PROBE_TIMEOUT))
+            .map_err(|error| error.to_string())?;
+        stream
+            .set_write_timeout(Some(PROBE_TIMEOUT))
+            .map_err(|error| error.to_string())?;
         let mut line = serde_json::to_string(&Request::Shutdown).unwrap();
         line.push('\n');
-        let _ = stream.write_all(line.as_bytes());
+        stream
+            .write_all(line.as_bytes())
+            .map_err(|error| error.to_string())?;
         let mut reader = BufReader::new(stream);
         let mut reply = String::new();
-        let _ = std::io::BufRead::read_line(&mut reader, &mut reply);
+        std::io::BufRead::read_line(&mut reader, &mut reply).map_err(|error| error.to_string())?;
+        serde_json::from_str(&reply).map_err(|error| error.to_string())
     }
 
     /// The watcher alone misses the transcript an agent is streaming (macOS
@@ -834,7 +841,7 @@ mod tests {
             sweeps.load(Ordering::SeqCst) > seen
         });
 
-        shutdown(&sock);
+        let _response = shutdown(&sock).expect("shutdown request must receive a response");
         wait_until("daemon to exit", Duration::from_secs(10), || {
             daemon.is_finished()
         });
@@ -969,7 +976,7 @@ mod tests {
         assert!(ping(&sock));
         assert_eq!(sweeps.load(Ordering::SeqCst), 0);
 
-        shutdown(&sock);
+        let _response = shutdown(&sock).expect("shutdown request must receive a response");
         wait_until("daemon to exit", Duration::from_secs(10), || {
             daemon.is_finished()
         });
