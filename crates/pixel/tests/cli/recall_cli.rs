@@ -253,6 +253,35 @@ fn search_on_a_cold_corpus_ingests_on_demand() {
     assert_eq!(hits[0]["source_session_id"], SESSION_ID);
 }
 
+/// The store-only commands catch up on demand too: sessions, show,
+/// maxtest, and export must all see the never-indexed corpus.
+#[test]
+fn cold_corpus_sessions_show_maxtest_and_export() {
+    let corpus = Corpus::write_fixture("lazy-ops", &format!("{NEEDLE}{}", TAIL.repeat(8)));
+    let sessions = corpus.json(&["recall", "sessions", "--json"]);
+    assert_eq!(
+        sessions["sessions"].as_array().map(Vec::len),
+        Some(1),
+        "{sessions}"
+    );
+    let shown = corpus.stdout(&["recall", "show", "claude:0123abcd"]);
+    assert!(shown.contains("streamed needle"), "{shown}");
+    let ranked = corpus.stdout(&["recall", "maxtest", "needle,zz-absent-token"]);
+    assert!(ranked.contains("needle"), "{ranked}");
+    let out_dir = corpus.home.join("export");
+    let out = corpus.run(&[
+        "recall",
+        "export",
+        "--out",
+        out_dir.to_str().unwrap(),
+        "--format",
+        "jsonl",
+    ]);
+    assert!(out.status.success(), "export: {out:?}");
+    let written = std::fs::read_dir(&out_dir).unwrap().flatten().count();
+    assert_eq!(written, 1, "one session file exported");
+}
+
 #[test]
 fn search_role_filter_is_validated_and_applied() {
     let corpus = Corpus::new("search-role");

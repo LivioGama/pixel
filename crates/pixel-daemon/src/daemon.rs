@@ -266,6 +266,7 @@ impl Corpus for Service {
 
 /// Run the repo daemon in the foreground until Shutdown, idle timeout, or
 /// error.
+#[cfg_attr(test, mutants::skip)] // thin adapter: open + run_corpus, both tested
 pub fn run(root: &Path) -> Result<(), ServeError> {
     let service = Service::open(root)?;
     // The facts/history index is demand-driven: no ingest thread is spawned
