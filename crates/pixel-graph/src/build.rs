@@ -150,6 +150,13 @@ fn rel_path(root: &Path, path: &Path) -> Option<String> {
 /// but stops a runaway walk on a mis-rooted or huge directory.
 const DEFAULT_GRAPH_MAX_FILES: usize = 50_000;
 
+/// The build-time file cap in force, as an evaluation reports it: `None`
+/// when the environment lifted it, so "the cap was hit" is never claimed
+/// where no cap applies.
+pub fn graph_file_cap() -> Option<usize> {
+    graph_max_files().filter(|&n| n != usize::MAX)
+}
+
 fn graph_max_files() -> Option<usize> {
     match std::env::var("PIXEL_GRAPH_MAX_FILES") {
         Ok(v) => v

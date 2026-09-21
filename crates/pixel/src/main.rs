@@ -25,6 +25,7 @@ macro_rules! eprintln {
 }
 mod call_guard;
 mod claude_controller;
+mod evaluate_cmd;
 mod guard;
 mod operation_metrics;
 mod plan_cmd;
@@ -376,6 +377,17 @@ enum Command {
         path: PathBuf,
         #[arg(long)]
         json: bool,
+    },
+    /// Evaluate a bounded predicate about the indexed call graph and
+    /// return the witness that established it.
+    ///
+    /// Unlike `call-path`, a negative distinguishes "no path in the stored
+    /// relation, traversal exhaustive" from "the traversal was cut": the
+    /// first is an answer, the second is `unknown` with the budget to
+    /// raise. The verdict always carries the snapshot it is about.
+    Evaluate {
+        #[command(subcommand)]
+        cmd: EvaluateCmd,
     },
     /// Discovered execution flows.
     #[command(alias = "processes")]
@@ -1040,6 +1052,46 @@ enum Command {
     ReplayFlow {
         #[command(subcommand)]
         cmd: FlowCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvaluateCmd {
+    /// Does a path exist from `--from` to `--to` in the indexed call graph?
+    ///
+    /// `--tiers` selects which stored edges form the relation, never a
+    /// confidence threshold: nothing widens automatically when the narrow
+    /// relation finds nothing.
+    Path {
+        /// Source symbol: a uid (`path#qualified#kind`) or a name that
+        /// resolves to exactly one symbol.
+        #[arg(long)]
+        from: String,
+        /// Target symbol: a uid or an unambiguous name.
+        #[arg(long)]
+        to: String,
+        /// Walk outgoing edges (`callees`) or incoming ones (`callers`).
+        #[arg(long, default_value = "callees")]
+        traversal: String,
+        /// Edge tiers forming the relation: `exact` or `exact,probable`.
+        #[arg(long, default_value = "exact")]
+        tiers: String,
+        /// Maximum traversal depth.
+        #[arg(long)]
+        max_depth: Option<u32>,
+        /// Wall-clock budget for the traversal itself, in milliseconds.
+        #[arg(long)]
+        time_budget_ms: Option<u64>,
+        /// Resolve names only under this repo-relative path prefix.
+        #[arg(long = "in")]
+        scope: Option<String>,
+        /// Answer about the stored snapshot: skip the after-check.
+        #[arg(long)]
+        at_snapshot: bool,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -4796,6 +4848,32 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }
+        Command::Evaluate {
+            cmd:
+                EvaluateCmd::Path {
+                    from,
+                    to,
+                    traversal,
+                    tiers,
+                    max_depth,
+                    time_budget_ms,
+                    scope,
+                    at_snapshot,
+                    path,
+                    json,
+                },
+        } => evaluate_cmd::run(evaluate_cmd::EvaluateOptions {
+            from,
+            to,
+            traversal,
+            tiers,
+            max_depth,
+            time_budget_ms,
+            scope,
+            at_snapshot,
+            path,
+            json,
+        }),
         Command::ListFlows { path, offset, json } => {
             let data = execute(
                 &path,

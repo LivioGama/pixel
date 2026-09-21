@@ -102,6 +102,13 @@ impl From<std::io::Error> for ServeError {
 /// not edits across 4+ crates).
 pub use pixel_proto::Op as Request;
 
+use crate::evaluate;
+use pixel_proto::evaluate as wire;
+
+#[cfg(test)]
+#[path = "evaluate_tests.rs"]
+mod evaluate_tests;
+
 /// The daemon response type: a `pixel_proto::Envelope<serde_json::Value>`.
 /// Success → `Envelope::success(op_name, result)`; failure →
 /// `Envelope::failure(op_name, error)`. The old ad-hoc `{ok, error, data}`
@@ -846,6 +853,25 @@ impl Service {
                 tag,
                 limit,
             } => self.op_plan(prompt.as_deref(), query.as_deref(), tag.as_deref(), limit),
+            Request::Evaluate {
+                from,
+                to,
+                traversal,
+                tiers,
+                max_depth,
+                time_budget_ms,
+                scope,
+                at_snapshot,
+            } => self.op_evaluate(EvaluateRequest {
+                from,
+                to,
+                traversal,
+                tiers,
+                max_depth,
+                time_budget_ms,
+                scope,
+                at_snapshot,
+            }),
         }
     }
 
@@ -1706,6 +1732,168 @@ impl Service {
         let mut out = json!({ "queries": names, "findings": findings });
         merge_build_info(&mut out, built);
         Ok(out)
+    }
+
+    /// `evaluate`: does a path exist from `from` to `to`, and what proves it.
+    ///
+    /// The answer is attributed to a graph generation, so the op does more
+    /// than run the traversal: it refuses to answer from a graph it cannot
+    /// name (no database, drift past the incremental threshold, a withheld
+    /// signature), and it brackets the traversal with a whole-tree check so
+    /// a negative cannot come from a tree that had already grown the edge.
+    fn op_evaluate(&mut self, req: EvaluateRequest) -> Result<Value, String> {
+        self.op_evaluate_probed(req, &mut || {})
+    }
+
+    /// [`Self::op_evaluate`] with a seam for tests: `probe` runs after the
+    /// before-check and before the after-check, which is exactly the window
+    /// a concurrent edit has to slip through.
+    fn op_evaluate_probed(
+        &mut self,
+        req: EvaluateRequest,
+        probe: &mut dyn FnMut(),
+    ) -> Result<Value, String> {
+        let args = req.parse()?;
+        let epistemics =
+            |caps: Vec<String>| derive_epistemics("evaluate", &json!({ "caps": caps })).0;
+
+        // Nothing to attribute an answer to: report it, never build one.
+        // A rebuild is a decision the caller makes with a command of its own.
+        if let Err(reason) = self.evaluate_gate()? {
+            let halted = evaluate::halted(reason, None, &args, false, epistemics(Vec::new()));
+            return serde_json::to_value(wire::Output::Evaluation(Box::new(halted)))
+                .map_err(|e| e.to_string());
+        }
+
+        let db = self.graph_db_path();
+        if self.graph.is_none() {
+            self.graph = Some(GraphStore::open(&db).map_err(|e| e.to_string())?);
+        }
+        let root = self.root.clone();
+        let store = self.graph.as_ref().expect("opened above");
+
+        // Identity and rows come from one handle, so they are one
+        // generation: the incremental writers commit rows and signature in
+        // a single transaction, so no interleaving can show one without the
+        // other.
+        let identity = match evaluate::identity(store) {
+            Ok(identity) => identity,
+            Err(evaluate::Halt(reason)) => {
+                let halted = evaluate::halted(reason, None, &args, false, epistemics(Vec::new()));
+                return serde_json::to_value(wire::Output::Evaluation(Box::new(halted)))
+                    .map_err(|e| e.to_string());
+            }
+        };
+
+        let resolved =
+            evaluate::resolve_argument(store, "--from", &args.from, args.scope.as_deref())
+                .and_then(|from| {
+                    evaluate::resolve_argument(store, "--to", &args.to, args.scope.as_deref())
+                        .map(|to| (from, to))
+                });
+        let (from, to) = match resolved {
+            Ok(pair) => pair,
+            Err(evaluate::Halt(reason)) => {
+                let halted =
+                    evaluate::halted(reason, Some(&identity), &args, true, epistemics(Vec::new()));
+                return serde_json::to_value(wire::Output::Evaluation(Box::new(halted)))
+                    .map_err(|e| e.to_string());
+            }
+        };
+
+        probe();
+
+        let (traversal, tiers) = evaluate::request_shape(&args);
+        let mut clock = pixel_graph::predicate::WallClock::start();
+        let evaluation = pixel_graph::predicate::evaluate(
+            store,
+            pixel_graph::predicate::Request {
+                sources: &[from.id],
+                targets: &[to.id],
+                traversal,
+                tiers,
+                budget: pixel_graph::predicate::Budget {
+                    max_depth: args.max_depth,
+                    time_budget: std::time::Duration::from_millis(args.time_budget_ms),
+                },
+            },
+            &mut clock,
+        )
+        .map_err(|e| format!("evaluate: {e}"))?;
+
+        // The after-check. Skipped only under `--at-snapshot`, where the
+        // envelope says so and the answer is explicitly about the stored
+        // snapshot rather than the tree on disk.
+        if !args.at_snapshot && !evaluate::tree_matches(&root, &identity.signature) {
+            let halted = evaluate::halted(
+                wire::Reason::SnapshotChanged,
+                Some(&identity),
+                &args,
+                false,
+                epistemics(Vec::new()),
+            );
+            return serde_json::to_value(wire::Output::Evaluation(Box::new(halted)))
+                .map_err(|e| e.to_string());
+        }
+
+        let caps = evaluate_caps(&evaluation);
+        let file_cap_hit = self.graph_file_cap_hit();
+        let store = self.graph.as_ref().expect("opened above");
+        let envelope = evaluate::envelope(
+            store,
+            &evaluation,
+            &identity,
+            &args,
+            epistemics(caps),
+            file_cap_hit,
+        );
+        serde_json::to_value(wire::Output::Evaluation(Box::new(envelope)))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Bring the graph to a generation an answer can name, or say why not.
+    ///
+    /// Drift under the incremental threshold is applied, as every graph op
+    /// does. Above it, and for a graph with no usable signature, the answer
+    /// is `graph_stale`: a full rebuild can take minutes and is never a side
+    /// effect of a question.
+    fn evaluate_gate(&mut self) -> Result<Result<(), wire::Reason>, String> {
+        let db = self.graph_db_path();
+        if !db.exists() {
+            return Ok(Err(wire::Reason::GraphUnavailable));
+        }
+        match bridge::tree_delta(&self.root, &db) {
+            Ok(Some(delta)) if delta.fresh => Ok(Ok(())),
+            Ok(Some(delta)) => {
+                if incremental_allowed(
+                    delta.changed_count(),
+                    delta.indexed_files,
+                    incremental_max_pct(),
+                ) {
+                    self.incremental_update_info(&delta)?;
+                    Ok(Ok(()))
+                } else {
+                    Ok(Err(wire::Reason::GraphStale))
+                }
+            }
+            Ok(None) => Ok(Err(wire::Reason::GraphStale)),
+            Err(error) => Err(format!("evaluate: {error}")),
+        }
+    }
+
+    /// Whether the graph holds at least as many files as the build cap
+    /// admits, which is when the walk stopped at the cap rather than at the
+    /// end of the tree. Conservative: it can only over-report, and an
+    /// over-report widens the stated limits of an absence rather than
+    /// narrowing them.
+    fn graph_file_cap_hit(&self) -> bool {
+        let Some(cap) = pixel_graph::build::graph_file_cap() else {
+            return false;
+        };
+        self.graph
+            .as_ref()
+            .and_then(|store| store.counts().ok())
+            .is_some_and(|(files, _, _, _)| files >= cap as u64)
     }
 
     fn op_graph(&mut self) -> Result<Value, String> {
@@ -2971,6 +3159,83 @@ impl pixel_graph::concept_resolve::Reranker for EngineReranker {
     fn clone_box(&self) -> Box<dyn pixel_graph::concept_resolve::Reranker> {
         Box::new(self.clone())
     }
+}
+
+/// The `evaluate` op's arguments as they arrive on the wire, before the
+/// strings are parsed into the types the evaluation runs on.
+pub(crate) struct EvaluateRequest {
+    pub from: String,
+    pub to: String,
+    pub traversal: Option<String>,
+    pub tiers: Option<String>,
+    pub max_depth: Option<u32>,
+    pub time_budget_ms: Option<u64>,
+    pub scope: Option<String>,
+    pub at_snapshot: bool,
+}
+
+/// Default traversal depth, matching `call-path`'s long-standing cap: deep
+/// enough for the call chains people ask about, shallow enough that an
+/// answer arrives.
+pub(crate) const DEFAULT_EVALUATE_MAX_DEPTH: u32 = 8;
+/// Default wall-clock budget for the traversal itself, excluding the
+/// whole-tree checks that bracket it.
+pub(crate) const DEFAULT_EVALUATE_TIME_BUDGET_MS: u64 = 250;
+
+impl EvaluateRequest {
+    /// Parse the wire strings. An unknown `traversal` or `tiers` is a usage
+    /// error, never a silent fallback to a different relation: answering a
+    /// question the caller did not ask is the failure this whole command
+    /// exists to avoid.
+    fn parse(self) -> Result<evaluate::Args, String> {
+        let traversal = match self.traversal.as_deref() {
+            None | Some("callees") => wire::Traversal::Callees,
+            Some("callers") => wire::Traversal::Callers,
+            Some(other) => {
+                return Err(format!(
+                    "evaluate: unknown --traversal {other:?} (callees | callers)"
+                ));
+            }
+        };
+        let tiers = match self.tiers.as_deref() {
+            None => evaluate::TierSelection::Exact,
+            Some(value) => evaluate::TierSelection::parse(value).ok_or_else(|| {
+                format!("evaluate: unknown --tiers {value:?} (exact | exact,probable)")
+            })?,
+        };
+        Ok(evaluate::Args {
+            from: self.from,
+            to: self.to,
+            traversal,
+            tiers,
+            max_depth: self.max_depth.unwrap_or(DEFAULT_EVALUATE_MAX_DEPTH),
+            time_budget_ms: self
+                .time_budget_ms
+                .unwrap_or(DEFAULT_EVALUATE_TIME_BUDGET_MS),
+            scope: self.scope,
+            at_snapshot: self.at_snapshot,
+        })
+    }
+}
+
+/// The caps an evaluation hit, in the words `derive_epistemics` turns into
+/// `lower_bound`. A traversal that stopped early is a bounded answer and
+/// the envelope must say so twice: once in `coverage`, once here.
+fn evaluate_caps(evaluation: &pixel_graph::predicate::Evaluation) -> Vec<String> {
+    let mut caps = Vec::new();
+    if evaluation.coverage.depth_cap_dropped_frontier {
+        let depth = evaluation.coverage.depth_cap;
+        caps.push(format!(
+            "traversal depth cap {depth} dropped a frontier node; paths beyond it were never walked"
+        ));
+    }
+    if evaluation.coverage.time_budget_hit {
+        let ms = evaluation.coverage.time_budget_ms;
+        caps.push(format!(
+            "traversal time budget {ms}ms expired with nodes still queued"
+        ));
+    }
+    caps
 }
 
 enum Resolved {

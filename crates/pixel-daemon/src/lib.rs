@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod daemon;
+pub mod evaluate;
 pub mod recall_service;
 
 pub use api::{Request, Response, ServeError, Service};
