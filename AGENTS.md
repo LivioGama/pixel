@@ -25,6 +25,7 @@ apply to:
 | `mutation-gate.md` | `crates/**/*.rs` | writing code and tests that pass `cargo mutants` on the first run |
 | `test-hygiene.md` | `crates/**/*.rs` | git fixtures, env vars, canonical paths, `clippy --fix` cleanup |
 | `test-campaigns.md` | always | running long mutants/nextest campaigns without surprises |
+| `measuring.md` | always | what a number must carry before it is evidence: run identity, the command beside the count, one variable per ablation, the baseline |
 | `rust-style.md` | `crates/**/*.rs` | the shapes the four pedantic lints expect (`uninlined_format_args`, `map_unwrap_or`, `redundant_closure_for_method_calls`, `items_after_statements`) and the cleanup after `clippy --fix` |
 | `release.md` | always | releases go through the `release` skill only: a prepare PR into `main`, then a tag on `main` |
 

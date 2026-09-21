@@ -13,6 +13,15 @@ Always loaded: how to run the long gates without losing an afternoon.
   mutant after a 3 min baseline and 10 to 15 s per library-crate mutant. A
   count that will not fit the 90-minute CI job means the PR must be split by
   file, never by weakening the gate.
+- **Count against the merge base, with three dots.** `git diff
+  origin/main...HEAD`, never `git diff origin/main`: the two-dot form adds
+  everything `main` gained since you branched, so you mutate code you did not
+  write and the count comes back inflated — 113 where the PR owed 103, ten of
+  them in a file another pull request had just rewritten.
+- **`--in-diff` compares the diff to the working tree, not to HEAD.** With an
+  uncommitted edit it prints `Diff content doesn't match source file` and
+  lists zero mutants, which reads like good news. Commit first, then write
+  the diff.
 - **`--timeout 20` breaks the baseline of crates with doctests**: rustdoc's
   doctest compile alone takes 15 to 20 s, and the cap applies to the
   baseline too. Use `--timeout 60` for a local `-F` run; CI's automatic cap
