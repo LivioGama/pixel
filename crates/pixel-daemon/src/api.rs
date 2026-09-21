@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -194,6 +195,10 @@ pub struct Service {
     embedder_unavailable: bool,
     /// A background download has been spawned — prevents duplicate threads.
     embedder_download_started: bool,
+    /// The facts/history warm loop is demand-driven: spawned on the first
+    /// facts-consuming request, not at daemon start — users who never touch
+    /// history commands never pay for the index.
+    facts_warmer_started: AtomicBool,
 }
 
 /// Counts watcher-side failures and decides which ones are logged: the
@@ -243,6 +248,7 @@ impl Service {
             embedder: None,
             embedder_unavailable: false,
             embedder_download_started: false,
+            facts_warmer_started: AtomicBool::new(false),
         })
     }
 
@@ -2416,7 +2422,19 @@ impl Service {
             pixel_facts::ingest::lazy_ingest(&mut facts)
                 .map_err(|e| format!("facts lazy ingest failed: {e}"))?;
         }
+        // First facts use: start the keep-fresh warm loop. `lazy_ingest` above
+        // serves this request within its budget; the warmer finishes the job
+        // in the background and keeps the index fresh for later queries.
+        if self.facts_warmer_needed() {
+            crate::daemon::spawn_facts_ingest(&self.root);
+        }
         Ok(facts)
+    }
+
+    /// True exactly once per Service: the first facts-consuming request.
+    /// Claims the flag atomically so a second caller never double-spawns.
+    fn facts_warmer_needed(&self) -> bool {
+        !self.facts_warmer_started.swap(true, Ordering::SeqCst)
     }
 
     /// M3 / Engine 2: history-wide fact + diff search.
@@ -4378,6 +4396,30 @@ mod tests {
             .output()
             .unwrap();
         assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    /// `Service::open` must stay cold: the history index is demand-driven,
+    /// so opening the daemon service cannot create `.pixel/history.db`.
+    #[test]
+    fn service_open_does_not_create_the_history_index() {
+        let root = tmpdir("lazy-facts-open");
+        git(&root, &["init", "-q"]);
+        std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+        let service = Service::open(&root).unwrap();
+        drop(service);
+        assert!(!root.join(".pixel/history.db").exists());
+    }
+
+    /// The facts warm loop is claimed exactly once: the first
+    /// facts-consuming request spawns it, later ones must not.
+    #[test]
+    fn facts_warmer_is_claimed_once() {
+        let root = tmpdir("lazy-facts-warmer");
+        git(&root, &["init", "-q"]);
+        let service = Service::open(&root).unwrap();
+        assert!(service.facts_warmer_needed());
+        assert!(!service.facts_warmer_needed());
+        assert!(!service.facts_warmer_needed());
     }
 
     /// The codes an agent acts on (`BUSY_REPOSITORY` → retry later,

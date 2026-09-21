@@ -105,6 +105,18 @@ impl RecallStore {
             .optional()
     }
 
+    /// Newest ingest timestamp for an agent across all its units — the
+    /// watermark an on-demand catch-up resumes from. `None` when the agent
+    /// has never ingested (unlike `stats`, which only sees agents that
+    /// already have sessions).
+    pub fn agent_last_ingest_at(&self, agent: &str) -> Result<Option<i64>> {
+        self.conn.query_row(
+            "SELECT MAX(last_ingest_at) FROM ingest_state WHERE agent = ?1",
+            params![agent],
+            |r| r.get(0),
+        )
+    }
+
     // --- session ingest (each call is one transaction) ---
 
     /// Replace a session wholesale: delete any prior row + turns, insert the
@@ -732,5 +744,24 @@ mod tests {
             (30, 30, None)
         );
         assert!(store.ingest_state("codex", "/a.jsonl").unwrap().is_none());
+    }
+
+    /// The watermark a lazy catch-up resumes from: `None` before any
+    /// ingest, a real timestamp after, and per-agent isolation.
+    #[test]
+    fn agent_last_ingest_at_is_none_until_the_agent_ingests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+        assert_eq!(store.agent_last_ingest_at("claude").unwrap(), None);
+        let st = IngestState {
+            file_size: 1,
+            mtime_ms: 1,
+            bytes_ingested: 1,
+            cursor: None,
+        };
+        store.touch_state("claude", "/a.jsonl", &st).unwrap();
+        let at = store.agent_last_ingest_at("claude").unwrap().unwrap();
+        assert!(at > 0, "touch_state stamps the wall clock");
+        assert_eq!(store.agent_last_ingest_at("codex").unwrap(), None);
     }
 }
