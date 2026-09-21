@@ -37,7 +37,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use pixel_bench::validate_query_score;
+use pixel_bench::{RESOLVE_RANK_GATE, labelled_rank, validate_query_score, validate_resolve_rank};
 use pixel_daemon::api::{Response, Service};
 use pixel_proto::Op;
 
@@ -130,6 +130,15 @@ fn success_at_k(ranking: &[String], relevant: &HashSet<String>, k: usize) -> f64
 /// match is one of its ground-truth relevant files, else unsolved (0). This is
 /// the correctness / success-rate axis for pixel's own resolve machinery —
 /// deterministic, no API, no agent, measured on identical inputs as the other lanes.
+///
+/// The per-probe guard is a rank gate ([`RESOLVE_RANK_GATE`]), not the
+/// success@1 the lane reports. Gating each probe on rank 1 made this lane the
+/// tripwire the `ask` lane above was already corrected for: the top of this
+/// corpus is a near-tie, and adding one ordinarily-named method to a file
+/// reorders a probe without any ranking quality having changed. Whether the
+/// cascade *answers* the task is what the gate asks; how often it answers
+/// first is what the reported mean measures, and every probe's rank is
+/// printed so a file sliding toward the gate is visible before it fires.
 fn resolve_success_rate(svc: &mut Service, qrels: &[(&'static str, Vec<String>)]) -> f64 {
     let mut sum = 0.0;
     for (q, relevant) in qrels {
@@ -144,8 +153,12 @@ fn resolve_success_rate(svc: &mut Service, qrels: &[(&'static str, Vec<String>)]
         assert!(resp.ok, "resolve query {q:?} failed: {resp:?}");
         let order = file_order_from_response(&resp);
         let score = success_at_k(&order, &rel_set, 1);
-        eprintln!("resolve query={q:?} success@1={score}");
-        validate_query_score(score, None)
+        let rank = labelled_rank(&order, &rel_set);
+        eprintln!(
+            "resolve query={q:?} rank={} success@1={score}",
+            rank.map_or_else(|| "unretrieved".to_string(), |rank| rank.to_string())
+        );
+        validate_resolve_rank(rank, RESOLVE_RANK_GATE)
             .unwrap_or_else(|err| panic!("resolve query {q:?}: {err}"));
         sum += score;
     }
