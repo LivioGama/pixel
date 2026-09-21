@@ -119,6 +119,13 @@ convention in this repo:
 Propose the version with the one-line reason; the user decides. Start the
 record.
 
+Then write `changelog.d/_highlights.md` on the release branch, unless the
+release is a handful of unrelated fixes: a lead paragraph saying what this
+release is about, then a `### Highlights` list of two or three bullets. It
+becomes the top of the released section and of the GitHub release body, which
+is what keeps that narrative out of the individual entries (`###` and below
+only, 2000 bytes; `prepare.sh` refuses more).
+
 ## 3. Prepare the release commit
 
 From an up-to-date `main`, on a `release-x.y.z` branch:
@@ -138,8 +145,9 @@ carries a bullet of its own. Otherwise it:
    surfaces with `scripts/gen-plugin-assets.sh`: Claude Code and Codex deliver
    a plugin update only when its version changes;
 2. folds the fragments into a new `## [x.y.z] - DATE` under a kept, now empty
-   `## [Unreleased]`, grouped by section in the order the headings have always
-   used, and deletes the fragments;
+   `## [Unreleased]`, led by `_highlights.md` when there is one and then
+   grouped by section in the order the headings have always used, and deletes
+   them all;
 3. runs `cargo update --workspace` so `Cargo.lock` follows;
 4. lists the pull requests merged into `main` since the last tag, then
    the commits since the tag that belong to no merged pull request (a push

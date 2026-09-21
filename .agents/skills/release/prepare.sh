@@ -10,12 +10,14 @@
 #    `## [x.y.z]` heading yet;
 # 2. `changelog.d/` holds at least one fragment, every fragment is a
 #    `<slug>.<section>.md` with a section from SECTIONS and a first line that
-#    carries the entry, opens on its scope and fits HARD_LIMIT, and
+#    carries the entry, opens on its scope and fits HARD_LIMIT, an optional
+#    `_highlights.md` carries no `## ` heading and fits HIGHLIGHTS_LIMIT, and
 #    `## [Unreleased]` carries no `- ` entry;
 # 3. every workspace member's `[package] version` is set to x.y.z (the
 #    members move in lockstep, as 0.2.4 did);
 # 4. the fragments are folded into a new `## [x.y.z] - DATE` under a kept,
-#    empty `## [Unreleased]`, grouped by section, and deleted;
+#    empty `## [Unreleased]`, grouped by section and led by `_highlights.md`
+#    when there is one, and deleted;
 # 5. `cargo update --workspace` refreshes Cargo.lock for the members only;
 # 6. the fragments this run released are listed next to the pull requests
 #    merged into main since the last tag, so each user-visible one can be
@@ -55,6 +57,21 @@ SECTIONS="added changed deprecated removed fixed security"
 SCOPE_PATTERN='^\*\*[a-z][a-z0-9 ,.-]*:\*\* [^[:space:]]'
 SOFT_LIMIT=500
 HARD_LIMIT=900
+
+# The release's own narrative, once per release instead of once per entry.
+# Without somewhere to put "what this release is about", every entry carries a
+# sentence of it, which is how 0.4.0 ended up with a median bullet of 715
+# bytes. Optional: a release of three fixes needs no chapeau. Emitted verbatim
+# under the version heading, above the sections, so the GitHub release body --
+# which release.yml cuts from that heading to the next `## ` -- opens on it.
+# `###` and below are the file's to use (mise leads with a paragraph, then a
+# `## Highlights` list of three); `#` and `##` are the changelog's structure
+# and would end the section the notes are cut from. The limit is mise
+# v2026.8.2's own lead plus highlights (1275 bytes) with room to spare: enough
+# for a paragraph and three bullets, not enough for the prose this whole
+# exercise moved out of the entries.
+HIGHLIGHTS="changelog.d/_highlights.md"
+HIGHLIGHTS_LIMIT=2000
 
 VERSION=""
 DATE="$(date +%Y-%m-%d)"
@@ -130,6 +147,18 @@ FRAGMENT_COUNT=0
 WARNINGS=""
 for fragment in changelog.d/*.md; do
     [ -e "$fragment" ] || continue
+    # `_highlights.md` is the release's narrative, not an entry: no section, no
+    # scope, no bullet. Any other underscore name is a typo of it, refused
+    # rather than skipped -- silently ignoring `_highlight.md` would drop the
+    # chapeau from the release it was written for.
+    case "${fragment##*/}" in
+        _*)
+            if [ "${fragment##*/}" != "_highlights.md" ]; then
+                echo "prepare.sh: $fragment: the only underscore-named file changelog.d/ takes is _highlights.md; an entry is <slug>.<section>.md" >&2
+                exit 1
+            fi
+            continue ;;
+    esac
     FRAGMENT_COUNT=$((FRAGMENT_COUNT + 1))
     FRAGMENTS="${FRAGMENTS}${FRAGMENTS:+
 }$fragment"
@@ -181,6 +210,24 @@ if [ -n "$WARNINGS" ]; then
     printf '%s\n' "$WARNINGS" >&2
 fi
 
+HAS_HIGHLIGHTS=0
+if [ -e "$HIGHLIGHTS" ]; then
+    HAS_HIGHLIGHTS=1
+    if ! grep -q '[^[:space:]]' "$HIGHLIGHTS"; then
+        echo "prepare.sh: $HIGHLIGHTS is empty; it carries the release's lead paragraph and highlights, or it is not there at all" >&2
+        exit 1
+    fi
+    if grep -Eq '^##? ' "$HIGHLIGHTS"; then
+        echo "prepare.sh: $HIGHLIGHTS: use \`###\` and below; a \`#\` or \`##\` heading ends the section the release body is cut from" >&2
+        exit 1
+    fi
+    HIGHLIGHTS_LENGTH="$(tr -d '\n' < "$HIGHLIGHTS" | wc -c | tr -d ' ')"
+    if [ "$HIGHLIGHTS_LENGTH" -gt "$HIGHLIGHTS_LIMIT" ]; then
+        echo "prepare.sh: $HIGHLIGHTS: $HIGHLIGHTS_LENGTH bytes, over the $HIGHLIGHTS_LIMIT cap; a lead paragraph and two or three highlights, not the entries again" >&2
+        exit 1
+    fi
+fi
+
 # An entry written straight into CHANGELOG.md would be released only by
 # accident: the cut below takes its text from the fragments and leaves the file
 # alone. check-release refuses the tag while one is still there; refusing it
@@ -203,10 +250,12 @@ fi
 # so its refusal moved under this return; above it, --check failed the release
 # pull request of every version, 0.4.0 included.
 if [ "$CHECK" -eq 1 ]; then
+    HIGHLIGHTS_NOTE=""
+    if [ "$HAS_HIGHLIGHTS" -eq 1 ]; then HIGHLIGHTS_NOTE=" plus _highlights.md"; fi
     if [ "$FRAGMENT_COUNT" -eq 0 ]; then
-        echo "prepare.sh: changelog.d/ is empty, which is well formed between a release and the next entry; ## [Unreleased] empty"
+        echo "prepare.sh: changelog.d/ holds no entry$HIGHLIGHTS_NOTE, which is well formed between a release and the next entry; ## [Unreleased] empty"
     else
-        echo "prepare.sh: $FRAGMENT_COUNT fragment(s) under changelog.d/, all well formed, ## [Unreleased] empty"
+        echo "prepare.sh: $FRAGMENT_COUNT fragment(s) under changelog.d/$HIGHLIGHTS_NOTE, all well formed, ## [Unreleased] empty"
     fi
     exit 0
 fi
@@ -239,10 +288,20 @@ SECTION_FILE="$(mktemp)"
 trap 'rm -f "$SECTION_FILE"' EXIT
 {
     printf '## [%s] - %s\n' "$VERSION" "$DATE"
+    if [ "$HAS_HIGHLIGHTS" -eq 1 ]; then
+        printf '\n'
+        # Verbatim, minus the trailing blank lines: the one blank line before
+        # the first `### Section` is the cut's, like every other one here.
+        awk '{ line[NR] = $0 }
+             END { last = NR
+                   while (last > 0 && line[last] ~ /^[[:space:]]*$/) last--
+                   for (i = 1; i <= last; i++) print line[i] }' "$HIGHLIGHTS"
+    fi
     for section in $SECTIONS; do
         first=1
         for fragment in changelog.d/*.md; do
             [ -e "$fragment" ] || continue
+            case "${fragment##*/}" in _*) continue ;; esac
             [ "$(fragment_section "$fragment")" = "$section" ] || continue
             if [ "$first" -eq 1 ]; then
                 printf '\n### %s\n' "$(section_title "$section")"
@@ -284,6 +343,7 @@ cargo update --workspace --quiet
 
 echo "prepare.sh: $FRAGMENT_COUNT changelog entr$( [ "$FRAGMENT_COUNT" -eq 1 ] && printf 'y' || printf 'ies' ) released as $VERSION ($DATE):"
 printf '%s\n' "$FRAGMENTS" | sed 's/^/  /'
+if [ "$HAS_HIGHLIGHTS" -eq 1 ]; then echo "led by $HIGHLIGHTS"; fi
 echo "members bumped:"
 for m in $MEMBERS; do printf '  %s\n' "$m"; done
 echo

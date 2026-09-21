@@ -135,7 +135,9 @@ reviews:
         the change, then the pull request link. Flag an entry with no scope
         prefix, over 500 bytes, or whose prose argues for a design choice
         instead of stating the change -- that argument belongs in the pull
-        request description the entry links. Nothing is written to
+        request description the entry links. `_highlights.md` is the
+        exception: the release's lead paragraph and a `### Highlights` list,
+        no section and no scope, `###` and below only. Nothing is written to
         CHANGELOG.md outside a release commit.
     - path: "CHANGELOG.md"
       instructions: |
