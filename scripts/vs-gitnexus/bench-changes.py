@@ -14,7 +14,9 @@ import tempfile
 import time
 from pathlib import Path
 
-GN_CLI = "/Users/navid/code/GitNexus/gitnexus/dist/cli/index.js"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bench_common import gitnexus_cli, positional  # noqa: E402
+
 REPS = 3
 MARKER = "// pixel-vs-gitnexus benchmark edit"
 
@@ -31,6 +33,31 @@ def run(cmd, cwd):
         return ms, Path(tmp).read_bytes(), p.returncode
     finally:
         Path(tmp).unlink(missing_ok=True)
+
+
+def snapshot(repo, targets):
+    """Read each target's exact bytes, refusing to touch an already-dirty file.
+
+    The restore path used to be `git checkout -- <files>`, which throws away
+    whatever the developer had uncommitted in those files. A benchmark must not
+    destroy work to measure something, so the originals are kept in memory and
+    written back verbatim. Running against a file that is already modified is
+    refused outright rather than snapshotted: the edit would land on top of
+    uncommitted work, and both tools would then be scored on a diff that is not
+    the one this harness constructed.
+    """
+    files = sorted({t["file"] for t in targets})
+    dirty = subprocess.run(["git", "status", "--porcelain", "--"] + files,
+                           cwd=repo, capture_output=True, text=True).stdout.strip()
+    if dirty:
+        sys.exit(f"refusing to run: target files already modified\n{dirty}\n"
+                 "commit or stash them first — this harness rewrites them.")
+    return {f: (repo / f).read_bytes() for f in files}
+
+
+def restore(repo, original):
+    for rel, data in original.items():
+        (repo / rel).write_bytes(data)
 
 
 def edit(repo, targets):
@@ -69,9 +96,12 @@ def parse_gitnexus_changes(raw):
 
 
 def main():
-    repo = Path(sys.argv[1]).resolve()
-    targets = json.load(open(sys.argv[2]))
+    args = positional()
+    GN_CLI = gitnexus_cli()
+    repo = Path(args[0]).resolve()
+    targets = json.load(open(args[1]))
     truth = {t["symbol"] for t in targets}
+    original = snapshot(repo, targets)
     try:
         edit(repo, targets)
         dirty = subprocess.run(["git", "status", "--porcelain"], cwd=repo,
@@ -82,7 +112,7 @@ def main():
             ("pixel", ["pixel", "what-changed", "--metrics", "off"],
              lambda d: {e.get("name") for e in d.get("symbols", [])
                         if isinstance(e, dict)}),
-            ("gitnexus", ["node", GN_CLI, "detect-changes", "--scope", "unstaged"],
+            ("gitnexus", GN_CLI + ["detect-changes", "--scope", "unstaged"],
              parse_gitnexus_changes),
         ):
             times, out, rc = [], b"", 0
@@ -109,11 +139,12 @@ def main():
                   file=sys.stderr)
         json.dump(rows, sys.stdout, indent=2)
     finally:
-        files = sorted({t["file"] for t in targets})
-        subprocess.run(["git", "checkout", "--"] + files, cwd=repo, check=False)
-        left = subprocess.run(["git", "status", "--porcelain"], cwd=repo,
-                              capture_output=True, text=True).stdout.strip()
-        print(f"\n[revert] tree now: {left or 'clean'}", file=sys.stderr)
+        restore(repo, original)
+        left = subprocess.run(
+            ["git", "status", "--porcelain", "--"] + sorted(original),
+            cwd=repo, capture_output=True, text=True).stdout.strip()
+        print(f"\n[restore] target files now: {left or 'as before the run'}",
+              file=sys.stderr)
 
 
 if __name__ == "__main__":

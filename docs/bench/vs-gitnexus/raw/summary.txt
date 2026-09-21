@@ -1,11 +1,13 @@
 corpus                   n | px rec gn rec | px prec gn prec |   px ms   gn ms |    px B    gn B
 ------------------------------------------------------------------------------------------------
-ruby-alonetone           5 |   0.90   1.00 |    0.93    0.93 |     127     401 |    2196    2873
-ruby-ddtrace             8 |   0.56   0.68 |    0.53    0.75 |     114     449 |    2417    1869
+ruby-alonetone           5 |   0.90   1.00 |     n/a     n/a |     127     401 |    2196    2873
+ruby-ddtrace             8 |   0.56   0.68 |     n/a     n/a |     114     449 |    2417    1869
 rust                     8 |   1.00   0.87 |    1.00    1.00 |     179     429 |    6375   28139
 typescript               8 |   1.00   0.88 |    0.97    0.88 |     182     437 |    6212    8100
 ------------------------------------------------------------------------------------------------
-ALL                     29 |   0.86   0.84 |    0.85    0.89 |     153     432 |    4518   11008
+ALL                     29 |   0.86   0.84 |    0.98    0.94 |     153     432 |    4518   11008
+
+precision: mean over 16/29 cases (Ruby excluded, truth set incomplete by construction)
 
 Cases where a tool found NOTHING at depth 1:
   pixel     dd-trace-rb  build_coverage_matrix                  truth=10 reported_d1=0

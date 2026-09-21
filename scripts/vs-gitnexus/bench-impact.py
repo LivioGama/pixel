@@ -21,7 +21,9 @@ import sys
 import time
 from pathlib import Path
 
-GN_CLI = "/Users/navid/code/GitNexus/gitnexus/dist/cli/index.js"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bench_common import gitnexus_cli, positional  # noqa: E402
+
 REPS = 5
 TIMEOUT = 300
 
@@ -73,8 +75,10 @@ def score(reported, truth):
 
 
 def main():
-    repo = Path(sys.argv[1]).resolve()
-    cases = json.load(open(sys.argv[2]))
+    args = positional()
+    GN_CLI = gitnexus_cli()
+    repo = Path(args[0]).resolve()
+    cases = json.load(open(args[1]))
     rows = []
     for c in cases:
         sym = c["symbol"]
@@ -83,7 +87,7 @@ def main():
                "truth_size": len(truth)}
         for tool, cmd, parse in (
             ("pixel", ["pixel", "impact", sym, "--metrics", "off"], pixel_files),
-            ("gitnexus", ["node", GN_CLI, "impact", sym], gitnexus_files),
+            ("gitnexus", GN_CLI + ["impact", sym], gitnexus_files),
         ):
             times, out, rc = [], b"", 0
             try:

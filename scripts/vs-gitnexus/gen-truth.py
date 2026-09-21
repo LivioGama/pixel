@@ -20,6 +20,11 @@ import json
 from pathlib import Path
 from collections import defaultdict
 
+# Defaults suit statically-typed corpora. Ruby resolves far fewer names
+# unambiguously, so its committed fixtures were generated with a wider window --
+# `MIN_FILES=2 MAX_FILES=12` -- which is why they hold truth sets of 2 and 10.
+# Regenerating them with the defaults produces a different, smaller set; the
+# exact commands are recorded in docs/bench/vs-gitnexus/cases/REGENERATE.md.
 MIN_FILES = int(os.environ.get("MIN_FILES", 3))
 MAX_FILES = int(os.environ.get("MAX_FILES", 8))
 

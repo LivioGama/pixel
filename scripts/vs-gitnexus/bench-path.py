@@ -14,7 +14,9 @@ import tempfile
 import time
 from pathlib import Path
 
-GN_CLI = "/Users/navid/code/GitNexus/gitnexus/dist/cli/index.js"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bench_common import gitnexus_cli, positional  # noqa: E402
+
 REPS = 3
 
 
@@ -69,8 +71,10 @@ def gitnexus_found(raw):
 
 
 def main():
-    repo = Path(sys.argv[1]).resolve()
-    cases = json.load(open(sys.argv[2]))
+    args = positional()
+    GN_CLI = gitnexus_cli()
+    repo = Path(args[0]).resolve()
+    cases = json.load(open(args[1]))
     rows = []
     for c in cases:
         row = {"from": c["from"], "to": c["to"], "verified_at":
@@ -78,7 +82,7 @@ def main():
         for tool, cmd, verdict in (
             ("pixel", ["pixel", "call-path", c["from"], c["to"], "--metrics", "off"],
              pixel_found),
-            ("gitnexus", ["node", GN_CLI, "trace", c["from"], c["to"]], gitnexus_found),
+            ("gitnexus", GN_CLI + ["trace", c["from"], c["to"]], gitnexus_found),
         ):
             times, out, rc = [], b"", 0
             for i in range(REPS + 1):

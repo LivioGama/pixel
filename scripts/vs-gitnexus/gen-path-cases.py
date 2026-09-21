@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """Generate call-path cases: (caller, callee) pairs with a located call site.
 
-A pair is kept only when BOTH names have exactly one definition in the repo, so
-neither tool is being scored on how it handles an ambiguous name (both ask for
-disambiguation, which is correct behaviour and a different question). In-file
-`#[cfg(test)]` blocks are stripped first, so a test helper never becomes a case.
+A pair is kept only when both names have exactly one **function** definition in
+the repo. That is a narrower namespace than either tool's symbol table, which
+also holds modules and commands: `branch`, `update` and `doctor` pass this
+filter and are still ambiguous to pixel and GitNexus alike. Those cases are kept
+on purpose -- `bench-path.py` scores "ambiguity reported" as its own verdict,
+separate from found/not-found, because refusing to guess is correct behaviour
+and worth measuring. What this filter buys is that no pair is ambiguous merely
+because two *functions* share a name.
+
+In-file `#[cfg(test)]` blocks are stripped first, so a test helper never becomes
+a case.
 """
 import importlib.util
 import json

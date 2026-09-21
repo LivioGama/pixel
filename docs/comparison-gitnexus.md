@@ -61,8 +61,8 @@ query.
 **Blast radius is complete on Rust and TypeScript.** pixel returned every true
 caller in all 16 cases across both languages — including on GitNexus' own
 TypeScript codebase, where GitNexus scored 0.88 and returned nothing at all for
-`isHardcodedIgnoredDirectoryAtPath` despite four real call sites in its own
-source.
+`isHardcodedIgnoredDirectoryAtPath` despite five true caller files in its own
+source (six call sites, two of them inside the defining file).
 
 **Git history is a first-class surface.** `search-history`, `dig-history`,
 `file-history`, `who-wrote` and `plan-rollback` answer "when did this break",
@@ -93,8 +93,13 @@ pixel's text index has those lines, and `pixel find-symbol` prints
 nothing. If your codebase is Ruby-heavy with significant top-level script code,
 this will bite you today.
 
-**Precision at depth 1.** 0.89 for GitNexus vs 0.85 for pixel over the full
-29-case set, driven by the same dynamic-Ruby cases.
+**Noisy answers on dynamic Ruby.** Asked about `application` in dd-trace-rb,
+pixel returns 8 files at depth 1 and not one is a caller; GitNexus returns none.
+Eight confident wrong answers cost an agent more than silence. (An earlier
+revision of this page reported a corpus-level precision loss, 0.89 for GitNexus
+against 0.85 for pixel. That figure averaged in the two Ruby corpora, whose
+truth sets are incomplete by construction, and is withdrawn — over the 16 cases
+where precision is scorable, pixel leads 0.98 to 0.94.)
 
 **Program analysis pixel does not have at all.** Raw Cypher over the graph
 (`cypher`), a persisted program dependence graph with taint findings
@@ -171,10 +176,14 @@ Nothing above asks to be taken on trust. On your own repository:
 
 ```sh
 git clone https://github.com/LivioGama/pixel && cd pixel
-python3 scripts/vs-gitnexus/gen-truth.py /path/to/your/repo rust 8 target,tests
+export GITNEXUS_CLI=/path/to/GitNexus/gitnexus/dist/cli/index.js   # or put `gitnexus` on PATH
+python3 scripts/vs-gitnexus/gen-truth.py /path/to/your/repo rust 8 target,tests > cases.json
 python3 scripts/vs-gitnexus/bench-impact.py /path/to/your/repo cases.json
 ```
 
 The ground truth is grep-derived from your source, not from either tool's graph,
-so neither can be right by construction. If pixel loses on your codebase, the
+so neither can be right by construction. The exact parameters behind the
+committed fixtures are in
+[`docs/bench/vs-gitnexus/cases/REGENERATE.md`](bench/vs-gitnexus/cases/REGENERATE.md) —
+the Ruby ones need a wider window than the defaults. If pixel loses on your codebase, the
 harness will say so — it did on Ruby.

@@ -64,9 +64,15 @@ different question). Median of 5 reps after a discarded warm-up.
 |---|---|---|---|---|---|---|---|---|---|---|
 | pixel | Rust | 8 | **1.00** | 0.87 | 1.00 | 1.00 | **179 ms** | 429 ms | **6 375** | 28 139 |
 | GitNexus | TypeScript | 8 | **1.00** | 0.88 | **0.97** | 0.88 | **182 ms** | 437 ms | **6 212** | 8 100 |
-| alonetone | Ruby | 5 | 0.90 | **1.00** | 0.93 | 0.93 | **127 ms** | 401 ms | **2 196** | 2 873 |
-| dd-trace-rb | Ruby | 8 | 0.56 | **0.68** | 0.53 | **0.75** | **114 ms** | 449 ms | 2 417 | **1 869** |
-| **All** | | **29** | **0.86** | 0.84 | 0.85 | **0.89** | **153 ms** | 432 ms | **4 518** | 11 008 |
+| alonetone | Ruby | 5 | 0.90 | **1.00** | n/a | n/a | **127 ms** | 401 ms | **2 196** | 2 873 |
+| dd-trace-rb | Ruby | 8 | 0.56 | **0.68** | n/a | n/a | **114 ms** | 449 ms | 2 417 | **1 869** |
+| **All** | | **29** | **0.86** | 0.84 | **0.98** | 0.94 | **153 ms** | 432 ms | **4 518** | 11 008 |
+
+Precision is a mean over the **16** cases whose truth set is complete, not all
+29. The Ruby truth sets match call syntax with parentheses, which Ruby callers
+routinely omit, so they are a strict subset of the real call sites: a tool that
+correctly returns a paren-less caller would be scored as imprecise for being
+right. Recall tolerates a subset of truth, precision does not.
 
 Readings, in order of how much weight they carry:
 
@@ -75,9 +81,15 @@ Readings, in order of how much weight they carry:
 - **The split by language is the real result.** pixel answers Rust and
   TypeScript completely (1.00 / 1.00, including on GitNexus' own TypeScript
   codebase); GitNexus answers Ruby better (1.00 / 0.68 vs 0.90 / 0.56).
-- **GitNexus has the better precision** (0.89 vs 0.85), driven by dd-trace-rb
-  where pixel returned 8 depth-1 files for `application` and none of them was a
-  real caller.
+- **pixel has the better precision on the corpora where precision is scorable**
+  (0.98 vs 0.94 over 16 cases). An earlier revision of this page reported the
+  reverse, 0.85 against 0.89, by averaging in the two Ruby corpora — whose
+  precision this same page calls untrustworthy two paragraphs above. That number
+  is withdrawn; it measured the fixture, not the tools.
+- **The dynamic-Ruby precision problem is real even though it is not scorable.**
+  On `application` in dd-trace-rb, pixel returned 8 depth-1 files and not one is
+  a caller, while GitNexus returned none. Eight confident wrong answers are
+  worse for an agent than silence, whatever the corpus-level number says.
 - **Latency is pixel's, consistently**: 153 ms vs 432 ms p50, every corpus, no
   overlap. This includes each runtime's process-start floor (a ~45 MB Rust
   binary talking to a warm daemon vs a Node CLI boot) — that floor is a property
@@ -208,14 +220,18 @@ them:
    correctly does not index. Dropped as a harness artifact, not a result.
 
 Remaining known weaknesses of the method: Ruby truth sets under-count
-paren-less calls (so Ruby *precision* is not trustworthy and is reported but not
-leaned on), n is 5–8 per corpus, and the whole run is one machine on one day.
+paren-less calls, so Ruby precision is **not reported at all** rather than
+reported with a caveat; n is 5–8 per corpus; and the whole run is one machine on
+one day.
 
 ## Open gaps this run produced
 
 - Ruby top-level script call sites are invisible to pixel's code graph
   (mechanism above). Costs pixel both Ruby corpora.
-- pixel's depth-1 precision on dynamic Ruby (`application`: 8 reported, 0 real).
+- pixel's depth-1 precision on dynamic Ruby (`application`: 8 reported, 0 real)
+  — visible per case, not measurable per corpus while the Ruby truth sets stay
+  paren-only. A truth generator that parses Ruby rather than grepping it would
+  make this scorable.
 - No agent-level A/B was run: everything here is op-level.
 - `context`, `query` and `rename` overlap but were not benchmarked.
 
