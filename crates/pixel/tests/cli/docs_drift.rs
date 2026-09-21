@@ -81,6 +81,7 @@ const DOCS: &[&str] = &[
     "crates/pixel-install/assets/pixel-subagent-prompt.md",
     "AGENTS.md",
     ".agents/rules/test-campaigns.md",
+    ".agents/rules/measuring.md",
     "scripts/README.md",
     "js/sniper/README.md",
 ];
