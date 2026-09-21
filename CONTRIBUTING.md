@@ -395,6 +395,15 @@ Pull request body, in this order:
 Keep PRs to one concern. A change over roughly 400 lines of diff or mixing
 concerns should be split into a stack of PRs.
 
+CodeRabbit reviews every pull request. Its configuration is
+[`.coderabbit.yaml`](.coderabbit.yaml) at the root: which paths are reviewed,
+the path-specific instructions that restate the rules above for the reviewer,
+the pre-merge checks (Conventional Commits title, description) and the
+guideline files it applies (this file, `.agents/rules/`). The file is read
+from the branch under review, so a change to it is exercised by the pull
+request that carries it. Answer or explicitly decline each of its findings
+before requesting a human review.
+
 ## Changelog
 
 `CHANGELOG.md` follows Keep a Changelog. Entries do not live in it until a
