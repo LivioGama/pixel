@@ -8,6 +8,7 @@
 //! - `resolve`: tiered edge resolution + epistemic envelope
 //! - `build`: whole-repo build/update orchestration
 //! - `impact`, `trace`, `process`, `cluster`, `changes`: analyses
+//! - `predicate`: bounded reachability with witnesses (`pixel evaluate`)
 
 pub mod build;
 pub mod changes;
@@ -18,6 +19,7 @@ pub mod extract;
 pub mod impact;
 pub mod imports;
 pub mod plan;
+pub mod predicate;
 pub mod process;
 pub mod rename;
 pub mod resolve;
