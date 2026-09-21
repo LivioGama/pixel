@@ -1,0 +1,1 @@
+**graph:** the freshness walk behind every graph command read and hashed its files on one thread; it moved to rayon's pool, path-sorted so the signature stayed byte-identical. A paired run cut a 50 000-file tree from 6.9 s to 0.9 s, and this repository's 249 files from 9.7 ms to 7.1 ms ([#203](https://github.com/LivioGama/pixel/pull/203)).

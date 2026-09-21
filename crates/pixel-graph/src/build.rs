@@ -394,12 +394,18 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
 /// `build_graph`, and the per-file hash is the `blob_oid` the store keeps
 /// for each file, so a stored row whose `blob_oid` differs from the entry
 /// here is a file that changed since the graph was built.
+///
+/// The walk is serial (`ignore::Walk` is an iterator and the directory
+/// listing is the cheap part); reading and hashing the candidate files,
+/// which is where the time goes on a large tree, runs on rayon's pool. The
+/// result is sorted by path afterwards, so it is byte-identical to a serial
+/// pass: the signature built over it never depends on thread scheduling.
 fn tree_hashes(root: &Path) -> Vec<(String, u64)> {
     // Must mirror `collect_files`'s walk policy exactly — both go through
     // `pixel_index::index::policy_walk` — or the freshness signature would
     // disagree with the set of files the graph was actually built from.
     let walker = pixel_index::index::policy_walk(root);
-    let mut entries: Vec<(String, u64)> = walker
+    let candidates: Vec<(String, std::path::PathBuf)> = walker
         .flatten()
         .filter_map(|entry| {
             let is_file = entry.file_type().is_some_and(|t| t.is_file());
@@ -408,12 +414,25 @@ fn tree_hashes(root: &Path) -> Vec<(String, u64)> {
             }
             let rel = rel_path(root, entry.path())?;
             lang_of(&rel)?;
-            let content = read_source_file(entry.path())?;
+            Some((rel, entry.into_path()))
+        })
+        .collect();
+    hash_candidates(candidates)
+}
+
+/// Read and hash `candidates` in parallel, dropping the ones
+/// `read_source_file` refuses (vanished, not a regular file, over
+/// `MAX_FILE_BYTES`) and the binaries, exactly as `collect_files` does.
+/// Sorted by path so callers see one order whatever the scheduling.
+fn hash_candidates(candidates: Vec<(String, std::path::PathBuf)>) -> Vec<(String, u64)> {
+    let mut entries: Vec<(String, u64)> = candidates
+        .into_par_iter()
+        .filter_map(|(rel, path)| {
+            let content = read_source_file(&path)?;
             if is_binary(&content) {
                 return None;
             }
-            let hash = xxh3_64(&content);
-            Some((rel, hash))
+            Some((rel, xxh3_64(&content)))
         })
         .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -434,7 +453,8 @@ fn signature_of(entries: &[(String, u64)]) -> String {
 /// equal-size edits even when mtime is restored (e.g. `touch -t`). This is
 /// more expensive than a stat-only signature but is necessary for trust:
 /// a stale graph would serve obsolete symbols. The cost is bounded by
-/// `MAX_FILE_BYTES` per file and parallelized via rayon. Symlinks are
+/// `MAX_FILE_BYTES` per file; the directory walk is serial and the per-file
+/// read + hash runs on rayon's pool (see `tree_hashes`). Symlinks are
 /// excluded (their target's content would be unstable and they are never
 /// indexed).
 pub fn freshness_signature(root: &Path) -> String {
@@ -2123,6 +2143,98 @@ mod tests {
         let call_edges = store.edges_to(plugin.id, Some(EdgeKind::Calls)).unwrap();
         assert!(call_edges.is_empty(), "no Calls edge to tenantScopePlugin");
         drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The freshness walk hashes files on rayon's pool, so its output must
+    /// not depend on scheduling: the same tree gives the same path-sorted
+    /// list a serial pass would, with the same exclusions `collect_files`
+    /// applies (unsupported extension, binary, over `MAX_FILE_BYTES`,
+    /// symlink). A divergence here is a graph that is either never fresh or
+    /// fresh over the wrong file set.
+    #[test]
+    fn tree_hashes_matches_a_serial_reference_and_applies_every_exclusion() {
+        let root = tmpdir("parallel-hashes");
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        let kept: [(&str, &[u8]); 4] = [
+            ("b.ts", b"export function beta() { return 2 }\n"),
+            ("src/a.rs", b"fn alpha() -> u32 { 1 }\n"),
+            ("src/deep/c.py", b"def gamma():\n    return 3\n"),
+            (
+                "src/deep/d.go",
+                b"package d\nfunc Delta() int { return 4 }\n",
+            ),
+        ];
+        for (rel, content) in kept {
+            std::fs::write(root.join(rel), content).unwrap();
+        }
+        // Excluded: no supported extension, a NUL in the first bytes, one
+        // byte over the size cap, and a symlink to a kept file.
+        std::fs::write(root.join("notes.txt"), b"fn looks_like_rust() {}\n").unwrap();
+        std::fs::write(root.join("src/blob.rs"), b"fn x() {}\n\0\0binary\n").unwrap();
+        let oversize_len = usize::try_from(MAX_FILE_BYTES).unwrap() + 1;
+        std::fs::write(root.join("src/huge.rs"), vec![b'/'; oversize_len]).unwrap();
+        std::os::unix::fs::symlink(root.join("src/a.rs"), root.join("src/link.rs")).unwrap();
+
+        // The serial reference: every kept file, hashed one by one, sorted.
+        let mut expected: Vec<(String, u64)> = kept
+            .iter()
+            .map(|(rel, content)| ((*rel).to_string(), xxh3_64(content)))
+            .collect();
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let walked = tree_hashes(&root);
+        assert_eq!(walked, expected, "same set, same hashes, path-sorted");
+        let paths: Vec<&str> = walked.iter().map(|(rel, _)| rel.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["b.ts", "src/a.rs", "src/deep/c.py", "src/deep/d.go"]
+        );
+        for excluded in ["notes.txt", "src/blob.rs", "src/huge.rs", "src/link.rs"] {
+            assert!(!paths.contains(&excluded), "{excluded} must not be hashed");
+        }
+
+        // Ten more walks give ten identical answers: the sort makes the
+        // parallel collection order invisible.
+        for _ in 0..10 {
+            assert_eq!(tree_hashes(&root), expected);
+        }
+
+        // And `build_graph`, whose input set is `collect_files`, signs the
+        // tree with exactly this walk's signature: both sides apply the same
+        // exclusions, or the graph would never read as fresh.
+        let db = root.join(".pixel").join("graph.db");
+        let stats = build_graph(&root, &db).unwrap();
+        assert_eq!(stats.files, 4, "collect_files kept the same four files");
+        assert_eq!(
+            stored_signature(&GraphStore::open(&db).unwrap()),
+            freshness_signature(&root)
+        );
+        assert!(is_fresh(&root, &db));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `hash_candidates` is the parallel half on its own: a candidate that
+    /// vanished between the walk and the read is dropped, not an error, and
+    /// the survivors come back sorted.
+    #[test]
+    fn hash_candidates_drops_vanished_files_and_sorts_the_rest() {
+        let root = tmpdir("hash-candidates");
+        std::fs::write(root.join("z.rs"), b"fn z() {}\n").unwrap();
+        std::fs::write(root.join("a.rs"), b"fn a() {}\n").unwrap();
+        let candidates = vec![
+            ("z.rs".to_string(), root.join("z.rs")),
+            ("gone.rs".to_string(), root.join("gone.rs")),
+            ("a.rs".to_string(), root.join("a.rs")),
+        ];
+        let hashed = hash_candidates(candidates);
+        assert_eq!(
+            hashed,
+            vec![
+                ("a.rs".to_string(), xxh3_64(b"fn a() {}\n")),
+                ("z.rs".to_string(), xxh3_64(b"fn z() {}\n")),
+            ]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
