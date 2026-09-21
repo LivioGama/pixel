@@ -10,21 +10,7 @@
 use std::path::Path;
 use std::process::Output;
 
-use crate::support::{Scratch, pixel_command};
-
-fn git(dir: &Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git {args:?}: {out:?}");
-}
+use crate::support::{Scratch, git, pixel_command};
 
 /// A repository whose graph is already built, since `evaluate` never builds
 /// one: `work` calls `helper`, `lonely` calls nothing.
@@ -275,6 +261,14 @@ fn the_json_absence_should_carry_no_witness_and_a_bounded_claim() {
     let dir = fixture("json-absent");
     let output = evaluate(&dir, &["--from", "lonely", "--to", "helper", "--json"]);
 
+    // The exit code first: an absence is an *evaluated* predicate, so this
+    // must be 0. Parsing stdout without checking it would let the test pass
+    // on a run that answered correctly and then reported a failure.
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "an evaluated absence exits 0: {output:?}"
+    );
     let value: serde_json::Value =
         serde_json::from_str(&stdout(&output)).expect("stdout must be one JSON object");
     assert_eq!(value["status"], "absent_in_snapshot");
@@ -289,5 +283,42 @@ fn the_json_absence_should_carry_no_witness_and_a_bounded_claim() {
             .as_str()
             .is_some_and(|s| s.contains("says nothing about calls outside that relation")),
         "an absence must bound itself: {value}"
+    );
+}
+
+/// `pixel evaluate` is in the action log, and its outcome there is the one
+/// the exit code reports.
+///
+/// The command owns a three-way exit contract that `main`'s `Result`
+/// cannot carry, so it hands its code back rather than calling
+/// `std::process::exit` itself. Exiting inside the command would return
+/// before the log is written and make `evaluate` the one command missing
+/// from the journal; recording every run as a success would be just as
+/// wrong, since the journal is what a later run reads to see what failed.
+#[test]
+fn the_action_log_should_record_an_evaluation_and_its_outcome() {
+    let dir = fixture("action-log");
+
+    let answered = evaluate(&dir, &["--from", "work", "--to", "helper"]);
+    assert_eq!(answered.status.code(), Some(0), "{answered:?}");
+    let refused = evaluate(
+        &dir,
+        &["--from", "work", "--to", "helper", "--tiers", "probable"],
+    );
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+
+    let log = std::fs::read_to_string(dir.join(".pixel/actions.jsonl"))
+        .expect("the command must reach the action log before exiting");
+    let outcomes: Vec<String> = log
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("complete JSONL record"))
+        .filter(|event| event["command"] == "evaluate")
+        .map(|event| event["outcome"].as_str().unwrap_or_default().to_string())
+        .collect();
+
+    assert_eq!(
+        outcomes,
+        vec!["ok".to_string(), "error".to_string()],
+        "both runs are journalled, and a usage error is not recorded as a success: {log}"
     );
 }

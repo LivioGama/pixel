@@ -33,13 +33,16 @@ pub struct EvaluateOptions {
     pub json: bool,
 }
 
-/// Run the evaluation and exit with the code its outcome maps to.
+/// Run the evaluation, print its envelope, and report the exit code its
+/// outcome maps to.
 ///
-/// Returns only on a path that has already printed and exited; the
-/// `ExitCode` is produced by `std::process::exit` so the three-way contract
-/// (0 evaluated / 2 usage / 3 technical) survives `main`'s two-way
-/// `Result`.
-pub fn run(opts: EvaluateOptions) -> ! {
+/// The code is returned rather than handed to `std::process::exit` here:
+/// exiting inside the command would skip the action log its caller writes,
+/// so `pixel evaluate` would be the one command absent from the journal.
+/// The caller owns the exit, which also makes the three-way contract
+/// (0 evaluated / 2 usage / 3 technical) assertable from a test without a
+/// subprocess.
+pub fn run(opts: EvaluateOptions) -> i32 {
     let json = opts.json;
     let asked = Asked {
         from: opts.from.clone(),
@@ -50,7 +53,7 @@ pub fn run(opts: EvaluateOptions) -> ! {
         Err(error) => wire::Output::Error(error),
     };
     print_output(&output, json, &asked);
-    std::process::exit(output.exit_code());
+    output.exit_code()
 }
 
 /// What the caller typed for each symbol argument. The envelope names the

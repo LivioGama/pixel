@@ -4131,7 +4131,14 @@ fn run() -> Result<(), String> {
         Ok(root) => pixel_actionlog::ActionLog::spawn_for_root(root),
         Err(_) => pixel_actionlog::ActionLog::noop(),
     };
-    let result = run_command(cli.command, &logger);
+    // An exit code a command owns end to end. `pixel evaluate` answers on
+    // a three-way contract (0 evaluated / 2 usage / 3 technical) that
+    // `main`'s two-way `Result` cannot carry, and it prints its own
+    // envelope, so it must not return `Err` — that would add a second
+    // diagnostic to stderr — nor exit before the action log is written.
+    let owned_exit: std::cell::Cell<Option<i32>> = std::cell::Cell::new(None);
+    let result = run_command(cli.command, &logger, &owned_exit);
+    let owned_exit = owned_exit.get();
     if let Err(error) = &result {
         // The stdout contract under `--json`: a failing command answers with a
         // parsable failure envelope carrying `error.code`, so an agent can
@@ -4149,8 +4156,15 @@ fn run() -> Result<(), String> {
     }
     let _ = std::io::stdout().flush();
     let elapsed = started.elapsed();
+    // A command that owns its exit code still reports its outcome to the
+    // journal: a non-zero code is a failure there, even though it never
+    // travelled as an `Err`.
+    let logged_result = match owned_exit {
+        Some(code) if code != 0 => Err(format!("{command_label} exited {code}")),
+        _ => result.clone(),
+    };
     let mut event = pixel_actionlog::ActionEvent::new(&command_label, argv[1..].join(" "))
-        .with_result(&result, elapsed);
+        .with_result(&logged_result, elapsed);
     if !protected {
         let output_bytes = operation_metrics::output_bytes();
         let mut metrics = match operation_metrics::evidence(&command_label, result.is_ok()) {
@@ -4180,10 +4194,17 @@ fn run() -> Result<(), String> {
     }
     logger.log(event);
     logger.finish();
+    if let Some(code) = owned_exit {
+        std::process::exit(code);
+    }
     result
 }
 
-fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<(), String> {
+fn run_command(
+    command: Command,
+    logger: &pixel_actionlog::ActionLog,
+    owned_exit: &std::cell::Cell<Option<i32>>,
+) -> Result<(), String> {
     match command {
         Command::SearchLikeRg { tool, args } => search_compat::run(tool, args),
         Command::BuildIndex {
@@ -4862,18 +4883,21 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
                     path,
                     json,
                 },
-        } => evaluate_cmd::run(evaluate_cmd::EvaluateOptions {
-            from,
-            to,
-            traversal,
-            tiers,
-            max_depth,
-            time_budget_ms,
-            scope,
-            at_snapshot,
-            path,
-            json,
-        }),
+        } => {
+            owned_exit.set(Some(evaluate_cmd::run(evaluate_cmd::EvaluateOptions {
+                from,
+                to,
+                traversal,
+                tiers,
+                max_depth,
+                time_budget_ms,
+                scope,
+                at_snapshot,
+                path,
+                json,
+            })));
+            Ok(())
+        }
         Command::ListFlows { path, offset, json } => {
             let data = execute(
                 &path,

@@ -171,7 +171,11 @@ impl Drop for Scratch {
     }
 }
 
-fn git(dir: &Path, args: &[&str]) {
+/// The one git fixture helper for this crate's CLI suite. It pins
+/// `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` to `/dev/null`, so a
+/// developer's global hooks, commit signing or `init.defaultBranch` cannot
+/// reach into a fixture; a suite that grows its own helper loses that.
+pub(crate) fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .current_dir(dir)
         .args(args)
