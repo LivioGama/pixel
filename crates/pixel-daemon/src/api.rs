@@ -3676,9 +3676,6 @@ fn incremental_max_pct() -> u64 {
         .unwrap_or(DEFAULT_GRAPH_INCREMENTAL_MAX_PCT)
 }
 
-/// Whether `changed` drifted files out of `indexed` may be applied
-/// incrementally under a `pct` threshold. A graph that indexed nothing has
-/// no incremental state to reuse; a threshold of 0 means "never".
 /// What [`Service::evaluate_gate`] must do with the delta it measured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GateAction {
@@ -3713,6 +3710,9 @@ fn gate_action(delta: Option<&pixel_graph::build::TreeDelta>, max_pct: u64) -> G
     }
 }
 
+/// Whether `changed` drifted files out of `indexed` may be applied
+/// incrementally under a `pct` threshold. A graph that indexed nothing has
+/// no incremental state to reuse; a threshold of 0 means "never".
 fn incremental_allowed(changed: usize, indexed: usize, pct: u64) -> bool {
     if pct == 0 || indexed == 0 {
         return false;
