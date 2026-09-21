@@ -403,7 +403,9 @@ fn run_context(
     }
     let mut store = open_store()?;
     let mut segments = SegmentSet::open(&pixel_recall::segments_dir())?;
-    lazy_catch_up(&mut store, &mut segments);
+    if lazy_catch_up(&mut store) != 0 {
+        let _ = segments.index_new(&store);
+    }
     let vectors = pixel_recall::vector::VectorStore::open(&pixel_recall::vectors_dir())?;
     let now = now_ms();
     let filters = SearchFilters {
@@ -573,7 +575,9 @@ fn run_ask(
         Err(e) => eprintln!("recall daemon: {e} — running in-process instead"),
     }
 
-    lazy_catch_up(&mut store, &mut segments);
+    if lazy_catch_up(&mut store) != 0 {
+        let _ = segments.index_new(&store);
+    }
     let mut embedder_slot = if lexical_only {
         None
     } else {
@@ -638,8 +642,11 @@ fn run_maxtest(
     if terms.len() > 10 {
         return Err("at most 10 keywords".to_string());
     }
-    let store = open_store()?;
-    let segments = SegmentSet::open(&pixel_recall::segments_dir())?;
+    let mut store = open_store()?;
+    let mut segments = SegmentSet::open(&pixel_recall::segments_dir())?;
+    if lazy_catch_up(&mut store) != 0 {
+        let _ = segments.index_new(&store);
+    }
     let now = now_ms();
     let filters = SearchFilters {
         agent,
@@ -718,7 +725,8 @@ fn run_export(
     format: &str,
 ) -> Result<(), String> {
     let format = pixel_recall::export::ExportFormat::parse(format)?;
-    let store = open_store()?;
+    let mut store = open_store()?;
+    lazy_catch_up(&mut store);
     let now = now_ms();
     let session_id = session
         .as_deref()
@@ -802,21 +810,18 @@ fn lazy_window_ms(last_ingest_at: Option<i64>, now_ms: i64) -> i64 {
 }
 
 /// On-demand catch-up for the in-process query paths: bounded ingest per
-/// agent (since its last ingest, capped) + re-index what was written.
-/// Agents whose newest ingest is fresh are skipped so repeated queries
-/// don't re-scan; per-adapter failures warn and move on. Never invoked by
-/// `build-index`, `prepare-repo`, or daemon start — transcripts are only
-/// scanned when a recall query actually runs.
+/// agent (since its last ingest, capped) — returns the turns written so
+/// callers holding a `SegmentSet` can re-index. Agents whose newest ingest
+/// is fresh are skipped so repeated queries don't re-scan; per-adapter
+/// failures warn and move on. Never invoked by `build-index`,
+/// `prepare-repo`, or daemon start — transcripts are only scanned when a
+/// recall command actually runs.
 #[cfg_attr(test, mutants::skip)] // adapter list comes from the process env
-fn lazy_catch_up(store: &mut RecallStore, segments: &mut SegmentSet) {
-    lazy_catch_up_with(store, segments, adapters(None).unwrap_or_default());
+fn lazy_catch_up(store: &mut RecallStore) -> usize {
+    lazy_catch_up_with(store, adapters(None).unwrap_or_default())
 }
 
-fn lazy_catch_up_with(
-    store: &mut RecallStore,
-    segments: &mut SegmentSet,
-    adapters: Vec<Box<dyn SourceAdapter>>,
-) {
+fn lazy_catch_up_with(store: &mut RecallStore, adapters: Vec<Box<dyn SourceAdapter>>) -> usize {
     let now = now_ms();
     let mut new_turns = 0usize;
     for adapter in adapters {
@@ -830,8 +835,9 @@ fn lazy_catch_up_with(
         }
     }
     if new_turns != 0 {
-        let _ = segments.index_new(store);
+        eprintln!("recall: caught up {new_turns} turns on demand");
     }
+    new_turns
 }
 
 pub fn run_index(source: Option<String>, stats: bool, full: bool) -> Result<(), String> {
@@ -927,7 +933,9 @@ fn run_search(
         Ok(None) => {}
         Err(e) => eprintln!("recall daemon: {e} — running in-process instead"),
     }
-    lazy_catch_up(&mut store, &mut segments);
+    if lazy_catch_up(&mut store) != 0 {
+        let _ = segments.index_new(&store);
+    }
     let result = search(&store, &segments, pattern, word, &filters, offset, limit)?;
     if json {
         let out = json!({
@@ -1086,7 +1094,8 @@ fn run_sessions(
     json: bool,
 ) -> Result<(), String> {
     check_limit(limit)?;
-    let store = open_store()?;
+    let mut store = open_store()?;
+    lazy_catch_up(&mut store);
     let now = now_ms();
     let since_ms = since.as_deref().map(|s| parse_time(s, now)).transpose()?;
     let until_ms = until.as_deref().map(|s| parse_time(s, now)).transpose()?;
@@ -1156,7 +1165,8 @@ fn parse_turn_range(spec: &str) -> Result<(i64, i64), String> {
 }
 
 fn run_show(session_ref: &str, turn: Option<&str>, json: bool) -> Result<(), String> {
-    let store = open_store()?;
+    let mut store = open_store()?;
+    lazy_catch_up(&mut store);
     let session = resolve_session(&store, session_ref)?;
     let range = turn.map(parse_turn_range).transpose()?;
     let turns = store
@@ -1410,7 +1420,6 @@ mod tests {
     fn lazy_catch_up_skips_agents_with_fresh_watermarks() {
         let root = scratch_root("lazy-skip");
         let mut store = RecallStore::open(&root.join("recall.db")).unwrap();
-        let mut segments = SegmentSet::open(&root.join("seg")).unwrap();
         store
             .touch_state(
                 "stub",
@@ -1424,16 +1433,17 @@ mod tests {
             )
             .unwrap();
         let (discovered, parsed) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
-        lazy_catch_up_with(
+        let written = lazy_catch_up_with(
             &mut store,
-            &mut segments,
             vec![stub("stub", Vec::new(), &discovered, &parsed)],
         );
+        assert_eq!(written, 0);
         assert_eq!(discovered.get(), 0, "fresh agent must not be walked");
     }
 
     /// A cold agent is ingested within the lazy window, the new turns are
-    /// searchable immediately, and the next catch-up reparses nothing.
+    /// searchable once the caller re-indexes, and the next catch-up
+    /// reparses nothing.
     #[test]
     fn lazy_catch_up_ingests_indexes_and_stays_incremental() {
         let root = scratch_root("lazy-cold");
@@ -1446,12 +1456,15 @@ mod tests {
             mtime_ms: now_ms(),
         };
         let (discovered, parsed) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
-        lazy_catch_up_with(
+        let written = lazy_catch_up_with(
             &mut store,
-            &mut segments,
             vec![stub("stub", vec![unit()], &discovered, &parsed)],
         );
-        assert_eq!((discovered.get(), parsed.get()), (1, 1));
+        assert_eq!((written, discovered.get(), parsed.get()), (1, 1, 1));
+        // The caller re-indexes only when something was written.
+        if written != 0 {
+            segments.index_new(&store).unwrap();
+        }
         let hits = search(
             &store,
             &segments,
@@ -1465,14 +1478,13 @@ mod tests {
         assert_eq!(hits.hits.len(), 1, "just-ingested turn must be searchable");
         // The recorded watermark is now fresh: a second catch-up walks
         // nothing and reparses nothing.
-        lazy_catch_up_with(
+        let written = lazy_catch_up_with(
             &mut store,
-            &mut segments,
             vec![stub("stub", vec![unit()], &discovered, &parsed)],
         );
         assert_eq!(
-            (discovered.get(), parsed.get()),
-            (1, 1),
+            (written, discovered.get(), parsed.get()),
+            (0, 1, 1),
             "back-to-back catch-up must be a no-op"
         );
     }
