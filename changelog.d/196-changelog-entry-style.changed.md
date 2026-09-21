@@ -1,0 +1,1 @@
+**release:** `prepare.sh` now gates the shape of a `changelog.d/` entry, so a released section is scannable: an entry opens on its scope (`**graph:** …`) and is refused over 900 bytes, with a warning over 500 or when it references no pull request. The 0.4.0 cut ran 264 to 1265 bytes a bullet with no scope prefix. ([#196](https://github.com/LivioGama/pixel/pull/196))
