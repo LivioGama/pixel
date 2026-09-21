@@ -186,9 +186,17 @@ pub fn concept_lang_of(path: &str) -> Option<&'static str> {
 // --- top-level entry ------------------------------------------------------
 
 /// Extract concepts from one file. Empty on unsupported language, oversized
-/// files (>1MB), or any parse/grammar failure (graceful degradation).
+/// files (>1MB), a generated/minified blob, or any parse/grammar failure
+/// (graceful degradation).
 pub fn extract_concepts(path_rel: &str, content: &[u8]) -> Vec<RawConcept> {
     if content.len() > MAX_FILE_BYTES {
+        return Vec::new();
+    }
+    // The size cap alone does not cover this: a 900 KB single-line bundle
+    // sits under it and still costs hundreds of milliseconds per parse, and
+    // this path runs several. Same deterministic predicate as symbol
+    // extraction, so both agree on what counts as source.
+    if crate::extract::is_generated_blob(content) {
         return Vec::new();
     }
     let Some(lang) = concept_lang_of(path_rel) else {
@@ -978,6 +986,32 @@ fn field_text(w: &TsWalker, n: Node, field: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Concept extraction runs several tree-sitter passes over a file, so a
+    /// bundle that slips under the 1 MB size cap costs more here than in
+    /// symbol extraction. Both paths must agree on what counts as source, or
+    /// a file contributes concepts while contributing no symbols.
+    #[test]
+    fn minified_bundle_yields_no_concepts() {
+        let mut bundle = String::new();
+        let mut i = 0;
+        while bundle.len() < 900 * 1024 {
+            bundle.push_str(&format!("const r{i}=useRouter();fetch('/api/x{i}');"));
+            i += 1;
+        }
+        assert!(
+            bundle.len() < MAX_FILE_BYTES,
+            "fixture must sit under the size cap, so the blob guard is what rejects it"
+        );
+        assert!(crate::extract::is_generated_blob(bundle.as_bytes()));
+        assert!(extract_concepts("public/assets/app.js", bundle.as_bytes()).is_empty());
+
+        // The same calls in ordinary layout are still picked up: the guard
+        // rejects the shape, never the content.
+        let readable = bundle.replace(';', ";\n");
+        assert!(!crate::extract::is_generated_blob(readable.as_bytes()));
+        assert!(!extract_concepts("src/app.js", readable.as_bytes()).is_empty());
+    }
 
     #[test]
     fn handle_tag_records_forms_and_components_and_skips_closing_or_html_tags() {

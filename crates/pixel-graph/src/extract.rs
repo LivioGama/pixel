@@ -103,12 +103,69 @@ pub fn lang_of(path: &str) -> Option<&'static str> {
     }
 }
 
+/// Size floor for the generated-blob guard: below this, even a one-line file
+/// parses in microseconds, so the guard would only add false-positive risk.
+pub const GENERATED_MIN_BYTES: usize = 65_536; // 64 KiB
+
+/// Mean bytes-per-line above which a file of at least [`GENERATED_MIN_BYTES`]
+/// is treated as a generated/minified blob rather than source.
+///
+/// Calibrated against real trees, not guessed: the worst hand-written file
+/// measured in a 400k-line Rails monolith averages 127 bytes/line (and its
+/// largest file, a 400 KB `schema.rb`, averages 47), while this workspace's
+/// worst averages 70. A single-line bundle averages its whole length. The
+/// threshold therefore sits a factor of four above anything a human writes
+/// and four orders of magnitude below a bundle.
+///
+/// Note the deliberate divergence from the per-line caps other tools use
+/// (MeshMCP rejects any line over 1024 bytes): that would reject real source
+/// here — `parking_id_extractor_service_spec.rb` has a 16 044-byte line, and
+/// an `assets_controller.rb` a 5 276-byte one. Only the whole-file *mean*
+/// separates the two populations cleanly.
+pub const GENERATED_MAX_BYTES_PER_LINE: usize = 512;
+
+/// Whether `content` looks like a generated/minified blob that tree-sitter
+/// should not be pointed at.
+///
+/// Deterministic by construction — a pure function of the bytes, with no
+/// clock and no machine-load dependency. That is the point: a wall-clock
+/// parser timeout (MeshMCP's 15 ms C-FFI bound) would make the extracted
+/// symbol set depend on how loaded the machine was during the build, and
+/// `graph.db`'s freshness signature assumes the same bytes always yield the
+/// same graph. A content-derived predicate keeps that invariant.
+///
+/// Both conditions must hold, so a large ordinary file (`schema.rb`) and a
+/// small dense one (a fixture with one long string) both pass through.
+pub fn is_generated_blob(content: &[u8]) -> bool {
+    if content.len() < GENERATED_MIN_BYTES {
+        return false;
+    }
+    // Count newlines rather than splitting: no allocation, and a trailing
+    // fragment counts as its own line so a file with no newline at all is
+    // treated as one line rather than zero.
+    let newlines = bytecount(content, b'\n');
+    let lines = if content.ends_with(b"\n") {
+        newlines
+    } else {
+        newlines + 1
+    };
+    content.len() / lines.max(1) >= GENERATED_MAX_BYTES_PER_LINE
+}
+
+fn bytecount(haystack: &[u8], needle: u8) -> usize {
+    haystack.iter().filter(|b| **b == needle).count()
+}
+
 /// Parse one file into a tree-sitter tree for the language its extension
-/// maps to. `None` on unsupported language or any parse/grammar failure.
+/// maps to. `None` on unsupported language, a generated/minified blob, or
+/// any parse/grammar failure.
 /// Shared by extraction and the rename verifier, which re-parses a file to
 /// confirm each candidate identifier's role before rewriting it.
 pub fn parse_file(path_rel: &str, content: &[u8]) -> Option<tree_sitter::Tree> {
     let lang = lang_of(path_rel)?;
+    if is_generated_blob(content) {
+        return None;
+    }
     let language = language_for(lang)?;
     std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut parser = Parser::new();
@@ -120,9 +177,18 @@ pub fn parse_file(path_rel: &str, content: &[u8]) -> Option<tree_sitter::Tree> {
 }
 
 /// Extract symbols/calls/imports from one file. `None` on unsupported
-/// language or any parse/grammar failure.
+/// language, a generated/minified blob, or any parse/grammar failure.
+///
+/// The [`is_generated_blob`] guard lives here rather than at the call sites
+/// so every path is covered by construction. It matters: `build_graph`
+/// filters its inputs through `is_binary` beforehand, but
+/// `update_files_unsigned` — the incremental path the daemon runs on every
+/// save — does not, so a committed bundle was re-parsed on each touch.
 pub fn extract_file(path_rel: &str, content: &[u8]) -> Option<FileExtraction> {
     let lang = lang_of(path_rel)?;
+    if is_generated_blob(content) {
+        return None;
+    }
     std::panic::catch_unwind(AssertUnwindSafe(|| extract_inner(lang, content)))
         .ok()
         .flatten()
@@ -1655,9 +1721,135 @@ fn generic_import(w: &mut Walker, node: Node) {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileExtraction, RawCall, RawSymbol, assign_enclosing, extract_file, jsx_component_call,
+        FileExtraction, GENERATED_MAX_BYTES_PER_LINE, GENERATED_MIN_BYTES, RawCall, RawSymbol,
+        assign_enclosing, extract_file, is_generated_blob, jsx_component_call, parse_file,
     };
     use crate::store::SymbolKind;
+
+    /// One line of `width` bytes plus its newline.
+    fn line_of(width: usize) -> String {
+        let mut s = "x".repeat(width);
+        s.push('\n');
+        s
+    }
+
+    /// A single-line minified bundle is skipped, and skipped for the reason
+    /// that matters: pointing tree-sitter at it costs seconds of CPU and
+    /// injects one junk symbol per minified function into the graph, which
+    /// then competes with real code in every symbol lookup and ranking.
+    ///
+    /// Measured before the guard, release build: 3.5 MB of one-line JS took
+    /// 5.97 s and produced 36 922 symbols; 1 MB took 768 ms for 10 880.
+    #[test]
+    fn minified_bundle_contributes_nothing_to_the_graph() {
+        let mut bundle = String::new();
+        let mut i = 0;
+        while bundle.len() < 1_000_000 {
+            bundle.push_str(&format!(
+                "function f{i}(a,b){{return a?{{k:[b,{i}]}}:((c)=>{{let d={i};return d+c}})(b)}};"
+            ));
+            i += 1;
+        }
+        assert!(i > 5_000, "fixture should hold thousands of functions");
+
+        assert!(is_generated_blob(bundle.as_bytes()));
+        assert!(extract_file("public/assets/app.js", bundle.as_bytes()).is_none());
+        // The rename verifier re-parses through `parse_file`: it must refuse
+        // the same blob, or a rename could rewrite identifiers inside a
+        // generated artifact that is regenerated from a source elsewhere.
+        assert!(parse_file("public/assets/app.js", bundle.as_bytes()).is_none());
+    }
+
+    /// The guard must not cost real source its symbols. These two shapes are
+    /// the ones that actually occur and that a naive per-line cap (MeshMCP
+    /// rejects any line over 1024 bytes) would wrongly reject.
+    #[test]
+    fn dense_real_source_still_extracts() {
+        // A file with one very long line — measured in the wild at 16 044
+        // bytes — but an ordinary mean, as source always has.
+        let mut ruby = String::from("class ParkingIdExtractor\n  def call\n    plates = \"");
+        ruby.push_str(&"AB-123-CD ".repeat(1_700));
+        ruby.push_str("\"\n    plates.split\n  end\nend\n");
+        assert!(
+            ruby.lines().map(str::len).max().unwrap() > 16_000,
+            "fixture must carry a line longer than a per-line cap would allow"
+        );
+        assert!(!is_generated_blob(ruby.as_bytes()));
+        let extracted = extract_file("app/services/parking_id_extractor.rb", ruby.as_bytes())
+            .expect("dense but hand-written source must still extract");
+        let names: Vec<&str> = extracted.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"call"), "got {names:?}");
+
+        // A large ordinary file, well over the size floor: the biggest real
+        // file measured in that monolith is a 400 KB `schema.rb` averaging
+        // 47 bytes/line. Size alone must never trip the guard.
+        let mut schema = String::from("# frozen_string_literal: true\n");
+        while schema.len() < GENERATED_MIN_BYTES * 6 {
+            schema.push_str("  create_table \"parkings\", force: :cascade do |t|\n  end\n");
+        }
+        assert!(!is_generated_blob(schema.as_bytes()));
+    }
+
+    /// Both conditions are load-bearing and the comparison is inclusive.
+    /// Pinning the boundary keeps a widened threshold (or a flipped
+    /// comparison) from silently swallowing real files.
+    #[test]
+    fn guard_boundary_is_exact_on_both_conditions() {
+        // Exactly at the mean threshold and exactly at the size floor: in.
+        let wide = line_of(GENERATED_MAX_BYTES_PER_LINE - 1);
+        let mut at_threshold = String::new();
+        while at_threshold.len() < GENERATED_MIN_BYTES {
+            at_threshold.push_str(&wide);
+        }
+        assert_eq!(at_threshold.len() % GENERATED_MAX_BYTES_PER_LINE, 0);
+        assert!(at_threshold.len() >= GENERATED_MIN_BYTES);
+        assert!(
+            is_generated_blob(at_threshold.as_bytes()),
+            "mean of exactly {GENERATED_MAX_BYTES_PER_LINE} bytes/line must be caught"
+        );
+
+        // One byte narrower per line: mean falls below the threshold, out —
+        // while still comfortably over the size floor, so it is the mean and
+        // not the size that decides.
+        let narrow = line_of(GENERATED_MAX_BYTES_PER_LINE - 2);
+        let mut narrower = String::new();
+        while narrower.len() < GENERATED_MIN_BYTES * 2 {
+            narrower.push_str(&narrow);
+        }
+        assert!(narrower.len() >= GENERATED_MIN_BYTES);
+        assert!(!is_generated_blob(narrower.as_bytes()));
+
+        // Same dense shape, one byte under the size floor: out. Small files
+        // parse in microseconds, so the guard buys nothing and only risks
+        // false positives.
+        let small = &at_threshold[..GENERATED_MIN_BYTES - 1];
+        assert!(!is_generated_blob(small.as_bytes()));
+
+        // A file with no trailing newline counts its last fragment as a
+        // line, so a single unterminated line is one line, not zero.
+        let unterminated = "y".repeat(GENERATED_MIN_BYTES);
+        assert!(is_generated_blob(unterminated.as_bytes()));
+        assert!(!is_generated_blob(b""));
+
+        // …and the same off-by-one must not bite a multi-line file that
+        // happens to lack its final newline. Sized so that counting the
+        // unterminated tail (the right answer) puts the mean one byte under
+        // the threshold, while dropping it would push the mean over and
+        // condemn the file. Editors that strip the trailing newline are
+        // common enough that this is a real shape, not a contrived one.
+        let body_lines = 128;
+        let mut no_final_newline = line_of(GENERATED_MAX_BYTES_PER_LINE - 2).repeat(body_lines);
+        let counted_lines = body_lines + 1;
+        let target_len = (GENERATED_MAX_BYTES_PER_LINE - 1) * counted_lines;
+        no_final_newline.push_str(&"z".repeat(target_len - no_final_newline.len()));
+        assert!(!no_final_newline.ends_with('\n'));
+        assert!(no_final_newline.len() >= GENERATED_MIN_BYTES);
+        assert!(
+            no_final_newline.len() / body_lines >= GENERATED_MAX_BYTES_PER_LINE,
+            "fixture must be one the wrong line count would condemn"
+        );
+        assert!(!is_generated_blob(no_final_newline.as_bytes()));
+    }
 
     fn sym(name: &str, start_line: u32, end_line: u32) -> RawSymbol {
         RawSymbol {
