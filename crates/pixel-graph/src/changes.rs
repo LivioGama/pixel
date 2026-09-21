@@ -876,6 +876,12 @@ mod tests {
         // Nothing covers it.
         assert_eq!(residues(5, 7, &[]), vec![(5, 7)]);
         assert_eq!(residues(5, 7, &[(8, 9), (1, 4)]), vec![(5, 7)]);
+        // A span far past the range must not stretch the residue to reach
+        // it: a symbol elsewhere in the file says nothing about these
+        // lines, and a range that grew beyond `end` would name lines the
+        // change never touched.
+        assert_eq!(residues(5, 7, &[(20, 21)]), vec![(5, 7)]);
+        assert_eq!(residues(5, 7, &[(1, 2), (20, 21)]), vec![(5, 7)]);
         // Partial: before, after, and a hole between two spans.
         assert_eq!(residues(1, 10, &[(4, 10)]), vec![(1, 3)]);
         assert_eq!(residues(1, 10, &[(1, 6)]), vec![(7, 10)]);
