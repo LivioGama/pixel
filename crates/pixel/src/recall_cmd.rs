@@ -404,7 +404,7 @@ fn run_context(
     let mut store = open_store()?;
     let mut segments = SegmentSet::open(&pixel_recall::segments_dir())?;
     if lazy_catch_up(&mut store) != 0 {
-        let _ = segments.index_new(&store);
+        segments.index_new(&store)?;
     }
     let vectors = pixel_recall::vector::VectorStore::open(&pixel_recall::vectors_dir())?;
     let now = now_ms();
@@ -576,7 +576,7 @@ fn run_ask(
     }
 
     if lazy_catch_up(&mut store) != 0 {
-        let _ = segments.index_new(&store);
+        segments.index_new(&store)?;
     }
     let mut embedder_slot = if lexical_only {
         None
@@ -645,7 +645,7 @@ fn run_maxtest(
     let mut store = open_store()?;
     let mut segments = SegmentSet::open(&pixel_recall::segments_dir())?;
     if lazy_catch_up(&mut store) != 0 {
-        let _ = segments.index_new(&store);
+        segments.index_new(&store)?;
     }
     let now = now_ms();
     let filters = SearchFilters {
@@ -904,7 +904,12 @@ fn run_search(
     }
     let mut store = open_store()?;
     let mut segments = SegmentSet::open(&pixel_recall::segments_dir())?;
+    if lazy_catch_up(&mut store) != 0 {
+        segments.index_new(&store)?;
+    }
     let now = now_ms();
+    // Resolve --session after the catch-up: a cold store must not fail a
+    // session ref that exists on disk but was never ingested.
     let session_id = session
         .as_deref()
         .map(|s| resolve_session(&store, s).map(|row| row.id))
@@ -932,9 +937,6 @@ fn run_search(
         }
         Ok(None) => {}
         Err(e) => eprintln!("recall daemon: {e} — running in-process instead"),
-    }
-    if lazy_catch_up(&mut store) != 0 {
-        let _ = segments.index_new(&store);
     }
     let result = search(&store, &segments, pattern, word, &filters, offset, limit)?;
     if json {
