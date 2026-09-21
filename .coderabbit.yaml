@@ -103,6 +103,9 @@ reviews:
         or `tests/all/main.rs`, not new `tests/<name>.rs` targets. Absolute
         paths compared against a temp dir are canonicalised first (macOS
         `/var` is a symlink to `/private/var`).
+        Test shape is not a finding: do not suggest restyling, splitting or
+        consolidating a passing test; flag only an assertion weaker than the
+        contract it claims to check.
     - path: "crates/pixel-proto/**"
       instructions: |
         Every `Op::op_name` must match its serde tag; the invariant test in
@@ -201,6 +204,10 @@ reviews:
     # test run; a review comment on them has nothing to add.
     ignore_usernames:
       - "dependabot[bot]"
+    ignore_title_keywords:
+      - "WIP"
+      - "[WIP]"
+      - "DO NOT MERGE"
 
   pre_merge_checks:
     # Rust documentation is judged by rustdoc and the contract tests, not by
