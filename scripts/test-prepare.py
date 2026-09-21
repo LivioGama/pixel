@@ -240,6 +240,33 @@ class PrepareContract(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("is empty", result.stderr)
 
+    def test_a_whitespace_only_fragment_is_refused(self):
+        """`-s` is not enough: a file of newlines would file a bare `- `."""
+        for name, body in (("12-newline.fixed.md", "\n"),
+                           ("13-spaces.fixed.md", "   \n"),
+                           ("14-blanks.fixed.md", "\n\n\n")):
+            with self.subTest(name=name):
+                self.write("changelog.d/" + name, body)
+                self.git("add", ".")
+                self.git("commit", "-qm", "fragment")
+
+                result = self.prepare()
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("is empty", result.stderr)
+                self.git("reset", "-q", "--hard", "HEAD~1")
+
+    def test_a_fragment_whose_first_line_is_blank_is_refused(self):
+        """The first line is the bullet; a blank one files `- ` and an indent."""
+        self.write("changelog.d/12-thing.fixed.md", "\nthe entry on the second line\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "fragment")
+
+        result = self.prepare()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("starts with a blank line", result.stderr)
+
     def test_an_entry_left_under_unreleased_is_refused(self):
         self.write("changelog.d/12-thing.fixed.md", "thing\n")
         self.write("CHANGELOG.md",
@@ -325,6 +352,20 @@ class FragmentContract(unittest.TestCase):
             cwd=root, capture_output=True, text=True, timeout=30,
         )
 
+    CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n"
+
+    def make_repo(self, fragments, changelog=None):
+        """A bare repository holding only what --check reads."""
+        tmp = tempfile.TemporaryDirectory(prefix="pixel-prepare-check-")
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "changelog.d").mkdir()
+        for name, text in fragments.items():
+            (root / "changelog.d" / name).write_text(text)
+        (root / "CHANGELOG.md").write_text(self.CHANGELOG if changelog is None else changelog)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+        return root
+
     def test_the_repository_fragments_are_well_formed(self):
         result = self.run_check(self.ROOT)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -340,15 +381,31 @@ class FragmentContract(unittest.TestCase):
         )
 
     def test_check_refuses_a_repository_whose_fragments_are_misnamed(self):
-        with tempfile.TemporaryDirectory(prefix="pixel-prepare-check-") as tmp:
-            root = Path(tmp)
-            (root / "changelog.d").mkdir()
-            (root / "changelog.d" / "thing.fized.md").write_text("thing\n")
-            (root / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n")
-            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
-            result = self.run_check(root)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("name it <slug>.<section>.md", result.stderr)
+        root = self.make_repo({"thing.fized.md": "thing\n"})
+        result = self.run_check(root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("name it <slug>.<section>.md", result.stderr)
+
+    def test_check_refuses_a_whitespace_only_fragment(self):
+        root = self.make_repo({"12-thing.fixed.md": "\n"})
+        result = self.run_check(root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is empty", result.stderr)
+
+    def test_check_does_not_report_unreleased_empty_without_looking(self):
+        """The success message claims something; it has to have checked it.
+
+        `--check` used to return before the stray-bullet test, so a tree that
+        release preparation refuses was reported as well formed.
+        """
+        root = self.make_repo(
+            {"12-thing.fixed.md": "thing\n"},
+            changelog="# Changelog\n\n## [Unreleased]\n\n### Fixed\n- stray\n\n## [0.1.0] - 2026-01-01\n",
+        )
+        result = self.run_check(root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bullet(s) still under ## [Unreleased]", result.stderr)
+        self.assertNotIn("all well formed", result.stdout)
 
 
 if __name__ == "__main__":

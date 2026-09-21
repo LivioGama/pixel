@@ -9,8 +9,8 @@
 # 1. the version is x.y.z (optional -suffix), has no `vx.y.z` tag and no
 #    `## [x.y.z]` heading yet;
 # 2. `changelog.d/` holds at least one fragment, every fragment is a
-#    `<slug>.<section>.md` with a section from SECTIONS, and `## [Unreleased]`
-#    carries no `- ` entry;
+#    `<slug>.<section>.md` with a section from SECTIONS and a first line that
+#    carries the entry, and `## [Unreleased]` carries no `- ` entry;
 # 3. every workspace member's `[package] version` is set to x.y.z (the
 #    members move in lockstep, as 0.2.4 did);
 # 4. the fragments are folded into a new `## [x.y.z] - DATE` under a kept,
@@ -120,8 +120,16 @@ for fragment in changelog.d/*.md; do
         *) echo "prepare.sh: $fragment: name it <slug>.<section>.md, <section> one of: $SECTIONS" >&2
            exit 1 ;;
     esac
-    if [ ! -s "$fragment" ]; then
+    # `-s` is not enough. A file of newlines is not empty, and the renderer
+    # below turns its first line into the bullet, so it would file a bare
+    # `- ` under a released heading, where check-release -- which reads only
+    # `## [Unreleased]` -- never looks again.
+    if ! grep -q '[^[:space:]]' "$fragment"; then
         echo "prepare.sh: $fragment is empty; it carries the entry's text" >&2
+        exit 1
+    fi
+    if ! head -n 1 "$fragment" | grep -q '[^[:space:]]'; then
+        echo "prepare.sh: $fragment starts with a blank line; its first line is the entry" >&2
         exit 1
     fi
 done
@@ -130,15 +138,12 @@ if [ "$FRAGMENT_COUNT" -eq 0 ]; then
     exit 1
 fi
 
-if [ "$CHECK" -eq 1 ]; then
-    echo "prepare.sh: $FRAGMENT_COUNT fragment(s) under changelog.d/, all well formed, ## [Unreleased] empty"
-    exit 0
-fi
-
 # An entry written straight into CHANGELOG.md would be released only by
 # accident: the cut below takes its text from the fragments and leaves the file
 # alone. check-release refuses the tag while one is still there; refusing it
-# here first is what lets the message say where the entry belongs.
+# here first is what lets the message say where the entry belongs. It runs
+# before the --check return, which otherwise reports the section as empty
+# without having looked.
 STRAY="$(awk '
     /^## / { inside = index($0, "## [Unreleased]") == 1; next }
     inside && /^[[:space:]]*- / { n++ }
@@ -147,6 +152,11 @@ STRAY="$(awk '
 if [ "$STRAY" -ne 0 ]; then
     echo "prepare.sh: $STRAY bullet(s) still under ## [Unreleased] in CHANGELOG.md; entries live in changelog.d/, one file per entry" >&2
     exit 1
+fi
+
+if [ "$CHECK" -eq 1 ]; then
+    echo "prepare.sh: $FRAGMENT_COUNT fragment(s) under changelog.d/, all well formed, ## [Unreleased] empty"
+    exit 0
 fi
 
 MEMBERS="$(sed -n '/^members *= *\[/,/\]/p' Cargo.toml | grep -o '"[^"]*"' | tr -d '"')"
