@@ -41,23 +41,55 @@ pub struct Hit {
 }
 
 /// The configured SearXNG base URL, if any.
+#[cfg_attr(test, mutants::skip)] // thin adapter over the process env; logic lives in `normalize_base`
 fn searxng_base() -> Option<String> {
-    std::env::var_os(SEARXNG_ENV)
+    normalize_base(std::env::var_os(SEARXNG_ENV))
+}
+
+/// A usable base URL is present, UTF-8, and non-empty.
+fn normalize_base(value: Option<std::ffi::OsString>) -> Option<String> {
+    value
         .and_then(|v| v.into_string().ok())
         .filter(|v| !v.is_empty())
 }
 
+/// The truth marker for `--json` output: `complete` iff any hit survived.
+fn marker(hits: &[Hit]) -> &'static str {
+    if hits.is_empty() {
+        "unresolved"
+    } else {
+        "complete"
+    }
+}
+
+/// The text (non-JSON) rendering of a result set.
+fn render(query: &str, hits: &[Hit]) -> String {
+    if hits.is_empty() {
+        return format!("unresolved: no web results for {query:?}\n");
+    }
+    let mut out = String::new();
+    for (i, h) in hits.iter().enumerate() {
+        out.push_str(&format!(
+            "{}. {} [{}]\n   {}\n",
+            i + 1,
+            h.title,
+            h.engine,
+            h.url
+        ));
+        if !h.snippet.is_empty() {
+            out.push_str(&format!("   {}\n", h.snippet));
+        }
+    }
+    out
+}
+
+#[cfg_attr(test, mutants::skip)] // printing adapter; logic lives in `marker`/`render` and is tested
 pub fn run(opts: WebSearchOptions) -> Result<(), String> {
     let hits = search_with(&opts.query, opts.limit, searxng_base().as_deref(), &fetch);
     if opts.json {
-        let marker = if hits.is_empty() {
-            "unresolved"
-        } else {
-            "complete"
-        };
         let payload = json!({
             "query": opts.query,
-            "marker": marker,
+            "marker": marker(&hits),
             "hits": hits.iter().map(|h| json!({
                 "title": h.title,
                 "url": h.url,
@@ -69,16 +101,8 @@ pub fn run(opts: WebSearchOptions) -> Result<(), String> {
             "{}",
             serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?
         );
-    } else if hits.is_empty() {
-        println!("unresolved: no web results for {:?}", opts.query);
     } else {
-        for (i, h) in hits.iter().enumerate() {
-            println!("{}. {} [{}]", i + 1, h.title, h.engine);
-            println!("   {}", h.url);
-            if !h.snippet.is_empty() {
-                println!("   {}", h.snippet);
-            }
-        }
+        print!("{}", render(&opts.query, &hits));
     }
     Ok(())
 }
@@ -393,6 +417,64 @@ mod tests {
         assert_eq!(url_encode("a b&c"), "a%20b%26c");
         assert_eq!(url_encode("JEV-2.0_~"), "JEV-2.0_~");
         assert_eq!(url_encode("été"), "%C3%A9t%C3%A9");
+    }
+
+    #[test]
+    fn normalize_base_keeps_only_nonempty_utf8_values() {
+        use std::ffi::OsString;
+        assert_eq!(normalize_base(None), None);
+        assert_eq!(normalize_base(Some(OsString::new())), None);
+        assert_eq!(
+            normalize_base(Some(OsString::from("https://sx.test"))),
+            Some("https://sx.test".to_string())
+        );
+        // Non-UTF-8 values cannot name a URL and are dropped.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            assert_eq!(normalize_base(Some(OsString::from_vec(vec![0xFF]))), None);
+        }
+    }
+
+    #[test]
+    fn marker_mirrors_whether_any_hit_survived() {
+        assert_eq!(marker(&[]), "unresolved");
+        assert_eq!(
+            marker(&[Hit {
+                title: "t".into(),
+                url: "u".into(),
+                snippet: String::new(),
+                engine: "wikipedia",
+            }]),
+            "complete"
+        );
+    }
+
+    #[test]
+    fn render_lists_hits_and_omits_empty_snippets() {
+        let hits = vec![
+            Hit {
+                title: "One".into(),
+                url: "https://a.test".into(),
+                snippet: "snippet one".into(),
+                engine: "searxng",
+            },
+            Hit {
+                title: "Two".into(),
+                url: "https://b.test".into(),
+                snippet: String::new(),
+                engine: "wikipedia",
+            },
+        ];
+        assert_eq!(
+            render("jev", &hits),
+            "1. One [searxng]\n   https://a.test\n   snippet one\n\
+             2. Two [wikipedia]\n   https://b.test\n"
+        );
+        assert_eq!(
+            render("jev", &[]),
+            "unresolved: no web results for \"jev\"\n"
+        );
     }
 
     #[test]
