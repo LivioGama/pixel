@@ -120,9 +120,11 @@ averaged in the two Ruby corpora, whose truth sets are incomplete by
 construction, and is withdrawn — over the 16 cases where precision is scorable,
 pixel leads 0.98 to 0.94.)
 
-**`.git/info/exclude` is ignored.** A repo-local exclude that git respects is
-invisible to pixel's indexer, so generated files can surface in search results.
-Found while building this benchmark; use `.gitignore` until it is fixed.
+**Ignored files can leak into search results.** A file created after the last
+full `build-index` is picked up by the live overlay refresh with no git ignore
+rules applied — `.gitignore` and `.git/info/exclude` leak alike — and stays
+queryable until the next rebuild. Found while building this benchmark; run
+`pixel build-index` after generating files you do not want indexed.
 
 **Program analysis pixel does not have at all.** Raw Cypher over the graph,
 persisted PDG with taint findings, API route/shape/impact maps, multi-repo

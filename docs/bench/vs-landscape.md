@@ -155,17 +155,24 @@ map navigates by directory ([`bench-map.py`](../../scripts/bench-vs/bench-map.py
 
 ## A pixel defect this benchmark uncovered
 
-**pixel does not honour `.git/info/exclude`.** The first retrieval run had
+**pixel's overlay indexes files that git ignores.** The first retrieval run had
 `pixel search-meaning` returning `stacklit.json` and `.gitnexus/gitnexus.json`
-— the benchmark's own artifacts — among its top hits, because the patterns had
-been added to `.git/info/exclude` (which git honours) rather than `.gitignore`
-(which pixel honours). Every measurement above was re-run after moving the
-patterns to `.gitignore` and rebuilding all four indexes; verified zero artifact
-hits before recording.
+— the benchmark's own artifacts — among its top hits.
 
-Two separate things follow: the numbers here are clean, and pixel has a real bug
-— a repo-local exclude that git respects is invisible to the indexer, so
-generated files land in search results. Worth fixing independently of this page.
+The mechanism was narrowed down in a fixture repo: a *full* `build-index` applies
+git's ignore rules correctly, but a file created **after** that build is picked up
+by the live overlay refresh with no ignore rules applied at all, and stays
+queryable until the next full rebuild evicts it. It makes no difference whether
+the pattern sits in `.gitignore` or in `.git/info/exclude` — both leak on the
+overlay path, and `pixel status` counts the file under `overlay_files`. (An
+earlier draft of this page blamed `.git/info/exclude` specifically. That was
+wrong; the fixture disproves it.)
+
+Every measurement above was re-run after rebuilding all four indexes, with zero
+artifact hits verified before recording, so the numbers here are clean. The bug
+is worth fixing on its own: a `.env.local` or a database dump that git ignores
+enters the index by the same path and can come back in an answer handed to an
+agent.
 
 ## Not measured
 
