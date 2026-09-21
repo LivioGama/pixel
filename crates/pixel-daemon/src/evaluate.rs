@@ -521,3 +521,129 @@ pub fn request_shape(args: &Args) -> (predicate::Traversal, predicate::TierSelec
     };
     (traversal, tiers)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pixel_graph::predicate;
+
+    /// `--tiers` selects a relation, so each accepted spelling has to reach
+    /// the relation it names. A value that silently fell through to `None`
+    /// would be reported as a usage error even though it is the documented
+    /// spelling, and — worse for the contract — a value that mapped to the
+    /// wrong arm would answer about a different set of edges under the name
+    /// the caller asked for.
+    #[test]
+    fn each_documented_tiers_value_should_select_the_relation_it_names() {
+        assert_eq!(TierSelection::parse("exact"), Some(TierSelection::Exact));
+        assert_eq!(
+            TierSelection::parse("exact,probable"),
+            Some(TierSelection::ExactAndProbable)
+        );
+        assert_eq!(
+            TierSelection::parse("exact").map(TierSelection::tiers),
+            Some(vec![wire::Tier::Exact]),
+            "the exact relation must not admit probable edges"
+        );
+        assert_eq!(
+            TierSelection::parse("exact,probable").map(TierSelection::tiers),
+            Some(vec![wire::Tier::Exact, wire::Tier::Probable])
+        );
+    }
+
+    /// Anything else is a usage error rather than a quiet widening to a
+    /// relation the caller did not ask for.
+    #[test]
+    fn an_undocumented_tiers_value_should_not_resolve_to_a_relation() {
+        for value in ["", "probable", "exact,", "Exact", "exact, probable", "all"] {
+            assert_eq!(
+                TierSelection::parse(value),
+                None,
+                "{value:?} is not a documented relation"
+            );
+        }
+    }
+
+    fn import_premise() -> predicate::ImportPremise {
+        predicate::ImportPremise {
+            from_path: "src/worker.ts".to_string(),
+            spec: "./util".to_string(),
+            to_path: "src/util.ts".to_string(),
+        }
+    }
+
+    /// The wire keeps three cases apart, and collapsing any two of them
+    /// misreports how well an edge is justified: "needs no premises" (an
+    /// exact edge), "here are the imports that justify it", and "this edge
+    /// rests on premises the store cannot show". The last one is the one a
+    /// reader must be able to distrust, so an unavailable premise set must
+    /// never be rendered as an empty — and therefore satisfied-looking —
+    /// import list.
+    #[test]
+    fn a_premise_set_the_store_cannot_show_should_be_unavailable_not_an_empty_list() {
+        let unavailable = predicate::Premises {
+            available: false,
+            imports: vec![import_premise()],
+        };
+        assert_eq!(
+            premises(Some(&unavailable)),
+            wire::Premises::Unavailable,
+            "an unavailable set must not be published as its imports"
+        );
+        assert_eq!(premises(None), wire::Premises::NotRequired);
+    }
+
+    /// An available premise set is published with its imports, so a reader
+    /// can check the edge against the import rows that justify it.
+    #[test]
+    fn an_available_premise_set_should_be_published_with_its_import_rows() {
+        let available = predicate::Premises {
+            available: true,
+            imports: vec![import_premise()],
+        };
+        let wire::Premises::Imports { imports } = premises(Some(&available)) else {
+            panic!("an available premise set must publish its imports");
+        };
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].from_path, "src/worker.ts");
+        assert_eq!(imports[0].spec, "./util");
+        assert_eq!(imports[0].to_path, "src/util.ts");
+    }
+
+    /// An available-but-empty set is still `Imports`: "the store looked and
+    /// there were none" is a different claim from "the store could not
+    /// look", and only the second one licenses distrusting the edge.
+    #[test]
+    fn an_available_but_empty_premise_set_should_still_be_an_import_list() {
+        let empty = predicate::Premises {
+            available: true,
+            imports: Vec::new(),
+        };
+        assert_eq!(
+            premises(Some(&empty)),
+            wire::Premises::Imports { imports: vec![] }
+        );
+    }
+
+    /// These four strings are why `closed_world` is never true: they are
+    /// the call shapes tree-sitter extraction does not see, and every
+    /// answer carries them so an absence is read as bounded rather than
+    /// total. An empty or placeholder list would publish a completeness
+    /// claim the extractor cannot support.
+    #[test]
+    fn every_answer_should_carry_the_four_extraction_blind_spots() {
+        let limits = extraction_limits();
+        assert_eq!(limits.len(), 4, "{limits:?}");
+        for expected in [
+            "callbacks passed as arguments",
+            "dynamic dispatch",
+            "macro-generated calls",
+            "eval / new Function",
+        ] {
+            assert!(
+                limits.iter().any(|l| l.contains(expected)),
+                "{expected:?} missing from {limits:?}"
+            );
+        }
+    }
+}

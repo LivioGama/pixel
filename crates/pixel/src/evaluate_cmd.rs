@@ -229,8 +229,64 @@ fn print_candidates(reason: &wire::Reason) {
     // A full list is a bounded list: the lookup stops at the cap, so more
     // symbols may share the name. Saying so is cheaper than letting a
     // reader assume the list is everything.
-    if candidates.len() >= pixel_daemon::evaluate::CANDIDATE_CAP {
+    if candidate_list_is_capped(candidates.len()) {
         let cap = pixel_daemon::evaluate::CANDIDATE_CAP;
         println!("  (list capped at {cap}; more symbols may share this name)");
+    }
+}
+
+/// Whether a candidate list of `count` entries has to be read as truncated.
+///
+/// The lookup asks the store for at most `CANDIDATE_CAP` rows, so a list
+/// that long is the one case where the caller cannot tell "these are all of
+/// them" from "these are the first of them". Exactly at the cap counts as
+/// truncated: that is the length a truncated list has. Reading it the other
+/// way round would stay silent on the only list that needs the warning and
+/// print it on every list that does not.
+fn candidate_list_is_capped(count: usize) -> bool {
+    count >= pixel_daemon::evaluate::CANDIDATE_CAP
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The envelope names the *flag* that failed; only the CLI still holds
+    /// what the caller typed for it. Losing either mapping prints a reason
+    /// with no value next to it, which is the one thing this indirection
+    /// exists to prevent.
+    #[test]
+    fn each_symbol_flag_should_map_back_to_the_value_the_caller_typed() {
+        let asked = Asked {
+            from: "handleRequest".to_string(),
+            to: "writeAudit".to_string(),
+        };
+        assert_eq!(asked.value_of("--from"), Some("handleRequest"));
+        assert_eq!(asked.value_of("--to"), Some("writeAudit"));
+        assert_eq!(
+            asked.value_of("--traversal"),
+            None,
+            "only the two symbol flags carry a value the reason can quote"
+        );
+        assert_eq!(asked.value_of(""), None);
+    }
+
+    /// The cap warning is a claim about completeness, so it must fire on
+    /// exactly the lists that are truncated: at the cap and above, never
+    /// below it.
+    #[test]
+    fn only_a_list_at_or_above_the_lookup_cap_should_be_called_truncated() {
+        let cap = pixel_daemon::evaluate::CANDIDATE_CAP;
+        assert!(!candidate_list_is_capped(0));
+        assert!(!candidate_list_is_capped(1));
+        assert!(
+            !candidate_list_is_capped(cap - 1),
+            "one short of the cap is a complete list"
+        );
+        assert!(
+            candidate_list_is_capped(cap),
+            "a list exactly as long as the lookup limit is where truncation hides"
+        );
+        assert!(candidate_list_is_capped(cap + 1));
     }
 }

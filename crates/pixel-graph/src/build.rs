@@ -1025,6 +1025,29 @@ mod tests {
     use crate::resolve::{Decision, ResolveIndex};
     use crate::store::Tier;
 
+    /// `graph_file_cap` is what an evaluation quotes when it says the build
+    /// stopped at the cap, so the number it reports has to be the cap the
+    /// walk actually enforces, and `None` has to mean "no cap applies"
+    /// rather than "the default".
+    ///
+    /// Reads the ambient environment on purpose: `PIXEL_GRAPH_MAX_FILES` is
+    /// unset everywhere this suite runs, and setting it here would be
+    /// process-global, capping the walk of every graph built concurrently
+    /// by another test in this binary.
+    #[test]
+    fn the_reported_build_file_cap_should_be_the_default_when_nothing_overrides_it() {
+        assert!(
+            std::env::var_os("PIXEL_GRAPH_MAX_FILES").is_none(),
+            "this test describes the unconfigured default; the variable is set"
+        );
+        assert_eq!(
+            graph_file_cap(),
+            Some(DEFAULT_GRAPH_MAX_FILES),
+            "an unconfigured build is capped, and the cap it reports is the \
+             one `collect_files` stops at"
+        );
+    }
+
     fn tmpdir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(
             "pixel-graph-{tag}-{}-{}",

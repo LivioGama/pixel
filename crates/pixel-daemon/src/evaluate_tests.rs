@@ -540,3 +540,150 @@ fn the_summary_should_name_the_snapshot_and_the_relation() {
         "the verdict must name the relation it is about: {first}"
     );
 }
+
+/// Deleting the zero-row arm of the name lookup turns "no such symbol"
+/// into "ambiguous, here are the candidates" with an empty candidate list:
+/// a reason that tells the caller to disambiguate between nothing. The uid
+/// path returns `SymbolNotFound` from its own branch, so only a *name* that
+/// matches no row exercises this one.
+#[test]
+fn a_name_that_matches_no_symbol_should_be_symbol_not_found_never_ambiguous() {
+    let dir = fixture("name-absent");
+    let mut svc = Service::open(&dir).unwrap();
+    let envelope = evaluate(&mut svc, request("work", "noSuchFunctionAnywhere"));
+
+    assert_eq!(
+        reason(&envelope),
+        &wire::Reason::SymbolNotFound {
+            argument: "--to".to_string()
+        },
+        "a name with no rows is not an ambiguity: {:?}",
+        envelope.outcome
+    );
+}
+
+/// The same arm, reached the other way: `--in` filters every row out. The
+/// name exists in the store, so only the post-filter count can produce the
+/// right reason.
+#[test]
+fn a_scope_that_excludes_every_match_should_be_symbol_not_found() {
+    let dir = fixture("scope-empty");
+    let mut svc = Service::open(&dir).unwrap();
+    let mut req = request("work", "helper");
+    req.scope = Some("no/such/dir".to_string());
+    let envelope = evaluate(&mut svc, req);
+
+    assert_eq!(
+        reason(&envelope),
+        &wire::Reason::SymbolNotFound {
+            argument: "--from".to_string()
+        },
+        "{:?}",
+        envelope.outcome
+    );
+}
+
+/// The witness carries the content hash so a reader can re-read the bytes
+/// the graph parsed and check the claim. That only works if it is the hash
+/// the store actually holds for that file: any other string — a constant, a
+/// digest of something else — still looks like a hash and silently fails
+/// every verification done against it.
+#[test]
+fn a_witness_hash_should_be_the_stored_hash_of_the_file_it_names() {
+    let dir = fixture("witness-hash");
+    let mut svc = Service::open(&dir).unwrap();
+    let envelope = evaluate(&mut svc, request("work", "helper"));
+
+    let wire::Outcome::Established { witness } = &envelope.outcome else {
+        panic!("expected established, got {:?}", envelope.outcome);
+    };
+    let wire::Witness::Path { edges, .. } = witness else {
+        panic!("expected a path witness, got {witness:?}");
+    };
+
+    let store = svc.graph.as_ref().expect("the evaluation opened the graph");
+    for end in [&edges[0].from, &edges[0].to] {
+        let stored = store
+            .file_by_path(&end.path)
+            .expect("store readable")
+            .unwrap_or_else(|| panic!("the witness names a file the store has: {}", end.path))
+            .blob_oid;
+        assert_eq!(
+            end.content_hash, stored,
+            "the witness hash for {} must be the hash the graph parsed",
+            end.path
+        );
+        assert!(
+            !stored.is_empty(),
+            "the fixture must give the store a real hash to compare against"
+        );
+    }
+}
+
+/// `coverage.graph_file_cap_hit` is a published claim about how the graph
+/// was built, and the three cases have to stay apart: no cap in force is
+/// not "the cap was hit", and a graph that stopped exactly at the cap is
+/// the case the flag exists for — a walk that ends at the cap is
+/// indistinguishable from one that ended at the cap with more files left.
+#[test]
+fn the_file_cap_flag_should_track_the_cap_the_build_actually_enforced() {
+    let dir = fixture("file-cap");
+    let mut svc = Service::open(&dir).unwrap();
+    let envelope = evaluate(&mut svc, request("work", "helper"));
+    assert!(
+        !envelope.coverage.graph_file_cap_hit,
+        "a three-file fixture under the default 50 000-file cap did not hit it"
+    );
+
+    let files = svc
+        .graph
+        .as_ref()
+        .expect("the evaluation opened the graph")
+        .counts()
+        .expect("counts readable")
+        .0;
+    assert!(files > 1, "the fixture has several files: {files}");
+
+    assert!(
+        !svc.graph_file_cap_hit(None),
+        "no cap in force is never a cap that was hit"
+    );
+    assert!(
+        svc.graph_file_cap_hit(Some(files as usize)),
+        "a graph holding exactly the cap is where the walk stopping early hides"
+    );
+    assert!(
+        svc.graph_file_cap_hit(Some(1)),
+        "more files than the cap admits means the cap was hit"
+    );
+    assert!(
+        !svc.graph_file_cap_hit(Some(files as usize + 1)),
+        "one file short of the cap is a walk that reached the end of the tree"
+    );
+}
+
+/// The blind spots ride on every answer, not just the ones that reach the
+/// unit that builds them: `closed_world` is false because of this list, so
+/// an envelope that lost it would publish a completeness it cannot back.
+#[test]
+fn every_envelope_should_publish_the_extraction_blind_spots() {
+    let dir = fixture("limits-on-wire");
+    let mut svc = Service::open(&dir).unwrap();
+    let envelope = evaluate(&mut svc, request("work", "helper"));
+
+    assert_eq!(
+        envelope.coverage.extraction_limits.len(),
+        4,
+        "{:?}",
+        envelope.coverage.extraction_limits
+    );
+    assert!(
+        envelope
+            .coverage
+            .extraction_limits
+            .iter()
+            .any(|l| l.contains("dynamic dispatch")),
+        "{:?}",
+        envelope.coverage.extraction_limits
+    );
+}

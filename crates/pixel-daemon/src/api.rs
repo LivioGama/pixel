@@ -1837,7 +1837,7 @@ impl Service {
         }
 
         let caps = evaluate_caps(&evaluation);
-        let file_cap_hit = self.graph_file_cap_hit();
+        let file_cap_hit = self.graph_file_cap_hit(pixel_graph::build::graph_file_cap());
         let store = self.graph.as_ref().expect("opened above");
         let envelope = evaluate::envelope(
             store,
@@ -1862,22 +1862,20 @@ impl Service {
         if !db.exists() {
             return Ok(Err(wire::Reason::GraphUnavailable));
         }
-        match bridge::tree_delta(&self.root, &db) {
-            Ok(Some(delta)) if delta.fresh => Ok(Ok(())),
-            Ok(Some(delta)) => {
-                if incremental_allowed(
-                    delta.changed_count(),
-                    delta.indexed_files,
-                    incremental_max_pct(),
-                ) {
+        let delta = match bridge::tree_delta(&self.root, &db) {
+            Ok(delta) => delta,
+            Err(error) => return Err(format!("evaluate: {error}")),
+        };
+        match gate_action(delta.as_ref(), incremental_max_pct()) {
+            GateAction::Ready => Ok(Ok(())),
+            GateAction::Incremental => {
+                // `Incremental` is only ever returned for a `Some` delta.
+                if let Some(delta) = delta {
                     self.incremental_update_info(&delta)?;
-                    Ok(Ok(()))
-                } else {
-                    Ok(Err(wire::Reason::GraphStale))
                 }
+                Ok(Ok(()))
             }
-            Ok(None) => Ok(Err(wire::Reason::GraphStale)),
-            Err(error) => Err(format!("evaluate: {error}")),
+            GateAction::Stale => Ok(Err(wire::Reason::GraphStale)),
         }
     }
 
@@ -1886,8 +1884,14 @@ impl Service {
     /// end of the tree. Conservative: it can only over-report, and an
     /// over-report widens the stated limits of an absence rather than
     /// narrowing them.
-    fn graph_file_cap_hit(&self) -> bool {
-        let Some(cap) = pixel_graph::build::graph_file_cap() else {
+    ///
+    /// `cap` is passed in rather than read from the environment here so a
+    /// test can reach all three cases — no cap, under it, at or over it —
+    /// without setting `PIXEL_GRAPH_MAX_FILES`, which is process-global and
+    /// would cap the walk of every graph another test builds concurrently
+    /// in the same binary.
+    fn graph_file_cap_hit(&self, cap: Option<usize>) -> bool {
+        let Some(cap) = cap else {
             return false;
         };
         self.graph
@@ -3675,6 +3679,40 @@ fn incremental_max_pct() -> u64 {
 /// Whether `changed` drifted files out of `indexed` may be applied
 /// incrementally under a `pct` threshold. A graph that indexed nothing has
 /// no incremental state to reuse; a threshold of 0 means "never".
+/// What [`Service::evaluate_gate`] must do with the delta it measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateAction {
+    /// The stored graph already describes the tree: answer from it.
+    Ready,
+    /// Drift small enough to apply before answering.
+    Incremental,
+    /// Too much drift, or no signature to compare against: refuse. A full
+    /// rebuild can take minutes and is never a side effect of a question.
+    Stale,
+}
+
+/// The gate's decision, separated from the I/O around it so that each
+/// branch is reachable from a test.
+///
+/// "Is the graph fresh" is not the same question as "is the drift small
+/// enough to apply". A fresh graph must be answered from directly: routing
+/// it through the incremental path would make a question rewrite the graph
+/// it is asking about, and `apply_tree_delta` re-signs the store even when
+/// it has no rows to change. A drifted graph must never be treated as
+/// fresh, which would answer from rows the tree no longer matches.
+fn gate_action(delta: Option<&pixel_graph::build::TreeDelta>, max_pct: u64) -> GateAction {
+    match delta {
+        Some(delta) if delta.fresh => GateAction::Ready,
+        Some(delta) if incremental_allowed(delta.changed_count(), delta.indexed_files, max_pct) => {
+            GateAction::Incremental
+        }
+        // Drift past the threshold, or no usable signature at all: built
+        // before signatures existed, or written by an update that could
+        // not sign what it committed.
+        Some(_) | None => GateAction::Stale,
+    }
+}
+
 fn incremental_allowed(changed: usize, indexed: usize, pct: u64) -> bool {
     if pct == 0 || indexed == 0 {
         return false;
@@ -5955,6 +5993,148 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn delta(fresh: bool, changed: usize, indexed: usize) -> pixel_graph::build::TreeDelta {
+        pixel_graph::build::TreeDelta {
+            fresh,
+            changed: (0..changed)
+                .map(|i| (format!("src/f{i}.ts"), i as u64))
+                .collect(),
+            removed: Vec::new(),
+            indexed_files: indexed,
+            signature: "cafe".to_string(),
+        }
+    }
+
+    /// The gate turns a measured delta into one of three actions, and each
+    /// pair of them is a different promise to the caller.
+    ///
+    /// A fresh graph must be `Ready`, not `Incremental`: the incremental
+    /// path takes the store away, calls `apply_tree_delta` — which re-signs
+    /// it even with nothing to change — and reopens it, so treating fresh
+    /// as drifted makes a question write to the graph it is asking about.
+    /// A drifted graph must never be `Ready`, which would answer from rows
+    /// the tree no longer matches. And drift past the threshold is `Stale`
+    /// rather than a minutes-long rebuild nobody asked for.
+    #[test]
+    fn the_evaluate_gate_should_answer_from_a_fresh_graph_and_never_rewrite_it() {
+        assert_eq!(
+            gate_action(Some(&delta(true, 0, 10)), DEFAULT_GRAPH_INCREMENTAL_MAX_PCT),
+            GateAction::Ready,
+            "a fresh graph is answered from directly"
+        );
+        // Fresh wins even where the drift would also have been applicable:
+        // the two questions are not the same one.
+        assert_eq!(
+            gate_action(
+                Some(&delta(true, 1, 100)),
+                DEFAULT_GRAPH_INCREMENTAL_MAX_PCT
+            ),
+            GateAction::Ready
+        );
+    }
+
+    #[test]
+    fn the_evaluate_gate_should_apply_drift_under_the_threshold_before_answering() {
+        assert_eq!(
+            gate_action(
+                Some(&delta(false, 1, 100)),
+                DEFAULT_GRAPH_INCREMENTAL_MAX_PCT
+            ),
+            GateAction::Incremental,
+            "a drifted graph must not be answered from as-is"
+        );
+    }
+
+    #[test]
+    fn the_evaluate_gate_should_refuse_rather_than_rebuild_past_the_threshold() {
+        assert_eq!(
+            gate_action(
+                Some(&delta(false, 99, 100)),
+                DEFAULT_GRAPH_INCREMENTAL_MAX_PCT
+            ),
+            GateAction::Stale,
+            "a full rebuild is never a side effect of a question"
+        );
+        assert_eq!(
+            gate_action(Some(&delta(false, 1, 100)), 0),
+            GateAction::Stale,
+            "the incremental path disabled means stale, not ready"
+        );
+    }
+
+    /// No delta at all is "built before signatures existed", or written by
+    /// an update that withheld its signature. Either way the graph cannot
+    /// be shown to describe the tree, so it is stale — never ready.
+    #[test]
+    fn a_graph_with_no_usable_signature_should_be_stale() {
+        assert_eq!(
+            gate_action(None, DEFAULT_GRAPH_INCREMENTAL_MAX_PCT),
+            GateAction::Stale
+        );
+        assert_eq!(gate_action(None, 100), GateAction::Stale);
+    }
+
+    fn evaluation_with(
+        depth_cap: u32,
+        depth_cap_dropped_frontier: bool,
+        time_budget_ms: u64,
+        time_budget_hit: bool,
+    ) -> pixel_graph::predicate::Evaluation {
+        pixel_graph::predicate::Evaluation {
+            status: pixel_graph::predicate::Status::AbsentInSnapshot,
+            traversal: pixel_graph::predicate::Traversal::Callees,
+            coverage: pixel_graph::predicate::Coverage {
+                traversal_exhausted: true,
+                depth_cap,
+                depth_cap_dropped_frontier,
+                time_budget_ms,
+                time_budget_hit,
+                visited: 3,
+                unresolved_same_name_sites: 0,
+                tiers: vec![pixel_graph::Tier::Exact],
+                edge_kinds: Vec::new(),
+            },
+            witness: pixel_graph::predicate::Witness::None,
+        }
+    }
+
+    /// A cap that fired is what turns an answer into a lower bound, and
+    /// `derive_epistemics` reads exactly this list: empty means
+    /// `lower_bound: false`, i.e. "nothing cut this answer short". So the
+    /// list has to be empty when no cap fired and has to name the cap that
+    /// did, with the number that would raise it — a placeholder string
+    /// would set the flag while telling the caller nothing to act on.
+    #[test]
+    fn an_evaluation_that_hit_no_cap_should_claim_none() {
+        assert!(evaluate_caps(&evaluation_with(8, false, 2_000, false)).is_empty());
+    }
+
+    #[test]
+    fn a_dropped_frontier_should_be_named_as_a_cap_with_the_depth_to_raise() {
+        let caps = evaluate_caps(&evaluation_with(8, true, 2_000, false));
+        assert_eq!(caps.len(), 1, "{caps:?}");
+        assert!(caps[0].contains("depth cap 8"), "{caps:?}");
+        assert!(caps[0].contains("frontier"), "{caps:?}");
+    }
+
+    #[test]
+    fn an_expired_time_budget_should_be_named_as_a_cap_with_its_duration() {
+        let caps = evaluate_caps(&evaluation_with(8, false, 2_000, true));
+        assert_eq!(caps.len(), 1, "{caps:?}");
+        assert!(caps[0].contains("2000ms"), "{caps:?}");
+        assert!(caps[0].contains("budget"), "{caps:?}");
+    }
+
+    /// Both caps firing must both be reported: a reader raising only the
+    /// one they were told about would get the same truncated answer again.
+    #[test]
+    fn both_caps_firing_should_both_be_reported() {
+        let caps = evaluate_caps(&evaluation_with(4, true, 50, true));
+        assert_eq!(caps.len(), 2, "{caps:?}");
+        assert!(caps.iter().any(|c| c.contains("depth cap 4")), "{caps:?}");
+        assert!(caps.iter().any(|c| c.contains("50ms")), "{caps:?}");
     }
 
     /// The incremental/full decision is what keeps an agent's
