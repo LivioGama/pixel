@@ -1,0 +1,1 @@
+**index:** history and transcript indexes are demand-driven — the daemon no longer ingests git history at startup, and `recall search`/`ask`/`context` catch up lazily on first use (cold: last 7 days, capped at 30 days). `build-index --history` and `recall index` remain the explicit full builds. ([#211](https://github.com/LivioGama/pixel/pull/211))
