@@ -220,6 +220,37 @@ reviews:
         `ref_guard` or the `_pixel_marker` check says "security" in the title.
     description:
       mode: "warning"
+    # The repository is on CodeRabbit's open-source tier, which carries the
+    # Team features, so custom checks are available. Both encode
+    # CONTRIBUTING.md "Commits and pull requests" and "Changelog" as
+    # warnings: the human reviewer decides, the check only makes the gap
+    # visible.
+    custom_checks:
+      - name: "Verification evidence in PR body"
+        mode: "warning"
+        instructions: |
+          Pass when the pull request description contains a section that
+          names the gate commands run (any of `cargo fmt`, `cargo test`,
+          `cargo nextest`, `cargo clippy`, `cargo deny`, `scripts/gates.sh`,
+          or a validator for non-Rust files) with their result, and states
+          what was not run. Pass also when the diff touches no file under
+          `crates/`, `Cargo.toml`, `Cargo.lock`, `deny.toml` or `.cargo/`
+          and the description says how the change was checked instead.
+          Fail when the description has no verification section at all, or
+          when it claims the gates passed without naming a single command.
+          Do not run any command; judge the description text only.
+      - name: "Changelog fragment for user-visible change"
+        mode: "warning"
+        instructions: |
+          Pass when the title type is `docs`, `chore`, `refactor`, `test`,
+          `perf` or `release`, or when the diff adds or modifies a file
+          matching `changelog.d/*.<section>.md` whose section is one of
+          added, changed, deprecated, removed, fixed, security and whose
+          content is a single line without a leading `-`.
+          Fail when the title type is `feat` or `fix`, the diff touches a
+          file under `crates/`, and no such fragment is present, or when a
+          fragment uses a section outside the list above, or when a pull
+          request other than `release: prepare x.y.z` edits CHANGELOG.md.
 
   finishing_touches:
     # The repository's tests must encode why a behaviour matters and pass the
