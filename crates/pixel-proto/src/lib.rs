@@ -12,6 +12,7 @@ pub mod commands;
 pub mod envelope;
 pub mod epistemics;
 pub mod error;
+pub mod evaluate;
 pub mod evidence;
 pub mod op;
 pub mod query;
