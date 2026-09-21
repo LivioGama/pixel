@@ -299,6 +299,36 @@ pub enum Op {
         #[serde(default)]
         limit: Option<usize>,
     },
+    /// Bounded predicate evaluation with a witness: does a path exist from
+    /// `from` to `to` along the selected call relation? Answers
+    /// `established` with the edges that prove it, `absent_in_snapshot`
+    /// after an exhaustive traversal, or `unknown` with a typed reason —
+    /// never a guess. The daemon owns it because the answer is attributed
+    /// to a graph generation whose signature it checks against the working
+    /// tree before and after the traversal.
+    Evaluate {
+        /// `--from`: a uid (`path#qualified#kind`) or a name.
+        from: String,
+        /// `--to`: a uid or a name.
+        to: String,
+        /// `callees` (outgoing edges) or `callers` (incoming).
+        #[serde(default)]
+        traversal: Option<String>,
+        /// `exact` or `exact,probable`; selects the relation, not a
+        /// confidence threshold.
+        #[serde(default)]
+        tiers: Option<String>,
+        #[serde(default)]
+        max_depth: Option<u32>,
+        #[serde(default)]
+        time_budget_ms: Option<u64>,
+        /// Restrict name resolution to paths under this prefix.
+        #[serde(default)]
+        scope: Option<String>,
+        /// Answer about the stored snapshot: skip the after-check.
+        #[serde(default)]
+        at_snapshot: bool,
+    },
     /// IDE-style symbol rename: the graph drives the edit set (definition,
     /// resolved call/reference sites, import bindings) and a tree-sitter
     /// re-parse verifies every rewritten identifier is the symbol — sites
@@ -359,6 +389,7 @@ impl Op {
             Op::Note { .. } => "note",
             Op::Map { .. } => "map",
             Op::Plan { .. } => "plan",
+            Op::Evaluate { .. } => "evaluate",
             Op::Rename { .. } => "rename",
             Op::Shutdown => "shutdown",
             Op::Reindex { .. } => "reindex",
@@ -412,6 +443,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "note",
     "map",
     "plan",
+    "evaluate",
     "rename",
     "flow",
 ];
@@ -798,6 +830,19 @@ mod tests {
                 "plan",
             ),
             (
+                Op::Evaluate {
+                    from: String::new(),
+                    to: String::new(),
+                    traversal: None,
+                    tiers: None,
+                    max_depth: None,
+                    time_budget_ms: None,
+                    scope: None,
+                    at_snapshot: false,
+                },
+                "evaluate",
+            ),
+            (
                 Op::Rename {
                     name: "".into(),
                     new_name: "".into(),
@@ -875,6 +920,7 @@ mod tests {
             "note",
             "map",
             "plan",
+            "evaluate",
             "flow",
             "rename",
             "shutdown",

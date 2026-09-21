@@ -19,7 +19,7 @@ use crate::resolve::{
     FileCalls, FileReferences, PendingCall, PendingReference, reconsider_resolved_calls,
     resolve_all, resolve_calls, resolve_references,
 };
-use crate::store::{EdgeKind, GraphStore, extract_crux};
+use crate::store::{EdgeKind, GraphStore, StoreError, extract_crux};
 
 /// Extract concepts for a file and insert them, linking each to the smallest
 /// enclosing symbol (by line range) when one exists. `symbol_ids` are the ids
@@ -153,8 +153,53 @@ const DEFAULT_GRAPH_MAX_FILES: usize = 50_000;
 /// The build-time file cap in force, as an evaluation reports it: `None`
 /// when the environment lifted it, so "the cap was hit" is never claimed
 /// where no cap applies.
+///
+/// This reads the *current* environment, so it is only correct at build
+/// time. An evaluation must ask [`stored_graph_file_cap`] what the loaded
+/// graph was actually built under.
 pub fn graph_file_cap() -> Option<usize> {
     graph_max_files().filter(|&n| n != usize::MAX)
+}
+
+/// Meta key: the file cap that was in force when the graph was last built
+/// in full.
+pub const GRAPH_FILE_CAP_KEY: &str = "graph_file_cap";
+
+/// The [`GRAPH_FILE_CAP_KEY`] value recording that no cap applied, kept
+/// distinct from a missing key: "the walk was unbounded" is a fact the
+/// build knows, while a missing key only means nobody recorded one.
+const GRAPH_FILE_CAP_NONE: &str = "none";
+
+/// The file cap the loaded graph was actually built under, `None` when the
+/// build walked the tree unbounded.
+///
+/// An evaluation must use this rather than [`graph_file_cap`]: the cap
+/// lives in the environment, and a daemon restarted with a different
+/// `PIXEL_GRAPH_MAX_FILES` would otherwise describe the loaded graph with a
+/// ceiling that never applied to it. That drift runs both ways, and the
+/// dangerous direction is a cap *raised* after a truncated build: the
+/// indexed count then falls below the new ceiling and the coverage flag
+/// reports `false` for a walk that did stop at a cap, narrowing a published
+/// limit instead of widening it.
+///
+/// A graph written before this key existed reports the built-in default
+/// rather than today's environment. Both are guesses about a build nobody
+/// recorded, but the constant cannot drift between build and evaluation,
+/// and the next full build replaces it with the truth.
+pub fn stored_graph_file_cap(store: &GraphStore) -> Result<Option<usize>, StoreError> {
+    match store.meta_get(GRAPH_FILE_CAP_KEY)? {
+        Some(value) if value == GRAPH_FILE_CAP_NONE => Ok(None),
+        Some(value) => Ok(value
+            .parse::<usize>()
+            .ok()
+            .or(Some(DEFAULT_GRAPH_MAX_FILES))),
+        None => Ok(Some(DEFAULT_GRAPH_MAX_FILES)),
+    }
+}
+
+/// [`GRAPH_FILE_CAP_KEY`]'s value for the cap a build ran under.
+fn graph_file_cap_value(cap: Option<usize>) -> String {
+    cap.map_or_else(|| GRAPH_FILE_CAP_NONE.to_string(), |n| n.to_string())
 }
 
 fn graph_max_files() -> Option<usize> {
@@ -442,6 +487,10 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
         .into());
     }
     store.meta_set(EXTRACTOR_VERSION_KEY, EXTRACTOR_VERSION)?;
+    // Before the signature on purpose: a crash between the two leaves the
+    // graph unsigned, and an unsigned graph is refused rather than read, so
+    // no evaluation can see a cap that belongs to a half-written build.
+    store.meta_set(GRAPH_FILE_CAP_KEY, &graph_file_cap_value(graph_file_cap()))?;
     store.meta_set(FRESHNESS_KEY, &snapshot_signature)?;
 
     let (files, symbols, edges, unresolved) = store.counts()?;
@@ -1083,6 +1132,29 @@ mod tests {
     use crate::resolve::{Decision, ResolveIndex};
     use crate::store::Tier;
 
+    /// `graph_file_cap` is what an evaluation quotes when it says the build
+    /// stopped at the cap, so the number it reports has to be the cap the
+    /// walk actually enforces, and `None` has to mean "no cap applies"
+    /// rather than "the default".
+    ///
+    /// Reads the ambient environment on purpose: `PIXEL_GRAPH_MAX_FILES` is
+    /// unset everywhere this suite runs, and setting it here would be
+    /// process-global, capping the walk of every graph built concurrently
+    /// by another test in this binary.
+    #[test]
+    fn the_reported_build_file_cap_should_be_the_default_when_nothing_overrides_it() {
+        assert!(
+            std::env::var_os("PIXEL_GRAPH_MAX_FILES").is_none(),
+            "this test describes the unconfigured default; the variable is set"
+        );
+        assert_eq!(
+            graph_file_cap(),
+            Some(DEFAULT_GRAPH_MAX_FILES),
+            "an unconfigured build is capped, and the cap it reports is the \
+             one `collect_files` stops at"
+        );
+    }
+
     fn tmpdir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(
             "pixel-graph-{tag}-{}-{}",
@@ -1221,14 +1293,14 @@ mod tests {
 
         let store = GraphStore::open(&db).unwrap();
         // Cross-file: main -> greet must be an Exact (T1 import-resolved) edge.
-        let greet = &store.symbols_by_name("greet", 10).unwrap()[0];
+        let greet = &store.symbols_by_name("greet", None, 10).unwrap()[0];
         let callers = store.edges_to(greet.id, Some(EdgeKind::Calls)).unwrap();
         assert_eq!(callers.len(), 1, "exactly one caller of greet");
         assert_eq!(callers[0].tier, Tier::Exact);
-        let main_sym = &store.symbols_by_name("main", 10).unwrap()[0];
+        let main_sym = &store.symbols_by_name("main", None, 10).unwrap()[0];
         assert_eq!(callers[0].src_id, main_sym.id, "caller is b.ts main");
         // Same-file Rust: run -> helper Exact (T0).
-        let helper = &store.symbols_by_name("helper", 10).unwrap()[0];
+        let helper = &store.symbols_by_name("helper", None, 10).unwrap()[0];
         let hcallers = store.edges_to(helper.id, Some(EdgeKind::Calls)).unwrap();
         assert_eq!(hcallers.len(), 1);
         assert_eq!(hcallers[0].tier, Tier::Exact);
@@ -1262,7 +1334,7 @@ mod tests {
         assert!(is_fresh(&root, &db));
 
         let store = GraphStore::open(&db).unwrap();
-        let greet = &store.symbols_by_name("greet", 10).unwrap()[0];
+        let greet = &store.symbols_by_name("greet", None, 10).unwrap()[0];
         let callers = store.edges_to(greet.id, Some(EdgeKind::Calls)).unwrap();
         assert_eq!(
             callers.len(),
@@ -1316,8 +1388,8 @@ mod tests {
         let mut paths: Vec<String> = store.files().unwrap().into_iter().map(|f| f.path).collect();
         paths.sort();
         assert_eq!(paths, ["a.ts", "b.ts", "d.ts"]);
-        assert!(store.symbols_by_name("gamma", 5).unwrap().is_empty());
-        assert_eq!(store.symbols_by_name("delta", 5).unwrap().len(), 1);
+        assert!(store.symbols_by_name("gamma", None, 5).unwrap().is_empty());
+        assert_eq!(store.symbols_by_name("delta", None, 5).unwrap().len(), 1);
         drop(store);
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1380,7 +1452,7 @@ mod tests {
                 "{importer}: import must resolve to b.ts"
             );
         }
-        let helper = &store.symbols_by_name("helper", 5).unwrap()[0];
+        let helper = &store.symbols_by_name("helper", None, 5).unwrap()[0];
         let callers = store.edges_to(helper.id, Some(EdgeKind::Calls)).unwrap();
         assert_eq!(callers.len(), 2, "work() and other() both call helper()");
         assert!(
@@ -1402,7 +1474,7 @@ mod tests {
         let db = root.join(".pixel").join("graph.db");
         build_graph(&root, &db).unwrap();
         let store = GraphStore::open(&db).unwrap();
-        let alpha = &store.symbols_by_name("alpha", 5).unwrap()[0];
+        let alpha = &store.symbols_by_name("alpha", None, 5).unwrap()[0];
         store
             .conn()
             .execute_batch(&format!(
@@ -1910,7 +1982,7 @@ mod tests {
         build_graph(&root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
-        let parse = &store.symbols_by_name("parse", 10).unwrap()[0];
+        let parse = &store.symbols_by_name("parse", None, 10).unwrap()[0];
         let callers = store.edges_to(parse.id, Some(EdgeKind::Calls)).unwrap();
         // At least the bare `parse("42")` call resolves (Exact, T1 imported).
         let exact: Vec<_> = callers.iter().filter(|e| e.tier == Tier::Exact).collect();
@@ -2077,7 +2149,7 @@ mod tests {
         build_graph(&root, &db).unwrap();
         {
             let store = GraphStore::open(&db).unwrap();
-            let target = store.symbols_by_name("target", 10).unwrap().remove(0);
+            let target = store.symbols_by_name("target", None, 10).unwrap().remove(0);
             assert_eq!(
                 store
                     .edges_to(target.id, Some(EdgeKind::Calls))
@@ -2090,7 +2162,7 @@ mod tests {
         std::fs::write(root.join("c.ts"), "export function target() {}\n").unwrap();
         update_file(&root, &db, "c.ts").unwrap();
         let store = GraphStore::open(&db).unwrap();
-        for target in store.symbols_by_name("target", 10).unwrap() {
+        for target in store.symbols_by_name("target", None, 10).unwrap() {
             assert!(
                 store
                     .edges_to(target.id, Some(EdgeKind::Calls))
@@ -2210,7 +2282,7 @@ mod tests {
         build_graph(&root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
-        let name = &store.symbols_by_name("name", 10).unwrap()[0];
+        let name = &store.symbols_by_name("name", None, 10).unwrap()[0];
         assert!(
             store
                 .edges_to(name.id, Some(EdgeKind::References))
@@ -2244,11 +2316,11 @@ mod tests {
         build_graph(&root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
-        let button = &store.symbols_by_name("Button", 10).unwrap()[0];
+        let button = &store.symbols_by_name("Button", None, 10).unwrap()[0];
         let callers = store.edges_to(button.id, Some(EdgeKind::Calls)).unwrap();
         assert_eq!(callers.len(), 1, "{callers:?}");
         assert_eq!(callers[0].tier, Tier::Exact, "import-bound");
-        let app = &store.symbols_by_name("App", 10).unwrap()[0];
+        let app = &store.symbols_by_name("App", None, 10).unwrap()[0];
         assert_eq!(callers[0].src_id, app.id);
         assert!(!store.envelope_for_name("div").unwrap().lower_bound);
         assert!(!store.envelope_for_name("button").unwrap().lower_bound);
@@ -2279,7 +2351,9 @@ mod tests {
         build_graph(&root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
-        let plugin = &store.symbols_by_name("tenantScopePlugin", 10).unwrap()[0];
+        let plugin = &store
+            .symbols_by_name("tenantScopePlugin", None, 10)
+            .unwrap()[0];
         // A References edge should point to tenantScopePlugin from setup.
         let ref_edges = store
             .edges_to(plugin.id, Some(EdgeKind::References))
@@ -2291,7 +2365,7 @@ mod tests {
         );
         assert_eq!(ref_edges[0].tier, Tier::Probable);
         // The source should be the `setup` symbol.
-        let setup = &store.symbols_by_name("setup", 10).unwrap()[0];
+        let setup = &store.symbols_by_name("setup", None, 10).unwrap()[0];
         assert_eq!(ref_edges[0].src_id, setup.id);
         // No Calls edge should exist (plugin is a method call on schema, not
         // a direct call to tenantScopePlugin).
@@ -2391,5 +2465,69 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The cap a build ran under must survive the process that built it.
+    ///
+    /// It lives in the environment, and the graph outlives the daemon, so
+    /// an evaluation that re-read the environment would describe a stored
+    /// graph with a ceiling that never applied to it.
+    #[test]
+    fn a_full_build_should_record_the_file_cap_it_ran_under() {
+        let root = tmpdir("records-file-cap");
+        std::fs::write(root.join("a.ts"), "export function target() {}\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+
+        let store = GraphStore::open(&db).unwrap();
+        assert_eq!(
+            stored_graph_file_cap(&store).unwrap(),
+            graph_file_cap(),
+            "the published graph must carry the cap the walk actually used"
+        );
+        assert!(
+            store.meta_get(GRAPH_FILE_CAP_KEY).unwrap().is_some(),
+            "the key must be written, not merely defaulted to on read"
+        );
+    }
+
+    /// "No cap applied" is a fact the build knows; a missing key is not.
+    #[test]
+    fn a_recorded_cap_should_be_read_back_including_its_disabled_state() {
+        let root = tmpdir("read-file-cap");
+        std::fs::write(root.join("a.ts"), "export function target() {}\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+
+        store.meta_set(GRAPH_FILE_CAP_KEY, "none").unwrap();
+        assert_eq!(
+            stored_graph_file_cap(&store).unwrap(),
+            None,
+            "an unbounded walk has no ceiling to report"
+        );
+
+        store.meta_set(GRAPH_FILE_CAP_KEY, "7").unwrap();
+        assert_eq!(stored_graph_file_cap(&store).unwrap(), Some(7));
+
+        // A graph written before the key existed, and one whose value no
+        // longer parses, both fall back to the built-in default rather than
+        // to whatever this process's environment happens to say.
+        for unusable in ["", "not-a-number"] {
+            store.meta_set(GRAPH_FILE_CAP_KEY, unusable).unwrap();
+            assert_eq!(
+                stored_graph_file_cap(&store).unwrap(),
+                Some(DEFAULT_GRAPH_MAX_FILES),
+                "`{unusable}` must not be read as a cap"
+            );
+        }
+    }
+
+    /// The two spellings the key uses, pinned so a reader and a writer
+    /// cannot drift apart on what "no cap" looks like.
+    #[test]
+    fn the_recorded_cap_value_should_spell_a_disabled_cap_distinctly() {
+        assert_eq!(graph_file_cap_value(None), "none");
+        assert_eq!(graph_file_cap_value(Some(50_000)), "50000");
     }
 }

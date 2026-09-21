@@ -102,6 +102,13 @@ impl From<std::io::Error> for ServeError {
 /// not edits across 4+ crates).
 pub use pixel_proto::Op as Request;
 
+use crate::evaluate;
+use pixel_proto::evaluate as wire;
+
+#[cfg(test)]
+#[path = "evaluate_tests.rs"]
+mod evaluate_tests;
+
 /// The daemon response type: a `pixel_proto::Envelope<serde_json::Value>`.
 /// Success → `Envelope::success(op_name, result)`; failure →
 /// `Envelope::failure(op_name, error)`. The old ad-hoc `{ok, error, data}`
@@ -846,6 +853,25 @@ impl Service {
                 tag,
                 limit,
             } => self.op_plan(prompt.as_deref(), query.as_deref(), tag.as_deref(), limit),
+            Request::Evaluate {
+                from,
+                to,
+                traversal,
+                tiers,
+                max_depth,
+                time_budget_ms,
+                scope,
+                at_snapshot,
+            } => self.op_evaluate(EvaluateRequest {
+                from,
+                to,
+                traversal,
+                tiers,
+                max_depth,
+                time_budget_ms,
+                scope,
+                at_snapshot,
+            }),
         }
     }
 
@@ -1300,7 +1326,9 @@ impl Service {
         let built = self.ensure_graph()?;
         let store = self.graph.as_ref().unwrap();
         let files = file_map(store)?;
-        let syms = store.symbols_by_name(name, 50).map_err(|e| e.to_string())?;
+        let syms = store
+            .symbols_by_name(name, None, 50)
+            .map_err(|e| e.to_string())?;
         let envelope = store.envelope_for_name(name).map_err(|e| e.to_string())?;
         let mut out = json!({
             "symbols": syms.iter().map(|s| symbol_json(s, &files)).collect::<Vec<_>>(),
@@ -1708,6 +1736,186 @@ impl Service {
         Ok(out)
     }
 
+    /// `evaluate`: does a path exist from `from` to `to`, and what proves it.
+    ///
+    /// The answer is attributed to a graph generation, so the op does more
+    /// than run the traversal: it refuses to answer from a graph it cannot
+    /// name (no database, drift past the incremental threshold, a withheld
+    /// signature), and it brackets the traversal with a whole-tree check so
+    /// a negative cannot come from a tree that had already grown the edge.
+    fn op_evaluate(&mut self, req: EvaluateRequest) -> Result<Value, String> {
+        self.op_evaluate_probed(req, &mut || {})
+    }
+
+    /// [`Self::op_evaluate`] with a seam for tests: `probe` runs after the
+    /// before-check and before the after-check, which is exactly the window
+    /// a concurrent edit has to slip through.
+    fn op_evaluate_probed(
+        &mut self,
+        req: EvaluateRequest,
+        probe: &mut dyn FnMut(),
+    ) -> Result<Value, String> {
+        let args = req.parse()?;
+        let epistemics =
+            |caps: Vec<String>| derive_epistemics("evaluate", &json!({ "caps": caps })).0;
+
+        // Nothing to attribute an answer to: report it, never build one.
+        // A rebuild is a decision the caller makes with a command of its own.
+        if let Err(reason) = self.evaluate_gate()? {
+            let halted = evaluate::halted(reason, None, &args, false, epistemics(Vec::new()));
+            return serde_json::to_value(wire::Output::Evaluation(Box::new(halted)))
+                .map_err(|e| e.to_string());
+        }
+
+        let db = self.graph_db_path();
+        if self.graph.is_none() {
+            self.graph = Some(GraphStore::open(&db).map_err(|e| e.to_string())?);
+        }
+        let root = self.root.clone();
+        let store = self.graph.as_ref().expect("opened above");
+
+        // Identity and rows come from one handle, so they are one
+        // generation: the incremental writers commit rows and signature in
+        // a single transaction, so no interleaving can show one without the
+        // other.
+        let identity = match evaluate::identity(store) {
+            Ok(identity) => identity,
+            // A store that could not be read is a technical failure, not an
+            // absence: it leaves as `Err` and exits 3 rather than being
+            // published as a reason the caller would read as an answer.
+            Err(evaluate::Failure::Store(error)) => return Err(format!("evaluate: {error}")),
+            Err(evaluate::Failure::Halt(evaluate::Halt(reason))) => {
+                let halted = evaluate::halted(reason, None, &args, false, epistemics(Vec::new()));
+                return serde_json::to_value(wire::Output::Evaluation(Box::new(halted)))
+                    .map_err(|e| e.to_string());
+            }
+        };
+
+        let resolved =
+            evaluate::resolve_argument(store, "--from", &args.from, args.scope.as_deref())
+                .and_then(|from| {
+                    evaluate::resolve_argument(store, "--to", &args.to, args.scope.as_deref())
+                        .map(|to| (from, to))
+                });
+        let (from, to) = match resolved {
+            Ok(pair) => pair,
+            Err(evaluate::Failure::Store(error)) => return Err(format!("evaluate: {error}")),
+            Err(evaluate::Failure::Halt(evaluate::Halt(reason))) => {
+                let halted =
+                    evaluate::halted(reason, Some(&identity), &args, true, epistemics(Vec::new()));
+                return serde_json::to_value(wire::Output::Evaluation(Box::new(halted)))
+                    .map_err(|e| e.to_string());
+            }
+        };
+
+        probe();
+
+        let (traversal, tiers) = evaluate::request_shape(&args);
+        let mut clock = pixel_graph::predicate::WallClock::start();
+        let evaluation = pixel_graph::predicate::evaluate(
+            store,
+            pixel_graph::predicate::Request {
+                sources: &[from.id],
+                targets: &[to.id],
+                traversal,
+                tiers,
+                budget: pixel_graph::predicate::Budget {
+                    max_depth: args.max_depth,
+                    time_budget: std::time::Duration::from_millis(args.time_budget_ms),
+                },
+            },
+            &mut clock,
+        )
+        .map_err(|e| format!("evaluate: {e}"))?;
+
+        // The after-check. Skipped only under `--at-snapshot`, where the
+        // envelope says so and the answer is explicitly about the stored
+        // snapshot rather than the tree on disk.
+        if !args.at_snapshot && !evaluate::tree_matches(&root, &identity.signature) {
+            let halted = evaluate::halted(
+                wire::Reason::SnapshotChanged,
+                Some(&identity),
+                &args,
+                false,
+                epistemics(Vec::new()),
+            );
+            return serde_json::to_value(wire::Output::Evaluation(Box::new(halted)))
+                .map_err(|e| e.to_string());
+        }
+
+        let caps = evaluate_caps(&evaluation);
+        // The cap the loaded graph was built under, not the one this
+        // process happens to have in its environment: a daemon restarted
+        // with a different `PIXEL_GRAPH_MAX_FILES` must not describe an
+        // older graph with a ceiling that never applied to it.
+        let built_cap = {
+            let store = self.graph.as_ref().expect("opened above");
+            pixel_graph::build::stored_graph_file_cap(store)
+                .map_err(|error| format!("evaluate: {error}"))?
+        };
+        let file_cap_hit = self.graph_file_cap_hit(built_cap);
+        let store = self.graph.as_ref().expect("opened above");
+        let envelope = evaluate::envelope(
+            store,
+            &evaluation,
+            &identity,
+            &args,
+            epistemics(caps),
+            file_cap_hit,
+        );
+        serde_json::to_value(wire::Output::Evaluation(Box::new(envelope)))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Bring the graph to a generation an answer can name, or say why not.
+    ///
+    /// Drift under the incremental threshold is applied, as every graph op
+    /// does. Above it, and for a graph with no usable signature, the answer
+    /// is `graph_stale`: a full rebuild can take minutes and is never a side
+    /// effect of a question.
+    fn evaluate_gate(&mut self) -> Result<Result<(), wire::Reason>, String> {
+        let db = self.graph_db_path();
+        if !db.exists() {
+            return Ok(Err(wire::Reason::GraphUnavailable));
+        }
+        let delta = match bridge::tree_delta(&self.root, &db) {
+            Ok(delta) => delta,
+            Err(error) => return Err(format!("evaluate: {error}")),
+        };
+        match gate_action(delta.as_ref(), incremental_max_pct()) {
+            GateAction::Ready => Ok(Ok(())),
+            GateAction::Incremental => {
+                // `Incremental` is only ever returned for a `Some` delta.
+                if let Some(delta) = delta {
+                    self.incremental_update_info(&delta)?;
+                }
+                Ok(Ok(()))
+            }
+            GateAction::Stale => Ok(Err(wire::Reason::GraphStale)),
+        }
+    }
+
+    /// Whether the graph holds at least as many files as the build cap
+    /// admits, which is when the walk stopped at the cap rather than at the
+    /// end of the tree. Conservative: it can only over-report, and an
+    /// over-report widens the stated limits of an absence rather than
+    /// narrowing them.
+    ///
+    /// `cap` is passed in rather than read from the environment here so a
+    /// test can reach all three cases — no cap, under it, at or over it —
+    /// without setting `PIXEL_GRAPH_MAX_FILES`, which is process-global and
+    /// would cap the walk of every graph another test builds concurrently
+    /// in the same binary.
+    fn graph_file_cap_hit(&self, cap: Option<usize>) -> bool {
+        let Some(cap) = cap else {
+            return false;
+        };
+        self.graph
+            .as_ref()
+            .and_then(|store| store.counts().ok())
+            .is_some_and(|(files, _, _, _)| files >= cap as u64)
+    }
+
     fn op_graph(&mut self) -> Result<Value, String> {
         let (stats, build_ms) = self.rebuild_graph()?;
         Ok(json!({
@@ -1911,7 +2119,9 @@ impl Service {
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("no symbol with uid {uid:?}"))?
         } else {
-            let mut syms = store.symbols_by_name(name, 50).map_err(|e| e.to_string())?;
+            let mut syms = store
+                .symbols_by_name(name, None, 50)
+                .map_err(|e| e.to_string())?;
             if let Some(file) = file {
                 let rel = normalize_file_arg(&self.root, file);
                 let file_row = store
@@ -2973,6 +3183,83 @@ impl pixel_graph::concept_resolve::Reranker for EngineReranker {
     }
 }
 
+/// The `evaluate` op's arguments as they arrive on the wire, before the
+/// strings are parsed into the types the evaluation runs on.
+pub(crate) struct EvaluateRequest {
+    pub from: String,
+    pub to: String,
+    pub traversal: Option<String>,
+    pub tiers: Option<String>,
+    pub max_depth: Option<u32>,
+    pub time_budget_ms: Option<u64>,
+    pub scope: Option<String>,
+    pub at_snapshot: bool,
+}
+
+/// Default traversal depth, matching `call-path`'s long-standing cap: deep
+/// enough for the call chains people ask about, shallow enough that an
+/// answer arrives.
+pub(crate) const DEFAULT_EVALUATE_MAX_DEPTH: u32 = 8;
+/// Default wall-clock budget for the traversal itself, excluding the
+/// whole-tree checks that bracket it.
+pub(crate) const DEFAULT_EVALUATE_TIME_BUDGET_MS: u64 = 250;
+
+impl EvaluateRequest {
+    /// Parse the wire strings. An unknown `traversal` or `tiers` is a usage
+    /// error, never a silent fallback to a different relation: answering a
+    /// question the caller did not ask is the failure this whole command
+    /// exists to avoid.
+    fn parse(self) -> Result<evaluate::Args, String> {
+        let traversal = match self.traversal.as_deref() {
+            None | Some("callees") => wire::Traversal::Callees,
+            Some("callers") => wire::Traversal::Callers,
+            Some(other) => {
+                return Err(format!(
+                    "evaluate: unknown --traversal {other:?} (callees | callers)"
+                ));
+            }
+        };
+        let tiers = match self.tiers.as_deref() {
+            None => evaluate::TierSelection::Exact,
+            Some(value) => evaluate::TierSelection::parse(value).ok_or_else(|| {
+                format!("evaluate: unknown --tiers {value:?} (exact | exact,probable)")
+            })?,
+        };
+        Ok(evaluate::Args {
+            from: self.from,
+            to: self.to,
+            traversal,
+            tiers,
+            max_depth: self.max_depth.unwrap_or(DEFAULT_EVALUATE_MAX_DEPTH),
+            time_budget_ms: self
+                .time_budget_ms
+                .unwrap_or(DEFAULT_EVALUATE_TIME_BUDGET_MS),
+            scope: self.scope,
+            at_snapshot: self.at_snapshot,
+        })
+    }
+}
+
+/// The caps an evaluation hit, in the words `derive_epistemics` turns into
+/// `lower_bound`. A traversal that stopped early is a bounded answer and
+/// the envelope must say so twice: once in `coverage`, once here.
+fn evaluate_caps(evaluation: &pixel_graph::predicate::Evaluation) -> Vec<String> {
+    let mut caps = Vec::new();
+    if evaluation.coverage.depth_cap_dropped_frontier {
+        let depth = evaluation.coverage.depth_cap;
+        caps.push(format!(
+            "traversal depth cap {depth} dropped a frontier node; paths beyond it were never walked"
+        ));
+    }
+    if evaluation.coverage.time_budget_hit {
+        let ms = evaluation.coverage.time_budget_ms;
+        caps.push(format!(
+            "traversal time budget {ms}ms expired with nodes still queued"
+        ));
+    }
+    caps
+}
+
 enum Resolved {
     One(SymbolRow),
     Many(Vec<SymbolRow>),
@@ -2989,7 +3276,7 @@ fn resolve_symbol(store: &GraphStore, uid_or_name: &str) -> Result<Resolved, Str
             .ok_or_else(|| format!("no symbol with uid {uid_or_name:?}"));
     }
     let syms = store
-        .symbols_by_name(uid_or_name, 50)
+        .symbols_by_name(uid_or_name, None, 50)
         .map_err(|e| e.to_string())?;
     match syms.len() {
         0 => Err(format!("no symbol named {uid_or_name:?}")),
@@ -3405,6 +3692,40 @@ fn incremental_max_pct() -> u64 {
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|pct| *pct <= 100)
         .unwrap_or(DEFAULT_GRAPH_INCREMENTAL_MAX_PCT)
+}
+
+/// What [`Service::evaluate_gate`] must do with the delta it measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateAction {
+    /// The stored graph already describes the tree: answer from it.
+    Ready,
+    /// Drift small enough to apply before answering.
+    Incremental,
+    /// Too much drift, or no signature to compare against: refuse. A full
+    /// rebuild can take minutes and is never a side effect of a question.
+    Stale,
+}
+
+/// The gate's decision, separated from the I/O around it so that each
+/// branch is reachable from a test.
+///
+/// "Is the graph fresh" is not the same question as "is the drift small
+/// enough to apply". A fresh graph must be answered from directly: routing
+/// it through the incremental path would make a question rewrite the graph
+/// it is asking about, and `apply_tree_delta` re-signs the store even when
+/// it has no rows to change. A drifted graph must never be treated as
+/// fresh, which would answer from rows the tree no longer matches.
+fn gate_action(delta: Option<&pixel_graph::build::TreeDelta>, max_pct: u64) -> GateAction {
+    match delta {
+        Some(delta) if delta.fresh => GateAction::Ready,
+        Some(delta) if incremental_allowed(delta.changed_count(), delta.indexed_files, max_pct) => {
+            GateAction::Incremental
+        }
+        // Drift past the threshold, or no usable signature at all: built
+        // before signatures existed, or written by an update that could
+        // not sign what it committed.
+        Some(_) | None => GateAction::Stale,
+    }
 }
 
 /// Whether `changed` drifted files out of `indexed` may be applied
@@ -5690,6 +6011,148 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn delta(fresh: bool, changed: usize, indexed: usize) -> pixel_graph::build::TreeDelta {
+        pixel_graph::build::TreeDelta {
+            fresh,
+            changed: (0..changed)
+                .map(|i| (format!("src/f{i}.ts"), i as u64))
+                .collect(),
+            removed: Vec::new(),
+            indexed_files: indexed,
+            signature: "cafe".to_string(),
+        }
+    }
+
+    /// The gate turns a measured delta into one of three actions, and each
+    /// pair of them is a different promise to the caller.
+    ///
+    /// A fresh graph must be `Ready`, not `Incremental`: the incremental
+    /// path takes the store away, calls `apply_tree_delta` — which re-signs
+    /// it even with nothing to change — and reopens it, so treating fresh
+    /// as drifted makes a question write to the graph it is asking about.
+    /// A drifted graph must never be `Ready`, which would answer from rows
+    /// the tree no longer matches. And drift past the threshold is `Stale`
+    /// rather than a minutes-long rebuild nobody asked for.
+    #[test]
+    fn the_evaluate_gate_should_answer_from_a_fresh_graph_and_never_rewrite_it() {
+        assert_eq!(
+            gate_action(Some(&delta(true, 0, 10)), DEFAULT_GRAPH_INCREMENTAL_MAX_PCT),
+            GateAction::Ready,
+            "a fresh graph is answered from directly"
+        );
+        // Fresh wins even where the drift would also have been applicable:
+        // the two questions are not the same one.
+        assert_eq!(
+            gate_action(
+                Some(&delta(true, 1, 100)),
+                DEFAULT_GRAPH_INCREMENTAL_MAX_PCT
+            ),
+            GateAction::Ready
+        );
+    }
+
+    #[test]
+    fn the_evaluate_gate_should_apply_drift_under_the_threshold_before_answering() {
+        assert_eq!(
+            gate_action(
+                Some(&delta(false, 1, 100)),
+                DEFAULT_GRAPH_INCREMENTAL_MAX_PCT
+            ),
+            GateAction::Incremental,
+            "a drifted graph must not be answered from as-is"
+        );
+    }
+
+    #[test]
+    fn the_evaluate_gate_should_refuse_rather_than_rebuild_past_the_threshold() {
+        assert_eq!(
+            gate_action(
+                Some(&delta(false, 99, 100)),
+                DEFAULT_GRAPH_INCREMENTAL_MAX_PCT
+            ),
+            GateAction::Stale,
+            "a full rebuild is never a side effect of a question"
+        );
+        assert_eq!(
+            gate_action(Some(&delta(false, 1, 100)), 0),
+            GateAction::Stale,
+            "the incremental path disabled means stale, not ready"
+        );
+    }
+
+    /// No delta at all is "built before signatures existed", or written by
+    /// an update that withheld its signature. Either way the graph cannot
+    /// be shown to describe the tree, so it is stale — never ready.
+    #[test]
+    fn a_graph_with_no_usable_signature_should_be_stale() {
+        assert_eq!(
+            gate_action(None, DEFAULT_GRAPH_INCREMENTAL_MAX_PCT),
+            GateAction::Stale
+        );
+        assert_eq!(gate_action(None, 100), GateAction::Stale);
+    }
+
+    fn evaluation_with(
+        depth_cap: u32,
+        depth_cap_dropped_frontier: bool,
+        time_budget_ms: u64,
+        time_budget_hit: bool,
+    ) -> pixel_graph::predicate::Evaluation {
+        pixel_graph::predicate::Evaluation {
+            status: pixel_graph::predicate::Status::AbsentInSnapshot,
+            traversal: pixel_graph::predicate::Traversal::Callees,
+            coverage: pixel_graph::predicate::Coverage {
+                traversal_exhausted: true,
+                depth_cap,
+                depth_cap_dropped_frontier,
+                time_budget_ms,
+                time_budget_hit,
+                visited: 3,
+                unresolved_same_name_sites: 0,
+                tiers: vec![pixel_graph::Tier::Exact],
+                edge_kinds: Vec::new(),
+            },
+            witness: pixel_graph::predicate::Witness::None,
+        }
+    }
+
+    /// A cap that fired is what turns an answer into a lower bound, and
+    /// `derive_epistemics` reads exactly this list: empty means
+    /// `lower_bound: false`, i.e. "nothing cut this answer short". So the
+    /// list has to be empty when no cap fired and has to name the cap that
+    /// did, with the number that would raise it — a placeholder string
+    /// would set the flag while telling the caller nothing to act on.
+    #[test]
+    fn an_evaluation_that_hit_no_cap_should_claim_none() {
+        assert!(evaluate_caps(&evaluation_with(8, false, 2_000, false)).is_empty());
+    }
+
+    #[test]
+    fn a_dropped_frontier_should_be_named_as_a_cap_with_the_depth_to_raise() {
+        let caps = evaluate_caps(&evaluation_with(8, true, 2_000, false));
+        assert_eq!(caps.len(), 1, "{caps:?}");
+        assert!(caps[0].contains("depth cap 8"), "{caps:?}");
+        assert!(caps[0].contains("frontier"), "{caps:?}");
+    }
+
+    #[test]
+    fn an_expired_time_budget_should_be_named_as_a_cap_with_its_duration() {
+        let caps = evaluate_caps(&evaluation_with(8, false, 2_000, true));
+        assert_eq!(caps.len(), 1, "{caps:?}");
+        assert!(caps[0].contains("2000ms"), "{caps:?}");
+        assert!(caps[0].contains("budget"), "{caps:?}");
+    }
+
+    /// Both caps firing must both be reported: a reader raising only the
+    /// one they were told about would get the same truncated answer again.
+    #[test]
+    fn both_caps_firing_should_both_be_reported() {
+        let caps = evaluate_caps(&evaluation_with(4, true, 50, true));
+        assert_eq!(caps.len(), 2, "{caps:?}");
+        assert!(caps.iter().any(|c| c.contains("depth cap 4")), "{caps:?}");
+        assert!(caps.iter().any(|c| c.contains("50ms")), "{caps:?}");
     }
 
     /// The incremental/full decision is what keeps an agent's

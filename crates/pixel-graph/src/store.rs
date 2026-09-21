@@ -1102,13 +1102,39 @@ impl GraphStore {
             .optional()?)
     }
 
-    pub fn symbols_by_name(&self, name: &str, limit: u32) -> Result<Vec<SymbolRow>> {
+    /// The symbols called `name`, optionally only those under `scope`,
+    /// capped at `limit`.
+    ///
+    /// `scope` is part of the query rather than something a caller filters
+    /// out of the result, because the cap applies to what the query
+    /// returns. Narrowed afterwards, a name with more homonyms than the cap
+    /// would come back empty for a directory that plainly contains it —
+    /// or, worse, with the one row that happened to fit, which then looks
+    /// unique while its rivals sit unseen beyond the cap.
+    ///
+    /// A scope is a directory: it covers itself and its descendants, never
+    /// a sibling that merely shares a leading substring (`src/foo` covers
+    /// `src/foo/x.ts`, not `src/foobar.ts`).
+    pub fn symbols_by_name(
+        &self,
+        name: &str,
+        scope: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SymbolRow>> {
+        // One statement for both shapes: an absent scope binds as NULL and
+        // the clause drops out. Two queries here would be two things to
+        // keep in step, which is how the scoped read drifted from the plain
+        // one in the first place.
         let sql = format!(
-            "SELECT {} FROM symbols WHERE name = ?1 ORDER BY kind, uid LIMIT ?2",
+            "SELECT {} FROM symbols WHERE name = ?1 \
+               AND (?2 IS NULL OR file_id IN \
+                 (SELECT id FROM files \
+                   WHERE path = ?2 OR substr(path, 1, length(?2) + 1) = ?2 || '/')) \
+             ORDER BY kind, uid LIMIT ?3",
             Self::SYMBOL_COLS
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![name, limit], Self::row_to_symbol)?;
+        let rows = stmt.query_map(params![name, scope, limit], Self::row_to_symbol)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 

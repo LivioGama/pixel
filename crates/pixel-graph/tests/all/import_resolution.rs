@@ -210,7 +210,7 @@ fn graph_build_and_incremental_refresh_do_not_invent_ambiguous_import_edges() {
             ("go_caller", "ParseGo", "svc/caller/main.go"),
             ("java_caller", "parse_java", "apps/caller/Main.java"),
         ] {
-            let caller = store.symbols_by_name(caller, 10).unwrap();
+            let caller = store.symbols_by_name(caller, None, 10).unwrap();
             assert_eq!(caller.len(), 1);
             assert!(
                 store

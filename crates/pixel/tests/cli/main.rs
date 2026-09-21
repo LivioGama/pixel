@@ -4,6 +4,7 @@
 
 mod ask_contract;
 mod docs_drift;
+mod evaluate_cli;
 #[cfg(unix)]
 mod flow_cli;
 mod guard_deny;

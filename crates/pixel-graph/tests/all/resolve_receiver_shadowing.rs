@@ -52,13 +52,13 @@ fn qualified_call_no_longer_links_the_callers_own_same_name_symbol() {
         .unwrap()
         .unwrap();
     let bridge_f = store
-        .symbols_by_name("f", 10)
+        .symbols_by_name("f", None, 10)
         .unwrap()
         .into_iter()
         .find(|s| s.file_id == bridge_file.id)
         .expect("bridge's own `f` is extracted");
     let bridge_g = store
-        .symbols_by_name("g", 10)
+        .symbols_by_name("g", None, 10)
         .unwrap()
         .into_iter()
         .find(|s| s.file_id == bridge_file.id)
@@ -132,7 +132,7 @@ fn sole_inherent_method_with_a_value_receiver_becomes_a_probable_edge() {
     let store = GraphStore::open(&db).unwrap();
 
     let push_call = store
-        .symbols_by_name("push_call", 10)
+        .symbols_by_name("push_call", None, 10)
         .unwrap()
         .into_iter()
         .find(|s| s.kind == SymbolKind::Method)
@@ -145,7 +145,7 @@ fn sole_inherent_method_with_a_value_receiver_becomes_a_probable_edge() {
         "the receiver's type is unknown: never Exact"
     );
     let walk = store
-        .symbols_by_name("walk", 10)
+        .symbols_by_name("walk", None, 10)
         .unwrap()
         .into_iter()
         .find(|s| s.file_id == push_call.file_id)
@@ -182,7 +182,7 @@ fn trait_impl_method_with_a_value_receiver_stays_unresolved() {
     let store = GraphStore::open(&db).unwrap();
 
     let clone = store
-        .symbols_by_name("clone", 10)
+        .symbols_by_name("clone", None, 10)
         .unwrap()
         .into_iter()
         .find(|s| s.kind == SymbolKind::Method)
@@ -234,7 +234,7 @@ fn receiver_path_type_selects_the_right_constructor() {
     build_graph(root.path(), &db).unwrap();
     let store = GraphStore::open(&db).unwrap();
 
-    let opens = store.symbols_by_name("open", 10).unwrap();
+    let opens = store.symbols_by_name("open", None, 10).unwrap();
     assert_eq!(opens.len(), 2, "both constructors extracted: {opens:?}");
     let store_open = opens
         .iter()
@@ -244,7 +244,10 @@ fn receiver_path_type_selects_the_right_constructor() {
         .iter()
         .find(|s| s.uid.contains("Other::open"))
         .unwrap();
-    let connect = store.symbols_by_name("connect", 10).unwrap().remove(0);
+    let connect = store
+        .symbols_by_name("connect", None, 10)
+        .unwrap()
+        .remove(0);
 
     let edges = store.edges_from(connect.id, Some(EdgeKind::Calls)).unwrap();
     assert_eq!(edges.len(), 1, "one call site, one edge: {edges:?}");
@@ -290,7 +293,10 @@ fn two_same_named_types_keep_the_path_call_unresolved() {
     build_graph(root.path(), &db).unwrap();
     let store = GraphStore::open(&db).unwrap();
 
-    let connect = store.symbols_by_name("connect", 10).unwrap().remove(0);
+    let connect = store
+        .symbols_by_name("connect", None, 10)
+        .unwrap()
+        .remove(0);
     assert!(
         store
             .edges_from(connect.id, Some(EdgeKind::Calls))
