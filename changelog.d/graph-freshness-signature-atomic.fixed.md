@@ -1,1 +1,0 @@
-Incremental graph updates (the daemon watcher batch and the drift delta a graph command applies on first use) committed their rows and the freshness signature in one SQLite transaction, invalidated the signature whenever the tree drifted while they ran, and kept one final action per path in a batch, so a cold open no longer served stale symbols as fresh.
