@@ -821,6 +821,13 @@ fn lazy_catch_up(store: &mut RecallStore) -> usize {
     lazy_catch_up_with(store, adapters(None).unwrap_or_default())
 }
 
+/// Unit key for the per-agent scan watermark: written after every catch-up
+/// pass, even when nothing was new — otherwise an agent whose transcripts
+/// are unchanged (or absent) never advances `last_ingest_at` and every
+/// query older than LAZY_FRESH_MS would re-walk its whole store. Not a real
+/// path, so it can never collide with a unit key.
+const PROBE_UNIT_KEY: &str = "@probe";
+
 fn lazy_catch_up_with(store: &mut RecallStore, adapters: Vec<Box<dyn SourceAdapter>>) -> usize {
     let now = now_ms();
     let mut new_turns = 0usize;
@@ -830,7 +837,20 @@ fn lazy_catch_up_with(store: &mut RecallStore, adapters: Vec<Box<dyn SourceAdapt
             continue;
         }
         match ingest_recent(store, adapter.as_ref(), now, lazy_window_ms(last, now)) {
-            Ok(r) => new_turns += r.turns_written,
+            Ok(r) => {
+                new_turns += r.turns_written;
+                // Advance the watermark on a clean pass even at zero writes.
+                let _ = store.touch_state(
+                    adapter.agent(),
+                    PROBE_UNIT_KEY,
+                    &pixel_recall::store::IngestState {
+                        file_size: 0,
+                        mtime_ms: 0,
+                        bytes_ingested: 0,
+                        cursor: None,
+                    },
+                );
+            }
             Err(e) => eprintln!("recall lazy ingest ({}): {e}", adapter.agent()),
         }
     }
@@ -1488,6 +1508,36 @@ mod tests {
             (written, discovered.get(), parsed.get()),
             (0, 1, 1),
             "back-to-back catch-up must be a no-op"
+        );
+    }
+
+    /// An agent whose units all fall outside the window writes nothing —
+    /// but the probe still advances its watermark, so the next catch-up
+    /// skips discovery instead of re-walking an unchanged store.
+    #[test]
+    fn lazy_catch_up_probe_skips_agents_with_nothing_to_ingest() {
+        let root = scratch_root("lazy-probe");
+        let mut store = RecallStore::open(&root.join("recall.db")).unwrap();
+        let ancient = || SourceUnit {
+            unit_key: "old".to_string(),
+            path: root.join("old"),
+            size: 42,
+            mtime_ms: 1, // far outside the cold window
+        };
+        let (discovered, parsed) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+        let written = lazy_catch_up_with(
+            &mut store,
+            vec![stub("stub", vec![ancient()], &discovered, &parsed)],
+        );
+        assert_eq!((written, discovered.get(), parsed.get()), (0, 1, 0));
+        let written = lazy_catch_up_with(
+            &mut store,
+            vec![stub("stub", vec![ancient()], &discovered, &parsed)],
+        );
+        assert_eq!(
+            (written, discovered.get()),
+            (0, 1),
+            "the probe watermark must skip the second walk"
         );
     }
 
