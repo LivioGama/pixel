@@ -141,6 +141,7 @@ fn upgrade_shutdown_is_scoped_to_selected_repository() {
     let selected = UnixListener::bind(&selected_socket).unwrap();
     let unrelated = UnixListener::bind(fixture.socket(&fixture.0.join("other"))).unwrap();
     unrelated.set_nonblocking(true).unwrap();
+    let (response_sent, response_received) = std::sync::mpsc::sync_channel(1);
     let server = std::thread::spawn(move || {
         let mut stream = accept_within(&selected, Duration::from_secs(10));
         stream
@@ -155,13 +156,23 @@ fn upgrade_shutdown_is_scoped_to_selected_repository() {
         let response =
             pixel_proto::Envelope::success("shutdown", serde_json::json!({"stopping": true}));
         writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
-        // A real daemon's shutdown unlinks its socket; removing the file is
-        // what `upgrade_daemon_socket_stopped` watches for.
         drop(stream);
         drop(selected);
-        std::fs::remove_file(selected_socket).unwrap();
+        response_sent.send(()).unwrap();
     });
-    let (output, timed_out) = fixture.upgrade();
+    let (output, timed_out) = std::thread::scope(|scope| {
+        let upgrade = scope.spawn(|| fixture.upgrade());
+        response_received
+            .recv_timeout(Duration::from_secs(10))
+            .expect("fake daemon must acknowledge shutdown");
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !upgrade.is_finished(),
+            "upgrade completed while the daemon socket still existed"
+        );
+        std::fs::remove_file(&selected_socket).unwrap();
+        upgrade.join().unwrap()
+    });
     server.join().unwrap();
     assert!(!timed_out, "upgrade exceeded bounded fixture deadline");
     assert!(output.status.success(), "{output:?}");
@@ -173,6 +184,45 @@ fn upgrade_shutdown_is_scoped_to_selected_repository() {
         std::fs::read(fixture.0.join("installed/pixel")).unwrap(),
         b"candidate fixture bytes\n"
     );
+}
+
+/// A socket inspection failure is not equivalent to a daemon that removed
+/// its socket: the upgrade must report the error and withhold completion.
+#[test]
+fn upgrade_reports_socket_inspection_error_after_shutdown() {
+    let fixture = Fixture::new("inspect-error");
+    let selected_socket = fixture.socket(&fixture.0);
+    let runtime_dir = selected_socket.parent().unwrap().to_path_buf();
+    let selected = UnixListener::bind(&selected_socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = accept_within(&selected, Duration::from_secs(10));
+        stream
+            .set_read_timeout(Some(Duration::from_secs(4)))
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let request: pixel_daemon::Request = serde_json::from_str(&line).unwrap();
+        assert!(matches!(request, pixel_daemon::Request::Shutdown));
+        drop(selected);
+        std::fs::remove_file(&selected_socket).unwrap();
+        std::fs::remove_dir(&runtime_dir).unwrap();
+        std::os::unix::fs::symlink(&runtime_dir, &runtime_dir).unwrap();
+        let response =
+            pixel_proto::Envelope::success("shutdown", serde_json::json!({"stopping": true}));
+        writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
+    });
+    let (output, timed_out) = fixture.upgrade();
+    server.join().unwrap();
+    assert!(!timed_out, "upgrade exceeded bounded fixture deadline");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not inspect daemon socket"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Upgrade complete"), "{stderr}");
 }
 
 /// A daemon that accepts the request and then withholds the reply must not
