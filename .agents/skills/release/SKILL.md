@@ -25,7 +25,7 @@ jobs, each needing the previous one:
 Three facts shape everything below:
 
 - **The macOS binary is first compiled by the tag, and first run by
-  `smoke`.** `ci.yml` and `cross-build.yml` run on `ubuntu-latest` only; a
+  `smoke`.** `ci.yml` and `cross-build.yml` run on `ubuntu-26.04` only; a
   green `main` proves the musl lane, never `aarch64-apple-darwin`.
 - **A published release is immutable.** GitHub's release immutability is on:
   once `release` has published, its assets cannot be added, replaced or
