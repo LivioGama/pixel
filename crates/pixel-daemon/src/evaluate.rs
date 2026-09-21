@@ -171,15 +171,11 @@ pub fn resolve_argument(
     if value.contains('#') {
         return store.symbol_by_uid(value)?.ok_or_else(not_found);
     }
-    // The scope belongs in the query, not in a filter over its result: see
-    // [`GraphStore::symbols_by_name_in_scope`] for why capping first would
-    // let the cap invent both absences and false unique matches.
-    let rows = match scope {
-        None => store.symbols_by_name(value, NAME_LOOKUP_LIMIT)?,
-        Some(prefix) => {
-            store.symbols_by_name_in_scope(value, &normalize_scope(prefix), NAME_LOOKUP_LIMIT)?
-        }
-    };
+    // The scope goes into the query, never over its result: see
+    // [`GraphStore::symbols_by_name`] for why narrowing a capped page lets
+    // the cap invent both absences and false unique matches.
+    let scope = scope.map(normalize_scope);
+    let rows = store.symbols_by_name(value, scope.as_deref(), NAME_LOOKUP_LIMIT)?;
     match rows.len() {
         0 => Err(not_found()),
         1 => Ok(rows.into_iter().next().expect("length checked")),

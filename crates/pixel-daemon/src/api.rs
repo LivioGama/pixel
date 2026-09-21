@@ -1326,7 +1326,9 @@ impl Service {
         let built = self.ensure_graph()?;
         let store = self.graph.as_ref().unwrap();
         let files = file_map(store)?;
-        let syms = store.symbols_by_name(name, 50).map_err(|e| e.to_string())?;
+        let syms = store
+            .symbols_by_name(name, None, 50)
+            .map_err(|e| e.to_string())?;
         let envelope = store.envelope_for_name(name).map_err(|e| e.to_string())?;
         let mut out = json!({
             "symbols": syms.iter().map(|s| symbol_json(s, &files)).collect::<Vec<_>>(),
@@ -2117,7 +2119,9 @@ impl Service {
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("no symbol with uid {uid:?}"))?
         } else {
-            let mut syms = store.symbols_by_name(name, 50).map_err(|e| e.to_string())?;
+            let mut syms = store
+                .symbols_by_name(name, None, 50)
+                .map_err(|e| e.to_string())?;
             if let Some(file) = file {
                 let rel = normalize_file_arg(&self.root, file);
                 let file_row = store
@@ -3272,7 +3276,7 @@ fn resolve_symbol(store: &GraphStore, uid_or_name: &str) -> Result<Resolved, Str
             .ok_or_else(|| format!("no symbol with uid {uid_or_name:?}"));
     }
     let syms = store
-        .symbols_by_name(uid_or_name, 50)
+        .symbols_by_name(uid_or_name, None, 50)
         .map_err(|e| e.to_string())?;
     match syms.len() {
         0 => Err(format!("no symbol named {uid_or_name:?}")),

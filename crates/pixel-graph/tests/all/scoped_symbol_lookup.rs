@@ -1,4 +1,4 @@
-//! `GraphStore::symbols_by_name_in_scope`: the store-level contract that
+//! `GraphStore::symbols_by_name` with a scope: the store-level contract that
 //! `pixel evaluate --in` rests on.
 //!
 //! These live beside the daemon's end-to-end resolution tests rather than
@@ -34,7 +34,7 @@ fn store_with(name: &str, paths: &[&str]) -> GraphStore {
 
 fn paths_of(store: &GraphStore, name: &str, scope: &str, limit: u32) -> Vec<String> {
     let mut found: Vec<String> = store
-        .symbols_by_name_in_scope(name, scope, limit)
+        .symbols_by_name(name, Some(scope), limit)
         .unwrap()
         .into_iter()
         .map(|row| {

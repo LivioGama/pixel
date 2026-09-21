@@ -331,11 +331,11 @@ pub fn resolve(
         tiers_attempted.push(Tier::Ident);
         // Try the exact original phrase first (symbol names are
         // case-sensitive in the DB).
-        let mut syms = store.symbols_by_name(phrase, candidate_limit)?;
+        let mut syms = store.symbols_by_name(phrase, None, candidate_limit)?;
         // If no exact-case hit, try the normalized (lowercased) form —
         // handles lowercase queries like "guard_matcher".
         if syms.is_empty() {
-            syms = store.symbols_by_name(&norm, candidate_limit)?;
+            syms = store.symbols_by_name(&norm, None, candidate_limit)?;
         }
         if !syms.is_empty() {
             let ident_capped = syms.len() as u32 >= candidate_limit;

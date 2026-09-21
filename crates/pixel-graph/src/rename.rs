@@ -740,7 +740,7 @@ mod tests {
 
     fn login_sym(store: &GraphStore) -> SymbolRow {
         store
-            .symbols_by_name("loginUser", 10)
+            .symbols_by_name("loginUser", None, 10)
             .unwrap()
             .into_iter()
             .find(|s| s.name == "loginUser")

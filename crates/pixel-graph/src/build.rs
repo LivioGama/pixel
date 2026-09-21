@@ -1293,14 +1293,14 @@ mod tests {
 
         let store = GraphStore::open(&db).unwrap();
         // Cross-file: main -> greet must be an Exact (T1 import-resolved) edge.
-        let greet = &store.symbols_by_name("greet", 10).unwrap()[0];
+        let greet = &store.symbols_by_name("greet", None, 10).unwrap()[0];
         let callers = store.edges_to(greet.id, Some(EdgeKind::Calls)).unwrap();
         assert_eq!(callers.len(), 1, "exactly one caller of greet");
         assert_eq!(callers[0].tier, Tier::Exact);
-        let main_sym = &store.symbols_by_name("main", 10).unwrap()[0];
+        let main_sym = &store.symbols_by_name("main", None, 10).unwrap()[0];
         assert_eq!(callers[0].src_id, main_sym.id, "caller is b.ts main");
         // Same-file Rust: run -> helper Exact (T0).
-        let helper = &store.symbols_by_name("helper", 10).unwrap()[0];
+        let helper = &store.symbols_by_name("helper", None, 10).unwrap()[0];
         let hcallers = store.edges_to(helper.id, Some(EdgeKind::Calls)).unwrap();
         assert_eq!(hcallers.len(), 1);
         assert_eq!(hcallers[0].tier, Tier::Exact);
@@ -1334,7 +1334,7 @@ mod tests {
         assert!(is_fresh(&root, &db));
 
         let store = GraphStore::open(&db).unwrap();
-        let greet = &store.symbols_by_name("greet", 10).unwrap()[0];
+        let greet = &store.symbols_by_name("greet", None, 10).unwrap()[0];
         let callers = store.edges_to(greet.id, Some(EdgeKind::Calls)).unwrap();
         assert_eq!(
             callers.len(),
@@ -1388,8 +1388,8 @@ mod tests {
         let mut paths: Vec<String> = store.files().unwrap().into_iter().map(|f| f.path).collect();
         paths.sort();
         assert_eq!(paths, ["a.ts", "b.ts", "d.ts"]);
-        assert!(store.symbols_by_name("gamma", 5).unwrap().is_empty());
-        assert_eq!(store.symbols_by_name("delta", 5).unwrap().len(), 1);
+        assert!(store.symbols_by_name("gamma", None, 5).unwrap().is_empty());
+        assert_eq!(store.symbols_by_name("delta", None, 5).unwrap().len(), 1);
         drop(store);
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1452,7 +1452,7 @@ mod tests {
                 "{importer}: import must resolve to b.ts"
             );
         }
-        let helper = &store.symbols_by_name("helper", 5).unwrap()[0];
+        let helper = &store.symbols_by_name("helper", None, 5).unwrap()[0];
         let callers = store.edges_to(helper.id, Some(EdgeKind::Calls)).unwrap();
         assert_eq!(callers.len(), 2, "work() and other() both call helper()");
         assert!(
@@ -1474,7 +1474,7 @@ mod tests {
         let db = root.join(".pixel").join("graph.db");
         build_graph(&root, &db).unwrap();
         let store = GraphStore::open(&db).unwrap();
-        let alpha = &store.symbols_by_name("alpha", 5).unwrap()[0];
+        let alpha = &store.symbols_by_name("alpha", None, 5).unwrap()[0];
         store
             .conn()
             .execute_batch(&format!(
@@ -1982,7 +1982,7 @@ mod tests {
         build_graph(&root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
-        let parse = &store.symbols_by_name("parse", 10).unwrap()[0];
+        let parse = &store.symbols_by_name("parse", None, 10).unwrap()[0];
         let callers = store.edges_to(parse.id, Some(EdgeKind::Calls)).unwrap();
         // At least the bare `parse("42")` call resolves (Exact, T1 imported).
         let exact: Vec<_> = callers.iter().filter(|e| e.tier == Tier::Exact).collect();
@@ -2149,7 +2149,7 @@ mod tests {
         build_graph(&root, &db).unwrap();
         {
             let store = GraphStore::open(&db).unwrap();
-            let target = store.symbols_by_name("target", 10).unwrap().remove(0);
+            let target = store.symbols_by_name("target", None, 10).unwrap().remove(0);
             assert_eq!(
                 store
                     .edges_to(target.id, Some(EdgeKind::Calls))
@@ -2162,7 +2162,7 @@ mod tests {
         std::fs::write(root.join("c.ts"), "export function target() {}\n").unwrap();
         update_file(&root, &db, "c.ts").unwrap();
         let store = GraphStore::open(&db).unwrap();
-        for target in store.symbols_by_name("target", 10).unwrap() {
+        for target in store.symbols_by_name("target", None, 10).unwrap() {
             assert!(
                 store
                     .edges_to(target.id, Some(EdgeKind::Calls))
@@ -2282,7 +2282,7 @@ mod tests {
         build_graph(&root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
-        let name = &store.symbols_by_name("name", 10).unwrap()[0];
+        let name = &store.symbols_by_name("name", None, 10).unwrap()[0];
         assert!(
             store
                 .edges_to(name.id, Some(EdgeKind::References))
@@ -2316,11 +2316,11 @@ mod tests {
         build_graph(&root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
-        let button = &store.symbols_by_name("Button", 10).unwrap()[0];
+        let button = &store.symbols_by_name("Button", None, 10).unwrap()[0];
         let callers = store.edges_to(button.id, Some(EdgeKind::Calls)).unwrap();
         assert_eq!(callers.len(), 1, "{callers:?}");
         assert_eq!(callers[0].tier, Tier::Exact, "import-bound");
-        let app = &store.symbols_by_name("App", 10).unwrap()[0];
+        let app = &store.symbols_by_name("App", None, 10).unwrap()[0];
         assert_eq!(callers[0].src_id, app.id);
         assert!(!store.envelope_for_name("div").unwrap().lower_bound);
         assert!(!store.envelope_for_name("button").unwrap().lower_bound);
@@ -2351,7 +2351,9 @@ mod tests {
         build_graph(&root, &db).unwrap();
 
         let store = GraphStore::open(&db).unwrap();
-        let plugin = &store.symbols_by_name("tenantScopePlugin", 10).unwrap()[0];
+        let plugin = &store
+            .symbols_by_name("tenantScopePlugin", None, 10)
+            .unwrap()[0];
         // A References edge should point to tenantScopePlugin from setup.
         let ref_edges = store
             .edges_to(plugin.id, Some(EdgeKind::References))
@@ -2363,7 +2365,7 @@ mod tests {
         );
         assert_eq!(ref_edges[0].tier, Tier::Probable);
         // The source should be the `setup` symbol.
-        let setup = &store.symbols_by_name("setup", 10).unwrap()[0];
+        let setup = &store.symbols_by_name("setup", None, 10).unwrap()[0];
         assert_eq!(ref_edges[0].src_id, setup.id);
         // No Calls edge should exist (plugin is a method call on schema, not
         // a direct call to tenantScopePlugin).
