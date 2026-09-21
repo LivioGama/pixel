@@ -81,18 +81,21 @@ step() {
     fi
 }
 
-# The two script contracts CI runs as their own jobs. test-prepare.py stubs gh
+# The script contracts CI runs as their own jobs. test-prepare.py stubs gh
 # and cargo in a disposable repository and also runs `prepare.sh --check`
 # against this tree, so it catches a fragment named for a section that does not
 # exist, an entry left under ## [Unreleased], and a --check that refuses the
 # tree release preparation produces; test-gates.py is this script's own
-# contract. Neither compiles anything (~6 s together), which is why they run
+# contract; test-mutants-config.py refuses an exclude_globs entry that would
+# take a module out of the mutation gate. None compiles anything (~6 s
+# together), which is why they run
 # above the cargo skip rather than under it: none of the paths they cover is
 # Rust-affecting, so under the skip a change to prepare.sh, to this file or to
 # either test would still have needed --force to be checked. 0.4.0's release
 # pull request went red twice on gates no local run could reach.
 step "release prepare contract" python3 scripts/test-prepare.py
 step "gate runner contract" python3 scripts/test-gates.py
+step "mutants config contract" python3 scripts/test-mutants-config.py
 
 if [ "$FORCE" -eq 0 ] && [ -z "${CI:-}" ] && [ "$(gate_decision)" = skip ]; then
     echo

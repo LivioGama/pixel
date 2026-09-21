@@ -3,9 +3,15 @@
 
 # Benches are not shipped and carry no tests: every mutant there would be a
 # false "missed".
-# Build scripts run at compile time; a mutated one changes what the binary
-# reports, not what a test asserts.
-exclude_globs = ["crates/pixel-bench/**", "**/benches/**", "**/build.rs"]
+# Build scripts run at compile time; a mutated one changes what the build
+# reports, not what a test asserts. The glob is anchored at a crate root on
+# purpose: `**/build.rs` reads as "cargo build scripts" but matches any
+# source file of that name, and this workspace has one --
+# crates/pixel-graph/src/build.rs, the module behind build_graph, tree_delta
+# and the freshness signature, which sat outside the gate for as long as the
+# glob did. An exclusion here must never be able to swallow a module;
+# scripts/test-mutants-config.py holds that line.
+exclude_globs = ["crates/pixel-bench/**", "**/benches/**", "crates/*/build.rs"]
 
 # Debug output is diagnostic, never part of the wire contract. Display is
 # deliberately kept: tokens, error codes and op names reach JSON and the
