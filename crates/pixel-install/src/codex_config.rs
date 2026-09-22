@@ -31,6 +31,16 @@ pub const DEVELOPER_INSTRUCTIONS_KEY: &str = "developer_instructions";
 /// `config.toml`, relative to the Codex home.
 pub const CODEX_CONFIG_FILE: &str = "config.toml";
 
+/// `hooks.json`, relative to the Codex home — Codex's hook registry, in the
+/// nested `hooks.<Event>[{hooks: [{command}]}]` shape Claude Code settings
+/// also use. (Distinct from `config::CODEX_HOOKS_FILE`, which is
+/// home-relative.)
+pub const HOOKS_FILE: &str = "hooks.json";
+
+/// Substring unique to the installed metrics-relay command, used for
+/// idempotent merge and uninstall removal.
+pub const METRICS_HOOK_MARKER: &str = "run-hook metrics";
+
 /// The agent prompt as bundled in the binary.
 pub(crate) const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
 
@@ -212,6 +222,146 @@ pub(crate) fn install_developer_instructions(
     Ok(step(CheckStatus::Green, summary))
 }
 
+/// The PostToolUse entry `pixel install` merges into `hooks.json`: Codex
+/// runs it after every tool call; `pixel run-hook metrics` self-filters to
+/// shell calls that invoked `pixel` and re-emits the finalized 🟩 line —
+/// the relay Codex's stderr-less tool results cannot show.
+fn metrics_hook_entry(exe: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "command": format!("{} run-hook metrics --provider codex", crate::routing::quoted_executable(exe)),
+            "timeout": 10,
+        }]
+    })
+}
+
+fn read_hooks(path: &Path) -> std::result::Result<serde_json::Value, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|e| format!("{} does not parse as JSON: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::json!({"hooks": {}})),
+        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+    }
+}
+
+fn write_hooks(path: &Path, value: &serde_json::Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.pixel-tmp");
+    fs::write(
+        &tmp,
+        format!("{}\n", serde_json::to_string_pretty(value).unwrap()),
+    )?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// `pixel install` step: register the metrics relay in `hooks.json`,
+/// idempotently alongside whatever PostToolUse groups already exist.
+pub(crate) fn install_metrics_hook(
+    codex_home: &Path,
+    exe: &Path,
+    dry_run: bool,
+) -> Result<InstallStep> {
+    let path = codex_home.join(HOOKS_FILE);
+    let detail = Some(format!(
+        "path={} event=PostToolUse marker={METRICS_HOOK_MARKER}",
+        path.display()
+    ));
+    let step = |status, summary: String| InstallStep {
+        id: "codex-metrics-hook".into(),
+        status,
+        summary,
+        detail: detail.clone(),
+    };
+    let mut value = match read_hooks(&path) {
+        Ok(v) => v,
+        Err(e) => return Ok(step(CheckStatus::Red, format!("{e} — not touched"))),
+    };
+    let hooks = value
+        .as_object_mut()
+        .map(|o| o.entry("hooks").or_insert_with(|| serde_json::json!({})))
+        .and_then(serde_json::Value::as_object_mut);
+    let Some(hooks) = hooks else {
+        return Ok(step(
+            CheckStatus::Red,
+            format!(
+                "`hooks` in {} is not an object — not touched",
+                path.display()
+            ),
+        ));
+    };
+    let merged = crate::config::merge_hook_entry(
+        hooks.get("PostToolUse"),
+        METRICS_HOOK_MARKER,
+        metrics_hook_entry(exe),
+    );
+    if hooks.get("PostToolUse") == Some(&merged) {
+        return Ok(step(
+            CheckStatus::Green,
+            format!("verified metrics hook in {}", path.display()),
+        ));
+    }
+    let summary = format!(
+        "{} metrics PostToolUse hook in {}",
+        if path.is_file() {
+            "updated"
+        } else {
+            "installed"
+        },
+        path.display()
+    );
+    if dry_run {
+        return Ok(step(CheckStatus::Green, dry_run_summary(true, &summary)));
+    }
+    hooks.insert("PostToolUse".to_string(), merged);
+    write_hooks(&path, &value)?;
+    Ok(step(CheckStatus::Green, summary))
+}
+
+/// `pixel doctor` check: the metrics relay is registered under PostToolUse.
+pub(crate) fn check_metrics_hook(
+    codex_home: &Path,
+) -> std::result::Result<(String, serde_json::Value), String> {
+    let path = codex_home.join(HOOKS_FILE);
+    let detail = serde_json::json!({
+        "path": path.display().to_string(),
+        "event": "PostToolUse",
+        "marker": METRICS_HOOK_MARKER,
+    });
+    let value = read_hooks(&path)?;
+    let registered = value
+        .get("hooks")
+        .and_then(|h| h.get("PostToolUse"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|hook| {
+                            hook.get("command")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|c| c.contains(METRICS_HOOK_MARKER))
+                        })
+                    })
+            })
+        });
+    if !registered {
+        return Err(format!(
+            "no metrics PostToolUse hook in {} — run `pixel install`",
+            path.display()
+        ));
+    }
+    Ok((
+        format!("metrics PostToolUse hook registered in {}", path.display()),
+        detail,
+    ))
+}
+
 /// `pixel uninstall` step: take the managed block out of
 /// `developer_instructions`, dropping the key when nothing else was in it.
 pub(crate) fn remove_developer_instructions(
@@ -366,5 +516,104 @@ mod tests {
             Some("Before.\n\nAfter.\n")
         );
         assert_eq!(value_without_block(&managed_block()), None);
+    }
+
+    // ---- metrics PostToolUse hook ----------------------------------------
+
+    fn scratch_codex_home(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pixel-codex-hooks-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn post_tool_use(home: &Path) -> serde_json::Value {
+        let text = fs::read_to_string(home.join(HOOKS_FILE)).unwrap();
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()["hooks"]["PostToolUse"].clone()
+    }
+
+    #[test]
+    fn metrics_hook_install_verify_and_preserve_foreign_entries() {
+        let home = scratch_codex_home("install");
+        let exe = Path::new("/opt/pixel tools/pixel");
+        // A foreign PostToolUse group survives the merge.
+        fs::write(
+            home.join(HOOKS_FILE),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {"PostToolUse": [
+                    {"hooks": [{"type": "command", "command": "cmux-feed"}]}
+                ]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        install_metrics_hook(&home, exe, false).unwrap();
+        let entries = post_tool_use(&home).as_array().unwrap().clone();
+        assert_eq!(entries.len(), 2, "foreign group preserved + ours added");
+        let command = entries[1]["hooks"][0]["command"].as_str().unwrap();
+        assert!(command.contains(METRICS_HOOK_MARKER));
+        assert!(
+            command.starts_with('\''),
+            "the exe path is shell-quoted: {command}"
+        );
+        assert!(
+            check_metrics_hook(&home).is_ok(),
+            "doctor check sees the registration"
+        );
+
+        // Second install verifies instead of duplicating.
+        let step = install_metrics_hook(&home, exe, false).unwrap();
+        assert!(step.summary.contains("verified"), "{}", step.summary);
+        assert_eq!(post_tool_use(&home).as_array().unwrap().len(), 2);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn metrics_hook_install_refuses_unparseable_hooks_json() {
+        let home = scratch_codex_home("broken");
+        fs::write(home.join(HOOKS_FILE), "not json").unwrap();
+        let step = install_metrics_hook(&home, Path::new("/x"), false).unwrap();
+        assert_eq!(step.status, CheckStatus::Red);
+        assert_eq!(
+            fs::read_to_string(home.join(HOOKS_FILE)).unwrap(),
+            "not json",
+            "an unparseable file is never rewritten"
+        );
+        fs::write(home.join(HOOKS_FILE), "{\"hooks\": [1]}").unwrap();
+        let step = install_metrics_hook(&home, Path::new("/x"), false).unwrap();
+        assert_eq!(
+            step.status,
+            CheckStatus::Red,
+            "a non-object hooks key is refused, not silently replaced"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn metrics_hook_check_is_red_until_registered() {
+        let home = scratch_codex_home("check");
+        assert!(
+            check_metrics_hook(&home).is_err(),
+            "absent file is not registered"
+        );
+        fs::write(home.join(HOOKS_FILE), "{\"hooks\": {}}").unwrap();
+        assert!(
+            check_metrics_hook(&home).is_err(),
+            "empty PostToolUse is not registered"
+        );
+        fs::write(
+            home.join(HOOKS_FILE),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {"PostToolUse": [
+                    {"hooks": [{"type": "command", "command": "pixel run-hook metrics --provider codex"}]}
+                ]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(check_metrics_hook(&home).is_ok());
+        let _ = fs::remove_dir_all(&home);
     }
 }

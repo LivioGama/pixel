@@ -26,6 +26,7 @@ macro_rules! eprintln {
 mod call_guard;
 mod classify;
 mod claude_controller;
+mod config_cmd;
 mod coverage_cmd;
 mod evaluate_cmd;
 mod guard;
@@ -974,6 +975,11 @@ enum Command {
         #[command(subcommand)]
         cmd: HookCmd,
     },
+    /// Persistent layered settings (`metrics` today).
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
+    },
     /// Inspect or reset Claude Code's local Pixel task-runtime packet.
     #[command(alias = "task")]
     TaskState {
@@ -1398,6 +1404,32 @@ enum HookCmd {
         /// Provider whose hook-response contract to emit under.
         #[arg(long, value_enum)]
         provider: Option<guard::Provider>,
+    },
+    /// `pixel hook metrics` — PostToolUse relay for hosts whose tool results
+    /// do not surface stderr (Codex). Reads the payload, matches the pixel
+    /// invocation to its finalized action record, and emits that record's
+    /// 🟩 metrics line as `additionalContext`. Honors `pixel config metrics`.
+    Metrics {
+        /// Provider whose hook-response contract to emit under.
+        #[arg(long, value_enum)]
+        provider: Option<guard::Provider>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Live 🟩 metrics footer: `pixel config metrics` reports the effective
+    /// setting and its layer; `on|off` persists it to `<root>/.pixel/
+    /// config.json` — or `~/.pixel/config.json` with `--global`.
+    Metrics {
+        /// New value; omit to report the effective setting.
+        #[arg(value_parser = ["on", "off"])]
+        value: Option<String>,
+        /// Write to the machine-wide `~/.pixel/config.json`.
+        #[arg(long)]
+        global: bool,
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
 }
 
@@ -4214,13 +4246,17 @@ fn run() -> Result<(), String> {
                 cmd: sniper_cmd::SniperCmd::Mcp { .. } | sniper_cmd::SniperCmd::Run { .. }
             }
     );
+    let root = discover_root(&path).or_else(|_| discover_root(Path::new(".")));
+    // `--metrics=off` and `PIXEL_METRICS=0` veto one invocation; the
+    // `metrics` key in `.pixel/config.json` (repo, then `~/.pixel/` global)
+    // is the persistent opt-out layer beneath them.
     let live = !protected
         && cli.metrics != "off"
-        && std::env::var_os("PIXEL_METRICS").is_none_or(|v| v != "0");
+        && std::env::var_os("PIXEL_METRICS").is_none_or(|v| v != "0")
+        && config_cmd::metrics_enabled(root.as_deref().ok());
     if let Some(note) = rename_note(&argv, live) {
         eprint!("{note}");
     }
-    let root = discover_root(&path).or_else(|_| discover_root(Path::new(".")));
     operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
     // Compatibility fallback must exec the original before any logging changes
     // its search corpus; its successful Pixel branch retains existing logging.
@@ -5894,6 +5930,19 @@ fn run_command(
                 // changed's dependants. Never returns.
                 guard::run_post_tool_use(provider);
             }
+            HookCmd::Metrics { provider } => {
+                // PostToolUse relay for hosts whose tool results drop stderr
+                // (Codex): re-emits the finalized invocation's 🟩 line as
+                // additionalContext. Never returns.
+                guard::run_metrics_hook(provider);
+            }
+        },
+        Command::Config { cmd } => match cmd {
+            ConfigCmd::Metrics {
+                value,
+                global,
+                path,
+            } => config_cmd::run_metrics(&path, global, value.as_deref().map(|v| v == "on")),
         },
         Command::TaskState { cmd } => match cmd {
             TaskCmd::Begin {

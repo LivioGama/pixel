@@ -287,9 +287,11 @@ pub(crate) fn claude_installed(home: &Path) -> bool {
 /// and sets up a `claude` shell wrapper plus the Codex `developer_instructions`
 /// config key so every invocation includes the Pixel retrieval protocol —
 /// and, when OpenCode is present, a managed block in its global
-/// `~/.config/opencode/AGENTS.md`. No hooks, no managed blocks in the
-/// home-level CLAUDE.md/AGENTS.md files, no provider-specific routing — the
-/// system prompt is the single enforcement mechanism.
+/// `~/.config/opencode/AGENTS.md`. The one hook is Codex's metrics relay:
+/// its tool results never surface stderr, so a PostToolUse entry re-emits
+/// the finalized 🟩 line as context. No other hooks, no managed blocks in
+/// the home-level CLAUDE.md/AGENTS.md files, no provider-specific routing —
+/// the system prompt is the single enforcement mechanism.
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     let home = options
         .home
@@ -311,6 +313,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         deploy_agent_prompt(&home, dry_run)?,
         install_shell_wrappers(&home, options.shell.as_deref(), &claude, dry_run)?,
         crate::codex_config::install_developer_instructions(&codex_home, dry_run)?,
+        crate::codex_config::install_metrics_hook(&codex_home, &exe, dry_run)?,
     ];
     let opencode_dir = crate::opencode_config::opencode_config_dir(&home, options.home.is_some());
     if opencode_dir.is_dir() {

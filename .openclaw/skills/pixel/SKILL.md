@@ -232,15 +232,21 @@ already relayed that invocation's line.
   workflow estimate to measured savings. Relay both `tokens saved (workflow
   estimate)` and `s saved (sequential estimate)` exactly as emitted; never
   compute your own chat line, and never run a command merely to obtain metrics.
-- `--metrics=off` and `PIXEL_METRICS=0` disable live reporting.
+- When the host drops stderr from tool results (Codex), a PostToolUse hook
+  (`pixel run-hook metrics`) injects the same finalized line as hook context —
+  relay that line verbatim instead; it is the same record, not a recompute.
+- `--metrics=off` and `PIXEL_METRICS=0` disable live reporting for one
+  invocation. `pixel config metrics off` disables it persistently for the
+  repository (`--global` for the machine); `pixel config metrics` reports the
+  effective setting. An opted-out invocation emits nothing — relay nothing.
 - Never append a metrics line to JSON stdout, search-compat output, hook
   responses, protocol streams or statuslines. Use only a separate host-supported
   chat channel for a correlated record, if available; otherwise leave the exact
   streams unchanged.
 - CLI reporting is mechanical; the assistant chat relay depends on the host
-  exposing that invocation's stderr and on the agent following these
-  instructions. Installation is not proof of live host delivery, nor of duplicate
-  suppression by an actual model.
+  exposing that invocation's stderr or the metrics hook being installed, and on
+  the agent following these instructions. Installation is not proof of live
+  host delivery, nor of duplicate suppression by an actual model.
 
 **Token accounting.** Approximately one token per four UTF-8 bytes, reporting
 overhead included. Workflow v1 assumes 4 KiB per assumed distinct returned file

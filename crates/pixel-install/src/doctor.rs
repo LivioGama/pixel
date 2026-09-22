@@ -245,6 +245,16 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             })
         },
     ));
+    checks.push(check(
+        "install.codex-metrics-hook",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            let (summary, detail) = crate::codex_config::check_metrics_hook(&codex_home)?;
+            Ok(DoctorCheckDetail {
+                summary,
+                detail: Some(detail),
+            })
+        },
+    ));
 
     checks.push(check(
         "install.opencode-agents-md",
