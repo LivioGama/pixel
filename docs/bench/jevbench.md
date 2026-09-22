@@ -104,16 +104,22 @@ not a causal explanation for how query placement changed the score gaps.
 
 The `pixel_local` adapter is in closed upstream
 [PR 21](https://github.com/fstandhartinger/jevbench/pull/21), not the upstream
-checkout. Acquire its patch locally; this does not reopen or submit that PR.
-Start in the Pixel checkout, then choose a fresh path for the harness clone:
+checkout. Pin the harness to v1.3 commit `75e6224ed8103bbc3485ca74820a2eaf7ce8abe0`
+and acquire the adapter's immutable commit patch. PR 21's own base/head predates
+v1.3 scoring, so checking out that head alone would select the wrong scorer.
+Applying the patch locally does not reopen or submit that PR. Start in the
+Pixel checkout, then choose a fresh path for the harness clone:
 
 ```bash
 cargo build --release -p pixel-cli
 PIXEL_BIN="$PWD/target/release/pixel"
 git clone https://github.com/fstandhartinger/jevbench /path/to/jevbench
 cd /path/to/jevbench
-gh pr diff 21 --repo fstandhartinger/jevbench --patch > /tmp/jevbench-pr21.patch
-patch -p1 < /tmp/jevbench-pr21.patch
+git switch --detach 75e6224ed8103bbc3485ca74820a2eaf7ce8abe0
+gh api repos/fstandhartinger/jevbench/commits/5d9434cf48fcd5c83a3f02c335a846355468c0d3 \
+  -H 'Accept: application/vnd.github.patch' > /tmp/jevbench-pr21.patch
+git apply --check /tmp/jevbench-pr21.patch
+git apply /tmp/jevbench-pr21.patch
 ```
 
 Before running, edit `jevbench/adapters/pixel_local.py::build_request`:
@@ -137,8 +143,10 @@ python -m jevbench.cli summarize --tasks "$TASKS" --results out-context.jsonl
 ```
 
 Interpret scores with upstream `jevbench/composite_v13.py`, not v1.2 math.
-These are reproduction instructions; no new benchmark run accompanies the
-input-validation and test-harness changes.
+Patch checking and application were verified on these pinned revisions; both
+the adapter and v1.3 scorer are present. These are reproduction pins, not
+claimed revision identities for the historical measurements. No new benchmark
+run accompanies the input-validation and test-harness changes.
 
 ## Where this can and cannot go
 
