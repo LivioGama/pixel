@@ -523,10 +523,13 @@ mod tests {
         let home = scratch("unreadable-agents");
         let dir = config_dir(&home);
         fs::create_dir_all(&dir).unwrap();
-        fs::create_dir(dir.join(AGENTS_MD_FILE)).unwrap();
-        // The error propagates; the directory must not be rewritten.
+        // Non-UTF-8 bytes fail read_to_string without depending on
+        // permissions — and the write path would happily replace the file,
+        // which is exactly what must not happen.
+        let agents = dir.join(AGENTS_MD_FILE);
+        fs::write(&agents, b"\xff\xfe\x00").unwrap();
         assert!(install_opencode(&dir, &home, false).is_err());
-        assert!(dir.join(AGENTS_MD_FILE).is_dir());
+        assert_eq!(fs::read(&agents).unwrap(), b"\xff\xfe\x00");
     }
 
     #[test]
