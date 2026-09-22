@@ -2217,7 +2217,9 @@ end
             .iter()
             .position(|symbol| symbol.kind == SymbolKind::Script)
             .unwrap();
-        assert_eq!(extraction.symbols[script_index].qualified, "scripts/run.rb");
+        let script = &extraction.symbols[script_index];
+        assert_eq!(script.qualified, "scripts/run.rb");
+        assert_eq!((script.start_line, script.end_line), (1, 6));
         let root_call = extraction
             .calls
             .iter()

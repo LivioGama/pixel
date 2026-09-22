@@ -335,7 +335,7 @@ fn ask_collected(
 ) -> Result<AskResult, String> {
     // Build the corpus (chunk every file) and embed the chunks in batches.
     let mut corpus: Vec<CorpusEntry> = Vec::new();
-    let mut lexical_tokens = HashMap::new();
+    let mut lexical_coverage = HashMap::new();
     let mut chunk_texts: Vec<String> = Vec::new();
     for file in &files {
         let Ok(bytes) = std::fs::read(file) else {
@@ -367,29 +367,23 @@ fn ask_collected(
             filename_tokens = words(stem);
         }
         let terms = query_terms(query);
-        let mut best_tokens = filename_tokens.clone();
         let mut best_coverage = terms
             .iter()
-            .filter(|term| best_tokens.contains(*term))
+            .filter(|term| filename_tokens.contains(*term))
             .count();
         for (start, end) in chunk_offsets(&text) {
             let chunk = text[start..end].to_string();
             let mut tokens = words(lexical_chunk(&text, start, end));
             tokens.extend(filename_tokens.iter().cloned());
-            let coverage = terms.iter().filter(|term| tokens.contains(*term)).count();
-            if coverage > best_coverage
-                || (coverage == best_coverage && tokens.len() < best_tokens.len())
-            {
-                best_coverage = coverage;
-                best_tokens = tokens;
-            }
+            let chunk_coverage = terms.iter().filter(|term| tokens.contains(*term)).count();
+            best_coverage = best_coverage.max(chunk_coverage);
             corpus.push(CorpusEntry {
                 path: file.display().to_string(),
                 text: chunk.clone(),
             });
             chunk_texts.push(chunk);
         }
-        lexical_tokens.insert(file.display().to_string(), best_tokens);
+        lexical_coverage.insert(file.display().to_string(), best_coverage);
     }
     coverage.degraded |= coverage.skipped_files > 0;
     if corpus.is_empty() {
@@ -430,7 +424,7 @@ fn ask_collected(
 
     coverage.result_limit_reached = best.len() > k;
     Ok(AskResult {
-        hits: rank_files(query, &lexical_tokens, best, snippet_of, k),
+        hits: rank_files(query, &lexical_coverage, best, snippet_of, k),
         coverage,
     })
 }
@@ -448,34 +442,25 @@ fn validate_vector(vector: &[f32], dims: usize) -> Result<(), String> {
 /// Exclude identifier fragments created only by fixed byte-window boundaries.
 fn lexical_chunk(text: &str, start: usize, end: usize) -> &str {
     let is_ident = |character: char| character.is_alphanumeric() || character == '_';
-    let mut lexical_start = start;
-    let mut lexical_end = end;
-    if start > 0
-        && text[..start].chars().next_back().is_some_and(&is_ident)
-        && text[start..].chars().next().is_some_and(&is_ident)
+    let chunk = &text[start..end];
+    let chunk = if text[..start].chars().next_back().is_some_and(&is_ident)
+        && chunk.chars().next().is_some_and(&is_ident)
     {
-        let Some((offset, _)) = text[start..end]
-            .char_indices()
-            .find(|(_, character)| !is_ident(*character))
-        else {
-            return "";
-        };
-        lexical_start += offset;
-    }
-    if end < text.len()
-        && text[..end].chars().next_back().is_some_and(&is_ident)
+        chunk
+            .split_once(|character| !is_ident(character))
+            .map_or("", |(_, complete)| complete)
+    } else {
+        chunk
+    };
+    if text[..end].chars().next_back().is_some_and(&is_ident)
         && text[end..].chars().next().is_some_and(&is_ident)
     {
-        let Some((offset, character)) = text[lexical_start..end]
-            .char_indices()
-            .rev()
-            .find(|(_, character)| !is_ident(*character))
-        else {
-            return "";
-        };
-        lexical_end = lexical_start + offset + character.len_utf8();
+        chunk
+            .rsplit_once(|character| !is_ident(character))
+            .map_or("", |(complete, _)| complete)
+    } else {
+        chunk
     }
-    &text[lexical_start..lexical_end]
 }
 
 /// Preserve complete identifiers and split snake_case, camelCase and acronyms.
@@ -569,31 +554,24 @@ fn query_terms(query: &str) -> HashSet<String> {
 
 fn rank_files(
     query: &str,
-    lexical_tokens: &HashMap<String, HashSet<String>>,
+    lexical_coverage: &HashMap<String, usize>,
     best: HashMap<String, f32>,
     mut snippets: HashMap<String, String>,
     k: usize,
 ) -> Vec<AskHit> {
     let terms = query_terms(query);
-    let mut matched: HashMap<&str, HashSet<&str>> = HashMap::new();
-    for (path, tokens) in lexical_tokens {
-        let file_terms = matched.entry(path).or_default();
-        file_terms.extend(
-            terms
-                .iter()
-                .filter(|w| tokens.contains(*w))
-                .map(String::as_str),
-        );
-    }
     let mut semantic: Vec<_> = best.into_iter().collect();
     semantic.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     let mut hits: Vec<_> = semantic
         .into_iter()
         .enumerate()
         .map(|(index, (path, score))| {
-            let coverage = matched.get(path.as_str()).map_or(0, HashSet::len);
+            let coverage = lexical_coverage.get(&path).copied().unwrap_or_default();
             // Competition ranks: equal coverage receives exactly equal evidence weight.
-            let lexical_rank = 1 + matched.values().filter(|v| v.len() > coverage).count();
+            let lexical_rank = 1 + lexical_coverage
+                .values()
+                .filter(|candidate| **candidate > coverage)
+                .count();
             let ranking_score = 2.0 / (60.0 + (index + 1) as f64)
                 + if coverage == 0 {
                     0.0
@@ -640,18 +618,23 @@ mod tests {
     use super::*;
 
     fn rank(query: &str, entries: &[(&str, &str, f32)]) -> Vec<AskHit> {
-        let mut lexical_tokens: HashMap<String, HashSet<String>> = HashMap::new();
+        let terms = query_terms(query);
+        let mut lexical_coverage: HashMap<String, usize> = HashMap::new();
         for (path, text, _) in entries {
-            lexical_tokens
+            let coverage = terms
+                .iter()
+                .filter(|term| words(text).contains(*term))
+                .count();
+            lexical_coverage
                 .entry(path.to_string())
-                .or_default()
-                .extend(words(text));
+                .and_modify(|best| *best = (*best).max(coverage))
+                .or_insert(coverage);
         }
         let best = entries
             .iter()
             .map(|(path, _, score)| (path.to_string(), *score))
             .collect();
-        rank_files(query, &lexical_tokens, best, HashMap::new(), usize::MAX)
+        rank_files(query, &lexical_coverage, best, HashMap::new(), usize::MAX)
     }
 
     #[test]
@@ -831,6 +814,14 @@ mod tests {
         assert_eq!(result.coverage.searched_files, 1);
         assert_eq!(result.coverage.empty_files, 2);
         assert!(!result.coverage.degraded);
+    }
+
+    #[test]
+    fn lexical_chunk_excludes_only_identifiers_cut_by_the_window() {
+        let text = "prefix manual setup suffix";
+        assert_eq!(lexical_chunk(text, 3, 19), "manual setup");
+        assert_eq!(lexical_chunk(text, 6, 20), " manual setup ");
+        assert_eq!(lexical_chunk(text, 1, 4), "");
     }
 
     #[test]
