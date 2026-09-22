@@ -1576,18 +1576,13 @@ mod tests {
         let mut segments = SegmentSet::open(&root.join("seg")).unwrap();
         // Nothing written: no index run, no hits.
         index_after_catch_up(&store, &mut segments, 0).unwrap();
-        let empty = search(
-            &store,
-            &segments,
-            "stub turn text",
-            false,
-            &SearchFilters::default(),
-            0,
-            10,
-        )
-        .unwrap();
-        assert_eq!(empty.hits.len(), 0);
-        // A catch-up writes a turn; written = 1 must index it.
+        // Nothing written: no index run — the manifest watermark must not
+        // move and no shard may appear.
+        assert_eq!(segments.manifest.last_turn_id, 0);
+        assert!(segments.manifest.segments.is_empty());
+        // A catch-up writes a turn; written = 1 must index it: search sees
+        // unindexed turns through the always-scanned tail, so hits alone
+        // cannot prove the index ran — the advancing manifest can.
         let (discovered, parsed) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
         let unit = SourceUnit {
             unit_key: "u1".to_string(),
@@ -1600,17 +1595,8 @@ mod tests {
             vec![stub("stub", vec![unit], &discovered, &parsed)],
         );
         index_after_catch_up(&store, &mut segments, written).unwrap();
-        let hits = search(
-            &store,
-            &segments,
-            "stub turn text",
-            false,
-            &SearchFilters::default(),
-            0,
-            10,
-        )
-        .unwrap();
-        assert_eq!(hits.hits.len(), 1);
+        assert_eq!(segments.manifest.segments.len(), 1);
+        assert!(segments.manifest.last_turn_id > 0);
     }
 
     /// A recall-daemon socket that answers the client's `Ping` and then one
