@@ -299,8 +299,9 @@ envelope talks to the daemon socket directly.
 short `pixel-subagent-prompt.md`, a managed shell function for Claude Code, a managed
 `developer_instructions` block for Codex and a managed block in Pi's
 `~/.pi/agent/APPEND_SYSTEM.md`. It
-preserves agent settings and rule files, and does not register provider hooks or
-activate routing. The shell functions pass the prompt on a subsequent launch
+preserves agent settings and rule files, does not activate legacy provider
+hooks or routing, and separately registers the managed Codex `PostToolUse`
+metrics hook (`$CODEX_HOME/hooks.json`, default `~/.codex/hooks.json`). The shell functions pass the prompt on a subsequent launch
 through the loaded profile; already-running agents and direct executable launches
 do not inherit it automatically. The `claude` function adds
 `--append-subagent-system-prompt-file` only when `-p`/`--print` is among the

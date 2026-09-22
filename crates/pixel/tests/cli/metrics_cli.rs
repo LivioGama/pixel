@@ -640,7 +640,7 @@ fn run_hook_metrics_replays_the_invocation_line_for_stderrless_hosts() {
     let context = doc["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .expect("the hook relays the finalized line as context");
-    assert!(context.starts_with("🟩 pixel repo-state ❀"), "{context}");
+    assert_eq!(context, emitted[0].as_str());
 
     // Opted out: the hook stays as silent as stderr would have been.
     assert_success(&run(&["config", "metrics", "off"]));

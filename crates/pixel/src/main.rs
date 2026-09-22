@@ -104,6 +104,12 @@ enum RoleArg {
     Callees,
 }
 
+/// One lock for every unit test that mutates process-wide state (`HOME`
+/// and friends): two module-local locks cannot see each other, so all
+/// such tests share this single mutex.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Subcommand)]
 enum Command {
     /// Build (or rebuild) the text index for a directory tree.

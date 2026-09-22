@@ -1322,10 +1322,13 @@ fn routing_isolated_provider_child() {
         let command = post[0]["hooks"][0]["command"].as_str().unwrap();
         assert!(command.contains("run-hook metrics"), "{command}");
         // The executable path holds a space and a quote: it must arrive
-        // shell-quoted so the hook actually launches.
+        // shell-quoted so the hook actually launches, with the embedded
+        // apostrophe emitted as the '\'' escape sequence.
         assert!(
-            command.starts_with('\'') && command.contains("directory/pixel' run-hook"),
-            "the executable path must survive spaces: {command}"
+            command.starts_with('\'')
+                && command.contains("directory/pixel' run-hook")
+                && command.contains("'\\''"),
+            "the executable path must survive spaces and quotes: {command}"
         );
     } else {
         assert_eq!(

@@ -571,6 +571,23 @@ mod tests {
     }
 
     #[test]
+    fn metrics_hook_reinstall_refreshes_a_stale_executable_path() {
+        let home = scratch_codex_home("refresh");
+        install_metrics_hook(&home, Path::new("/old/pixel"), false).unwrap();
+        install_metrics_hook(&home, Path::new("/new/pixel"), false).unwrap();
+        let entries = post_tool_use(&home).as_array().unwrap().clone();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the stale entry is replaced, not appended"
+        );
+        let command = entries[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(command.contains("/new/pixel"), "{command}");
+        assert!(!command.contains("/old/pixel"), "{command}");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn metrics_hook_install_refuses_unparseable_hooks_json() {
         let home = scratch_codex_home("broken");
         fs::write(home.join(HOOKS_FILE), "not json").unwrap();

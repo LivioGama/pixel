@@ -299,11 +299,9 @@ mod tests {
     }
 
     /// Env mutation is process-global, so the session tests are serialised
-    /// behind one lock and always restore the previous value.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    /// behind the crate-wide `ENV_LOCK` and always restore the previous value.
     fn with_session<T>(id: Option<&str>, f: impl FnOnce() -> T) -> T {
-        let _g = ENV_LOCK
+        let _g = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prev = std::env::var("PIXEL_SESSION_ID").ok();

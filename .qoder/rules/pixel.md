@@ -227,7 +227,8 @@ already relayed that invocation's line.
 - `--metrics=off` and `PIXEL_METRICS=0` disable live reporting for one
   invocation. `pixel config metrics off` disables it persistently for the
   repository (`--global` for the machine); `pixel config metrics` reports the
-  effective setting. An opted-out invocation emits nothing — relay nothing.
+  effective setting. An opted-out invocation emits no live metrics line —
+  relay nothing.
 - Never append a metrics line to JSON stdout, search-compat output, hook
   responses, protocol streams or statuslines. Use only a separate host-supported
   chat channel for a correlated record, if available; otherwise leave the exact

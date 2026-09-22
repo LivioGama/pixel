@@ -80,10 +80,24 @@ fn write_metrics(path: &Path, on: bool) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, format!("{doc}\n"))
-        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))?;
+    // A tmp name shared across concurrent invocations could rename one
+    // command's content as another's — scope it to this process. Same-process
+    // callers serialize on ENV_LOCK in tests; the pid separates real ones.
+    let tmp = path.with_file_name(format!(
+        "{}.{}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("config.json"),
+        std::process::id(),
+    ));
+    if let Err(e) = std::fs::write(&tmp, format!("{doc}\n")) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("write {}: {e}", tmp.display()));
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("rename {}: {e}", path.display()));
+    }
     Ok(())
 }
 
@@ -135,10 +149,6 @@ pub fn run_metrics(path: &Path, global: bool, value: Option<bool>) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// HOME is process-global; serialize tests that point it at a fixture.
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     struct HomeGuard(PathBuf);
 
@@ -165,12 +175,12 @@ mod tests {
     }
 
     fn point_home(dir: &Path) {
-        // SAFETY: under HOME_LOCK in tests only.
+        // SAFETY: under crate::ENV_LOCK in tests only.
         unsafe { std::env::set_var("HOME", dir) };
     }
 
     fn restore_home(saved: Option<std::ffi::OsString>) {
-        // SAFETY: under HOME_LOCK in tests only.
+        // SAFETY: under crate::ENV_LOCK in tests only.
         unsafe {
             match saved {
                 Some(v) => std::env::set_var("HOME", v),
@@ -186,7 +196,7 @@ mod tests {
 
     #[test]
     fn unset_layers_default_on_and_nearest_scope_wins() {
-        let _lock = HOME_LOCK.lock().unwrap();
+        let _lock = crate::ENV_LOCK.lock().unwrap();
         let home = HomeGuard::set();
         let saved = home_env();
         point_home(&home.0);
@@ -212,7 +222,7 @@ mod tests {
 
     #[test]
     fn malformed_layers_are_skipped_not_fatal() {
-        let _lock = HOME_LOCK.lock().unwrap();
+        let _lock = crate::ENV_LOCK.lock().unwrap();
         let home = HomeGuard::set();
         let saved = home_env();
         point_home(&home.0);
@@ -241,7 +251,7 @@ mod tests {
 
     #[test]
     fn write_metrics_preserves_unknown_keys_and_roundtrips() {
-        let _lock = HOME_LOCK.lock().unwrap();
+        let _lock = crate::ENV_LOCK.lock().unwrap();
         let home = HomeGuard::set();
         let saved = home_env();
         point_home(&home.0);
@@ -269,7 +279,7 @@ mod tests {
 
     #[test]
     fn resolution_names_the_layer_that_set_the_value() {
-        let _lock = HOME_LOCK.lock().unwrap();
+        let _lock = crate::ENV_LOCK.lock().unwrap();
         let home = HomeGuard::set();
         let saved = home_env();
         point_home(&home.0);
@@ -306,5 +316,23 @@ mod tests {
         );
 
         restore_home(saved);
+    }
+
+    #[test]
+    fn a_failed_publish_leaves_no_tmp_file_behind() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        // Renaming the tmp file onto an existing directory must fail — and
+        // the tmp file must not be left behind.
+        let dir = home.0.join("target-is-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = write_metrics(&dir, false).expect_err("rename onto a dir fails");
+        assert!(err.contains("rename"), "{err}");
+        let leftovers: Vec<_> = std::fs::read_dir(&home.0)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp cleaned up: {leftovers:?}");
     }
 }
