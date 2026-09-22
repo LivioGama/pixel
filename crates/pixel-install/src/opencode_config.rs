@@ -400,6 +400,9 @@ mod tests {
         let real_plugin = dir.join("exists/pixel.mjs");
         fs::create_dir_all(real_plugin.parent().unwrap()).unwrap();
         fs::write(&real_plugin, "// exists\n").unwrap();
+        // Missing config entirely: no sweep, and no "untouched" note either.
+        let step = install_opencode(&dir, &home, false).unwrap();
+        assert!(!step.summary.contains("untouched"), "{}", step.summary);
         fs::write(
             dir.join(OPENCODE_CONFIG_FILE),
             serde_json::to_string_pretty(&serde_json::json!({
@@ -418,7 +421,13 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        install_opencode(&dir, &home, false).unwrap();
+        let step = install_opencode(&dir, &home, false).unwrap();
+        assert!(
+            step.summary
+                .contains("swept 1 instruction + 2 plugin entries"),
+            "exact per-kind counts land in the summary: {}",
+            step.summary
+        );
         let config: Value =
             serde_json::from_str(&fs::read_to_string(dir.join(OPENCODE_CONFIG_FILE)).unwrap())
                 .unwrap();
@@ -454,6 +463,73 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dir.join(OPENCODE_CONFIG_FILE)).unwrap(),
             "{ // jsonc\n}"
+        );
+        // Valid JSON of the wrong shape is skipped the same way.
+        fs::write(dir.join(OPENCODE_CONFIG_FILE), "[1]").unwrap();
+        let step = install_opencode(&dir, &home, false).unwrap();
+        assert_eq!(step.status, CheckStatus::Green, "{}", step.summary);
+        assert!(step.summary.contains("untouched"), "{}", step.summary);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_config_does_not_block_the_agents_md() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = scratch("unreadable-cfg");
+        let dir = config_dir(&home);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(OPENCODE_CONFIG_FILE);
+        fs::write(&path, "{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        // Permission denied is not "absent": the sweep reports the file
+        // untouched rather than silently treating it as empty.
+        let step = install_opencode(&dir, &home, false).unwrap();
+        assert_eq!(step.status, CheckStatus::Green, "{}", step.summary);
+        assert!(step.summary.contains("untouched"), "{}", step.summary);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{}");
+    }
+
+    #[test]
+    fn a_config_with_nothing_to_sweep_is_not_rewritten() {
+        let home = scratch("clean");
+        let dir = config_dir(&home);
+        fs::create_dir_all(&dir).unwrap();
+        // Deliberately non-pretty formatting: a rewrite would reflow it.
+        fs::write(
+            dir.join(OPENCODE_CONFIG_FILE),
+            "{\"model\":\"m\",\"plugin\":[\"x.js\"]}",
+        )
+        .unwrap();
+        let step = install_opencode(&dir, &home, false).unwrap();
+        assert!(!step.summary.contains("swept"), "{}", step.summary);
+        assert_eq!(
+            fs::read_to_string(dir.join(OPENCODE_CONFIG_FILE)).unwrap(),
+            "{\"model\":\"m\",\"plugin\":[\"x.js\"]}"
+        );
+    }
+
+    #[test]
+    fn sweep_counts_each_kind_independently() {
+        let home = scratch("sweep-one-kind");
+        let dir = config_dir(&home);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(OPENCODE_CONFIG_FILE),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "instructions": [
+                    format!("{}/.local/share/pixel/agent-prompt.md", home.display())
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let step = install_opencode(&dir, &home, false).unwrap();
+        assert!(
+            step.summary
+                .contains("swept 1 instruction + 0 plugin entry"),
+            "a single swept entry stays singular: {}",
+            step.summary
         );
     }
 
@@ -518,11 +594,32 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        remove_opencode(&dir, &home, false).unwrap();
+        let step = remove_opencode(&dir, &home, false).unwrap();
+        assert!(
+            step.summary.contains("1 instruction + 0 plugin entries"),
+            "{}",
+            step.summary
+        );
         let config: Value =
             serde_json::from_str(&fs::read_to_string(dir.join(OPENCODE_CONFIG_FILE)).unwrap())
                 .unwrap();
         assert!(config.get("instructions").is_none(), "{config}");
+
+        // Plugin-only removal reports its own count.
+        fs::write(
+            dir.join(OPENCODE_CONFIG_FILE),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "plugin": ["~/nowhere/pixel.mjs"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let step = remove_opencode(&dir, &home, false).unwrap();
+        assert!(
+            step.summary.contains("0 instruction + 1 plugin entries"),
+            "{}",
+            step.summary
+        );
     }
 
     #[test]
