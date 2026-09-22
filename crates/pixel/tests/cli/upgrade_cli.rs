@@ -208,7 +208,12 @@ fn upgrade_reports_socket_inspection_error_after_shutdown() {
         drop(selected);
         std::fs::remove_file(&selected_socket).unwrap();
         std::fs::remove_dir(&runtime_dir).unwrap();
-        std::os::unix::fs::symlink(&runtime_dir, &runtime_dir).unwrap();
+        // A regular file where the runtime dir was makes every socket lookup
+        // underneath it fail with ENOTDIR — portably. A symlink loop reaches
+        // lstat on macOS, but on Linux runtime_dir() probes XDG_RUNTIME_DIR
+        // with exists(), which follows the loop, reports false, and silently
+        // redirects the inspected socket to the ~/.cache fallback instead.
+        std::fs::write(&runtime_dir, b"not a directory\n").unwrap();
         let response =
             pixel_proto::Envelope::success("shutdown", serde_json::json!({"stopping": true}));
         writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();

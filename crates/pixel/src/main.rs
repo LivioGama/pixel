@@ -26,10 +26,14 @@ macro_rules! eprintln {
 mod call_guard;
 mod classify;
 mod claude_controller;
+mod coverage_cmd;
 mod evaluate_cmd;
 mod guard;
+mod index_cmd;
+mod mcp_cmd;
 mod operation_metrics;
 mod plan_cmd;
+mod plan_state;
 mod post_compaction;
 mod prompt_submit;
 mod recall_cmd;
@@ -41,6 +45,7 @@ mod task_runtime;
 mod task_sandbox;
 mod task_scheduler;
 mod web_search;
+mod workspace_cmd;
 use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service, failure_response};
 use pixel_daemon::daemon;
 use pixel_index::index::{build, shard_path};
@@ -330,6 +335,9 @@ enum Command {
         direction: DirectionArg,
         #[arg(long)]
         depth: Option<u32>,
+        /// Answer from every repo in .pixel/workspace.json, merged per repo.
+        #[arg(long)]
+        workspace: bool,
         #[arg(long)]
         json: bool,
     },
@@ -344,6 +352,9 @@ enum Command {
         /// Skip this many relationships for page-wise retrieval.
         #[arg(long, default_value_t = 0)]
         offset: usize,
+        /// Answer from every repo in .pixel/workspace.json, merged per repo.
+        #[arg(long)]
+        workspace: bool,
         #[arg(long)]
         json: bool,
     },
@@ -434,6 +445,42 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Manage the multi-repo workspace (.pixel/workspace.json) that
+    /// `impact --workspace` and `who-calls --workspace` fan out across.
+    Workspace {
+        #[command(subcommand)]
+        cmd: workspace_cmd::WorkspaceCmd,
+    },
+    /// Freeze this repo's index into a single shareable `.pxpack` bundle —
+    /// the file CI builds once and teammates install instead of re-indexing.
+    IndexPack {
+        /// Output file (e.g. index.pxpack).
+        #[arg(long)]
+        out: PathBuf,
+        /// Also pack history.db (the on-demand facts index).
+        #[arg(long)]
+        include_history: bool,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Install a packed index into this repo's `.pixel/` — from a path or
+    /// an https:// URL.
+    IndexUnpack {
+        /// Pack file path or URL.
+        source: String,
+        /// Replace the index while a daemon is running.
+        #[arg(long)]
+        force: bool,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Serve this repo's index over MCP stdio — the single integration for
+    /// every MCP-capable agent (search, resolve, impact, callers/callees,
+    /// evaluate, context, status).
+    Mcp {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Index + graph freshness status.
     Status {
         #[arg(default_value = ".")]
@@ -443,6 +490,14 @@ enum Command {
         /// Compact one-line summary for shell prompts / statuslines.
         #[arg(long)]
         statusline: bool,
+    },
+    /// Per-language coverage: files the index policy sees on disk vs files
+    /// the graph actually indexed, with symbol counts per language.
+    Coverage {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
     /// Make a repository ready for agent work: index, graph, and warm daemon.
     #[command(alias = "ready")]
@@ -1060,6 +1115,18 @@ enum Command {
         /// Cap the number of findings returned.
         #[arg(long)]
         max_todos: Option<usize>,
+        /// Print the tracked checklist (.pixel/plan.json) without planning.
+        #[arg(long, conflicts_with_all = ["prompt", "query", "tag", "limit", "format", "no_verify", "max_todos"])]
+        status: bool,
+        /// Mark tracked item N done (numbering from --status). Repeatable.
+        #[arg(long, value_name = "N", conflicts_with_all = ["prompt", "query", "tag", "limit", "format", "no_verify", "max_todos"])]
+        done: Vec<usize>,
+        /// Mark tracked item N not done. Repeatable.
+        #[arg(long, value_name = "N", conflicts_with_all = ["prompt", "query", "tag", "limit", "format", "no_verify", "max_todos"])]
+        undone: Vec<usize>,
+        /// Drop findings the latest plan no longer reports.
+        #[arg(long, conflicts_with_all = ["prompt", "query", "tag", "limit", "format", "no_verify", "max_todos"])]
+        prune: bool,
         #[arg(long)]
         json: bool,
     },
@@ -4142,6 +4209,7 @@ fn run() -> Result<(), String> {
                     ..
                 }
             }
+            | Command::Mcp { .. }
             | Command::ListErrors {
                 cmd: sniper_cmd::SniperCmd::Mcp { .. } | sniper_cmd::SniperCmd::Run { .. }
             }
@@ -4275,11 +4343,6 @@ fn run_command(
                         report.diff_indexed_pct * 100.0,
                         report.fresh
                     );
-                    // Also ingest transcripts from all LLM CLIs so that
-                    // `pixel recall search/ask` covers this project's sessions.
-                    if let Err(e) = recall_cmd::run_index(None, false, false) {
-                        eprintln!("recall: index warning: {e}");
-                    }
                 }
                 return Ok(());
             }
@@ -4305,11 +4368,6 @@ fn run_command(
                     report.diff_indexed_pct * 100.0,
                     report.fresh
                 );
-                // Also ingest transcripts from all LLM CLIs so that
-                // `pixel recall search/ask` covers this project's sessions.
-                if let Err(e) = recall_cmd::run_index(None, false, false) {
-                    eprintln!("recall: index warning: {e}");
-                }
             }
             Ok(())
         }
@@ -4746,6 +4804,7 @@ fn run_command(
             path,
             direction,
             depth,
+            workspace,
             json,
         } => {
             if call_guard_check("impact", &format!("{uid_or_name} {}", path.display())) {
@@ -4755,6 +4814,14 @@ fn run_command(
                 DirectionArg::Upstream => "upstream",
                 DirectionArg::Downstream => "downstream",
             };
+            if workspace {
+                let results = workspace_cmd::fan_out(&path, &|| Request::Impact {
+                    uid_or_name: uid_or_name.clone(),
+                    direction: dir.to_string(),
+                    depth,
+                })?;
+                return workspace_cmd::print_fan_out(&results, json);
+            }
             let data = execute(
                 &path,
                 Request::Impact {
@@ -4772,12 +4839,21 @@ fn run_command(
             path,
             role,
             offset,
+            workspace,
             json,
         } => {
             let role_s = match role {
                 RoleArg::Callers => "callers",
                 RoleArg::Callees => "callees",
             };
+            if workspace {
+                let results = workspace_cmd::fan_out(&path, &|| Request::Uses {
+                    uid_or_name: uid_or_name.clone(),
+                    role: role_s.to_string(),
+                    offset: Some(offset),
+                })?;
+                return workspace_cmd::print_fan_out(&results, json);
+            }
             let data = execute(
                 &path,
                 Request::Uses {
@@ -4986,6 +5062,29 @@ fn run_command(
             print_data(&v, json)?;
             Ok(())
         }
+        Command::Coverage { path, json } => {
+            coverage_cmd::run(coverage_cmd::CoverageOptions { path, json })
+        }
+        Command::Workspace { cmd } => workspace_cmd::run(cmd),
+        Command::IndexPack {
+            out,
+            include_history,
+            path,
+        } => index_cmd::run(index_cmd::IndexCmd::Pack {
+            out,
+            include_history,
+            path,
+        }),
+        Command::IndexUnpack {
+            source,
+            force,
+            path,
+        } => index_cmd::run(index_cmd::IndexCmd::Unpack {
+            source,
+            force,
+            path,
+        }),
+        Command::Mcp { path } => mcp_cmd::run(path),
         Command::Status {
             path,
             json,
@@ -6169,6 +6268,10 @@ fn run_command(
             format,
             no_verify,
             max_todos,
+            status,
+            done,
+            undone,
+            prune,
             json,
         } => {
             let format = if json { "json".to_string() } else { format };
@@ -6181,6 +6284,11 @@ fn run_command(
                 format,
                 no_verify,
                 max_todos,
+                status,
+                done,
+                undone,
+                prune,
+                json,
             })
         }
         Command::ReplayFlow { cmd } => {

@@ -33,6 +33,15 @@ impl Corpus {
     /// `new` sizes it for the context budget, the stdout-cap test needs one
     /// far past the cap.
     fn with_human_turn(tag: &str, text: &str) -> Self {
+        let corpus = Self::write_fixture(tag, text);
+        let out = corpus.run(&["recall", "index", "--source", "claude"]);
+        assert!(out.status.success(), "index: {out:?}");
+        corpus
+    }
+
+    /// The transcript files only — no index: the corpus starts cold so a
+    /// test can prove a query path catches up on demand.
+    fn write_fixture(tag: &str, text: &str) -> Self {
         let home = Scratch::for_test("recall-cli", tag);
         let slug = home.join(".claude/projects/-work-pixel");
         std::fs::create_dir_all(&slug).unwrap();
@@ -55,10 +64,7 @@ impl Corpus {
             format!("{}\n", lines.join("\n")),
         )
         .unwrap();
-        let corpus = Self { home };
-        let out = corpus.run(&["recall", "index", "--source", "claude"]);
-        assert!(out.status.success(), "index: {out:?}");
-        corpus
+        Self { home }
     }
 
     fn command(&self) -> Command {
@@ -232,6 +238,57 @@ fn search_returns_the_matching_turn_with_its_session_reference() {
 
     let miss = corpus.stdout(&["recall", "search", "no-such-token-xyzzy"]);
     assert!(miss.starts_with("no matches ("), "{miss}");
+}
+
+/// The lazy contract end to end: a query on a corpus that was never
+/// indexed ingests on demand — no `recall index`, no daemon — instead of
+/// answering from an empty store. The window filters on the file's mtime
+/// (just written → recent), not the timestamps inside the records.
+#[test]
+fn search_on_a_cold_corpus_ingests_on_demand() {
+    let corpus = Corpus::write_fixture("lazy", &format!("{NEEDLE}{}", TAIL.repeat(8)));
+    let out = corpus.json(&["recall", "search", "streamed needle", "--json"]);
+    let hits = out["hits"].as_array().expect("hits array");
+    assert_eq!(hits.len(), 1, "cold search must self-ingest: {out}");
+    assert_eq!(hits[0]["source_session_id"], SESSION_ID);
+}
+
+/// The store-only commands catch up on demand too: sessions, show,
+/// maxtest, and export each run against their own never-indexed corpus, so
+/// a missing catch-up in one cannot hide behind another's warm-up.
+#[test]
+fn cold_corpus_sessions_show_maxtest_and_export() {
+    let content = || format!("{NEEDLE}{}", TAIL.repeat(8));
+
+    let corpus = Corpus::write_fixture("lazy-sessions", &content());
+    let sessions = corpus.json(&["recall", "sessions", "--json"]);
+    assert_eq!(
+        sessions["sessions"].as_array().map(Vec::len),
+        Some(1),
+        "{sessions}"
+    );
+
+    let corpus = Corpus::write_fixture("lazy-show", &content());
+    let shown = corpus.stdout(&["recall", "show", "claude:0123abcd"]);
+    assert!(shown.contains("streamed needle"), "{shown}");
+
+    let corpus = Corpus::write_fixture("lazy-maxtest", &content());
+    let ranked = corpus.stdout(&["recall", "maxtest", "needle,zz-absent-token"]);
+    assert!(ranked.contains("needle"), "{ranked}");
+
+    let corpus = Corpus::write_fixture("lazy-export", &content());
+    let out_dir = corpus.home.join("export");
+    let out = corpus.run(&[
+        "recall",
+        "export",
+        "--out",
+        out_dir.to_str().unwrap(),
+        "--format",
+        "jsonl",
+    ]);
+    assert!(out.status.success(), "export: {out:?}");
+    let written = std::fs::read_dir(&out_dir).unwrap().flatten().count();
+    assert_eq!(written, 1, "one session file exported");
 }
 
 #[test]

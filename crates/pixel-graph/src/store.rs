@@ -1288,6 +1288,20 @@ impl GraphStore {
         Ok((files, symbols, edges, unresolved))
     }
 
+    /// Symbol count per indexed language, for the coverage report.
+    pub fn symbols_by_lang(&self) -> Result<Vec<(String, u64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.lang, COUNT(*) FROM symbols s \
+             JOIN files f ON f.id = s.file_id GROUP BY f.lang",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Read a `meta` table value, or `None` if the key is absent.
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
         Ok(self
@@ -1936,5 +1950,27 @@ mod tests {
                 .is_none()
         );
         assert_eq!(store.annotation_count().unwrap(), 0);
+    }
+
+    /// `symbols_by_lang` groups symbol counts by the file's language tag.
+    #[test]
+    fn symbols_by_lang_groups_counts_per_language() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let rust = store.replace_file("src/a.rs", "o1", "rust").unwrap();
+        let ts = store.replace_file("src/b.ts", "o2", "ts").unwrap();
+        store.replace_file("src/c.rs", "o3", "rust").unwrap();
+        store
+            .conn()
+            .execute_batch(&format!(
+                "INSERT INTO symbols (uid, file_id, name, qualified, kind, start_line, end_line) VALUES
+                 ('a#f#function', {rust}, 'f', 'f', 'function', 1, 1),
+                 ('a#g#function', {rust}, 'g', 'g', 'function', 2, 2),
+                 ('b#h#function', {ts}, 'h', 'h', 'function', 1, 1);"
+            ))
+            .unwrap();
+        let by_lang: std::collections::BTreeMap<String, u64> =
+            store.symbols_by_lang().unwrap().into_iter().collect();
+        assert_eq!(by_lang["rust"], 2);
+        assert_eq!(by_lang["ts"], 1);
     }
 }

@@ -266,17 +266,21 @@ impl Corpus for Service {
 
 /// Run the repo daemon in the foreground until Shutdown, idle timeout, or
 /// error.
+#[cfg_attr(test, mutants::skip)] // thin adapter: open + run_corpus, both tested
 pub fn run(root: &Path) -> Result<(), ServeError> {
     let service = Service::open(root)?;
-    spawn_facts_ingest(root);
+    // The facts/history index is demand-driven: no ingest thread is spawned
+    // here. `facts_open_and_catch_up` serves the first history query with a
+    // bounded lazy ingest and spawns `spawn_facts_ingest` to keep it fresh.
     run_corpus(service)
 }
 
 /// Spawn a low-priority background thread that periodically ticks the facts
 /// ingest (history.db) until fresh, then idle-polls so a ref move re-triggers
 /// ingest. Queries never block on it: the ingest shares the WAL-mode
-/// connection and yields every tick budget.
-fn spawn_facts_ingest(root: &Path) {
+/// connection and yields every tick budget. Spawned on first facts use, not
+/// at daemon start.
+pub(crate) fn spawn_facts_ingest(root: &Path) {
     let root = root.to_path_buf();
     std::thread::spawn(move || {
         let mut store = match pixel_facts::FactsStore::open(&root) {
