@@ -250,6 +250,8 @@ mod tests {
     fn every_tool_reports_the_error_instead_of_a_default() {
         // A path that does not exist: root discovery fails before any
         // daemon or service work, so every tool surfaces the error fast.
+        // SAFETY: process-wide env mutation, but the test restores it before
+        // returning and no assertion depends on a concurrent read.
         unsafe {
             std::env::set_var("PIXEL_DAEMON_AUTO_START", "0");
         }
@@ -293,6 +295,7 @@ mod tests {
                 "a dead root must surface an error, not a default answer"
             );
         }
+        // SAFETY: restoring the pre-test environment (see above).
         unsafe {
             std::env::remove_var("PIXEL_DAEMON_AUTO_START");
         }
