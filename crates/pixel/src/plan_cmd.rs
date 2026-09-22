@@ -68,21 +68,9 @@ pub fn run(opts: PlanOptions) -> Result<(), String> {
 /// without planning — this path never touches the daemon.
 fn run_state_ops(opts: &PlanOptions) -> Result<(), String> {
     let mut state = plan_state::load(&opts.path)?;
-    let mut changed = false;
-    for &n in &opts.done {
-        plan_state::set_done(&mut state, n, true)?;
-        changed = true;
-    }
-    for &n in &opts.undone {
-        plan_state::set_done(&mut state, n, false)?;
-        changed = true;
-    }
-    if opts.prune {
-        let pruned = plan_state::prune(&mut state);
-        if pruned > 0 {
-            eprintln!("pruned {pruned} stale plan item(s)");
-            changed = true;
-        }
+    let (changed, reports) = apply_state_ops(opts, &mut state)?;
+    for line in &reports {
+        eprintln!("{line}");
     }
     if changed {
         plan_state::save(&opts.path, &state)?;
@@ -102,6 +90,33 @@ fn run_state_ops(opts: &PlanOptions) -> Result<(), String> {
         print!("{}", plan_state::render_status(&state));
     }
     Ok(())
+}
+
+/// The mutations the state flags ask for, as data: whether the state
+/// changed (drives save) and what to report. Returned rather than printed
+/// so the prune gate is observable in tests.
+fn apply_state_ops(
+    opts: &PlanOptions,
+    state: &mut plan_state::PlanState,
+) -> Result<(bool, Vec<String>), String> {
+    let mut changed = false;
+    let mut reports = Vec::new();
+    for &n in &opts.done {
+        plan_state::set_done(state, n, true)?;
+        changed = true;
+    }
+    for &n in &opts.undone {
+        plan_state::set_done(state, n, false)?;
+        changed = true;
+    }
+    if opts.prune {
+        let pruned = plan_state::prune(state);
+        if pruned > 0 {
+            reports.push(format!("pruned {pruned} stale plan item(s)"));
+            changed = true;
+        }
+    }
+    Ok((changed, reports))
 }
 
 /// `prompt` and `path` are both optional positionals, so
@@ -343,5 +358,68 @@ mod tests {
             ]
         );
         assert!(!markdown(true, &three).contains("Verify"));
+    }
+
+    /// Each state flag alone must route to `run_state_ops` — any `||`→`&&`
+    /// flip on the gate sends a lone flag to the daemon path, which fails
+    /// on a root with no index.
+    #[test]
+    fn each_state_flag_alone_routes_to_state_ops() {
+        let root = std::env::temp_dir().join(format!("px-plan-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // Seed one tracked item so --done has something to mark.
+        let mut state = plan_state::PlanState::default();
+        plan_state::merge(&mut state, &[finding("a.rs", 1, 9)]);
+        plan_state::save(&root, &state).unwrap();
+
+        for opts in [
+            PlanOptions {
+                status: true,
+                ..options(None, root.to_str().unwrap(), None)
+            },
+            PlanOptions {
+                prune: true,
+                ..options(None, root.to_str().unwrap(), None)
+            },
+        ] {
+            run(opts).expect("state ops never need a daemon");
+        }
+        // done then undone: each flag alone must route to state ops, and the
+        // last write wins on disk.
+        run(PlanOptions {
+            done: vec![1],
+            ..options(None, root.to_str().unwrap(), None)
+        })
+        .unwrap();
+        assert!(plan_state::load(&root).unwrap().items[0].done);
+        run(PlanOptions {
+            undone: vec![1],
+            ..options(None, root.to_str().unwrap(), None)
+        })
+        .unwrap();
+        assert!(!plan_state::load(&root).unwrap().items[0].done);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `apply_state_ops` reports the prune count and marks the state changed
+    /// only when something was actually dropped — `>=` would report on a
+    /// no-op prune, `==`/`<` would never report a real one.
+    #[test]
+    fn prune_reports_exactly_when_items_were_dropped() {
+        let mut state = plan_state::PlanState::default();
+        plan_state::merge(&mut state, &[finding("a.rs", 1, 9), finding("b.rs", 2, 3)]);
+        plan_state::merge(&mut state, &[finding("a.rs", 1, 9)]); // b.rs → stale
+        let opts = PlanOptions {
+            prune: true,
+            ..options(None, ".", None)
+        };
+        let (changed, reports) = apply_state_ops(&opts, &mut state).unwrap();
+        assert!(changed);
+        assert_eq!(reports, vec!["pruned 1 stale plan item(s)".to_string()]);
+
+        let (changed, reports) = apply_state_ops(&opts, &mut state).unwrap();
+        assert!(!changed);
+        assert!(reports.is_empty(), "{reports:?}");
     }
 }

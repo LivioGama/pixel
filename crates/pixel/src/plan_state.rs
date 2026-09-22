@@ -230,4 +230,15 @@ mod tests {
         assert!(render_status(&fresh).contains("no tracked plan items"));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Only `NotFound` means "no checklist yet" — any other read failure is
+    /// an error, not an empty state that would silently drop progress.
+    #[test]
+    fn load_errors_when_the_state_file_is_not_a_file() {
+        let dir = std::env::temp_dir().join(format!("px-plan-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(state_path(&dir)).unwrap();
+        assert!(load(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

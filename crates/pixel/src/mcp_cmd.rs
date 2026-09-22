@@ -200,6 +200,7 @@ impl ServerHandler for PixelServer {
 
 /// Blocking stdio entrypoint over a current-thread tokio runtime, same
 /// shape as the sniper MCP server.
+#[cfg_attr(test, mutants::skip)] // serving stdio blocks forever; the tool surface is what tests pin
 pub fn run(root: PathBuf) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -240,5 +241,76 @@ mod tests {
         let server = PixelServer::new(std::env::temp_dir().join("px-mcp-no-such-root"));
         let result = server.call(Request::Status {});
         assert!(result.is_error.unwrap_or(false));
+    }
+
+    /// Every tool must produce a real CallToolResult — a `Default::default()`
+    /// body answers success-with-no-content, which is worse than an error.
+    /// On a root with no daemon each tool must surface the failure.
+    #[test]
+    fn every_tool_reports_the_error_instead_of_a_default() {
+        // A path that does not exist: root discovery fails before any
+        // daemon or service work, so every tool surfaces the error fast.
+        unsafe {
+            std::env::set_var("PIXEL_DAEMON_AUTO_START", "0");
+        }
+        let root = std::env::temp_dir().join(format!("px-mcp-dead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let server = PixelServer::new(root.clone());
+        let results = [
+            server.status(),
+            server.search(Parameters(SearchParams {
+                pattern: "x".to_string(),
+                limit: None,
+                scope: None,
+            })),
+            server.resolve(Parameters(ResolveParams {
+                phrase: "x".to_string(),
+                limit: None,
+            })),
+            server.impact(Parameters(ImpactParams {
+                symbol: "x".to_string(),
+                direction: None,
+                depth: None,
+            })),
+            server.callers(Parameters(UsesParams {
+                symbol: "x".to_string(),
+            })),
+            server.callees(Parameters(UsesParams {
+                symbol: "x".to_string(),
+            })),
+            server.evaluate(Parameters(EvaluateParams {
+                from: "a".to_string(),
+                to: "b".to_string(),
+            })),
+            server.context(Parameters(ContextParams {
+                uid: "x".to_string(),
+                budget_tokens: None,
+            })),
+        ];
+        for result in results {
+            assert!(
+                result.is_error.unwrap_or(false),
+                "a dead root must surface an error, not a default answer"
+            );
+        }
+        unsafe {
+            std::env::remove_var("PIXEL_DAEMON_AUTO_START");
+        }
+    }
+
+    /// get_info carries the server's identity and instructions — a default
+    /// would hand clients an anonymous, instructionless server.
+    #[test]
+    fn get_info_names_the_server_and_its_contract() {
+        let server = PixelServer::new(PathBuf::from("."));
+        let info = server.get_info();
+        assert_eq!(info.server_info.name, "pixel");
+        assert!(
+            info.instructions
+                .as_deref()
+                .is_some_and(|i| i.contains("Deterministic")),
+            "{:?}",
+            info.instructions
+        );
     }
 }

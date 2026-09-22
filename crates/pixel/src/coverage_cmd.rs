@@ -110,38 +110,59 @@ pub fn run(opts: CoverageOptions) -> Result<(), String> {
         return Ok(());
     }
 
+    print!(
+        "{}",
+        render_human(&rows, unrecognized, graph_present, &root)
+    );
+    Ok(())
+}
+
+/// The plain-text table, as a pure string so the conditional lines are
+/// assertable — the `unrecognized` footnote and the no-graph note are the
+/// parts that change what the user does next.
+fn render_human(
+    rows: &BTreeMap<String, Row>,
+    unrecognized: u64,
+    graph_present: bool,
+    root: &Path,
+) -> String {
     if rows.is_empty() {
-        println!("no recognized source files under {}", root.display());
-        return Ok(());
+        return format!("no recognized source files under {}\n", root.display());
     }
-    println!(
-        "{:<10} {:>8} {:>8} {:>9} {:>8}",
+    let (disk_total, indexed_total): (u64, u64) = (
+        rows.values().map(|r| r.on_disk).sum(),
+        rows.values().map(|r| r.indexed).sum(),
+    );
+    let mut out = format!(
+        "{:<10} {:>8} {:>8} {:>9} {:>8}\n",
         "language", "on-disk", "indexed", "coverage", "symbols"
     );
-    for (lang, r) in &rows {
-        println!(
-            "{:<10} {:>8} {:>8} {:>8.1}% {:>8}",
+    for (lang, r) in rows {
+        out.push_str(&format!(
+            "{:<10} {:>8} {:>8} {:>8.1}% {:>8}\n",
             lang,
             r.on_disk,
             r.indexed,
             pct(r.indexed, r.on_disk),
             r.symbols
-        );
+        ));
     }
-    println!(
-        "{:<10} {:>8} {:>8} {:>8.1}%",
+    out.push_str(&format!(
+        "{:<10} {:>8} {:>8} {:>8.1}%\n",
         "total",
         disk_total,
         indexed_total,
         pct(indexed_total, disk_total)
-    );
+    ));
     if unrecognized > 0 {
-        println!("{unrecognized} file(s) with unrecognized extensions (never indexed)");
+        out.push_str(&format!(
+            "{unrecognized} file(s) with unrecognized extensions (never indexed)\n"
+        ));
     }
     if !graph_present {
-        println!("note: no graph.db — indexed counts are zero; run `pixel build-index`");
+        out.push_str("note: no graph.db — indexed counts are zero; run `pixel build-index`\n");
     }
-    Ok(())
+    out
 }
 
 fn pct(part: u64, whole: u64) -> f64 {
@@ -166,6 +187,7 @@ mod tests {
     #[test]
     fn collect_counts_recognized_and_unrecognized() {
         let dir = std::env::temp_dir().join(format!("px-cov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/a.rs"), b"fn a() {}\n").unwrap();
         std::fs::write(dir.join("src/b.ts"), b"export const b = 1;\n").unwrap();
@@ -177,5 +199,68 @@ mod tests {
         assert_eq!(unrecognized, 1);
         assert!(!graph_present);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The indexed side of the ratio: a graph.db naming files must move
+    /// `indexed` — `+=` mutants that subtract or multiply leave it at zero.
+    #[test]
+    fn collect_reads_indexed_counts_from_the_graph() {
+        let dir = std::env::temp_dir().join(format!("px-cov-graph-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let shard = dir.join(SHARD_DIR);
+        std::fs::create_dir_all(&shard).unwrap();
+        std::fs::write(dir.join("a.rs"), b"fn a() {}\n").unwrap();
+        std::fs::write(dir.join("b.rs"), b"fn b() {}\n").unwrap();
+        {
+            let mut store = GraphStore::open(&shard.join(GRAPH_DB_FILE)).unwrap();
+            store.replace_file("a.rs", "blob-a", "rust").unwrap();
+        }
+        let (rows, _, graph_present) = collect(&dir).unwrap();
+        assert!(graph_present);
+        assert_eq!(rows["rust"].on_disk, 2);
+        assert_eq!(rows["rust"].indexed, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `run` on a path that does not exist must fail — a body replaced by
+    /// `Ok(())` would swallow that error.
+    #[test]
+    fn run_errors_on_a_missing_path() {
+        let missing = std::env::temp_dir().join(format!("px-cov-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        let err = run(CoverageOptions {
+            path: missing,
+            json: false,
+        })
+        .unwrap_err();
+        assert!(err.contains("coverage"), "{err}");
+    }
+
+    #[test]
+    fn render_human_names_unrecognized_files_and_a_missing_graph() {
+        let mut rows = BTreeMap::new();
+        rows.insert(
+            "rust".to_string(),
+            Row {
+                on_disk: 2,
+                indexed: 1,
+                symbols: 3,
+            },
+        );
+        let root = Path::new("/repo");
+        let out = render_human(&rows, 4, false, root);
+        assert!(out.contains("rust"));
+        assert!(out.contains("50.0%"));
+        assert!(
+            out.contains("4 file(s) with unrecognized extensions"),
+            "{out}"
+        );
+        assert!(out.contains("no graph.db"), "{out}");
+        // Neither footnote when both conditions are absent.
+        let clean = render_human(&rows, 0, true, root);
+        assert!(!clean.contains("unrecognized"), "{clean}");
+        assert!(!clean.contains("no graph.db"), "{clean}");
+        // Empty input gets its own line, not a table header.
+        assert!(render_human(&BTreeMap::new(), 0, false, root).contains("no recognized"));
     }
 }

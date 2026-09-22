@@ -164,9 +164,15 @@ fn pack(root: &Path, out: &Path, include_history: bool) -> Result<Value, String>
     }))
 }
 
+/// A pack source is a URL only when it opens with http(s):// — anything
+/// else is a filesystem path.
+fn is_url(source: &str) -> bool {
+    source.starts_with("https://") || source.starts_with("http://")
+}
+
 /// Read the pack bytes from a path or an https URL.
 fn fetch_source(source: &str) -> Result<Vec<u8>, String> {
-    if source.starts_with("https://") || source.starts_with("http://") {
+    if is_url(source) {
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(FETCH_TIMEOUT))
             .user_agent("pixel-cli index-unpack")
@@ -347,6 +353,181 @@ mod tests {
     fn pack_errors_on_an_empty_index() {
         let root = scratch("empty");
         let err = pack(&root, &root.join("x.pxpack"), false).unwrap_err();
+        assert!(err.contains("nothing to pack"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The fetch ceiling is a literal contract, not arithmetic — pin the
+    /// byte value so `*` mutants can't shrink or inflate it silently.
+    #[test]
+    fn fetch_cap_is_two_gib() {
+        assert_eq!(FETCH_CAP, 2_147_483_648);
+    }
+
+    /// history.db's SQLite sidecars travel only with the db they belong to:
+    /// `--include-history` absent means no `history.*` member at all.
+    #[test]
+    fn pack_list_gates_history_sidecars_on_the_flag() {
+        let root = scratch("list");
+        let shard = root.join(SHARD_DIR);
+        for name in ["graph.db", "graph.db-wal", "history.db", "history.db-wal"] {
+            std::fs::write(shard.join(name), b"x").unwrap();
+        }
+        let plain: Vec<String> = pack_list(&shard, false)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(plain.contains(&"graph.db-wal".to_string()), "{plain:?}");
+        assert!(!plain.iter().any(|n| n.starts_with("history")), "{plain:?}");
+        let full: Vec<String> = pack_list(&shard, true)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(full.contains(&"history.db-wal".to_string()), "{full:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn urls_take_the_fetch_path_not_the_filesystem() {
+        assert!(is_url("https://x.example/p.pxpack"));
+        assert!(is_url("http://x.example/p.pxpack"));
+        assert!(!is_url("pack.pxpack"));
+        assert!(!is_url("/tmp/pack.pxpack"));
+    }
+
+    /// A tar member like `files/sub/evil` must be refused — a `||`→`&&`
+    /// mutant on the unsafe-member check would let nested paths land.
+    #[test]
+    fn unpack_refuses_a_nested_member_name() {
+        let dst = scratch("evil");
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let manifest = serde_json::to_vec(&Manifest {
+                format: PACK_FORMAT,
+                pixel_version: "test".to_string(),
+                created_at_ms: 0,
+                repo_head: None,
+                files: vec![],
+            })
+            .unwrap();
+            let mut header = tar::Header::new_gnu();
+            header.set_size(manifest.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, MANIFEST, manifest.as_slice())
+                .unwrap();
+            let body = b"evil";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "files/sub/evil", body.as_slice())
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let pack_file = dst.join("evil.pxpack");
+        std::fs::write(&pack_file, &tar_bytes).unwrap();
+        let err = unpack(&dst, pack_file.to_str().unwrap(), true).unwrap_err();
+        assert!(err.contains("unsafe member"), "{err}");
+        let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    /// `head_matches` compares the packed head with the checkout's — both
+    /// Some and equal must yield `Some(true)`, not `Some(false)`.
+    #[test]
+    fn unpack_reports_a_matching_repo_head() {
+        let root = scratch("git");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("HOME", &root)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ]);
+        std::fs::write(root.join(SHARD_DIR).join("graph.db"), b"g").unwrap();
+        let pack_file = root.join("p.pxpack");
+        pack(&root, &pack_file, false).unwrap();
+        let report = unpack(&root, pack_file.to_str().unwrap(), true).unwrap();
+        assert_eq!(report["head_matches"], serde_json::json!(true), "{report}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Without a daemon the guard must let an unpack proceed — a `&&`→`||`
+    /// flip would refuse on `!force` alone.
+    #[test]
+    fn unpack_without_force_proceeds_when_no_daemon_runs() {
+        let dst = scratch("nodae");
+        let src = scratch("nodae-src");
+        std::fs::write(src.join(SHARD_DIR).join("graph.db"), b"g").unwrap();
+        let pack_file = src.join("p.pxpack");
+        pack(&src, &pack_file, false).unwrap();
+        unpack(&dst, pack_file.to_str().unwrap(), false).unwrap();
+        let _ = std::fs::remove_dir_all(&dst);
+        let _ = std::fs::remove_dir_all(&src);
+    }
+
+    /// A live daemon + no --force must refuse — the `!` on `!force` is the
+    /// whole protection.
+    #[test]
+    fn unpack_refuses_while_a_daemon_answers() {
+        use std::io::{BufRead, BufReader, Write};
+        let root = scratch("live");
+        let listener =
+            std::os::unix::net::UnixListener::bind(pixel_daemon::daemon::socket_path(&root))
+                .unwrap();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut line = String::new();
+                if BufReader::new(&stream).read_line(&mut line).is_ok() {
+                    let reply = pixel_daemon::api::Response::success(
+                        "ping",
+                        serde_json::json!({"pong": true}),
+                    );
+                    let _ = writeln!(stream, "{}", serde_json::to_string(&reply).unwrap());
+                }
+            }
+        });
+        let src = scratch("live-src");
+        std::fs::write(src.join(SHARD_DIR).join("graph.db"), b"g").unwrap();
+        let pack_file = src.join("p.pxpack");
+        pack(&src, &pack_file, false).unwrap();
+        let err = unpack(&root, pack_file.to_str().unwrap(), false).unwrap_err();
+        assert!(err.contains("daemon is running"), "{err}");
+        // --force overrides the same live daemon.
+        unpack(&root, pack_file.to_str().unwrap(), true).unwrap();
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&src);
+    }
+
+    /// `run` on an empty index must surface pack's error, not Ok(()).
+    #[test]
+    fn run_propagates_pack_errors() {
+        let root = scratch("run");
+        let err = run(IndexCmd::Pack {
+            out: root.join("x.pxpack"),
+            include_history: false,
+            path: root.clone(),
+        })
+        .unwrap_err();
         assert!(err.contains("nothing to pack"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
