@@ -285,7 +285,9 @@ pub(crate) fn claude_installed(home: &Path) -> bool {
 ///
 /// The install is deliberately minimal: it deploys the agent system prompt
 /// and sets up a `claude` shell wrapper plus the Codex `developer_instructions`
-/// config key so every invocation includes the Pixel retrieval protocol. No hooks, no managed blocks in CLAUDE.md/
+/// config key so every invocation includes the Pixel retrieval protocol —
+/// and, when OpenCode is present, an `instructions` entry in its global
+/// `opencode.json` pointing at the same deployed prompt. No hooks, no managed blocks in CLAUDE.md/
 /// AGENTS.md, no provider-specific routing — the system prompt is the single
 /// enforcement mechanism.
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {
@@ -310,6 +312,14 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         install_shell_wrappers(&home, options.shell.as_deref(), &claude, dry_run)?,
         crate::codex_config::install_developer_instructions(&codex_home, dry_run)?,
     ];
+    let opencode_dir = crate::opencode_config::opencode_config_dir(&home, options.home.is_some());
+    if opencode_dir.is_dir() {
+        steps.push(crate::opencode_config::install_instructions(
+            &opencode_dir,
+            &agent_prompt_path(&home),
+            dry_run,
+        )?);
+    }
     if crate::antigravity::antigravity_config_dir(&home).is_dir() {
         steps.push(crate::antigravity::deploy_plugin_assets(
             &home, &exe, dry_run,
@@ -368,9 +378,15 @@ pub(crate) const PI_PROMPT_REL: &str = ".pi/agent/APPEND_SYSTEM.md";
 /// prompt into Pi's system-prompt file (pi reads it automatically, no flag needed).
 /// The prompt instructs agents to use `pixel search-content`/`pixel find-code`/`pixel impact`
 /// instead of `grep`/`rg` for code discovery in indexed repositories.
+/// Where `deploy_agent_prompt` puts the agent system prompt; OpenCode's
+/// `instructions` entry names this same path.
+pub(crate) fn agent_prompt_path(home: &Path) -> PathBuf {
+    home.join(".local/share/pixel/agent-prompt.md")
+}
+
 fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let dest_dir = home.join(".local/share/pixel");
-    let dest = dest_dir.join("agent-prompt.md");
+    let dest = agent_prompt_path(home);
     let subagent_dest = dest_dir.join(SUBAGENT_PROMPT_FILE);
     let pi_dest = home.join(PI_PROMPT_REL);
     if dry_run {

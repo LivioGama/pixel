@@ -246,6 +246,19 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     ));
 
+    checks.push(check(
+        "install.opencode-instructions",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            let (summary, detail) = crate::opencode_config::check_instructions(
+                &crate::opencode_config::opencode_config_dir(&home, options.home.is_some()),
+            )?;
+            Ok(DoctorCheckDetail {
+                summary,
+                detail: Some(detail),
+            })
+        },
+    ));
+
     let exe_for_antigravity = exe.clone();
     let home_for_antigravity = home.clone();
     checks.push(check(

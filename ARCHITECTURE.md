@@ -51,7 +51,7 @@ binary, and Pixel is deliberately a CLI plus hooks, not an MCP server.
 | `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel action-log` and `pixel token-savings` reporting. | none |
 | `pixel-release` | `pixel check-release`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
 | `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. | none |
-| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`: deploys the bundled prompt, the Claude shell wrapper and the Codex `developer_instructions` config key, backs up changed files; retains legacy hook/routing and cleanup implementations without activating them. | proto, daemon, index, facts, git |
+| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`: deploys the bundled prompt, the Claude shell wrapper, the Codex `developer_instructions` config key and the OpenCode `instructions` entry, backs up changed files; retains legacy hook/routing and cleanup implementations without activating them. | proto, daemon, index, facts, git |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, proto, recall) |
 
 Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context`, `pixel-actionlog`, `pixel-flow` and `pixel-release`; `pixel-session` depends on `pixel-git` only). `pixel-daemon` is
@@ -115,7 +115,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md` or the bundled agent prompts
 | `pixel dig-history` | Engine 2: history-wide discovery (rescue v2) |
 | `pixel sync-branch` | Engine 4: one-call deterministic branch sync |
 | `pixel record-event` | M5: journal a session event (fire-and-forget) |
-| `pixel install` | Idempotently deploy the agent prompt, the Claude shell wrapper and the Codex developer_instructions config key |
+| `pixel install` | Idempotently deploy the agent prompt, the Claude shell wrapper, the Codex developer_instructions config key and — when `~/.config/opencode` exists — the prompt path in OpenCode's global `instructions` |
 | `pixel uninstall` | Remove everything `pixel install` wrote: managed blocks from agent-config files, hook entries from all settings files, hook scripts, the pi guard extension, the rule source file, and the pixel binary itself. |
 | `pixel check-release` | Check that a release tag is consistent with the tree before anything is built or published: crates/pixel/Cargo.toml carries the version, Cargo.lock is fresh for every workspace member, CHANGELOG.md has the `## [x.y.z]` heading and an empty Unreleased section. |
 | `pixel self-update` | Rebuild the binary, stop the daemon, copy the new binary to the install path, and optionally restart the daemon. |
@@ -319,6 +319,18 @@ removes the block, or the key when nothing else was in it. Pi reads
 `~/.pi/agent/APPEND_SYSTEM.md` automatically; that file is shared the same way
 (markers, text outside them kept, `install.pi-prompt` in `doctor`, block — not
 the file — removed by `uninstall`), so a user's own pi instructions survive.
+OpenCode — when `~/.config/opencode` (`$XDG_CONFIG_HOME` honoured) exists —
+gets the prompt through the `instructions` array of its global
+`opencode.json`, which OpenCode merges into every session's context: the
+mechanism is additive, where creating `~/.config/opencode/AGENTS.md` would
+win global precedence and shadow a migrating user's `~/.claude/CLAUDE.md`.
+The entry names the deployed `~/.local/share/pixel/agent-prompt.md`, every
+other key and instruction round-trips untouched, a file that does not parse
+as strict JSON is refused rather than rewritten (a sibling `opencode.jsonc`
+is honoured alongside), `doctor` (`install.opencode-instructions`) verifies
+the entry and skips when OpenCode is absent, and `uninstall` drops only
+pixel's entries — another install's path recognised by the deployed tail —
+and the key once empty.
 
 Existing hook entry points remain implemented, separately from active installation:
 

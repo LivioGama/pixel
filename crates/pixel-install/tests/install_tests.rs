@@ -2161,6 +2161,70 @@ fn install_keeps_a_users_own_developer_instructions_and_refreshes_a_stale_pixel_
 }
 
 #[test]
+fn install_registers_the_agent_prompt_in_opencode_instructions_when_opencode_is_present() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let config = home.join(".config/opencode/opencode.json");
+
+    // No ~/.config/opencode: the step is skipped and no config appears.
+    install_for_shell(home, TEST_SHELL);
+    assert!(
+        !config.exists(),
+        "install must not create OpenCode config for a user without OpenCode"
+    );
+
+    // OpenCode present: the deployed prompt lands in `instructions`, a
+    // foreign entry and other keys survive, a re-install is byte-identical.
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-5",
+            "instructions": ["CONTRIBUTING.md"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    install_for_shell(home, TEST_SHELL);
+    let first: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+    let slot = first["instructions"].as_array().unwrap();
+    assert_eq!(slot.len(), 2, "{first}");
+    assert_eq!(slot[0], "CONTRIBUTING.md");
+    assert!(
+        slot[1]
+            .as_str()
+            .unwrap()
+            .ends_with(".local/share/pixel/agent-prompt.md"),
+        "the instructions entry must name the deployed prompt: {slot:?}"
+    );
+    assert_eq!(first["model"], "anthropic/claude-sonnet-4-5");
+    let written = fs::read_to_string(&config).unwrap();
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        written,
+        "a re-install must be byte-for-byte idempotent"
+    );
+
+    // Uninstall drops only the pixel entry.
+    uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        binary_path: Some(home.join(".local/bin/pixel")),
+        shell: Some(TEST_SHELL.into()),
+        dry_run: false,
+        wrappers_only: false,
+    })
+    .expect("uninstall");
+    let after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+    assert_eq!(
+        after["instructions"],
+        serde_json::json!(["CONTRIBUTING.md"])
+    );
+}
+
+#[test]
 fn install_refuses_to_rewrite_a_codex_config_it_cannot_parse() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
