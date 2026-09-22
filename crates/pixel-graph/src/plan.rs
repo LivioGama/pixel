@@ -499,9 +499,14 @@ fn content_query_words(query: &str) -> Vec<String> {
 /// A match is evidence only when it shares a content word with the query.
 /// Symbol-fallback matches already matched on identifier words, and a weak
 /// text hit inside a well-named owner symbol still points at the right site.
+/// A query reduced to stopwords has no content word to share: ordinary
+/// lexical matches are noise then, not evidence.
 fn match_shares_content(m: &concept_resolve::ConceptMatch, qwords: &[String]) -> bool {
-    if qwords.is_empty() || m.symbol_kind.is_some() {
+    if m.symbol_kind.is_some() {
         return true;
+    }
+    if qwords.is_empty() {
+        return false;
     }
     let mut words = crate::concept::concept_words(&m.norm);
     // `norm` is already lowercased, so camelCase members ("totalPrice" →
@@ -1500,6 +1505,26 @@ mod tests {
     }
 
     #[test]
+    fn by_concept_returns_nothing_for_an_all_stopword_query() {
+        // A prompt that reduces to stopwords has no content word: even if
+        // resolve returns lexical hits, none of them are evidence.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.ts"),
+            "const a = \"in the mood\";\nconst b = \"and so on\";\n",
+        )
+        .unwrap();
+        let db = dir.path().join("graph.db");
+        crate::build::build_graph(dir.path(), &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        assert!(content_query_words("in the and").is_empty());
+        assert!(
+            by_concept(&store, "in the and").unwrap().is_empty(),
+            "a stopword-only query must not emit findings"
+        );
+    }
+
+    #[test]
     fn match_shares_content_splits_camel_case_raw() {
         // `norm` is lowercased, so "totalPrice" survives there only as the
         // single token "totalprice" — the raw split is what lets a multi-word
@@ -1526,6 +1551,31 @@ mod tests {
             ..m
         };
         assert!(!match_shares_content(&noise, &qwords));
+    }
+
+    #[test]
+    fn match_shares_content_rejects_lexical_matches_without_content_words() {
+        // A stopword-only query leaves no content word to overlap: an
+        // ordinary lexical hit is noise then, not evidence — while a
+        // symbol-tier match is still trusted on its own.
+        let m = concept_resolve::ConceptMatch {
+            path: "a.ts".into(),
+            start_line: 1,
+            end_line: 1,
+            kind: crate::concept::ConceptKind::String,
+            raw: "in the mood".into(),
+            norm: "in the mood".into(),
+            owner: None,
+            symbol_kind: None,
+            score: 1.0,
+            reasons: vec![],
+        };
+        assert!(!match_shares_content(&m, &[]));
+        let sym = concept_resolve::ConceptMatch {
+            symbol_kind: Some("function".into()),
+            ..m
+        };
+        assert!(match_shares_content(&sym, &[]));
     }
 
     #[test]
