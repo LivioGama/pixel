@@ -248,10 +248,10 @@ fn run_ndcg(
 }
 
 /// A/B lane: run `pixel ask` (semantic) over the SAME qrels, rooted at the
-/// same `crates/pixel-graph/src` subtree. `ask` returns absolute paths; we
-/// relativize them against the workspace root so they compare against the
-/// qrels' `crates/pixel-graph/src/<name>` form. Same query strings as the
-/// lexical lane → identical inputs, isolated channel effect.
+/// same `crates/pixel-graph/src` subtree. `ask` returns paths relative to its
+/// search root; we resolve and verify them inside that subtree before converting
+/// them to the qrels' `crates/pixel-graph/src/<name>` form. Same query strings as
+/// the lexical lane → identical inputs, isolated channel effect.
 ///
 /// The per-probe guard is a *presence* check, not the `k`-truncated score the
 /// lexical lane gates on. `ask` retrieves the whole corpus here, so a labelled
@@ -277,10 +277,21 @@ fn run_ndcg_ask(root: &std::path::Path, qrels: &[(&'static str, Vec<String>)], k
         let order: Vec<String> = hits
             .iter()
             .map(|h| {
-                h.path
-                    .strip_prefix(&format!("{}/", root.display()))
-                    .expect("ask result must be inside the benchmark corpus")
-                    .to_string()
+                let hit = std::path::Path::new(&h.path);
+                let hit = if hit.is_absolute() {
+                    hit.to_path_buf()
+                } else {
+                    subtree.join(hit)
+                };
+                let hit = hit
+                    .canonicalize()
+                    .expect("ask result must name a file in the benchmark corpus");
+                hit.strip_prefix(&subtree)
+                    .expect("ask result must be inside the benchmark corpus");
+                hit.strip_prefix(root)
+                    .expect("benchmark corpus must be inside its fixture root")
+                    .to_string_lossy()
+                    .into_owned()
             })
             .collect();
         let score = ndcg_at_k(&order, &rel_set, k);

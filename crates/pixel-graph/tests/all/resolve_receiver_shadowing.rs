@@ -106,6 +106,35 @@ fn qualified_call_no_longer_links_the_callers_own_same_name_symbol() {
     );
 }
 
+#[test]
+fn ruby_root_call_resolves_from_a_script_scope() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("lib.rb"), "def foo\nend\n").unwrap();
+    fs::write(root.path().join("script.rb"), "foo()\n").unwrap();
+    let db = root.path().join(".pixel/graph.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    build_graph(root.path(), &db).unwrap();
+    let store = GraphStore::open(&db).unwrap();
+
+    let foo = store.symbols_by_name("foo", None, 10).unwrap().remove(0);
+    let callers = store.edges_to(foo.id, Some(EdgeKind::Calls)).unwrap();
+    assert_eq!(callers.len(), 1, "callers: {callers:?}");
+    let script_file = store.file_by_path("script.rb").unwrap().unwrap();
+    let script = store
+        .symbols_in_file(script_file.id)
+        .unwrap()
+        .into_iter()
+        .find(|symbol| symbol.id == callers[0].src_id)
+        .unwrap();
+    assert_eq!(script.kind, SymbolKind::Script);
+    assert_eq!(script.qualified, "script.rb");
+    assert_eq!(callers[0].tier, Tier::Probable);
+    assert_eq!(
+        store.envelope_for_name("foo").unwrap().unresolved_same_name,
+        0
+    );
+}
+
 /// The receiver relaxation: when a file holds the graph's only definition of
 /// a name and it is an inherent method, a value receiver links to it at
 /// `Probable` (never `Exact`). Before this, `w.push_call()` in

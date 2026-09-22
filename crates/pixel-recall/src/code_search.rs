@@ -312,7 +312,14 @@ fn ask_with_embedder(
 
     let mut embedder = open_code_embedder(download)?;
 
-    ask_collected(query, k, files, coverage, embedder.as_mut())
+    let mut result = ask_collected(query, k, files, coverage, embedder.as_mut())?;
+    for hit in &mut result.hits {
+        let path = Path::new(&hit.path);
+        if let Ok(relative) = path.strip_prefix(root) {
+            hit.path = relative.to_string_lossy().into_owned();
+        }
+    }
+    Ok(result)
 }
 
 fn open_code_embedder(download: bool) -> Result<Box<dyn crate::embed::Embedder>, String> {
@@ -328,7 +335,7 @@ fn ask_collected(
 ) -> Result<AskResult, String> {
     // Build the corpus (chunk every file) and embed the chunks in batches.
     let mut corpus: Vec<CorpusEntry> = Vec::new();
-    let mut lexical_tokens = HashMap::new();
+    let mut lexical_coverage = HashMap::new();
     let mut chunk_texts: Vec<String> = Vec::new();
     for file in &files {
         let Ok(bytes) = std::fs::read(file) else {
@@ -348,27 +355,35 @@ fn ask_collected(
             continue;
         }
         coverage.searched_files += 1;
-        // Tokenize whole files: an embedding chunk boundary is not a word boundary.
-        let mut tokens = words(&text);
         // Filenames are evidence too, but directory names and language extensions
         // must not add shared noise or change ranks when the repository moves.
+        let mut filename_tokens = HashSet::new();
         if let Some(name) = file.file_name() {
             // A filename can have compound extensions (`types.d.ts`). Keep
             // only the basename before its first dot so suffix components
             // cannot become lexical evidence.
             let basename = name.to_string_lossy();
             let stem = basename.split('.').next().unwrap_or_default();
-            tokens.extend(words(stem));
+            filename_tokens = words(stem);
         }
-        lexical_tokens.insert(file.display().to_string(), tokens);
+        let terms = query_terms(query);
+        let mut best_coverage = terms
+            .iter()
+            .filter(|term| filename_tokens.contains(*term))
+            .count();
         for (start, end) in chunk_offsets(&text) {
             let chunk = text[start..end].to_string();
+            let mut tokens = words(lexical_chunk(&text, start, end));
+            tokens.extend(filename_tokens.iter().cloned());
+            let chunk_coverage = terms.iter().filter(|term| tokens.contains(*term)).count();
+            best_coverage = best_coverage.max(chunk_coverage);
             corpus.push(CorpusEntry {
                 path: file.display().to_string(),
                 text: chunk.clone(),
             });
             chunk_texts.push(chunk);
         }
+        lexical_coverage.insert(file.display().to_string(), best_coverage);
     }
     coverage.degraded |= coverage.skipped_files > 0;
     if corpus.is_empty() {
@@ -409,7 +424,7 @@ fn ask_collected(
 
     coverage.result_limit_reached = best.len() > k;
     Ok(AskResult {
-        hits: rank_files(query, &lexical_tokens, best, snippet_of, k),
+        hits: rank_files(query, &lexical_coverage, best, snippet_of, k),
         coverage,
     })
 }
@@ -422,6 +437,30 @@ fn validate_vector(vector: &[f32], dims: usize) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Exclude identifier fragments created only by fixed byte-window boundaries.
+fn lexical_chunk(text: &str, start: usize, end: usize) -> &str {
+    let is_ident = |character: char| character.is_alphanumeric() || character == '_';
+    let chunk = &text[start..end];
+    let chunk = if text[..start].chars().next_back().is_some_and(&is_ident)
+        && chunk.chars().next().is_some_and(&is_ident)
+    {
+        chunk
+            .split_once(|character| !is_ident(character))
+            .map_or("", |(_, complete)| complete)
+    } else {
+        chunk
+    };
+    if text[..end].chars().next_back().is_some_and(&is_ident)
+        && text[end..].chars().next().is_some_and(&is_ident)
+    {
+        chunk
+            .rsplit_once(|character| !is_ident(character))
+            .map_or("", |(complete, _)| complete)
+    } else {
+        chunk
+    }
 }
 
 /// Preserve complete identifiers and split snake_case, camelCase and acronyms.
@@ -515,31 +554,24 @@ fn query_terms(query: &str) -> HashSet<String> {
 
 fn rank_files(
     query: &str,
-    lexical_tokens: &HashMap<String, HashSet<String>>,
+    lexical_coverage: &HashMap<String, usize>,
     best: HashMap<String, f32>,
     mut snippets: HashMap<String, String>,
     k: usize,
 ) -> Vec<AskHit> {
     let terms = query_terms(query);
-    let mut matched: HashMap<&str, HashSet<&str>> = HashMap::new();
-    for (path, tokens) in lexical_tokens {
-        let file_terms = matched.entry(path).or_default();
-        file_terms.extend(
-            terms
-                .iter()
-                .filter(|w| tokens.contains(*w))
-                .map(String::as_str),
-        );
-    }
     let mut semantic: Vec<_> = best.into_iter().collect();
     semantic.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     let mut hits: Vec<_> = semantic
         .into_iter()
         .enumerate()
         .map(|(index, (path, score))| {
-            let coverage = matched.get(path.as_str()).map_or(0, HashSet::len);
+            let coverage = lexical_coverage.get(&path).copied().unwrap_or_default();
             // Competition ranks: equal coverage receives exactly equal evidence weight.
-            let lexical_rank = 1 + matched.values().filter(|v| v.len() > coverage).count();
+            let lexical_rank = 1 + lexical_coverage
+                .values()
+                .filter(|candidate| **candidate > coverage)
+                .count();
             let ranking_score = 2.0 / (60.0 + (index + 1) as f64)
                 + if coverage == 0 {
                     0.0
@@ -586,18 +618,23 @@ mod tests {
     use super::*;
 
     fn rank(query: &str, entries: &[(&str, &str, f32)]) -> Vec<AskHit> {
-        let mut lexical_tokens: HashMap<String, HashSet<String>> = HashMap::new();
+        let terms = query_terms(query);
+        let mut lexical_coverage: HashMap<String, usize> = HashMap::new();
         for (path, text, _) in entries {
-            lexical_tokens
+            let coverage = terms
+                .iter()
+                .filter(|term| words(text).contains(*term))
+                .count();
+            lexical_coverage
                 .entry(path.to_string())
-                .or_default()
-                .extend(words(text));
+                .and_modify(|best| *best = (*best).max(coverage))
+                .or_insert(coverage);
         }
         let best = entries
             .iter()
             .map(|(path, _, score)| (path.to_string(), *score))
             .collect();
-        rank_files(query, &lexical_tokens, best, HashMap::new(), usize::MAX)
+        rank_files(query, &lexical_coverage, best, HashMap::new(), usize::MAX)
     }
 
     #[test]
@@ -780,6 +817,15 @@ mod tests {
     }
 
     #[test]
+    fn lexical_chunk_excludes_only_identifiers_cut_by_the_window() {
+        let text = "prefix manual setup suffix";
+        assert_eq!(lexical_chunk(text, 3, 19), "manual setup");
+        assert_eq!(lexical_chunk(text, 7, 23), "manual setup");
+        assert_eq!(lexical_chunk(text, 6, 20), " manual setup ");
+        assert_eq!(lexical_chunk(text, 1, 4), "");
+    }
+
+    #[test]
     fn chunk_boundaries_cannot_invent_lexical_words() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -797,6 +843,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.hits[0].lexical_matches, 0);
+    }
+
+    #[test]
+    fn lexical_evidence_must_cooccur_in_one_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("large.rs"),
+            format!("manual{}setup", " unrelated".repeat(300)),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("focused.rs"),
+            "manual setup belongs together",
+        )
+        .unwrap();
+        let (files, coverage) = collect_files(dir.path(), 10);
+        let result = ask_collected(
+            "manual setup",
+            8,
+            files,
+            coverage,
+            &mut FixtureEmbedder { fail: false },
+        )
+        .unwrap();
+        let large = result
+            .hits
+            .iter()
+            .find(|hit| hit.path.ends_with("large.rs"))
+            .unwrap();
+        let focused = result
+            .hits
+            .iter()
+            .find(|hit| hit.path.ends_with("focused.rs"))
+            .unwrap();
+        assert_eq!(large.lexical_matches, 1);
+        assert_eq!(focused.lexical_matches, 2);
+        assert!(focused.ranking_score > large.ranking_score);
     }
 
     #[test]

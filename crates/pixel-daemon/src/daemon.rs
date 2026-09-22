@@ -421,7 +421,7 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
                 handle_conn(&mut service, stream, &mut shutdown);
             }
             Ok(Msg::Fs(ev)) => {
-                record_event(&ev, &mut pending);
+                record_event(&root, &ev, &mut pending);
                 if !pending.is_empty() {
                     flush_at = Some(Instant::now() + DEBOUNCE);
                 }
@@ -481,7 +481,7 @@ fn root_removed(root: &Path) -> bool {
 /// events (a `chmod`, a `touch`) cannot change an answer either. Every event
 /// that can change content (create, modify data or name, remove) is still
 /// recorded.
-fn record_event(ev: &notify::Event, pending: &mut BTreeMap<PathBuf, bool>) {
+fn record_event(root: &Path, ev: &notify::Event, pending: &mut BTreeMap<PathBuf, bool>) {
     if matches!(
         ev.kind,
         notify::EventKind::Access(_)
@@ -490,10 +490,15 @@ fn record_event(ev: &notify::Event, pending: &mut BTreeMap<PathBuf, bool>) {
         return;
     }
     for path in &ev.paths {
-        if path.components().any(|c| match c {
-            Component::Normal(s) => IGNORED_DIRS.iter().any(|d| s == *d),
-            _ => false,
-        }) {
+        let root_git_exclude = path
+            .strip_prefix(root)
+            .is_ok_and(|relative| relative == Path::new(".git/info/exclude"));
+        if !root_git_exclude
+            && path.components().any(|c| match c {
+                Component::Normal(s) => IGNORED_DIRS.iter().any(|d| s == *d),
+                _ => false,
+            })
+        {
             continue;
         }
         if path.is_dir() {
@@ -920,6 +925,7 @@ mod tests {
         ] {
             let mut pending = BTreeMap::new();
             record_event(
+                &root,
                 &notify::Event::new(kind).add_path(file.clone()),
                 &mut pending,
             );
@@ -933,12 +939,14 @@ mod tests {
             notify::EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Any)),
         ] {
             record_event(
+                &root,
                 &notify::Event::new(kind).add_path(file.clone()),
                 &mut pending,
             );
             assert_eq!(pending.get(&file), Some(&false), "{kind:?} is a change");
         }
         record_event(
+            &root,
             &notify::Event::new(notify::EventKind::Remove(notify::event::RemoveKind::File))
                 .add_path(file.clone()),
             &mut pending,
@@ -947,6 +955,7 @@ mod tests {
         // The ignored-tree rule survives the content filter: `.pixel` state
         // is the daemon's own churn, never a source change.
         record_event(
+            &root,
             &notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)))
                 .add_path(ignored.clone()),
             &mut pending,
@@ -954,6 +963,35 @@ mod tests {
         assert!(
             !pending.contains_key(&ignored),
             ".pixel state is not a source change"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn watcher_admits_only_the_root_git_info_exclude_control() {
+        use notify::event::{DataChange, ModifyKind};
+
+        let root = scratch_root("git-exclude-event");
+        let root_exclude = root.join(".git/info/exclude");
+        let object = root.join(".git/objects/ab/object");
+        let nested_exclude = root.join("nested/.git/info/exclude");
+        for path in [&root_exclude, &object, &nested_exclude] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "changed\n").unwrap();
+        }
+        let event =
+            notify::Event::new(notify::EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+                .add_path(root_exclude.clone())
+                .add_path(object.clone())
+                .add_path(nested_exclude.clone());
+        let mut pending = BTreeMap::new();
+        record_event(&root, &event, &mut pending);
+
+        assert_eq!(pending.get(&root_exclude), Some(&false));
+        assert!(!pending.contains_key(&object), ".git objects stay excluded");
+        assert!(
+            !pending.contains_key(&nested_exclude),
+            "only the served root's exclude file is a control"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -18,7 +18,7 @@ use pixel_facts::FactsStore;
 use pixel_graph::{EdgeKind, EdgeRow, FileRow, GraphStore, SymbolKind, SymbolRow};
 use pixel_index::TrigramExtractor;
 use pixel_index::index::{MAX_FILE_BYTES, open_regular_bounded};
-use pixel_index::indexset::{IndexSet, IndexSetError};
+use pixel_index::indexset::{IndexSet, IndexSetError, RefreshOutcome};
 use pixel_proto::{Envelope, Epistemics, ErrorCode, PixelError, SnapshotInfo, Warning};
 use pixel_recall::embed::{EmbedKind, Embedder, open_default_embedder};
 
@@ -258,15 +258,7 @@ impl Service {
 
     /// Watcher hook: refresh one file in index + graph.
     pub fn refresh_file(&mut self, rel: &str) {
-        self.index.refresh_file(rel);
-        let db = self.graph_db_path();
-        if db.exists() {
-            if let Err(error) = bridge::update_file(&self.root, &db, rel) {
-                self.note_graph_update_failure(rel, &error);
-            }
-            // Drop the cached handle so the next read sees the update.
-            self.graph = None;
-        }
+        self.refresh_files(&[(rel, false)]);
     }
 
     /// Watcher hook: file deleted.
@@ -286,16 +278,14 @@ impl Service {
         if files.is_empty() {
             return;
         }
-        for &(rel, removed) in files {
-            if removed {
-                self.index.remove_file(rel);
-            } else {
-                self.index.refresh_file(rel);
-            }
-        }
+        let graph_changes = self.index.refresh_files(files);
+        let graph_files: Vec<(&str, bool)> = graph_changes
+            .iter()
+            .map(|(path, outcome)| (path.as_str(), *outcome == RefreshOutcome::Excluded))
+            .collect();
         let db = self.graph_db_path();
         if db.exists() {
-            if let Err(error) = bridge::update_files(&self.root, &db, files) {
+            if let Err(error) = bridge::update_files(&self.root, &db, &graph_files) {
                 self.note_graph_update_failure(
                     &format!("batch of {} file(s) from {}", files.len(), files[0].0),
                     &error,
@@ -3823,15 +3813,6 @@ mod bridge {
         pixel_graph::build::apply_tree_delta(root, db, delta).map_err(es)
     }
 
-    /// One file changed under the watcher: re-extract it into the graph.
-    /// The error is returned instead of dropped: a lost update serves a
-    /// stale index until the next graph op walks the tree.
-    pub fn update_file(root: &Path, db: &Path, rel: &str) -> Result<(), String> {
-        pixel_graph::build::update_file(root, db, rel)
-            .map(|_| ())
-            .map_err(es)
-    }
-
     /// The same for a debounced batch of watcher events.
     pub fn update_files(root: &Path, db: &Path, files: &[(&str, bool)]) -> Result<(), String> {
         pixel_graph::build::update_files(root, db, files)
@@ -6619,6 +6600,107 @@ mod tests {
             [true, true, false, true, false, false, false, true, false]
         );
         assert_eq!(log.count(), 9);
+    }
+
+    #[test]
+    fn ignore_control_refresh_reconciles_text_and_graph_stores() {
+        let root = tmpdir("watcher-ignore-transition");
+        std::fs::write(root.join("visible.rb"), "def visible\nend\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let db = root.join(".pixel/graph.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        pixel_graph::build::build_graph(&root, &db).unwrap();
+        let mut svc = Service::open(&root).unwrap();
+
+        std::fs::write(root.join("secret.rb"), "def watcherSecretNeedle\nend\n").unwrap();
+        svc.refresh_file("secret.rb");
+        assert_eq!(
+            svc.index
+                .search("watcherSecretNeedle", None)
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        assert!(
+            GraphStore::open(&db)
+                .unwrap()
+                .file_by_path("secret.rb")
+                .unwrap()
+                .is_some()
+        );
+
+        std::fs::write(root.join(".gitignore"), "secret.rb\n").unwrap();
+        svc.refresh_file(".gitignore");
+        assert!(
+            svc.index
+                .search("watcherSecretNeedle", None)
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        assert!(
+            GraphStore::open(&db)
+                .unwrap()
+                .file_by_path("secret.rb")
+                .unwrap()
+                .is_none()
+        );
+
+        std::fs::write(root.join(".gitignore"), "").unwrap();
+        svc.refresh_file(".gitignore");
+        assert_eq!(
+            svc.index
+                .search("watcherSecretNeedle", None)
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        assert!(
+            GraphStore::open(&db)
+                .unwrap()
+                .file_by_path("secret.rb")
+                .unwrap()
+                .is_some()
+        );
+
+        std::fs::write(root.join(".git/info/exclude"), "secret.rb\n").unwrap();
+        svc.refresh_file(".git/info/exclude");
+        assert!(
+            svc.index
+                .search("watcherSecretNeedle", None)
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        assert!(
+            GraphStore::open(&db)
+                .unwrap()
+                .file_by_path("secret.rb")
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(root.join(".git/info/exclude"), "").unwrap();
+        svc.refresh_file(".git/info/exclude");
+        assert_eq!(
+            svc.index
+                .search("watcherSecretNeedle", None)
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        assert!(
+            GraphStore::open(&db)
+                .unwrap()
+                .file_by_path("secret.rb")
+                .unwrap()
+                .is_some()
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A graph update that fails under the watcher is counted and surfaced

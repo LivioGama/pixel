@@ -10,7 +10,7 @@
 //!
 //! Outside a git repo the set degrades to a plain single-shard index.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
@@ -79,6 +79,12 @@ pub struct FreshnessStatus {
     pub tombstones: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    Indexed,
+    Excluded,
+}
+
 pub struct IndexSet {
     root: PathBuf,
     extractor: Box<dyn GramExtractor>,
@@ -92,6 +98,10 @@ pub struct IndexSet {
 /// Paths inside our own sidecar dir are never indexed or tombstoned.
 fn is_internal(rel: &str) -> bool {
     rel == SHARD_DIR || rel.starts_with(&format!("{SHARD_DIR}/"))
+}
+
+fn is_ignore_control_path(rel: &str) -> bool {
+    rel == ".git/info/exclude" || matches!(rel.rsplit('/').next(), Some(".gitignore" | ".ignore"))
 }
 
 /// Sidecar path for the plain-walk freshness signature.
@@ -545,12 +555,49 @@ impl IndexSet {
         Ok(())
     }
 
-    /// Re-extract one file from disk into the in-memory overlay (tombstoning
-    /// its base/delta entry). Called by the daemon watcher on file change.
-    pub fn refresh_file(&mut self, rel_path: &str) {
-        let root = self.root.clone();
-        self.overlay
-            .refresh_file(&root, rel_path, self.extractor.as_ref());
+    /// Re-extract one admitted file into the overlay, or tombstone an excluded path.
+    pub fn refresh_file(&mut self, rel_path: &str) -> RefreshOutcome {
+        self.refresh_files(&[(rel_path, false)])
+            .into_iter()
+            .find_map(|(path, outcome)| (path == rel_path).then_some(outcome))
+            .unwrap_or(RefreshOutcome::Excluded)
+    }
+
+    /// Refresh a watcher batch from one ignore-policy snapshot.
+    pub fn refresh_files(&mut self, files: &[(&str, bool)]) -> Vec<(String, RefreshOutcome)> {
+        let policy_changed = files.iter().any(|(path, _)| is_ignore_control_path(path));
+        let admitted = if policy_changed {
+            index::policy_indexable_paths(&self.root)
+        } else {
+            index::policy_file_paths(&self.root)
+        };
+        let before: HashSet<String> = self.paths().into_iter().collect();
+        let mut outcomes = BTreeMap::new();
+
+        for &(path, removed) in files {
+            if removed || !admitted.contains(path) {
+                self.overlay.remove_file(path);
+                outcomes.insert(path.to_string(), RefreshOutcome::Excluded);
+            } else {
+                self.overlay
+                    .refresh_file(&self.root, path, self.extractor.as_ref());
+                outcomes.insert(path.to_string(), RefreshOutcome::Indexed);
+            }
+        }
+
+        if policy_changed {
+            for path in before.difference(&admitted) {
+                self.overlay.remove_file(path);
+                outcomes.insert(path.clone(), RefreshOutcome::Excluded);
+            }
+            for path in admitted.difference(&before) {
+                self.overlay
+                    .refresh_file(&self.root, path, self.extractor.as_ref());
+                outcomes.insert(path.clone(), RefreshOutcome::Indexed);
+            }
+        }
+
+        outcomes.into_iter().collect()
     }
 
     /// Tombstone a deleted file everywhere.
@@ -1078,6 +1125,96 @@ mod tests {
         set.remove_file("gamma.rs");
         let (m, _) = set.search("freshDeltaSymbol", None).unwrap();
         assert!(m.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refresh_file_excludes_gitignore_and_git_info_exclude_paths() {
+        let _cache =
+            IsolatedCache::new("refresh_file_excludes_gitignore_and_git_info_exclude_paths");
+        let dir = std::env::temp_dir().join(format!(
+            "gpx-indexset-refresh-ignore-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("visible.rs"), "fn visible_base() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+
+        let mut set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        std::fs::write(dir.join(".gitignore"), "ignored.env\n").unwrap();
+        std::fs::write(dir.join("ignored.env"), "gitignoreSecretNeedle\n").unwrap();
+        std::fs::write(dir.join(".git/info/exclude"), "info-excluded.json\n").unwrap();
+        std::fs::write(dir.join("info-excluded.json"), "infoExcludeSecretNeedle\n").unwrap();
+
+        assert_eq!(set.refresh_file("ignored.env"), RefreshOutcome::Excluded);
+        assert_eq!(
+            set.refresh_file("info-excluded.json"),
+            RefreshOutcome::Excluded
+        );
+        assert!(set.search("SecretNeedle", None).unwrap().0.is_empty());
+        assert_eq!(set.status().overlay_files, 0);
+        assert!(!set.paths().iter().any(|path| path.contains("excluded")));
+
+        std::fs::write(dir.join("ordinary.txt"), "ordinaryOverlayNeedle\n").unwrap();
+        assert_eq!(set.refresh_file("ordinary.txt"), RefreshOutcome::Indexed);
+        assert_eq!(
+            set.search("ordinaryOverlayNeedle", None).unwrap().0.len(),
+            1
+        );
+
+        std::fs::write(dir.join(".gitignore"), "ignored.env\nordinary.txt\n").unwrap();
+        set.refresh_file(".gitignore");
+        assert!(
+            set.search("ordinaryOverlayNeedle", None)
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        std::fs::write(dir.join(".gitignore"), "ignored.env\n").unwrap();
+        set.refresh_file(".gitignore");
+        assert_eq!(
+            set.search("ordinaryOverlayNeedle", None).unwrap().0.len(),
+            1
+        );
+
+        std::fs::write(dir.join("info-live.json"), "infoTransitionNeedle\n").unwrap();
+        set.refresh_file("info-live.json");
+        std::fs::write(
+            dir.join(".git/info/exclude"),
+            "info-excluded.json\ninfo-live.json\n",
+        )
+        .unwrap();
+        set.refresh_file(".git/info/exclude");
+        assert!(
+            set.search("infoTransitionNeedle", None)
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        std::fs::write(dir.join(".git/info/exclude"), "info-excluded.json\n").unwrap();
+        set.refresh_file(".git/info/exclude");
+        assert_eq!(set.search("infoTransitionNeedle", None).unwrap().0.len(), 1);
+
+        std::fs::write(dir.join("ignore-live.log"), "ignoreTransitionNeedle\n").unwrap();
+        set.refresh_file("ignore-live.log");
+        std::fs::write(dir.join(".ignore"), "ignore-live.log\n").unwrap();
+        set.refresh_file(".ignore");
+        assert!(
+            set.search("ignoreTransitionNeedle", None)
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        std::fs::write(dir.join(".ignore"), "").unwrap();
+        set.refresh_file(".ignore");
+        assert_eq!(
+            set.search("ignoreTransitionNeedle", None).unwrap().0.len(),
+            1
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
