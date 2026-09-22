@@ -425,6 +425,37 @@ mod tests {
     }
 
     #[test]
+    fn config_dir_honours_xdg_only_on_a_real_install() {
+        let home = Path::new("/home/u");
+        let saved = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: the only reader of XDG_CONFIG_HOME in this test binary is
+        // opencode_config_dir, exercised serially inside this block; the
+        // variable is restored on exit either way.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", "/xdg");
+            assert_eq!(
+                opencode_config_dir(home, false),
+                PathBuf::from("/xdg/opencode")
+            );
+            // An explicit --home is a test fixture, not the user's machine:
+            // XDG must not leak into it.
+            assert_eq!(
+                opencode_config_dir(home, true),
+                home.join(".config/opencode")
+            );
+            std::env::remove_var("XDG_CONFIG_HOME");
+            assert_eq!(
+                opencode_config_dir(home, false),
+                home.join(".config/opencode")
+            );
+            match saved {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+
+    #[test]
     fn check_skips_absent_opencode_and_verifies_the_entry() {
         let missing = Path::new("/definitely/not/here/opencode");
         let (summary, _) = check_instructions(missing).unwrap();
