@@ -53,6 +53,7 @@ const PIXEL_HOOK_MARKERS: &[&str] = &[
     config::SESSION_START_HOOK,
     config::PROMPT_SUBMIT_HOOK,
     config::POST_COMPACTION_HOOK,
+    crate::codex_config::METRICS_HOOK_MARKER,
     // Also clean up the old guard hook from pre-rename installs.
     config::OLD_GUARD_HOOK,
 ];

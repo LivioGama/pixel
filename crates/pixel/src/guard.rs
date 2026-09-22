@@ -1185,6 +1185,234 @@ fn post_tool_use_advisory(note: &str) -> serde_json::Value {
     })
 }
 
+/// Shell-shaped tools whose `command`/`cmd` input can hold a `pixel` call.
+const METRICS_SHELL_TOOLS: &[&str] = &[
+    "Bash",
+    "bash",
+    "shell",
+    "local_shell",
+    "unified_exec",
+    "exec",
+    "run_command",
+    "container.exec",
+    "functions.shell",
+];
+
+/// `pixel run-hook metrics` — PostToolUse relay for hosts whose tool results
+/// never surface stderr (Codex). The invocation's 🟩 block went to stderr and
+/// its finalized record went to the action log before the process exited, so
+/// this hook replays that record's line as `additionalContext` — same bytes
+/// the stderr path would have shown. Any miss is a silent exit: the relay is
+/// advisory and must never turn a tool call into a failure.
+#[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; every decision lives in `metrics_hook_line`
+pub fn run_metrics_hook(provider: Option<Provider>) -> ! {
+    // One contract today: the advisory shape below is the PostToolUse
+    // response every supported provider consumes.
+    let _ = provider;
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
+        std::process::exit(0);
+    }
+    let Ok(payload) = serde_json::from_str::<Value>(&input) else {
+        std::process::exit(0);
+    };
+    if let Some(line) = metrics_hook_line(&payload) {
+        print!("{}", post_tool_use_advisory(&line));
+    }
+    std::process::exit(0);
+}
+
+/// Resolve the payload to the metrics line of the invocation it describes,
+/// or `None` when there is nothing to relay.
+fn metrics_hook_line(payload: &Value) -> Option<String> {
+    let tool = payload.get("tool_name")?.as_str()?;
+    if !METRICS_SHELL_TOOLS.contains(&tool) {
+        return None;
+    }
+    // A host that already put stderr in the tool result made the relay a
+    // duplicate — leave the line where it is.
+    if payload
+        .get("tool_response")
+        .is_some_and(|r| r.to_string().contains("🟩 pixel"))
+    {
+        return None;
+    }
+    let command = tool_command_text(payload.get("tool_input")?)?;
+    let payload_cwd = payload.get("cwd").and_then(Value::as_str).map_or_else(
+        || std::env::current_dir().unwrap_or_default(),
+        PathBuf::from,
+    );
+    // A leading `cd dir &&` selects where the invocation actually ran:
+    // the record's cwd is that effective directory, not the tool cwd.
+    let (effective_cwd, effective_cmd) = strip_cd_prefix(&command, &payload_cwd);
+    let tool_cwd = canonical(&effective_cwd);
+    let invocation = pixel_invocation(effective_cmd)?;
+    // Suppress exactly when the invocation suppressed its own footer: an
+    // effective PIXEL_METRICS of 0 — the inherited env, overridden in
+    // command order by inline `PIXEL_METRICS=` prefixes on the pixel call.
+    if invocation
+        .metrics_env
+        .or_else(|| std::env::var("PIXEL_METRICS").ok())
+        .as_deref()
+        == Some("0")
+    {
+        return None;
+    }
+    if invocation.args.contains("--metrics=off") || invocation.args.contains("--metrics off") {
+        return None;
+    }
+    let root = find_up(&tool_cwd, ".pixel")?;
+    // The persistent opt-out applies to the relay exactly as to stderr.
+    if !crate::config_cmd::metrics_enabled(Some(&root)) {
+        return None;
+    }
+    let log = pixel_actionlog::ActionLog::path_for_root(&root);
+    let events = pixel_actionlog::tail(&log, 100).ok()?;
+    // A PostToolUse payload carries no per-invocation identity pixel could
+    // have recorded, so identical concurrent calls cannot be told apart.
+    // The newest matching record is this invocation's own: it is finalized
+    // before the process exits and the hook fires right after the call.
+    events.iter().rev().find_map(|e| {
+        (e.args == invocation.args && canonical(Path::new(&e.cwd)) == tool_cwd)
+            .then(|| pixel_actionlog::format_metrics_line(e))
+            .flatten()
+    })
+}
+
+/// The command string a shell tool was asked to run: a plain string, or the
+/// argv array `local_shell`-shaped tools send, joined back to one line.
+fn tool_command_text(tool_input: &Value) -> Option<String> {
+    let value = tool_input
+        .get("command")
+        .or_else(|| tool_input.get("cmd"))?;
+    match value {
+        // `command_text` unwraps `bash -c` with the argv boundary intact —
+        // joining first would fold $0 positionals into the script.
+        Value::String(_) | Value::Array(_) => Some(command_text(value)),
+        _ => None,
+    }
+}
+
+/// What a compound command actually runs under `pixel`: the argument tail
+/// plus the `PIXEL_METRICS=` value its env prefixes leave behind.
+#[derive(Debug, PartialEq)]
+struct PixelInvocation {
+    args: String,
+    metrics_env: Option<String>,
+}
+
+/// Split a command line at the separators a shell would honor — `&`, `;`,
+/// `|` and newlines — but only outside quotes: `pixel search 'a|b'` is one
+/// segment whose `|` belongs to the argument, not a pipeline.
+fn shell_segments(command: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut start = 0;
+    for (idx, c) in command.char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if matches!(c, '&' | ';' | '|' | '\n') => {
+                out.push(&command[start..idx]);
+                start = idx + c.len_utf8();
+            }
+            None => {}
+        }
+    }
+    out.push(&command[start..]);
+    out
+}
+
+/// The first `pixel` invocation in a compound command (`cd x && pixel
+/// impact y | head`, env prefixes, `export`, `bash -lc` wrappers).
+fn pixel_invocation(command: &str) -> Option<PixelInvocation> {
+    pixel_invocation_in(command, None)
+}
+
+fn pixel_invocation_in(command: &str, env: Option<String>) -> Option<PixelInvocation> {
+    let mut exported = env;
+    for segment in shell_segments(command) {
+        let tokens: Vec<&str> = segment.split_whitespace().collect();
+        // `export K=v; pixel f` reaches the pixel call ambiently — collect
+        // it the way the shell would.
+        if tokens
+            .first()
+            .is_some_and(|t| t.trim_matches(['\'', '"']) == "export")
+        {
+            for tok in tokens.iter().skip(1) {
+                if let Some(v) = tok.trim_matches(['\'', '"']).strip_prefix("PIXEL_METRICS=") {
+                    // `K='v'` leaves the opening quote on the value once the
+                    // token's trailing quote is trimmed — `PIXEL_METRICS='0'`
+                    // must compare equal to `PIXEL_METRICS=0`.
+                    exported = Some(v.trim_start_matches(['\'', '"']).to_string());
+                }
+            }
+            continue;
+        }
+        if let Some(inv) = pixel_invocation_in_tokens(&tokens, exported.clone()) {
+            return Some(inv);
+        }
+    }
+    None
+}
+
+fn pixel_invocation_in_tokens(tokens: &[&str], env: Option<String>) -> Option<PixelInvocation> {
+    // Quote characters arrive attached to tokens (`bash -lc 'cd x && …'`);
+    // strip them so the binary and its args match the recorded invocation.
+    let tokens: Vec<&str> = tokens.iter().map(|t| t.trim_matches(['\'', '"'])).collect();
+    // Skip env assignments, flags and launcher words to reach the binary.
+    // A `for` keeps every mutation of the index update a wrong value, never
+    // an unbounded loop.
+    let mut i = 0;
+    let mut metrics_env = env;
+    for (j, tok) in tokens.iter().enumerate() {
+        let prefix = (tok.contains('=') && !tok.starts_with('-'))
+            || tok.starts_with('-')
+            || matches!(*tok, "env" | "sudo" | "command" | "time" | "xargs");
+        if !prefix {
+            break;
+        }
+        if let Some(v) = tok.strip_prefix("PIXEL_METRICS=") {
+            metrics_env = Some(v.trim_start_matches(['\'', '"']).to_string());
+        }
+        i = j + 1;
+    }
+    let bin = tokens.get(i)?;
+    let base = bin.rsplit('/').next().unwrap_or(bin);
+    if base == "pixel" || base == "pixel-dev" {
+        return Some(PixelInvocation {
+            args: tokens[i + 1..].join(" "),
+            metrics_env,
+        });
+    }
+    if matches!(base, "bash" | "sh" | "zsh" | "dash" | "fish") {
+        // `bash -lc "…"`: the script follows the first flag carrying `c`,
+        // and prefix assignments pass into it as its inherited env.
+        for (j, tok) in tokens.iter().enumerate().skip(i + 1) {
+            if !tok.starts_with('-') {
+                break;
+            }
+            if tok.trim_start_matches('-').contains('c') {
+                return bash_script_invocation(&tokens, j, metrics_env);
+            }
+        }
+    }
+    None
+}
+
+/// Re-parse everything after a shell's `-c` flag as its own command line:
+/// for an argv array joined back into one line the script is every
+/// remaining token, not just the next one.
+#[cfg_attr(test, mutants::skip)] // tokens[j] is `-`-prefixed by the caller's guard, so `j` and `j+1` converge in the recursive flag-skip — the slice bound is unobservable
+fn bash_script_invocation(
+    tokens: &[&str],
+    j: usize,
+    env: Option<String>,
+) -> Option<PixelInvocation> {
+    pixel_invocation_in(&tokens[j + 1..].join(" "), env)
+}
+
 /// Outcome of reading `.pixel/targets.json`: distinguishes "no usable
 /// manifest because everything hit the 24h TTL" (worth an advisory note)
 /// from "no manifest at all / unreadable" (silent).
@@ -4034,5 +4262,398 @@ mod tests {
         assert_eq!((dir.as_path(), body), (Path::new("/repo/a && b"), "ls"));
         let (dir, body) = strip_cd_prefix("cd sub", cwd);
         assert_eq!((dir.as_path(), body), (Path::new("/repo"), "cd sub"));
+    }
+
+    // ---- `pixel run-hook metrics` ----------------------------------------
+
+    // HOME is process-global and the metrics layer consults
+    // `~/.pixel/config.json`; serialize tests that repoint it through the
+    // crate-wide `ENV_LOCK`.
+    struct MetricsFixture {
+        root: PathBuf,
+        saved_home: Option<std::ffi::OsString>,
+        saved_metrics: Option<std::ffi::OsString>,
+    }
+
+    impl MetricsFixture {
+        /// A repo root holding `.pixel/` and one finalized `impact` action
+        /// record, plus a fake HOME so no real global config leaks in and
+        /// no inherited `PIXEL_METRICS` overrides the effective-env tests.
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "pixel-metrics-hook-{}-{}-{}",
+                name,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let root = dir.join("repo");
+            std::fs::create_dir_all(root.join(".pixel")).unwrap();
+            let root = canonical(&root);
+            let home = dir.join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            let saved_home = std::env::var_os("HOME");
+            let saved_metrics = std::env::var_os("PIXEL_METRICS");
+            // SAFETY: under crate::ENV_LOCK in tests only.
+            unsafe {
+                std::env::set_var("HOME", &home);
+                std::env::remove_var("PIXEL_METRICS");
+            }
+            let fixture = Self {
+                root,
+                saved_home,
+                saved_metrics,
+            };
+            fixture.record("impact", "impact src/login.rs");
+            fixture
+        }
+
+        /// Append a finalized action record for `args` run in `cwd`.
+        fn record(&self, command: &str, args: &str) {
+            self.write_event(command, args, &self.root, None);
+        }
+
+        fn record_at(&self, command: &str, args: &str, cwd: &Path) {
+            self.write_event(command, args, cwd, None);
+        }
+
+        fn record_with_id(&self, command: &str, args: &str, invocation_id: &str) {
+            self.write_event(command, args, &self.root, Some(invocation_id));
+        }
+
+        fn write_event(&self, command: &str, args: &str, cwd: &Path, id: Option<&str>) {
+            use std::io::Write;
+            let mut event = pixel_actionlog::ActionEvent::new(command, args);
+            event.cwd = cwd.display().to_string();
+            if let Some(id) = id {
+                event.invocation_id = Some(id.to_string());
+            }
+            event.metrics = Some(
+                pixel_actionlog::OperationMetrics::new(
+                    std::time::Duration::from_millis(4),
+                    120,
+                    None,
+                )
+                .with_comparison_gap(pixel_actionlog::ComparisonGap::NoPolicy),
+            );
+            let mut log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.root.join(".pixel/actions.jsonl"))
+                .unwrap();
+            writeln!(log, "{}", serde_json::to_string(&event).unwrap()).unwrap();
+        }
+
+        fn payload(&self, command: serde_json::Value) -> Value {
+            serde_json::json!({
+                "tool_name": "shell",
+                "tool_input": { "command": command },
+                "cwd": self.root.display().to_string(),
+            })
+        }
+    }
+
+    impl Drop for MetricsFixture {
+        fn drop(&mut self) {
+            // SAFETY: paired with the set_var/remove_var in new(); under the lock.
+            unsafe {
+                match self.saved_home.take() {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+                match self.saved_metrics.take() {
+                    Some(v) => std::env::set_var("PIXEL_METRICS", v),
+                    None => std::env::remove_var("PIXEL_METRICS"),
+                }
+            }
+            let _ = std::fs::remove_dir_all(self.root.parent().unwrap());
+        }
+    }
+
+    #[test]
+    fn extract_pixel_args_finds_the_invocation_through_shell_noise() {
+        for (command, want) in [
+            ("pixel impact src/a.rs", "impact src/a.rs"),
+            ("cd /r && pixel impact a | head", "impact a"),
+            ("FOO=1 sudo pixel status .", "status ."),
+            ("env PIXEL_X=2 ~/.local/bin/pixel plan", "plan"),
+            ("bash -lc pixel repo-state .", "repo-state ."),
+            ("bash -lc 'cd /r && pixel impact f'", "impact f"),
+            ("xargs -0 pixel context", "context"),
+        ] {
+            assert_eq!(
+                pixel_invocation(command).map(|i| i.args).as_deref(),
+                Some(want),
+                "{command}"
+            );
+        }
+        for command in [
+            "grep pixel src/",
+            "echo pixel",
+            "ls; rm -rf pixel",
+            "cd /r && cargo test",
+        ] {
+            assert_eq!(pixel_invocation(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn pixel_invocation_keeps_separators_inside_quotes() {
+        for (command, want) in [
+            (
+                "pixel search-content 'foo|bar' .",
+                "search-content foo|bar .",
+            ),
+            ("pixel search-content \"a;b\" .", "search-content a;b ."),
+            ("pixel search-content 'a&b' .", "search-content a&b ."),
+            ("pixel plan\ntrue", "plan"),
+            ("true; pixel repo-state .", "repo-state ."),
+            ("true && pixel context f", "context f"),
+        ] {
+            assert_eq!(
+                pixel_invocation(command).map(|i| i.args).as_deref(),
+                Some(want),
+                "{command}"
+            );
+        }
+        // A quoted pixel word is still an argument, not an invocation.
+        assert_eq!(pixel_invocation("echo 'pixel status'"), None);
+        // A quote must close where it ends: if it ran to end-of-line, the
+        // separator after it would hide a later pixel call.
+        assert_eq!(
+            pixel_invocation("echo 'quoted' ; pixel impact f")
+                .map(|i| i.args)
+                .as_deref(),
+            Some("impact f")
+        );
+    }
+
+    #[test]
+    fn pixel_invocation_resolves_metrics_env_in_command_order() {
+        for (command, want) in [
+            ("PIXEL_METRICS=0 pixel f", Some("0")),
+            ("PIXEL_METRICS=1 pixel f", Some("1")),
+            ("PIXEL_METRICS='0' pixel f", Some("0")),
+            ("PIXEL_METRICS=\"0\" pixel f", Some("0")),
+            ("env PIXEL_METRICS=0 pixel f", Some("0")),
+            ("export PIXEL_METRICS='0'; pixel f", Some("0")),
+            ("PIXEL_METRICS=0 PIXEL_METRICS=1 pixel f", Some("1")),
+            // Prefixes pass into a wrapper's script as its inherited env.
+            ("PIXEL_METRICS=0 bash -lc 'pixel f'", Some("0")),
+            // …and the script's own prefixes override them.
+            (
+                "PIXEL_METRICS=0 bash -lc 'PIXEL_METRICS=1 pixel f'",
+                Some("1"),
+            ),
+            ("bash -lc 'PIXEL_METRICS=0 pixel f'", Some("0")),
+            // `export` reaches a later segment's call ambiently.
+            ("export PIXEL_METRICS=0; pixel f", Some("0")),
+            // An assignment on another segment is not the pixel call's env.
+            ("PIXEL_METRICS=0 true && pixel f", None),
+            // Argument position is not an env assignment.
+            ("pixel f PIXEL_METRICS=0", None),
+        ] {
+            assert_eq!(
+                pixel_invocation(command).map(|i| i.metrics_env),
+                Some(want.map(str::to_string)),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn metrics_hook_line_correlates_on_the_effective_cd_directory() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("cd");
+        // The host ran the tool from /, but the command cd'd into the repo:
+        // the record lives under the effective cwd, not the payload cwd.
+        let payload = serde_json::json!({
+            "tool_name": "shell",
+            "tool_input": { "command": format!("cd {} && pixel impact src/login.rs", fixture.root.display()) },
+            "cwd": "/",
+        });
+        let line = metrics_hook_line(&payload).expect("the cd selects the record's cwd");
+        assert!(line.starts_with("🟩 pixel impact ❀"), "{line}");
+    }
+
+    #[test]
+    fn metrics_hook_line_honors_the_effective_pixel_metrics_env() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("env");
+        let saved = std::env::var_os("PIXEL_METRICS");
+        // SAFETY: under crate::ENV_LOCK in tests only; restored below.
+        unsafe { std::env::set_var("PIXEL_METRICS", "0") };
+        // The invocation emitted no footer — there is nothing to relay.
+        assert_eq!(
+            metrics_hook_line(&fixture.payload(serde_json::json!("pixel impact src/login.rs"))),
+            None
+        );
+        // An inline assignment overrides the inherited value in command order.
+        assert!(
+            metrics_hook_line(&fixture.payload(serde_json::json!(
+                "PIXEL_METRICS=1 pixel impact src/login.rs"
+            )))
+            .is_some()
+        );
+        // SAFETY: paired restore under the same lock.
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("PIXEL_METRICS", v),
+                None => std::env::remove_var("PIXEL_METRICS"),
+            }
+        }
+        // Prefixes reach the call through wrappers and export alike.
+        for command in [
+            "PIXEL_METRICS=0 bash -lc 'pixel impact src/login.rs'",
+            "bash -lc 'PIXEL_METRICS=0 pixel impact src/login.rs'",
+            "export PIXEL_METRICS=0; pixel impact src/login.rs",
+        ] {
+            assert_eq!(
+                metrics_hook_line(&fixture.payload(serde_json::json!(command))),
+                None,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn metrics_hook_line_relays_the_newest_matching_record() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("newest");
+        // Identical concurrent calls leave indistinguishable records — the
+        // hook relays the newest, which is this invocation's own (the
+        // record is finalized before exit and the hook fires right after).
+        fixture.record_with_id("impact", "impact src/login.rs", "x-000001");
+        fixture.record_with_id("impact", "impact src/login.rs", "x-000002");
+        let line =
+            metrics_hook_line(&fixture.payload(serde_json::json!("pixel impact src/login.rs")))
+                .unwrap();
+        assert!(line.contains("#000002"), "{line}");
+    }
+
+    #[test]
+    fn tool_command_text_accepts_string_and_argv_array_forms() {
+        assert_eq!(
+            tool_command_text(&serde_json::json!({"command": "pixel x"})),
+            Some("pixel x".to_string())
+        );
+        assert_eq!(
+            tool_command_text(&serde_json::json!({"cmd": "pixel y"})),
+            Some("pixel y".to_string())
+        );
+        assert_eq!(
+            tool_command_text(&serde_json::json!({"command": ["bash", "-lc", "pixel impact f"]})),
+            Some("pixel impact f".to_string())
+        );
+        // argv keeps the `-c` script boundary: trailing elements are $0
+        // positionals, not part of the command.
+        assert_eq!(
+            tool_command_text(
+                &serde_json::json!({"command": ["bash", "-c", "pixel impact", "ignored"]})
+            ),
+            Some("pixel impact".to_string())
+        );
+        assert_eq!(tool_command_text(&serde_json::json!({})), None);
+        assert_eq!(tool_command_text(&serde_json::json!({"command": 3})), None);
+    }
+
+    #[test]
+    fn metrics_hook_line_replays_the_matching_finalized_record() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("replay");
+        let line =
+            metrics_hook_line(&fixture.payload(serde_json::json!("pixel impact src/login.rs")))
+                .expect("the seeded record must relay");
+        assert!(line.starts_with("🟩 pixel impact ❀"), "{line}");
+        assert!(line.contains("unavailable"), "{line}");
+    }
+
+    #[test]
+    fn metrics_hook_line_stays_silent_on_every_miss() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("miss");
+        // Not a shell tool.
+        assert_eq!(
+            metrics_hook_line(&serde_json::json!({
+                "tool_name": "Edit",
+                "tool_input": {"command": "pixel impact src/login.rs"},
+                "cwd": fixture.root.display().to_string(),
+            })),
+            None
+        );
+        // Host already delivered stderr in the tool result.
+        assert_eq!(
+            metrics_hook_line(&serde_json::json!({
+                "tool_name": "shell",
+                "tool_input": {"command": "pixel impact src/login.rs"},
+                "tool_response": {"output": "…\n🟩 pixel impact ❀ 1ms"},
+                "cwd": fixture.root.display().to_string(),
+            })),
+            None
+        );
+        // Per-invocation vetoes stay vetoes.
+        assert_eq!(
+            metrics_hook_line(&fixture.payload(serde_json::json!(
+                "PIXEL_METRICS=0 pixel impact src/login.rs"
+            ))),
+            None
+        );
+        assert_eq!(
+            metrics_hook_line(
+                &fixture.payload(serde_json::json!("pixel impact src/login.rs --metrics=off"))
+            ),
+            None
+        );
+        // Either veto form alone must silence — the recorded args matching
+        // the veto'd command must not leak a line back.
+        fixture.record("impact", "impact src/login.rs --metrics=off");
+        fixture.record("impact", "impact src/login.rs --metrics off");
+        assert_eq!(
+            metrics_hook_line(
+                &fixture.payload(serde_json::json!("pixel impact src/login.rs --metrics=off"))
+            ),
+            None
+        );
+        assert_eq!(
+            metrics_hook_line(
+                &fixture.payload(serde_json::json!("pixel impact src/login.rs --metrics off"))
+            ),
+            None
+        );
+        // No pixel invocation at all.
+        assert_eq!(
+            metrics_hook_line(&fixture.payload(serde_json::json!("cargo test"))),
+            None
+        );
+        // A record from another cwd must not be claimed as this call.
+        let other = fixture.root.parent().unwrap().join("elsewhere");
+        std::fs::create_dir_all(other.join(".pixel")).unwrap();
+        let other = canonical(&other);
+        fixture.record_at("foreign", "impact src/login.rs", &other);
+        let line =
+            metrics_hook_line(&fixture.payload(serde_json::json!("pixel impact src/login.rs")))
+                .expect("this repo's own record still matches");
+        assert!(
+            line.starts_with("🟩 pixel impact ❀"),
+            "a foreign-cwd record must not be claimed: {line}"
+        );
+    }
+
+    #[test]
+    fn metrics_hook_line_honors_the_persistent_opt_out() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("optout");
+        std::fs::write(
+            fixture.root.join(".pixel/config.json"),
+            "{\"metrics\": \"off\"}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            metrics_hook_line(&fixture.payload(serde_json::json!("pixel impact src/login.rs"))),
+            None,
+            "config off silences the relay exactly like stderr"
+        );
     }
 }

@@ -301,16 +301,31 @@ fn install_leaves_codex_config_untouched() {
     };
     install(&options).expect("install");
 
-    // The new install does NOT touch provider hook configs — a pre-existing
-    // Codex hooks.json (even one carrying a stale pixel guard) must pass
-    // through install byte-identical. Cleanup of old guards is `pixel
-    // uninstall`'s job now.
-    let after = fs::read_to_string(&codex_path).unwrap();
-    assert_eq!(
-        after,
-        serde_json::to_string_pretty(&original).unwrap(),
-        "Codex hooks.json must be byte-identical — install no longer rewrites provider configs"
+    // Install adds exactly one entry — the metrics PostToolUse relay — and
+    // leaves every foreign hook and unrelated key untouched. Stale pixel
+    // guards are still `pixel uninstall`'s job, not install's.
+    let after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&codex_path).unwrap()).unwrap();
+    let post_tool_use = after["hooks"]["PostToolUse"]
+        .as_array()
+        .expect("metrics hook registered under PostToolUse");
+    assert!(
+        post_tool_use.iter().any(|entry| {
+            entry["hooks"].as_array().is_some_and(|hooks| {
+                hooks.iter().any(|hook| {
+                    hook["command"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("run-hook metrics"))
+                })
+            })
+        }),
+        "the metrics relay must be registered: {after}"
     );
+    assert_eq!(
+        after["hooks"]["PreToolUse"], original["hooks"]["PreToolUse"],
+        "foreign hooks must pass through untouched"
+    );
+    assert_eq!(after["unrelated"], true);
 }
 
 #[test]
@@ -1116,6 +1131,10 @@ fn uninstall_removes_codex_hooks_preserving_others() {
             "PreToolUse": [
                 { "matcher": "Bash", "hooks": [{ "type": "command", "command": "~/.claude/hooks/pixel-targets-guard" }] },
                 { "matcher": "Bash", "hooks": [{ "type": "command", "command": "~/.claude/hooks/other-tool" }] }
+            ],
+            "PostToolUse": [
+                { "hooks": [{ "type": "command", "command": "/opt/pixel run-hook metrics --provider codex" }] },
+                { "hooks": [{ "type": "command", "command": "~/.cmux/hooks/cmux-feed" }] }
             ]
         }
     });
@@ -1138,6 +1157,13 @@ fn uninstall_removes_codex_hooks_preserving_others() {
         pre[0]["hooks"][0]["command"].as_str().unwrap(),
         "~/.claude/hooks/other-tool",
         "the other-tool entry should be preserved"
+    );
+    let post = after["hooks"]["PostToolUse"].as_array().unwrap();
+    assert_eq!(post.len(), 1, "only the non-pixel relay should remain");
+    assert_eq!(
+        post[0]["hooks"][0]["command"].as_str().unwrap(),
+        "~/.cmux/hooks/cmux-feed",
+        "the foreign PostToolUse entry should be preserved"
     );
 }
 
@@ -1275,9 +1301,10 @@ fn routing_isolated_provider_child() {
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
-    // The new install wires NO provider hooks. The provider config must
-    // pass through install untouched (still "{}"), and no hooks directory
-    // or hook scripts are created for any provider.
+    // The install wires no provider hooks except Codex's metrics relay:
+    // its tool results never surface stderr, so the 🟩 line is re-emitted
+    // through PostToolUse. Every other provider config passes through
+    // untouched, and no hooks directory or hook scripts are created.
     install(&opts).unwrap();
     let first = fs::read(&config).unwrap();
     install(&opts).unwrap();
@@ -1286,16 +1313,34 @@ fn routing_isolated_provider_child() {
         first,
         "repeat install must leave the provider config stable"
     );
-    assert_eq!(
-        first.as_slice(),
-        b"{}",
-        "provider config must stay {{}} — install wires no hooks"
-    );
     let value: serde_json::Value = serde_json::from_slice(&first).unwrap();
-    assert!(
-        value.get("hooks").is_none(),
-        "no hooks key should be written by the new install, got: {value}"
-    );
+    if provider == "codex" {
+        let post = value["hooks"]["PostToolUse"]
+            .as_array()
+            .expect("codex gets exactly the metrics PostToolUse relay");
+        assert_eq!(post.len(), 1);
+        let command = post[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(command.contains("run-hook metrics"), "{command}");
+        // The executable path holds a space and a quote: it must arrive
+        // shell-quoted so the hook actually launches, with the embedded
+        // apostrophe emitted as the '\'' escape sequence.
+        assert!(
+            command.starts_with('\'')
+                && command.contains("directory/pixel' run-hook")
+                && command.contains("'\\''"),
+            "the executable path must survive spaces and quotes: {command}"
+        );
+    } else {
+        assert_eq!(
+            first.as_slice(),
+            b"{}",
+            "provider config must stay {{}} — install wires no hooks"
+        );
+        assert!(
+            value.get("hooks").is_none(),
+            "no hooks key should be written by the new install, got: {value}"
+        );
+    }
     // No provider gets a ~/.claude/hooks directory from the new install.
     assert!(
         !home.join(".claude/hooks").exists(),

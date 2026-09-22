@@ -120,7 +120,8 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md` or the bundled agent prompts
 | `pixel check-release` | Check that a release tag is consistent with the tree before anything is built or published: crates/pixel/Cargo.toml carries the version, Cargo.lock is fresh for every workspace member, CHANGELOG.md has the `## [x.y.z]` heading and an empty Unreleased section. |
 | `pixel self-update` | Rebuild the binary, stop the daemon, copy the new binary to the install path, and optionally restart the daemon. |
 | `pixel doctor` | Health check: install state, daemon, index/graph/facts freshness |
-| `pixel run-hook` | Hook entrypoints (guard, session-start) invoked by Claude hooks |
+| `pixel run-hook` | Hook entrypoints (guard, session-start, metrics relay) invoked by agent hooks |
+| `pixel config` | Persistent layered settings — `metrics on|off` writes `<root>/.pixel/config.json` (`--global` → `~/.pixel/config.json`); bare reports the effective setting and its layer |
 | `pixel task-state` | Inspect or reset Claude Code's local Pixel task-runtime packet |
 | `pixel action-log` | Self-assessment: pixel's own action log (what ran, what went wrong). |
 | `pixel token-savings` | Token-savings report: for retrieval-shaped commands (search/query/ context/resolve) that recorded snippet-vs-pool volumes, aggregate the fraction of the candidate pool the agent did NOT have to read. |
@@ -298,8 +299,9 @@ envelope talks to the daemon socket directly.
 short `pixel-subagent-prompt.md`, a managed shell function for Claude Code, a managed
 `developer_instructions` block for Codex and a managed block in Pi's
 `~/.pi/agent/APPEND_SYSTEM.md`. It
-preserves agent settings and rule files, and does not register provider hooks or
-activate routing. The shell functions pass the prompt on a subsequent launch
+preserves agent settings and rule files, does not activate legacy provider
+hooks or routing, and separately registers the managed Codex `PostToolUse`
+metrics hook (`$CODEX_HOME/hooks.json`, default `~/.codex/hooks.json`). The shell functions pass the prompt on a subsequent launch
 through the loaded profile; already-running agents and direct executable launches
 do not inherit it automatically. The `claude` function adds
 `--append-subagent-system-prompt-file` only when `-p`/`--print` is among the
@@ -351,6 +353,7 @@ Existing hook entry points remain implemented, separately from active installati
 | `PostCompaction` | `pixel run-hook post-compaction` | Re-injects the active task evidence as additional context. |
 | `PreToolUse` | `pixel run-hook guard` | Bounded compatible command routing; native fallback and host permissions remain authoritative. |
 | `PostToolUse` | `pixel run-hook post-tool-use` | After an edit, emits the dependants of what was just changed. |
+| `PostToolUse` (Codex) | `pixel run-hook metrics` | Codex tool results drop stderr, so the finalized invocation's 🟩 metrics line is re-emitted as `additionalContext` — correlated to the action record by cwd + argv, silent on any miss, and suppressed by the same `metrics` opt-out. |
 | (Codex install step) | `pixel run-hook composed-guard` | Runs a sealed install-time snapshot of a foreign hook before Pixel's Codex rewrite. |
 
 `pixel doctor` checks current installation artifacts and distinguishes configured

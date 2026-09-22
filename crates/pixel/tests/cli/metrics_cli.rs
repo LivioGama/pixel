@@ -534,6 +534,121 @@ fn action_log_failure_does_not_change_success_or_reporting() {
     assert!(fixture.0.join(".pixel/actions.jsonl").is_dir());
 }
 
+/// A scratch HOME so the machine's real `~/.pixel/config.json` can never
+/// leak a global layer into these tests.
+fn fake_home(fixture: &Fixture) -> PathBuf {
+    let home = fixture.0.join("fake-home");
+    fs::create_dir_all(&home).unwrap();
+    home
+}
+
+#[test]
+fn config_metrics_off_hides_the_footer_until_turned_back_on() {
+    let fixture = Fixture::new();
+    let home = fake_home(&fixture);
+    let run = |args: &[&str]| {
+        fixture
+            .command()
+            .args(args)
+            .env("HOME", &home)
+            .output()
+            .unwrap()
+    };
+    let on = run(&["repo-state", ".", "--json"]);
+    assert_success(&on);
+    assert_eq!(metric_lines(&on).len(), 1);
+
+    // The persistent repo-level opt-out.
+    let set = run(&["config", "metrics", "off"]);
+    assert_success(&set);
+    let config: Value =
+        serde_json::from_str(&fs::read_to_string(fixture.0.join(".pixel/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(config["metrics"], "off");
+
+    let off = run(&["repo-state", ".", "--json"]);
+    assert_success(&off);
+    assert_eq!(off.stdout, on.stdout, "stdout is untouched by the opt-out");
+    assert!(metric_lines(&off).is_empty(), "config off emits no block");
+    // Accounting still lands in the journal — the opt-out is presentation.
+    let events = fixture.events("repo-state");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1]["metrics"]["reporting_bytes"], 0);
+    assert!(events[1]["metrics"]["duration_us"].as_u64().unwrap() > 0);
+
+    // Bare `config metrics` reports the effective setting and its layer.
+    let status = run(&["config", "metrics"]);
+    assert_success(&status);
+    let text = String::from_utf8_lossy(&status.stdout);
+    assert!(text.contains("metrics: off"), "{text}");
+    assert!(text.contains("repo"), "{text}");
+
+    // Per-invocation vetoes still veto when the config says on.
+    let reenable = run(&["config", "metrics", "on"]);
+    assert_success(&reenable);
+    let vetoed = run(&["repo-state", ".", "--json", "--metrics=off"]);
+    assert!(metric_lines(&vetoed).is_empty());
+    let on_again = run(&["repo-state", ".", "--json"]);
+    assert_eq!(metric_lines(&on_again).len(), 1);
+}
+
+#[test]
+fn run_hook_metrics_replays_the_invocation_line_for_stderrless_hosts() {
+    use std::io::Write;
+    let fixture = Fixture::new();
+    let home = fake_home(&fixture);
+    let run = |args: &[&str]| {
+        fixture
+            .command()
+            .args(args)
+            .env("HOME", &home)
+            .output()
+            .unwrap()
+    };
+    let call = run(&["repo-state", ".", "--json"]);
+    assert_success(&call);
+    let emitted = metric_lines(&call);
+    assert_eq!(emitted.len(), 1);
+
+    // Codex-shaped PostToolUse payload: shell tool, command string, cwd.
+    let payload = json!({
+        "tool_name": "shell",
+        "tool_input": {"command": "pixel repo-state . --json"},
+        "cwd": fixture.0.display().to_string(),
+    });
+    let hook = |payload: &Value| {
+        let mut child = fixture
+            .command()
+            .args(["run-hook", "metrics", "--provider", "codex"])
+            .env("HOME", &home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let output = hook(&payload);
+    assert_success(&output);
+    let doc: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let context = doc["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("the hook relays the finalized line as context");
+    assert_eq!(context, emitted[0].as_str());
+
+    // Opted out: the hook stays as silent as stderr would have been.
+    assert_success(&run(&["config", "metrics", "off"]));
+    let output = hook(&payload);
+    assert_success(&output);
+    assert!(output.stdout.is_empty(), "{output:?}");
+}
+
 #[test]
 fn protected_native_hook_and_statusline_streams_have_no_metrics_line() {
     let fixture = Fixture::new();
