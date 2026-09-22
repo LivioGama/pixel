@@ -457,6 +457,42 @@ mod tests {
         assert!((u[0] - 1.0 / 3.0).abs() < 1e-6);
     }
 
+    /// The gap is the contract, not the ranking: at `TAU`, a 0.6 cosine
+    /// difference is a factor `exp(0.6 / TAU)` in probability, and that is
+    /// what the caller thresholds on. Ordering survives almost any
+    /// arithmetic on `(s - max) / TAU`; the value does not.
+    #[test]
+    fn softmax_scales_the_gap_by_the_fixed_temperature() {
+        let p = softmax(&[0.9, 0.3]);
+        let top = 1.0 / (1.0 + (-0.6f64 / TAU).exp());
+        assert!((p[0] - top).abs() < 1e-12, "{p:?}");
+        assert!((p[1] - (1.0 - top)).abs() < 1e-12, "{p:?}");
+    }
+
+    /// Subtracting the max is what keeps `exp()` finite. It is invisible on
+    /// cosines, which live in [-1, 1], so it takes an input no cosine would
+    /// produce to show it: added instead of subtracted, both exponentials
+    /// overflow and every probability comes back NaN.
+    #[test]
+    fn softmax_stays_finite_on_extreme_similarities() {
+        let p = softmax(&[900.0, 0.0]);
+        assert!(p.iter().all(|x| x.is_finite()), "{p:?}");
+        assert_eq!(p[0], 1.0, "{p:?}");
+        assert!((p.iter().sum::<f64>() - 1.0).abs() < 1e-12, "{p:?}");
+    }
+
+    /// The cap bounds worst-case latency, and it counts characters rather
+    /// than bytes so a multi-byte character is never cut in half.
+    #[test]
+    fn clip_text_bounds_long_input_and_leaves_short_input_alone() {
+        assert_eq!(clip_text("hello"), "hello");
+        assert_eq!(clip_text(""), "");
+        let long = "é".repeat(TEXT_CAP_CHARS + 10);
+        let clipped = clip_text(&long);
+        assert_eq!(clipped.chars().count(), TEXT_CAP_CHARS);
+        assert!(clipped.chars().all(|c| c == 'é'));
+    }
+
     #[test]
     fn decide_picks_the_semantically_matching_criterion() {
         let mut e = FakeEmbedder;
