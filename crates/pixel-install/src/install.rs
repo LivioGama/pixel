@@ -484,7 +484,7 @@ fn managed_pi_content(existing: &str, asset: &str) -> String {
 /// renamed over the target. A crash mid-write leaves the old profile intact
 /// instead of a half-written one — a shell profile is read by every
 /// interactive shell, and it is the user's file.
-fn write_atomically(path: &Path, content: &str) -> Result<()> {
+pub(crate) fn write_atomically(path: &Path, content: &str) -> Result<()> {
     config::backup_if_changing(path, content.as_bytes())?;
     let tmp = path.with_extension("pixel-tmp");
     fs::write(&tmp, content)?;

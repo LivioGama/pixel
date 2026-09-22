@@ -53,8 +53,18 @@ const PIXEL_PLUGIN_FILE: &str = "pixel.mjs";
 /// install (the variable OpenCode itself honours), `<home>/.config/opencode`
 /// for tests and explicit `--home` overrides.
 pub(crate) fn opencode_config_dir(home: &Path, home_was_explicit: bool) -> PathBuf {
+    resolve_config_dir(home, home_was_explicit, std::env::var_os("XDG_CONFIG_HOME"))
+}
+
+/// Pure resolution behind [`opencode_config_dir`], so tests pin every arm
+/// without mutating the process environment.
+fn resolve_config_dir(
+    home: &Path,
+    home_was_explicit: bool,
+    xdg_config_home: Option<std::ffi::OsString>,
+) -> PathBuf {
     if !home_was_explicit
-        && let Some(dir) = std::env::var_os("XDG_CONFIG_HOME")
+        && let Some(dir) = xdg_config_home
         && !dir.is_empty()
     {
         return PathBuf::from(dir).join("opencode");
@@ -71,9 +81,13 @@ fn config_path(config_dir: &Path) -> PathBuf {
 }
 
 /// True when an `instructions` entry names the deployed Pixel prompt,
-/// wherever it was installed from.
+/// wherever it was installed from. Suffix-matched, not substring: a
+/// `.../agent-prompt.md.bak` backup is the user's file, not our entry.
 fn is_pixel_instruction(entry: &str) -> bool {
-    entry.replace('\\', "/").contains(PROMPT_PATH_TAIL)
+    entry
+        .replace('\\', "/")
+        .trim_end()
+        .ends_with(PROMPT_PATH_TAIL)
 }
 
 /// True when a `plugin`/`plugins` entry names `pixel.mjs` and resolves to a
@@ -126,12 +140,22 @@ pub(crate) fn install_opencode(
     };
 
     // The managed block ----------------------------------------------------
-    let existing = fs::read_to_string(&agents).ok();
+    // Only NotFound means "no file": an unreadable AGENTS.md is an error to
+    // surface, not a file to replace wholesale.
+    let existing = match fs::read_to_string(&agents) {
+        Ok(content) => Some(content),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
     let seeded = match &existing {
         Some(content) => content.clone(),
         // A new global AGENTS.md wins the slot ~/.claude/CLAUDE.md fills on
         // v1 — carry that content into it so nothing is shadowed.
-        None => fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap_or_default(),
+        None => match fs::read_to_string(home.join(".claude/CLAUDE.md")) {
+            Ok(content) => content,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e.into()),
+        },
     };
     let wanted = config::apply_managed_markers(&seeded, install::AGENT_PROMPT_ASSET);
     if existing.as_deref() == Some(wanted.as_str()) {
@@ -143,7 +167,7 @@ pub(crate) fn install_opencode(
         ));
     } else {
         fs::create_dir_all(config_dir)?;
-        fs::write(&agents, &wanted)?;
+        install::write_atomically(&agents, &wanted)?;
     }
 
     // The sweeps -----------------------------------------------------------
@@ -266,7 +290,7 @@ pub(crate) fn remove_opencode(
                 fs::remove_file(&agents)?;
                 removed.push(format!("{} (block was the whole file)", agents.display()));
             } else {
-                fs::write(&agents, &stripped)?;
+                install::write_atomically(&agents, &stripped)?;
                 removed.push(format!("block from {}", agents.display()));
             }
         }
@@ -409,7 +433,10 @@ mod tests {
                 "model": "m",
                 "instructions": [
                     "CONTRIBUTING.md",
-                    format!("{}/.local/share/pixel/agent-prompt.md", home.display())
+                    format!("{}/.local/share/pixel/agent-prompt.md", home.display()),
+                    // Contains the tail but does not end with it: a backup
+                    // the user keeps, not our entry.
+                    format!("{}/.local/share/pixel/agent-prompt.md.bak", home.display())
                 ],
                 "plugin": [
                     "~/missing/pixel.mjs",
@@ -433,7 +460,10 @@ mod tests {
                 .unwrap();
         assert_eq!(
             config["instructions"],
-            serde_json::json!(["CONTRIBUTING.md"])
+            serde_json::json!([
+                "CONTRIBUTING.md",
+                format!("{}/.local/share/pixel/agent-prompt.md.bak", home.display())
+            ])
         );
         let plugin = config["plugin"].as_array().unwrap();
         assert_eq!(plugin.len(), 2, "{plugin:?}");
@@ -471,23 +501,32 @@ mod tests {
         assert!(step.summary.contains("untouched"), "{}", step.summary);
     }
 
-    #[cfg(unix)]
     #[test]
     fn an_unreadable_config_does_not_block_the_agents_md() {
-        use std::os::unix::fs::PermissionsExt;
         let home = scratch("unreadable-cfg");
         let dir = config_dir(&home);
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(OPENCODE_CONFIG_FILE);
-        fs::write(&path, "{}").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
-        // Permission denied is not "absent": the sweep reports the file
-        // untouched rather than silently treating it as empty.
+        // A directory where a file is expected fails the read on every
+        // platform and for every user — including root, which a 0o000 mode
+        // would not stop.
+        fs::create_dir(dir.join(OPENCODE_CONFIG_FILE)).unwrap();
+        // Not "absent": the sweep reports the file untouched rather than
+        // silently treating it as empty.
         let step = install_opencode(&dir, &home, false).unwrap();
         assert_eq!(step.status, CheckStatus::Green, "{}", step.summary);
         assert!(step.summary.contains("untouched"), "{}", step.summary);
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "{}");
+        assert!(dir.join(AGENTS_MD_FILE).is_file());
+    }
+
+    #[test]
+    fn an_unreadable_agents_md_is_an_error_not_a_replace() {
+        let home = scratch("unreadable-agents");
+        let dir = config_dir(&home);
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir(dir.join(AGENTS_MD_FILE)).unwrap();
+        // The error propagates; the directory must not be rewritten.
+        assert!(install_opencode(&dir, &home, false).is_err());
+        assert!(dir.join(AGENTS_MD_FILE).is_dir());
     }
 
     #[test]
@@ -625,32 +664,26 @@ mod tests {
     #[test]
     fn config_dir_honours_xdg_only_on_a_real_install() {
         let home = Path::new("/home/u");
-        let saved = std::env::var_os("XDG_CONFIG_HOME");
-        // SAFETY: the only reader of XDG_CONFIG_HOME in this test binary is
-        // opencode_config_dir, exercised serially inside this block; the
-        // variable is restored on exit either way.
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", "/xdg");
-            assert_eq!(
-                opencode_config_dir(home, false),
-                PathBuf::from("/xdg/opencode")
-            );
-            // An explicit --home is a test fixture, not the user's machine:
-            // XDG must not leak into it.
-            assert_eq!(
-                opencode_config_dir(home, true),
-                home.join(".config/opencode")
-            );
-            std::env::remove_var("XDG_CONFIG_HOME");
-            assert_eq!(
-                opencode_config_dir(home, false),
-                home.join(".config/opencode")
-            );
-            match saved {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
-            }
-        }
+        let xdg = Some(std::ffi::OsString::from("/xdg"));
+        assert_eq!(
+            resolve_config_dir(home, false, xdg.clone()),
+            PathBuf::from("/xdg/opencode")
+        );
+        // An explicit --home is a test fixture, not the user's machine:
+        // XDG must not leak into it.
+        assert_eq!(
+            resolve_config_dir(home, true, xdg),
+            home.join(".config/opencode")
+        );
+        assert_eq!(
+            resolve_config_dir(home, false, None),
+            home.join(".config/opencode")
+        );
+        // An empty XDG variable is unset, not a root-relative path.
+        assert_eq!(
+            resolve_config_dir(home, false, Some(std::ffi::OsString::new())),
+            home.join(".config/opencode")
+        );
     }
 
     #[test]

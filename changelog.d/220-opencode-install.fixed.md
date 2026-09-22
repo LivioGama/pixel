@@ -7,4 +7,4 @@ with `~/.claude/CLAUDE.md` so a v1 install shadows nothing. The step also
 sweeps stale `instructions` entries naming the deployed prompt and
 `plugin`/`plugins` entries whose `pixel.mjs` target no longer exists.
 `uninstall` strips the block, and `doctor` gains
-`install.opencode-agents-md`. (#220)
+`install.opencode-agents-md`. ([#220](https://github.com/LivioGama/pixel/pull/220))
