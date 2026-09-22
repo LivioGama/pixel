@@ -24,6 +24,7 @@ macro_rules! eprintln {
     ($($arg:tt)*) => { crate::operation_metrics::print_error(format_args!("{}\n", format_args!($($arg)*))) };
 }
 mod call_guard;
+mod classify;
 mod claude_controller;
 mod evaluate_cmd;
 mod guard;
@@ -476,6 +477,12 @@ enum Command {
         #[command(subcommand)]
         cmd: sniper_cmd::SniperCmd,
     },
+    /// Zero-shot decision over a bounded label set: embed the text and each
+    /// option's criterion, cosine → fixed-temperature softmax. The
+    /// probability distribution a Jev-class decision model returns, computed
+    /// deterministically with no LLM. `--jsonl` serves one decision per
+    /// stdin line with the model resident.
+    Classify(classify::ClassifyOptions),
     /// Deterministic web lookup for terms the index cannot know — the
     /// refine step of a gated `pixel plan`. No LLM, no daemon.
     WebSearch {
@@ -5153,6 +5160,7 @@ fn run_command(
         },
         Command::Recall { cmd } => recall_cmd::run_recall(cmd),
         Command::ListErrors { cmd } => sniper_cmd::run_sniper(cmd),
+        Command::Classify(options) => classify::run(options),
         Command::WebSearch { query, limit, json } => {
             web_search::run(web_search::WebSearchOptions { query, limit, json })
         }
