@@ -473,18 +473,27 @@ const CONCEPT_QUERY_STOPWORDS: &[&str] = &[
     "just",
 ];
 
-/// The query words that can identify a code site: identifier-split,
-/// lowercased, minus [`CONCEPT_QUERY_STOPWORDS`].
-fn content_query_words(query: &str) -> Vec<String> {
+/// Words of a text seen as identifiers: split on non-alphanumeric noise,
+/// then on `_-.:#` and camelCase boundaries, lowercased, deduped.
+fn ident_words(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for chunk in query.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-') {
+    for chunk in text.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-') {
         for w in crate::impact::split_ident_words(chunk) {
-            if w.len() >= 2 && !CONCEPT_QUERY_STOPWORDS.contains(&w.as_str()) && !out.contains(&w) {
+            if !out.contains(&w) {
                 out.push(w);
             }
         }
     }
     out
+}
+
+/// The query words that can identify a code site: identifier-split,
+/// lowercased, minus [`CONCEPT_QUERY_STOPWORDS`].
+fn content_query_words(query: &str) -> Vec<String> {
+    ident_words(query)
+        .into_iter()
+        .filter(|w| w.len() >= 2 && !CONCEPT_QUERY_STOPWORDS.contains(&w.as_str()))
+        .collect()
 }
 
 /// A match is evidence only when it shares a content word with the query.
@@ -494,7 +503,16 @@ fn match_shares_content(m: &concept_resolve::ConceptMatch, qwords: &[String]) ->
     if qwords.is_empty() || m.symbol_kind.is_some() {
         return true;
     }
-    let words = crate::concept::concept_words(&m.norm);
+    let mut words = crate::concept::concept_words(&m.norm);
+    // `norm` is already lowercased, so camelCase members ("totalPrice" →
+    // "totalprice") can no longer be split there — split the raw text into
+    // identifier words too or identifier-shaped literals would never overlap
+    // a multi-word query.
+    for w in ident_words(&m.raw) {
+        if !words.contains(&w) {
+            words.push(w);
+        }
+    }
     if qwords.iter().any(|q| words.contains(q)) {
         return true;
     }
@@ -519,13 +537,11 @@ fn enclosing_symbol(store: &GraphStore, file: &str, line: u32) -> Option<(String
         .map(|s| (s.name, s.start_line))
 }
 
-/// One file's collapsed concept matches.
+/// One file's collapsed concept matches, keeping the highest-scoring match.
 struct ConceptGroup {
-    line: u32,
     count: u32,
     score: f64,
-    raw: String,
-    owner: Option<String>,
+    best: Option<concept_resolve::ConceptMatch>,
 }
 
 /// Collapse whitespace and cap a raw match for a one-line label.
@@ -560,36 +576,34 @@ fn by_concept(
         .into_iter()
         .filter(|m| match_shares_content(m, &qwords))
     {
-        let enc = enclosing_symbol(store, &m.path, m.start_line);
-        let owner = m
-            .owner
-            .clone()
-            .or_else(|| enc.as_ref().map(|(name, _)| name.clone()));
-        let site_line = enc.map_or(m.start_line, |(_, start)| start);
         let g = grouped.entry(m.path.clone()).or_insert_with(|| {
             order.push(m.path.clone());
             ConceptGroup {
-                line: site_line,
                 count: 0,
                 score: f64::MIN,
-                raw: String::new(),
-                owner: None,
+                best: None,
             }
         });
         g.count += 1;
         if m.score > g.score {
             g.score = m.score;
-            g.line = site_line;
-            g.raw = m.raw.clone();
-            g.owner = owner;
+            g.best = Some(m);
         }
     }
     let fan_in = fan_in_for_file_paths(store, &order)?;
     let mut out = Vec::with_capacity(order.len());
     for file in order {
         let g = grouped.remove(&file).expect("grouped per file above");
-        let snippet = evidence_snippet(&g.raw, 80);
-        let label = match (&g.owner, g.count) {
+        let best = g.best.expect("count > 0 implies a best match");
+        // The symbol lookup runs once per file, for the representative match.
+        let enc = enclosing_symbol(store, &file, best.start_line);
+        let owner = best
+            .owner
+            .clone()
+            .or_else(|| enc.as_ref().map(|(name, _)| name.clone()));
+        let site_line = enc.map_or(best.start_line, |(_, start)| start);
+        let snippet = evidence_snippet(&best.raw, 80);
+        let label = match (&owner, g.count) {
             (Some(name), 1) => format!("Check `{name}` — concept match \"{snippet}\""),
             (Some(name), n) => {
                 format!("Check `{name}` — {n} concept matches, e.g. \"{snippet}\"")
@@ -600,7 +614,7 @@ fn by_concept(
         let fi = *fan_in.get(&file).unwrap_or(&0);
         out.push(PlanFinding {
             file,
-            line: g.line,
+            line: site_line,
             label,
             fan_in: fi,
             severity: Severity::from_fan_in(fi),
@@ -1483,5 +1497,34 @@ mod tests {
             findings[0].label.contains("2 concept matches"),
             "{findings:?}"
         );
+    }
+
+    #[test]
+    fn match_shares_content_splits_camel_case_raw() {
+        // `norm` is lowercased, so "totalPrice" survives there only as the
+        // single token "totalprice" — the raw split is what lets a multi-word
+        // query overlap an identifier-shaped literal.
+        let m = concept_resolve::ConceptMatch {
+            path: "price.ts".into(),
+            start_line: 1,
+            end_line: 1,
+            kind: crate::concept::ConceptKind::String,
+            raw: "the totalPrice field".into(),
+            norm: "the totalprice field".into(),
+            owner: None,
+            symbol_kind: None,
+            score: 1.0,
+            reasons: vec![],
+        };
+        let qwords = content_query_words("show total price");
+        assert_eq!(qwords, vec!["total".to_string(), "price".to_string()]);
+        assert!(match_shares_content(&m, &qwords));
+        // And a pure stopword overlap still fails.
+        let noise = concept_resolve::ConceptMatch {
+            raw: "in my opinion".into(),
+            norm: "in my opinion".into(),
+            ..m
+        };
+        assert!(!match_shares_content(&noise, &qwords));
     }
 }
