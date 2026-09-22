@@ -254,20 +254,29 @@ fn search_on_a_cold_corpus_ingests_on_demand() {
 }
 
 /// The store-only commands catch up on demand too: sessions, show,
-/// maxtest, and export must all see the never-indexed corpus.
+/// maxtest, and export each run against their own never-indexed corpus, so
+/// a missing catch-up in one cannot hide behind another's warm-up.
 #[test]
 fn cold_corpus_sessions_show_maxtest_and_export() {
-    let corpus = Corpus::write_fixture("lazy-ops", &format!("{NEEDLE}{}", TAIL.repeat(8)));
+    let content = || format!("{NEEDLE}{}", TAIL.repeat(8));
+
+    let corpus = Corpus::write_fixture("lazy-sessions", &content());
     let sessions = corpus.json(&["recall", "sessions", "--json"]);
     assert_eq!(
         sessions["sessions"].as_array().map(Vec::len),
         Some(1),
         "{sessions}"
     );
+
+    let corpus = Corpus::write_fixture("lazy-show", &content());
     let shown = corpus.stdout(&["recall", "show", "claude:0123abcd"]);
     assert!(shown.contains("streamed needle"), "{shown}");
+
+    let corpus = Corpus::write_fixture("lazy-maxtest", &content());
     let ranked = corpus.stdout(&["recall", "maxtest", "needle,zz-absent-token"]);
     assert!(ranked.contains("needle"), "{ranked}");
+
+    let corpus = Corpus::write_fixture("lazy-export", &content());
     let out_dir = corpus.home.join("export");
     let out = corpus.run(&[
         "recall",

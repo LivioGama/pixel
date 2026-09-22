@@ -1574,15 +1574,9 @@ mod tests {
         let root = scratch_root("lazy-index-gate");
         let mut store = RecallStore::open(&root.join("recall.db")).unwrap();
         let mut segments = SegmentSet::open(&root.join("seg")).unwrap();
-        // Nothing written: no index run, no hits.
-        index_after_catch_up(&store, &mut segments, 0).unwrap();
-        // Nothing written: no index run — the manifest watermark must not
-        // move and no shard may appear.
-        assert_eq!(segments.manifest.last_turn_id, 0);
-        assert!(segments.manifest.segments.is_empty());
-        // A catch-up writes a turn; written = 1 must index it: search sees
-        // unindexed turns through the always-scanned tail, so hits alone
-        // cannot prove the index ran — the advancing manifest can.
+        // Seed one unindexed turn: search would still find it through the
+        // always-scanned tail, so segment state — not hits — is the only
+        // thing that can prove whether the gate ran the indexer.
         let (discovered, parsed) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
         let unit = SourceUnit {
             unit_key: "u1".to_string(),
@@ -1594,6 +1588,14 @@ mod tests {
             &mut store,
             vec![stub("stub", vec![unit], &discovered, &parsed)],
         );
+        assert!(written > 0);
+        // Nothing written on this pass: no index run — the manifest
+        // watermark must not move and no shard may appear, even with an
+        // unindexed turn waiting in the store.
+        index_after_catch_up(&store, &mut segments, 0).unwrap();
+        assert_eq!(segments.manifest.last_turn_id, 0);
+        assert!(segments.manifest.segments.is_empty());
+        // A catch-up that wrote turns must index them.
         index_after_catch_up(&store, &mut segments, written).unwrap();
         assert_eq!(segments.manifest.segments.len(), 1);
         assert!(segments.manifest.last_turn_id > 0);
