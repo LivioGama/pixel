@@ -1,11 +1,27 @@
 //! `pixel classify` — deterministic zero-shot label decision, no LLM.
 //!
-//! The decision half of the refinement contract: embed the question
-//! (instructions + state) and each option's criterion text with the shared
-//! static embedding model, then map cosine similarities through a
-//! fixed-temperature softmax. The output is a probability distribution over
-//! the caller's labels — the same shape a Jev-class decision model returns,
-//! produced deterministically and offline. No daemon, no index required.
+//! The decision half of the refinement contract: embed the text to judge and
+//! each option's criterion with the shared static embedding model, then map
+//! cosine similarities through a fixed-temperature softmax. The output is a
+//! probability distribution over the caller's labels — the same shape a
+//! Jev-class decision model returns, produced deterministically and offline.
+//! No daemon, no index required.
+//!
+//! # Why `context` is a field and not a prefix on `text`
+//!
+//! The model is a static embedding (Model2Vec): a document's vector is the
+//! mean of its token vectors, so every character of `text` competes for the
+//! same budget. Framing that is identical for all candidates — the question,
+//! the rubric preamble — therefore *dilutes* the part that actually varies,
+//! and it pulls every query toward the same point, compressing exactly the
+//! cosine gaps the decision reads. Folded into each candidate instead, the
+//! same words are common to both sides of every comparison and cancel.
+//!
+//! This is not a tuning knob; it is where shared text has to go for a
+//! mean-pooled model. Measured on the 231 public JevBench v1.2 items, moving
+//! the shared instructions out of `text` and into `context` took the tiers
+//! from 64.6 / 36.1 / 45.0 % to 89.6 / 54.2 / 47.7 % — chance-corrected
+//! Intelligence 19.5 → 38.3 (`docs/bench/jevbench.md`).
 //!
 //! `pixel classify --jsonl` serves one decision per stdin line with the
 //! model resident, so per-decision latency never includes model load.
@@ -21,11 +37,17 @@ pub const TAU: f64 = 0.07;
 /// signal; bounding it keeps worst-case latency flat.
 const TEXT_CAP_CHARS: usize = 32_768;
 
-/// One decision request: the text to judge, the allowed labels, and an
-/// optional criterion description per label (what the label *means*).
+/// One decision request: the text to judge, the framing every candidate
+/// shares, the allowed labels, and an optional criterion description per
+/// label (what the label *means*).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spec {
+    /// The part that varies from decision to decision — the state to judge.
     pub text: String,
+    /// Framing shared by every candidate: the question being asked, the
+    /// rubric preamble. Embedded into each candidate, never into `text` —
+    /// see the module docs for why that placement decides the answer.
+    pub context: String,
     pub labels: Vec<String>,
     pub criteria: BTreeMap<String, String>,
 }
@@ -36,6 +58,7 @@ impl Spec {
     /// skews the distribution if dropped, so it is an error instead).
     pub fn checked(
         text: String,
+        context: String,
         labels: Vec<String>,
         criteria: BTreeMap<String, String>,
     ) -> Result<Self, String> {
@@ -54,16 +77,24 @@ impl Spec {
         }
         Ok(Spec {
             text,
+            context,
             labels,
             criteria,
         })
     }
 }
 
-/// What gets embedded for a candidate: the criterion text when the caller
-/// supplied one, else the label name itself.
-fn candidate_text<'a>(label: &'a str, criteria: &'a BTreeMap<String, String>) -> &'a str {
-    criteria.get(label).map_or(label, String::as_str)
+/// What gets embedded for a candidate: the shared `context`, then the
+/// criterion text when the caller supplied one, else the label name itself.
+/// Every candidate carries the same context, so it cancels in the comparison
+/// instead of diluting the query.
+fn candidate_text(label: &str, spec: &Spec) -> String {
+    let base = spec.criteria.get(label).map_or(label, String::as_str);
+    if spec.context.is_empty() {
+        return base.to_string();
+    }
+    let context = &spec.context;
+    format!("{context} {base}")
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -94,7 +125,7 @@ fn decide(embedder: &mut dyn Embedder, spec: &Spec) -> Result<BTreeMap<String, f
     let candidates: Vec<String> = spec
         .labels
         .iter()
-        .map(|l| candidate_text(l, &spec.criteria).to_string())
+        .map(|l| candidate_text(l, spec))
         .collect();
     // Kind is per-batch, so question and candidates embed in two calls:
     // E5-family models prefix queries and passages differently.
@@ -161,6 +192,11 @@ fn parse_spec_line(line: &str) -> Result<Spec, String> {
         .and_then(Value::as_str)
         .ok_or("spec needs a \"text\" string")?
         .to_string();
+    let context = v
+        .get("context")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let labels = v
         .get("labels")
         .and_then(Value::as_array)
@@ -178,7 +214,7 @@ fn parse_spec_line(line: &str) -> Result<Spec, String> {
                 .collect()
         })
         .unwrap_or_default();
-    Spec::checked(clip_text(&text), labels, criteria)
+    Spec::checked(clip_text(&text), clip_text(&context), labels, criteria)
 }
 
 /// One result line per spec line; a bad line fails that line only — the
@@ -210,6 +246,7 @@ fn serve_jsonl(embedder: &mut dyn Embedder) -> Result<(), String> {
 
 pub struct ClassifyOptions {
     pub text: Option<String>,
+    pub context: Option<String>,
     pub labels: Vec<String>,
     pub criteria: Vec<String>,
     pub jsonl: bool,
@@ -239,6 +276,7 @@ pub fn run(opts: ClassifyOptions) -> Result<(), String> {
         .ok_or("classify needs a text argument (or --jsonl)")?;
     let spec = Spec::checked(
         clip_text(&text),
+        clip_text(opts.context.as_deref().unwrap_or_default()),
         opts.labels.clone(),
         parse_criteria(&opts.criteria)?,
     )?;
@@ -289,27 +327,117 @@ mod tests {
         }
     }
 
+    /// Mean-pooling fake, the property that makes placement matter: a text's
+    /// vector is the mean of its whitespace tokens, "alpha"/"beta" carrying
+    /// one dimension each and every other word a shared third one. Any
+    /// static embedding behaves this way, which is why shared framing in
+    /// `text` competes with the state for the same budget.
+    struct MeanPoolEmbedder;
+    impl Embedder for MeanPoolEmbedder {
+        fn model_id(&self) -> &str {
+            "mean-pool"
+        }
+        fn dims(&self) -> usize {
+            3
+        }
+        fn embed_batch(
+            &mut self,
+            texts: &[&str],
+            _kind: EmbedKind,
+        ) -> Result<Vec<Vec<f32>>, String> {
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    let mut v = [0.0f32; 3];
+                    let words: Vec<&str> = t.split_whitespace().collect();
+                    for w in &words {
+                        match *w {
+                            "alpha" => v[0] += 1.0,
+                            "beta" => v[1] += 1.0,
+                            _ => v[2] += 1.0,
+                        }
+                    }
+                    let n = words.len().max(1) as f32;
+                    v.iter().map(|x| x / n).collect()
+                })
+                .collect())
+        }
+    }
+
+    fn spec(text: &str, context: &str, labels: &[&str], criteria: &[(&str, &str)]) -> Spec {
+        Spec::checked(
+            text.to_string(),
+            context.to_string(),
+            labels.iter().map(ToString::to_string).collect(),
+            criteria
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn spec_rejects_bad_label_sets() {
         let labels = |v: &[&str]| v.iter().map(ToString::to_string).collect();
-        assert!(Spec::checked("t".into(), labels(&["a"]), BTreeMap::new()).is_err());
-        assert!(Spec::checked("t".into(), labels(&["a", "a"]), BTreeMap::new()).is_err());
-        assert!(Spec::checked("t".into(), labels(&["a", ""]), BTreeMap::new()).is_err());
-        assert!(Spec::checked("t".into(), labels(&["a", "b"]), BTreeMap::new()).is_ok());
+        let checked = |l| Spec::checked("t".into(), String::new(), l, BTreeMap::new());
+        assert!(checked(labels(&["a"])).is_err());
+        assert!(checked(labels(&["a", "a"])).is_err());
+        assert!(checked(labels(&["a", ""])).is_err());
+        assert!(checked(labels(&["a", "b"])).is_ok());
         let mut stray = BTreeMap::new();
         stray.insert("zz".to_string(), "desc".to_string());
-        assert!(Spec::checked("t".into(), labels(&["a", "b"]), stray).is_err());
+        assert!(Spec::checked("t".into(), String::new(), labels(&["a", "b"]), stray).is_err());
     }
 
     #[test]
     fn candidate_text_prefers_criterion_over_label_name() {
-        let mut c = BTreeMap::new();
-        c.insert(
-            "yes".to_string(),
-            "Every condition is established".to_string(),
+        let s = spec("t", "", &["yes", "no"], &[("yes", "Every condition holds")]);
+        assert_eq!(candidate_text("yes", &s), "Every condition holds");
+        assert_eq!(candidate_text("no", &s), "no");
+    }
+
+    #[test]
+    fn candidate_text_prefixes_every_candidate_with_the_context() {
+        let s = spec(
+            "t",
+            "Under the policy,",
+            &["yes", "no"],
+            &[("yes", "it holds")],
         );
-        assert_eq!(candidate_text("yes", &c), "Every condition is established");
-        assert_eq!(candidate_text("no", &c), "no");
+        assert_eq!(candidate_text("yes", &s), "Under the policy, it holds");
+        assert_eq!(candidate_text("no", &s), "Under the policy, no");
+    }
+
+    /// The contract the `context` field exists for. Shared framing is long
+    /// and says nothing about which label is right, so mean-pooled into
+    /// `text` it swamps the state and hands the decision to whichever
+    /// criterion happens to be wordiest. Carried by every candidate instead,
+    /// it cancels. Same words, same model, opposite answers — so this fails
+    /// the moment `candidate_text` stops folding the context in, or a caller
+    /// is told to concatenate it onto `text` again.
+    #[test]
+    fn shared_framing_belongs_in_context_not_in_text() {
+        let framing = "under the stated policy decide whether the action is permitted";
+        let criteria: &[(&str, &str)] = &[
+            ("yes", "alpha"),
+            ("no", "beta and otherwise a great many qualifying words"),
+        ];
+        let mut e = MeanPoolEmbedder;
+
+        // Framing concatenated onto the state, as the first mapping did.
+        let diluted = spec(&format!("{framing} alpha"), "", &["yes", "no"], criteria);
+        let probs = decide(&mut e, &diluted).unwrap();
+        assert_eq!(
+            predicted(&probs, &diluted.labels),
+            "no",
+            "shared framing in `text` is expected to swamp the state here"
+        );
+
+        // Same words, moved to where they cancel.
+        let framed = spec("alpha", framing, &["yes", "no"], criteria);
+        let probs = decide(&mut e, &framed).unwrap();
+        assert_eq!(predicted(&probs, &framed.labels), "yes");
     }
 
     #[test]
@@ -332,18 +460,15 @@ mod tests {
     #[test]
     fn decide_picks_the_semantically_matching_criterion() {
         let mut e = FakeEmbedder;
-        let spec = Spec::checked(
-            "alpha happens here".into(),
-            vec!["no".into(), "yes".into()],
-            BTreeMap::from([
-                ("no".into(), "beta outcome".into()),
-                ("yes".into(), "alpha outcome".into()),
-            ]),
-        )
-        .unwrap();
-        let probs = decide(&mut e, &spec).unwrap();
+        let s = spec(
+            "alpha happens here",
+            "",
+            &["no", "yes"],
+            &[("no", "beta outcome"), ("yes", "alpha outcome")],
+        );
+        let probs = decide(&mut e, &s).unwrap();
         assert!(probs["yes"] > probs["no"]);
-        assert_eq!(predicted(&probs, &spec.labels), "yes");
+        assert_eq!(predicted(&probs, &s.labels), "yes");
     }
 
     #[test]
@@ -361,6 +486,12 @@ mod tests {
             .unwrap();
         assert_eq!(s.labels, vec!["a", "b"]);
         assert_eq!(s.criteria["a"], "desc a");
+        // `context` is optional and defaults to empty — never to the text.
+        assert_eq!(s.context, "");
+        let s = parse_spec_line(r#"{"text":"hello","context":"the rubric","labels":["a","b"]}"#)
+            .unwrap();
+        assert_eq!(s.context, "the rubric");
+        assert_eq!(s.text, "hello");
         assert!(parse_spec_line("not json").is_err());
         assert!(parse_spec_line(r#"{"text":"t"}"#).is_err());
         assert!(parse_spec_line(r#"{"labels":["a","b"]}"#).is_err());
@@ -370,10 +501,9 @@ mod tests {
 
     #[test]
     fn document_carries_probs_argmax_and_envelope() {
-        let spec =
-            Spec::checked("t".into(), vec!["a".into(), "b".into()], BTreeMap::new()).unwrap();
+        let s = spec("t", "", &["a", "b"], &[]);
         let probs = BTreeMap::from([("a".to_string(), 0.9f64), ("b".to_string(), 0.1f64)]);
-        let doc = document("potion-multilingual-128m", &spec, &probs);
+        let doc = document("potion-multilingual-128m", &s, &probs);
         assert_eq!(doc["marker"], "complete");
         assert_eq!(doc["predicted"], "a");
         assert_eq!(doc["probs"]["a"], 0.9);
