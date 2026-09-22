@@ -33,10 +33,26 @@ it is not comparable to the board. The first measurement of this op scored
 (`minishlab/potion-multilingual-128M`, Model2Vec) resident and answers one
 JSONL spec per line:
 
+One request line (`original-policy-01-0`, reflowed here for width — the wire
+format is one line):
+
 ```json
-{"text": "<state>", "context": "<instructions>", "labels": [...],
- "criteria": {label: description}}
-→ {"ok": true, "probs": {label: p}, "predicted": label}
+{"text": "Policy: refunds require a receipt and purchase within 30 days. A customer bought 12 days ago but has no receipt. Issue a refund.",
+ "context": "Under the stated policy, is the requested action permitted? Treat unproved required conditions as not satisfied.",
+ "labels": ["no", "yes"],
+ "criteria": {"no": "A condition is missing or a prohibition applies.",
+              "yes": "Every required condition is established and no prohibition applies."}}
+```
+
+and the answer it gets back:
+
+```json
+{"ok": true, "marker": "complete", "predicted": "no",
+ "probs": {"no": 0.6786325892998001, "yes": 0.32136741070019986},
+ "epistemics": {"closed_world": false, "lower_bound": false, "confidence": "complete",
+                "basis": "zero-shot embedding similarity (cosine + softmax), not a trained classifier"},
+ "snapshot": {"model": "minishlab/potion-multilingual-128M", "temperature": 0.07,
+              "labels": ["no", "yes"]}}
 ```
 
 Cosine similarity per candidate, softmax at a fixed temperature (`TAU =
@@ -64,16 +80,23 @@ two runs.
 | standard (72) | 26 — 36.1 % | **39 — 54.2 %** |
 | hard public (111) | 50 — 45.0 % | **53 — 47.8 %** |
 | ECE (hard, 10 bins) | 0.2068 | **0.1148** |
-| raw p50 / p95 | 0.49 / 2.89 ms | 2.61 / 16.20 ms |
+| raw p50 / p95 | 0.344 / 2.818 ms | 0.392 / 2.948 ms |
 | Intelligence | 19.51 | **38.28** |
 | Calibration | 58.63 | **77.04** |
-| Speed | 96.29 | 95.48 |
+| Speed | 96.30 | 96.29 |
 | Cost | 87.25 | 87.25 |
-| **JevBench Score (v1.3)** | **8.48** | **41.26** |
+| **JevBench Score (v1.3)** | **8.48** | **41.34** |
 
-Nothing else changed: same binary, same model, same temperature, same items.
-Candidates carry the instructions now, so each candidate embed is longer —
-that is the whole latency difference, and it costs 0.8 points of Speed.
+Nothing else changed: same binary, same model, same temperature, same items,
+both runs back to back on an otherwise idle machine. Candidates carry the
+instructions now, so each candidate embed is a little longer, and the two
+latency distributions are indistinguishable at this scale — Speed moves by
+0.01 points.
+
+Calibration is not a second intervention. The same dilution that cost
+accuracy also compressed the cosine gaps, and a compressed gap through a
+fixed-temperature softmax is an overconfident distribution; removing it
+halves ECE on its own.
 
 ## Reproduce
 
