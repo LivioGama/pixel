@@ -10,18 +10,18 @@
 //! # Why `context` is a field and not a prefix on `text`
 //!
 //! The model is a static embedding (Model2Vec): a document's vector is the
-//! mean of its token vectors, so every character of `text` competes for the
-//! same budget. Framing that is identical for all candidates — the question,
-//! the rubric preamble — therefore *dilutes* the part that actually varies,
-//! and it pulls every query toward the same point, compressing exactly the
-//! cosine gaps the decision reads. Folded into each candidate instead, the
-//! same words are common to both sides of every comparison and cancel.
+//! mean of its token vectors, so framing prefixed to `text` changes the query
+//! and dilutes the state that varies between decisions. `context` keeps that
+//! state query untouched and instead replicates the shared framing into each
+//! candidate before its own criterion. This placement is not mathematical
+//! cancellation; it is an explicit choice of which representations carry the
+//! shared words.
 //!
-//! This is not a tuning knob; it is where shared text has to go for a
-//! mean-pooled model. Measured on the 231 public JevBench v1.2 items, moving
-//! the shared instructions out of `text` and into `context` took the tiers
-//! from 64.6 / 36.1 / 45.0 % to 89.6 / 54.2 / 47.7 % — chance-corrected
-//! Intelligence 19.5 → 38.3 (`docs/bench/jevbench.md`).
+//! On the 231 public JevBench items scored under v1.3, moving the shared
+//! instructions from `text` to `context` changed the measured tiers from
+//! 64.6 / 36.1 / 45.0 % to 89.6 / 54.2 / 47.8 % and chance-corrected
+//! Intelligence from 19.5 to 38.3 (`docs/bench/jevbench.md`). These are
+//! historical measurements, not results from every later code revision.
 //!
 //! `pixel classify --jsonl` serves one decision per stdin line with the
 //! model resident, so per-decision latency never includes model load.
@@ -29,12 +29,13 @@
 use pixel_recall::embed::{EmbedKind, Embedder};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::io::BufRead;
 
 /// Softmax temperature over cosine similarities. Fixed a priori — CLIP's
 /// learned temperature — never tuned on any benchmark item.
 pub const TAU: f64 = 0.07;
-/// Input cap: static embeddings mean-pool, so longer text only dilutes the
-/// signal; bounding it keeps worst-case latency flat.
+/// Per-component character cap for state, context, and criterion/fallback text.
+/// Components stay separate so context truncation cannot erase a criterion.
 const TEXT_CAP_CHARS: usize = 32_768;
 
 /// One decision request: the text to judge, the framing every candidate
@@ -44,18 +45,16 @@ const TEXT_CAP_CHARS: usize = 32_768;
 pub struct Spec {
     /// The part that varies from decision to decision — the state to judge.
     pub text: String,
-    /// Framing shared by every candidate: the question being asked, the
-    /// rubric preamble. Embedded into each candidate, never into `text` —
-    /// see the module docs for why that placement decides the answer.
+    /// Framing shared by every candidate: the question being asked and rubric.
     pub context: String,
     pub labels: Vec<String>,
+    /// Normalized explicit criteria plus bounded label fallbacks when needed.
     pub criteria: BTreeMap<String, String>,
+    clipped_fields: Vec<String>,
 }
 
 impl Spec {
-    /// Validated construction: at least two distinct non-empty labels, and
-    /// every criterion must name a real label (a stray criterion silently
-    /// skews the distribution if dropped, so it is an error instead).
+    /// Validate identities, then cap every component used by the embedder.
     pub fn checked(
         text: String,
         context: String,
@@ -65,29 +64,60 @@ impl Spec {
         let mut seen = std::collections::HashSet::new();
         if labels
             .iter()
-            .any(|l| l.is_empty() || !seen.insert(l.clone()))
+            .any(|label| label.is_empty() || !seen.insert(label.clone()))
         {
             return Err("labels must be non-empty and distinct".to_string());
         }
         if labels.len() < 2 {
             return Err("at least two labels are required".to_string());
         }
-        if let Some(bad) = criteria.keys().find(|k| !labels.contains(k)) {
+        if let Some(bad) = criteria.keys().find(|key| !labels.contains(key)) {
             return Err(format!("criterion for unknown label {bad:?}"));
         }
+
+        let mut clipped_fields = Vec::new();
+        let (text, text_clipped) = clip_text(&text);
+        if text_clipped {
+            clipped_fields.push("text".to_string());
+        }
+        let (context, context_clipped) = clip_text(&context);
+        if context_clipped {
+            clipped_fields.push("context".to_string());
+        }
+        let mut normalized = BTreeMap::new();
+        for (label, criterion) in criteria {
+            let (criterion, clipped) = clip_text(&criterion);
+            if clipped {
+                clipped_fields.push(format!("criteria.{label}"));
+            }
+            normalized.insert(label, criterion);
+        }
+        for label in &labels {
+            if !normalized.contains_key(label) {
+                let (fallback, clipped) = clip_text(label);
+                if clipped {
+                    clipped_fields.push(format!("label_fallback.{label}"));
+                    normalized.insert(label.clone(), fallback);
+                }
+            }
+        }
+
         Ok(Spec {
             text,
             context,
             labels,
-            criteria,
+            criteria: normalized,
+            clipped_fields,
         })
+    }
+
+    fn was_clipped(&self) -> bool {
+        !self.clipped_fields.is_empty()
     }
 }
 
-/// What gets embedded for a candidate: the shared `context`, then the
-/// criterion text when the caller supplied one, else the label name itself.
-/// Every candidate carries the same context, so it cancels in the comparison
-/// instead of diluting the query.
+/// Build one candidate from separately bounded context and criterion/fallback.
+/// Explicit empty criteria remain empty; omitted short criteria use the label.
 fn candidate_text(label: &str, spec: &Spec) -> String {
     let base = spec.criteria.get(label).map_or(label, String::as_str);
     if spec.context.is_empty() {
@@ -178,30 +208,57 @@ fn predicted<'a>(probs: &BTreeMap<String, f64>, labels: &'a [String]) -> &'a str
         .map_or("", String::as_str)
 }
 
-/// The per-decision JSON document: probs, argmax, and the epistemics
-/// envelope — `basis` records that this is embedding similarity, not a
-/// trained classifier.
+/// Build the per-decision JSON document and disclose any input clipping.
 fn document(model: &str, spec: &Spec, probs: &BTreeMap<String, f64>) -> Value {
-    json!({
-        "marker": "complete",
+    let mut basis =
+        "zero-shot embedding similarity (cosine + softmax), not a trained classifier".to_string();
+    if spec.was_clipped() {
+        basis.push_str(&format!(
+            "; caps: {TEXT_CAP_CHARS} characters per input component; affected fields: {}",
+            spec.clipped_fields.join(", ")
+        ));
+    }
+    let marker = if spec.was_clipped() {
+        "capped"
+    } else {
+        "complete"
+    };
+    let mut out = json!({
+        "marker": marker,
         "predicted": predicted(probs, &spec.labels),
         "probs": probs,
         "epistemics": {
             "closed_world": false,
             "lower_bound": false,
-            "basis": "zero-shot embedding similarity (cosine + softmax), not a trained classifier",
-            "confidence": "complete",
+            "basis": basis,
+            "confidence": marker,
         },
         "snapshot": {
             "model": model,
             "temperature": TAU,
             "labels": spec.labels,
         },
-    })
+    });
+    if spec.was_clipped() {
+        let message = format!(
+            "input capped at {TEXT_CAP_CHARS} characters per component; affected fields: {}",
+            spec.clipped_fields.join(", ")
+        );
+        out["caps"] = json!([{
+            "name": "input_chars_per_component",
+            "limit": TEXT_CAP_CHARS,
+            "affected_fields": spec.clipped_fields,
+        }]);
+        out["warnings"] = json!([{"code": "INPUT_CAPPED", "message": message}]);
+    }
+    out
 }
 
-fn clip_text(text: &str) -> String {
-    text.chars().take(TEXT_CAP_CHARS).collect()
+/// Return the bounded text and whether at least one character was removed.
+fn clip_text(text: &str) -> (String, bool) {
+    let mut chars = text.chars();
+    let clipped = chars.by_ref().take(TEXT_CAP_CHARS).collect();
+    (clipped, chars.next().is_some())
 }
 
 /// Open the shared embedding model; first call may download it.
@@ -218,11 +275,11 @@ fn parse_spec_line(line: &str) -> Result<Spec, String> {
         .and_then(Value::as_str)
         .ok_or("spec needs a \"text\" string")?
         .to_string();
-    let context = v
-        .get("context")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    let context = match v.get("context") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(context)) => context.clone(),
+        Some(other) => return Err(format!("\"context\" must be a string or null, got {other}")),
+    };
     // Dropping a non-string silently would classify a request the caller
     // never sent: `["a", 7, "b"]` would pass validation as two labels, and a
     // numeric criterion would fall back to embedding the label's own name.
@@ -249,7 +306,7 @@ fn parse_spec_line(line: &str) -> Result<Spec, String> {
             .collect::<Result<BTreeMap<_, _>, _>>()?,
         Some(other) => return Err(format!("\"criteria\" must be an object, got {other}")),
     };
-    Spec::checked(clip_text(&text), clip_text(&context), labels, criteria)
+    Spec::checked(text, context, labels, criteria)
 }
 
 /// One input line to zero or one output lines. `None` is a blank line, which
@@ -275,28 +332,65 @@ fn serve_line(embedder: &mut dyn Embedder, model: &str, line: &str) -> Option<St
     }))
 }
 
-/// The serve loop: stdin lines in, result lines out, model resident.
-#[cfg_attr(test, mutants::skip)] // stdin/stdout loop only; the per-line contract is `serve_line`
-fn serve_jsonl(embedder: &mut dyn Embedder) -> Result<(), String> {
-    use std::io::BufRead;
-    let stdin = std::io::stdin();
+trait ClassifyOutput {
+    fn write_text(&mut self, text: &str) -> Result<(), String>;
+    fn print_document(&mut self, document: &Value) -> Result<(), String>;
+}
+
+struct ProductionOutput;
+
+impl ClassifyOutput for ProductionOutput {
+    #[cfg_attr(test, mutants::skip)] // thin adapter preserving stdout accounting
+    fn write_text(&mut self, text: &str) -> Result<(), String> {
+        crate::write_stdout(text)
+    }
+
+    #[cfg_attr(test, mutants::skip)] // thin adapter preserving JSON output caps
+    fn print_document(&mut self, document: &Value) -> Result<(), String> {
+        crate::print_data(document, true)
+    }
+}
+
+/// Stream stdin lines through one resident model and preserve line framing.
+fn serve_jsonl(
+    reader: impl BufRead,
+    embedder: &mut dyn Embedder,
+    output: &mut dyn ClassifyOutput,
+) -> Result<(), String> {
     let model = embedder.model_id().to_string();
-    for line in stdin.lock().lines() {
-        let line = line.map_err(|e| format!("stdin read: {e}"))?;
-        if let Some(out) = serve_line(embedder, &model, &line) {
-            crate::write_stdout(&out)?;
-            crate::write_stdout("\n")?;
+    for line in reader.lines() {
+        let line = line.map_err(|error| format!("stdin read: {error}"))?;
+        if let Some(line_output) = serve_line(embedder, &model, &line) {
+            output.write_text(&line_output)?;
+            output.write_text("\n")?;
         }
     }
     Ok(())
 }
 
+#[derive(clap::Args, Debug)]
+#[group(multiple = true)]
 pub struct ClassifyOptions {
+    /// The state text to judge — the part that varies (omit with --jsonl).
     pub text: Option<String>,
+    /// Framing every candidate shares (the question and rubric preamble).
+    /// It is replicated into each candidate rather than added to the state.
+    #[arg(long, conflicts_with = "jsonl")]
     pub context: Option<String>,
+    /// Candidate labels (repeatable or comma-separated).
+    #[arg(
+        long = "label",
+        value_delimiter = ',',
+        required_unless_present = "jsonl"
+    )]
     pub labels: Vec<String>,
+    /// Criterion text per label: --criterion label="description".
+    #[arg(long = "criterion")]
     pub criteria: Vec<String>,
+    /// Serve mode: JSONL spec lines on stdin, one result per line.
+    #[arg(long)]
     pub jsonl: bool,
+    #[arg(long)]
     pub json: bool,
 }
 
@@ -323,45 +417,65 @@ fn one_shot_spec(opts: &ClassifyOptions) -> Result<Spec, String> {
         .as_deref()
         .ok_or("classify needs a text argument (or --jsonl)")?;
     Spec::checked(
-        clip_text(text),
-        clip_text(opts.context.as_deref().unwrap_or_default()),
+        text.to_string(),
+        opts.context.clone().unwrap_or_default(),
         opts.labels.clone(),
         parse_criteria(&opts.criteria)?,
     )
 }
 
-/// The human-readable rendering: one `label: probability` line per label in
-/// sorted order, then the argmax.
-fn render_probs(probs: &BTreeMap<String, f64>, labels: &[String]) -> String {
+/// Render probabilities and disclose component clipping only when it occurred.
+fn render_probs(probs: &BTreeMap<String, f64>, spec: &Spec) -> String {
     let mut out = String::new();
-    for (label, p) in probs {
-        out.push_str(&format!("{label}: {p:.3}\n"));
+    for (label, probability) in probs {
+        out.push_str(&format!("{label}: {probability:.3}\n"));
     }
-    let top = predicted(probs, labels);
+    let top = predicted(probs, &spec.labels);
     out.push_str(&format!("predicted: {top}\n"));
+    if spec.was_clipped() {
+        out.push_str("marker: capped\nconfidence: capped\n");
+        out.push_str(&format!(
+            "warning: input capped at {TEXT_CAP_CHARS} characters per component; affected fields: {}\n",
+            spec.clipped_fields.join(", ")
+        ));
+    }
     out
 }
 
-#[cfg_attr(test, mutants::skip)] // model open + stdout; the contracts are `one_shot_spec`/`decide`/`render_probs`
-pub fn run(opts: ClassifyOptions) -> Result<(), String> {
+fn run_with(
+    opts: ClassifyOptions,
+    opener: impl FnOnce() -> Result<Box<dyn Embedder>, String>,
+    reader: impl BufRead,
+    output: &mut dyn ClassifyOutput,
+) -> Result<(), String> {
     if opts.jsonl {
-        let mut embedder = open_embedder()?;
-        return serve_jsonl(embedder.as_mut());
+        let mut embedder = opener()?;
+        return serve_jsonl(reader, embedder.as_mut(), output);
     }
-    // Validate first: the model is opened only once the request is known good.
+
     let spec = one_shot_spec(&opts)?;
-    let mut embedder = open_embedder()?;
+    let mut embedder = opener()?;
     let probs = decide(embedder.as_mut(), &spec)?;
     if opts.json {
-        crate::print_data(&document(embedder.model_id(), &spec, &probs), true)
+        output.print_document(&document(embedder.model_id(), &spec, &probs))
     } else {
-        crate::write_stdout(&render_probs(&probs, &spec.labels))
+        output.write_text(&render_probs(&probs, &spec))
     }
+}
+
+#[cfg_attr(test, mutants::skip)] // thin environment adapter over model, stdin, and stdout
+pub fn run(opts: ClassifyOptions) -> Result<(), String> {
+    let stdin = std::io::stdin();
+    let mut output = ProductionOutput;
+    run_with(opts, open_embedder, stdin.lock(), &mut output)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+    use std::io::{self, Cursor, Read};
+    use std::sync::{Arc, Mutex};
 
     /// Deterministic fake: vector = one-hot on which keyword the text
     /// contains ("alpha"→dim0, "beta"→dim1, else zeros).
@@ -391,6 +505,92 @@ mod tests {
                 })
                 .collect())
         }
+    }
+
+    type RecordedCalls = Arc<Mutex<Vec<(EmbedKind, Vec<String>)>>>;
+
+    struct RecordingEmbedder {
+        calls: RecordedCalls,
+        fail_next_passage: bool,
+    }
+
+    impl Embedder for RecordingEmbedder {
+        fn model_id(&self) -> &str {
+            "recording"
+        }
+
+        fn dims(&self) -> usize {
+            2
+        }
+
+        fn embed_batch(
+            &mut self,
+            texts: &[&str],
+            kind: EmbedKind,
+        ) -> Result<Vec<Vec<f32>>, String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((kind, texts.iter().map(|text| (*text).to_string()).collect()));
+            if kind == EmbedKind::Passage && self.fail_next_passage {
+                self.fail_next_passage = false;
+                return Err("embedding failed".to_string());
+            }
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    if text.contains("alpha") {
+                        vec![1.0, 0.0]
+                    } else if text.contains("beta") {
+                        vec![0.0, 1.0]
+                    } else {
+                        vec![0.0, 0.0]
+                    }
+                })
+                .collect())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingOutput {
+        text: String,
+        documents: Vec<Value>,
+        fail_text: bool,
+        fail_document: bool,
+    }
+
+    impl ClassifyOutput for RecordingOutput {
+        fn write_text(&mut self, text: &str) -> Result<(), String> {
+            if self.fail_text {
+                return Err("text output failed".to_string());
+            }
+            self.text.push_str(text);
+            Ok(())
+        }
+
+        fn print_document(&mut self, document: &Value) -> Result<(), String> {
+            if self.fail_document {
+                return Err("document output failed".to_string());
+            }
+            self.documents.push(document.clone());
+            Ok(())
+        }
+    }
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("reader failed"))
+        }
+    }
+
+    impl BufRead for FailingReader {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            Err(io::Error::other("reader failed"))
+        }
+
+        fn consume(&mut self, _amount: usize) {}
     }
 
     /// Mean-pooling fake, the property that makes placement matter: a text's
@@ -428,6 +628,23 @@ mod tests {
                 })
                 .collect())
         }
+    }
+
+    fn parse_classify(args: &[&str]) -> ClassifyOptions {
+        const PARSER_TEST_STACK: usize = 16_777_216;
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        std::thread::Builder::new()
+            .stack_size(PARSER_TEST_STACK)
+            .spawn(move || {
+                let cli = crate::Cli::try_parse_from(args).unwrap();
+                let crate::Command::Classify(options) = cli.command else {
+                    panic!("classify argv parsed as another command");
+                };
+                options
+            })
+            .unwrap()
+            .join()
+            .unwrap()
     }
 
     fn spec(text: &str, context: &str, labels: &[&str], criteria: &[(&str, &str)]) -> Spec {
@@ -478,10 +695,9 @@ mod tests {
     /// The contract the `context` field exists for. Shared framing is long
     /// and says nothing about which label is right, so mean-pooled into
     /// `text` it swamps the state and hands the decision to whichever
-    /// criterion happens to be wordiest. Carried by every candidate instead,
-    /// it cancels. Same words, same model, opposite answers — so this fails
-    /// the moment `candidate_text` stops folding the context in, or a caller
-    /// is told to concatenate it onto `text` again.
+    /// criterion happens to be wordiest. Replicating it into each candidate
+    /// leaves the state query untouched. Same words, same model, opposite
+    /// answers — so this fails if placement regresses.
     #[test]
     fn shared_framing_belongs_in_context_not_in_text() {
         let framing = "under the stated policy decide whether the action is permitted";
@@ -500,7 +716,7 @@ mod tests {
             "shared framing in `text` is expected to swamp the state here"
         );
 
-        // Same words, moved to where they cancel.
+        // Same words, moved to the candidate representations.
         let framed = spec("alpha", framing, &["yes", "no"], criteria);
         let probs = decide(&mut e, &framed).unwrap();
         assert_eq!(predicted(&probs, &framed.labels), "yes");
@@ -550,13 +766,16 @@ mod tests {
     /// The cap bounds worst-case latency, and it counts characters rather
     /// than bytes so a multi-byte character is never cut in half.
     #[test]
-    fn clip_text_bounds_long_input_and_leaves_short_input_alone() {
-        assert_eq!(clip_text("hello"), "hello");
-        assert_eq!(clip_text(""), "");
-        let long = "é".repeat(TEXT_CAP_CHARS + 10);
-        let clipped = clip_text(&long);
+    fn clip_text_bounds_long_input_and_reports_only_removed_characters() {
+        assert_eq!(clip_text("hello"), ("hello".to_string(), false));
+        assert_eq!(clip_text(""), (String::new(), false));
+        let exact = "é".repeat(TEXT_CAP_CHARS);
+        assert_eq!(clip_text(&exact), (exact, false));
+        let long = "é".repeat(TEXT_CAP_CHARS + 1);
+        let (clipped, was_clipped) = clip_text(&long);
+        assert!(was_clipped);
         assert_eq!(clipped.chars().count(), TEXT_CAP_CHARS);
-        assert!(clipped.chars().all(|c| c == 'é'));
+        assert!(clipped.chars().all(|character| character == 'é'));
     }
 
     #[test]
@@ -594,6 +813,23 @@ mod tests {
             .unwrap();
         assert_eq!(s.context, "the rubric");
         assert_eq!(s.text, "hello");
+        assert_eq!(
+            parse_spec_line(r#"{"text":"hello","context":"","labels":["a","b"]}"#)
+                .unwrap()
+                .context,
+            ""
+        );
+        assert_eq!(
+            parse_spec_line(r#"{"text":"hello","context":null,"labels":["a","b"]}"#)
+                .unwrap()
+                .context,
+            ""
+        );
+        for context in ["7", "true", "[]", "{}"] {
+            let line = format!(r#"{{"text":"hello","context":{context},"labels":["a","b"]}}"#);
+            let error = parse_spec_line(&line).unwrap_err();
+            assert!(error.contains("must be a string or null"), "{error}");
+        }
         assert!(parse_spec_line("not json").is_err());
         assert!(parse_spec_line(r#"{"text":"t"}"#).is_err());
         assert!(parse_spec_line(r#"{"labels":["a","b"]}"#).is_err());
@@ -780,11 +1016,406 @@ mod tests {
     }
 
     #[test]
+    fn checked_caps_components_and_preserves_label_and_key_identity() {
+        let exact = "é".repeat(TEXT_CAP_CHARS);
+        let over = "é".repeat(TEXT_CAP_CHARS + 1);
+        let labels = vec!["yes".to_string(), "no".to_string()];
+        let exact_spec = Spec::checked(
+            exact.clone(),
+            exact.clone(),
+            labels.clone(),
+            BTreeMap::from([("yes".to_string(), exact.clone())]),
+        )
+        .unwrap();
+        assert!(!exact_spec.was_clipped());
+        assert_eq!(exact_spec.text, exact);
+        assert_eq!(exact_spec.criteria["yes"].chars().count(), TEXT_CAP_CHARS);
+
+        let capped = Spec::checked(
+            over.clone(),
+            over.clone(),
+            labels.clone(),
+            BTreeMap::from([("yes".to_string(), over), ("no".to_string(), String::new())]),
+        )
+        .unwrap();
+        assert_eq!(capped.labels, labels);
+        assert_eq!(
+            capped.criteria.keys().cloned().collect::<Vec<_>>(),
+            ["no", "yes"]
+        );
+        assert_eq!(capped.criteria["no"], "");
+        assert_eq!(capped.text.chars().count(), TEXT_CAP_CHARS);
+        assert_eq!(capped.context.chars().count(), TEXT_CAP_CHARS);
+        assert_eq!(capped.criteria["yes"].chars().count(), TEXT_CAP_CHARS);
+        assert_eq!(capped.clipped_fields, ["text", "context", "criteria.yes"]);
+    }
+
+    #[test]
+    fn checked_bounds_omitted_label_fallback_without_changing_label_identity() {
+        let long_label = "x".repeat(TEXT_CAP_CHARS + 1);
+        let capped = Spec::checked(
+            "state".to_string(),
+            String::new(),
+            vec![long_label.clone(), "short".to_string()],
+            BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(capped.labels[0], long_label);
+        assert_eq!(capped.criteria[&capped.labels[0]].len(), TEXT_CAP_CHARS);
+        assert_eq!(
+            candidate_text(&capped.labels[0], &capped).len(),
+            TEXT_CAP_CHARS
+        );
+        assert_eq!(
+            capped.clipped_fields,
+            [format!("label_fallback.{}", capped.labels[0])]
+        );
+
+        let explicit_empty = Spec::checked(
+            "state".to_string(),
+            String::new(),
+            vec![capped.labels[0].clone(), "short".to_string()],
+            BTreeMap::from([(capped.labels[0].clone(), String::new())]),
+        )
+        .unwrap();
+        assert_eq!(
+            candidate_text(&explicit_empty.labels[0], &explicit_empty),
+            ""
+        );
+        assert!(!explicit_empty.was_clipped());
+    }
+
+    #[test]
+    fn disclosure_changes_only_capped_json_jsonl_and_human_output() {
+        let probs = BTreeMap::from([("no".to_string(), 0.25), ("yes".to_string(), 0.75)]);
+        let uncapped = spec("t", "", &["no", "yes"], &[]);
+        let uncapped_doc = document("fake", &uncapped, &probs);
+        assert_eq!(uncapped_doc["marker"], "complete");
+        assert!(uncapped_doc.get("caps").is_none());
+        assert!(uncapped_doc.get("warnings").is_none());
+        assert_eq!(
+            render_probs(&probs, &uncapped),
+            "no: 0.250\nyes: 0.750\npredicted: yes\n"
+        );
+
+        let capped = spec(&"x".repeat(TEXT_CAP_CHARS + 1), "", &["no", "yes"], &[]);
+        let capped_doc = document("fake", &capped, &probs);
+        assert_eq!(capped_doc["marker"], "capped");
+        assert_eq!(capped_doc["epistemics"]["confidence"], "capped");
+        assert_eq!(capped_doc["caps"][0]["limit"], TEXT_CAP_CHARS);
+        assert_eq!(capped_doc["caps"][0]["affected_fields"], json!(["text"]));
+        assert_eq!(capped_doc["warnings"][0]["code"], "INPUT_CAPPED");
+        assert!(
+            capped_doc["epistemics"]["basis"]
+                .as_str()
+                .unwrap()
+                .contains("affected fields: text")
+        );
+        let human = render_probs(&probs, &capped);
+        assert!(human.contains("marker: capped\nconfidence: capped\n"));
+        assert!(human.contains("affected fields: text"));
+
+        let mut embedder = FakeEmbedder;
+        let line = format!(
+            r#"{{"text":"{}","labels":["no","yes"],"criteria":{{"yes":"alpha","no":"beta"}}}}"#,
+            "x".repeat(TEXT_CAP_CHARS + 1)
+        );
+        let jsonl: Value =
+            serde_json::from_str(&serve_line(&mut embedder, "fake", &line).unwrap()).unwrap();
+        assert_eq!(jsonl["ok"], true);
+        assert_eq!(jsonl["marker"], "capped");
+        assert_eq!(jsonl["caps"][0]["affected_fields"], json!(["text"]));
+    }
+
+    #[test]
+    fn parsed_one_shot_payload_runs_offline_and_preserves_placement() {
+        let options = parse_classify(&[
+            "pixel",
+            "classify",
+            "state alpha",
+            "--context",
+            "the rubric",
+            "--label",
+            "yes,no",
+            "--criterion",
+            "yes=alpha",
+            "--criterion",
+            "no=beta",
+        ]);
+        assert_eq!(options.text.as_deref(), Some("state alpha"));
+        assert_eq!(options.context.as_deref(), Some("the rubric"));
+        assert_eq!(options.labels, ["yes", "no"]);
+        assert_eq!(options.criteria, ["yes=alpha", "no=beta"]);
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&calls);
+        let mut output = RecordingOutput::default();
+        run_with(
+            options,
+            move || {
+                Ok(Box::new(RecordingEmbedder {
+                    calls: recorded,
+                    fail_next_passage: false,
+                }))
+            },
+            Cursor::new(Vec::<u8>::new()),
+            &mut output,
+        )
+        .unwrap();
+        assert!(output.text.contains("predicted: yes"));
+        assert!(output.documents.is_empty());
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls[0],
+            (EmbedKind::Query, vec!["state alpha".to_string()])
+        );
+        assert_eq!(
+            calls[1],
+            (
+                EmbedKind::Passage,
+                vec![
+                    "the rubric alpha".to_string(),
+                    "the rubric beta".to_string()
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn parser_preserves_all_one_shot_arguments_and_json_flag() {
+        let options = parse_classify(&[
+            "pixel",
+            "classify",
+            "the state",
+            "--context",
+            "the rubric",
+            "--label",
+            "yes,no",
+            "--label",
+            "maybe",
+            "--criterion",
+            "yes=allowed",
+            "--criterion",
+            "maybe=unknown",
+            "--json",
+        ]);
+        assert_eq!(options.text.as_deref(), Some("the state"));
+        assert_eq!(options.context.as_deref(), Some("the rubric"));
+        assert_eq!(options.labels, ["yes", "no", "maybe"]);
+        assert_eq!(options.criteria, ["yes=allowed", "maybe=unknown"]);
+        assert!(options.json);
+        assert!(!options.jsonl);
+    }
+
+    #[test]
+    fn parser_accepts_jsonl_with_omitted_text_and_labels() {
+        let options = parse_classify(&["pixel", "classify", "--jsonl"]);
+        assert!(options.text.is_none());
+        assert!(options.labels.is_empty());
+        assert!(options.jsonl);
+    }
+
+    #[test]
+    fn run_with_validates_before_open_and_selects_json_output() {
+        let opens = Arc::new(Mutex::new(0usize));
+        let opened = Arc::clone(&opens);
+        let invalid = ClassifyOptions {
+            text: None,
+            context: None,
+            labels: vec!["yes".to_string(), "no".to_string()],
+            criteria: Vec::new(),
+            jsonl: false,
+            json: false,
+        };
+        let mut output = RecordingOutput::default();
+        let error = run_with(
+            invalid,
+            move || {
+                *opened.lock().unwrap() += 1;
+                Ok(Box::new(FakeEmbedder))
+            },
+            Cursor::new(Vec::<u8>::new()),
+            &mut output,
+        )
+        .unwrap_err();
+        assert_eq!(error, "classify needs a text argument (or --jsonl)");
+        assert_eq!(*opens.lock().unwrap(), 0);
+        assert!(output.text.is_empty());
+        assert!(output.documents.is_empty());
+
+        let options = ClassifyOptions {
+            text: Some("alpha".to_string()),
+            context: None,
+            labels: vec!["yes".to_string(), "no".to_string()],
+            criteria: vec!["yes=alpha".to_string(), "no=beta".to_string()],
+            jsonl: false,
+            json: true,
+        };
+        run_with(
+            options,
+            || Ok(Box::new(FakeEmbedder)),
+            Cursor::new(Vec::<u8>::new()),
+            &mut output,
+        )
+        .unwrap();
+        assert!(output.text.is_empty());
+        assert_eq!(output.documents.len(), 1);
+        assert_eq!(output.documents[0]["predicted"], "yes");
+    }
+
+    #[test]
+    fn run_with_jsonl_opens_once_and_continues_across_line_errors() {
+        let input = [
+            "",
+            "not json",
+            r#"{"text":"alpha","context":"rubric","labels":["yes","no"],"criteria":{"yes":"alpha","no":"beta"}}"#,
+            r#"{"text":"beta","context":null,"labels":["yes","no"],"criteria":{"yes":"alpha","no":"beta"}}"#,
+        ]
+        .join("\n");
+        let opens = Arc::new(Mutex::new(0usize));
+        let opened = Arc::clone(&opens);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&calls);
+        let options = ClassifyOptions {
+            text: None,
+            context: None,
+            labels: Vec::new(),
+            criteria: Vec::new(),
+            jsonl: true,
+            json: false,
+        };
+        let mut output = RecordingOutput::default();
+        run_with(
+            options,
+            move || {
+                *opened.lock().unwrap() += 1;
+                Ok(Box::new(RecordingEmbedder {
+                    calls: recorded,
+                    fail_next_passage: false,
+                }))
+            },
+            Cursor::new(input),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(*opens.lock().unwrap(), 1);
+        assert!(output.text.ends_with('\n'));
+        let lines: Vec<Value> = output
+            .text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0]["ok"], false);
+        assert_eq!(lines[1]["ok"], true);
+        assert_eq!(lines[1]["predicted"], "yes");
+        assert_eq!(lines[2]["ok"], true);
+        assert_eq!(lines[2]["predicted"], "no");
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(
+            calls[1],
+            (
+                EmbedKind::Passage,
+                vec!["rubric alpha".to_string(), "rubric beta".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn jsonl_embedding_error_is_a_line_error_and_next_request_continues() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let input = [
+            r#"{"text":"alpha","labels":["yes","no"],"criteria":{"yes":"alpha","no":"beta"}}"#,
+            r#"{"text":"beta","labels":["yes","no"],"criteria":{"yes":"alpha","no":"beta"}}"#,
+        ]
+        .join("\n");
+        let mut output = RecordingOutput::default();
+        let mut embedder = RecordingEmbedder {
+            calls,
+            fail_next_passage: true,
+        };
+        serve_jsonl(Cursor::new(input), &mut embedder, &mut output).unwrap();
+        let lines: Vec<Value> = output
+            .text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["ok"], false);
+        assert_eq!(lines[0]["error"], "embedding failed");
+        assert_eq!(lines[1]["ok"], true);
+        assert_eq!(lines[1]["predicted"], "no");
+    }
+
+    #[test]
+    fn run_with_propagates_opener_reader_and_output_failures() {
+        let jsonl_options = || ClassifyOptions {
+            text: None,
+            context: None,
+            labels: Vec::new(),
+            criteria: Vec::new(),
+            jsonl: true,
+            json: false,
+        };
+        let mut output = RecordingOutput::default();
+        let error = run_with(
+            jsonl_options(),
+            || Err("open failed".to_string()),
+            Cursor::new(Vec::<u8>::new()),
+            &mut output,
+        )
+        .unwrap_err();
+        assert_eq!(error, "open failed");
+
+        let error = run_with(
+            jsonl_options(),
+            || Ok(Box::new(FakeEmbedder)),
+            FailingReader,
+            &mut output,
+        )
+        .unwrap_err();
+        assert_eq!(error, "stdin read: reader failed");
+
+        output.fail_text = true;
+        let line =
+            r#"{"text":"alpha","labels":["yes","no"],"criteria":{"yes":"alpha","no":"beta"}}"#;
+        let error = run_with(
+            jsonl_options(),
+            || Ok(Box::new(FakeEmbedder)),
+            Cursor::new(line),
+            &mut output,
+        )
+        .unwrap_err();
+        assert_eq!(error, "text output failed");
+
+        let mut output = RecordingOutput {
+            fail_document: true,
+            ..RecordingOutput::default()
+        };
+        let error = run_with(
+            ClassifyOptions {
+                text: Some("alpha".to_string()),
+                context: None,
+                labels: vec!["yes".to_string(), "no".to_string()],
+                criteria: vec!["yes=alpha".to_string(), "no=beta".to_string()],
+                jsonl: false,
+                json: true,
+            },
+            || Ok(Box::new(FakeEmbedder)),
+            Cursor::new(Vec::<u8>::new()),
+            &mut output,
+        )
+        .unwrap_err();
+        assert_eq!(error, "document output failed");
+    }
+
+    #[test]
     fn render_probs_lists_every_label_then_the_argmax() {
         let probs = BTreeMap::from([("no".to_string(), 0.25f64), ("yes".to_string(), 0.75f64)]);
-        let labels = vec!["no".to_string(), "yes".to_string()];
+        let spec = spec("t", "", &["no", "yes"], &[]);
         assert_eq!(
-            render_probs(&probs, &labels),
+            render_probs(&probs, &spec),
             "no: 0.250\nyes: 0.750\npredicted: yes\n"
         );
     }

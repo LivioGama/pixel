@@ -25,7 +25,7 @@ Intelligence 50 scores ≈ 72.
 
 v1.2 scored raw accuracy with no such multiplier, so a number computed under
 it is not comparable to the board. The first measurement of this op scored
-70.2 under v1.2 and **8.5** under v1.3 — same run, same accuracies.
+68.6 under v1.2 and **8.48** under v1.3 — same run, same accuracies.
 
 ## Method (fixed before the run)
 
@@ -62,17 +62,20 @@ list index to the label string. A label with no criterion embeds as its own
 name.
 
 **The instructions go in `context`, never in `text`.** They are identical for
-every item of a family and say nothing about which label is right, so
-mean-pooled into the state they dilute the only part that varies; carried by
-every candidate they cancel. The mechanism is in the module docs of
-`crates/pixel/src/classify.rs`, and the size of the effect is the table below.
+every item of a family and say nothing about which label is right. Prefixing
+them to the state changes and dilutes the query; `context` instead leaves the
+state query untouched and replicates the framing into each candidate before
+that candidate's own criterion. This is not mathematical cancellation. The
+placement and component caps are documented in `crates/pixel/src/classify.rs`;
+the historical measured difference is the table below.
 
 ## Public-item results (231/534; the judge tier and the held-out halves are maintainer-side)
 
-Measured on an Apple M4 Max, model resident, serial, through the unchanged
-upstream runner and v1.3 scoring. Cost is the encoder-class estimate carried
-by the submitted row ($0.005/M input tokens, chars/4), unchanged between the
-two runs.
+Historically measured on an Apple M4 Max, model resident, serial, through the
+unchanged upstream runner and v1.3 scoring. These figures describe those two
+recorded runs, not every later branch head. Cost is the encoder-class estimate
+carried by the submitted row ($0.005/M input tokens, chars/4), unchanged
+between the two runs.
 
 | | instructions in `text` | instructions in `context` |
 |---|---|---|
@@ -93,22 +96,49 @@ instructions now, so each candidate embed is a little longer, and the two
 latency distributions are indistinguishable at this scale — Speed moves by
 0.01 points.
 
-Calibration is not a second intervention. The same dilution that cost
-accuracy also compressed the cosine gaps, and a compressed gap through a
-fixed-temperature softmax is an overconfident distribution; removing it
-halves ECE on its own.
+Calibration was not a separate intervention: ECE moved from 0.2068 to 0.1148
+in the same placement comparison. The measurements establish that observation,
+not a causal explanation for how query placement changed the score gaps.
 
 ## Reproduce
 
+The `pixel_local` adapter is in closed upstream
+[PR 21](https://github.com/fstandhartinger/jevbench/pull/21), not the upstream
+checkout. Acquire its patch locally; this does not reopen or submit that PR.
+Start in the Pixel checkout, then choose a fresh path for the harness clone:
+
 ```bash
-git clone https://github.com/fstandhartinger/jevbench
-cd jevbench
-python -m jevbench.cli run \
-  --tasks datasets/public/easy.jsonl,datasets/public/original.jsonl,datasets/public/hard.jsonl \
-  --adapter pixel_local --endpoint "$(which pixel)" \
-  --results out.jsonl --raw-dir raw/
-python -m jevbench.cli summarize --tasks <same> --results out.jsonl
+cargo build --release -p pixel-cli
+PIXEL_BIN="$PWD/target/release/pixel"
+git clone https://github.com/fstandhartinger/jevbench /path/to/jevbench
+cd /path/to/jevbench
+gh pr diff 21 --repo fstandhartinger/jevbench --patch > /tmp/jevbench-pr21.patch
+patch -p1 < /tmp/jevbench-pr21.patch
 ```
+
+Before running, edit `jevbench/adapters/pixel_local.py::build_request`:
+send the item state alone as `"text": state` and add
+`"context": q["instructions"]`, retaining its labels/criteria mapping.
+The original adapter prefixes instructions onto the text; applying the patch
+alone does not reproduce the context column above. Install the harness's
+Python dependencies as its README specifies.
+
+Use the same shell so `PIXEL_BIN` still points to the built classify-capable
+binary, not an installed release without this command. Use fresh result and
+raw-output paths on every run; run latency measurements on an idle machine
+and do not pipe the runner into `head`.
+
+```bash
+TASKS=datasets/public/easy.jsonl,datasets/public/original.jsonl,datasets/public/hard.jsonl
+python -m jevbench.cli run \
+  --tasks "$TASKS" --adapter pixel_local --endpoint "$PIXEL_BIN" \
+  --results out-context.jsonl --raw-dir raw-context/
+python -m jevbench.cli summarize --tasks "$TASKS" --results out-context.jsonl
+```
+
+Interpret scores with upstream `jevbench/composite_v13.py`, not v1.2 math.
+These are reproduction instructions; no new benchmark run accompanies the
+input-validation and test-harness changes.
 
 ## Where this can and cannot go
 

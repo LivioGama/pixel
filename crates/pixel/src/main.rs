@@ -482,27 +482,7 @@ enum Command {
     /// probability distribution a Jev-class decision model returns, computed
     /// deterministically with no LLM. `--jsonl` serves one decision per
     /// stdin line with the model resident.
-    Classify {
-        /// The state text to judge — the part that varies (omit with --jsonl).
-        text: Option<String>,
-        /// Framing every candidate shares (the question, the rubric
-        /// preamble). It belongs here, not in TEXT: a static embedding
-        /// mean-pools, so shared words in TEXT dilute the state, while in
-        /// every candidate they cancel.
-        #[arg(long)]
-        context: Option<String>,
-        /// Candidate labels (repeatable or comma-separated).
-        #[arg(long, value_delimiter = ',', required_unless_present = "jsonl")]
-        label: Vec<String>,
-        /// Criterion text per label: --criterion label="description".
-        #[arg(long)]
-        criterion: Vec<String>,
-        /// Serve mode: JSONL spec lines on stdin, one result per line.
-        #[arg(long)]
-        jsonl: bool,
-        #[arg(long)]
-        json: bool,
-    },
+    Classify(classify::ClassifyOptions),
     /// Deterministic web lookup for terms the index cannot know — the
     /// refine step of a gated `pixel plan`. No LLM, no daemon.
     WebSearch {
@@ -5180,21 +5160,7 @@ fn run_command(
         },
         Command::Recall { cmd } => recall_cmd::run_recall(cmd),
         Command::ListErrors { cmd } => sniper_cmd::run_sniper(cmd),
-        Command::Classify {
-            text,
-            context,
-            label,
-            criterion,
-            jsonl,
-            json,
-        } => classify::run(classify::ClassifyOptions {
-            text,
-            context,
-            labels: label,
-            criteria: criterion,
-            jsonl,
-            json,
-        }),
+        Command::Classify(options) => classify::run(options),
         Command::WebSearch { query, limit, json } => {
             web_search::run(web_search::WebSearchOptions { query, limit, json })
         }
