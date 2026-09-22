@@ -2161,53 +2161,64 @@ fn install_keeps_a_users_own_developer_instructions_and_refreshes_a_stale_pixel_
 }
 
 #[test]
-fn install_registers_the_agent_prompt_in_opencode_instructions_when_opencode_is_present() {
+fn install_writes_the_agent_prompt_into_opencode_agents_md_when_opencode_is_present() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
-    let config = home.join(".config/opencode/opencode.json");
+    let opencode = home.join(".config/opencode");
+    let agents_md = opencode.join("AGENTS.md");
+    let config = opencode.join("opencode.json");
 
-    // No ~/.config/opencode: the step is skipped and no config appears.
+    // No ~/.config/opencode: the step is skipped and no files appear.
     install_for_shell(home, TEST_SHELL);
     assert!(
-        !config.exists(),
+        !agents_md.exists() && !config.exists(),
         "install must not create OpenCode config for a user without OpenCode"
     );
 
-    // OpenCode present: the deployed prompt lands in `instructions`, a
-    // foreign entry and other keys survive, a re-install is byte-identical.
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    // OpenCode present with a global AGENTS.md and a config carrying a
+    // stale pixel instructions entry plus a dead pixel.mjs plugin entry:
+    // the block merges into AGENTS.md, user text survives, and the dead
+    // config entries are swept.
+    fs::create_dir_all(&opencode).unwrap();
+    fs::write(&agents_md, "user rules stay\n").unwrap();
     fs::write(
         &config,
         serde_json::to_string_pretty(&serde_json::json!({
             "model": "anthropic/claude-sonnet-4-5",
-            "instructions": ["CONTRIBUTING.md"]
+            "instructions": ["/old/home/.local/share/pixel/agent-prompt.md"],
+            "plugin": ["~/nowhere/pixel.mjs", "./plugins/caveman/plugin.js"]
         }))
         .unwrap(),
     )
     .unwrap();
     install_for_shell(home, TEST_SHELL);
-    let first: serde_json::Value =
+    let content = fs::read_to_string(&agents_md).unwrap();
+    assert!(content.contains("user rules stay"), "{content}");
+    assert!(content.contains(PIXEL_BLOCK_BEGIN), "{content}");
+    let prompt = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
+    assert!(content.contains(&prompt), "the bundled prompt is embedded");
+    let value: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
-    let slot = first["instructions"].as_array().unwrap();
-    assert_eq!(slot.len(), 2, "{first}");
-    assert_eq!(slot[0], "CONTRIBUTING.md");
     assert!(
-        slot[1]
-            .as_str()
-            .unwrap()
-            .ends_with(".local/share/pixel/agent-prompt.md"),
-        "the instructions entry must name the deployed prompt: {slot:?}"
+        value.get("instructions").is_none(),
+        "the stale instructions entry is swept: {value}"
     );
-    assert_eq!(first["model"], "anthropic/claude-sonnet-4-5");
-    let written = fs::read_to_string(&config).unwrap();
+    assert_eq!(
+        value["plugin"],
+        serde_json::json!(["./plugins/caveman/plugin.js"]),
+        "only the missing-file pixel.mjs entry goes"
+    );
+    assert_eq!(value["model"], "anthropic/claude-sonnet-4-5");
+
+    let written = fs::read_to_string(&agents_md).unwrap();
     install_for_shell(home, TEST_SHELL);
     assert_eq!(
-        fs::read_to_string(&config).unwrap(),
+        fs::read_to_string(&agents_md).unwrap(),
         written,
         "a re-install must be byte-for-byte idempotent"
     );
 
-    // Uninstall drops only the pixel entry.
+    // Uninstall strips only the block.
     uninstall(&UninstallOptions {
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join(".local/bin/pixel")),
@@ -2216,12 +2227,7 @@ fn install_registers_the_agent_prompt_in_opencode_instructions_when_opencode_is_
         wrappers_only: false,
     })
     .expect("uninstall");
-    let after: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
-    assert_eq!(
-        after["instructions"],
-        serde_json::json!(["CONTRIBUTING.md"])
-    );
+    assert_eq!(fs::read_to_string(&agents_md).unwrap(), "user rules stay\n");
 }
 
 #[test]

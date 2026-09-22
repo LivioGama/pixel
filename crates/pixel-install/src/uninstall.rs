@@ -117,9 +117,10 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         )?,
         // 7c. Remove Antigravity plugin and hooks.
         crate::antigravity::remove_antigravity(&home, dry_run)?,
-        // 7d. Drop the pixel entry from OpenCode's global instructions.
-        crate::opencode_config::remove_instructions(
+        // 7d. Take the pixel block out of OpenCode's global AGENTS.md.
+        crate::opencode_config::remove_opencode(
             &crate::opencode_config::opencode_config_dir(&home, options.home.is_some()),
+            &home,
             dry_run,
         )?,
         // 8. Remove the pixel binary.
