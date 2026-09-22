@@ -820,6 +820,7 @@ mod tests {
     fn lexical_chunk_excludes_only_identifiers_cut_by_the_window() {
         let text = "prefix manual setup suffix";
         assert_eq!(lexical_chunk(text, 3, 19), "manual setup");
+        assert_eq!(lexical_chunk(text, 7, 23), "manual setup");
         assert_eq!(lexical_chunk(text, 6, 20), " manual setup ");
         assert_eq!(lexical_chunk(text, 1, 4), "");
     }
