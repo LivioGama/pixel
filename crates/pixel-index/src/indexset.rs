@@ -1199,6 +1199,23 @@ mod tests {
         set.refresh_file(".git/info/exclude");
         assert_eq!(set.search("infoTransitionNeedle", None).unwrap().0.len(), 1);
 
+        std::fs::write(dir.join("ignore-live.log"), "ignoreTransitionNeedle\n").unwrap();
+        set.refresh_file("ignore-live.log");
+        std::fs::write(dir.join(".ignore"), "ignore-live.log\n").unwrap();
+        set.refresh_file(".ignore");
+        assert!(
+            set.search("ignoreTransitionNeedle", None)
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        std::fs::write(dir.join(".ignore"), "").unwrap();
+        set.refresh_file(".ignore");
+        assert_eq!(
+            set.search("ignoreTransitionNeedle", None).unwrap().0.len(),
+            1
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -331,11 +331,11 @@ pub fn resolve(
         tiers_attempted.push(Tier::Ident);
         // Try the exact original phrase first (symbol names are
         // case-sensitive in the DB).
-        let mut syms = store.symbols_by_name(phrase, None, candidate_limit)?;
+        let mut syms = non_script_symbols_by_name(store, phrase, candidate_limit)?;
         // If no exact-case hit, try the normalized (lowercased) form —
         // handles lowercase queries like "guard_matcher".
         if syms.is_empty() {
-            syms = store.symbols_by_name(&norm, None, candidate_limit)?;
+            syms = non_script_symbols_by_name(store, &norm, candidate_limit)?;
         }
         if !syms.is_empty() {
             let ident_capped = syms.len() as u32 >= candidate_limit;
@@ -743,11 +743,38 @@ fn match_word_count(norm: &str, qwords: &[String]) -> usize {
     qwords.iter().filter(|word| words.contains(word)).count()
 }
 
-/// Build the final outcome for the symbol fallback tier. Each `SymbolRow`
-/// becomes a [`ConceptMatch`] carrying its real symbol kind in `symbol_kind`
-/// and a best-effort [`ConceptKind`] in `kind` (see [`symbol_kind_to_concept`]).
-/// `tier` is the tier that produced these matches (`Tier::Symbol` for the
-/// fallback cascade, `Tier::Ident` for the identifier-exact-match tier).
+/// Read exact-name candidates after excluding synthetic script owners, so
+/// those rows cannot consume the bounded candidate window.
+fn non_script_symbols_by_name(
+    store: &GraphStore,
+    name: &str,
+    limit: u32,
+) -> Result<Vec<SymbolRow>, StoreError> {
+    let mut stmt = store.conn().prepare(
+        "SELECT id, uid, file_id, name, qualified, kind, start_line, end_line, sig
+           FROM symbols
+          WHERE name = ?1 AND kind != 'script'
+          ORDER BY kind, uid
+          LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![name, limit], |row| {
+        Ok(SymbolRow {
+            id: row.get(0)?,
+            uid: row.get(1)?,
+            file_id: row.get(2)?,
+            name: row.get(3)?,
+            qualified: row.get(4)?,
+            kind: SymbolKind::parse(&row.get::<_, String>(5)?),
+            start_line: row.get(6)?,
+            end_line: row.get(7)?,
+            sig: row.get(8)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Build the final symbol-tier outcome. Each row becomes a [`ConceptMatch`]
+/// carrying its real symbol kind and a best-effort [`ConceptKind`].
 fn finish_symbols(
     store: &GraphStore,
     phrase: &str,
@@ -1206,7 +1233,7 @@ fn symbol_fallback(
     }
     let sql = format!(
         "SELECT id, uid, file_id, name, qualified, kind, start_line, end_line, sig
-         FROM symbols {SYMBOL_SCAN_ORDER} LIMIT ?1"
+         FROM symbols WHERE kind != 'script' {SYMBOL_SCAN_ORDER} LIMIT ?1"
     );
     let mut stmt = store.conn().prepare(&sql)?;
     let mut scanned: u32 = 0;
@@ -1289,7 +1316,8 @@ fn concept_scan_identity(store: &GraphStore, cap: u32) -> Result<u64, StoreError
 /// Identity of the symbol window the fallback scan reads: `SYMBOL_SCAN_CAP`
 /// rows in [`SYMBOL_SCAN_ORDER`].
 fn symbol_scan_identity(store: &GraphStore, cap: u32) -> Result<u64, StoreError> {
-    let sql = format!("SELECT id, name FROM symbols {SYMBOL_SCAN_ORDER} LIMIT ?1");
+    let sql =
+        format!("SELECT id, name FROM symbols WHERE kind != 'script' {SYMBOL_SCAN_ORDER} LIMIT ?1");
     scan_window_identity(store, &sql, cap)
 }
 
@@ -1406,7 +1434,7 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_script_symbols_do_not_become_concept_matches() {
+    fn synthetic_script_symbols_continue_to_later_concept_tiers() {
         let mut store = store();
         let file = add_file(&mut store, "scripts/run.rb");
         store
@@ -1421,8 +1449,26 @@ mod tests {
                 "scripts/run.rb",
             )
             .unwrap();
+        store
+            .insert_concept(
+                file,
+                ConceptKind::UiText,
+                "RunScriptOwner",
+                &normalize("RunScriptOwner"),
+                "",
+                1,
+                1,
+                None,
+            )
+            .unwrap();
+
         let out = resolve(&store, "RunScriptOwner", &ResolveOptions::default()).unwrap();
-        assert!(out.matches.is_empty(), "{out:?}");
+        assert_eq!(out.confidence, Confidence::Resolved, "{out:?}");
+        assert_eq!(out.tier, Some(Tier::T0), "{out:?}");
+        assert_eq!(out.matches.len(), 1, "{out:?}");
+        assert_eq!(out.matches[0].path, "scripts/run.rb");
+        assert_eq!(out.matches[0].kind, ConceptKind::UiText);
+        assert_eq!(out.tiers_attempted, [Tier::Ident, Tier::T0]);
     }
 
     #[test]
@@ -1566,6 +1612,42 @@ mod tests {
             .unwrap();
         assert!((prod.score - 1.0).abs() < 1e-9, "prod score {}", prod.score);
         assert!((test.score - 0.7).abs() < 1e-9, "test score {}", test.score);
+    }
+
+    #[test]
+    fn symbol_fallback_excludes_scripts_before_its_scan_cap() {
+        let mut store = store();
+        let file = add_file(&mut store, "scripts/run.rb");
+        store
+            .insert_symbol(
+                file,
+                "a-script",
+                "RunScriptOwner",
+                "scripts/run.rb",
+                SymbolKind::Script,
+                1,
+                3,
+                "scripts/run.rb",
+            )
+            .unwrap();
+        store
+            .insert_symbol(
+                file,
+                "b-function",
+                "RunWorker",
+                "RunWorker",
+                SymbolKind::Function,
+                5,
+                7,
+                "RunWorker()",
+            )
+            .unwrap();
+
+        let (rows, capped) = symbol_fallback(&store, &["run".to_string()], 10, 1).unwrap();
+        assert!(capped);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "RunWorker");
+        assert_eq!(rows[0].kind, SymbolKind::Function);
     }
 
     #[test]

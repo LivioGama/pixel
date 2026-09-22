@@ -326,12 +326,15 @@ impl ResolveIndex {
         let Some(candidates) = self.by_name.get(name) else {
             return false;
         };
-        candidates
+        let local_count = candidates
             .iter()
-            .any(|candidate| candidate.file_id == caller_file_id)
-            && candidates
-                .iter()
-                .any(|candidate| candidate.file_id != caller_file_id)
+            .filter(|candidate| candidate.file_id == caller_file_id)
+            .count();
+        local_count > 1
+            || (local_count == 1
+                && candidates
+                    .iter()
+                    .any(|candidate| candidate.file_id != caller_file_id))
     }
 
     fn ruby_self_target(
@@ -933,6 +936,55 @@ mod tests {
             idx.decide_from(local, Some(unrelated_caller), "application", Some("self")),
             Decision::Unresolved
         );
+    }
+
+    #[test]
+    fn ruby_same_file_duplicate_owners_are_ambiguous_without_remote_candidates() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let file = store.replace_file("lib/local.rb", "oid", "ruby").unwrap();
+        let caller = store
+            .insert_symbol(
+                file,
+                "local#App#run#method",
+                "run",
+                "App#run",
+                SymbolKind::Method,
+                1,
+                3,
+                "run",
+            )
+            .unwrap();
+        let app_target = store
+            .insert_symbol(
+                file,
+                "local#App#application#method",
+                "application",
+                "App#application",
+                SymbolKind::Method,
+                5,
+                7,
+                "application",
+            )
+            .unwrap();
+        store
+            .insert_symbol(
+                file,
+                "local#Admin#application#method",
+                "application",
+                "Admin#application",
+                SymbolKind::Method,
+                9,
+                11,
+                "application",
+            )
+            .unwrap();
+
+        let idx = ResolveIndex::build(&store).unwrap();
+        assert_eq!(
+            idx.decide_from(file, Some(caller), "application", Some("self")),
+            Decision::Exact(app_target)
+        );
+        assert_eq!(idx.decide(file, "application", None), Decision::Unresolved);
     }
 
     #[test]

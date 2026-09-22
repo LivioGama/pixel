@@ -2218,8 +2218,12 @@ end
             .position(|symbol| symbol.kind == SymbolKind::Script)
             .unwrap();
         let script = &extraction.symbols[script_index];
+        assert_eq!(script.name, "scripts/run.rb");
         assert_eq!(script.qualified, "scripts/run.rb");
         assert_eq!((script.start_line, script.end_line), (1, 6));
+        assert_eq!(script.sig, "scripts/run.rb");
+        assert!(!script.trait_impl);
+        assert!(!script.module_decl);
         let root_call = extraction
             .calls
             .iter()
@@ -2236,6 +2240,14 @@ end
                 .enclosing_index
                 .map(|index| extraction.symbols[index].qualified.as_str()),
             Some("worker")
+        );
+
+        let non_ruby = extract_file("scripts/run.ts", b"function worker() {}\n").unwrap();
+        assert!(
+            non_ruby
+                .symbols
+                .iter()
+                .all(|symbol| symbol.kind != SymbolKind::Script)
         );
     }
 
