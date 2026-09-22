@@ -3911,8 +3911,8 @@ mod upgrade_target_tests {
 
 /// Upgrade control messages must never inherit the retrieval client's 600s timeout.
 /// Only a missing/refused socket means absent; a stalled or malformed reply is an error.
-fn upgrade_daemon_request(root: &Path, req: &Request) -> Result<Option<Response>, String> {
-    let mut stream = match UnixStream::connect(daemon::socket_path(root)) {
+fn upgrade_daemon_request(socket: &Path, req: &Request) -> Result<Option<Response>, String> {
+    let mut stream = match UnixStream::connect(socket) {
         Ok(stream) => stream,
         Err(e)
             if matches!(
@@ -3936,9 +3936,8 @@ fn upgrade_daemon_request(root: &Path, req: &Request) -> Result<Option<Response>
 /// A daemon that accepted shutdown is stopped only after it unlinks its own
 /// repository socket. Pinging during that teardown can be accepted by the
 /// listener after the serving loop has exited, then time out without a reply.
-fn upgrade_daemon_socket_stopped(root: &Path) -> Result<bool, String> {
-    let socket = daemon::socket_path(root);
-    match std::fs::symlink_metadata(&socket) {
+fn upgrade_daemon_socket_stopped(socket: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(socket) {
         Ok(_) => Ok(false),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(error) => Err(format!(
@@ -5625,13 +5624,16 @@ fn run_command(
                 );
             }
             // 5. Stop only the selected repository after installation succeeds.
-            if let Some(response) = upgrade_daemon_request(&repo_path, &Request::Shutdown)? {
+            // Resolve once: the runtime directory can become invalid while the
+            // daemon unlinks its socket, but inspection must stay on that socket.
+            let daemon_socket = daemon::socket_path(&repo_path);
+            if let Some(response) = upgrade_daemon_request(&daemon_socket, &Request::Shutdown)? {
                 if !response.ok {
                     return Err("installed binary, but repository daemon refused shutdown".into());
                 }
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
                 loop {
-                    if upgrade_daemon_socket_stopped(&repo_path)? {
+                    if upgrade_daemon_socket_stopped(&daemon_socket)? {
                         break;
                     }
                     if std::time::Instant::now() >= deadline {
