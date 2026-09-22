@@ -35,3 +35,26 @@ fn classify_jsonl_does_not_require_text_or_labels() {
         "clap rejected the jsonl shape: {stderr}"
     );
 }
+
+#[test]
+fn classify_accepts_context_beside_the_text_argument() {
+    // The shared framing is its own flag, not a second positional: a caller
+    // concatenating it onto TEXT is the mistake this guards against, so clap
+    // must take `--context` without reading it as the text.
+    let out = pixel_command()
+        .args([
+            "classify",
+            "the state",
+            "--context",
+            "the rubric preamble",
+            "--label",
+            "yes,no",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("unexpected argument") && !stderr.contains("--context"),
+        "clap rejected --context: {stderr}"
+    );
+}

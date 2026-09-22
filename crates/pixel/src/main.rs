@@ -471,8 +471,14 @@ enum Command {
     /// deterministically with no LLM. `--jsonl` serves one decision per
     /// stdin line with the model resident.
     Classify {
-        /// The state/question text (omit with --jsonl).
+        /// The state text to judge — the part that varies (omit with --jsonl).
         text: Option<String>,
+        /// Framing every candidate shares (the question, the rubric
+        /// preamble). It belongs here, not in TEXT: a static embedding
+        /// mean-pools, so shared words in TEXT dilute the state, while in
+        /// every candidate they cancel.
+        #[arg(long)]
+        context: Option<String>,
         /// Candidate labels (repeatable or comma-separated).
         #[arg(long, value_delimiter = ',', required_unless_present = "jsonl")]
         label: Vec<String>,
@@ -5060,12 +5066,14 @@ fn run_command(command: Command, logger: &pixel_actionlog::ActionLog) -> Result<
         Command::ListErrors { cmd } => sniper_cmd::run_sniper(cmd),
         Command::Classify {
             text,
+            context,
             label,
             criterion,
             jsonl,
             json,
         } => classify::run(classify::ClassifyOptions {
             text,
+            context,
             labels: label,
             criteria: criterion,
             jsonl,
