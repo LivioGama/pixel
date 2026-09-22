@@ -127,7 +127,12 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md` or the bundled agent prompts
 | `pixel who-wrote` | Per-region blame attribution: who introduced/owns each region of a file |
 | `pixel list-branches` | One-call read-only branch inventory: ahead/behind, merged, stale, unpushed — the deterministic "did you push everything?" answer |
 | `pixel edit-env` | Additive-only, key-level .env mutations with snapshots and restore. |
-| `pixel plan` | Deterministic todo list generation from code analysis |
+| `pixel plan` | Deterministic todo list generation from code analysis; persists findings in `.pixel/plan.json` so `--status`/`--done N`/`--undone N`/`--prune` track execution state across re-plans without the daemon |
+| `pixel coverage` | Per-language index coverage: files on disk vs files indexed, with unrecognized extensions surfaced — the "what did the index miss?" answer |
+| `pixel workspace` | Multi-repo registry (`.pixel/workspace.json` members add/remove/list); `--workspace` fans `impact`/`who-calls` out across registered repos with per-repo provenance |
+| `pixel index-pack` | Freeze the index into one checksummed `.pxpack` bundle — CI builds once, teammates install instead of re-indexing |
+| `pixel index-unpack` | Install a packed index bundle from a path or https:// URL, hash-verified, refusing to overwrite a live index without `--force` |
+| `pixel mcp` | Serve this repo's index over MCP stdio — the single integration for every MCP-capable agent (search, resolve, impact, callers/callees, evaluate, context, status) |
 | `pixel replay-flow` | Save, retrieve, list, revise, and replay proven agent-browser paths (auth flows, config flows) so the agent follows a deterministic shortcut instead of re-discovering the UI from scratch every time |
 | `pixel help` | Print this message or the help of the given subcommand(s). |
 

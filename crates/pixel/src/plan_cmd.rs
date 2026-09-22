@@ -11,6 +11,8 @@ use pixel_daemon::api::Request;
 use pixel_graph::plan::PlanFinding;
 use serde_json::json;
 
+use crate::plan_state;
+
 #[derive(Debug, Clone)]
 pub struct PlanOptions {
     pub prompt: Option<String>,
@@ -21,10 +23,18 @@ pub struct PlanOptions {
     pub format: String,
     pub no_verify: bool,
     pub max_todos: Option<usize>,
+    pub status: bool,
+    pub done: Vec<usize>,
+    pub undone: Vec<usize>,
+    pub prune: bool,
+    pub json: bool,
 }
 
 pub fn run(opts: PlanOptions) -> Result<(), String> {
     let opts = path_given_as_prompt(opts);
+    if opts.status || !opts.done.is_empty() || !opts.undone.is_empty() || opts.prune {
+        return run_state_ops(&opts);
+    }
     let data = crate::execute(
         &opts.path,
         Request::Plan {
@@ -36,7 +46,62 @@ pub fn run(opts: PlanOptions) -> Result<(), String> {
         false,
     )?;
     let findings = findings_of(&data)?;
+    // Persist the checklist before rendering: a failed state write must not
+    // swallow the plan itself, so a write error is a warning, not a failure.
+    // A corrupt file is named too — silently resetting tracked progress is
+    // a data loss the user should see.
+    let mut state = match plan_state::load(&opts.path) {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!("warning: {e}; starting a fresh checklist");
+            plan_state::PlanState::default()
+        }
+    };
+    plan_state::merge(&mut state, &findings);
+    if let Err(e) = plan_state::save(&opts.path, &state) {
+        eprintln!("warning: plan state not saved: {e}");
+    }
     render(opts, findings)
+}
+
+/// `--status`/`--done`/`--undone`/`--prune`: operate on `.pixel/plan.json`
+/// without planning — this path never touches the daemon.
+fn run_state_ops(opts: &PlanOptions) -> Result<(), String> {
+    let mut state = plan_state::load(&opts.path)?;
+    let mut changed = false;
+    for &n in &opts.done {
+        plan_state::set_done(&mut state, n, true)?;
+        changed = true;
+    }
+    for &n in &opts.undone {
+        plan_state::set_done(&mut state, n, false)?;
+        changed = true;
+    }
+    if opts.prune {
+        let pruned = plan_state::prune(&mut state);
+        if pruned > 0 {
+            eprintln!("pruned {pruned} stale plan item(s)");
+            changed = true;
+        }
+    }
+    if changed {
+        plan_state::save(&opts.path, &state)?;
+    }
+    if opts.json {
+        let done = state.items.iter().filter(|i| i.done).count();
+        let out = json!({
+            "items": state.items,
+            "done": done,
+            "total": state.items.len(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
+        );
+    } else {
+        print!("{}", plan_state::render_status(&state));
+    }
+    Ok(())
 }
 
 /// `prompt` and `path` are both optional positionals, so
@@ -203,6 +268,11 @@ mod tests {
             format: "markdown".to_string(),
             no_verify: false,
             max_todos: None,
+            status: false,
+            done: Vec::new(),
+            undone: Vec::new(),
+            prune: false,
+            json: false,
         }
     }
 
