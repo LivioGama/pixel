@@ -395,6 +395,172 @@ fn hotspots(
     Ok(out)
 }
 
+/// Words that carry task intent or grammar but identify no code site. A
+/// concept match that overlaps the prompt only through these is lexical
+/// noise ("in", "add", "the"), not evidence of an edit site.
+const CONCEPT_QUERY_STOPWORDS: &[&str] = &[
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "can",
+    "could",
+    "do",
+    "does",
+    "for",
+    "from",
+    "get",
+    "give",
+    "has",
+    "have",
+    "how",
+    "i",
+    "in",
+    "info",
+    "information",
+    "into",
+    "is",
+    "it",
+    "its",
+    "make",
+    "me",
+    "my",
+    "need",
+    "of",
+    "on",
+    "or",
+    "our",
+    "please",
+    "put",
+    "so",
+    "that",
+    "the",
+    "their",
+    "them",
+    "this",
+    "to",
+    "up",
+    "us",
+    "want",
+    "we",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "with",
+    "you",
+    "your",
+    // intent verbs: they say what to do, not where
+    "add",
+    "create",
+    "implement",
+    "update",
+    "fix",
+    "change",
+    "wire",
+    "display",
+    "show",
+    "use",
+    "now",
+    "new",
+    "also",
+    "just",
+];
+
+/// Words of a text seen as identifiers: split on non-alphanumeric noise,
+/// then on `_-.:#` and camelCase boundaries, lowercased, deduped.
+fn ident_words(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for chunk in text.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-') {
+        for w in crate::impact::split_ident_words(chunk) {
+            if !out.contains(&w) {
+                out.push(w);
+            }
+        }
+    }
+    out
+}
+
+/// The query words that can identify a code site: identifier-split,
+/// lowercased, minus [`CONCEPT_QUERY_STOPWORDS`].
+fn content_query_words(query: &str) -> Vec<String> {
+    ident_words(query)
+        .into_iter()
+        .filter(|w| w.len() >= 2 && !CONCEPT_QUERY_STOPWORDS.contains(&w.as_str()))
+        .collect()
+}
+
+/// A match is evidence only when it shares a content word with the query.
+/// Symbol-fallback matches already matched on identifier words, and a weak
+/// text hit inside a well-named owner symbol still points at the right site.
+/// A query reduced to stopwords has no content word to share: ordinary
+/// lexical matches are noise then, not evidence.
+fn match_shares_content(m: &concept_resolve::ConceptMatch, qwords: &[String]) -> bool {
+    if m.symbol_kind.is_some() {
+        return true;
+    }
+    if qwords.is_empty() {
+        return false;
+    }
+    let mut words = crate::concept::concept_words(&m.norm);
+    // `norm` is already lowercased, so camelCase members ("totalPrice" →
+    // "totalprice") can no longer be split there — split the raw text into
+    // identifier words too or identifier-shaped literals would never overlap
+    // a multi-word query.
+    for w in ident_words(&m.raw) {
+        if !words.contains(&w) {
+            words.push(w);
+        }
+    }
+    if qwords.iter().any(|q| words.contains(q)) {
+        return true;
+    }
+    if let Some(owner) = &m.owner {
+        let ow = crate::impact::split_ident_words(owner);
+        if qwords.iter().any(|q| ow.contains(q)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The smallest symbol enclosing `line` in `file`: `(name, start_line)`.
+/// Concept rows carry `owner_symbol_id` only when one was resolved at index
+/// time; this answers the same question for top-level or anonymous scopes.
+fn enclosing_symbol(store: &GraphStore, file: &str, line: u32) -> Option<(String, u32)> {
+    let file_id = store.file_by_path(file).ok()??.id;
+    let syms = store.symbols_in_file(file_id).ok()?;
+    syms.into_iter()
+        .filter(|s| s.start_line <= line && s.end_line >= line)
+        .min_by_key(|s| s.end_line.saturating_sub(s.start_line))
+        .map(|s| (s.name, s.start_line))
+}
+
+/// One file's collapsed concept matches, keeping the highest-scoring match.
+struct ConceptGroup {
+    count: u32,
+    score: f64,
+    best: Option<concept_resolve::ConceptMatch>,
+}
+
+/// Collapse whitespace and cap a raw match for a one-line label.
+fn evidence_snippet(raw: &str, max: usize) -> String {
+    let flat = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = flat.chars();
+    let truncated: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
 fn by_concept(
     store: &GraphStore,
     query: &str,
@@ -404,19 +570,56 @@ fn by_concept(
         ..ResolveOptions::default()
     };
     let outcome = concept_resolve::resolve(store, query, &opts)?;
-    let paths: Vec<String> = outcome.matches.iter().map(|m| m.path.clone()).collect();
-    let fan_in = fan_in_for_file_paths(store, &paths)?;
-    let mut out = Vec::with_capacity(outcome.matches.len());
-    for m in outcome.matches {
-        let fi = *fan_in.get(&m.path).unwrap_or(&0);
-        let label = if let Some(owner) = m.owner {
-            format!("{owner}: {}", m.raw)
-        } else {
-            m.raw
+    let qwords = content_query_words(query);
+    // Several lexical hits inside one file are one place to inspect, not one
+    // todo per hit: collapse to a single finding per file, anchored to the
+    // enclosing symbol when there is one.
+    let mut order: Vec<String> = Vec::new();
+    let mut grouped: HashMap<String, ConceptGroup> = HashMap::new();
+    for m in outcome
+        .matches
+        .into_iter()
+        .filter(|m| match_shares_content(m, &qwords))
+    {
+        let g = grouped.entry(m.path.clone()).or_insert_with(|| {
+            order.push(m.path.clone());
+            ConceptGroup {
+                count: 0,
+                score: f64::MIN,
+                best: None,
+            }
+        });
+        g.count += 1;
+        if m.score > g.score {
+            g.score = m.score;
+            g.best = Some(m);
+        }
+    }
+    let fan_in = fan_in_for_file_paths(store, &order)?;
+    let mut out = Vec::with_capacity(order.len());
+    for file in order {
+        let g = grouped.remove(&file).expect("grouped per file above");
+        let best = g.best.expect("count > 0 implies a best match");
+        // The symbol lookup runs once per file, for the representative match.
+        let enc = enclosing_symbol(store, &file, best.start_line);
+        let owner = best
+            .owner
+            .clone()
+            .or_else(|| enc.as_ref().map(|(name, _)| name.clone()));
+        let site_line = enc.map_or(best.start_line, |(_, start)| start);
+        let snippet = evidence_snippet(&best.raw, 80);
+        let label = match (&owner, g.count) {
+            (Some(name), 1) => format!("Check `{name}` — concept match \"{snippet}\""),
+            (Some(name), n) => {
+                format!("Check `{name}` — {n} concept matches, e.g. \"{snippet}\"")
+            }
+            (None, 1) => format!("Check concept match \"{snippet}\""),
+            (None, n) => format!("Check {n} concept matches, e.g. \"{snippet}\""),
         };
+        let fi = *fan_in.get(&file).unwrap_or(&0);
         out.push(PlanFinding {
-            file: m.path,
-            line: m.start_line,
+            file,
+            line: site_line,
             label,
             fan_in: fi,
             severity: Severity::from_fan_in(fi),
@@ -1272,5 +1475,189 @@ mod tests {
         assert_eq!(hit.line, 1);
         assert_eq!(hit.severity, Severity::Low);
         assert!(by_concept(&store, "zzqx unrelated").unwrap().is_empty());
+    }
+
+    #[test]
+    fn by_concept_drops_stopword_only_matches_and_groups_per_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("status.ts"),
+            "const a = \"status bar shows model\";\nconst b = \"status of the build\";\n",
+        )
+        .unwrap();
+        // Overlaps the query only through stopwords ("in my"): lexical noise,
+        // not evidence — must not become a finding.
+        std::fs::write(
+            dir.path().join("noise.ts"),
+            "const z = \"in my opinion the thing\";\n",
+        )
+        .unwrap();
+        let db = dir.path().join("graph.db");
+        crate::build::build_graph(dir.path(), &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let findings = by_concept(&store, "add provider info in my status line").unwrap();
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].file, "status.ts");
+        assert!(
+            findings[0].label.contains("2 concept matches"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn by_concept_returns_nothing_for_an_all_stopword_query() {
+        // A prompt that reduces to stopwords has no content word: even if
+        // resolve returns lexical hits, none of them are evidence.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.ts"),
+            "const a = \"in the mood\";\nconst b = \"and so on\";\n",
+        )
+        .unwrap();
+        let db = dir.path().join("graph.db");
+        crate::build::build_graph(dir.path(), &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        assert!(content_query_words("in the and").is_empty());
+        assert!(
+            by_concept(&store, "in the and").unwrap().is_empty(),
+            "a stopword-only query must not emit findings"
+        );
+    }
+
+    #[test]
+    fn match_shares_content_splits_camel_case_raw() {
+        // `norm` is lowercased, so "totalPrice" survives there only as the
+        // single token "totalprice" — the raw split is what lets a multi-word
+        // query overlap an identifier-shaped literal.
+        let m = concept_resolve::ConceptMatch {
+            path: "price.ts".into(),
+            start_line: 1,
+            end_line: 1,
+            kind: crate::concept::ConceptKind::String,
+            raw: "the totalPrice field".into(),
+            norm: "the totalprice field".into(),
+            owner: None,
+            symbol_kind: None,
+            score: 1.0,
+            reasons: vec![],
+        };
+        let qwords = content_query_words("show total price");
+        assert_eq!(qwords, vec!["total".to_string(), "price".to_string()]);
+        assert!(match_shares_content(&m, &qwords));
+        // And a pure stopword overlap still fails.
+        let noise = concept_resolve::ConceptMatch {
+            raw: "in my opinion".into(),
+            norm: "in my opinion".into(),
+            ..m
+        };
+        assert!(!match_shares_content(&noise, &qwords));
+    }
+
+    #[test]
+    fn match_shares_content_rejects_lexical_matches_without_content_words() {
+        // A stopword-only query leaves no content word to overlap: an
+        // ordinary lexical hit is noise then, not evidence — while a
+        // symbol-tier match is still trusted on its own.
+        let m = concept_resolve::ConceptMatch {
+            path: "a.ts".into(),
+            start_line: 1,
+            end_line: 1,
+            kind: crate::concept::ConceptKind::String,
+            raw: "in the mood".into(),
+            norm: "in the mood".into(),
+            owner: None,
+            symbol_kind: None,
+            score: 1.0,
+            reasons: vec![],
+        };
+        assert!(!match_shares_content(&m, &[]));
+        let sym = concept_resolve::ConceptMatch {
+            symbol_kind: Some("function".into()),
+            ..m
+        };
+        assert!(match_shares_content(&sym, &[]));
+    }
+
+    #[test]
+    fn match_shares_content_trusts_a_symbol_match_without_word_overlap() {
+        // A symbol-resolution match is evidence on its own: the gate must
+        // not require a content-word overlap on top of `symbol_kind`.
+        let m = concept_resolve::ConceptMatch {
+            path: "svc.ts".into(),
+            start_line: 1,
+            end_line: 1,
+            kind: crate::concept::ConceptKind::String,
+            raw: "entirely unrelated words".into(),
+            norm: "entirely unrelated words".into(),
+            owner: None,
+            symbol_kind: Some("function".into()),
+            score: 1.0,
+            reasons: vec![],
+        };
+        let qwords = content_query_words("invoice total");
+        assert!(!qwords.is_empty());
+        assert!(match_shares_content(&m, &qwords));
+    }
+
+    #[test]
+    fn enclosing_symbol_picks_the_tightest_true_encloser() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let f = file(&mut store, "src/a.ts");
+        // `before` ends and `after` starts outside line 10: only `big`
+        // encloses it. Loosened `||`/comparisons would admit the smaller
+        // non-enclosing spans and win `min_by_key`.
+        for (name, start, end) in [("big", 1, 100), ("before", 1, 2), ("after", 50, 51)] {
+            store
+                .insert_symbol(
+                    f,
+                    &format!("{name}#uid"),
+                    name,
+                    name,
+                    SymbolKind::Function,
+                    start,
+                    end,
+                    "",
+                )
+                .unwrap();
+        }
+        let (name, start) = enclosing_symbol(&store, "src/a.ts", 10).unwrap();
+        assert_eq!((name.as_str(), start), ("big", 1));
+        // Boundary: a symbol starting or ending exactly on the line encloses it.
+        let (name, _) = enclosing_symbol(&store, "src/a.ts", 2).unwrap();
+        assert_eq!(name, "before");
+        let (name, _) = enclosing_symbol(&store, "src/a.ts", 50).unwrap();
+        assert_eq!(name, "after");
+        assert!(enclosing_symbol(&store, "src/a.ts", 200).is_none());
+        assert!(enclosing_symbol(&store, "missing.ts", 10).is_none());
+    }
+
+    #[test]
+    fn evidence_snippet_flattens_whitespace_and_marks_truncation() {
+        assert_eq!(evidence_snippet("a  b\n c", 80), "a b c");
+        assert_eq!(evidence_snippet("x", 80), "x");
+        let got = evidence_snippet(&"y".repeat(200), 80);
+        assert!(got.ends_with('…'), "{got}");
+        assert_eq!(got.chars().count(), 81);
+    }
+
+    #[test]
+    fn by_concept_on_a_score_tie_keeps_the_first_match() {
+        let dir = tempfile::tempdir().unwrap();
+        // Same tokens, same file — a score tie between two lines. `>` keeps
+        // the first-seen match; `>=` would silently take the last one.
+        std::fs::write(
+            dir.path().join("dup.ts"),
+            "const a = \"invoice total alpha\";\nconst b = \"invoice total beta\";\n",
+        )
+        .unwrap();
+        let db = dir.path().join("graph.db");
+        crate::build::build_graph(dir.path(), &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let findings = by_concept(&store, "invoice total").unwrap();
+        let f = findings
+            .iter()
+            .find(|f| f.file == "dup.ts")
+            .unwrap_or_else(|| panic!("{findings:?}"));
+        assert_eq!(f.line, 1, "{findings:?}");
     }
 }
