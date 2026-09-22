@@ -1342,7 +1342,10 @@ fn pixel_invocation_in(command: &str, env: Option<String>) -> Option<PixelInvoca
         {
             for tok in tokens.iter().skip(1) {
                 if let Some(v) = tok.trim_matches(['\'', '"']).strip_prefix("PIXEL_METRICS=") {
-                    exported = Some(v.to_string());
+                    // `K='v'` leaves the opening quote on the value once the
+                    // token's trailing quote is trimmed — `PIXEL_METRICS='0'`
+                    // must compare equal to `PIXEL_METRICS=0`.
+                    exported = Some(v.trim_start_matches(['\'', '"']).to_string());
                 }
             }
             continue;
@@ -1371,7 +1374,7 @@ fn pixel_invocation_in_tokens(tokens: &[&str], env: Option<String>) -> Option<Pi
             break;
         }
         if let Some(v) = tok.strip_prefix("PIXEL_METRICS=") {
-            metrics_env = Some(v.to_string());
+            metrics_env = Some(v.trim_start_matches(['\'', '"']).to_string());
         }
         i = j + 1;
     }
@@ -4432,7 +4435,10 @@ mod tests {
         for (command, want) in [
             ("PIXEL_METRICS=0 pixel f", Some("0")),
             ("PIXEL_METRICS=1 pixel f", Some("1")),
+            ("PIXEL_METRICS='0' pixel f", Some("0")),
+            ("PIXEL_METRICS=\"0\" pixel f", Some("0")),
             ("env PIXEL_METRICS=0 pixel f", Some("0")),
+            ("export PIXEL_METRICS='0'; pixel f", Some("0")),
             ("PIXEL_METRICS=0 PIXEL_METRICS=1 pixel f", Some("1")),
             // Prefixes pass into a wrapper's script as its inherited env.
             ("PIXEL_METRICS=0 bash -lc 'pixel f'", Some("0")),
