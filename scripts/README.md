@@ -19,8 +19,21 @@ pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-c
 | `test-gates.py` | `python3 scripts/test-gates.py` | contract of `gates.sh` (stub cargo in a throwaway repo) |
 | `test-prepare.py` | `python3 scripts/test-prepare.py` | contract of `.agents/skills/release/prepare.sh`'s pull request listing (stub gh/cargo, disposable repo, needs `jq`) |
 | `test-install.py` | `python3 scripts/test-install.py` | contract of `install.sh` (fake curl/uname, local tarball) |
+| `test-clean.py` | `python3 scripts/test-clean.py` | contract of `clean.sh`, mostly what it must *not* remove (disposable repo with a second worktree) |
 | `install.sh` | `curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh \| sh` | end-user installer, published as an asset of every release: latest GitHub release, checksum, atomic rename into `$PIXEL_INSTALL_DIR` (default `~/.local/bin`) |
 | `refresh-guidelines.sh` | `scripts/refresh-guidelines.sh` | re-download the vendored Rust guidelines; exit 1 when rule headings moved |
+
+## Disk
+
+| Script | Run | What |
+| --- | --- | --- |
+| `clean.sh` | `scripts/clean.sh [build\|index\|cache\|bench\|all] [--dry-run]` | reclaim what this checkout can rebuild, across every worktree `git worktree list` reports. `--help` documents each scope and what getting it back costs |
+
+The `justfile` is a front end for it: `just disk` is `clean.sh all --dry-run`,
+`just clean` is the build scope, `just clean-index` / `clean-cache` /
+`clean-bench` / `clean-all` are the others. Start with `just disk`: it prints
+the exact list the other recipes would remove and removes nothing. The recall
+corpus and `~/.local/state/pixel` are never touched by any of them.
 
 ## Smoke and audits (after `pixel self-update`, before a PR that touches the CLI, hooks or install)
 

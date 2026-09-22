@@ -41,6 +41,7 @@ A change is ready for a pull request when every line below is true.
 | `git` | any recent version; tests build git fixtures in temp dirs |
 | `perl`, `make` (Linux) | needed by vendored OpenSSL |
 | `cross` (optional) | only to reproduce the musl release build: `cargo install cross` |
+| `just` (optional) | only for the `justfile` recipes (see "Reclaiming disk"): `cargo install just`, `brew install just`, `mise use -g just`. Every recipe is a one-line call into `scripts/`, which runs without it |
 
 No `rust-toolchain` file is pinned; CI uses `dtolnay/rust-toolchain@stable`.
 
@@ -262,6 +263,40 @@ binary from the profile named in that command.
 
 Skip this loop for changes limited to docs, prompts, or bench scripts.
 
+## Reclaiming disk
+
+A workspace build is tens of gigabytes, and it is per worktree: four
+worktrees on one laptop carry four of them, plus four indexes. `scripts/clean.sh`
+removes what this checkout can rebuild, across every worktree `git worktree
+list` reports; the `justfile` is a front end for it, so `just` alone lists the
+recipes.
+
+```bash
+just disk          # what every scope below would remove, and the total. Removes nothing.
+just clean         # build output: target/ of every worktree, plus the ignored scratch in the tree
+just clean-index   # .pixel/ of every worktree (each daemon is stopped first)
+just clean-cache   # the base-shard cache shared by every worktree (~/.cache/pixel/shards)
+just clean-bench   # /tmp scratch from scripts/pixel-bench.sh
+just clean-all     # all of the above
+```
+
+Run `just disk` first: it prints the exact list, largest first. Every scope
+reaches into the other worktrees, so a build, a test run or a mutants campaign
+running in one of them loses its output mid-flight; the scopes otherwise differ
+by what getting the bytes back costs. `clean` costs one `cargo build`;
+`clean-index` costs `pixel build-index --history .`, minutes on a repository of
+a few hundred commits; `clean-cache` costs every worktree its next index build,
+because the cache is what makes a second worktree at the same commit cheap.
+`just` is not a prerequisite for anything: `scripts/clean.sh --help` documents
+the same scopes and runs without it.
+
+Nothing under `~/.local/share/pixel/recall` (the recall corpus) or
+`~/.local/state/pixel` (publish recovery, journals) is ever removed: this tree
+cannot rebuild it. Two rules keep an `rm -rf` built from a list of names safe,
+and `scripts/test-clean.py` pins both — inside a worktree nothing goes unless
+git ignores it, outside one nothing goes unless it is the pixel shard cache or
+the `/tmp/pixel-bench-*` scratch.
+
 ## Repository map
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full map. The short version:
@@ -276,7 +311,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full map. The short version:
 | `crates/pixel-facts`, `pixel-recall`, `pixel-session`, `pixel-actionlog`, `pixel-flow` | History facts, semantic recall, session recall, action log, browser flows |
 | `crates/pixel-install` | `pixel install` / `doctor` / `uninstall`, hook scripts, the agent prompt asset |
 | `crates/pixel-bench` | Criterion benches. Not shipped. |
-| `scripts/` | install, smoke test, demos, bench wrappers |
+| `scripts/` | install, smoke test, demos, bench wrappers, disk reclamation |
 | `docs/` | user docs, demos, manual setup |
 
 ### Adding or changing an op

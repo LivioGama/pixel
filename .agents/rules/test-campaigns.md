@@ -36,7 +36,10 @@ Always loaded: how to run the long gates without losing an afternoon.
 - **Watch the disk.** Every mutant rebuilds incrementally; `target/debug`
   reached 34 GB and the run aborted on a full disk, leaving a mutated file
   behind. `df -h .` before a run; `target/debug/incremental`, `target/release`
-  and `target/dev-release` are safe to delete between campaigns.
+  and `target/dev-release` are safe to delete between campaigns. `just disk`
+  prices every worktree's build output, index and scratch in one list, and
+  `just clean` takes the build output of all of them (CONTRIBUTING.md,
+  "Reclaiming disk"); a `mutants.out` left by an aborted run is in that list.
 - **Stacked PRs diff against their base**, not `main`:
   `cargo mutants --in-diff <(git diff <base-branch>)`. A lower PR fixed after
   review gets a follow-up commit pushed to its branch; the branches above

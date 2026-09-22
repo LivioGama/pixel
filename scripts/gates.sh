@@ -87,8 +87,11 @@ step() {
 # exist, an entry left under ## [Unreleased], and a --check that refuses the
 # tree release preparation produces; test-gates.py is this script's own
 # contract; test-mutants-config.py refuses an exclude_globs entry that would
-# take a module out of the mutation gate. None compiles anything (~6 s
-# together), which is why they run
+# take a module out of the mutation gate; test-clean.py holds clean.sh to what
+# it must not remove (a tracked file, a tree behind a symlink, the index under
+# the default scope, the daemon sockets beside the shard cache). None compiles
+# anything (17 s for the four, from this script's own step timings), which is
+# why they run
 # above the cargo skip rather than under it: none of the paths they cover is
 # Rust-affecting, so under the skip a change to prepare.sh, to this file or to
 # either test would still have needed --force to be checked. 0.4.0's release
@@ -96,6 +99,7 @@ step() {
 step "release prepare contract" python3 scripts/test-prepare.py
 step "gate runner contract" python3 scripts/test-gates.py
 step "mutants config contract" python3 scripts/test-mutants-config.py
+step "clean contract" python3 scripts/test-clean.py
 
 if [ "$FORCE" -eq 0 ] && [ -z "${CI:-}" ] && [ "$(gate_decision)" = skip ]; then
     echo
