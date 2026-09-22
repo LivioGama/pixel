@@ -151,6 +151,13 @@ jobs:
       - name: Mutation gate config contract (no module silently excluded)
         run: python3 scripts/test-mutants-config.py
 
+      # clean.sh removes whole directories. The cases that matter are the ones
+      # asserting what it leaves alone: a file git tracks, a tree behind a
+      # symlink, the index under `just clean`, the daemon sockets beside the
+      # shard cache.
+      - name: Clean contract (disposable repo with a second worktree)
+        run: python3 scripts/test-clean.py
+
       - name: Warnings-denied Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

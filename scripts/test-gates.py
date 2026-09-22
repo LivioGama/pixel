@@ -27,7 +27,8 @@ class GatesContract(unittest.TestCase):
         # gates. Stub them here: this fixture asserts that gates.sh invokes
         # them and honours their exit code, not what the real ones check.
         self.prepare_log = self.root / "contracts.log"
-        for name in ("test-prepare.py", "test-gates.py", "test-mutants-config.py"):
+        for name in ("test-prepare.py", "test-gates.py", "test-mutants-config.py",
+                     "test-clean.py"):
             (self.repo / "scripts" / name).write_text(
                 "import os, sys\n"
                 f"open(os.environ['CONTRACT_LOG'], 'a').write('{name}\\n')\n"
@@ -109,7 +110,8 @@ class GatesContract(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             self.contracts(),
-            ["test-prepare.py", "test-gates.py", "test-mutants-config.py"],
+            ["test-prepare.py", "test-gates.py", "test-mutants-config.py",
+             "test-clean.py"],
         )
         self.assertEqual(self.invocations(), [])
 
