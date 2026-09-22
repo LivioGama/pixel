@@ -530,6 +530,19 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_claude_seed_is_an_error_not_an_empty_file() {
+        let home = scratch("unreadable-seed");
+        let dir = config_dir(&home);
+        fs::create_dir_all(&dir).unwrap();
+        let claude_dir = home.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        fs::create_dir(claude_dir.join("CLAUDE.md")).unwrap();
+        // Same rule as AGENTS.md: a seed that exists but cannot be read is
+        // surfaced, never silently replaced with an empty file.
+        assert!(install_opencode(&dir, &home, false).is_err());
+    }
+
+    #[test]
     fn a_config_with_nothing_to_sweep_is_not_rewritten() {
         let home = scratch("clean");
         let dir = config_dir(&home);
