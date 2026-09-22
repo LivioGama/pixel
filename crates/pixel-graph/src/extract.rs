@@ -189,9 +189,27 @@ pub fn extract_file(path_rel: &str, content: &[u8]) -> Option<FileExtraction> {
     if is_generated_blob(content) {
         return None;
     }
-    std::panic::catch_unwind(AssertUnwindSafe(|| extract_inner(lang, content)))
-        .ok()
-        .flatten()
+    let mut extraction =
+        std::panic::catch_unwind(AssertUnwindSafe(|| extract_inner(lang, content)))
+            .ok()
+            .flatten()?;
+    if lang == "ruby" {
+        let end_line = u32::try_from(content.iter().filter(|byte| **byte == b'\n').count())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        extraction.symbols.push(RawSymbol {
+            name: path_rel.to_string(),
+            qualified: path_rel.to_string(),
+            kind: SymbolKind::Script,
+            start_line: 1,
+            end_line,
+            sig: path_rel.to_string(),
+            trait_impl: false,
+            module_decl: false,
+        });
+        assign_enclosing(&mut extraction);
+    }
+    Some(extraction)
 }
 
 fn language_for(lang: &str) -> Option<Language> {
@@ -2187,6 +2205,35 @@ end
                 .map(|i| extraction.symbols[i].qualified.as_str()),
             Some("Admin::UsersController#index"),
             "call sites attach to the smallest enclosing method so impact walks method-to-method"
+        );
+    }
+
+    #[test]
+    fn ruby_root_calls_attach_to_script_while_method_calls_keep_method_owner() {
+        let source = b"root_call()\n\ndef worker\n  nested_call()\nend\n";
+        let extraction = extract_file("scripts/run.rb", source).unwrap();
+        let script_index = extraction
+            .symbols
+            .iter()
+            .position(|symbol| symbol.kind == SymbolKind::Script)
+            .unwrap();
+        assert_eq!(extraction.symbols[script_index].qualified, "scripts/run.rb");
+        let root_call = extraction
+            .calls
+            .iter()
+            .find(|call| call.callee_name == "root_call")
+            .unwrap();
+        assert_eq!(root_call.enclosing_index, Some(script_index));
+        let nested_call = extraction
+            .calls
+            .iter()
+            .find(|call| call.callee_name == "nested_call")
+            .unwrap();
+        assert_eq!(
+            nested_call
+                .enclosing_index
+                .map(|index| extraction.symbols[index].qualified.as_str()),
+            Some("worker")
         );
     }
 

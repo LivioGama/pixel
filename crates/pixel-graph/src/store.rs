@@ -51,6 +51,8 @@ pub enum SymbolKind {
     Interface,
     Const,
     Module,
+    /// Synthetic file scope used to own top-level calls in script languages.
+    Script,
 }
 
 impl SymbolKind {
@@ -66,6 +68,7 @@ impl SymbolKind {
             SymbolKind::Interface => "interface",
             SymbolKind::Const => "const",
             SymbolKind::Module => "module",
+            SymbolKind::Script => "script",
         }
     }
     pub fn parse(s: &str) -> Self {
@@ -79,6 +82,7 @@ impl SymbolKind {
             "interface" => SymbolKind::Interface,
             "const" => SymbolKind::Const,
             "module" => SymbolKind::Module,
+            "script" => SymbolKind::Script,
             _ => SymbolKind::Function,
         }
     }

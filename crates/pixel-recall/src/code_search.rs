@@ -312,7 +312,14 @@ fn ask_with_embedder(
 
     let mut embedder = open_code_embedder(download)?;
 
-    ask_collected(query, k, files, coverage, embedder.as_mut())
+    let mut result = ask_collected(query, k, files, coverage, embedder.as_mut())?;
+    for hit in &mut result.hits {
+        let path = Path::new(&hit.path);
+        if let Ok(relative) = path.strip_prefix(root) {
+            hit.path = relative.to_string_lossy().into_owned();
+        }
+    }
+    Ok(result)
 }
 
 fn open_code_embedder(download: bool) -> Result<Box<dyn crate::embed::Embedder>, String> {
@@ -348,27 +355,41 @@ fn ask_collected(
             continue;
         }
         coverage.searched_files += 1;
-        // Tokenize whole files: an embedding chunk boundary is not a word boundary.
-        let mut tokens = words(&text);
         // Filenames are evidence too, but directory names and language extensions
         // must not add shared noise or change ranks when the repository moves.
+        let mut filename_tokens = HashSet::new();
         if let Some(name) = file.file_name() {
             // A filename can have compound extensions (`types.d.ts`). Keep
             // only the basename before its first dot so suffix components
             // cannot become lexical evidence.
             let basename = name.to_string_lossy();
             let stem = basename.split('.').next().unwrap_or_default();
-            tokens.extend(words(stem));
+            filename_tokens = words(stem);
         }
-        lexical_tokens.insert(file.display().to_string(), tokens);
+        let terms = query_terms(query);
+        let mut best_tokens = filename_tokens.clone();
+        let mut best_coverage = terms
+            .iter()
+            .filter(|term| best_tokens.contains(*term))
+            .count();
         for (start, end) in chunk_offsets(&text) {
             let chunk = text[start..end].to_string();
+            let mut tokens = words(lexical_chunk(&text, start, end));
+            tokens.extend(filename_tokens.iter().cloned());
+            let coverage = terms.iter().filter(|term| tokens.contains(*term)).count();
+            if coverage > best_coverage
+                || (coverage == best_coverage && tokens.len() < best_tokens.len())
+            {
+                best_coverage = coverage;
+                best_tokens = tokens;
+            }
             corpus.push(CorpusEntry {
                 path: file.display().to_string(),
                 text: chunk.clone(),
             });
             chunk_texts.push(chunk);
         }
+        lexical_tokens.insert(file.display().to_string(), best_tokens);
     }
     coverage.degraded |= coverage.skipped_files > 0;
     if corpus.is_empty() {
@@ -422,6 +443,39 @@ fn validate_vector(vector: &[f32], dims: usize) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Exclude identifier fragments created only by fixed byte-window boundaries.
+fn lexical_chunk(text: &str, start: usize, end: usize) -> &str {
+    let is_ident = |character: char| character.is_alphanumeric() || character == '_';
+    let mut lexical_start = start;
+    let mut lexical_end = end;
+    if start > 0
+        && text[..start].chars().next_back().is_some_and(&is_ident)
+        && text[start..].chars().next().is_some_and(&is_ident)
+    {
+        let Some((offset, _)) = text[start..end]
+            .char_indices()
+            .find(|(_, character)| !is_ident(*character))
+        else {
+            return "";
+        };
+        lexical_start += offset;
+    }
+    if end < text.len()
+        && text[..end].chars().next_back().is_some_and(&is_ident)
+        && text[end..].chars().next().is_some_and(&is_ident)
+    {
+        let Some((offset, character)) = text[lexical_start..end]
+            .char_indices()
+            .rev()
+            .find(|(_, character)| !is_ident(*character))
+        else {
+            return "";
+        };
+        lexical_end = lexical_start + offset + character.len_utf8();
+    }
+    &text[lexical_start..lexical_end]
 }
 
 /// Preserve complete identifiers and split snake_case, camelCase and acronyms.
@@ -797,6 +851,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.hits[0].lexical_matches, 0);
+    }
+
+    #[test]
+    fn lexical_evidence_must_cooccur_in_one_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("large.rs"),
+            format!("manual{}setup", " unrelated".repeat(300)),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("focused.rs"),
+            "manual setup belongs together",
+        )
+        .unwrap();
+        let (files, coverage) = collect_files(dir.path(), 10);
+        let result = ask_collected(
+            "manual setup",
+            8,
+            files,
+            coverage,
+            &mut FixtureEmbedder { fail: false },
+        )
+        .unwrap();
+        let large = result
+            .hits
+            .iter()
+            .find(|hit| hit.path.ends_with("large.rs"))
+            .unwrap();
+        let focused = result
+            .hits
+            .iter()
+            .find(|hit| hit.path.ends_with("focused.rs"))
+            .unwrap();
+        assert_eq!(large.lexical_matches, 1);
+        assert_eq!(focused.lexical_matches, 2);
+        assert!(focused.ranking_score > large.ranking_score);
     }
 
     #[test]

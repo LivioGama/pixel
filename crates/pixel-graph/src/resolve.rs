@@ -113,6 +113,7 @@ struct Candidate {
 /// Symbol-name index + import graph snapshot used for tier decisions.
 pub struct ResolveIndex {
     by_name: HashMap<String, Vec<Candidate>>,
+    ruby_files: HashSet<i64>,
     /// symbol_id → qualified name, for the type-qualified receiver tiebreak
     /// (`pixel_git::GitRunner` + `new` ↔ `GitRunner::new`). Kept beside the
     /// `Copy` candidate rows so the tier code stays copy-based.
@@ -153,6 +154,11 @@ fn best(cands: &[Candidate]) -> Option<i64> {
 impl ResolveIndex {
     pub fn build(store: &GraphStore) -> Result<Self, StoreError> {
         let conn = store.conn();
+        let ruby_files = {
+            let mut stmt = conn.prepare("SELECT id FROM files WHERE lang = 'ruby'")?;
+            let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+            rows.collect::<Result<HashSet<_>, _>>()?
+        };
         let mut by_name: HashMap<String, Vec<Candidate>> = HashMap::new();
         let mut qualified_of: HashMap<i64, String> = HashMap::new();
         {
@@ -174,8 +180,8 @@ impl ResolveIndex {
             })?;
             for row in rows {
                 let (name, cand, qualified) = row?;
+                qualified_of.insert(cand.symbol_id, qualified);
                 if callable(cand.kind) {
-                    qualified_of.insert(cand.symbol_id, qualified);
                     by_name.entry(name).or_default().push(cand);
                 }
             }
@@ -213,6 +219,7 @@ impl ResolveIndex {
         }
         Ok(Self {
             by_name,
+            ruby_files,
             qualified_of,
             imports_of,
             import_bindings,
@@ -257,6 +264,29 @@ impl ResolveIndex {
     /// (`A::walk` beside `B::walk`), and any name with a definition in
     /// another file keep the shadow veto.
     pub fn decide(&self, caller_file_id: i64, name: &str, receiver: Option<&str>) -> Decision {
+        self.decide_from(caller_file_id, None, name, receiver)
+    }
+
+    fn decide_from(
+        &self,
+        caller_file_id: i64,
+        caller_symbol_id: Option<i64>,
+        name: &str,
+        receiver: Option<&str>,
+    ) -> Decision {
+        if self.ruby_files.contains(&caller_file_id)
+            && self.ambiguous_local_name(caller_file_id, name)
+        {
+            match receiver.map(str::trim) {
+                None => return Decision::Unresolved,
+                Some("self") => {
+                    return caller_symbol_id
+                        .and_then(|id| self.ruby_self_target(caller_file_id, id, name))
+                        .map_or(Decision::Unresolved, Decision::Exact);
+                }
+                Some(_) => {}
+            }
+        }
         if has_real_receiver(receiver) && self.defines_in_file(caller_file_id, name) {
             if let Some(r) = receiver
                 && let Some(id) = self.qualified_match(r, name)
@@ -290,6 +320,41 @@ impl ResolveIndex {
             }
         }
         raw
+    }
+
+    fn ambiguous_local_name(&self, caller_file_id: i64, name: &str) -> bool {
+        let Some(candidates) = self.by_name.get(name) else {
+            return false;
+        };
+        candidates
+            .iter()
+            .any(|candidate| candidate.file_id == caller_file_id)
+            && candidates
+                .iter()
+                .any(|candidate| candidate.file_id != caller_file_id)
+    }
+
+    fn ruby_self_target(
+        &self,
+        caller_file_id: i64,
+        caller_symbol_id: i64,
+        name: &str,
+    ) -> Option<i64> {
+        let caller_owner = ruby_owner(self.qualified_of.get(&caller_symbol_id)?)?;
+        let matches: Vec<Candidate> = self
+            .by_name
+            .get(name)?
+            .iter()
+            .copied()
+            .filter(|candidate| candidate.file_id == caller_file_id)
+            .filter(|candidate| {
+                self.qualified_of
+                    .get(&candidate.symbol_id)
+                    .and_then(|qualified| ruby_owner(qualified))
+                    == Some(caller_owner)
+            })
+            .collect();
+        best(&matches)
     }
 
     /// The sole callable candidate of `name` whose qualified name starts with
@@ -400,6 +465,14 @@ impl ResolveIndex {
 /// True iff `receiver` is a real receiver expression (not absent and not one
 /// of the self-pseudo-receivers). `self`/`Self`/`this`/`crate`/`super` resolve
 /// against the enclosing type/module, so they keep the normal tier.
+fn ruby_owner(qualified: &str) -> Option<(&str, char)> {
+    let separator = qualified.rfind(['#', '.'])?;
+    Some((
+        &qualified[..separator],
+        qualified[separator..].chars().next()?,
+    ))
+}
+
 fn has_real_receiver(receiver: Option<&str>) -> bool {
     match receiver {
         None => false,
@@ -456,7 +529,12 @@ pub fn resolve_calls(
                 stats.unresolved += 1;
                 continue;
             };
-            match idx.decide(fc.file_id, &call.callee_name, call.receiver.as_deref()) {
+            match idx.decide_from(
+                fc.file_id,
+                Some(src_id),
+                &call.callee_name,
+                call.receiver.as_deref(),
+            ) {
                 Decision::Exact(dst) => {
                     store.insert_edge(&EdgeRow {
                         src_id,
@@ -602,7 +680,12 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
     };
     let mut stats = ResolveStats::default();
     for row in &rows {
-        let decision = idx.decide(row.file_id, &row.name, row.receiver.as_deref());
+        let decision = idx.decide_from(
+            row.file_id,
+            Some(row.enclosing),
+            &row.name,
+            row.receiver.as_deref(),
+        );
         let (dst, tier) = match decision {
             Decision::Exact(d) => (d, Tier::Exact),
             Decision::Probable(d) => (d, Tier::Probable),
@@ -767,6 +850,98 @@ mod tests {
                 "receiver {receiver:?} keeps the T0 definition"
             );
         }
+    }
+
+    #[test]
+    fn ruby_unqualified_t0_is_unresolved_when_other_files_define_the_name() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let local = store
+            .replace_file("lib/local.rb", "oid-local", "ruby")
+            .unwrap();
+        let remote = store
+            .replace_file("lib/remote.rb", "oid-remote", "ruby")
+            .unwrap();
+        insert(&store, local, "lib/local.rb", "application");
+        insert(&store, remote, "lib/remote.rb", "application");
+        let idx = ResolveIndex::build(&store).unwrap();
+        assert_eq!(idx.decide(local, "application", None), Decision::Unresolved);
+    }
+
+    #[test]
+    fn ruby_self_call_resolves_only_with_matching_local_owner() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let local = store
+            .replace_file("lib/local.rb", "oid-local", "ruby")
+            .unwrap();
+        let remote = store
+            .replace_file("lib/remote.rb", "oid-remote", "ruby")
+            .unwrap();
+        let caller = store
+            .insert_symbol(
+                local,
+                "local#App#run#method",
+                "run",
+                "App#run",
+                SymbolKind::Method,
+                1,
+                3,
+                "run",
+            )
+            .unwrap();
+        let unrelated_caller = store
+            .insert_symbol(
+                local,
+                "local#Admin#run#method",
+                "run",
+                "Admin#run",
+                SymbolKind::Method,
+                5,
+                7,
+                "run",
+            )
+            .unwrap();
+        let local_target = store
+            .insert_symbol(
+                local,
+                "local#App#application#method",
+                "application",
+                "App#application",
+                SymbolKind::Method,
+                9,
+                11,
+                "application",
+            )
+            .unwrap();
+        store
+            .insert_symbol(
+                remote,
+                "remote#Other#application#method",
+                "application",
+                "Other#application",
+                SymbolKind::Method,
+                1,
+                3,
+                "application",
+            )
+            .unwrap();
+        let idx = ResolveIndex::build(&store).unwrap();
+        assert_eq!(
+            idx.decide_from(local, Some(caller), "application", Some("self")),
+            Decision::Exact(local_target)
+        );
+        assert_eq!(
+            idx.decide_from(local, Some(unrelated_caller), "application", Some("self")),
+            Decision::Unresolved
+        );
+    }
+
+    #[test]
+    fn ruby_unique_unqualified_t0_stays_exact() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let file = store.replace_file("lib/local.rb", "oid", "ruby").unwrap();
+        let local = insert(&store, file, "lib/local.rb", "helper");
+        let idx = ResolveIndex::build(&store).unwrap();
+        assert_eq!(idx.decide(file, "helper", None), Decision::Exact(local));
     }
 
     #[test]

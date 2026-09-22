@@ -4,6 +4,7 @@
 //! in Phase 2; the search path here is already the final shape — plan →
 //! resolve postings → verify.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
@@ -82,6 +83,32 @@ pub fn policy_walk(root: &Path) -> ignore::Walk {
             !(prune_default && is_ignored_dir_name(&name))
         })
         .build()
+}
+
+/// Collect repository-relative regular files admitted by the indexing walk policy.
+pub fn policy_file_paths(root: &Path) -> HashSet<String> {
+    policy_walk(root)
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .filter_map(|entry| {
+            entry
+                .path()
+                .strip_prefix(root)
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+        })
+        .collect()
+}
+
+/// Collect admitted files whose bytes are eligible for the text index.
+pub fn policy_indexable_paths(root: &Path) -> HashSet<String> {
+    policy_file_paths(root)
+        .into_iter()
+        .filter(|relative| {
+            read_regular_bounded(&root.join(relative), MAX_FILE_BYTES)
+                .is_ok_and(|content| !content[..content.len().min(8192)].contains(&0))
+        })
+        .collect()
 }
 
 /// Time budget for the un-anchored plain-walk build (see [`build_with_budget`]).

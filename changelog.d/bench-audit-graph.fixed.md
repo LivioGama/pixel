@@ -1,0 +1,1 @@
+**graph:** Ruby root-level calls now originate from explicit script-scope symbols, while ambiguous unqualified Ruby calls remain unresolved instead of linking to same-file homonyms.

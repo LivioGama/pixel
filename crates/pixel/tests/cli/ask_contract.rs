@@ -39,8 +39,11 @@ fn ask_reports_cosine_ranking_coverage_and_honest_human_labels() {
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let hits = value["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 2);
-    assert!(hits[0]["path"].as_str().unwrap().ends_with("manual.md"));
+    assert_eq!(hits[0]["path"], "manual.md");
     for hit in hits {
+        let path = hit["path"].as_str().unwrap();
+        assert!(!std::path::Path::new(path).is_absolute());
+        assert!(!path.contains(&repo.display().to_string()));
         assert_eq!(hit["score"], hit["semantic_score"]);
         assert!(hit["ranking_score"].as_f64().unwrap() > 0.0);
     }
@@ -57,5 +60,7 @@ fn ask_reports_cosine_ranking_coverage_and_honest_human_labels() {
     let text = String::from_utf8(human.stdout).unwrap();
     assert!(text.contains("hybrid matches"));
     assert!(text.contains("RRF") && text.contains("cosine"));
+    assert!(text.contains("manual.md"));
+    assert!(!text.contains(&repo.display().to_string()));
     std::fs::remove_dir_all(&repo).unwrap();
 }

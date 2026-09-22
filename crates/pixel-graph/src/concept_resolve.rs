@@ -758,6 +758,10 @@ fn finish_symbols(
     scan_capped: bool,
 ) -> Result<ResolveOutcome, StoreError> {
     let limit = opts.limit.max(1);
+    let rows: Vec<SymbolRow> = rows
+        .into_iter()
+        .filter(|row| row.kind != SymbolKind::Script)
+        .collect();
     // The symbol tiers must be able to express their best case: a single
     // exact match is `resolved`, not `ranked` (a hardcoded `Ranked` here
     // previously made `resolved` unreachable for identifier queries).
@@ -792,6 +796,9 @@ fn finish_symbols(
         "symbol fallback"
     };
     for row in rows {
+        let Some(kind) = symbol_kind_to_concept(row.kind) else {
+            continue;
+        };
         let id = row.id as u64;
         let path = file_path(store, row.file_id)?;
         let score = score_symbol(&row, phrase, &path);
@@ -799,7 +806,7 @@ fn finish_symbols(
             path: path.clone(),
             start_line: row.start_line,
             end_line: row.end_line,
-            kind: symbol_kind_to_concept(row.kind),
+            kind,
             raw: row.name.clone(),
             norm: normalize(&row.name),
             owner: None,
@@ -1007,16 +1014,17 @@ fn symbol_words(name: &str) -> Vec<String> {
 /// Best-effort [`ConceptKind`] for a symbol match's `kind` field. The real
 /// kind is carried losslessly in `ConceptMatch::symbol_kind`; this mapping only
 /// gives the response a non-arbitrary `kind` for consumers that read it.
-fn symbol_kind_to_concept(kind: SymbolKind) -> ConceptKind {
+fn symbol_kind_to_concept(kind: SymbolKind) -> Option<ConceptKind> {
     match kind {
-        SymbolKind::Function | SymbolKind::Method | SymbolKind::Const => ConceptKind::String,
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Const => Some(ConceptKind::String),
         SymbolKind::Class
         | SymbolKind::Struct
         | SymbolKind::Enum
         | SymbolKind::Variant
         | SymbolKind::Trait
         | SymbolKind::Interface
-        | SymbolKind::Module => ConceptKind::Component,
+        | SymbolKind::Module => Some(ConceptKind::Component),
+        SymbolKind::Script => None,
     }
 }
 
@@ -1395,6 +1403,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.matches[0].path, "src/z.rs");
+    }
+
+    #[test]
+    fn synthetic_script_symbols_do_not_become_concept_matches() {
+        let mut store = store();
+        let file = add_file(&mut store, "scripts/run.rb");
+        store
+            .insert_symbol(
+                file,
+                "scripts/run.rb#RunScriptOwner#script",
+                "RunScriptOwner",
+                "scripts/run.rb",
+                SymbolKind::Script,
+                1,
+                3,
+                "scripts/run.rb",
+            )
+            .unwrap();
+        let out = resolve(&store, "RunScriptOwner", &ResolveOptions::default()).unwrap();
+        assert!(out.matches.is_empty(), "{out:?}");
     }
 
     #[test]
