@@ -592,6 +592,19 @@ mod tests {
     }
 
     #[test]
+    fn metrics_hook_install_reports_an_unreadable_hooks_json() {
+        let home = scratch_codex_home("unreadable");
+        // A directory where the file is expected fails the read for every
+        // user including root — and is not "absent": it must come back Red,
+        // never Ok-treated-as-empty.
+        fs::create_dir(home.join(HOOKS_FILE)).unwrap();
+        let step = install_metrics_hook(&home, Path::new("/x"), false).unwrap();
+        assert_eq!(step.status, CheckStatus::Red, "{}", step.summary);
+        assert!(step.summary.contains("not touched"), "{}", step.summary);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn metrics_hook_check_is_red_until_registered() {
         let home = scratch_codex_home("check");
         assert!(

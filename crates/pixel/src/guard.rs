@@ -1204,6 +1204,7 @@ const METRICS_SHELL_TOOLS: &[&str] = &[
 /// this hook replays that record's line as `additionalContext` — same bytes
 /// the stderr path would have shown. Any miss is a silent exit: the relay is
 /// advisory and must never turn a tool call into a failure.
+#[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; every decision lives in `metrics_hook_line`
 pub fn run_metrics_hook(provider: Option<Provider>) -> ! {
     // One contract today: the advisory shape below is the PostToolUse
     // response every supported provider consumes.
@@ -1317,13 +1318,19 @@ fn pixel_args_in_tokens(tokens: &[&str]) -> Option<String> {
                 break;
             }
             if tok.trim_start_matches('-').contains('c') {
-                // For an argv array joined back into one line the script is
-                // every remaining token, not just the next one.
-                return extract_pixel_args(&tokens[j + 1..].join(" "));
+                return bash_script_args(&tokens, j);
             }
         }
     }
     None
+}
+
+/// Re-parse everything after a shell's `-c` flag as its own command line:
+/// for an argv array joined back into one line the script is every
+/// remaining token, not just the next one.
+#[cfg_attr(test, mutants::skip)] // tokens[j] is `-`-prefixed by the caller's guard, so `j` and `j+1` converge in the recursive flag-skip — the slice bound is unobservable
+fn bash_script_args(tokens: &[&str], j: usize) -> Option<String> {
+    extract_pixel_args(&tokens[j + 1..].join(" "))
 }
 
 /// Outcome of reading `.pixel/targets.json`: distinguishes "no usable
@@ -4350,6 +4357,22 @@ mod tests {
         assert_eq!(
             metrics_hook_line(
                 &fixture.payload(serde_json::json!("pixel impact src/login.rs --metrics=off"))
+            ),
+            None
+        );
+        // Either veto form alone must silence — the recorded args matching
+        // the veto'd command must not leak a line back.
+        fixture.record("impact", "impact src/login.rs --metrics=off");
+        fixture.record("impact", "impact src/login.rs --metrics off");
+        assert_eq!(
+            metrics_hook_line(
+                &fixture.payload(serde_json::json!("pixel impact src/login.rs --metrics=off"))
+            ),
+            None
+        );
+        assert_eq!(
+            metrics_hook_line(
+                &fixture.payload(serde_json::json!("pixel impact src/login.rs --metrics off"))
             ),
             None
         );
