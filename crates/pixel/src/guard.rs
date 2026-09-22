@@ -1298,13 +1298,18 @@ fn pixel_args_in_tokens(tokens: &[&str]) -> Option<String> {
     // Quote characters arrive attached to tokens (`bash -lc 'cd x && …'`);
     // strip them so the binary and its args match the recorded invocation.
     let tokens: Vec<&str> = tokens.iter().map(|t| t.trim_matches(['\'', '"'])).collect();
+    // Skip env assignments, flags and launcher words to reach the binary.
+    // A `for` keeps every mutation of the index update a wrong value, never
+    // an unbounded loop.
     let mut i = 0;
-    while i < tokens.len()
-        && (tokens[i].contains('=') && !tokens[i].starts_with('-')
-            || tokens[i].starts_with('-')
-            || matches!(tokens[i], "env" | "sudo" | "command" | "time" | "xargs"))
-    {
-        i += 1;
+    for (j, tok) in tokens.iter().enumerate() {
+        let prefix = (tok.contains('=') && !tok.starts_with('-'))
+            || tok.starts_with('-')
+            || matches!(*tok, "env" | "sudo" | "command" | "time" | "xargs");
+        if !prefix {
+            break;
+        }
+        i = j + 1;
     }
     let bin = tokens.get(i)?;
     let base = bin.rsplit('/').next().unwrap_or(bin);
