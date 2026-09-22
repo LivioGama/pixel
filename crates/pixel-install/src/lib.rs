@@ -14,6 +14,7 @@ pub mod codex_config;
 pub mod config;
 pub mod doctor;
 pub mod install;
+pub mod opencode_config;
 mod routing;
 pub mod uninstall;
 

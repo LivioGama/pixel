@@ -285,9 +285,11 @@ pub(crate) fn claude_installed(home: &Path) -> bool {
 ///
 /// The install is deliberately minimal: it deploys the agent system prompt
 /// and sets up a `claude` shell wrapper plus the Codex `developer_instructions`
-/// config key so every invocation includes the Pixel retrieval protocol. No hooks, no managed blocks in CLAUDE.md/
-/// AGENTS.md, no provider-specific routing — the system prompt is the single
-/// enforcement mechanism.
+/// config key so every invocation includes the Pixel retrieval protocol —
+/// and, when OpenCode is present, a managed block in its global
+/// `~/.config/opencode/AGENTS.md`. No hooks, no managed blocks in the
+/// home-level CLAUDE.md/AGENTS.md files, no provider-specific routing — the
+/// system prompt is the single enforcement mechanism.
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     let home = options
         .home
@@ -310,6 +312,14 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         install_shell_wrappers(&home, options.shell.as_deref(), &claude, dry_run)?,
         crate::codex_config::install_developer_instructions(&codex_home, dry_run)?,
     ];
+    let opencode_dir = crate::opencode_config::opencode_config_dir(&home, options.home.is_some());
+    if opencode_dir.is_dir() {
+        steps.push(crate::opencode_config::install_opencode(
+            &opencode_dir,
+            &home,
+            dry_run,
+        )?);
+    }
     if crate::antigravity::antigravity_config_dir(&home).is_dir() {
         steps.push(crate::antigravity::deploy_plugin_assets(
             &home, &exe, dry_run,
@@ -474,7 +484,7 @@ fn managed_pi_content(existing: &str, asset: &str) -> String {
 /// renamed over the target. A crash mid-write leaves the old profile intact
 /// instead of a half-written one — a shell profile is read by every
 /// interactive shell, and it is the user's file.
-fn write_atomically(path: &Path, content: &str) -> Result<()> {
+pub(crate) fn write_atomically(path: &Path, content: &str) -> Result<()> {
     config::backup_if_changing(path, content.as_bytes())?;
     let tmp = path.with_extension("pixel-tmp");
     fs::write(&tmp, content)?;

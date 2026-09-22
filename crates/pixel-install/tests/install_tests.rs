@@ -2161,6 +2161,76 @@ fn install_keeps_a_users_own_developer_instructions_and_refreshes_a_stale_pixel_
 }
 
 #[test]
+fn install_writes_the_agent_prompt_into_opencode_agents_md_when_opencode_is_present() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let opencode = home.join(".config/opencode");
+    let agents_md = opencode.join("AGENTS.md");
+    let config = opencode.join("opencode.json");
+
+    // No ~/.config/opencode: the step is skipped and no files appear.
+    install_for_shell(home, TEST_SHELL);
+    assert!(
+        !agents_md.exists() && !config.exists(),
+        "install must not create OpenCode config for a user without OpenCode"
+    );
+
+    // OpenCode present with a global AGENTS.md and a config carrying a
+    // stale pixel instructions entry plus a dead pixel.mjs plugin entry:
+    // the block merges into AGENTS.md, user text survives, and the dead
+    // config entries are swept.
+    fs::create_dir_all(&opencode).unwrap();
+    fs::write(&agents_md, "user rules stay\n").unwrap();
+    fs::write(
+        &config,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-5",
+            "instructions": ["/old/home/.local/share/pixel/agent-prompt.md"],
+            "plugin": ["~/nowhere/pixel.mjs", "./plugins/caveman/plugin.js"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    install_for_shell(home, TEST_SHELL);
+    let content = fs::read_to_string(&agents_md).unwrap();
+    assert!(content.contains("user rules stay"), "{content}");
+    assert!(content.contains(PIXEL_BLOCK_BEGIN), "{content}");
+    let prompt = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
+    assert!(content.contains(&prompt), "the bundled prompt is embedded");
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+    assert!(
+        value.get("instructions").is_none(),
+        "the stale instructions entry is swept: {value}"
+    );
+    assert_eq!(
+        value["plugin"],
+        serde_json::json!(["./plugins/caveman/plugin.js"]),
+        "only the missing-file pixel.mjs entry goes"
+    );
+    assert_eq!(value["model"], "anthropic/claude-sonnet-4-5");
+
+    let written = fs::read_to_string(&agents_md).unwrap();
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(
+        fs::read_to_string(&agents_md).unwrap(),
+        written,
+        "a re-install must be byte-for-byte idempotent"
+    );
+
+    // Uninstall strips only the block.
+    uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        binary_path: Some(home.join(".local/bin/pixel")),
+        shell: Some(TEST_SHELL.into()),
+        dry_run: false,
+        wrappers_only: false,
+    })
+    .expect("uninstall");
+    assert_eq!(fs::read_to_string(&agents_md).unwrap(), "user rules stay\n");
+}
+
+#[test]
 fn install_refuses_to_rewrite_a_codex_config_it_cannot_parse() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
