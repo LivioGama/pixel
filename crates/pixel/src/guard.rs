@@ -1271,13 +1271,9 @@ fn tool_command_text(tool_input: &Value) -> Option<String> {
         .get("command")
         .or_else(|| tool_input.get("cmd"))?;
     match value {
-        Value::String(s) => Some(s.clone()),
-        Value::Array(argv) => Some(
-            argv.iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" "),
-        ),
+        // `command_text` unwraps `bash -c` with the argv boundary intact —
+        // joining first would fold $0 positionals into the script.
+        Value::String(_) | Value::Array(_) => Some(command_text(value)),
         _ => None,
     }
 }
@@ -4312,7 +4308,15 @@ mod tests {
         );
         assert_eq!(
             tool_command_text(&serde_json::json!({"command": ["bash", "-lc", "pixel impact f"]})),
-            Some("bash -lc pixel impact f".to_string())
+            Some("pixel impact f".to_string())
+        );
+        // argv keeps the `-c` script boundary: trailing elements are $0
+        // positionals, not part of the command.
+        assert_eq!(
+            tool_command_text(
+                &serde_json::json!({"command": ["bash", "-c", "pixel impact", "ignored"]})
+            ),
+            Some("pixel impact".to_string())
         );
         assert_eq!(tool_command_text(&serde_json::json!({})), None);
         assert_eq!(tool_command_text(&serde_json::json!({"command": 3})), None);
