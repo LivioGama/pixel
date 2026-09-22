@@ -121,6 +121,13 @@ fn softmax(sims: &[f64]) -> Vec<f64> {
 
 /// The decision core over an embedding seam: tests inject a fake Embedder.
 /// Returns label → probability in the caller's label order.
+///
+/// `Embedder` promises nothing about the shape of what it returns, and every
+/// way it can disagree with the request is silent downstream: a short
+/// candidate batch drops labels off the end of the `zip`, leaving `predicted`
+/// to index a probability that is not there — a panic — while a long one
+/// feeds `softmax` candidates that are then discarded, so what is returned
+/// does not sum to one. Both are checked here instead.
 fn decide(embedder: &mut dyn Embedder, spec: &Spec) -> Result<BTreeMap<String, f64>, String> {
     let candidates: Vec<String> = spec
         .labels
@@ -129,13 +136,32 @@ fn decide(embedder: &mut dyn Embedder, spec: &Spec) -> Result<BTreeMap<String, f
         .collect();
     // Kind is per-batch, so question and candidates embed in two calls:
     // E5-family models prefix queries and passages differently.
-    let query = embedder
-        .embed_batch(&[spec.text.as_str()], EmbedKind::Query)?
-        .into_iter()
-        .next()
-        .ok_or("embedder returned no query vector")?;
+    let mut queries = embedder.embed_batch(&[spec.text.as_str()], EmbedKind::Query)?;
+    if queries.len() != 1 {
+        return Err(format!(
+            "embedder returned {} vectors for 1 query text",
+            queries.len()
+        ));
+    }
+    let query = queries.remove(0);
     let refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
     let cand_vecs = embedder.embed_batch(&refs, EmbedKind::Passage)?;
+    if cand_vecs.len() != spec.labels.len() {
+        return Err(format!(
+            "embedder returned {} vectors for {} labels",
+            cand_vecs.len(),
+            spec.labels.len()
+        ));
+    }
+    // `cosine` zips, so a shorter candidate vector would silently compare on
+    // a prefix and score higher than it should.
+    if let Some(v) = cand_vecs.iter().find(|v| v.len() != query.len()) {
+        return Err(format!(
+            "embedder returned a {}-dim candidate vector against a {}-dim query",
+            v.len(),
+            query.len()
+        ));
+    }
     let sims: Vec<f64> = cand_vecs.iter().map(|v| cosine(&query, v) as f64).collect();
     Ok(spec.labels.iter().cloned().zip(softmax(&sims)).collect())
 }
@@ -197,49 +223,70 @@ fn parse_spec_line(line: &str) -> Result<Spec, String> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    // Dropping a non-string silently would classify a request the caller
+    // never sent: `["a", 7, "b"]` would pass validation as two labels, and a
+    // numeric criterion would fall back to embedding the label's own name.
     let labels = v
         .get("labels")
         .and_then(Value::as_array)
         .ok_or("spec needs a \"labels\" array")?
         .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let criteria = v
-        .get("criteria")
-        .and_then(Value::as_object)
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
+        .map(|l| {
+            l.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("every label must be a string, got {l}"))
         })
-        .unwrap_or_default();
+        .collect::<Result<Vec<_>, _>>()?;
+    let criteria = match v.get("criteria") {
+        None | Some(Value::Null) => BTreeMap::new(),
+        Some(Value::Object(m)) => m
+            .iter()
+            .map(|(k, v)| {
+                v.as_str()
+                    .map(|s| (k.clone(), s.to_string()))
+                    .ok_or_else(|| format!("criterion {k:?} must be a string, got {v}"))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?,
+        Some(other) => return Err(format!("\"criteria\" must be an object, got {other}")),
+    };
     Spec::checked(clip_text(&text), clip_text(&context), labels, criteria)
 }
 
-/// One result line per spec line; a bad line fails that line only — the
-/// stream keeps serving (a benchmark run must not abort on one item).
-#[cfg_attr(test, mutants::skip)] // stdin/stdout adapter; logic lives in `parse_spec_line`/`decide`
+/// One input line to zero or one output lines. `None` is a blank line, which
+/// carries no decision and so produces no result; a bad line answers `{"ok":
+/// false}` rather than ending the stream, because one malformed item must not
+/// abort a run of several hundred.
+fn serve_line(embedder: &mut dyn Embedder, model: &str, line: &str) -> Option<String> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let out = match parse_spec_line(line).and_then(|s| decide(embedder, &s).map(|p| (s, p))) {
+        Ok((spec, probs)) => {
+            let mut doc = document(model, &spec, &probs);
+            doc["ok"] = json!(true);
+            doc
+        }
+        Err(e) => json!({"ok": false, "error": e}),
+    };
+    // A `Value` built here is always encodable; a failure would still have to
+    // answer on this line rather than take the stream down with it.
+    Some(serde_json::to_string(&out).unwrap_or_else(|e| {
+        format!("{{\"ok\":false,\"error\":\"result encode: {e}\"}}").replace('\n', " ")
+    }))
+}
+
+/// The serve loop: stdin lines in, result lines out, model resident.
+#[cfg_attr(test, mutants::skip)] // stdin/stdout loop only; the per-line contract is `serve_line`
 fn serve_jsonl(embedder: &mut dyn Embedder) -> Result<(), String> {
     use std::io::BufRead;
     let stdin = std::io::stdin();
     let model = embedder.model_id().to_string();
     for line in stdin.lock().lines() {
         let line = line.map_err(|e| format!("stdin read: {e}"))?;
-        if line.trim().is_empty() {
-            continue;
+        if let Some(out) = serve_line(embedder, &model, &line) {
+            crate::write_stdout(&out)?;
+            crate::write_stdout("\n")?;
         }
-        let out = match parse_spec_line(&line).and_then(|s| decide(embedder, &s).map(|p| (s, p))) {
-            Ok((spec, probs)) => {
-                let mut doc = document(&model, &spec, &probs);
-                doc["ok"] = json!(true);
-                doc
-            }
-            Err(e) => json!({"ok": false, "error": e}),
-        };
-        let line_out = serde_json::to_string(&out).map_err(|e| format!("result encode: {e}"))?;
-        crate::write_stdout(&line_out)?;
-        crate::write_stdout("\n")?;
     }
     Ok(())
 }
@@ -265,31 +312,50 @@ fn parse_criteria(pairs: &[String]) -> Result<BTreeMap<String, String>, String> 
         .collect()
 }
 
-#[cfg_attr(test, mutants::skip)] // model/IO adapter; logic lives in `decide`/`document`/`parse_spec_line`
-pub fn run(opts: ClassifyOptions) -> Result<(), String> {
-    let mut embedder = open_embedder()?;
-    if opts.jsonl {
-        return serve_jsonl(embedder.as_mut());
-    }
+/// The `Spec` a one-shot invocation asks for. Separate from `run` so the
+/// argument contract is checked before anything touches the model: on a
+/// fresh install `open_embedder` downloads, and a caller who forgot
+/// `--label` should be told that, not made to wait for a model they will
+/// not use.
+fn one_shot_spec(opts: &ClassifyOptions) -> Result<Spec, String> {
     let text = opts
         .text
+        .as_deref()
         .ok_or("classify needs a text argument (or --jsonl)")?;
-    let spec = Spec::checked(
-        clip_text(&text),
+    Spec::checked(
+        clip_text(text),
         clip_text(opts.context.as_deref().unwrap_or_default()),
         opts.labels.clone(),
         parse_criteria(&opts.criteria)?,
-    )?;
+    )
+}
+
+/// The human-readable rendering: one `label: probability` line per label in
+/// sorted order, then the argmax.
+fn render_probs(probs: &BTreeMap<String, f64>, labels: &[String]) -> String {
+    let mut out = String::new();
+    for (label, p) in probs {
+        out.push_str(&format!("{label}: {p:.3}\n"));
+    }
+    let top = predicted(probs, labels);
+    out.push_str(&format!("predicted: {top}\n"));
+    out
+}
+
+#[cfg_attr(test, mutants::skip)] // model open + stdout; the contracts are `one_shot_spec`/`decide`/`render_probs`
+pub fn run(opts: ClassifyOptions) -> Result<(), String> {
+    if opts.jsonl {
+        let mut embedder = open_embedder()?;
+        return serve_jsonl(embedder.as_mut());
+    }
+    // Validate first: the model is opened only once the request is known good.
+    let spec = one_shot_spec(&opts)?;
+    let mut embedder = open_embedder()?;
     let probs = decide(embedder.as_mut(), &spec)?;
     if opts.json {
         crate::print_data(&document(embedder.model_id(), &spec, &probs), true)
     } else {
-        let mut out = String::new();
-        for (label, p) in &probs {
-            out.push_str(&format!("{label}: {p:.3}\n"));
-        }
-        out.push_str(&format!("predicted: {}\n", predicted(&probs, &spec.labels)));
-        crate::write_stdout(&out)
+        crate::write_stdout(&render_probs(&probs, &spec.labels))
     }
 }
 
@@ -555,5 +621,171 @@ mod tests {
     fn parse_criteria_requires_key_value_pairs() {
         assert!(parse_criteria(&["a=desc".to_string()]).is_ok());
         assert!(parse_criteria(&["missing-eq".to_string()]).is_err());
+    }
+
+    /// An embedder that answers with the wrong shape. `decide` has to say so:
+    /// a short batch used to drop labels off the `zip` and leave `predicted`
+    /// indexing a probability that was never inserted, which panics.
+    struct ShapeEmbedder {
+        n_query: usize,
+        n_cand: usize,
+        dims: usize,
+    }
+    impl Embedder for ShapeEmbedder {
+        fn model_id(&self) -> &str {
+            "shape"
+        }
+        fn dims(&self) -> usize {
+            self.dims
+        }
+        fn embed_batch(
+            &mut self,
+            _texts: &[&str],
+            kind: EmbedKind,
+        ) -> Result<Vec<Vec<f32>>, String> {
+            let (n, d) = match kind {
+                EmbedKind::Query => (self.n_query, 3),
+                EmbedKind::Passage => (self.n_cand, self.dims),
+            };
+            Ok((0..n).map(|i| vec![i as f32 + 1.0; d]).collect())
+        }
+    }
+
+    #[test]
+    fn decide_rejects_an_embedder_that_answers_with_the_wrong_shape() {
+        let s = spec("t", "", &["a", "b", "c"], &[]);
+        // One candidate short: the old zip dropped "c" and `predicted` panicked.
+        let err = decide(
+            &mut ShapeEmbedder {
+                n_query: 1,
+                n_cand: 2,
+                dims: 3,
+            },
+            &s,
+        )
+        .unwrap_err();
+        assert!(err.contains("2 vectors for 3 labels"), "{err}");
+
+        // One candidate too many: softmax would normalise over a candidate
+        // the zip then throws away, so the probabilities would not sum to 1.
+        let err = decide(
+            &mut ShapeEmbedder {
+                n_query: 1,
+                n_cand: 4,
+                dims: 3,
+            },
+            &s,
+        )
+        .unwrap_err();
+        assert!(err.contains("4 vectors for 3 labels"), "{err}");
+
+        // More than one query vector: which one was the question?
+        let err = decide(
+            &mut ShapeEmbedder {
+                n_query: 2,
+                n_cand: 3,
+                dims: 3,
+            },
+            &s,
+        )
+        .unwrap_err();
+        assert!(err.contains("2 vectors for 1 query"), "{err}");
+
+        // Mismatched width: `cosine` zips, so it would score on a prefix.
+        let err = decide(
+            &mut ShapeEmbedder {
+                n_query: 1,
+                n_cand: 3,
+                dims: 2,
+            },
+            &s,
+        )
+        .unwrap_err();
+        assert!(err.contains("2-dim candidate vector"), "{err}");
+
+        // The well-shaped case still answers.
+        assert!(
+            decide(
+                &mut ShapeEmbedder {
+                    n_query: 1,
+                    n_cand: 3,
+                    dims: 3
+                },
+                &s
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn parse_spec_line_rejects_non_string_labels_and_criteria() {
+        // Silently dropping the 7 would classify a two-label request the
+        // caller never sent.
+        let e = parse_spec_line(r#"{"text":"t","labels":["a",7,"b"]}"#).unwrap_err();
+        assert!(e.contains("every label must be a string"), "{e}");
+        let e =
+            parse_spec_line(r#"{"text":"t","labels":["a","b"],"criteria":{"a":7}}"#).unwrap_err();
+        assert!(e.contains("must be a string"), "{e}");
+        let e = parse_spec_line(r#"{"text":"t","labels":["a","b"],"criteria":[]}"#).unwrap_err();
+        assert!(e.contains("must be an object"), "{e}");
+        // An absent or null `criteria` is still the documented default.
+        assert!(parse_spec_line(r#"{"text":"t","labels":["a","b"],"criteria":null}"#).is_ok());
+    }
+
+    #[test]
+    fn serve_line_skips_blanks_and_isolates_a_bad_line() {
+        let mut e = FakeEmbedder;
+        assert_eq!(serve_line(&mut e, "fake", ""), None);
+        assert_eq!(serve_line(&mut e, "fake", "   \t "), None);
+
+        // A bad line answers on that line; the caller keeps serving.
+        let out = serve_line(&mut e, "fake", "not json").unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], json!(false));
+        assert!(v["error"].as_str().unwrap().contains("invalid spec JSON"));
+
+        // A good line carries the full envelope plus `ok`.
+        let line =
+            r#"{"text":"alpha","labels":["no","yes"],"criteria":{"yes":"alpha","no":"beta"}}"#;
+        let out = serve_line(&mut e, "fake", line).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["predicted"], json!("yes"));
+        assert_eq!(v["marker"], json!("complete"));
+        assert_eq!(v["snapshot"]["model"], json!("fake"));
+        assert!(out.lines().count() == 1, "one result line per input line");
+    }
+
+    #[test]
+    fn one_shot_spec_validates_before_any_model_is_opened() {
+        let opts = |text: Option<&str>, labels: &[&str], criteria: &[&str]| ClassifyOptions {
+            text: text.map(str::to_string),
+            context: Some("the rubric".to_string()),
+            labels: labels.iter().map(ToString::to_string).collect(),
+            criteria: criteria.iter().map(ToString::to_string).collect(),
+            jsonl: false,
+            json: false,
+        };
+        let e = one_shot_spec(&opts(None, &["a", "b"], &[])).unwrap_err();
+        assert!(e.contains("needs a text argument"), "{e}");
+        let e = one_shot_spec(&opts(Some("t"), &["a"], &[])).unwrap_err();
+        assert!(e.contains("at least two labels"), "{e}");
+        let e = one_shot_spec(&opts(Some("t"), &["a", "b"], &["no-equals"])).unwrap_err();
+        assert!(e.contains("label=description"), "{e}");
+
+        let s = one_shot_spec(&opts(Some("t"), &["a", "b"], &["a=desc"])).unwrap();
+        assert_eq!(s.text, "t");
+        assert_eq!(s.context, "the rubric");
+        assert_eq!(s.criteria["a"], "desc");
+    }
+
+    #[test]
+    fn render_probs_lists_every_label_then_the_argmax() {
+        let probs = BTreeMap::from([("no".to_string(), 0.25f64), ("yes".to_string(), 0.75f64)]);
+        let labels = vec!["no".to_string(), "yes".to_string()];
+        assert_eq!(
+            render_probs(&probs, &labels),
+            "no: 0.250\nyes: 0.750\npredicted: yes\n"
+        );
     }
 }
