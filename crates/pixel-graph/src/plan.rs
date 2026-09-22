@@ -1527,4 +1527,87 @@ mod tests {
         };
         assert!(!match_shares_content(&noise, &qwords));
     }
+
+    #[test]
+    fn match_shares_content_trusts_a_symbol_match_without_word_overlap() {
+        // A symbol-resolution match is evidence on its own: the gate must
+        // not require a content-word overlap on top of `symbol_kind`.
+        let m = concept_resolve::ConceptMatch {
+            path: "svc.ts".into(),
+            start_line: 1,
+            end_line: 1,
+            kind: crate::concept::ConceptKind::String,
+            raw: "entirely unrelated words".into(),
+            norm: "entirely unrelated words".into(),
+            owner: None,
+            symbol_kind: Some("function".into()),
+            score: 1.0,
+            reasons: vec![],
+        };
+        let qwords = content_query_words("invoice total");
+        assert!(!qwords.is_empty());
+        assert!(match_shares_content(&m, &qwords));
+    }
+
+    #[test]
+    fn enclosing_symbol_picks_the_tightest_true_encloser() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let f = file(&mut store, "src/a.ts");
+        // `before` ends and `after` starts outside line 10: only `big`
+        // encloses it. Loosened `||`/comparisons would admit the smaller
+        // non-enclosing spans and win `min_by_key`.
+        for (name, start, end) in [("big", 1, 100), ("before", 1, 2), ("after", 50, 51)] {
+            store
+                .insert_symbol(
+                    f,
+                    &format!("{name}#uid"),
+                    name,
+                    name,
+                    SymbolKind::Function,
+                    start,
+                    end,
+                    "",
+                )
+                .unwrap();
+        }
+        let (name, start) = enclosing_symbol(&store, "src/a.ts", 10).unwrap();
+        assert_eq!((name.as_str(), start), ("big", 1));
+        // Boundary: a symbol starting or ending exactly on the line encloses it.
+        let (name, _) = enclosing_symbol(&store, "src/a.ts", 2).unwrap();
+        assert_eq!(name, "before");
+        let (name, _) = enclosing_symbol(&store, "src/a.ts", 50).unwrap();
+        assert_eq!(name, "after");
+        assert!(enclosing_symbol(&store, "src/a.ts", 200).is_none());
+        assert!(enclosing_symbol(&store, "missing.ts", 10).is_none());
+    }
+
+    #[test]
+    fn evidence_snippet_flattens_whitespace_and_marks_truncation() {
+        assert_eq!(evidence_snippet("a  b\n c", 80), "a b c");
+        assert_eq!(evidence_snippet("x", 80), "x");
+        let got = evidence_snippet(&"y".repeat(200), 80);
+        assert!(got.ends_with('…'), "{got}");
+        assert_eq!(got.chars().count(), 81);
+    }
+
+    #[test]
+    fn by_concept_on_a_score_tie_keeps_the_first_match() {
+        let dir = tempfile::tempdir().unwrap();
+        // Same tokens, same file — a score tie between two lines. `>` keeps
+        // the first-seen match; `>=` would silently take the last one.
+        std::fs::write(
+            dir.path().join("dup.ts"),
+            "const a = \"invoice total alpha\";\nconst b = \"invoice total beta\";\n",
+        )
+        .unwrap();
+        let db = dir.path().join("graph.db");
+        crate::build::build_graph(dir.path(), &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let findings = by_concept(&store, "invoice total").unwrap();
+        let f = findings
+            .iter()
+            .find(|f| f.file == "dup.ts")
+            .unwrap_or_else(|| panic!("{findings:?}"));
+        assert_eq!(f.line, 1, "{findings:?}");
+    }
 }
