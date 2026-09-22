@@ -370,6 +370,22 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn install_refuses_a_config_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("unreadable");
+        let path = dir.join(OPENCODE_CONFIG_FILE);
+        fs::write(&path, "{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        // Permission denied is not "absent": the step must go red and leave
+        // the file alone, not treat the config as empty and overwrite it.
+        let step = install_instructions(&dir, &prompt(&dir), false).unwrap();
+        assert_eq!(step.status, CheckStatus::Red, "{}", step.summary);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{}");
+    }
+
     #[test]
     fn dry_run_writes_nothing() {
         let dir = scratch("dry-run");
