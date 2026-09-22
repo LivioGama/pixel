@@ -4417,6 +4417,14 @@ mod tests {
         }
         // A quoted pixel word is still an argument, not an invocation.
         assert_eq!(pixel_invocation("echo 'pixel status'"), None);
+        // A quote must close where it ends: if it ran to end-of-line, the
+        // separator after it would hide a later pixel call.
+        assert_eq!(
+            pixel_invocation("echo 'quoted' ; pixel impact f")
+                .map(|i| i.args)
+                .as_deref(),
+            Some("impact f")
+        );
     }
 
     #[test]
