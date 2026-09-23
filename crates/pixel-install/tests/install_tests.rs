@@ -3,7 +3,7 @@
 use std::fs;
 
 use pixel_install::config::{MANAGED_BEGIN, MANAGED_END};
-use pixel_install::doctor::{CheckStatus, DoctorOptions, doctor};
+use pixel_install::doctor::{CHECKS, CheckStatus, DoctorOptions, doctor};
 use pixel_install::install::{InstallOptions, InstallReport, install};
 use pixel_install::uninstall::{UninstallOptions, uninstall};
 use tempfile::TempDir;
@@ -152,6 +152,101 @@ fn doctor_runs_and_returns_report() {
         report.summary.green + report.summary.yellow + report.summary.red > 0,
         "summary should tally checks"
     );
+}
+
+/// A full run with a repo and a CLI parser runs every catalogued check, in
+/// catalogue order: a check added without an entry would panic, and an entry
+/// no run produces would be an id `--only` accepts but never runs.
+#[test]
+fn doctor_should_run_every_catalogued_check_in_order_when_nothing_is_filtered() {
+    let dir = TempDir::new().unwrap();
+    let report = doctor(&DoctorOptions {
+        home: Some(dir.path().join("home")),
+        repo_root: Some(dir.path().join("repo")),
+        shell: Some(TEST_SHELL.into()),
+        syntax_validator: Some(|_| Ok(())),
+        ..Default::default()
+    })
+    .unwrap();
+    let ran: Vec<&str> = report.checks.iter().map(|c| c.id.as_str()).collect();
+    let catalogue: Vec<&str> = CHECKS.iter().map(|c| c.id).collect();
+    assert_eq!(ran, catalogue);
+    assert_eq!(report.summary.skipped, 0);
+}
+
+/// `--only` runs just the named checks and `--skip` leaves its ids out; the
+/// skip count lets a focused gate confirm it ran what it meant to.
+#[test]
+fn doctor_should_run_only_the_selected_checks_and_count_the_rest_as_skipped() {
+    let dir = TempDir::new().unwrap();
+    let options = |only: &[&str], skip: &[&str]| DoctorOptions {
+        home: Some(dir.path().join("home")),
+        repo_root: Some(dir.path().join("repo")),
+        shell: Some(TEST_SHELL.into()),
+        syntax_validator: Some(|_| Ok(())),
+        only: only.iter().map(ToString::to_string).collect(),
+        skip: skip.iter().map(ToString::to_string).collect(),
+        ..Default::default()
+    };
+
+    let only = doctor(&options(&["binary.path", "index.freshness"], &[])).unwrap();
+    let ran: Vec<&str> = only.checks.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ran, ["binary.path", "index.freshness"]);
+    assert_eq!(only.summary.skipped, CHECKS.len() - 2);
+
+    let skip = doctor(&options(&[], &["binary.path"])).unwrap();
+    assert!(skip.checks.iter().all(|c| c.id != "binary.path"));
+    assert_eq!(skip.checks.len(), CHECKS.len() - 1);
+    assert_eq!(skip.summary.skipped, 1);
+}
+
+#[test]
+fn doctor_should_refuse_an_unknown_check_id_before_running_anything() {
+    let dir = TempDir::new().unwrap();
+    let err = doctor(&DoctorOptions {
+        home: Some(dir.path().to_path_buf()),
+        only: vec!["install.shell-wrappers".into()],
+        ..Default::default()
+    })
+    .unwrap_err();
+    assert!(
+        matches!(&err, pixel_install::InstallError::UnknownDoctorCheck(id) if id == "install.shell-wrappers"),
+        "{err}"
+    );
+}
+
+/// The fix travels with the finding: a red install check names `pixel
+/// install`, a red repo check names its repository, a green check none.
+#[test]
+fn doctor_should_attach_a_fix_to_failing_checks_only() {
+    let dir = TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let report = doctor(&DoctorOptions {
+        home: Some(dir.path().join("home")),
+        repo_root: Some(repo.clone()),
+        shell: Some(TEST_SHELL.into()),
+        only: ["binary.path", "install.agent-prompt", "index.freshness"]
+            .map(String::from)
+            .to_vec(),
+        ..Default::default()
+    })
+    .unwrap();
+    let binary = check(&report, "binary.path");
+    assert_eq!(
+        (binary.status, binary.fix.as_deref()),
+        (CheckStatus::Green, None)
+    );
+    let prompt = check(&report, "install.agent-prompt");
+    assert_eq!(prompt.status, CheckStatus::Red);
+    assert_eq!(prompt.fix.as_deref(), Some("pixel install"));
+    let index = check(&report, "index.freshness");
+    assert_eq!(index.status, CheckStatus::Red, "{index:?}");
+    assert_eq!(
+        index.fix.as_deref(),
+        Some(format!("pixel prepare-repo '{}'", repo.display()).as_str())
+    );
+    assert!(report.fails(CheckStatus::Red));
 }
 
 // ---------------------------------------------------------------------------

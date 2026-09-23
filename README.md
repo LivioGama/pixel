@@ -137,7 +137,8 @@ Upgrading replaces the binary only. The agent prompt, shell wrapper and
 per-agent config keys are written by `pixel install` into your home — they
 are yours, not the package manager's — so they keep the old release's text
 until you refresh them. `pixel doctor .` reports the wiring as missing or
-stale until you do.
+stale until you do, with the command that repairs each finding, and exits 1
+while a check is red.
 
 | Installed with | Upgrade the binary |
 | --- | --- |

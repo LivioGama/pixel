@@ -91,7 +91,10 @@ def audit(binary):
         run(["install", "--json"])
         run(["install", "--json"])
         assert json.loads(settings.read_text())["unrelatedSetting"] == {"preserve": True}
-        run(["doctor", str(repo), "--json"])
+        # The fixture never starts a daemon nor builds the graph and history,
+        # so those checks are red by design; the install wiring must be green.
+        run(["doctor", str(repo), "--json", "--skip", "daemon.health",
+             "--skip", "graph.freshness", "--skip", "facts.freshness"])
         run(["uninstall", "--json", "--binary-path", str(home / "unused-binary")])
         assert json.loads(settings.read_text())["unrelatedSetting"] == {"preserve": True}
         old = repo / ".gitpixel"

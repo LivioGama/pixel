@@ -359,6 +359,11 @@ Existing hook entry points remain implemented, separately from active installati
 `pixel doctor` checks current installation artifacts and distinguishes configured
 or protocol-checked hooks from observed live execution. Dormant registration code
 is not an installed feature. Legacy uninstall behavior remains available.
+Every check is listed in `pixel_install::doctor::CHECKS` with a stable id and
+the command that repairs it (`pixel doctor --list`): `--only`/`--skip` select
+by id, and each yellow or red check reports that command as `fix`. The exit
+code carries the verdict: 0 when no check reaches `--fail-on` (default `red`),
+1 when one does, 2 when the checks could not run.
 
 ### Invocation accounting and chat delivery
 

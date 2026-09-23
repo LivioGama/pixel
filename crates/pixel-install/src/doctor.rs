@@ -1,6 +1,11 @@
 //! `pixel doctor` — checks install state, binary path, daemon health, and
-//! index/graph/facts freshness, reporting green/red per check.
+//! index/graph/facts freshness, reporting green/yellow/red per check.
+//!
+//! Every check is listed in [`CHECKS`] with the command that repairs it, so a
+//! caller can select checks by id (`--only`, `--skip`) and act on a finding
+//! without parsing its prose.
 
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,14 +32,82 @@ pub const MANDATORY_SCENARIOS: &[&str] = &[
     "impact",
 ];
 
-/// Per-check status for the doctor report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Per-check status for the doctor report, ordered from healthy to broken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     Green,
     Yellow,
     Red,
 }
+
+impl fmt::Display for CheckStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Green => "green",
+            Self::Yellow => "yellow",
+            Self::Red => "red",
+        })
+    }
+}
+
+/// One check the doctor knows: its stable id and the command that repairs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CheckSpec {
+    pub id: &'static str,
+    /// Shell command that repairs a yellow or red outcome, `{root}` standing
+    /// for the quoted repository root; `None` when no command can.
+    pub fix: Option<&'static str>,
+}
+
+/// A catalogue entry; keeps [`CHECKS`] one line per check.
+const fn entry(id: &'static str, fix: Option<&'static str>) -> CheckSpec {
+    CheckSpec { id, fix }
+}
+
+/// Command that rewrites everything `pixel install` deploys in the home.
+const FIX_INSTALL: Option<&str> = Some("pixel install");
+/// Command that rewrites the repo-local enforcement files.
+const FIX_REPO_INSTALL: Option<&str> = Some("pixel install --repo {root}");
+/// Command that builds the text index and the graph, and warms the daemon.
+const FIX_PREPARE: Option<&str> = Some("pixel prepare-repo {root}");
+
+/// Every check, in the order a run reports them. Ids are stable: scripts
+/// select them with `--only`/`--skip`, and a check missing from this list
+/// panics when it runs.
+pub const CHECKS: &[CheckSpec] = &[
+    entry("binary.path", None),
+    entry("binary.executable", None),
+    entry("install.agent-prompt", FIX_INSTALL),
+    entry("install.subagent-prompt", FIX_INSTALL),
+    entry("install.pi-prompt", FIX_INSTALL),
+    entry("install.codex-config", FIX_INSTALL),
+    entry("install.codex-metrics-hook", FIX_INSTALL),
+    entry("install.opencode-agents-md", FIX_INSTALL),
+    entry("install.antigravity", FIX_INSTALL),
+    entry("install.claude-hooks", FIX_INSTALL),
+    // The removal command names the orphaned file, so the outcome carries it.
+    entry("install.rtk-backup", None),
+    entry("install.legacy-wrappers", FIX_INSTALL),
+    entry("rule.parity", FIX_INSTALL),
+    entry("rule.scenarios", FIX_INSTALL),
+    entry("repo.codex-config", FIX_REPO_INSTALL),
+    entry("repo.codex-hooks", FIX_REPO_INSTALL),
+    entry("repo.devin-hooks", FIX_REPO_INSTALL),
+    entry("repo.claude-hooks", FIX_REPO_INSTALL),
+    entry("repo.pi-guard", FIX_REPO_INSTALL),
+    entry("daemon.health", Some("pixel daemon start {root}")),
+    entry(
+        "daemon.epistemics",
+        Some("pixel daemon stop {root} && pixel daemon start {root}"),
+    ),
+    entry("index.freshness", FIX_PREPARE),
+    entry("graph.freshness", FIX_PREPARE),
+    entry(
+        "facts.freshness",
+        Some("pixel build-index --history {root}"),
+    ),
+];
 
 /// One doctor check.
 #[derive(Debug, Clone, Serialize)]
@@ -48,6 +121,9 @@ pub struct DoctorCheck {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<serde_json::Value>,
+    /// Shell command that repairs this check; only on a yellow or red one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
 }
 
 /// The full doctor report.
@@ -66,6 +142,59 @@ pub struct DoctorSummary {
     pub green: usize,
     pub yellow: usize,
     pub red: usize,
+    /// Checks left out by `only`/`skip`.
+    pub skipped: usize,
+}
+
+impl DoctorReport {
+    /// Whether any check sits at or above `threshold`: the CLI exits 1 then.
+    #[must_use]
+    pub fn fails(&self, threshold: CheckStatus) -> bool {
+        self.checks.iter().any(|c| c.status >= threshold)
+    }
+}
+
+/// The terminal form: one tally line, then every yellow or red check, red
+/// first, each with its `fix:` line when a command repairs it.
+impl fmt::Display for DoctorReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = &self.summary;
+        write!(f, "pixel doctor: ran {} check(s)", self.checks.len())?;
+        if s.skipped > 0 {
+            write!(f, ", skipped {}", s.skipped)?;
+        }
+        writeln!(
+            f,
+            " — {} green, {} yellow, {} red",
+            s.green, s.yellow, s.red
+        )?;
+        let mut flagged: Vec<&DoctorCheck> = self
+            .checks
+            .iter()
+            .filter(|c| c.status != CheckStatus::Green)
+            .collect();
+        // Stable: checks of one status keep their run order.
+        flagged.sort_by_key(|c| std::cmp::Reverse(c.status));
+        for c in flagged {
+            let message = c.reason.as_deref().unwrap_or(&c.summary);
+            writeln!(f, "  [{}] {}: {}", c.status, c.id, one_line(message))?;
+            if let Some(fix) = &c.fix {
+                writeln!(f, "    fix: {fix}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The terminal form of `pixel doctor --list`: one line per check, its id
+/// padded to a column, then its repair command or `-` when none exists.
+#[must_use]
+pub fn render_catalogue(checks: &[CheckSpec]) -> String {
+    let width = checks.iter().map(|c| c.id.len()).max().unwrap_or(0);
+    checks
+        .iter()
+        .map(|c| format!("{:<width$}  {}\n", c.id, c.fix.unwrap_or("-")))
+        .collect()
 }
 
 /// Options controlling a doctor run.
@@ -94,10 +223,21 @@ pub struct DoctorOptions {
     /// without access to the CLI parser), the parity check is skipped.
     #[allow(clippy::type_complexity)]
     pub syntax_validator: Option<fn(&[String]) -> std::result::Result<(), String>>,
+    /// Check ids to run; empty runs every check. Ids come from [`CHECKS`].
+    pub only: Vec<String>,
+    /// Check ids to leave out.
+    pub skip: Vec<String>,
 }
 
 /// Run `pixel doctor`.
+///
+/// # Errors
+///
+/// Fails before any check runs when `only` or `skip` names an id missing
+/// from [`CHECKS`] or both name the same id, when no home directory
+/// resolves, or when the current executable cannot be located.
 pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
+    validate_selection(&options.only, &options.skip)?;
     let home = options
         .home
         .clone()
@@ -111,9 +251,15 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         .canonicalize()
         .unwrap_or_else(|_| executable_path.clone());
 
-    let mut checks = Vec::new();
+    let mut runner = Runner {
+        only: &options.only,
+        skip: &options.skip,
+        root: options.repo_root.as_deref(),
+        checks: Vec::new(),
+        skipped: 0,
+    };
 
-    checks.push(check(
+    runner.check(
         "binary.path",
         || -> std::result::Result<DoctorCheckDetail, String> {
             if !exe.is_file() {
@@ -124,9 +270,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 detail: Some(serde_json::json!({ "path": exe.display().to_string() })),
             })
         },
-    ));
+    );
 
-    checks.push(check(
+    runner.check(
         "binary.executable",
         || -> std::result::Result<DoctorCheckDetail, String> {
             let out = Command::new(&exe).arg("--version").output();
@@ -141,14 +287,17 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 Ok(o) => Err(format!(
                     "binary exited {}: {}",
                     o.status,
-                    String::from_utf8_lossy(&o.stderr).trim()
+                    capped(
+                        &one_line(&String::from_utf8_lossy(&o.stderr)),
+                        STDERR_EXCERPT_CHARS
+                    )
                 )),
                 Err(e) => Err(format!("failed to run binary: {e}")),
             }
         },
-    ));
+    );
 
-    checks.push(check(
+    runner.check(
         "install.agent-prompt",
         || -> std::result::Result<DoctorCheckDetail, String> {
             let path = home.join(".local/share/pixel/agent-prompt.md");
@@ -169,9 +318,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 detail: Some(serde_json::json!({ "path": path.display().to_string() })),
             })
         },
-    ));
+    );
 
-    checks.push(check(
+    runner.check(
         "install.subagent-prompt",
         || -> std::result::Result<DoctorCheckDetail, String> {
             let path = home
@@ -202,9 +351,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 detail: Some(serde_json::json!({ "path": path.display().to_string() })),
             })
         },
-    ));
+    );
 
-    checks.push(check(
+    runner.check(
         "install.pi-prompt",
         || -> std::result::Result<DoctorCheckDetail, String> {
             let path = home.join(install::PI_PROMPT_REL);
@@ -232,10 +381,10 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 detail: Some(serde_json::json!({ "path": path.display().to_string() })),
             })
         },
-    ));
+    );
 
     let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
-    checks.push(check(
+    runner.check(
         "install.codex-config",
         || -> std::result::Result<DoctorCheckDetail, String> {
             let (summary, detail) = crate::codex_config::check_developer_instructions(&codex_home)?;
@@ -244,8 +393,8 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 detail: Some(detail),
             })
         },
-    ));
-    checks.push(check(
+    );
+    runner.check(
         "install.codex-metrics-hook",
         || -> std::result::Result<DoctorCheckDetail, String> {
             let (summary, detail) = crate::codex_config::check_metrics_hook(&codex_home)?;
@@ -254,9 +403,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 detail: Some(detail),
             })
         },
-    ));
+    );
 
-    checks.push(check(
+    runner.check(
         "install.opencode-agents-md",
         || -> std::result::Result<DoctorCheckDetail, String> {
             let (summary, detail) = crate::opencode_config::check_opencode(
@@ -267,11 +416,11 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 detail: Some(detail),
             })
         },
-    ));
+    );
 
     let exe_for_antigravity = exe.clone();
     let home_for_antigravity = home.clone();
-    checks.push(check(
+    runner.check(
         "install.antigravity",
         move || -> std::result::Result<DoctorCheckDetail, String> {
             let (summary, detail) = crate::antigravity::check_antigravity_install(
@@ -283,14 +432,14 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 detail: Some(detail),
             })
         },
-    ));
+    );
 
     // The doctrine now reaches every Claude process through the lifecycle
     // hooks in ~/.claude/settings.json — SessionStart injects the deployed
     // agent prompt itself. Verify the whole lifecycle contract: matchers,
     // commands and the executable this binary's install would write, not
     // just a `pixel` substring.
-    checks.push(check(
+    runner.check(
         "install.claude-hooks",
         || -> std::result::Result<DoctorCheckDetail, String> {
             let path = home.join(".claude/settings.json");
@@ -372,20 +521,20 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 detail: Some(serde_json::json!({ "path": path.display().to_string() })),
             })
         },
-    ));
+    );
 
     // A global RTK backup that no guard delegates to is never applied again;
     // say so rather than leave a file that looks like a live registration.
-    checks.push(check_status("install.rtk-backup", || {
-        rtk_backup_check(crate::routing::orphan_rtk_backup(&home))
-    }));
+    runner.record("install.rtk-backup", || {
+        Ok(rtk_backup_check(crate::routing::orphan_rtk_backup(&home)))
+    });
 
     // Legacy `claude()` shell wrappers are harmful now: a surviving block
     // double-injects the prompt on every wrapped launch. Any pixel-managed
     // block in ANY candidate profile (the resolved shell's or a stray left
     // by an install that ran under the wrong $SHELL) is red.
     let shell_override = options.shell.clone();
-    checks.push(check(
+    runner.check(
         "install.legacy-wrappers",
         || -> std::result::Result<DoctorCheckDetail, String> {
             let shell = install::resolve_shell(shell_override.as_deref());
@@ -420,7 +569,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     .collect::<Vec<_>>() })),
             })
         },
-    ));
+    );
 
     // Rule-vs-binary parity: every `pixel …` command line documented in the
     // INSTALLED rule text must dry-run parse against the binary's real clap
@@ -429,12 +578,14 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     // instead of a silent lie agents follow into parse errors.
     if let Some(validator) = options.syntax_validator {
         let home_for_rule = home.clone();
-        checks.push(check_status("rule.parity", move || {
+        // The prompt `pixel install` deploys always carries command lines, so
+        // a rule text without any is not something a reinstall repairs.
+        runner.record("rule.parity", move || {
             let Some((source, rule_text)) = installed_rule_text(&home_for_rule) else {
                 return Ok((CheckStatus::Yellow, DoctorCheckDetail {
                     summary: "no installed rule text found (agent-prompt.md not deployed, no managed block or rule file) — run `pixel install`; parity not checked".into(),
                     detail: None,
-                }));
+                }, Remedy::Catalogue));
             };
             let commands = extract_rule_commands(&rule_text);
             if commands.is_empty() {
@@ -444,7 +595,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                         source.display()
                     ),
                     detail: None,
-                }));
+                }, Remedy::Manual));
             }
             let mut parsed_ok = 0usize;
             let mut unparsed: Vec<String> = Vec::new();
@@ -479,8 +630,8 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     unparsed.len()
                 ),
                 detail,
-            }))
-        }));
+            }, Remedy::Catalogue))
+        });
     }
 
     // Scenario-count consistency: the installed rule text and the
@@ -490,7 +641,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     // is exactly the drift class this doctor exists to catch.
     {
         let home_for_rule = home.clone();
-        checks.push(check_status("rule.scenarios", move || {
+        runner.check_status("rule.scenarios", move || {
             let Some((source, rule_text)) = installed_rule_text(&home_for_rule) else {
                 return Ok((
                     CheckStatus::Yellow,
@@ -522,7 +673,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     })),
                 },
             ))
-        }));
+        });
     }
 
     if let Some(root) = &options.repo_root {
@@ -532,7 +683,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         // absent file, or one the project keeps for itself with nothing of
         // Pixel's in it, is informational green: a repo where repo-install
         // never ran is a valid state, not a broken one.
-        checks.push(check_status("repo.codex-config", || {
+        runner.check_status("repo.codex-config", || {
             let codex_dir = root.join(".codex");
             if !crate::codex_config::carries_pixel_block(&codex_dir)? {
                 return Ok((
@@ -552,9 +703,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     detail: Some(detail),
                 },
             ))
-        }));
+        });
 
-        checks.push(check_status("repo.codex-hooks", || {
+        runner.check_status("repo.codex-hooks", || {
             let hooks_path = root.join(".codex").join(crate::codex_config::HOOKS_FILE);
             let sidecar = root.join(".codex").join(crate::routing::CODEX_COMPOSED_BACKUP);
             match (hooks_path.is_file(), sidecar.is_file()) {
@@ -632,9 +783,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     ))
                 }
             }
-        }));
+        });
 
-        checks.push(check_status("repo.devin-hooks", || {
+        runner.check_status("repo.devin-hooks", || {
             let path = root.join(crate::routing::DEVIN_LOCAL_CONFIG);
             let value = if path.is_file() {
                 install::read_settings(&path).map_err(|e| e.to_string())?
@@ -666,9 +817,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     detail: Some(serde_json::json!({ "path": path.display().to_string() })),
                 },
             ))
-        }));
+        });
 
-        checks.push(check_status("repo.claude-hooks", || {
+        runner.check_status("repo.claude-hooks", || {
             // The shared settings.json is committed: a pixel guard there
             // runs this machine's binary path on every teammate's clone.
             let shared = root.join(crate::routing::CLAUDE_SHARED_SETTINGS);
@@ -745,13 +896,13 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     detail: Some(serde_json::json!({ "path": path.display().to_string() })),
                 },
             ))
-        }));
+        });
 
-        checks.push(check_status("repo.pi-guard", || {
+        runner.check_status("repo.pi-guard", || {
             pi_guard_check(root, crate::pi_project::guard_state(root))
-        }));
+        });
 
-        checks.push(check(
+        runner.check(
             "daemon.health",
             || -> std::result::Result<DoctorCheckDetail, String> {
                 let sock = pixel_daemon::daemon::socket_path(root);
@@ -763,38 +914,40 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     detail: Some(serde_json::json!({ "socket": sock.display().to_string() })),
                 })
             },
-        ));
+        );
 
         // Epistemics-presence probe: when a daemon answers, one retrieval op
         // should carry an `epistemics` object in its response. Warning-only
         // (Yellow), never red — the envelope is landing concurrently and a
         // daemon built from an older binary is a staleness note, not a
         // broken install.
-        checks.push(check_status("daemon.epistemics", || {
+        // Only an answering daemon without the envelope needs the restart;
+        // no daemon at all is `daemon.health`'s finding and carries its fix.
+        runner.record("daemon.epistemics", || {
             let sock = pixel_daemon::daemon::socket_path(root);
             if !sock.exists() {
                 return Ok((CheckStatus::Yellow, DoctorCheckDetail {
                     summary: "no daemon running — epistemics probe skipped".into(),
                     detail: None,
-                }));
+                }, Remedy::Manual));
             }
             match probe_daemon_epistemics(&sock) {
                 Ok(true) => Ok((CheckStatus::Green, DoctorCheckDetail {
                     summary: "daemon retrieval response carries an epistemics object".into(),
                     detail: None,
-                })),
+                }, Remedy::Catalogue)),
                 Ok(false) => Ok((CheckStatus::Yellow, DoctorCheckDetail {
                     summary: "daemon retrieval response has NO epistemics object — daemon may predate the epistemics envelope; restart it".into(),
                     detail: None,
-                })),
+                }, Remedy::Catalogue)),
                 Err(e) => Ok((CheckStatus::Yellow, DoctorCheckDetail {
                     summary: format!("epistemics probe inconclusive: {e}"),
                     detail: None,
-                })),
+                }, Remedy::Manual)),
             }
-        }));
+        });
 
-        checks.push(check(
+        runner.check(
             "index.freshness",
             || -> std::result::Result<DoctorCheckDetail, String> {
                 let shard = root
@@ -813,9 +966,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     detail: Some(serde_json::json!({ "age_secs": age })),
                 })
             },
-        ));
+        );
 
-        checks.push(check(
+        runner.check(
             "graph.freshness",
             || -> std::result::Result<DoctorCheckDetail, String> {
                 let db = root
@@ -834,9 +987,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     detail: Some(serde_json::json!({ "age_secs": age })),
                 })
             },
-        ));
+        );
 
-        checks.push(check_status("facts.freshness", || -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+        runner.check_status("facts.freshness", || -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
             let store = pixel_facts::FactsStore::open(root).map_err(|e| e.to_string())?;
             let state = store.index_state();
             // Red: schema version mismatch — the db was written by a different
@@ -899,9 +1052,12 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 ),
                 detail,
             }))
-        }));
+        });
     }
 
+    let Runner {
+        checks, skipped, ..
+    } = runner;
     let green = checks
         .iter()
         .filter(|c| c.status == CheckStatus::Green)
@@ -922,7 +1078,12 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         executable_path: exe.display().to_string(),
         home: home.display().to_string(),
         checks,
-        summary: DoctorSummary { green, yellow, red },
+        summary: DoctorSummary {
+            green,
+            yellow,
+            red,
+            skipped,
+        },
     })
 }
 
@@ -978,29 +1139,31 @@ fn pi_guard_check(
 }
 /// `install.rtk-backup`: yellow when `orphan` names a global RTK backup no
 /// pixel guard delegates to, with the command that removes it.
-fn rtk_backup_check(
-    orphan: Option<PathBuf>,
-) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
-    Ok(match orphan {
+fn rtk_backup_check(orphan: Option<PathBuf>) -> (CheckStatus, DoctorCheckDetail, Remedy) {
+    match orphan {
         None => (
             CheckStatus::Green,
             DoctorCheckDetail {
                 summary: "no orphaned RTK backup".into(),
                 detail: None,
             },
+            Remedy::Catalogue,
         ),
-        Some(path) => (
-            CheckStatus::Yellow,
-            DoctorCheckDetail {
-                summary: format!(
-                    "{} holds an RTK hook no pixel guard delegates to; pixel never applies it — remove it: rm {}",
-                    path.display(),
-                    crate::routing::quoted_executable(&path)
-                ),
-                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-            },
-        ),
-    })
+        Some(path) => {
+            let remove = format!("rm {}", crate::routing::quoted_executable(&path));
+            (
+                CheckStatus::Yellow,
+                DoctorCheckDetail {
+                    summary: format!(
+                        "{} holds an RTK hook no pixel guard delegates to; pixel never applies it — remove it: {remove}",
+                        path.display(),
+                    ),
+                    detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+                },
+                Remedy::Command(remove),
+            )
+        }
+    }
 }
 
 struct DoctorCheckDetail {
@@ -1008,60 +1171,169 @@ struct DoctorCheckDetail {
     detail: Option<serde_json::Value>,
 }
 
-fn check(
-    id: &str,
-    run: impl FnOnce() -> std::result::Result<DoctorCheckDetail, String>,
-) -> DoctorCheck {
-    let started = Instant::now();
-    match run() {
-        Ok(d) => DoctorCheck {
-            id: id.into(),
-            status: CheckStatus::Green,
-            required: true,
-            duration_ms: started.elapsed().as_millis() as u64,
-            summary: d.summary,
-            reason: None,
-            detail: d.detail,
-        },
-        Err(reason) => DoctorCheck {
-            id: id.into(),
-            status: CheckStatus::Red,
-            required: true,
-            duration_ms: started.elapsed().as_millis() as u64,
-            summary: "check failed".into(),
-            reason: Some(reason),
-            detail: None,
-        },
+/// Which repair command a yellow or red outcome carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Remedy {
+    /// The check's command in [`CHECKS`].
+    Catalogue,
+    /// A command only this outcome can name, such as a path to remove.
+    Command(String),
+    /// No command: nothing to repair, or another check carries the fix.
+    Manual,
+}
+
+/// Longest stderr excerpt a check reason quotes from a child process.
+const STDERR_EXCERPT_CHARS: usize = 256;
+
+/// Runs the checks the selection keeps and records each outcome.
+struct Runner<'a> {
+    only: &'a [String],
+    skip: &'a [String],
+    root: Option<&'a Path>,
+    checks: Vec<DoctorCheck>,
+    skipped: usize,
+}
+
+impl Runner<'_> {
+    /// Run a check that is green on `Ok` and red on `Err`.
+    fn check(
+        &mut self,
+        id: &'static str,
+        run: impl FnOnce() -> std::result::Result<DoctorCheckDetail, String>,
+    ) {
+        self.record(id, || {
+            run().map(|d| (CheckStatus::Green, d, Remedy::Catalogue))
+        });
+    }
+
+    /// Like `check`, but the closure may also report a non-fatal `Yellow`
+    /// status (e.g. a stale-but-valid index) in addition to `Green`/`Red`.
+    fn check_status(
+        &mut self,
+        id: &'static str,
+        run: impl FnOnce() -> std::result::Result<(CheckStatus, DoctorCheckDetail), String>,
+    ) {
+        self.record(id, || {
+            run().map(|(status, d)| (status, d, Remedy::Catalogue))
+        });
+    }
+
+    /// Run `id` unless the selection leaves it out, timing it and attaching
+    /// its repair command.
+    fn record(
+        &mut self,
+        id: &'static str,
+        run: impl FnOnce() -> std::result::Result<(CheckStatus, DoctorCheckDetail, Remedy), String>,
+    ) {
+        let spec = spec(id);
+        if !selected(self.only, self.skip, id) {
+            self.skipped += 1;
+            return;
+        }
+        let started = Instant::now();
+        let outcome = run();
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let check = match outcome {
+            Ok((status, d, remedy)) => DoctorCheck {
+                id: id.into(),
+                status,
+                required: true,
+                duration_ms,
+                summary: d.summary,
+                reason: None,
+                detail: d.detail,
+                fix: fix_for(spec, status, remedy, self.root),
+            },
+            Err(reason) => DoctorCheck {
+                id: id.into(),
+                status: CheckStatus::Red,
+                required: true,
+                duration_ms,
+                summary: "check failed".into(),
+                reason: Some(reason),
+                detail: None,
+                fix: fix_for(spec, CheckStatus::Red, Remedy::Catalogue, self.root),
+            },
+        };
+        self.checks.push(check);
     }
 }
 
-/// Like `check`, but the closure may also report a non-fatal `Yellow` status
-/// (e.g. a stale-but-valid index) in addition to `Green`/`Red`.
-fn check_status(
-    id: &str,
-    run: impl FnOnce() -> std::result::Result<(CheckStatus, DoctorCheckDetail), String>,
-) -> DoctorCheck {
-    let started = Instant::now();
-    match run() {
-        Ok((status, d)) => DoctorCheck {
-            id: id.into(),
-            status,
-            required: true,
-            duration_ms: started.elapsed().as_millis() as u64,
-            summary: d.summary,
-            reason: None,
-            detail: d.detail,
-        },
-        Err(reason) => DoctorCheck {
-            id: id.into(),
-            status: CheckStatus::Red,
-            required: true,
-            duration_ms: started.elapsed().as_millis() as u64,
-            summary: "check failed".into(),
-            reason: Some(reason),
-            detail: None,
-        },
+/// The catalogue entry for `id`.
+///
+/// # Panics
+///
+/// When `id` is missing from [`CHECKS`]: a check the catalogue does not list
+/// could be neither selected nor repaired, which is a bug in this module.
+fn spec(id: &str) -> &'static CheckSpec {
+    CHECKS
+        .iter()
+        .find(|spec| spec.id == id)
+        .unwrap_or_else(|| panic!("doctor check `{id}` is missing from CHECKS"))
+}
+
+/// Whether `id` runs: listed by `only` (or `only` is empty) and not by `skip`.
+fn selected(only: &[String], skip: &[String], id: &str) -> bool {
+    (only.is_empty() || only.iter().any(|o| o == id)) && !skip.iter().any(|s| s == id)
+}
+
+/// Refuse a selection that names an unknown check, or one both kept and
+/// left out: either would silently run fewer checks than the caller meant.
+fn validate_selection(only: &[String], skip: &[String]) -> Result<()> {
+    if let Some(id) = only
+        .iter()
+        .chain(skip)
+        .find(|id| !CHECKS.iter().any(|spec| spec.id == id.as_str()))
+    {
+        return Err(InstallError::UnknownDoctorCheck(id.clone()));
     }
+    if let Some(id) = only.iter().find(|id| skip.contains(id)) {
+        return Err(InstallError::ConflictingDoctorSelection(id.clone()));
+    }
+    Ok(())
+}
+
+/// The repair command a check reports: none on green, otherwise what the
+/// outcome names, with `{root}` in a catalogue command replaced by the quoted
+/// repository root (`.` when there is none).
+fn fix_for(
+    spec: &CheckSpec,
+    status: CheckStatus,
+    remedy: Remedy,
+    root: Option<&Path>,
+) -> Option<String> {
+    if status == CheckStatus::Green {
+        return None;
+    }
+    match remedy {
+        Remedy::Catalogue => spec.fix.map(|template| {
+            template.replace(
+                "{root}",
+                &root.map_or_else(|| ".".to_owned(), crate::routing::quoted_executable),
+            )
+        }),
+        Remedy::Command(command) => Some(command),
+        Remedy::Manual => None,
+    }
+}
+
+/// `text` on one line: whitespace runs and control characters (a child's
+/// newlines, a terminal escape) collapse to single spaces.
+fn one_line(text: &str) -> String {
+    text.split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `text` cut to `max_chars` characters, an ellipsis marking the cut.
+fn capped(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let mut cut: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
 }
 
 /// The dead/poisoned-DB predicate for `facts.freshness`, factored out so it
@@ -1311,11 +1583,301 @@ pub use pixel_daemon::daemon::socket_path as daemon_socket_path;
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::facts_dead_reason;
     use super::{
-        age_secs, extract_rule_commands, normalize_rule_command, probe_daemon_epistemics,
-        scenario_mismatches,
+        CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary, Remedy, age_secs,
+        capped, extract_rule_commands, fix_for, normalize_rule_command, one_line,
+        probe_daemon_epistemics, render_catalogue, rtk_backup_check, scenario_mismatches, selected,
+        spec, validate_selection,
     };
+    use crate::InstallError;
+
+    fn finding(
+        id: &str,
+        status: CheckStatus,
+        reason: Option<&str>,
+        fix: Option<&str>,
+    ) -> DoctorCheck {
+        DoctorCheck {
+            id: id.into(),
+            status,
+            required: true,
+            duration_ms: 0,
+            summary: format!("{id} summary"),
+            reason: reason.map(Into::into),
+            detail: None,
+            fix: fix.map(Into::into),
+        }
+    }
+
+    fn report(checks: Vec<DoctorCheck>, skipped: usize) -> DoctorReport {
+        let count = |status| checks.iter().filter(|c| c.status == status).count();
+        let summary = DoctorSummary {
+            green: count(CheckStatus::Green),
+            yellow: count(CheckStatus::Yellow),
+            red: count(CheckStatus::Red),
+            skipped,
+        };
+        DoctorReport {
+            version: "v1".into(),
+            ok: summary.red == 0,
+            executable_path: "/bin/pixel".into(),
+            home: "/home".into(),
+            checks,
+            summary,
+        }
+    }
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(ToString::to_string).collect()
+    }
+
+    /// The exit code gates CI and the agent loop: a check exactly at the
+    /// threshold must fail it, a milder one must not.
+    #[test]
+    fn fails_should_trip_at_the_threshold_and_not_below() {
+        let green = report(vec![finding("a", CheckStatus::Green, None, None)], 0);
+        let yellow = report(
+            vec![
+                finding("a", CheckStatus::Green, None, None),
+                finding("b", CheckStatus::Yellow, None, None),
+            ],
+            0,
+        );
+        let red = report(
+            vec![finding("c", CheckStatus::Red, Some("broken"), None)],
+            0,
+        );
+        assert!(!green.fails(CheckStatus::Yellow));
+        assert!(!green.fails(CheckStatus::Red));
+        assert!(yellow.fails(CheckStatus::Yellow));
+        assert!(
+            !yellow.fails(CheckStatus::Red),
+            "yellow alone passes the default gate"
+        );
+        assert!(red.fails(CheckStatus::Red));
+        assert!(red.fails(CheckStatus::Yellow));
+    }
+
+    #[test]
+    fn check_status_should_display_its_serialized_name() {
+        for status in [CheckStatus::Green, CheckStatus::Yellow, CheckStatus::Red] {
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::Value::String(status.to_string())
+            );
+        }
+        assert_eq!(CheckStatus::Yellow.to_string(), "yellow");
+    }
+
+    /// The terminal form lists what needs attention, red first, each with the
+    /// command that repairs it, and hides the green checks behind the tally.
+    #[test]
+    fn report_display_should_list_red_before_yellow_with_fix_lines() {
+        let text = report(
+            vec![
+                finding("binary.path", CheckStatus::Green, None, None),
+                finding(
+                    "facts.freshness",
+                    CheckStatus::Yellow,
+                    None,
+                    Some("pixel build-index --history '/r'"),
+                ),
+                finding(
+                    "install.agent-prompt",
+                    CheckStatus::Red,
+                    Some("stale\n  prompt"),
+                    Some("pixel install"),
+                ),
+                finding("daemon.epistemics", CheckStatus::Yellow, None, None),
+            ],
+            2,
+        )
+        .to_string();
+        let expected = [
+            "pixel doctor: ran 4 check(s), skipped 2 — 1 green, 2 yellow, 1 red",
+            "  [red] install.agent-prompt: stale prompt",
+            "    fix: pixel install",
+            "  [yellow] facts.freshness: facts.freshness summary",
+            "    fix: pixel build-index --history '/r'",
+            "  [yellow] daemon.epistemics: daemon.epistemics summary",
+            "",
+        ]
+        .join("\n");
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn report_display_should_omit_the_skip_count_when_nothing_was_skipped() {
+        let text = report(
+            vec![finding("binary.path", CheckStatus::Green, None, None)],
+            0,
+        )
+        .to_string();
+        assert_eq!(
+            text,
+            "pixel doctor: ran 1 check(s) — 1 green, 0 yellow, 0 red\n"
+        );
+    }
+
+    #[test]
+    fn render_catalogue_should_align_ids_and_mark_checks_without_a_fix() {
+        let text = render_catalogue(&[
+            CheckSpec {
+                id: "binary.path",
+                fix: None,
+            },
+            CheckSpec {
+                id: "index.freshness",
+                fix: Some("pixel prepare-repo {root}"),
+            },
+        ]);
+        assert_eq!(
+            text,
+            [
+                "binary.path      -",
+                "index.freshness  pixel prepare-repo {root}",
+                ""
+            ]
+            .join("\n")
+        );
+    }
+
+    /// `--only`/`--skip` address checks by id, so two entries sharing one
+    /// would make a selection ambiguous.
+    #[test]
+    fn checks_should_have_unique_ids() {
+        let mut seen = std::collections::HashSet::new();
+        for check in CHECKS {
+            assert!(seen.insert(check.id), "duplicate id {}", check.id);
+        }
+    }
+
+    #[test]
+    fn spec_should_return_the_catalogue_entry() {
+        assert_eq!(
+            spec("facts.freshness").fix,
+            Some("pixel build-index --history {root}")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "doctor check `nope` is missing from CHECKS")]
+    fn spec_should_panic_on_an_uncatalogued_id() {
+        let _ = spec("nope");
+    }
+
+    #[test]
+    fn selected_should_keep_only_listed_ids_and_drop_skipped_ones() {
+        assert!(
+            selected(&[], &[], "binary.path"),
+            "no selection runs everything"
+        );
+        assert!(selected(&ids(&["binary.path"]), &[], "binary.path"));
+        assert!(!selected(&ids(&["binary.path"]), &[], "daemon.health"));
+        assert!(!selected(&[], &ids(&["daemon.health"]), "daemon.health"));
+        assert!(selected(&[], &ids(&["daemon.health"]), "binary.path"));
+    }
+
+    #[test]
+    fn validate_selection_should_refuse_unknown_and_conflicting_ids() {
+        assert!(validate_selection(&ids(&["binary.path"]), &ids(&["daemon.health"])).is_ok());
+        assert!(matches!(
+            validate_selection(&ids(&["binary.path", "nope"]), &[]),
+            Err(InstallError::UnknownDoctorCheck(id)) if id == "nope"
+        ));
+        assert!(matches!(
+            validate_selection(&[], &ids(&["typo"])),
+            Err(InstallError::UnknownDoctorCheck(id)) if id == "typo"
+        ));
+        assert!(matches!(
+            validate_selection(&ids(&["binary.path"]), &ids(&["binary.path"])),
+            Err(InstallError::ConflictingDoctorSelection(id)) if id == "binary.path"
+        ));
+    }
+
+    /// A fix is a command an agent may run as is: never on a healthy check,
+    /// and always pointed at the repository the report is about.
+    #[test]
+    fn fix_for_should_name_a_command_only_for_a_check_that_needs_one() {
+        let repo = CheckSpec {
+            id: "repo.pi-guard",
+            fix: Some("pixel install --repo {root}"),
+        };
+        let root = Path::new("/tmp/it's here");
+        assert_eq!(
+            fix_for(&repo, CheckStatus::Green, Remedy::Catalogue, Some(root)),
+            None
+        );
+        assert_eq!(
+            fix_for(&repo, CheckStatus::Red, Remedy::Catalogue, Some(root)).as_deref(),
+            Some("pixel install --repo '/tmp/it'\\''s here'")
+        );
+        assert_eq!(
+            fix_for(&repo, CheckStatus::Yellow, Remedy::Catalogue, None).as_deref(),
+            Some("pixel install --repo .")
+        );
+        assert_eq!(
+            fix_for(
+                &repo,
+                CheckStatus::Yellow,
+                Remedy::Command("rm x".into()),
+                Some(root)
+            )
+            .as_deref(),
+            Some("rm x")
+        );
+        assert_eq!(
+            fix_for(&repo, CheckStatus::Red, Remedy::Manual, Some(root)),
+            None
+        );
+        let bare = CheckSpec {
+            id: "binary.path",
+            fix: None,
+        };
+        assert_eq!(
+            fix_for(&bare, CheckStatus::Red, Remedy::Catalogue, Some(root)),
+            None
+        );
+    }
+
+    #[test]
+    fn rtk_backup_check_should_carry_the_removal_command_as_its_fix() {
+        let (status, _, remedy) = rtk_backup_check(None);
+        assert_eq!((status, remedy), (CheckStatus::Green, Remedy::Catalogue));
+        let (status, detail, remedy) = rtk_backup_check(Some(PathBuf::from("/h/.claude/rtk.json")));
+        assert_eq!(status, CheckStatus::Yellow);
+        assert_eq!(remedy, Remedy::Command("rm '/h/.claude/rtk.json'".into()));
+        assert!(
+            detail
+                .summary
+                .ends_with("remove it: rm '/h/.claude/rtk.json'"),
+            "{}",
+            detail.summary
+        );
+    }
+
+    #[test]
+    fn one_line_should_fold_newlines_and_control_characters_into_single_spaces() {
+        assert_eq!(
+            one_line("  error:\n\tbad\x1b[31m  thing \r\n"),
+            "error: bad [31m thing"
+        );
+        assert_eq!(one_line("plain"), "plain");
+    }
+
+    #[test]
+    fn capped_should_keep_text_at_the_limit_and_cut_beyond_it() {
+        assert_eq!(capped("abcd", 4), "abcd", "exactly at the cap is kept");
+        assert_eq!(capped("abcde", 4), "abc…");
+        assert_eq!(
+            capped("éééé", 3).chars().count(),
+            3,
+            "counts characters, not bytes"
+        );
+    }
 
     #[test]
     fn age_secs_is_the_seconds_since_the_mtime() {
