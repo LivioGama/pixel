@@ -46,6 +46,7 @@ and its supporting files; `.claude/skills` is a symlink to it.
 | --- | --- | --- |
 | `rust-guidelines/` | writing, refactoring or reviewing anything under `crates/` | Microsoft's Pragmatic Rust Guidelines (`M-*` ids): a workspace-specific checklist in `SKILL.md`, the full MIT-licensed text in `guidelines.txt` to grep by id, never to read whole |
 | `release/` | cutting a release or hotfix, bumping the version, tagging, or a failed Release run | the tag-to-tap procedure around `.github/workflows/release.yml`, and `prepare.sh`, which bumps every member, cuts the changelog, refreshes `Cargo.lock` and runs `check-release` |
+| `pixel-retro/` | asking what to improve in pixel from recent usage, or "/pixel-retro" | mines a window (24 h by default) of every repo's `.pixel/actions.jsonl` and the `pixel recall` transcripts for frictions pixel caused, reproduces each on the current binary, and reports ranked, evidence-backed suggestions without implementing any |
 
 Rules are always-on for the files they name; a skill is read when its
 `description` matches the task. A tool without skill support reads
