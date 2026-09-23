@@ -10,21 +10,31 @@
   <main id="main">
     {{/* ---------- hero ---------- */}}
     {{ $s := hugo.Data.scope }}
+    {{ $gh := printf "%s/blob/main/" site.Params.github_url }}
     <section class="hero wrap">
-      <h1 class="hero__title">Let your coding agent ask the repository instead of reading it.</h1>
+      <h1 class="hero__title">Your coding agent reads whole files. Pixel hands it the answer.</h1>
       <div class="hero__row">
-        <p class="hero__lede">Pixel is a local index of your code and its Git history. Agents get a ranked answer with its limits stated, not a pile of files to read, and every Git change goes through a crash-safe path.</p>
+        <div>
+          <p class="hero__lede">Pixel is a command-line tool your agent calls instead of <code>grep</code>, <code>cat</code> and <code>git log</code>. It indexes your code and its Git history on your machine, answers with the few files and symbols that matter, and says when an answer may be incomplete.</p>
+          <p class="hero__agents">Works with Claude Code, Codex, Cursor, Copilot CLI, Gemini CLI, Pi and OpenCode.</p>
+        </div>
         <div class="hero__act">
           <div class="cmd">
             <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
             <button class="cmd__copy" type="button" data-copy="brew install LivioGama/tap/pixel">Copy</button>
           </div>
           <p class="hero__links">
-            <a class="link" href="#install">Other ways to install</a>
-            <a class="link" href="{{ "docs/" | relURL }}">Read the docs</a>
+            <a class="link" href="#install">Install in three commands</a>
+            <a class="link" href="#benchmarks">See the benchmarks</a>
           </p>
         </div>
       </div>
+
+      <ul class="proof">
+        <li><a href="#benchmarks"><strong>95% fewer tokens</strong><span>to learn what a 4,661-line file contains</span></a></li>
+        <li><a href="#vs-gitnexus"><strong>153 ms</strong><span>median time to list a symbol's callers, 2.8&times; faster than GitNexus</span></a></li>
+        <li><a href="#faq"><strong>Local and MIT</strong><span>one binary, no account, no server, your code stays on your machine</span></a></li>
+      </ul>
 
       <figure class="board" data-board data-p1="{{ delimit $s.p1 "," }}" data-files="{{ $s.files }}">
         <p class="board__cmd"><span class="board__prompt" aria-hidden="true">$</span><code>pixel scope-task "{{ $s.task }}"</code></p>
@@ -39,10 +49,32 @@
         <figcaption class="board__legend">
           <span class="key key--p0">{{ len $s.p0 }} files to start with</span>
           <span class="key key--p1">{{ len $s.p1 }} likely needed</span>
-          <span class="key key--pad">{{ $s.files }} indexed files, one pad each, in path order</span>
-          <span class="board__note">A real run on Pixel's own repository.</span>
+          <span class="key key--pad">{{ $s.files }} files in the index, one square each</span>
+          <span class="board__note">A real run on Pixel's own repository: asked where to start on a task, Pixel named 5 files out of 555.</span>
         </figcaption>
       </figure>
+    </section>
+
+    {{/* ---------- how it works ---------- */}}
+    <section class="section wrap" id="how" aria-labelledby="how-title">
+      <header class="section__head">
+        <h2 id="how-title">How it works</h2>
+        <p>Nothing changes in how you prompt. Your agent keeps its own tools and uses Pixel's where they answer faster.</p>
+      </header>
+      <ol class="how">
+        <li class="how__step">
+          <h3>Index once</h3>
+          <p><code>pixel install</code> wires your agents. The first command in a repository builds its index in <code>.pixel/</code>. In the benchmark below, Pixel's own repository took 9.3 seconds from cold.</p>
+        </li>
+        <li class="how__step">
+          <h3>Your agent asks</h3>
+          <p>A hook hands your agent the Pixel protocol when a session starts. Where it would grep or open a file, it runs <code>pixel search-content</code>, <code>pixel scope-task</code> or <code>pixel impact</code>.</p>
+        </li>
+        <li class="how__step">
+          <h3>It gets an answer with its limits</h3>
+          <p>Ranked, size-capped results, each marked <code>complete</code>, <code>capped</code> or <code>unresolved</code>. Git writes are crash-safe and never force-push.</p>
+        </li>
+      </ol>
     </section>
 
     {{/* ---------- six jobs ---------- */}}
@@ -70,30 +102,16 @@
       </div>
     </section>
 
-    {{/* ---------- the flow ---------- */}}
-    <section class="section wrap" id="flow" aria-labelledby="flow-title">
+    {{/* ---------- benchmarks ---------- */}}
+    <section class="section wrap" id="benchmarks" aria-labelledby="bench-title">
       <header class="section__head">
-        <h2 id="flow-title">One path from a task to a pushed commit</h2>
-        <p>The agent prompt that <code>pixel install</code> deploys walks every change through the same steps. Only the edit is left to the agent's own tools.</p>
+        <h2 id="bench-title">Measured, including where Pixel loses</h2>
+        <p>Every number below links to its method and raw data in the repository, with the scripts to re-run it on your own code. Losses are reported in the same place as wins.</p>
       </header>
-      <ol class="flow">
-        <li class="flow__step"><span class="flow__pad" aria-hidden="true"></span><code>scope-task</code><span>Which files to open first</span></li>
-        <li class="flow__step"><span class="flow__pad" aria-hidden="true"></span><code>find-code</code><span>A phrase resolved to the exact symbol</span></li>
-        <li class="flow__step"><span class="flow__pad" aria-hidden="true"></span><code>impact</code><span>Every caller that could break</span></li>
-        <li class="flow__step flow__step--agent"><span class="flow__pad" aria-hidden="true"></span><code>edit</code><span>Your agent's own tools</span></li>
-        <li class="flow__step"><span class="flow__pad" aria-hidden="true"></span><code>what-changed</code><span>The symbols the diff touches</span></li>
-        <li class="flow__step"><span class="flow__pad" aria-hidden="true"></span><code>review-changes</code><span>Staged, unstaged and untracked, structured</span></li>
-        <li class="flow__step flow__step--end"><span class="flow__pad" aria-hidden="true"></span><code>commit-and-push</code><span>Commit, then a leased push</span></li>
-      </ol>
-    </section>
 
-    {{/* ---------- savings ---------- */}}
-    <section class="section wrap" id="savings" aria-labelledby="savings-title">
-      <header class="section__head">
-        <h2 id="savings-title">Fewer tokens, with a second model nowhere in the loop</h2>
-        <p>Pixel answers "what is in this file" from its index, so no file contents reach the agent's context and no paid worker model reads them instead. Measured on this repository (138K lines of Rust), counting UTF-8 bytes divided by four.</p>
-      </header>
-      <div class="savings">
+      <div class="bench">
+        <h3 class="bench__title">Reading code: 94 to 96% fewer tokens</h3>
+        <p class="bench__lede">What reaches the agent's context when it needs to know what a file contains, measured on Pixel's own repository (138K lines of Rust), counting UTF-8 bytes divided by four. No second model reads the files instead.</p>
         <table class="savings__table">
           <thead>
             <tr><th scope="col">Scenario</th><th scope="col">Full reads</th><th scope="col">With Pixel</th><th scope="col">Saved</th></tr>
@@ -109,7 +127,78 @@
             {{ end }}
           </tbody>
         </table>
-        <p class="savings__note">These numbers measure what the agent reads, not your invoice. <code>pixel token-savings</code> reports the fraction from your own sessions: 41 to 83% across 798 recorded operations on the maintainer's machine. Check it against your own usage.</p>
+        <p class="bench__note">This counts what the agent reads, not your invoice. <code>pixel token-savings</code> reports the same ratio from your own sessions: 41 to 83% across 798 operations on the maintainer's machine. <a class="link" href="{{ site.Params.github_url }}#-token-savings--measured-no-second-model">Method</a></p>
+      </div>
+
+      <div class="bench" id="vs-gitnexus">
+        <h3 class="bench__title">Against GitNexus, on the jobs both tools do</h3>
+        <p class="bench__lede">29 blast-radius cases on four repositories in Rust, TypeScript and Ruby, with callers found by grep as the ground truth. GitNexus 1.6.12 and Pixel 0.4.0, same machine, September 2026.</p>
+        <div class="table-scroll">
+          <table class="vs">
+            <thead>
+              <tr><th scope="col"></th><th scope="col">Pixel</th><th scope="col">GitNexus</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row">Callers found (recall, 29 cases)</th><td>0.86</td><td>0.84</td></tr>
+              <tr><th scope="row">Median time per answer</th><td class="is-win">153 ms</td><td>432 ms</td></tr>
+              <tr><th scope="row">Mean answer size</th><td class="is-win">4.5 KB</td><td>11.0 KB</td></tr>
+              <tr><th scope="row">Context cost on every turn</th><td class="is-win">~4,160 tokens</td><td>~19,700 tokens</td></tr>
+              <tr><th scope="row">Cold index of Pixel's repository</th><td class="is-win">9.3 s, 8.6 MB</td><td>28.7 s, 184 MB</td></tr>
+              <tr><th scope="row">Git history and Git operations</th><td class="is-win">Yes</td><td>No</td></tr>
+              <tr><th scope="row">Cypher queries, taint analysis, API route maps</th><td>No</td><td class="is-win">Yes</td></tr>
+              <tr><th scope="row">Callers in Ruby (two repositories)</th><td>0.90 and 0.56</td><td class="is-win">1.00 and 0.68</td></tr>
+              <tr><th scope="row">Licence</th><td class="is-win">MIT</td><td>PolyForm Noncommercial</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="bench__note">Recall is a tie at this sample size. Pixel finds every caller in Rust and TypeScript, GitNexus does better on Ruby. <a class="link" href="{{ $gh }}docs/bench/vs-gitnexus.md">Full method and raw rows</a></p>
+      </div>
+
+      <div class="bench">
+        <h3 class="bench__title">On whole agent tasks</h3>
+        <p class="bench__lede">Claude Code on real tasks in this repository, with and without Pixel, against a vanilla agent with no rules or hooks.</p>
+        <ul class="outcomes">
+          <li class="outcomes__item is-win"><strong>About 30% faster</strong> to scope a multi-file task. Two independent A/B designs agree: 31% and 29%.</li>
+          <li class="outcomes__item"><strong>About 1.5 seconds slower</strong> on a single lookup in the isolated run: the cost of reading the protocol before a one-shot answer.</li>
+          <li class="outcomes__item"><strong>Still slower</strong> at recovering deleted code from history. Open work, measured and published.</li>
+        </ul>
+        <p class="bench__note"><a class="link" href="{{ $gh }}docs/bench/measured-performance.md">Agent A/B runs and their caveats</a></p>
+      </div>
+
+      <div class="bench">
+        <h3 class="bench__title">Where a specialist wins</h3>
+        <ul class="outcomes">
+          <li class="outcomes__item"><strong>Natural-language search:</strong> semble finds the right file in its top 10 for 100% of 45 queries, Pixel for 69%.</li>
+          <li class="outcomes__item"><strong>Compact repository map:</strong> stacklit covers more directories for fewer tokens on 3 of 4 repositories.</li>
+          <li class="outcomes__item"><strong>Context cost:</strong> Pixel is 4.7&times; lighter than GitNexus, but heavier than semble (~980 tokens) and stacklit (~420).</li>
+        </ul>
+        <p class="bench__note">They combine: semble for search and Pixel for the graph, history and Git costs about 5,100 always-on tokens. <a class="link" href="{{ $gh }}docs/comparison.md">Full comparison</a></p>
+      </div>
+    </section>
+
+    {{/* ---------- decisions ---------- */}}
+    <section class="section wrap" id="decisions" aria-labelledby="decisions-title">
+      <header class="section__head">
+        <h2 id="decisions-title">Coding decisions, routed to the model you choose</h2>
+        <p><code>pixel classify</code> puts a bounded question to a model you configure (OpenRouter, Ollama Cloud or a local server) and returns one probability per label. On the 14 public coding items of JevBench, five models it can call beat Jev's published coding score.</p>
+      </header>
+      <div class="bench">
+        <div class="table-scroll">
+          <table class="vs vs--decide">
+            <thead>
+              <tr><th scope="col">Model, through <code>pixel classify</code></th><th scope="col">Coding accuracy</th><th scope="col">Median per item</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row">deepseek-v4.1-flash</th><td class="is-win">1.00 <span class="vs__n">14 of 14</span></td><td>1.4 s</td></tr>
+              <tr><th scope="row">gpt-oss:120b</th><td class="is-win">0.93 <span class="vs__n">13 of 14</span></td><td>2.0 s</td></tr>
+              <tr><th scope="row">deepseek-v4-flash</th><td class="is-win">0.93 <span class="vs__n">13 of 14</span></td><td>2.0 s</td></tr>
+              <tr><th scope="row">gpt-oss:20b</th><td class="is-win">0.93 <span class="vs__n">13 of 14</span></td><td>6.4 s</td></tr>
+              <tr><th scope="row">nemotron-3-ultra</th><td class="is-win">0.86 <span class="vs__n">12 of 14</span></td><td>8.1 s</td></tr>
+              <tr class="vs__ref"><th scope="row">Jev, published score</th><td>0.839 <span class="vs__n">on 56 items</span></td><td></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="bench__note">Read it with its limits: Jev's 0.839 is its own published score on 56 coding items, not re-measured here, and 14 items is a small sample. Answers come from a remote model and are not deterministic; every answer says so. No off-the-shelf local model up to 575M parameters passed 0.50 on the same items. <a class="link" href="{{ $gh }}docs/bench/decide-bakeoff.md">The bake-off</a></p>
       </div>
     </section>
 
@@ -149,6 +238,38 @@
           <p>Reports the global wiring and this repository's index as green, stale or missing. The first command that needs the index builds it.</p>
         </li>
       </ol>
+    </section>
+    {{/* ---------- faq ---------- */}}
+    <section class="section wrap" id="faq" aria-labelledby="faq-title">
+      <header class="section__head">
+        <h2 id="faq-title">Questions before you install</h2>
+      </header>
+      <div class="faq">
+        <details>
+          <summary>Does my code leave my machine?</summary>
+          <p>No. The index, the code graph and the history data live in <code>.pixel/</code> inside your repository, and Pixel sends nothing on its own. The network is used only by commands that exist for it, when called: fetch and push to your Git remotes, <code>pixel classify</code> to the model you configure, <code>pixel web-search</code>, and <code>pixel index-unpack</code> from a URL.</p>
+        </details>
+        <details>
+          <summary>Which languages does it understand?</summary>
+          <p>The code graph (callers, impact, call paths) covers TypeScript, JavaScript, Rust, Go, Java, Python, C# and Ruby, plus PHP, C, Swift, Elixir and Lua through a generic extractor. Text search covers every text file under 4 MiB that Git does not ignore.</p>
+        </details>
+        <details>
+          <summary>Does the protocol cost my agent tokens?</summary>
+          <p>About 4,160 tokens on every turn, the prompt that teaches your agent the commands. One <code>pixel impact</code> answer in place of reading a symbol's callers can recover it. GitNexus costs about 19,700 for comparable jobs.</p>
+        </details>
+        <details>
+          <summary>Will it make my agent faster?</summary>
+          <p>On multi-file tasks, yes: scoping measured about 30% faster. On a single lookup it adds about 1.5 seconds. The <a class="link" href="#benchmarks">benchmarks</a> show both.</p>
+        </details>
+        <details>
+          <summary>Which agents does it work with?</summary>
+          <p><code>pixel install</code> wires Claude Code, Codex, Pi, OpenCode and Antigravity. Copilot CLI, Gemini CLI and Devin load it as a plugin; Cursor, Windsurf, Kiro, Cline and Qoder as a rules file. <a class="link" href="{{ "docs/#plugins" | relURL }}">Setup for each</a></p>
+        </details>
+        <details>
+          <summary>How do I remove it?</summary>
+          <p><code>pixel uninstall</code> removes everything <code>pixel install</code> wrote, the binary included. Delete <code>.pixel/</code> in a repository to drop its index.</p>
+        </details>
+      </div>
     </section>
   </main>
 
