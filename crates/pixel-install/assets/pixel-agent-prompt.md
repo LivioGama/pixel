@@ -1,14 +1,13 @@
 # Pixel Retrieval Layer
 
 This repo has Pixel installed and indexed — a deterministic code retrieval
-system. Two things happen automatically:
+system.
 
-- A PreToolUse guard rewrites `grep`/`rg` calls to `pixel search-content`
-  (explicit path, file, or implicit cwd). You'll see the rewritten command in
-  the tool call — that's expected, not an error.
 - Hooks inject this file at session start and emit advisories after commands.
-
-You don't need to police yourself for native commands — the guard does it.
+- A PreToolUse guard exists only where the repo ran `pixel install --repo`.
+- Where it exists, it rewrites `grep`/`rg` calls to `pixel search-content`; a rewritten command is expected, not an error.
+- Where it does not, nothing rewrites your commands: run `pixel search-content` yourself instead of `grep`/`rg`.
+- Either way, prefer the Pixel commands below over native search and raw `git`.
 
 ## MANDATORY WORKFLOW
 
@@ -27,7 +26,7 @@ pixel commit --files <f>... -m "msg" --request-id "id"   # only when asked
 
 | Call | When |
 | --- | --- |
-| `pixel search-content "re" [path]` | regex search (what greps get rewritten to) |
+| `pixel search-content "re" [path]` | regex search, instead of `grep`/`rg` |
 | `pixel find-code "name"` | function/type by name or concept phrase |
 | `pixel find-symbol "Foo"` | exact symbol definition via the code graph |
 | `pixel search-meaning "how is auth handled?"` | conceptual question, not regex |
