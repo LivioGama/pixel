@@ -708,6 +708,36 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     path.display()
                 ));
             }
+            // Claude Code merges the shared and global settings into the
+            // same session: a shell rewriter there races the guard.
+            let global = crate::routing::Provider::Claude.path(&home);
+            let mut others = vec![&shared];
+            if !crate::routing::same_file(&shared, &global) {
+                others.push(&global);
+            }
+            let mut rivals = Vec::new();
+            for other in others {
+                let (groups, _) = crate::routing::global_pre_tool_use(other);
+                for command in
+                    crate::routing::hook_commands(&crate::routing::blocking_claude_groups(&groups))
+                {
+                    rivals.push(format!("{command} in {}", other.display()));
+                }
+            }
+            if !rivals.is_empty() {
+                return Ok((
+                    CheckStatus::Yellow,
+                    DoctorCheckDetail {
+                        summary: format!(
+                            "claude guard in {} runs beside another shell rewriter ({}) — run `pixel install --repo {}` to hold the guard back",
+                            path.display(),
+                            rivals.join(", "),
+                            root.display()
+                        ),
+                        detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+                    },
+                ));
+            }
             Ok((
                 CheckStatus::Green,
                 DoctorCheckDetail {

@@ -249,7 +249,7 @@ fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Resul
         crate::routing::install_project_codex_at(home, &codex_hooks, exe, dry_run)?
     };
     let steps = vec![
-        crate::routing::install_project_claude_at(repo, exe, dry_run)?,
+        crate::routing::install_project_claude_at(repo, home, exe, dry_run)?,
         crate::codex_config::install_developer_instructions(&codex_dir, dry_run)?,
         codex_step,
         crate::routing::install_project_devin_at(repo, exe, dry_run)?,
