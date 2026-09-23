@@ -148,7 +148,7 @@ Per repository, under `.pixel/` (git-ignored):
 | `graph.db` | `pixel-graph` | SQLite: files, symbols, edges with resolution tier. Built lazily on first graph command. |
 | `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle. Populated by `pixel build-index --history` or the daemon ingest thread. |
 | `targets.json` | CLI `targets` | Active task map (version 2): tasks with ids, timestamps, and P0/P1/P2 paths. Read by the guard hook and re-injected after compaction. |
-| `actions.jsonl` | `pixel-actionlog` | One line per invocation. |
+| `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
 | `reconcile-conflict.json`, `env-snapshots/` | `pixel-ops` | Conflict marker left by `reconcile` for the guard, and the pre-mutation copies `env` takes. |
 | `user-state.json` | `pixel-install` | Per-repository install state. |
 | `calls.json` | CLI | Circuit breaker counters for repeated identical calls. |
@@ -359,6 +359,11 @@ Existing hook entry points remain implemented, separately from active installati
 `pixel doctor` checks current installation artifacts and distinguishes configured
 or protocol-checked hooks from observed live execution. Dormant registration code
 is not an installed feature. Legacy uninstall behavior remains available.
+Every check is listed in `pixel_install::doctor::CHECKS` with a stable id and
+the command that repairs it (`pixel doctor --list`): `--only`/`--skip` select
+by id, and each yellow or red check reports that command as `fix`. The exit
+code carries the verdict: 0 when no check reaches `--fail-on` (default `red`),
+1 when one does, 2 when the checks could not run.
 
 ### Invocation accounting and chat delivery
 

@@ -75,7 +75,7 @@ pixel install
 pixel doctor .
 ```
 
-`pixel doctor .` reports the wiring as stale until you do.
+`pixel doctor .` reports the wiring as stale until you do, with the command that repairs each finding, and exits 1 while a check is red.
 
 ## Plugins
 

@@ -147,9 +147,13 @@ scripts/pixel-smoke-test.sh     # exercises the installed pixel (command -v pixe
 ```
 
 The `Cross-build` workflow (`.github/workflows/cross-build.yml`) builds the
-musl release lane on every push to `main` and on pull requests
+three release lanes (musl x86_64 and aarch64 through `cross`,
+`aarch64-apple-darwin` natively) on every push to `main`, saving the cache
+the tag's build restores, and on pull requests
 that touch a Rust-affecting path (`crates/`, `Cargo.*`, `.cargo/`,
-`deny.toml`, the workflow itself); a docs, prompt or script PR skips it.
+`deny.toml`, the workflow itself); a docs, prompt or script PR skips it, and
+so does a `release-x.y.z` prepare PR into `main`, whose merge commit's push
+run is the one the tag waits for.
 To reproduce it locally:
 
 ```bash
@@ -247,7 +251,7 @@ instead, and `--install-path <path>` overwrites a managed binary on purpose.
 pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-cli"
 pixel build-index --history .   # rebuild facts/history index
 pixel install             # redeploy the agent prompt, shell wrapper, Codex config
-pixel doctor .            # must be green; report any non-green check in the PR
+pixel doctor . --fail-on yellow   # must exit 0; report any non-green check in the PR
 scripts/pixel-smoke-test.sh   # the installed binary end to end (read-only)
 ```
 

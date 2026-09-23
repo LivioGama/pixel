@@ -373,6 +373,26 @@ pub(crate) const SUBAGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-sub
 /// owns only the managed block inside it.
 pub(crate) const PI_PROMPT_REL: &str = ".pi/agent/APPEND_SYSTEM.md";
 
+/// The prompt files a `pixel install` deployed under `home` that no longer
+/// match the copies bundled in this binary, by file name. Claude's
+/// SessionStart hook and the sub-agent flag read these files as they are, so
+/// after an upgrade every agent keeps the old command map until the install
+/// is rerun. A file that was never deployed is not listed: an install that
+/// never happened is `pixel doctor`'s report, not an upgrade's.
+pub fn stale_prompts(home: &Path) -> Vec<&'static str> {
+    let dir = home.join(".local/share/pixel");
+    [
+        ("agent-prompt.md", AGENT_PROMPT_ASSET),
+        (SUBAGENT_PROMPT_FILE, SUBAGENT_PROMPT_ASSET),
+    ]
+    .into_iter()
+    .filter(|(name, asset)| {
+        fs::read_to_string(dir.join(name)).is_ok_and(|deployed| deployed != *asset)
+    })
+    .map(|(name, _)| name)
+    .collect()
+}
+
 /// Copy the bundled Pixel agent system prompt to `~/.local/share/pixel/agent-prompt.md`,
 /// the sub-agent prompt to `~/.local/share/pixel/subagent-prompt.md`, and the
 /// prompt into Pi's system-prompt file (pi reads it automatically, no flag needed).
@@ -1175,6 +1195,46 @@ pub fn migrate(repo_root: &Path) -> Result<MigrateReport> {
         new_state_rebuilt: false,
         new_state_directory_prepared: true,
     })
+}
+
+#[cfg(test)]
+mod stale_prompt_tests {
+    use super::*;
+
+    fn deploy(home: &Path, name: &str, content: &str) {
+        let dir = home.join(".local/share/pixel");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(name), content).unwrap();
+    }
+
+    #[test]
+    fn nothing_deployed_is_not_stale() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(stale_prompts(home.path()).is_empty());
+    }
+
+    #[test]
+    fn prompts_matching_this_binary_are_not_stale() {
+        let home = tempfile::tempdir().unwrap();
+        deploy(home.path(), "agent-prompt.md", AGENT_PROMPT_ASSET);
+        deploy(home.path(), SUBAGENT_PROMPT_FILE, SUBAGENT_PROMPT_ASSET);
+        assert!(stale_prompts(home.path()).is_empty());
+    }
+
+    /// An older release's prompt, the case an upgrade leaves behind: each
+    /// file is judged on its own, against its own bundled copy.
+    #[test]
+    fn a_prompt_from_another_release_is_named() {
+        let home = tempfile::tempdir().unwrap();
+        deploy(home.path(), "agent-prompt.md", "# Pixel, an older prompt\n");
+        deploy(home.path(), SUBAGENT_PROMPT_FILE, SUBAGENT_PROMPT_ASSET);
+        assert_eq!(stale_prompts(home.path()), vec!["agent-prompt.md"]);
+        deploy(home.path(), SUBAGENT_PROMPT_FILE, AGENT_PROMPT_ASSET);
+        assert_eq!(
+            stale_prompts(home.path()),
+            vec!["agent-prompt.md", SUBAGENT_PROMPT_FILE]
+        );
+    }
 }
 
 #[cfg(test)]

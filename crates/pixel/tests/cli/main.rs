@@ -5,6 +5,7 @@
 mod ask_contract;
 mod classify_cli;
 mod docs_drift;
+mod doctor_cli;
 mod evaluate_cli;
 mod execution_brief;
 #[cfg(unix)]

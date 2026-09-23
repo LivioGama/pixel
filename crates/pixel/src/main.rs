@@ -7,7 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
@@ -22,6 +22,9 @@ macro_rules! println {
 macro_rules! eprintln {
     () => { crate::operation_metrics::print_error(format_args!("\n")) };
     ($($arg:tt)*) => { crate::operation_metrics::print_error(format_args!("{}\n", format_args!($($arg)*))) };
+}
+macro_rules! eprint {
+    ($($arg:tt)*) => { crate::operation_metrics::print_error(format_args!($($arg)*)) };
 }
 mod call_guard;
 mod classify;
@@ -42,6 +45,7 @@ mod prompt_submit;
 mod recall_cmd;
 mod rescue_cmd;
 mod search_compat;
+mod serve_trace;
 mod sniper_cmd;
 mod task_plan;
 mod task_runtime;
@@ -49,6 +53,7 @@ mod task_sandbox;
 mod task_scheduler;
 mod web_search;
 mod workspace_cmd;
+use pixel_actionlog::{InProcessReason, ServeRoute, ServeStep};
 use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service, failure_response};
 use pixel_daemon::daemon;
 use pixel_index::index::{build, shard_path};
@@ -104,6 +109,22 @@ enum DirectionArg {
 enum RoleArg {
     Callers,
     Callees,
+}
+
+/// `pixel doctor --fail-on`: the lowest check status that exits 1.
+#[derive(Copy, Clone, ValueEnum)]
+enum FailOn {
+    Yellow,
+    Red,
+}
+
+impl FailOn {
+    fn threshold(self) -> pixel_install::doctor::CheckStatus {
+        match self {
+            Self::Yellow => pixel_install::doctor::CheckStatus::Yellow,
+            Self::Red => pixel_install::doctor::CheckStatus::Red,
+        }
+    }
 }
 
 /// One lock for every unit test that mutates process-wide state (`HOME`
@@ -1006,6 +1027,10 @@ enum Command {
         dry_run: bool,
     },
     /// Health check: install state, daemon, index/graph/facts freshness.
+    ///
+    /// Exits 0 when no check reaches `--fail-on`, 1 when one does, 2 when the
+    /// checks could not run. Every yellow or red check names the command that
+    /// repairs it (`fix`).
     Doctor {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -1014,6 +1039,18 @@ enum Command {
         /// Shell whose wrapper block should be checked (default: $SHELL).
         #[arg(long)]
         shell: Option<String>,
+        /// Run only this check id (repeatable); `--list` names them.
+        #[arg(long, value_name = "ID")]
+        only: Vec<String>,
+        /// Leave out this check id (repeatable).
+        #[arg(long, value_name = "ID")]
+        skip: Vec<String>,
+        /// Lowest status that makes the command exit 1.
+        #[arg(long, value_enum, default_value = "red")]
+        fail_on: FailOn,
+        /// Print every check id with its repair command, then exit.
+        #[arg(long)]
+        list: bool,
     },
     /// Removed: the legacy `.gitpixel/` migration. Hidden and kept only so a
     /// script that still calls it exits 0 with a note instead of failing
@@ -1745,25 +1782,72 @@ fn roundtrip(stream: &mut UnixStream, req: &Request) -> Option<Response> {
 
 /// Daemon path: only if the socket answers Ping within ~100ms.
 fn try_daemon(root: &Path, req: &Request) -> Option<Response> {
-    match try_daemon_inner(root, req) {
-        DaemonRoute::Served(response) => Some(*response),
-        // A newer daemon belongs to a newer CLI still using it: leave it
-        // running and serve this command in process, without starting ours.
-        DaemonRoute::Declined => None,
-        DaemonRoute::Absent => auto_start_daemon(root, req),
-    }
+    let (response, step) = route_through_daemon(root, req);
+    serve_trace::record(step);
+    response
 }
 
-fn auto_start_daemon(root: &Path, req: &Request) -> Option<Response> {
+/// Route one request through the daemon, starting one when none answers,
+/// and say how it went; `None` leaves the request to this process, and the
+/// step then names why.
+fn route_through_daemon(root: &Path, req: &Request) -> (Option<Response>, ServeStep) {
+    route_through_daemon_with(root, req, auto_start_daemon)
+}
+
+/// [`route_through_daemon`] with the auto-start as a parameter, so a test can
+/// reach the start arm without spawning a process.
+fn route_through_daemon_with(
+    root: &Path,
+    req: &Request,
+    auto_start: impl FnOnce(&Path, &Request) -> Result<Response, InProcessReason>,
+) -> (Option<Response>, ServeStep) {
+    let clock = Instant::now();
+    let probe = probe_daemon(root);
+    let probe_ms = serve_trace::millis_since(clock);
+    // Retiring a stale daemon is the first part of starting its replacement,
+    // not a queue at the probe: `start_ms` counts it.
+    let mut start_clock = Instant::now();
+    let mut request_ms = None;
+    let route = route_for_probe(root, probe).unwrap_or_else(|| {
+        let clock = Instant::now();
+        let route = send_to_daemon(root, req);
+        request_ms = Some(serve_trace::millis_since(clock));
+        start_clock = Instant::now();
+        route
+    });
+    let (response, mut step) = match route {
+        DaemonRoute::Served(response) => (Some(*response), ServeStep::new(ServeRoute::Daemon)),
+        // A newer daemon belongs to a newer CLI still using it: leave it
+        // running and serve this command in process, without starting ours.
+        DaemonRoute::Declined => (None, ServeStep::in_process(InProcessReason::NewerDaemon)),
+        DaemonRoute::Absent => {
+            let started = auto_start(root, req);
+            let start_ms = serve_trace::millis_since(start_clock);
+            let (response, mut step) = match started {
+                Ok(response) => (Some(response), ServeStep::new(ServeRoute::DaemonStarted)),
+                Err(reason) => (None, ServeStep::in_process(reason)),
+            };
+            if step.reason != Some(InProcessReason::AutoStartDisabled) {
+                step.start_ms = Some(start_ms);
+            }
+            (response, step)
+        }
+    };
+    step.probe_ms = Some(probe_ms);
+    step.request_ms = request_ms;
+    (response, step)
+}
+
+fn auto_start_daemon(root: &Path, req: &Request) -> Result<Response, InProcessReason> {
     {
         // Auto-start: socket connection failed. Spawn the daemon in the
         // background and retry once. This makes the fast path transparent —
         // no need for the user to run `pixel daemon start` manually.
         // `PIXEL_DAEMON_AUTO_START=0` disables auto-start.
         if env_flag_off("PIXEL_DAEMON_AUTO_START") {
-            return None;
+            return Err(InProcessReason::AutoStartDisabled);
         }
-        let exe = std::env::current_exe().ok()?;
+        let exe = std::env::current_exe().map_err(|_| InProcessReason::StartFailed)?;
         let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let mut command = std::process::Command::new(exe);
         command
@@ -1775,15 +1859,15 @@ fn auto_start_daemon(root: &Path, req: &Request) -> Option<Response> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .process_group(0);
-        command.spawn().ok()?;
+        command.spawn().map_err(|_| InProcessReason::StartFailed)?;
         // Wait up to 5s for the socket to come up.
         for _ in 0..50 {
             if let DaemonRoute::Served(resp) = try_daemon_inner(root, req) {
-                return Some(*resp);
+                return Ok(*resp);
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        None
+        Err(InProcessReason::StartTimedOut)
     }
 }
 
@@ -1857,16 +1941,31 @@ enum DaemonRoute {
 }
 
 fn try_daemon_inner(root: &Path, req: &Request) -> DaemonRoute {
-    match probe_daemon(root) {
-        DaemonProbe::Current => {}
-        DaemonProbe::Newer => return DaemonRoute::Declined,
+    probe_route(root).unwrap_or_else(|| send_to_daemon(root, req))
+}
+
+/// The route the probe settles by itself; `None` when a current daemon
+/// answered and the request can be sent to it.
+fn probe_route(root: &Path) -> Option<DaemonRoute> {
+    route_for_probe(root, probe_daemon(root))
+}
+
+/// [`probe_route`] for a probe already made; a stale daemon is retired here.
+fn route_for_probe(root: &Path, probe: DaemonProbe) -> Option<DaemonRoute> {
+    match probe {
+        DaemonProbe::Current => None,
+        DaemonProbe::Newer => Some(DaemonRoute::Declined),
         DaemonProbe::Stale => {
             // An old daemon must not serve stale schemas to a newer CLI.
             retire_stale_daemon_within(root, STALE_DAEMON_EXIT_CAP);
-            return DaemonRoute::Absent;
+            Some(DaemonRoute::Absent)
         }
-        DaemonProbe::Absent => return DaemonRoute::Absent,
+        DaemonProbe::Absent => Some(DaemonRoute::Absent),
     }
+}
+
+/// Send `req` to the daemon a probe found current.
+fn send_to_daemon(root: &Path, req: &Request) -> DaemonRoute {
     // Each request gets its own connection. Besides removing a head-of-line
     // wait behind the Ping handshake, this keeps the client compatible with
     // a daemon that intentionally serves one request per connection.
@@ -1895,11 +1994,28 @@ fn env_flag_off(name: &str) -> bool {
 /// pointing any command at a subdirectory or file just works.
 fn execute(path: &Path, req: Request, no_daemon: bool) -> Result<Value, String> {
     let root = discover_root(path)?;
-    if !no_daemon && let Some(resp) = try_daemon(&root, &req) {
-        return unwrap_response(resp);
-    }
-    let mut svc = Service::open(&root).map_err(|e| e.to_string())?;
-    unwrap_response(svc.handle(req))
+    let mut step = if no_daemon {
+        ServeStep::in_process(InProcessReason::NoDaemon)
+    } else {
+        match route_through_daemon(&root, &req) {
+            (Some(resp), step) => {
+                serve_trace::record(step);
+                return unwrap_response(resp);
+            }
+            (None, step) => step,
+        }
+    };
+    let clock = Instant::now();
+    let opened = Service::open(&root);
+    step.open_ms = Some(serve_trace::millis_since(clock));
+    let resp = opened.map(|mut svc| {
+        let clock = Instant::now();
+        let resp = svc.handle(req);
+        step.handle_ms = Some(serve_trace::millis_since(clock));
+        resp
+    });
+    serve_trace::record(step);
+    unwrap_response(resp.map_err(|e| e.to_string())?)
 }
 
 fn unwrap_response(resp: Response) -> Result<Value, String> {
@@ -3653,6 +3769,92 @@ mod daemon_ping_tests {
         })
     }
 
+    /// A current daemon's answer is logged as a daemon route with both its
+    /// phases timed: the probe (the queue ahead) and the request itself.
+    #[test]
+    fn route_through_daemon_times_the_probe_and_the_request_of_a_current_daemon() {
+        let root = scratch_root("route-current");
+        let server = fake_daemon(&root, PROTOCOL_VERSION, 2, Duration::ZERO);
+        let (response, step) = route_through_daemon(&root, &Request::Status {});
+        assert!(response.is_some_and(|r| r.ok));
+        assert_eq!(step.route, ServeRoute::Daemon);
+        assert_eq!(step.reason, None);
+        assert!(
+            step.probe_ms.is_some() && step.request_ms.is_some(),
+            "{step:?}"
+        );
+        assert_eq!((step.start_ms, step.open_ms), (None, None), "{step:?}");
+        assert_eq!(
+            server.join().unwrap(),
+            vec![Request::Ping, Request::Status {}]
+        );
+        let _ = std::fs::remove_file(daemon::socket_path(&root));
+    }
+
+    /// A newer daemon sends the request back to this process without a
+    /// start attempt: the step says so, and times only the probe.
+    #[test]
+    fn route_through_daemon_names_a_newer_daemon_as_the_in_process_reason() {
+        let root = scratch_root("route-newer");
+        let server = fake_daemon(&root, PROTOCOL_VERSION + 1, 1, Duration::ZERO);
+        let (response, step) = route_through_daemon(&root, &Request::Status {});
+        assert!(response.is_none());
+        assert_eq!(step.route, ServeRoute::InProcess);
+        assert_eq!(step.reason, Some(InProcessReason::NewerDaemon));
+        assert!(step.probe_ms.is_some(), "{step:?}");
+        assert_eq!((step.request_ms, step.start_ms), (None, None), "{step:?}");
+        assert_eq!(server.join().unwrap(), vec![Request::Ping]);
+        let _ = std::fs::remove_file(daemon::socket_path(&root));
+    }
+
+    /// A stale daemon's retirement is timed as the start of its replacement:
+    /// on the first call after an upgrade the probe itself is quick, and a
+    /// `probe_ms` holding the retirement would read as a busy daemon.
+    #[test]
+    fn retiring_a_stale_daemon_counts_toward_the_start_not_the_probe() {
+        let root = scratch_root("route-stale");
+        let server = fake_daemon(&root, PROTOCOL_VERSION - 1, 100, Duration::from_millis(400));
+        let (response, step) = route_through_daemon_with(&root, &Request::Status {}, |_, _| {
+            Err(InProcessReason::StartTimedOut)
+        });
+        assert!(response.is_none());
+        assert_eq!(step.reason, Some(InProcessReason::StartTimedOut));
+        let (probe_ms, start_ms) = (step.probe_ms.unwrap(), step.start_ms.unwrap());
+        assert!(
+            start_ms >= 300,
+            "the retirement waited on the linger: {step:?}"
+        );
+        assert!(probe_ms < start_ms, "{step:?}");
+        let seen = server.join().unwrap();
+        assert_eq!(seen[..2], [Request::Ping, Request::Shutdown]);
+    }
+
+    /// No daemon answers: the started one's answer is returned and logged as
+    /// `daemon_started`; a refused start sends the request back to this
+    /// process under the start's own reason, untimed when it never ran.
+    #[test]
+    fn an_absent_daemon_is_started_or_names_why_it_was_not() {
+        let root = scratch_root("route-absent");
+        let (response, step) = route_through_daemon_with(&root, &Request::Status {}, |_, _| {
+            Ok(Response::success("status", json!({"started": true})))
+        });
+        assert_eq!(response.unwrap().data()["started"], true);
+        assert_eq!(step.route, ServeRoute::DaemonStarted);
+        assert!(
+            step.start_ms.is_some() && step.probe_ms.is_some(),
+            "{step:?}"
+        );
+        assert_eq!(step.request_ms, None, "{step:?}");
+
+        let (response, step) = route_through_daemon_with(&root, &Request::Status {}, |_, _| {
+            Err(InProcessReason::AutoStartDisabled)
+        });
+        assert!(response.is_none());
+        assert_eq!(step.route, ServeRoute::InProcess);
+        assert_eq!(step.reason, Some(InProcessReason::AutoStartDisabled));
+        assert_eq!(step.start_ms, None, "{step:?}");
+    }
+
     #[test]
     fn a_newer_daemon_is_left_running_and_declines_without_a_restart() {
         let root = scratch_root("newer");
@@ -4563,6 +4765,33 @@ fn rename_note(argv: &[String], unprotected: bool) -> Option<String> {
     ))
 }
 
+/// Whether this invocation checks the prompts `pixel install` deployed:
+/// every command but the protected streams, and the three that already deal
+/// with them (`install` rewrites them, `doctor` reports them, `uninstall`
+/// removes them).
+fn checks_deployed_prompts(command_label: &str, protected: bool) -> bool {
+    !protected && !matches!(command_label, "install" | "doctor" | "uninstall")
+}
+
+/// One stderr line naming the deployed prompts that differ from this
+/// binary's copies. Nothing outside `pixel doctor` said so, and every agent kept the
+/// old command map after an upgrade until someone reran the install.
+fn stale_prompt_note(stale: &[&str]) -> Option<String> {
+    if stale.is_empty() {
+        return None;
+    }
+    let (verb, pronoun) = if stale.len() == 1 {
+        ("differs", "it")
+    } else {
+        ("differ", "them")
+    };
+    Some(format!(
+        "note: {} deployed by `pixel install` {verb} from the copy in this pixel ({}); agents read the deployed one — run `pixel install` to update {pronoun}\n",
+        stale.join(" and "),
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
 fn run() -> Result<(), String> {
     let started = std::time::Instant::now();
     let argv: Vec<String> = std::env::args().collect();
@@ -4597,10 +4826,19 @@ fn run() -> Result<(), String> {
         && cli.metrics != "off"
         && std::env::var_os("PIXEL_METRICS").is_none_or(|v| v != "0")
         && config_cmd::metrics_enabled(root.as_deref().ok());
+    operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
+    // After `begin`, which zeroes the byte counters: both notes are rendered
+    // output the caller reads.
     if let Some(note) = rename_note(&argv, !protected) {
         eprint!("{note}");
     }
-    operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
+    if checks_deployed_prompts(&command_label, protected)
+        && let Some(home) = std::env::var_os("HOME")
+        && let Some(note) =
+            stale_prompt_note(&pixel_install::install::stale_prompts(Path::new(&home)))
+    {
+        eprint!("{note}");
+    }
     // Compatibility fallback must exec the original before any logging changes
     // its search corpus; its successful Pixel branch retains existing logging.
     let mut logger = match &root {
@@ -4652,6 +4890,7 @@ fn run() -> Result<(), String> {
     };
     let mut event = pixel_actionlog::ActionEvent::new(&command_label, logged_args(&argv[1..]))
         .with_result(&logged_result, elapsed);
+    event.serve = serve_trace::take();
     if !protected {
         // The repeated error is rendered output the caller reads, written
         // after the block: count it here, before the block is sized.
@@ -6200,23 +6439,55 @@ fn run_command(
             eprintln!("Upgrade complete: {}", dest.display());
             Ok(())
         }
-        Command::Doctor { path, json, shell } => {
-            let root = discover_root(&path)?;
-            let report = pixel_install::doctor::doctor(&pixel_install::doctor::DoctorOptions {
-                repo_root: Some(root),
-                shell,
-                // Hand the doctor this binary's REAL clap parser so the
-                // rule-vs-binary parity check dry-runs every `pixel …` line
-                // documented in the installed rule text against the actual
-                // CLI definition — documented-but-rejected syntax goes red.
-                syntax_validator: Some(validate_cli_syntax),
-                ..Default::default()
-            })
-            .map_err(|e| e.to_string())?;
-            print_data(
-                &serde_json::to_value(&report).map_err(|e| e.to_string())?,
-                json,
-            )
+        Command::Doctor {
+            path,
+            json,
+            shell,
+            only,
+            skip,
+            fail_on,
+            list,
+        } => {
+            if list {
+                let catalogue = serde_json::to_value(pixel_install::doctor::CHECKS)
+                    .map_err(|e| e.to_string())?;
+                return if json {
+                    print_data(&catalogue, true)
+                } else {
+                    write_stdout(&pixel_install::doctor::render_catalogue(
+                        pixel_install::doctor::CHECKS,
+                    ))
+                };
+            }
+            let report = discover_root(&path).and_then(|root| {
+                pixel_install::doctor::doctor(&pixel_install::doctor::DoctorOptions {
+                    repo_root: Some(root),
+                    shell,
+                    // Hand the doctor this binary's REAL clap parser so the
+                    // rule-vs-binary parity check dry-runs every `pixel …` line
+                    // documented in the installed rule text against the actual
+                    // CLI definition — documented-but-rejected syntax goes red.
+                    syntax_validator: Some(validate_cli_syntax),
+                    only,
+                    skip,
+                    ..Default::default()
+                })
+                .map_err(|e| e.to_string())
+            });
+            // Exit 2 keeps "the checks could not run" apart from exit 1,
+            // "a check found a problem", for a script gating on doctor.
+            let report = report.inspect_err(|_| owned_exit.set(Some(2)))?;
+            let value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+            if json {
+                print_data(&value, true)?;
+            } else {
+                operation_metrics::observe(&value);
+                write_stdout(&report.to_string())?;
+            }
+            if report.fails(fail_on.threshold()) {
+                owned_exit.set(Some(1));
+            }
+            Ok(())
         }
         Command::Migrate { .. } => {
             eprintln!("{MIGRATE_REMOVED_NOTE}");
@@ -8085,7 +8356,10 @@ mod prompt_asset_parity {
 
 #[cfg(test)]
 mod renamed_command_tests {
-    use super::{Cli, logged_args, rename_note, renamed_invocation};
+    use super::{
+        Cli, checks_deployed_prompts, logged_args, rename_note, renamed_invocation,
+        stale_prompt_note,
+    };
     use clap::CommandFactory;
     use std::collections::BTreeSet;
 
@@ -8199,6 +8473,37 @@ mod renamed_command_tests {
             "search-content config src",
             "other commands are logged verbatim"
         );
+    }
+
+    #[test]
+    fn stale_prompt_note_names_each_stale_file_in_one_line() {
+        assert_eq!(stale_prompt_note(&[]), None);
+        let one = stale_prompt_note(&["agent-prompt.md"]).unwrap();
+        assert_eq!(
+            one,
+            format!(
+                "note: agent-prompt.md deployed by `pixel install` differs from the copy in this pixel ({}); agents read the deployed one — run `pixel install` to update it\n",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        let both = stale_prompt_note(&["agent-prompt.md", "subagent-prompt.md"]).unwrap();
+        assert!(
+            both.starts_with(
+                "note: agent-prompt.md and subagent-prompt.md deployed by `pixel install` differ from"
+            ) && both.ends_with("update them\n"),
+            "{both}"
+        );
+        assert_eq!(both.lines().count(), 1, "{both}");
+    }
+
+    #[test]
+    fn deployed_prompts_are_checked_except_by_the_commands_that_own_them() {
+        assert!(checks_deployed_prompts("search-content", false));
+        assert!(checks_deployed_prompts("self-update", false));
+        assert!(!checks_deployed_prompts("search-content", true));
+        for owner in ["install", "doctor", "uninstall"] {
+            assert!(!checks_deployed_prompts(owner, false), "{owner}");
+        }
     }
 
     #[test]

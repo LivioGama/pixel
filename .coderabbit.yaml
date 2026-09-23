@@ -225,6 +225,10 @@ reviews:
       - "WIP"
       - "[WIP]"
       - "DO NOT MERGE"
+      # A release-prepare pull request is version bumps, Cargo.lock and the
+      # changelog cut by prepare.sh; the release skill reads the released
+      # section itself, and a review of the bumps has nothing to add.
+      - "release: prepare"
 
   pre_merge_checks:
     # Rust documentation is judged by rustdoc and the contract tests, not by

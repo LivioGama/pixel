@@ -1,1 +1,0 @@
-**cli:** `pixel classify` accepts shared framing through `--context` and JSONL `"context"`; on the 231 public JevBench items, this raised v1.3 chance-corrected Intelligence from 19.5 to 38.3. ([#209](https://github.com/LivioGama/pixel/pull/209))

@@ -24,9 +24,13 @@ jobs, each needing the previous one:
 
 Three facts shape everything below:
 
-- **The macOS binary is first compiled by the tag, and first run by
-  `smoke`.** `ci.yml` and `cross-build.yml` run on `ubuntu-26.04` only; a
-  green `main` proves the musl lane, never `aarch64-apple-darwin`.
+- **The macOS binary is first run by `smoke`.** `cross-build.yml` builds
+  all three release targets on every push to `main` with release.yml's exact
+  commands, so a green `main` proves each lane compiles and links; nothing
+  before `smoke` runs the darwin binary. The same job saves the per-target
+  cache (`release-<target>`) that the tag's `build` job restores, and the
+  `verify` job restores ci.yml's `linux-debug` one: a tag run reads the
+  default branch's caches, never another tag's.
 - **A published release is immutable.** GitHub's release immutability is on:
   once `release` has published, its assets cannot be added, replaced or
   deleted, and its tag cannot move or be deleted while the release exists (a
@@ -40,12 +44,39 @@ Three facts shape everything below:
 ## Authority
 
 Being asked to fix, merge or ship a change is not an authorization to
-release. A release starts on the user's explicit ask, and each outward step
-gets its own go: merging the prepare PR, pushing the tag, deleting a tag
-(an Admin bypass of the tag ruleset). An ask that names the steps ("do
-the release, merge and tag") is the go for those steps; say each command in a
-progress line just before running it. Anything the ask did not name (deleting
-a tag, force-pushing, retagging) still waits for its own go.
+release. A release starts on the user's explicit ask ("release", "/release",
+"cut 0.5.0"), and that ask is the go for the whole happy path: pick the
+version, prepare, open the PR, merge it once green, tag its merge commit once
+that commit's push CI is green, watch the run and verify the publication.
+Run it to the end without pausing for confirmation; say each outward command
+(merge, tag push) in a progress line just before running it, and report once,
+with the step 5 summary. An ask that limits the scope ("prepare 0.5.0",
+"don't tag yet") stops there.
+
+Stop and ask only when something is off — the happy path's evidence is
+missing or contradicts itself:
+
+- a precondition fails: dirty tree, red CI/Cross-build on `origin/main`'s
+  head, the last tag not on `main`, nothing to release, less disk than the
+  gates need after deleting `target/debug/incremental` (itself routine);
+- the version is not clear-cut: a fragment that could read either as patch
+  or as minor, anything that would make it `1.0.0` or a major, or a user
+  who named a version the convention contradicts;
+- `prepare.sh` or `check-release` refuses, the diff holds anything beyond
+  the list in step 3, or a user-visible pull request has no entry you can
+  write from its body alone;
+- a gate is red and the failure is not provably local (reproduce it with the
+  suspected variable or config unset);
+- a PR check is red or cancelled, or a review left an actionable comment;
+- the merge commit is not on `main`, is not the prepare PR's, or its push
+  CI is red;
+- any failed Release run: classify it (Recovery), and ask before anything
+  beyond one `gh run rerun --failed` for an **infra** failure.
+
+Whatever the path, these always wait for their own go, even inside a release
+the user asked for: deleting or moving a tag (an Admin bypass of the tag
+ruleset), force-pushing, retagging, editing the tap by hand, and deleting a
+release or its assets.
 
 Commands use the current names (`new-branch`, `repo-state`, `commit`). A
 `pixel` that rejects them predates 0.2.5: update it before releasing.
@@ -65,7 +96,7 @@ of reconstructing the release from `gh` output:
 - release run: <run-id> <url>; verify ✓/✗, build ✓/✗, release ✓/✗, smoke ✓/✗
 - publication: assets ✓/✗, install.sh ✓/✗, body ✓/✗, tap ✓/✗, binary ✓/✗
 - failure: <job, step, class (code|tooling|infra), evidence>
-- next action: <one command, and whether it needs the user's go>
+- next action: <one command, and whether it waits for the user (Authority)>
 ```
 
 On resume, trust the record only as a map: re-read the live state it points
@@ -87,7 +118,7 @@ gh secret list | grep HOMEBREW_TAP_TOKEN
 - Pick the last tag by version sort, not `git describe`: v0.2.4's commit is
   not an ancestor of `main` (it was replayed before the histories were
   joined), so `describe` can answer an older tag.
-- A red `Cross-build` on `main` means the musl lane fails with `--locked`:
+- A red `Cross-build` on `main` means a release lane fails with `--locked`:
   the `build` job will fail the same way. A red `Dependency policy
   (cargo-deny)` blocks every PR, the prepare PR included: a fresh RustSec
   advisory is a `chore(deps)` PR (`cargo update -p <crate>`) merged before
@@ -116,7 +147,12 @@ convention in this repo:
 - `1.0.0` also removes the hidden pre-rename aliases (0.2.5's `Changed`
   entry promises it); do not cut it by accident.
 
-Propose the version with the one-line reason; the user decides. Start the
+Pick the version by that convention, state it with its one-line reason in a
+progress line, and go on; stop only on the cases Authority lists. Check that
+what a `Removed` or `Changed` fragment breaks actually shipped in the last
+tag (`git cat-file -e v<last>:<path>`, or `git grep` the command at the tag):
+0.5.0 carried a `Removed` entry for `pixel classify` backends that no release
+had ever held, so it was no reason for a minor and no entry at all. Start the
 record.
 
 Then write `changelog.d/_highlights.md` on the release branch, unless the
@@ -188,8 +224,12 @@ gh pr create --base main --title "release: prepare x.y.z" --body-file <body>
 ```
 
 Body: the version, the reason for patch/minor, the gate output, "tag `vx.y.z`
-follows on this PR's merge commit". Wait for its CI, then merge it (the
-user's go).
+follows on this PR's merge commit". Watch its checks in the background
+(`gh pr checks <n> --watch`, `run_in_background: true`). The prepare PR skips
+`Cross-build` (the push run on its merge commit is the one step 4 waits for)
+and CodeRabbit (`ignore_title_keywords`); Test + Format, cargo-deny, MSRV and
+Mutants still run. All green and no actionable review comment: merge it,
+squash like every PR on `main` (`gh pr merge <n> --squash --delete-branch`).
 
 ## 4. Tag
 
@@ -205,7 +245,7 @@ git show --stat "$SHA" | head -5                      # the merge of release: pr
 git show "${SHA}:crates/pixel/Cargo.toml" | sed -n 3p # version = "x.y.z"; braces: zsh reads "$SHA:c" as a modifier
 gh run list --branch main --commit "$SHA"             # CI and Cross-build: success
 git tag -a vx.y.z -m "pixel x.y.z" "$SHA"             # annotated, as v0.2.4
-git push origin vx.y.z                                # ← the user's go first
+git push origin vx.y.z                                # the release ask covers it (Authority)
 ```
 
 Record the SHA, then find the run and watch it in the background, never with
@@ -222,8 +262,8 @@ space-separated string sees one word, and a watcher built that way reports
 failures that never happened.
 
 About 12 minutes to the end of `smoke` (0.3.0: verify 5 min, builds 6 min,
-publish and smoke under a minute). A failed `build` on
-`aarch64-apple-darwin` is the likeliest surprise (see the first fact above).
+publish and smoke under a minute; 0.5.0, uncached: builds 5.3 to 5.5 min
+on musl).
 
 ## 5. Verify the publication
 
