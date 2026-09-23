@@ -732,7 +732,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                             "claude guard in {} runs beside another shell rewriter ({}) — run `pixel install --repo {}` to hold the guard back",
                             path.display(),
                             rivals.join(", "),
-                            root.display()
+                            crate::routing::quoted_executable(root)
                         ),
                         detail: Some(serde_json::json!({ "path": path.display().to_string() })),
                     },
@@ -959,7 +959,7 @@ fn pi_guard_check(
             return Err(format!(
                 "{} is not a pixel-managed guard extension — move it aside, then run `pixel install --repo {}`",
                 path.display(),
-                root.display()
+                crate::routing::quoted_executable(root)
             ));
         }
         GuardState::Legacy(path) => (
@@ -968,7 +968,7 @@ fn pi_guard_check(
                 summary: format!(
                     "pi guard at {}, which pi never loads in a project — run `pixel install --repo {}` to move it to {}",
                     path.display(),
-                    root.display(),
+                    crate::routing::quoted_executable(root),
                     crate::pi_project::EXTENSION
                 ),
                 detail: Some(serde_json::json!({ "path": path.display().to_string() })),

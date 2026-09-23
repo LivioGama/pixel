@@ -4048,7 +4048,8 @@ fn uninstall_should_remove_the_pre_rename_guard_entry_and_script() {
 fn doctor_pi_guard_should_flag_a_guard_pi_never_loads() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
-    let repo = dir.path().join("repo");
+    // A space in the path: the suggested command is pasted into a shell.
+    let repo = dir.path().join("my repo");
     fs::create_dir_all(&home).unwrap();
     let legacy = repo.join(".pi/agent/extensions/pixel-guard.ts");
     fs::create_dir_all(legacy.parent().unwrap()).unwrap();
@@ -4068,7 +4069,7 @@ fn doctor_pi_guard_should_flag_a_guard_pi_never_loads() {
     assert!(c.summary.contains("never loads"), "{c:?}");
     assert!(
         c.summary
-            .contains(&format!("pixel install --repo {}", repo.display())),
+            .contains(&format!("pixel install --repo '{}'", repo.display())),
         "{c:?}"
     );
 
@@ -4084,7 +4085,8 @@ fn doctor_pi_guard_should_flag_a_guard_pi_never_loads() {
     assert!(
         c.reason
             .as_deref()
-            .is_some_and(|r| r.contains("not a pixel-managed guard extension")),
+            .is_some_and(|r| r.contains("not a pixel-managed guard extension")
+                && r.contains(&format!("pixel install --repo '{}'", repo.display()))),
         "{c:?}"
     );
 }
@@ -4290,6 +4292,7 @@ fn repo_install_at_home_should_read_the_global_file_once() {
         r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"'/old/pixel' run-hook guard --provider claude","timeout":10}]}]}}"#,
     )
     .unwrap();
+    let global_before = fs::read(home.join(".claude/settings.json")).unwrap();
     for dry_run in [true, false] {
         let mut options = repo_install_options(&repo, &home);
         options.dry_run = dry_run;
@@ -4304,7 +4307,20 @@ fn repo_install_at_home_should_read_the_global_file_once() {
             pixel_install::install::CheckStatus::Green,
             "dry_run={dry_run}: {step:?}"
         );
+        if dry_run {
+            assert_eq!(
+                fs::read(home.join(".claude/settings.json")).unwrap(),
+                global_before,
+                "a dry run writes nothing, the global file included"
+            );
+        }
     }
+    // The global file is this repository's shared one: the stale guard moves
+    // out of it into the personal file, and only the guard leaves.
+    let global = read_json(&home.join(".claude/settings.json"));
+    assert!(pixel_commands(&global, "PreToolUse").is_empty(), "{global}");
+    let local = read_json(&home.join(".claude/settings.local.json"));
+    assert_eq!(pixel_commands(&local, "PreToolUse").len(), 1, "{local}");
 }
 
 /// A full install of an older release left pixel's own guard in the global
@@ -4347,7 +4363,8 @@ fn repo_install_should_name_pixel_install_for_a_global_pixel_guard() {
 fn doctor_repo_claude_hooks_should_flag_a_guard_beside_a_global_rewriter() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
-    let repo = dir.path().join("repo");
+    // A space in the path: the suggested command is pasted into a shell.
+    let repo = dir.path().join("my repo");
     fs::create_dir_all(home.join(".claude")).unwrap();
     fs::create_dir_all(&repo).unwrap();
     install(&repo_install_options(&repo, &home)).unwrap();
@@ -4370,7 +4387,7 @@ fn doctor_repo_claude_hooks_should_flag_a_guard_beside_a_global_rewriter() {
     assert_eq!(c.status, CheckStatus::Yellow, "{c:?}");
     assert!(
         c.summary.contains(&format!(
-            "runs beside another shell rewriter (`rtk hook claude` in {}) — run `pixel install --repo {}`",
+            "runs beside another shell rewriter (`rtk hook claude` in {}) — run `pixel install --repo '{}'`",
             home.join(".claude/settings.json").display(),
             repo.display()
         )),
