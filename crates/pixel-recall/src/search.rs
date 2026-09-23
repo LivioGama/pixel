@@ -396,8 +396,8 @@ pub(crate) fn snippet_around(text: &str, m_start: usize, m_end: usize) -> (Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Role;
-    use crate::testutil::{TS, add_session};
+    use crate::model::{IntentSource, Role};
+    use crate::testutil::{TS, add_session, add_session_with_intents};
 
     /// Three turns mentioning `needle` across two sessions, indexed.
     fn corpus() -> (tempfile::TempDir, RecallStore, SegmentSet) {
@@ -500,6 +500,70 @@ mod tests {
         .unwrap();
         assert_eq!(page.hits.len(), 3);
         assert!(page.truncated);
+    }
+
+    /// `--human-only` drops harness-injected user turns and nothing else:
+    /// assistant and tool turns stay, because `ask`'s lexical channel sets
+    /// the filter to skip boilerplate while still ranking the discussion.
+    /// Human text alone takes `--role user` on top. Both the candidate-fetch
+    /// path (a literal pattern) and the ordered scan (`.`) apply it.
+    #[test]
+    fn human_only_should_drop_injected_user_turns_and_keep_assistant_and_tool_turns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+        add_session_with_intents(
+            &mut store,
+            "claude",
+            "cccc3333",
+            &[
+                (Role::User, Some(IntentSource::Human), "human needle"),
+                (
+                    Role::User,
+                    Some(IntentSource::Orchestrator),
+                    "injected needle",
+                ),
+                (Role::Assistant, None, "assistant needle"),
+                (Role::Tool, None, "tool needle"),
+            ],
+        );
+        let mut segments = SegmentSet::open(&tmp.path().join("segments")).unwrap();
+        segments.index_new(&store).unwrap();
+        let texts = |pattern: &str, filters: &SearchFilters| -> Vec<String> {
+            let mut texts: Vec<String> = search(&store, &segments, pattern, false, filters, 0, 10)
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|h| h.snippet)
+                .collect();
+            texts.sort_unstable();
+            texts
+        };
+        let human_only = SearchFilters {
+            human_only: true,
+            ..SearchFilters::default()
+        };
+        let human_user = SearchFilters {
+            human_only: true,
+            role: Some("user".to_string()),
+            ..SearchFilters::default()
+        };
+        for pattern in ["needle", "."] {
+            assert_eq!(
+                texts(pattern, &SearchFilters::default()).len(),
+                4,
+                "{pattern}: unfiltered baseline"
+            );
+            assert_eq!(
+                texts(pattern, &human_only),
+                ["assistant needle", "human needle", "tool needle"],
+                "{pattern}: only the injected user turn goes"
+            );
+            assert_eq!(
+                texts(pattern, &human_user),
+                ["human needle"],
+                "{pattern}: --role user narrows to human text"
+            );
+        }
     }
 
     #[test]
