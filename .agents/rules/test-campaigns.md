@@ -10,9 +10,12 @@ Always loaded: how to run the long gates without losing an afternoon.
   on the one or two functions in question (minutes) and never the full diff.
 - **Measure before you launch anything.** `cargo mutants --list --in-diff
   <diff> | wc -l` gives the mutant count; CI costs about 25 s per `pixel-cli`
-  mutant after a 3 min baseline and 10 to 15 s per library-crate mutant. A
-  count that will not fit the 90-minute CI job means the PR must be split by
-  file, never by weakening the gate.
+  mutant after a 3 min baseline and 10 to 15 s per library-crate mutant.
+  The workflow shards the list: one job per 20 mutants, at most 10 jobs
+  (`MUTANTS_PER_SHARD`, `MAX_SHARDS` in `scripts/mutants-gate.py`), each
+  paying its own baseline. The limit is per shard: a count whose slices will
+  not fit a 90-minute job (roughly 2 000 CLI mutants) means the PR must be
+  split by file, never by weakening the gate.
 - **Count against the merge base, with three dots.** `git diff
   origin/main...HEAD` diffs the merge base against HEAD — what the branch
   changed. `git diff origin/main..HEAD` diffs the two commits and adds

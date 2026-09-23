@@ -73,7 +73,8 @@ clean:
   fix the bug in its own PR with a `changelog.d/` fragment, below the PR that
   found it. Do not bend the test to the broken behaviour.
 - **Fix from the CI report, verify locally only per function.** Read the
-  `Mutants` job's `MISSED`/`TIMEOUT` lines, write the test, and if asked to
+  `MISSED`/`TIMEOUT` lines (the `Mutants in diff` summary gathers every
+  shard's), write the test, and if asked to
   check before pushing run `cargo mutants --in-diff <diff> -F <function>`
   (minutes). Never the full in-diff run: it is the job's work. Never edit
   the tree while a run is in flight: it mutates files in place. After a
