@@ -14,21 +14,57 @@ crate-root build script, `Cargo.toml` alone. A diff that touches Rust the
 config does NOT exclude, and still produced zero mutants, is the vacuous
 case: it gets a warning annotation and an unmissable summary block.
 
+The workflow shards the run, so the script also plays the two roles around
+the shards. Before them, `--github-output` sizes the matrix from the listing.
+After them, `--outcomes-root` totals every shard's `outcomes.json` and holds
+the total against the listing. A shard that crashed, was cancelled or ran a
+different list leaves mutants without a verdict. Without that check, the
+shards that did finish would add up to a pass.
+
 Usage:
     mutants-gate.py --diff pr.diff --list mutants-list.txt [--fail-on-vacuous]
+        [--github-output FILE] [--outcomes-root DIR]
 
 `--list` is the stdout of `cargo mutants --list --in-diff <diff>`, which
 costs no build. Exit 0 unless `--fail-on-vacuous` is passed and the diff is
-vacuous.
+vacuous, or `--outcomes-root` is passed and a listed mutant survived, timed
+out or never reached a verdict.
 """
 
 import argparse
+from collections import Counter
+import json
 from pathlib import Path
 import re
 import sys
 
 REPO = Path(__file__).resolve().parent.parent
 CONFIG = REPO / ".cargo/mutants.toml"
+
+#: Mutants one shard is sized for. A shard pays a baseline (one to three
+#: minutes with the shared cache) before its first mutant, then about 25 s
+#: per `pixel-cli` mutant and 10 to 15 s per library mutant. At 20 mutants,
+#: the baseline is at most a third of a shard's run.
+MUTANTS_PER_SHARD = 20
+#: Upper bound on parallel shard jobs. Free accounts run 20 jobs at a time,
+#: and this leaves room for the CI workflow of the same push. Past 200
+#: mutants, shards grow beyond `MUTANTS_PER_SHARD`: a 658-mutant diff puts
+#: 66 on each shard, about 30 minutes against the job's 90-minute limit.
+MAX_SHARDS = 10
+
+#: `outcomes.json` summaries, by the name the report prints for them.
+OUTCOME_NAMES = {
+    "CaughtMutant": "caught",
+    "MissedMutant": "missed",
+    "Timeout": "timeout",
+    "Unviable": "unviable",
+}
+#: The only outcomes that pass: a test failed under the mutant, or the
+#: mutant did not compile. Anything else fails the gate, including a summary
+#: this script does not know (a later cargo-mutants may add one).
+HELD = ("caught", "unviable")
+#: Outcomes that fail the gate: the mutant survived or never finished.
+SURVIVING = ("missed", "timeout")
 
 
 def exclude_globs(config: Path = CONFIG) -> list[str]:
@@ -88,6 +124,66 @@ def count_mutants(list_text: str) -> int:
     return sum(1 for line in list_text.splitlines() if re.match(r"^\S+\.rs:\d+:\d+:", line))
 
 
+def shard_count(mutants: int) -> int:
+    """Shard jobs for `mutants` listed mutants: none when there is nothing to run."""
+    return min(MAX_SHARDS, -(-mutants // MUTANTS_PER_SHARD))
+
+
+def shard_matrix(mutants: int) -> list[str]:
+    """The `--shard k/n` values, ready to pass to cargo-mutants as they are.
+
+    cargo-mutants numbers shards from 0 (`n/n` is rejected), and its default
+    `slice` sharding cuts the listing into consecutive ranges, so a shard's
+    mutants sit in few packages and its baseline builds only those.
+    """
+    count = shard_count(mutants)
+    return [f"{k}/{count}" for k in range(count)]
+
+
+def tally(root: Path) -> tuple[Counter[str], list[str]]:
+    """Outcome counts over every `root/*/outcomes.json`, and the survivors' names.
+
+    A mutant with a summary outside `OUTCOME_NAMES` still counts, under its
+    raw summary, so the total always accounts for every scenario the shard
+    reported. Every mutant outside `HELD` is named. The baseline is not a
+    mutant and is not counted.
+    """
+    counts: Counter[str] = Counter()
+    survivors = []
+    for path in sorted(root.glob("*/outcomes.json")):
+        for outcome in json.loads(path.read_text())["outcomes"]:
+            scenario = outcome["scenario"]
+            if not isinstance(scenario, dict) or "Mutant" not in scenario:
+                continue
+            name = OUTCOME_NAMES.get(outcome["summary"], outcome["summary"])
+            counts[name] += 1
+            if name not in HELD:
+                survivors.append(f"{name.upper()} {scenario['Mutant']['name']}")
+    return counts, survivors
+
+
+def outcome_failure(listed: int, counts: Counter[str]) -> str | None:
+    """Why the shards' outcomes fail the gate, or `None` when every mutant was held."""
+    reached = sum(counts.values())
+    if reached != listed:
+        return (
+            f"{listed} mutant(s) listed, {reached} reached a verdict: a shard "
+            "crashed, timed out, was cancelled or ran a different list. The "
+            "missing mutants were never judged; re-run the failed shard jobs."
+        )
+    surviving = sum(counts[name] for name in SURVIVING)
+    if surviving:
+        return f"{surviving} mutant(s) survived; each one needs a test or a reasoned skip."
+    unknown = sorted(name for name in counts if name not in HELD)
+    if unknown:
+        return (
+            f"{sum(counts[name] for name in unknown)} mutant(s) ended with an "
+            f"outcome the gate does not know ({', '.join(unknown)}); it cannot "
+            "read them as caught."
+        )
+    return None
+
+
 def verdict(mutants: int, mutable: list[str]) -> tuple[str, str]:
     """`(status, message)` for a run that produced `mutants` over `mutable` files.
 
@@ -131,6 +227,29 @@ def render(status: str, message: str, mutants: int, mutable: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_outcomes(
+    counts: Counter[str], survivors: list[str], failure: str | None
+) -> str:
+    """The shards' totals, every survivor by name, and the gate's decision."""
+    known = [f"{counts[name]} {name}" for name in OUTCOME_NAMES.values()]
+    other = [
+        f"{n} {name}"
+        for name, n in sorted(counts.items())
+        if name not in OUTCOME_NAMES.values()
+    ]
+    lines = [
+        "",
+        f"- **outcomes across shards:** {sum(counts.values())} judged: "
+        + ", ".join(known + other),
+        f"- **gate:** {'failed' if failure else 'passed'}",
+    ]
+    if failure:
+        lines += ["", failure]
+    if survivors:
+        lines += ["", "```", *survivors, "```"]
+    return "\n".join(lines) + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--diff", required=True, type=Path)
@@ -142,6 +261,17 @@ def main(argv: list[str] | None = None) -> int:
         help="exit 1 when the diff changed mutable Rust and no mutant came out",
     )
     parser.add_argument("--summary", type=Path, help="append the report here")
+    parser.add_argument(
+        "--github-output",
+        type=Path,
+        help="append `mutants=<count>` and `shards=<JSON list of k/n>` here",
+    )
+    parser.add_argument(
+        "--outcomes-root",
+        type=Path,
+        help="directory holding one mutants.out per shard; fail unless every "
+        "listed mutant was caught or unviable",
+    )
     args = parser.parse_args(argv)
 
     paths = diff_paths(args.diff.read_text(errors="replace"))
@@ -149,7 +279,17 @@ def main(argv: list[str] | None = None) -> int:
     mutants = count_mutants(args.listing.read_text(errors="replace"))
     status, message = verdict(mutants, mutable)
 
+    if args.github_output:
+        with args.github_output.open("a") as fh:
+            fh.write(f"mutants={mutants}\n")
+            fh.write(f"shards={json.dumps(shard_matrix(mutants))}\n")
+
     report = render(status, message, mutants, mutable)
+    failure = None
+    if args.outcomes_root:
+        counts, survivors = tally(args.outcomes_root)
+        failure = outcome_failure(mutants, counts)
+        report += render_outcomes(counts, survivors, failure)
     print(report, end="")
     if args.summary:
         with args.summary.open("a") as fh:
@@ -160,6 +300,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::warning title=Mutation gate tested nothing::{message}")
         if args.fail_on_vacuous:
             return 1
+    if failure:
+        print(f"::error title=Mutation gate failed::{failure}")
+        return 1
     return 0
 
 

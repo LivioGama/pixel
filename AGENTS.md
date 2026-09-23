@@ -4,7 +4,7 @@ Build, gates, PR format and the definition of done live in [CONTRIBUTING.md](CON
 
 ## Mutation Testing Loop
 
-Mutation testing runs in CI only: the `Mutants` workflow runs `cargo mutants --in-diff` against the PR's base and fails the pull request on any surviving mutant. Do not run `cargo mutants` locally on your own initiative; it holds the tree (`--in-place`) and a laptop for up to hours, which is what the workflow's runners are for. The local loop is: write the code in the shapes `.agents/rules/mutation-gate.md` describes, pass the fast gates (`cargo fmt`, `cargo test`, `cargo clippy`), push, open the PR, then read the `Mutants` job's `MISSED`/`TIMEOUT` lines (`gh run view --log` or the job annotations). A local `cargo mutants … -F '<fn>'` on one or two functions, bounded to a few minutes, is acceptable only when explicitly asked for.
+Mutation testing runs in CI only: the `Mutants` workflow runs `cargo mutants --in-diff` against the PR's base and fails the pull request on any surviving mutant. Do not run `cargo mutants` locally on your own initiative; it holds the tree (`--in-place`) and a laptop for up to hours, which is what the workflow's runners are for. The local loop is: write the code in the shapes `.agents/rules/mutation-gate.md` describes, pass the fast gates (`cargo fmt`, `cargo test`, `cargo clippy`), push, open the PR, then read the `MISSED`/`TIMEOUT` lines: the `Mutants in diff` job summary lists every shard's survivors, and `gh run view --log` on a `Mutants shard k/n` job or the annotations give the detail. A local `cargo mutants … -F '<fn>'` on one or two functions, bounded to a few minutes, is acceptable only when explicitly asked for.
 
 For each `MISSED` line either:
 

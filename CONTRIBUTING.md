@@ -125,7 +125,11 @@ regardless; `CI=1` disables both behaviours. Its contract is pinned by
 The `Mutants` workflow (`.github/workflows/mutants.yml`) runs on every pull
 request that touches `crates/` and fails on a surviving mutant. It is the
 gate; push and read its output rather than reproducing it locally (a
-231-mutant PR held a laptop for two hours). To reproduce one finding
+231-mutant PR held a laptop for two hours). A `Mutants plan` job lists the
+diff's mutants and splits them into consecutive slices. Each `Mutants shard
+k/n` job runs one slice (`--shard k/n`, numbered from 0). `Mutants in diff`
+then totals the slices and fails when a mutant survived or a shard left its
+slice unjudged. Its summary names every survivor. To reproduce one finding
 locally, scope the run to the function:
 
 ```bash
