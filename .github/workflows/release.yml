@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# Same value as ci.yml and cross-build.yml: rust-cache hashes every CARGO_*
+# variable into its key, so a different set here would miss their caches.
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   # Gate: nothing is built or published unless the tag names the version that
   # Cargo.toml declares and the test suite passes on the tagged commit. CI does
@@ -29,6 +34,14 @@ jobs:
           # The SHA pin no longer names the toolchain through the ref, so
           # it is passed explicitly (same channel as before).
           toolchain: stable
+
+      # Restores the debug cache ci.yml's Test job saves on main (shared key
+      # linux-debug); never saves: a tag's cache is unreadable by the next tag.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: linux-debug
+          save-if: false
 
       - name: Install system dependencies
         run: |
@@ -73,6 +86,16 @@ jobs:
           # it is passed explicitly (same channel as before).
           toolchain: stable
           targets: ${{ matrix.target }}
+
+      # Restores what cross-build.yml saved on main for this target (shared
+      # key release-<target>): the dependencies arrive compiled, and only the
+      # workspace crates and the thin-LTO link are left. Never saves, for the
+      # same reason as the verify job.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          save-if: false
 
       # Prebuilt binary instead of `cargo install cross`. cross compiles inside
       # its own Docker image (musl toolchain included), so no host packages.
