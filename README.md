@@ -50,6 +50,10 @@ Replicating shunt's benchmark shape on this repo (138K lines, Rust), same method
 
 Unlike shunt's headline number, Pixel also self-reports **measured** savings from real sessions via `pixel token-savings` — on this machine: **41–83%** across 798 recorded operations. Same caveat as every tool in this space: these numbers measure what the agent reads, not your invoice — verify against your own usage.
 
+<p align="center">
+  <img src="docs/examples/pixel-measured-comparison.gif" width="100%" alt="Without Pixel: blind reads and claimed savings; with Pixel: a git-anchored index and measured token savings" />
+</p>
+
 ## 🚀 Start here
 
 ```bash

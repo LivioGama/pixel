@@ -129,10 +129,8 @@ latest measured run, fetched 2026-09-23).
 number, not re-measured here; different denominator than our n=14 subset.
 
 OpenRouter note: `api.openrouter.ai` was NXDOMAIN during the run; the
-preset now defaults to the working `openrouter.ai/api/v1` base. The
-shell-env `OPENROUTER_API_KEY` maps to a
-guardrail-locked workspace that rejects Google models; the working key
-lives in Infisical (ship-fast project).
+preset now defaults to the working `openrouter.ai/api/v1` base. Keys come
+from the env var named by the preset; keep them in your own secret store.
 
 ## Honesty notes (decision backends)
 
