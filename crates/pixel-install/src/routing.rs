@@ -371,6 +371,23 @@ pub(crate) fn load_rtk_backup(home: &Path) -> crate::Result<Vec<Value>> {
     Ok(saved)
 }
 
+/// Which events a provider install may register. The doctrine reaches every
+/// Claude process through the lifecycle hooks in the user-level settings
+/// (`~/.claude/settings.json`), while enforcement stays repo-local
+/// (`<repo>/.claude/settings.json`); neither file should carry the other's
+/// half.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HookScope {
+    /// Lifecycle + PreToolUse shell routing (the historical full install).
+    All,
+    /// SessionStart/UserPromptSubmit/PostToolUse/compaction only — no
+    /// PreToolUse. Used for the global Claude install.
+    LifecycleOnly,
+    /// PreToolUse guard only — no lifecycle events. Used for repo-local
+    /// enforcement (`<repo>/.claude/settings.json`).
+    GuardOnly,
+}
+
 /// Apply the pure configuration transform and return (routing enabled, RTK
 /// fragments adopted). Unknown overlapping hooks remain untouched.
 fn configure(
@@ -378,6 +395,16 @@ fn configure(
     provider: Provider,
     exe: &Path,
     saved: &[Value],
+) -> Result<(bool, Vec<Value>), String> {
+    configure_scoped(value, provider, exe, saved, HookScope::All)
+}
+
+fn configure_scoped(
+    value: &mut Value,
+    provider: Provider,
+    exe: &Path,
+    saved: &[Value],
+    scope: HookScope,
 ) -> Result<(bool, Vec<Value>), String> {
     let root = value
         .as_object_mut()
@@ -392,47 +419,57 @@ fn configure(
         return Err("RTK delegate backup missing; refusing to lose its registration".into());
     }
     remove_pixel_hooks(hooks);
-    if delegated {
+    if delegated || (scope == HookScope::LifecycleOnly && !saved.is_empty()) {
+        // Restore the adopted RTK fragment even when only lifecycle hooks
+        // are managed: `remove_pixel_hooks` strips a stale delegate entry,
+        // and leaving it removed would orphan the user's RTK hook.
         restore_rtk(hooks, saved);
     }
-    let pre = hooks
-        .entry("PreToolUse")
-        .or_insert_with(|| json!([]))
-        .as_array_mut()
-        .ok_or("PreToolUse is not an array")?;
-    let blocked = pre.iter().any(|group| {
-        !(!shell_overlap(group, provider)
-            || passive_vibe_claude_bridge(group, provider)
-            || passive_gitnexus_claude_hook(group, provider)
-            || passive_cmux_codex_feed(group, provider)
-            || inactive_orca_observer(group, provider)
-            || provider == Provider::Claude && exact_rtk(group))
-    });
+    let mut enabled = true;
     let mut adopted = Vec::new();
-    if !blocked {
-        if provider == Provider::Claude {
-            pre.retain(|group| {
-                if exact_rtk(group) {
-                    adopted.push(group.clone());
-                    false
-                } else {
-                    true
-                }
-            });
+    if scope != HookScope::LifecycleOnly {
+        let pre = hooks
+            .entry("PreToolUse")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or("PreToolUse is not an array")?;
+        let blocked = pre.iter().any(|group| {
+            !(!shell_overlap(group, provider)
+                || passive_vibe_claude_bridge(group, provider)
+                || passive_gitnexus_claude_hook(group, provider)
+                || passive_cmux_codex_feed(group, provider)
+                || inactive_orca_observer(group, provider)
+                || provider == Provider::Claude && exact_rtk(group))
+        });
+        if !blocked {
+            if provider == Provider::Claude {
+                pre.retain(|group| {
+                    if exact_rtk(group) {
+                        adopted.push(group.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            let delegate = if adopted.is_empty() {
+                ""
+            } else {
+                " --delegate-rtk"
+            };
+            pre.push(hook_group(
+                format!(
+                    "{} run-hook guard --provider {}{delegate}",
+                    quoted_executable(exe),
+                    provider.name()
+                ),
+                Some(provider.shell_matcher()),
+            ));
         }
-        let delegate = if adopted.is_empty() {
-            ""
-        } else {
-            " --delegate-rtk"
-        };
-        pre.push(hook_group(
-            format!(
-                "{} run-hook guard --provider {}{delegate}",
-                quoted_executable(exe),
-                provider.name()
-            ),
-            Some(provider.shell_matcher()),
-        ));
+        enabled = !blocked;
+    }
+    if scope == HookScope::GuardOnly {
+        return Ok((enabled, adopted));
     }
     for (event, verb, matcher) in [
         (
@@ -476,7 +513,7 @@ fn configure(
             matcher,
         ));
     }
-    Ok((!blocked, adopted))
+    Ok((enabled, adopted))
 }
 
 #[cfg_attr(not(test), allow(dead_code))] // exercised by uninstall/routing tests
@@ -737,24 +774,65 @@ pub(crate) fn install_at(
     provider: Provider,
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
+    install_at_scoped(home, path, exe, provider, HookScope::All, dry_run)
+}
+
+/// Scoped install: lifecycle hooks only (global Claude doctrine delivery) or
+/// the PreToolUse guard only (repo-local Claude enforcement). Same merge and
+/// foreign-hook preservation rules as the full install.
+pub(crate) fn install_at_scoped(
+    home: &Path,
+    path: &Path,
+    exe: &Path,
+    provider: Provider,
+    scope: HookScope,
+    dry_run: bool,
+) -> crate::Result<install::InstallStep> {
     let mut value = install::read_settings(path)?;
     let saved = if provider == Provider::Claude {
         load_rtk_backup(home)?
     } else {
         Vec::new()
     };
-    let (enabled, adopted) = configure(&mut value, provider, exe, &saved).map_err(|reason| {
-        InstallError::InvalidSettings {
-            path: path.into(),
-            reason,
-        }
-    })?;
+    let (enabled, adopted) =
+        configure_scoped(&mut value, provider, exe, &saved, scope).map_err(|reason| {
+            InstallError::InvalidSettings {
+                path: path.into(),
+                reason,
+            }
+        })?;
     // Persist only the adopted fragment, never restore a whole settings file
     // over later user edits. Save before changing its active registration.
     if !adopted.is_empty() {
         install::write_settings(&home.join(RTK_BACKUP), &json!(adopted), dry_run)?;
     }
     let backup = install::write_settings(path, &value, dry_run)?;
+    let summary_text = match scope {
+        HookScope::LifecycleOnly => {
+            format!(
+                "{} lifecycle hooks configured (live unverified)",
+                provider.name()
+            )
+        }
+        HookScope::GuardOnly => format!(
+            "{} guard {}",
+            provider.name(),
+            if enabled {
+                "configured (live unverified)"
+            } else {
+                "not installed: unknown overlapping hook"
+            }
+        ),
+        HookScope::All => format!(
+            "{} lifecycle configured; shell routing {} (live unverified)",
+            provider.name(),
+            if enabled {
+                "configured"
+            } else {
+                "not installed: unknown overlapping hook"
+            }
+        ),
+    };
     Ok(install::InstallStep {
         id: format!("hooks.{}", provider.name()),
         status: if enabled {
@@ -762,18 +840,7 @@ pub(crate) fn install_at(
         } else {
             install::CheckStatus::Yellow
         },
-        summary: install::dry_run_summary(
-            dry_run,
-            &format!(
-                "{} lifecycle configured; shell routing {} (live unverified)",
-                provider.name(),
-                if enabled {
-                    "configured"
-                } else {
-                    "not installed: unknown overlapping hook"
-                }
-            ),
-        ),
+        summary: install::dry_run_summary(dry_run, &summary_text),
         detail: Some(install::with_backup_note(
             path.display().to_string(),
             backup,

@@ -28,16 +28,16 @@ fn fake_pixel_exe(dir: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
-// The new install writes shell wrappers (a pixel-managed block) into the
-// user's shell profile, whose location depends on the shell. Every test pins
-// an explicit shell instead of inheriting the runner's `$SHELL`, so a
-// developer running `cargo test` from fish gets the same result as one running
-// it from zsh — and so the fish tests below exercise fish on every machine.
+// The install wires the Claude lifecycle hooks into ~/.claude/settings.json
+// (the SessionStart hook injects the prompt into every Claude process) and
+// removes legacy `claude()` shell-wrapper blocks. Every test pins an explicit
+// shell instead of inheriting the runner's `$SHELL`, so a developer running
+// `cargo test` from fish gets the same result as one running it from zsh —
+// and so the fish cases below exercise fish on every machine.
 /// Claude Code versions on both sides of the `--append-subagent-system-prompt-file`
 /// line (its CHANGELOG entry is 2.1.261; earlier releases exit 1 on the
 /// unknown option).
 const CLAUDE_WITH_SUBAGENT_FLAG: &str = "2.1.269";
-const CLAUDE_WITHOUT_SUBAGENT_FLAG: &str = "2.1.260";
 
 /// A fake `claude` that only answers `--version` the way Claude Code prints it.
 #[cfg(unix)]
@@ -63,9 +63,6 @@ const PIXEL_MANAGED_BEGIN: &str = "# >>> pixel-managed >>>";
 #[test]
 #[cfg(unix)]
 fn installed_metrics_guidance_reaches_wrapped_agents_without_rewriting_streams() {
-    use std::os::unix::fs::PermissionsExt;
-    use std::process::Command;
-
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     install(&InstallOptions {
@@ -80,14 +77,14 @@ fn installed_metrics_guidance_reaches_wrapped_agents_without_rewriting_streams()
     let prompt = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
     for required in [
         "## LIVE OPERATION METRICS",
-        "same tool-call result",
+        "tool-call result",
         "exact line once",
-        "global latest",
+        "never a global latest",
         "already relayed",
         "PIXEL_METRICS=0",
         "PIXEL_METRICS_ROUND_TRIP_MS",
         "sequential-v1",
-        "Default `round_trip_ms` is 2000",
+        "default `round_trip_ms` is 2000",
         "search-compat",
         "Do not invent",
     ] {
@@ -97,20 +94,6 @@ fn installed_metrics_guidance_reaches_wrapped_agents_without_rewriting_streams()
         );
     }
 
-    // Mock the agent boundary: verify the received prompt, then emit real-shape
-    // tool streams. No model, external service, or paid evaluation is involved.
-    let mock = r#"#!/bin/sh
-case "$1" in
-  --append-system-prompt-file) prompt="$(cat "$2")" || exit 82 ;;
-  *) exit 81 ;;
-esac
-printf '%s\n' "$prompt" | grep -q '## LIVE OPERATION METRICS' || exit 83
-shift 2
-test "$1" = 'real task with spaces' || exit 84
-printf '%s\n' '{"result":"fixture"}'
-printf '%s\n' '🟩 Pixel · impact · 12.4 ms · ~820 output tokens · ~3100 tokens saved (workflow estimate) · ~3.99 s saved (sequential estimate) · id=fixture-invocation' >&2
-exit 7
-"#;
     // Codex reads the prompt from config.toml itself: the value the file
     // carries is what its developer message gets.
     let codex_value = codex_developer_instructions(home).expect("developer_instructions written");
@@ -118,27 +101,30 @@ exit 7
         codex_value.contains("## LIVE OPERATION METRICS"),
         "the relay contract must reach codex through config.toml"
     );
-    let agent = "claude";
-    {
-        let executable = home.join(agent);
-        fs::write(&executable, mock).unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-        let result = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(format!(". \"$1\"; {agent} 'real task with spaces'"))
-            .arg("fixture")
-            .arg(shell_profile_path(home))
-            .env("HOME", home)
-            .env("PATH", format!("{}:/usr/bin:/bin", home.display()))
-            .output()
+    // Claude gets the doctrine through the SessionStart hook, which injects
+    // the deployed prompt itself — every `claude` process, not only shells
+    // launched through the retired wrapper.
+    let settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap())
             .unwrap();
-        assert_eq!(result.status.code(), Some(7), "{agent}: {result:?}");
-        assert_eq!(result.stdout, b"{\"result\":\"fixture\"}\n");
-        assert_eq!(
-            String::from_utf8(result.stderr).unwrap(),
-            "🟩 Pixel · impact · 12.4 ms · ~820 output tokens · ~3100 tokens saved (workflow estimate) · ~3.99 s saved (sequential estimate) · id=fixture-invocation\n"
-        );
-    }
+    let session_hooks = settings["hooks"]["SessionStart"].as_array().unwrap();
+    assert!(
+        session_hooks.iter().any(|g| {
+            g["hooks"].as_array().is_some_and(|h| {
+                h.iter().any(|hook| {
+                    hook["command"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("run-hook session-start"))
+                })
+            })
+        }),
+        "the SessionStart hook must be registered: {settings}"
+    );
+    // And the file that hook injects is the verified prompt above.
+    assert!(
+        prompt.contains("## LIVE OPERATION METRICS"),
+        "the SessionStart-injected prompt carries the relay contract"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -206,18 +192,24 @@ fn install_creates_config_with_managed_markers() {
         claude, original,
         "CLAUDE.md must be byte-identical — install no longer rewrites agent configs"
     );
-    // The shell wrappers + agent prompt are the new install artifacts.
+    // The lifecycle hooks + agent prompt are the install artifacts; no
+    // shell wrapper is written anymore.
     assert!(
         home.join(".local/share/pixel/agent-prompt.md").is_file(),
         "agent-prompt.md should be deployed"
     );
-    let profile = shell_profile_path(home);
+    let settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap())
+            .unwrap();
     assert!(
-        fs::read_to_string(&profile)
-            .unwrap_or_default()
-            .contains(PIXEL_MANAGED_BEGIN),
-        "shell wrappers should be installed in {}",
-        profile.display()
+        settings["hooks"]["SessionStart"]
+            .as_array()
+            .is_some_and(|g| !g.is_empty()),
+        "claude lifecycle hooks should be installed: {settings}"
+    );
+    assert!(
+        !shell_profile_path(home).exists(),
+        "no shell wrapper is installed — SessionStart injects the prompt"
     );
 }
 
@@ -244,12 +236,12 @@ fn install_is_idempotent() {
     assert!(r2.ok, "second install should succeed");
     assert!(r2.summary.red == 0, "no red steps on re-install");
 
-    // The new install deploys the agent prompt and shell wrappers (no
-    // managed blocks, no hooks). Both must be stable across re-installs.
+    // The install deploys the agent prompt and the Claude lifecycle hooks.
+    // Both must be stable across re-installs.
     let prompt = home.join(".local/share/pixel/agent-prompt.md");
     let p1 = fs::read(&prompt).expect("agent-prompt deployed");
-    let profile = shell_profile_path(home);
-    let s1 = fs::read(&profile).expect("shell wrappers installed");
+    let settings = home.join(".claude/settings.json");
+    let s1 = fs::read(&settings).expect("claude settings installed");
 
     install(&options).expect("install 3");
     assert_eq!(
@@ -258,9 +250,9 @@ fn install_is_idempotent() {
         "agent-prompt must be byte-identical across re-installs"
     );
     assert_eq!(
-        fs::read(&profile).unwrap(),
+        fs::read(&settings).unwrap(),
         s1,
-        "shell wrappers must be byte-identical across re-installs"
+        "claude settings.json must be byte-identical across re-installs"
     );
 
     // No managed blocks are ever written by the new install.
@@ -483,7 +475,10 @@ fn dry_run_leaves_pre_existing_files_byte_identical() {
 
     let settings_path = home.join(".claude").join("settings.json");
     let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
+    // A profile with user content (no pixel block): the legacy-wrapper
+    // cleanup must leave it byte-identical, dry-run or not.
     let profile_path = shell_profile_path(home);
+    fs::write(&profile_path, "# user aliases\nexport EDITOR=vim\n").unwrap();
     let before_settings = fs::read(&settings_path).unwrap();
     let before_prompt = fs::read(&prompt_path).unwrap();
     let before_profile = fs::read(&profile_path).unwrap();
@@ -617,21 +612,40 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
         "agent-prompt.md should carry the replacement map"
     );
 
-    // Shell wrappers are installed in the shell profile.
-    let profile = shell_profile_path(home);
-    let profile_content =
-        fs::read_to_string(&profile).expect("shell profile should be created on a fresh home");
+    // Claude lifecycle hooks are installed in ~/.claude/settings.json; no
+    // shell profile is created or touched.
+    let settings: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(home.join(".claude/settings.json"))
+            .expect("claude settings.json should be created on a fresh home"),
+    )
+    .unwrap();
+    for (event, verb) in [
+        ("SessionStart", "session-start"),
+        ("UserPromptSubmit", "prompt-submit"),
+    ] {
+        let groups = settings["hooks"][event].as_array().unwrap();
+        assert!(
+            groups.iter().any(|g| {
+                g["hooks"].as_array().is_some_and(|h| {
+                    h.iter().any(|hook| {
+                        hook["command"]
+                            .as_str()
+                            .is_some_and(|c| c.contains(&format!("run-hook {verb}")))
+                    })
+                })
+            }),
+            "missing {event} → run-hook {verb}: {settings}"
+        );
+    }
+    // Enforcement stays repo-local: the global install must not wire
+    // PreToolUse into the user-level settings.
     assert!(
-        profile_content.contains(PIXEL_MANAGED_BEGIN),
-        "shell profile should carry the pixel-managed wrapper block"
+        settings["hooks"].get("PreToolUse").is_none(),
+        "global install must not add PreToolUse: {settings}"
     );
     assert!(
-        profile_content.contains("claude()"),
-        "shell profile should define the claude() wrapper"
-    );
-    assert!(
-        !profile_content.contains("codex"),
-        "codex is wired through config.toml, not a shell function:\n{profile_content}"
+        !shell_profile_path(home).exists(),
+        "no shell wrapper is written — the SessionStart hook injects the prompt"
     );
     assert!(
         codex_developer_instructions(home).is_some_and(|v| v.contains("MANDATORY WORKFLOW")),
@@ -640,13 +654,15 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
 }
 
 // ---------------------------------------------------------------------------
-// doctor install-artifact check tests (agent-prompt, shell-wrappers)
+// doctor install-artifact check tests (agent-prompt, claude-hooks,
+// legacy-wrappers)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn doctor_install_artifact_checks_red_and_green() {
-    // The new install wires no hooks — doctor verifies only the two install
-    // artifacts: install.agent-prompt and install.shell-wrappers. This test
+    // Doctor verifies the install artifacts: install.agent-prompt,
+    // install.claude-hooks (the SessionStart prompt injection), and
+    // install.legacy-wrappers (no stale `claude()` block survives). This test
     // walks each through its red and green states.
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
@@ -659,7 +675,8 @@ fn doctor_install_artifact_checks_red_and_green() {
         ..Default::default()
     };
 
-    // 1. With nothing installed, agent-prompt and shell-wrappers are red.
+    // 1. With nothing installed, agent-prompt and claude-hooks are red;
+    //    legacy-wrappers is green (there is nothing to remove).
     let report = doctor(&doc_opts).expect("doctor runs");
     let prompt_check = report
         .checks
@@ -671,18 +688,28 @@ fn doctor_install_artifact_checks_red_and_green() {
         pixel_install::doctor::CheckStatus::Red,
         "agent-prompt should be red when not deployed"
     );
-    let wrappers_check = report
+    let hooks_check = report
         .checks
         .iter()
-        .find(|c| c.id == "install.shell-wrappers")
+        .find(|c| c.id == "install.claude-hooks")
         .unwrap();
     assert_eq!(
-        wrappers_check.status,
+        hooks_check.status,
         pixel_install::doctor::CheckStatus::Red,
-        "shell-wrappers should be red when not installed"
+        "claude-hooks should be red when not installed"
+    );
+    let legacy_check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.legacy-wrappers")
+        .unwrap();
+    assert_eq!(
+        legacy_check.status,
+        pixel_install::doctor::CheckStatus::Green,
+        "legacy-wrappers should be green when no stale block exists"
     );
 
-    // 2. Run install: deploys agent-prompt + shell wrappers → both go green.
+    // 2. Run install: deploys agent-prompt + claude lifecycle hooks → all green.
     install(&InstallOptions {
         repo: None,
         home: Some(home.to_path_buf()),
@@ -694,7 +721,11 @@ fn doctor_install_artifact_checks_red_and_green() {
     .expect("install");
 
     let report = doctor(&doc_opts).expect("doctor runs");
-    for id in ["install.agent-prompt", "install.shell-wrappers"] {
+    for id in [
+        "install.agent-prompt",
+        "install.claude-hooks",
+        "install.legacy-wrappers",
+    ] {
         let check = report.checks.iter().find(|c| c.id == id).unwrap();
         assert_eq!(
             check.status,
@@ -1230,30 +1261,44 @@ fn routing_full_install_rtk_round_trip_preserves_foreign_hooks() {
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
-    // The new install wires NO hooks — it only scrubs deprecated MCP entries
-    // and removes old guard hooks. The foreign RTK + SessionStart entries
-    // are neither, so settings.json must pass through install untouched.
+    // The global install wires ONLY lifecycle hooks (SessionStart,
+    // UserPromptSubmit, PostToolUse, compaction) — no PreToolUse guard, and
+    // foreign entries (RTK + SessionStart) pass through untouched.
     install(&opts).unwrap();
     let once = fs::read(&settings).unwrap();
     install(&opts).unwrap();
     assert_eq!(
         fs::read(&settings).unwrap(),
         once,
-        "repeat install must leave foreign hooks stable"
+        "repeat install must leave the merged settings stable"
     );
     let installed: serde_json::Value = serde_json::from_slice(&once).unwrap();
     // No pixel delegate is added; the RTK entry survives verbatim.
     assert_eq!(
-        installed["hooks"]["PreToolUse"].as_array().unwrap().len(),
-        1,
-        "PreToolUse should retain only the foreign RTK entry"
+        installed["hooks"]["PreToolUse"],
+        serde_json::json!([rtk]),
+        "PreToolUse must retain only the foreign RTK entry — enforcement is repo-local"
     );
-    assert_eq!(
-        installed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap(),
-        "rtk hook claude",
-        "the foreign RTK entry must survive untouched (no delegate added)"
+    // The foreign SessionStart group is kept, pixel lifecycle entries added.
+    let session = installed["hooks"]["SessionStart"].as_array().unwrap();
+    assert_eq!(session[0], foreign, "foreign SessionStart group preserved");
+    assert!(
+        session.iter().skip(1).any(|g| {
+            g["hooks"].as_array().is_some_and(|h| {
+                h.iter().any(|hook| {
+                    hook["command"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("run-hook session-start"))
+                })
+            })
+        }),
+        "pixel session-start lifecycle hook registered: {installed}"
+    );
+    assert!(
+        installed["hooks"]["UserPromptSubmit"]
+            .as_array()
+            .is_some_and(|g| !g.is_empty()),
+        "pixel prompt-submit lifecycle hook registered: {installed}"
     );
     assert!(
         !installed
@@ -1324,10 +1369,11 @@ fn routing_isolated_provider_child() {
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
-    // The install wires no provider hooks except Codex's metrics relay:
-    // its tool results never surface stderr, so the 🟩 line is re-emitted
-    // through PostToolUse. Every other provider config passes through
-    // untouched, and no hooks directory or hook scripts are created.
+    // Claude gets the lifecycle hooks (the SessionStart prompt injection is
+    // how the doctrine reaches every `claude` process); Codex gets the
+    // metrics PostToolUse relay (its tool results never surface stderr, so
+    // the 🟩 line is re-emitted). Devin's config passes through untouched,
+    // and no hooks directory or hook scripts are created.
     install(&opts).unwrap();
     let first = fs::read(&config).unwrap();
     install(&opts).unwrap();
@@ -1337,39 +1383,90 @@ fn routing_isolated_provider_child() {
         "repeat install must leave the provider config stable"
     );
     let value: serde_json::Value = serde_json::from_slice(&first).unwrap();
-    if provider == "codex" {
-        let post = value["hooks"]["PostToolUse"]
-            .as_array()
-            .expect("codex gets exactly the metrics PostToolUse relay");
-        assert_eq!(post.len(), 1);
-        let command = post[0]["hooks"][0]["command"].as_str().unwrap();
-        assert!(command.contains("run-hook metrics"), "{command}");
-        // The executable path holds a space and a quote: it must arrive
-        // shell-quoted so the hook actually launches, with the embedded
-        // apostrophe emitted as the '\'' escape sequence.
-        assert!(
-            command.starts_with('\'')
-                && command.contains("directory/pixel' run-hook")
-                && command.contains("'\\''"),
-            "the executable path must survive spaces and quotes: {command}"
-        );
-    } else {
-        assert_eq!(
-            first.as_slice(),
-            b"{}",
-            "provider config must stay {{}} — install wires no hooks"
-        );
-        assert!(
-            value.get("hooks").is_none(),
-            "no hooks key should be written by the new install, got: {value}"
-        );
+    match provider.as_str() {
+        "codex" => {
+            let post = value["hooks"]["PostToolUse"]
+                .as_array()
+                .expect("codex gets exactly the metrics PostToolUse relay");
+            assert_eq!(post.len(), 1);
+            let command = post[0]["hooks"][0]["command"].as_str().unwrap();
+            assert!(command.contains("run-hook metrics"), "{command}");
+            // The executable path holds a space and a quote: it must arrive
+            // shell-quoted so the hook actually launches, with the embedded
+            // apostrophe emitted as the '\'' escape sequence.
+            assert!(
+                command.starts_with('\'')
+                    && command.contains("directory/pixel' run-hook")
+                    && command.contains("'\\''"),
+                "the executable path must survive spaces and quotes: {command}"
+            );
+        }
+        "claude" => {
+            // Lifecycle only — no PreToolUse guard in the global settings.
+            let hooks = value["hooks"].as_object().unwrap();
+            assert!(
+                hooks.get("PreToolUse").is_none(),
+                "global claude install must not wire PreToolUse: {value}"
+            );
+            for (event, verb) in [
+                ("SessionStart", "run-hook session-start"),
+                ("UserPromptSubmit", "run-hook prompt-submit"),
+                ("PostToolUse", "run-hook post-tool-use"),
+            ] {
+                let groups = hooks[event].as_array().unwrap();
+                assert!(
+                    groups.iter().any(|g| {
+                        g["hooks"].as_array().is_some_and(|h| {
+                            h.iter().any(|hook| {
+                                hook["command"].as_str().is_some_and(|c| c.contains(verb))
+                            })
+                        })
+                    }),
+                    "{event} must register {verb}: {value}"
+                );
+            }
+            // Claude's post-compaction rides SessionStart with matcher "compact".
+            let session = hooks["SessionStart"].as_array().unwrap();
+            assert!(
+                session.iter().any(|g| {
+                    g["matcher"].as_str() == Some("compact")
+                        && g["hooks"].as_array().is_some_and(|h| {
+                            h.iter().any(|hook| {
+                                hook["command"]
+                                    .as_str()
+                                    .is_some_and(|c| c.contains("run-hook post-compaction"))
+                            })
+                        })
+                }),
+                "the compact SessionStart entry must be registered: {value}"
+            );
+            // The quoted executable with a space and apostrophe must survive.
+            let command = session[0]["hooks"][0]["command"].as_str().unwrap();
+            assert!(
+                command.starts_with('\'')
+                    && command.contains("directory/pixel' run-hook")
+                    && command.contains("'\\''"),
+                "the executable path must survive spaces and quotes: {command}"
+            );
+        }
+        _ => {
+            assert_eq!(
+                first.as_slice(),
+                b"{}",
+                "devin config must stay {{}} — global install wires no devin hooks"
+            );
+            assert!(
+                value.get("hooks").is_none(),
+                "no hooks key should be written for devin, got: {value}"
+            );
+        }
     }
-    // No provider gets a ~/.claude/hooks directory from the new install.
+    // No provider gets a ~/.claude/hooks directory from the install.
     assert!(
         !home.join(".claude/hooks").exists(),
         "install must not create ~/.claude/hooks for any provider"
     );
-    // The new install artifacts (agent-prompt + shell wrappers) are deployed
+    // The install artifacts (agent-prompt + lifecycle hooks) are deployed
     // regardless of provider.
     assert!(
         home.join(".local/share/pixel/agent-prompt.md").is_file(),
@@ -1394,6 +1491,24 @@ fn fish_dropin(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".config/fish/conf.d/pixel.fish")
 }
 
+/// A legacy `claude()` wrapper block the way the retired install wrote it —
+/// fixtures hand-place it to exercise the removal path.
+fn legacy_posix_block() -> String {
+    format!(
+        "{PIXEL_MANAGED_BEGIN}\n\
+         claude() {{ command claude --append-system-prompt-file \"$HOME/.local/share/pixel/agent-prompt.md\" \"$@\"; }}\n\
+         # <<< pixel-managed <<<\n"
+    )
+}
+
+fn legacy_fish_block() -> String {
+    format!(
+        "{PIXEL_MANAGED_BEGIN}\n\
+         function claude; command claude --append-system-prompt-file \"$HOME/.local/share/pixel/agent-prompt.md\" $argv; end\n\
+         # <<< pixel-managed <<<\n"
+    )
+}
+
 fn install_for_shell(home: &std::path::Path, shell: &str) {
     install(&InstallOptions {
         repo: None,
@@ -1407,104 +1522,39 @@ fn install_for_shell(home: &std::path::Path, shell: &str) {
 }
 
 #[test]
-fn fish_wrappers_land_in_the_fish_dropin_and_not_in_a_profile_fish_never_reads() {
+fn install_removes_a_legacy_fish_dropin_and_writes_no_profile() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
+    // A legacy install's fish drop-in: pixel owns the whole file, so once
+    // the block is stripped the empty leftover is deleted outright.
+    let dropin = fish_dropin(home);
+    fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+    fs::write(&dropin, legacy_fish_block()).unwrap();
+
     install_for_shell(home, FISH_SHELL);
 
-    let dropin = fs::read_to_string(fish_dropin(home)).expect(
-        "fish wrappers belong in ~/.config/fish/conf.d/pixel.fish — fish sources conf.d \
-         automatically for every session",
-    );
     assert!(
-        dropin.contains(PIXEL_MANAGED_BEGIN),
-        "the drop-in should carry the pixel-managed block"
+        !dropin.exists(),
+        "the owned drop-in must be deleted once its block is stripped"
     );
     assert!(
         !home.join(".zshrc").exists() && !home.join(".bashrc").exists(),
-        "a fish install must not write wrappers into a profile fish never sources"
+        "a fish install must not write into a profile fish never sources"
     );
-}
-
-#[test]
-fn fish_wrappers_are_written_in_fish_syntax_not_posix_syntax() {
-    let dir = TempDir::new().expect("tempdir");
-    let home = dir.path();
-    install_for_shell(home, FISH_SHELL);
-    let block = fs::read_to_string(fish_dropin(home)).expect("fish drop-in");
-
-    for required in [
-        "function claude\n",
-        "command claude --append-system-prompt-file",
-        "if contains -- --print $argv; or string match -qr -- '^-[^-]*p' $argv",
-        "$argv\n",
-    ] {
-        assert!(
-            block.contains(required),
-            "fish block must define functions in fish syntax, missing {required:?}:\n{block}"
-        );
-    }
-    for forbidden in ["claude()", "codex()", "function codex", "\"$@\""] {
-        assert!(
-            !block.contains(forbidden),
-            "POSIX construct {forbidden:?} is a parse error in fish:\n{block}"
-        );
-    }
+    // The doctrine still arrives — through the lifecycle hooks.
     assert!(
-        block.contains("$HOME/.local/share/pixel/agent-prompt.md"),
-        "the wrappers must still point at the deployed agent prompt:\n{block}"
-    );
-}
-
-/// `<shell> -n` parses a file without executing it — the only check that
-/// proves the installed block is loadable rather than merely plausible.
-#[test]
-#[cfg(unix)]
-fn every_installed_block_parses_in_the_shell_it_was_written_for() {
-    use std::process::Command;
-
-    type ProfileOf = fn(&std::path::Path) -> std::path::PathBuf;
-    let cases: [(&str, ProfileOf); 3] = [
-        ("bash", |home| home.join(".bashrc")),
-        ("zsh", |home| home.join(".zshrc")),
-        ("fish", fish_dropin),
-    ];
-    let mut checked = 0;
-    for (shell, profile_of) in cases {
-        let dir = TempDir::new().expect("tempdir");
-        let home = dir.path();
-        install_for_shell(home, shell);
-        let profile = profile_of(home);
-        assert!(
-            profile.is_file(),
-            "{shell} install should have written {}",
-            profile.display()
-        );
-        // Absent from this machine — nothing to prove here, other cases carry.
-        let Ok(output) = Command::new(shell).arg("-n").arg(&profile).output() else {
-            continue;
-        };
-        checked += 1;
-        assert!(
-            output.status.success(),
-            "{shell} rejects the block pixel wrote for it in {}:\n{}",
-            profile.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    assert!(
-        checked > 0,
-        "no shell was available to parse-check against — the assertion above never ran"
+        home.join(".claude/settings.json").is_file(),
+        "claude lifecycle hooks must be configured instead"
     );
 }
 
 #[test]
-fn doctor_reads_the_profile_of_the_shell_it_is_asked_about() {
+fn doctor_reports_a_clean_home_and_a_stale_wrapper_block() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     install_for_shell(home, FISH_SHELL);
 
-    let wrappers_check = |shell: &str| {
+    let legacy_check = |shell: &str| {
         let report = doctor(&DoctorOptions {
             home: Some(home.to_path_buf()),
             executable_path: None,
@@ -1516,124 +1566,68 @@ fn doctor_reads_the_profile_of_the_shell_it_is_asked_about() {
         report
             .checks
             .iter()
-            .find(|c| c.id == "install.shell-wrappers")
-            .expect("shell-wrappers check")
+            .find(|c| c.id == "install.legacy-wrappers")
+            .expect("legacy-wrappers check")
             .clone()
     };
 
     assert_eq!(
-        wrappers_check(FISH_SHELL).status,
+        legacy_check(FISH_SHELL).status,
         pixel_install::doctor::CheckStatus::Green,
-        "a fish install must read back green for fish"
+        "a fresh install has no stale wrapper"
     );
     assert_eq!(
-        wrappers_check("/bin/zsh").status,
-        pixel_install::doctor::CheckStatus::Red,
-        "nothing was installed for zsh — its profile does not exist"
-    );
-}
-
-/// The residue of an install that ran under an agent's `$SHELL`: a valid
-/// fish install plus a pixel block in `~/.zshrc`, which fish never loads.
-/// Doctor names the stray file, its shell and the two ways out, as yellow:
-/// a machine that launches `claude` from a second shell on purpose keeps a
-/// working install and must not be sent to `pixel install`.
-#[test]
-fn doctor_flags_a_pixel_block_in_another_shells_profile_as_yellow() {
-    let dir = TempDir::new().expect("tempdir");
-    let home = dir.path();
-    install_for_shell(home, FISH_SHELL);
-    let check = || {
-        doctor(&DoctorOptions {
-            home: Some(home.to_path_buf()),
-            executable_path: None,
-            shell: Some(FISH_SHELL.into()),
-            claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
-            ..Default::default()
-        })
-        .expect("doctor runs")
-        .checks
-        .into_iter()
-        .find(|c| c.id == "install.shell-wrappers")
-        .expect("shell-wrappers check")
-    };
-
-    let clean = check();
-    assert_eq!(clean.status, pixel_install::doctor::CheckStatus::Green);
-    assert_eq!(
-        clean.detail.as_ref().unwrap()["stray_profiles"],
-        serde_json::json!([])
+        legacy_check("/bin/zsh").status,
+        pixel_install::doctor::CheckStatus::Green,
+        "no stale block exists for zsh either"
     );
 
-    // A `.zshrc` without a block is not a stray: every macOS account has one.
-    fs::write(home.join(".zshrc"), "export EDITOR=vim\n").unwrap();
-    assert_eq!(check().status, pixel_install::doctor::CheckStatus::Green);
-
-    install_for_shell(home, "/bin/zsh");
-    let stray = check();
-    assert_eq!(stray.status, pixel_install::doctor::CheckStatus::Yellow);
+    // A block an older install left in a profile is red — the wrapper
+    // double-injects next to the SessionStart hook.
+    fs::write(home.join(".zshrc"), legacy_posix_block()).unwrap();
+    let stale = legacy_check(FISH_SHELL);
+    assert_eq!(stale.status, pixel_install::doctor::CheckStatus::Red);
     let zshrc = home.join(".zshrc").display().to_string();
     assert!(
-        stray
-            .summary
-            .starts_with("fish shell wrappers installed in "),
-        "{}",
-        stray.summary
-    );
-    assert!(stray.summary.contains(&zshrc), "{}", stray.summary);
-    assert!(
-        stray.summary.contains("not loaded by fish"),
-        "{}",
-        stray.summary
-    );
-    assert!(
-        stray
-            .summary
-            .contains("`pixel uninstall --wrappers-only --shell zsh`")
-            && stray.summary.contains("`--shell zsh`"),
-        "{}",
-        stray.summary
-    );
-    assert_eq!(
-        stray.detail.as_ref().unwrap()["stray_profiles"],
-        serde_json::json!([{"shell": "zsh", "profile": zshrc}])
+        stale.reason.as_deref().unwrap_or_default().contains(&zshrc),
+        "the stale profile must be named: {stale:?}"
     );
 
-    // The same install seen from zsh: green for zsh, with fish as the stray.
-    let from_zsh = doctor(&DoctorOptions {
-        home: Some(home.to_path_buf()),
-        executable_path: None,
-        shell: Some("/bin/zsh".into()),
-        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
-        ..Default::default()
-    })
-    .expect("doctor runs")
-    .checks
-    .into_iter()
-    .find(|c| c.id == "install.shell-wrappers")
-    .unwrap();
-    assert_eq!(from_zsh.status, pixel_install::doctor::CheckStatus::Yellow);
+    // `pixel install` is the named fix: it strips the stray block.
+    install_for_shell(home, FISH_SHELL);
     assert_eq!(
-        from_zsh.detail.as_ref().unwrap()["stray_profiles"][0]["shell"],
-        "fish"
+        legacy_check(FISH_SHELL).status,
+        pixel_install::doctor::CheckStatus::Green,
+        "install removes the stale block"
+    );
+    assert!(
+        !fs::read_to_string(&home.join(".zshrc"))
+            .unwrap()
+            .contains("pixel-managed"),
+        "the stray zsh block is gone"
     );
 }
 
-/// The way out doctor names: only the named shell's block goes, the
-/// working install (the other shell's block, the prompt files) stays.
+/// `pixel uninstall --wrappers-only` removes only the named shell's block —
+/// the surgical fix for a block in a profile the login shell never loads.
 #[test]
 fn uninstall_wrappers_only_removes_one_shells_block_and_nothing_else() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     install_for_shell(home, FISH_SHELL);
-    install_for_shell(home, "/bin/zsh");
     let prompt = home.join(".local/share/pixel/agent-prompt.md");
     assert!(prompt.is_file(), "fixture: the prompt is installed");
-    assert!(
-        fs::read_to_string(home.join(".zshrc"))
-            .unwrap()
-            .contains("pixel-managed")
-    );
+    // Two legacy blocks, one per shell, as an old install left them. The
+    // .zshrc carries user content around its block so the profile survives
+    // once the block is stripped.
+    fs::write(
+        home.join(".zshrc"),
+        format!("export EDITOR=vim\n{}", legacy_posix_block()),
+    )
+    .unwrap();
+    let dropin = fish_dropin(home);
+    fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+    fs::write(&dropin, legacy_fish_block()).unwrap();
 
     let report = uninstall(&UninstallOptions {
         repo: None,
@@ -1667,14 +1661,14 @@ fn uninstall_wrappers_only_removes_one_shells_block_and_nothing_else() {
         "the zsh block is gone"
     );
     assert!(
-        fs::read_to_string(fish_dropin(home))
+        fs::read_to_string(&dropin)
             .unwrap()
             .contains("pixel-managed"),
         "the fish block stays"
     );
     assert!(prompt.is_file(), "the prompt files stay");
 
-    // Doctor now reads the fish install back green with no stray.
+    // Doctor still flags the remaining fish block — it is stale too.
     let check = doctor(&DoctorOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
@@ -1685,9 +1679,13 @@ fn uninstall_wrappers_only_removes_one_shells_block_and_nothing_else() {
     .expect("doctor runs")
     .checks
     .into_iter()
-    .find(|c| c.id == "install.shell-wrappers")
+    .find(|c| c.id == "install.legacy-wrappers")
     .unwrap();
-    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
+    assert_eq!(
+        check.status,
+        pixel_install::doctor::CheckStatus::Red,
+        "the surviving fish block is stale: {check:?}"
+    );
 }
 
 /// A begin marker with no end marker used to mean "everything to EOF is
@@ -1756,16 +1754,19 @@ fn an_unterminated_managed_block_refuses_the_rewrite_and_keeps_the_profile() {
     );
 }
 
-/// The write is destructive (it replaces the user's profile), so the bytes it
-/// replaces are backed up first, and a re-install that changes nothing adds no
-/// second backup.
+/// Removing the legacy block rewrites the profile, so the bytes it replaces
+/// are backed up first, and a re-install that finds nothing left to remove
+/// adds no second backup.
 #[test]
-fn rewriting_the_shell_profile_backs_it_up_first() {
+fn removing_a_legacy_wrapper_backs_up_the_profile_first() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     let profile = shell_profile_path(home);
-    let original = "# user aliases\nexport EDITOR=vim\n";
-    fs::write(&profile, original).unwrap();
+    let original = format!(
+        "# user aliases\nexport EDITOR=vim\n{}",
+        legacy_posix_block()
+    );
+    fs::write(&profile, &original).unwrap();
 
     install_for_shell(home, TEST_SHELL);
 
@@ -1789,34 +1790,33 @@ fn rewriting_the_shell_profile_backs_it_up_first() {
         original,
         "the backup holds the bytes install replaced"
     );
-    let installed = fs::read_to_string(&profile).unwrap();
-    assert!(installed.contains("export EDITOR=vim"), "{installed}");
-    assert!(installed.contains(PIXEL_MANAGED_BEGIN), "{installed}");
+    let cleaned = fs::read_to_string(&profile).unwrap();
+    assert!(cleaned.contains("export EDITOR=vim"), "{cleaned}");
+    assert!(!cleaned.contains(PIXEL_MANAGED_BEGIN), "{cleaned}");
 
     install_for_shell(home, TEST_SHELL);
     assert_eq!(
         profile_backups(home).len(),
         1,
-        "an idempotent re-install must not back up an unchanged profile"
+        "a re-install with nothing to remove must not back up the profile again"
     );
     assert_eq!(
         fs::read_to_string(&profile).unwrap(),
-        installed,
-        "an idempotent re-install must leave the profile byte-identical"
+        cleaned,
+        "a re-install with nothing to remove must leave the profile byte-identical"
     );
 }
 
 #[test]
-fn doctor_refuses_to_green_a_posix_block_sitting_in_the_fish_dropin() {
-    // Reproduces the shipped bug in its observable form: the markers are
-    // present in the file fish sources, so a marker-only check calls this
-    // installed. fish cannot parse a line of it.
+fn doctor_flags_a_posix_block_sitting_in_the_fish_dropin_as_stale() {
+    // The markers in the file fish sources mean a legacy install ran here —
+    // fish cannot parse a line of the POSIX block, and next to the
+    // SessionStart hook it would double-inject. Doctor must flag it red.
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
-    install_for_shell(home, "/bin/zsh");
-    let posix_block = fs::read_to_string(home.join(".zshrc")).expect("zsh profile");
+    install_for_shell(home, FISH_SHELL);
     fs::create_dir_all(fish_dropin(home).parent().unwrap()).unwrap();
-    fs::write(fish_dropin(home), &posix_block).unwrap();
+    fs::write(fish_dropin(home), legacy_posix_block()).unwrap();
 
     let report = doctor(&DoctorOptions {
         home: Some(home.to_path_buf()),
@@ -1829,25 +1829,24 @@ fn doctor_refuses_to_green_a_posix_block_sitting_in_the_fish_dropin() {
     let check = report
         .checks
         .iter()
-        .find(|c| c.id == "install.shell-wrappers")
-        .expect("shell-wrappers check");
+        .find(|c| c.id == "install.legacy-wrappers")
+        .expect("legacy-wrappers check");
     assert_eq!(
         check.status,
         pixel_install::doctor::CheckStatus::Red,
-        "a POSIX block in the fish drop-in is not a working install, got {:?}",
+        "a POSIX block in the fish drop-in is stale, got {:?}",
         check.reason
     );
 }
 
 #[test]
-fn uninstall_deletes_the_fish_dropin_it_created() {
+fn uninstall_deletes_a_fish_dropin_it_emptied() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
-    install_for_shell(home, FISH_SHELL);
-    assert!(
-        fish_dropin(home).is_file(),
-        "precondition: drop-in installed"
-    );
+    // A drop-in that is only the pixel block — pixel owns the whole file.
+    let dropin = fish_dropin(home);
+    fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+    fs::write(&dropin, legacy_fish_block()).unwrap();
 
     uninstall(&UninstallOptions {
         repo: None,
@@ -1860,42 +1859,8 @@ fn uninstall_deletes_the_fish_dropin_it_created() {
     .expect("uninstall");
 
     assert!(
-        !fish_dropin(home).exists(),
-        "pixel created the drop-in and owns all of it — an empty leftover file is litter"
-    );
-}
-
-#[test]
-fn a_shell_path_that_merely_contains_fish_is_not_treated_as_fish() {
-    // Substring matching on the whole path is what made `bash` detection
-    // sloppy; a user whose home is /home/fisher must still get zsh wrappers.
-    let dir = TempDir::new().expect("tempdir");
-    let home = dir.path();
-    install_for_shell(home, "/home/fisher/bin/zsh");
-
-    assert!(
-        home.join(".zshrc").is_file(),
-        "the shell's executable name is zsh — the block belongs in ~/.zshrc"
-    );
-    assert!(
-        !fish_dropin(home).exists(),
-        "a path containing 'fish' is not a fish shell"
-    );
-}
-
-#[test]
-fn a_shell_path_that_merely_contains_bash_is_not_treated_as_bash() {
-    let dir = TempDir::new().expect("tempdir");
-    let home = dir.path();
-    install_for_shell(home, "/home/bashful/bin/zsh");
-
-    assert!(
-        home.join(".zshrc").is_file(),
-        "the shell's executable name is zsh — the block belongs in ~/.zshrc"
-    );
-    assert!(
-        !home.join(".bashrc").exists(),
-        "a path containing 'bash' is not a bash shell"
+        !dropin.exists(),
+        "pixel owned the whole drop-in — an empty leftover file is litter"
     );
 }
 
@@ -1972,136 +1937,6 @@ fn dry_run_does_not_write_the_subagent_prompt() {
         "the dry-run report must announce the sub-agent prompt it would deploy: {}",
         step.summary
     );
-}
-
-/// Source the installed block in the shell it was written for, call the
-/// `claude` wrapper through a mock that echoes its argv, and check which
-/// prompt files it received. Runs in every shell found on the caller's PATH
-/// (the mock's directory is prepended, the rest of PATH is kept so that a
-/// Homebrew fish is found); a shell that cannot be spawned is skipped.
-#[test]
-#[cfg(unix)]
-fn the_subagent_prompt_flag_is_passed_in_print_mode_only() {
-    use std::os::unix::fs::PermissionsExt;
-    use std::process::Command;
-
-    type ProfileOf = fn(&std::path::Path) -> std::path::PathBuf;
-    let cases: [(&str, ProfileOf); 3] = [
-        ("bash", |home| home.join(".bashrc")),
-        ("zsh", |home| home.join(".zshrc")),
-        ("fish", fish_dropin),
-    ];
-    let mock = "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n";
-    let mut checked = 0;
-    for (shell, profile_of) in cases {
-        let dir = TempDir::new().expect("tempdir");
-        let home = dir.path();
-        install_for_shell(home, shell);
-        let mock_path = home.join("claude");
-        fs::write(&mock_path, mock).unwrap();
-        fs::set_permissions(&mock_path, fs::Permissions::from_mode(0o755)).unwrap();
-
-        let run = |args: &[&str]| -> Option<Vec<String>> {
-            let quoted: Vec<String> = args.iter().map(|a| format!("'{a}'")).collect();
-            let script = format!(
-                "source '{}'; claude {}",
-                profile_of(home).display(),
-                quoted.join(" ")
-            );
-            let inherited = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
-            let output = Command::new(shell)
-                .arg("-c")
-                .arg(script)
-                .env("HOME", home)
-                .env("PATH", format!("{}:{inherited}", home.display()))
-                .output()
-                .ok()?;
-            assert!(
-                output.status.success(),
-                "{shell}: wrapper failed for {args:?}:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            Some(
-                String::from_utf8(output.stdout)
-                    .unwrap()
-                    .lines()
-                    .map(str::to_string)
-                    .collect(),
-            )
-        };
-        // Absent from this machine — the other shells carry the assertion.
-        let Some(interactive) = run(&["real task"]) else {
-            continue;
-        };
-        checked += 1;
-        let agent_prompt = home
-            .join(".local/share/pixel/agent-prompt.md")
-            .display()
-            .to_string();
-        let subagent_prompt = subagent_prompt_path(home).display().to_string();
-
-        assert!(
-            interactive
-                .windows(2)
-                .any(|w| w == ["--append-system-prompt-file", agent_prompt.as_str()]),
-            "{shell}: interactive call must still carry the agent prompt: {interactive:?}"
-        );
-        assert!(
-            !interactive
-                .iter()
-                .any(|a| a == "--append-subagent-system-prompt-file"),
-            "{shell}: Claude Code ignores --append-subagent-system-prompt-file outside print mode, \
-             so an interactive call must not carry it: {interactive:?}"
-        );
-        assert_eq!(
-            interactive.last().map(String::as_str),
-            Some("real task"),
-            "{shell}: user arguments must survive untouched: {interactive:?}"
-        );
-
-        // Claude Code splits short-flag clusters, so `-pc` and `-cp` are
-        // print mode too (verified: `claude -pv` prints the version).
-        for print_flag in ["-p", "--print", "-pc", "-cp"] {
-            let print = run(&["--model", "sonnet", print_flag, "real task"]).unwrap();
-            assert!(
-                print
-                    .windows(2)
-                    .any(|w| w == ["--append-system-prompt-file", agent_prompt.as_str()]),
-                "{shell}: print-mode call must carry the agent prompt: {print:?}"
-            );
-            assert!(
-                print.windows(2).any(|w| w
-                    == [
-                        "--append-subagent-system-prompt-file",
-                        subagent_prompt.as_str()
-                    ]),
-                "{shell}: `{print_flag}` anywhere in the arguments must add the sub-agent prompt: {print:?}"
-            );
-            assert_eq!(
-                print
-                    .iter()
-                    .filter(|a| *a == "--append-subagent-system-prompt-file")
-                    .count(),
-                1,
-                "{shell}: the flag must be added exactly once: {print:?}"
-            );
-            assert_eq!(
-                &print[print.len() - 4..],
-                ["--model", "sonnet", print_flag, "real task"],
-                "{shell}: user arguments must survive in order: {print:?}"
-            );
-        }
-    }
-    assert!(
-        checked > 0,
-        "no shell was available to run the wrapper in — the assertions above never ran"
-    );
-    if Command::new("fish").arg("--version").output().is_ok() {
-        assert_eq!(
-            checked, 3,
-            "fish is on PATH but the fish block was not exercised"
-        );
-    }
 }
 
 fn codex_config_path(home: &std::path::Path) -> std::path::PathBuf {
@@ -2187,10 +2022,9 @@ fn install_writes_the_agent_prompt_into_codex_config_and_leaves_the_rest_of_the_
         written,
         "a re-install must be byte-for-byte idempotent"
     );
-    let block = fs::read_to_string(shell_profile_path(home)).unwrap();
     assert!(
-        !block.contains("codex"),
-        "no codex shell function next to the config key — the CLI override would shadow it:\n{block}"
+        !shell_profile_path(home).exists(),
+        "no shell wrapper is written — codex carries the prompt in config.toml"
     );
 }
 
@@ -2488,33 +2322,33 @@ fn uninstall_takes_only_the_pixel_block_out_of_codex_config() {
 }
 
 #[test]
-fn reinstall_keeps_one_managed_block_with_one_subagent_flag() {
+fn reinstall_never_recreates_a_removed_wrapper_block() {
     for shell in [TEST_SHELL, FISH_SHELL] {
         let dir = TempDir::new().expect("tempdir");
         let home = dir.path();
-        install_for_shell(home, shell);
-        install_for_shell(home, shell);
-        install_for_shell(home, shell);
         let profile = match shell {
             FISH_SHELL => fish_dropin(home),
             _ => shell_profile_path(home),
         };
-        let content = fs::read_to_string(&profile).expect("profile");
+        fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        let block = match shell {
+            FISH_SHELL => legacy_fish_block(),
+            _ => legacy_posix_block(),
+        };
+        fs::write(&profile, format!("export EDITOR=vim\n{block}")).unwrap();
+
+        install_for_shell(home, shell);
+        install_for_shell(home, shell);
+        install_for_shell(home, shell);
+        let content = fs::read_to_string(&profile).expect("profile survives");
         assert_eq!(
             content.matches(PIXEL_MANAGED_BEGIN).count(),
-            1,
-            "{shell}: re-installs must replace the managed block, not stack it:\n{content}"
-        );
-        assert_eq!(
-            content
-                .matches("--append-subagent-system-prompt-file")
-                .count(),
-            1,
-            "{shell}: the block carries the sub-agent flag on exactly one branch:\n{content}"
+            0,
+            "{shell}: re-installs must not recreate the wrapper block:\n{content}"
         );
         assert!(
-            content.contains("$HOME/.local/share/pixel/subagent-prompt.md"),
-            "{shell}: the flag must point at the deployed sub-agent prompt:\n{content}"
+            content.contains("export EDITOR=vim"),
+            "{shell}: the user's own lines survive:\n{content}"
         );
     }
 }
@@ -2816,29 +2650,12 @@ fn doctor_pi_prompt_check_is_red_until_the_managed_block_is_current() {
 }
 
 // ---------------------------------------------------------------------------
-// Claude Code version gate for the sub-agent prompt flag
+// Legacy wrapper removal
 //
-// Claude Code accepts `--append-subagent-system-prompt-file` from 2.1.261.
-// Older releases exit 1 with `error: unknown option`, so a wrapper that
-// always passed it would break every `claude -p` call for them. The wrapper
-// is therefore chosen at install time from `claude --version`, and doctor
-// re-derives the expected block from the Claude Code found at check time.
+// The retired install wrote a `claude()` shell function. Every install and
+// uninstall now strips that block through the "shell-wrappers" step so the
+// wrapper cannot double-inject the prompt next to the SessionStart hook.
 // ---------------------------------------------------------------------------
-
-fn install_with_claude(
-    home: &std::path::Path,
-    claude: Option<std::path::PathBuf>,
-) -> InstallReport {
-    install(&InstallOptions {
-        repo: None,
-        home: Some(home.to_path_buf()),
-        executable_path: Some(fake_pixel_exe(home)),
-        claude_executable: claude,
-        dry_run: false,
-        shell: Some(TEST_SHELL.into()),
-    })
-    .expect("install")
-}
 
 fn wrappers_step(report: &InstallReport) -> &pixel_install::install::InstallStep {
     report
@@ -2846,245 +2663,6 @@ fn wrappers_step(report: &InstallReport) -> &pixel_install::install::InstallStep
         .iter()
         .find(|s| s.id == "shell-wrappers")
         .expect("shell-wrappers step")
-}
-
-#[test]
-#[cfg(unix)]
-fn the_subagent_flag_is_written_only_for_claude_code_at_least_2_1_261() {
-    for (version, expect_flag) in [
-        ("2.1.261", true),
-        ("2.1.269", true),
-        ("2.2.0", true),
-        ("3.0.0", true),
-        ("2.1.260", false),
-        // Numeric comparison: "2.1.99" sorts after "2.1.261" as text.
-        ("2.1.99", false),
-        ("1.9.9", false),
-    ] {
-        let dir = TempDir::new().expect("tempdir");
-        let home = dir.path();
-        let report = install_with_claude(home, Some(fake_claude_exe(home, version)));
-        let profile = fs::read_to_string(shell_profile_path(home)).expect("profile");
-        assert_eq!(
-            profile.contains("--append-subagent-system-prompt-file"),
-            expect_flag,
-            "Claude Code {version}: flag expected={expect_flag}\n{profile}"
-        );
-        assert!(
-            profile.contains("--append-system-prompt-file"),
-            "Claude Code {version}: the session prompt is wired either way"
-        );
-        let step = wrappers_step(&report);
-        if expect_flag {
-            assert_eq!(step.status, pixel_install::install::CheckStatus::Green);
-        } else {
-            assert_eq!(
-                step.status,
-                pixel_install::install::CheckStatus::Yellow,
-                "an old Claude Code must be reported, not silently accommodated"
-            );
-            assert!(
-                step.summary.contains("2.1.261") && step.summary.contains(version),
-                "the summary must name the version found and the one required: {}",
-                step.summary
-            );
-        }
-        assert!(
-            subagent_prompt_path(home).is_file(),
-            "the prompt file is deployed regardless, so a later `pixel install` only rewrites the block"
-        );
-    }
-}
-
-#[test]
-#[cfg(unix)]
-fn no_usable_claude_means_no_subagent_flag() {
-    // Missing binary: the safe side is the plain wrapper. Passing the flag
-    // to an unknown Claude Code could break every print-mode call.
-    let dir = TempDir::new().expect("tempdir");
-    let home = dir.path();
-    let report = install_with_claude(home, Some(home.join("no-such-claude")));
-    let profile = fs::read_to_string(shell_profile_path(home)).expect("profile");
-    assert!(!profile.contains("--append-subagent-system-prompt-file"));
-    assert_eq!(
-        wrappers_step(&report).status,
-        pixel_install::install::CheckStatus::Yellow
-    );
-
-    // A claude that prints something unparseable is treated the same way.
-    let dir = TempDir::new().expect("tempdir");
-    let home = dir.path();
-    let odd = fake_claude_exe(home, "unknown");
-    let report = install_with_claude(home, Some(odd));
-    let profile = fs::read_to_string(shell_profile_path(home)).expect("profile");
-    assert!(!profile.contains("--append-subagent-system-prompt-file"));
-    assert_eq!(
-        wrappers_step(&report).status,
-        pixel_install::install::CheckStatus::Yellow
-    );
-}
-
-#[test]
-#[cfg(unix)]
-fn a_reinstall_without_claude_keeps_the_flag_an_earlier_install_proved() {
-    // No `claude` on the PATH of the re-installing process (cron, an agent's
-    // command tool) is no evidence that Claude Code got older: stripping the
-    // flag there would silently drop sub-agent rules from a working setup.
-    let dir = TempDir::new().expect("tempdir");
-    let home = dir.path();
-    install_with_claude(home, Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)));
-    let before = fs::read_to_string(shell_profile_path(home)).expect("profile");
-    assert!(before.contains("--append-subagent-system-prompt-file"));
-
-    let report = install_with_claude(home, Some(home.join("no-such-claude")));
-    let after = fs::read_to_string(shell_profile_path(home)).expect("profile");
-    assert_eq!(
-        after, before,
-        "the block must survive a blind re-install unchanged"
-    );
-    let step = wrappers_step(&report);
-    assert_eq!(step.status, pixel_install::install::CheckStatus::Yellow);
-    assert!(
-        step.summary.contains("keeping the sub-agent prompt flag"),
-        "the report must say the flag was kept on trust: {}",
-        step.summary
-    );
-
-    // The reverse is not preserved by accident: a block proven old by a real
-    // old Claude Code stays plain on a blind re-install.
-    install_with_claude(
-        home,
-        Some(fake_claude_exe(home, CLAUDE_WITHOUT_SUBAGENT_FLAG)),
-    );
-    install_with_claude(home, Some(home.join("no-such-claude")));
-    assert!(
-        !fs::read_to_string(shell_profile_path(home))
-            .unwrap()
-            .contains("--append-subagent-system-prompt-file")
-    );
-}
-
-#[test]
-#[cfg(unix)]
-fn doctor_without_claude_is_yellow_not_red() {
-    // A red would send the user to `pixel install`, which has no better
-    // evidence — and used to strip the flag.
-    let dir = TempDir::new().expect("tempdir");
-    let home = dir.path();
-    install_with_claude(home, Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)));
-    let check = doctor(&DoctorOptions {
-        home: Some(home.to_path_buf()),
-        shell: Some(TEST_SHELL.into()),
-        claude_executable: Some(home.join("no-such-claude")),
-        ..Default::default()
-    })
-    .expect("doctor")
-    .checks
-    .into_iter()
-    .find(|c| c.id == "install.shell-wrappers")
-    .expect("install.shell-wrappers check");
-    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Yellow);
-    assert!(
-        check
-            .summary
-            .contains("cannot verify the sub-agent prompt flag"),
-        "{check:?}"
-    );
-
-    // A foreign block is still red even when claude is unknown.
-    fs::write(
-        shell_profile_path(home),
-        "# >>> pixel-managed >>>\nclaude() { command claude \"$@\"; }\n# <<< pixel-managed <<<\n",
-    )
-    .unwrap();
-    let check = doctor(&DoctorOptions {
-        home: Some(home.to_path_buf()),
-        shell: Some(TEST_SHELL.into()),
-        claude_executable: Some(home.join("no-such-claude")),
-        ..Default::default()
-    })
-    .expect("doctor")
-    .checks
-    .into_iter()
-    .find(|c| c.id == "install.shell-wrappers")
-    .expect("install.shell-wrappers check");
-    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
-}
-
-#[test]
-#[cfg(unix)]
-fn the_plain_wrapper_for_old_claude_is_the_0_2_2_block() {
-    // A 0.2.2 install in front of an old Claude Code must read green after
-    // upgrading pixel, without a reinstall: the block pixel writes for that
-    // Claude Code is byte-identical to what 0.2.2 wrote.
-    let dir = TempDir::new().expect("tempdir");
-    let home = dir.path();
-    install_with_claude(
-        home,
-        Some(fake_claude_exe(home, CLAUDE_WITHOUT_SUBAGENT_FLAG)),
-    );
-    let profile = fs::read_to_string(shell_profile_path(home)).expect("profile");
-    assert!(profile.contains(
-        "claude() { command claude --append-system-prompt-file \"$HOME/.local/share/pixel/agent-prompt.md\" \"$@\"; }"
-    ), "{profile}");
-}
-
-#[test]
-#[cfg(unix)]
-fn doctor_reds_a_block_that_disagrees_with_the_claude_code_found_now() {
-    let dir = TempDir::new().expect("tempdir");
-    let home = dir.path();
-    let new_claude = fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG);
-    let old_claude = fake_claude_exe(home, CLAUDE_WITHOUT_SUBAGENT_FLAG);
-    let check = |claude: &std::path::Path| {
-        doctor(&DoctorOptions {
-            home: Some(home.to_path_buf()),
-            shell: Some(TEST_SHELL.into()),
-            claude_executable: Some(claude.to_path_buf()),
-            ..Default::default()
-        })
-        .expect("doctor")
-        .checks
-        .into_iter()
-        .find(|c| c.id == "install.shell-wrappers")
-        .expect("install.shell-wrappers check")
-    };
-
-    // Installed against a new Claude Code: green now, red if Claude Code is
-    // downgraded (the flag would make every `claude -p` exit 1).
-    install_with_claude(home, Some(new_claude.clone()));
-    assert_eq!(
-        check(&new_claude).status,
-        pixel_install::doctor::CheckStatus::Green
-    );
-    let downgraded = check(&old_claude);
-    assert_eq!(downgraded.status, pixel_install::doctor::CheckStatus::Red);
-    assert!(
-        downgraded
-            .reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("pass the sub-agent prompt flag"),
-        "{downgraded:?}"
-    );
-
-    // Installed against an old Claude Code: green now, red once Claude Code
-    // is updated (sub-agents would silently miss the rules).
-    install_with_claude(home, Some(old_claude.clone()));
-    assert_eq!(
-        check(&old_claude).status,
-        pixel_install::doctor::CheckStatus::Green
-    );
-    let upgraded = check(&new_claude);
-    assert_eq!(upgraded.status, pixel_install::doctor::CheckStatus::Red);
-    assert!(
-        upgraded
-            .reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("lack the sub-agent prompt flag"),
-        "{upgraded:?}"
-    );
 }
 
 /// Plugin-manifest surfaces (skills/, .cursor/rules/, …) are generated from
@@ -3345,7 +2923,7 @@ fn repo_install_options(repo: &std::path::Path, home: &std::path::Path) -> Insta
 
 #[test]
 #[cfg(unix)]
-fn repo_install_writes_all_four_artifacts() {
+fn repo_install_writes_all_five_artifacts() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
@@ -3354,6 +2932,33 @@ fn repo_install_writes_all_four_artifacts() {
 
     let report = install(&repo_install_options(&repo, &home)).expect("repo install");
     assert!(report.ok, "{report:?}");
+
+    // .claude/settings.json — repo-local guard only: a pixel PreToolUse
+    // group, no lifecycle events (those live in the user-level settings).
+    let claude: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    let claude_hooks = claude["hooks"].as_object().unwrap();
+    let pre = claude_hooks["PreToolUse"].as_array().unwrap();
+    assert!(
+        pre.iter().any(|g| {
+            g["matcher"].as_str() == Some("Bash")
+                && g["hooks"].as_array().is_some_and(|h| {
+                    h.iter().any(|hook| {
+                        hook["command"]
+                            .as_str()
+                            .is_some_and(|c| c.contains("run-hook guard --provider claude"))
+                    })
+                })
+        }),
+        "repo .claude/settings.json must carry the pixel guard: {claude}"
+    );
+    for event in ["SessionStart", "UserPromptSubmit", "PostToolUse"] {
+        assert!(
+            claude_hooks.get(event).is_none(),
+            "repo settings must not wire {event} — lifecycle is global: {claude}"
+        );
+    }
 
     // .codex/config.toml — developer_instructions managed block.
     let config = fs::read_to_string(repo.join(".codex/config.toml")).unwrap();
@@ -3420,32 +3025,21 @@ fn repo_install_is_idempotent() {
     fs::create_dir_all(&repo).unwrap();
 
     install(&repo_install_options(&repo, &home)).unwrap();
-    let snapshot = |rel: &str| fs::read(repo.join(rel)).unwrap();
-    let before: Vec<_> = [
+    let artifacts = [
+        ".claude/settings.json",
         ".codex/config.toml",
         ".codex/hooks.json",
         ".codex/pixel-composed-guard-backup.json",
         ".devin/hooks.json",
         ".pi/agent/extensions/pixel-guard.ts",
         ".pi/agent/AGENTS.md",
-    ]
-    .iter()
-    .map(|rel| snapshot(rel))
-    .collect();
+    ];
+    let snapshot = |rel: &str| fs::read(repo.join(rel)).unwrap();
+    let before: Vec<_> = artifacts.iter().map(|rel| snapshot(rel)).collect();
 
     let report = install(&repo_install_options(&repo, &home)).unwrap();
     assert!(report.ok);
-    let after: Vec<_> = [
-        ".codex/config.toml",
-        ".codex/hooks.json",
-        ".codex/pixel-composed-guard-backup.json",
-        ".devin/hooks.json",
-        ".pi/agent/extensions/pixel-guard.ts",
-        ".pi/agent/AGENTS.md",
-    ]
-    .iter()
-    .map(|rel| snapshot(rel))
-    .collect();
+    let after: Vec<_> = artifacts.iter().map(|rel| snapshot(rel)).collect();
     assert_eq!(before, after, "reinstall must be byte-identical");
 }
 
@@ -3456,8 +3050,26 @@ fn repo_install_preserves_foreign_hooks() {
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
     fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".claude")).unwrap();
     fs::create_dir_all(repo.join(".codex")).unwrap();
     fs::create_dir_all(repo.join(".devin")).unwrap();
+
+    // .claude/settings.json: a foreign lifecycle hook and a foreign
+    // PreToolUse group that does not overlap the shell (a shell-overlapping
+    // unknown hook is a routing blocker by design). Both must survive.
+    let claude_foreign_lifecycle = serde_json::json!({"matcher":"startup","hooks":[{"type":"command","command":"keep-session-check"}]});
+    let claude_foreign_guard = serde_json::json!({"matcher":"Write","hooks":[{"type":"command","command":"keep-write-check"}]});
+    fs::write(
+        repo.join(".claude/settings.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {
+                "SessionStart": [claude_foreign_lifecycle.clone()],
+                "PreToolUse": [claude_foreign_guard.clone()],
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
     let foreign = serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":"keep-security-check"}]});
     fs::write(
@@ -3478,6 +3090,30 @@ fn repo_install_preserves_foreign_hooks() {
     .unwrap();
 
     install(&repo_install_options(&repo, &home)).unwrap();
+
+    // Claude: both foreign groups intact, the pixel guard appended, and no
+    // lifecycle events added — those live in the user-level settings.
+    let claude: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        claude["hooks"]["SessionStart"],
+        serde_json::json!([claude_foreign_lifecycle]),
+        "foreign SessionStart preserved"
+    );
+    let claude_pre = claude["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(claude_pre[0], claude_foreign_guard);
+    assert_eq!(claude_pre.len(), 2, "{claude}");
+    assert!(
+        claude_pre[1]["hooks"].as_array().is_some_and(|h| {
+            h.iter().any(|hook| {
+                hook["command"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("run-hook guard --provider claude"))
+            })
+        }),
+        "{claude}"
+    );
 
     // Codex: the foreign group moved into the sidecar; the live PreToolUse is
     // the single composed-guard group.
@@ -3513,7 +3149,17 @@ fn repo_uninstall_removes_only_pixel_artifacts() {
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
     fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".claude")).unwrap();
     fs::create_dir_all(repo.join(".devin")).unwrap();
+    let claude_foreign = serde_json::json!({"matcher":"Write","hooks":[{"type":"command","command":"keep-write-check"}]});
+    fs::write(
+        repo.join(".claude/settings.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {"PreToolUse": [claude_foreign.clone()]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let foreign =
         serde_json::json!({"matcher":"exec","hooks":[{"type":"command","command":"keep-me"}]});
     fs::write(
@@ -3567,6 +3213,16 @@ fn repo_uninstall_removes_only_pixel_artifacts() {
     let config = fs::read_to_string(repo.join(".codex/config.toml")).unwrap();
     assert!(!config.contains(MANAGED_BEGIN), "{config}");
 
+    // Claude: only the foreign group remains — the pixel guard is gone.
+    let claude: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        claude["hooks"]["PreToolUse"],
+        serde_json::json!([claude_foreign]),
+        "foreign claude group preserved, pixel guard removed: {claude}"
+    );
+
     // Devin: only the foreign group remains.
     let devin: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(repo.join(".devin/hooks.json")).unwrap()).unwrap();
@@ -3593,6 +3249,7 @@ fn repo_install_dry_run_writes_nothing() {
     assert!(report.dry_run);
     assert!(report.ok, "{report:?}");
 
+    assert!(!repo.join(".claude").exists());
     assert!(!repo.join(".codex").exists());
     assert!(!repo.join(".devin").exists());
     assert!(!repo.join(".pi").exists());

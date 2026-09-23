@@ -215,6 +215,23 @@ fn uninstall_project(repo: &Path, binary_path: &Path, dry_run: bool) -> Result<I
             summary: install::dry_run_summary(dry_run, &codex_summary),
             detail: Some(format!("config={}", codex_hooks.display())),
         },
+        {
+            let claude_settings = repo.join(".claude").join("settings.json");
+            let (removed, backup_path) =
+                remove_pixel_hooks_from_settings(&claude_settings, dry_run)?;
+            InstallStep {
+                id: "hooks.claude".into(),
+                status: CheckStatus::Green,
+                summary: install::dry_run_summary(
+                    dry_run,
+                    &format!("removed {removed} Claude hook entry/entries"),
+                ),
+                detail: Some(install::with_backup_note(
+                    format!("config={}", claude_settings.display()),
+                    backup_path,
+                )),
+            }
+        },
         crate::codex_config::remove_developer_instructions(&repo.join(".codex"), dry_run)?,
         {
             let devin_hooks = repo.join(".devin").join("hooks.json");

@@ -4299,12 +4299,13 @@ fn renamed_invocation(argv: &[String]) -> Option<(&str, &'static str)> {
 }
 
 /// The one stderr line announcing that an old command name was used, or
-/// `None` when the name is current or live reporting is off. `live` is the
-/// metrics gate: `--metrics off`, `PIXEL_METRICS=0` and the protected
-/// streams (hooks, `search-like-rg`, the statusline) silence both alike, so
-/// the note never lands in a hook response or a byte-compatible rg output.
-fn rename_note(argv: &[String], live: bool) -> Option<String> {
-    if !live {
+/// `None` when the name is current or the stream is protected (hooks,
+/// `search-like-rg`, the statusline), so the note never lands in a hook
+/// response or a byte-compatible rg output. The note is not a metrics line:
+/// `--metrics off`, `PIXEL_METRICS=0` and the persistent `metrics` opt-out
+/// silence reporting, not the rename teaching signal.
+fn rename_note(argv: &[String], unprotected: bool) -> Option<String> {
+    if !unprotected {
         return None;
     }
     let (old, new) = renamed_invocation(argv)?;
@@ -4348,7 +4349,7 @@ fn run() -> Result<(), String> {
         && cli.metrics != "off"
         && std::env::var_os("PIXEL_METRICS").is_none_or(|v| v != "0")
         && config_cmd::metrics_enabled(root.as_deref().ok());
-    if let Some(note) = rename_note(&argv, live) {
+    if let Some(note) = rename_note(&argv, !protected) {
         eprint!("{note}");
     }
     operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
@@ -6039,7 +6040,14 @@ fn run_command(
                     pixel["repo"] = Value::Object(repo);
                 }
                 let block = serde_json::json!({ "pixel": pixel });
-                write_stdout(&serde_json::to_string_pretty(&block).map_err(|e| e.to_string())?)?;
+                // Claude's SessionStart contract: wrap the block so the hook
+                // injects the deployed agent prompt itself as
+                // hookSpecificOutput.additionalContext — the doctrine reaches
+                // every `claude` process, not just wrapper-launched shells.
+                write_stdout(
+                    &serde_json::to_string_pretty(&guard::session_start_output(&block))
+                        .map_err(|e| e.to_string())?,
+                )?;
                 Ok(())
             }
             HookCmd::PromptSubmit { provider } => {
@@ -7901,7 +7909,7 @@ mod renamed_command_tests {
     }
 
     #[test]
-    fn rename_note_is_one_line_and_follows_the_metrics_gate() {
+    fn rename_note_is_one_line_and_skips_only_protected_streams() {
         assert_eq!(
             rename_note(&argv(&["pixel", "ready", "--json"]), true).as_deref(),
             Some("note: 'ready' is now 'prepare-repo'; the old name stays accepted until 1.0\n")

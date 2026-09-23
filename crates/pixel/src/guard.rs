@@ -58,6 +58,45 @@ const COMPOSED_MAX_INPUT: usize = 1024 * 1024;
 const COMPOSED_MAX_OUTPUT: usize = 1024 * 1024;
 const COMPOSED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Path, under `$HOME`, of the deployed agent prompt `pixel install` writes
+/// and `install.agent-prompt` verifies byte-for-byte.
+const AGENT_PROMPT_REL: &str = ".local/share/pixel/agent-prompt.md";
+
+/// Read the deployed agent prompt for SessionStart injection. `None` when
+/// the file is absent, unreadable, or empty — the capability block is still
+/// emitted, so a missing prompt degrades to the pre-hook behavior instead of
+/// a failed hook.
+fn deployed_agent_prompt() -> Option<String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let content = std::fs::read_to_string(home.join(AGENT_PROMPT_REL)).ok()?;
+    (!content.trim().is_empty()).then_some(content)
+}
+
+/// Claude's SessionStart contract: the doctrine reaches EVERY Claude process
+/// — including `claude` launched directly by cmux, agents and cron, which
+/// never saw the retired shell wrapper — because the hook injects the
+/// deployed agent prompt itself as `hookSpecificOutput.additionalContext`.
+/// The structured `pixel` capability block stays top-level for consumers
+/// that parse it, and its JSON is appended to the context text.
+pub fn session_start_output(pixel_block: &Value) -> Value {
+    session_start_envelope(pixel_block, deployed_agent_prompt().as_deref())
+}
+
+fn session_start_envelope(pixel_block: &Value, agent_prompt: Option<&str>) -> Value {
+    let mut context = String::new();
+    if let Some(prompt) = agent_prompt {
+        context.push_str(prompt.trim_end());
+        context.push_str("\n\n");
+    }
+    context.push_str(&serde_json::to_string_pretty(pixel_block).unwrap_or_default());
+    let mut output = pixel_block.clone();
+    output["hookSpecificOutput"] = serde_json::json!({
+        "hookEventName": "SessionStart",
+        "additionalContext": context,
+    });
+    output
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Provider {
     Claude,
@@ -1743,7 +1782,10 @@ fn is_source_file(p: &Path) -> bool {
 fn read_scoping_advisory_lines(abs: &Path, lines: usize, idx_root: &Path) -> Vec<String> {
     let rel = rel_of(abs, idx_root);
     vec![
-        format!("pixel-guard advisory: '{rel}' is {lines} lines — a whole-file read costs ~{} tokens.", lines * 35 / 4),
+        format!(
+            "pixel-guard advisory: '{rel}' is {lines} lines — a whole-file read costs ~{} tokens.",
+            lines * 35 / 4
+        ),
         "Cheaper paths that answer most questions without the file contents:".into(),
         format!("  pixel list-signatures {rel}    # skeleton: every signature, ~10% of Read cost"),
         "  pixel search-content '<pattern>' --context 5    # the relevant region only".into(),
@@ -1769,11 +1811,9 @@ fn read_is_targeted(tool_input: &serde_json::Map<String, Value>) -> bool {
         "start_line",
         "end_line",
     ];
-    RANGE_KEYS.iter().any(|k| {
-        tool_input
-            .get(*k)
-            .is_some_and(|v| !v.is_null())
-    })
+    RANGE_KEYS
+        .iter()
+        .any(|k| tool_input.get(*k).is_some_and(|v| !v.is_null()))
 }
 
 /// Newline count via buffered read — one sequential pass, cheap even on
@@ -1784,7 +1824,10 @@ fn file_line_count(p: &Path) -> usize {
     let Ok(f) = std::fs::File::open(p) else {
         return 0;
     };
-    std::io::BufReader::new(f).lines().map_while(Result::ok).count()
+    std::io::BufReader::new(f)
+        .lines()
+        .map_while(Result::ok)
+        .count()
 }
 
 /// Line threshold above which an untargeted source-file Read gets the
@@ -4754,10 +4797,7 @@ mod tests {
         // and may be set in the host environment, so this asserts the
         // fallback is either 350 or the configured override parses.
         match std::env::var("PIXEL_GUARD_READ_LINES") {
-            Ok(v) => assert_eq!(
-                read_advisory_min_lines(),
-                v.parse().unwrap_or(350)
-            ),
+            Ok(v) => assert_eq!(read_advisory_min_lines(), v.parse().unwrap_or(350)),
             Err(_) => assert_eq!(read_advisory_min_lines(), 350),
         }
     }
@@ -4774,5 +4814,34 @@ mod tests {
         assert!(text.contains("offset/limit"), "{text}");
         assert!(text.contains("Proceeding"), "{text}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn session_start_envelope_wraps_the_prompt_in_claude_contract() {
+        let block =
+            serde_json::json!({"pixel": {"capabilities": ["search-content"], "usage": "u"}});
+        let out = session_start_envelope(&block, Some("# Pixel doctrine\nuse pixel"));
+        assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        let context = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(
+            context.starts_with("# Pixel doctrine\nuse pixel"),
+            "{context}"
+        );
+        assert!(context.contains("\"capabilities\""), "{context}");
+        // The structured block survives for consumers that parse it.
+        assert_eq!(out["pixel"]["capabilities"][0], "search-content");
+    }
+
+    #[test]
+    fn session_start_envelope_without_prompt_still_emits_the_block() {
+        let block = serde_json::json!({"pixel": {"capabilities": []}});
+        let out = session_start_envelope(&block, None);
+        let context = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.contains("\"pixel\""), "{context}");
+        assert!(!context.starts_with('\n'), "{context}");
     }
 }
