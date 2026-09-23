@@ -24,9 +24,13 @@ jobs, each needing the previous one:
 
 Three facts shape everything below:
 
-- **The macOS binary is first compiled by the tag, and first run by
-  `smoke`.** `ci.yml` and `cross-build.yml` run on `ubuntu-26.04` only; a
-  green `main` proves the musl lane, never `aarch64-apple-darwin`.
+- **The macOS binary is first run by `smoke`.** `cross-build.yml` builds
+  all three release targets on every push to `main` with release.yml's exact
+  commands, so a green `main` proves each lane compiles and links; nothing
+  before `smoke` runs the darwin binary. The same job saves the per-target
+  cache (`release-<target>`) that the tag's `build` job restores, and the
+  `verify` job restores ci.yml's `linux-debug` one: a tag run reads the
+  default branch's caches, never another tag's.
 - **A published release is immutable.** GitHub's release immutability is on:
   once `release` has published, its assets cannot be added, replaced or
   deleted, and its tag cannot move or be deleted while the release exists (a
@@ -114,7 +118,7 @@ gh secret list | grep HOMEBREW_TAP_TOKEN
 - Pick the last tag by version sort, not `git describe`: v0.2.4's commit is
   not an ancestor of `main` (it was replayed before the histories were
   joined), so `describe` can answer an older tag.
-- A red `Cross-build` on `main` means the musl lane fails with `--locked`:
+- A red `Cross-build` on `main` means a release lane fails with `--locked`:
   the `build` job will fail the same way. A red `Dependency policy
   (cargo-deny)` blocks every PR, the prepare PR included: a fresh RustSec
   advisory is a `chore(deps)` PR (`cargo update -p <crate>`) merged before
@@ -263,8 +267,8 @@ space-separated string sees one word, and a watcher built that way reports
 failures that never happened.
 
 About 12 minutes to the end of `smoke` (0.3.0: verify 5 min, builds 6 min,
-publish and smoke under a minute). A failed `build` on
-`aarch64-apple-darwin` is the likeliest surprise (see the first fact above).
+publish and smoke under a minute; 0.5.0, uncached: builds 5.3 to 5.5 min
+on musl).
 
 ## 5. Verify the publication
 

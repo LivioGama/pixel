@@ -147,7 +147,9 @@ scripts/pixel-smoke-test.sh     # exercises the installed pixel (command -v pixe
 ```
 
 The `Cross-build` workflow (`.github/workflows/cross-build.yml`) builds the
-musl release lane on every push to `main` and on pull requests
+three release lanes (musl x86_64 and aarch64 through `cross`,
+`aarch64-apple-darwin` natively) on every push to `main`, saving the cache
+the tag's build restores, and on pull requests
 that touch a Rust-affecting path (`crates/`, `Cargo.*`, `.cargo/`,
 `deny.toml`, the workflow itself); a docs, prompt or script PR skips it, and
 so does a `release-x.y.z` prepare PR into `main`, whose merge commit's push
