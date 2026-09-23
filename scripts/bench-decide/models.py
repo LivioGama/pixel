@@ -6,6 +6,14 @@ spec = {id, set, family, qtype, text, context, labels, criteria, expected}
 Mapping mirrors upstream jevbench adapters (pixel_local / local_openjev /
 verdict_local / laya_local) so results stay comparable: instructions ride in
 `context`, options carry their criterion text, noul maps to yes/no.
+
+Third-party packages (torch, transformers, laya, gliformer and the upstream
+engine checkouts) are imported only inside the `load()`/`decide()` of the ML
+adapter that needs them, never at module level: `keyword-router`,
+`remote-cli`, `run.py` and `score.py` run on the standard library alone, and
+the ML rows need a venv that has those packages. This is the
+scoped exemption from the scripts' standard-library rule recorded in
+`.coderabbit.yaml`.
 """
 from __future__ import annotations
 
@@ -14,7 +22,6 @@ import math
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 THREADS = 4
@@ -263,15 +270,20 @@ class RemoteCli:
     """Remote decision: `pixel classify --jsonl`.
 
     One OpenAI-compatible chat completion per spec (OpenRouter / Ollama Cloud
-    / local), opt-in and non-deterministic. The preset and model are passed
-    through env so the same adapter serves every provider.
+    / local), opt-in and non-deterministic. The preset is passed as a flag so
+    the same adapter serves every provider; the model is passed only when one
+    is set (argument, then `REMOTE_MODEL`), otherwise `pixel` resolves it
+    (`PIXEL_REMOTE_MODEL`, then the preset default). `resolved_model` records
+    the model `pixel` reports in each reply's `snapshot.model`, so the run
+    manifest names the model that actually answered.
     """
     name = "remote-cli"
 
     def __init__(self, preset="ollama", model=None, binary="pixel"):
         self.binary = binary
         self.preset = preset
-        self.model = model or os.environ.get("REMOTE_MODEL") or "deepseek-v4.1-flash:cloud"
+        self.model = model or os.environ.get("REMOTE_MODEL") or None
+        self.resolved_model = None
         self._proc = None
 
     def _cmd(self):
@@ -300,6 +312,7 @@ class RemoteCli:
         doc = json.loads(self._proc.stdout.readline())
         if not doc.get("ok"):
             raise RuntimeError(f"pixel classify remote: {doc.get('error')}")
+        self.resolved_model = (doc.get("snapshot") or {}).get("model", self.resolved_model)
         return {l: float(doc["probs"][l]) for l in spec["labels"]}
 
 

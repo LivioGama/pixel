@@ -4,9 +4,11 @@
 Outputs, both under scripts/fixtures/:
   decide-coding-subset.jsonl   14 public JevBench items whose topic is `coding`,
                                normalized to the `pixel classify` spec shape.
-  decide-plan-routing.jsonl    47 plan-routing gold items x 5 labels, decomposed
-                               to one `noul` spec per label (235 lines), plus an
-                               item index for exact-set scoring.
+  decide-plan-routing.jsonl    every plan-routing-real-gold.jsonl item x 5 labels,
+                               decomposed to one `noul` spec per label, plus an
+                               item index for exact-set scoring. The counts of
+                               the last freeze are in decide-manifest.json
+                               (n_routing_items, n_routing_specs).
 
 Spec shape per line:
   {id, set, family, qtype, text, context, labels, criteria, expected, gold_labels?}

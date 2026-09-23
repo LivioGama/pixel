@@ -30,9 +30,15 @@ backend beats every small decision model except the 575M/8 GB GLiFormer.
 | gte-reranker | 149M | 0.286 | 0.067 | 0.326 | 59 ms | 123 ms | 1.0 s | ² |
 
 ¹ Per-set p95; gliformer's plan-routing p95 was 7.1 s.
-² RSS is peak-of-process; openjev-deberta and gte-reranker ran in the same
-process as gliformer so their peaks are not separable — both are PyTorch
-transformers and land in the 1–2 GB class.
+² Peak RSS is the runner process's cumulative peak (`peak_rss_bytes` in
+run1's manifest, `getrusage(RUSAGE_SELF)` after each model): every model ran
+in one process, in the order pixel-static, gavel, verdict, laya, gliformer,
+openjev-deberta, gte-reranker, so a figure can include memory still held from
+an earlier model and is an upper bound for that model. openjev-deberta and
+gte-reranker ran after gliformer, so their peaks are not separable — both are
+PyTorch transformers and land in the 1–2 GB class. Child processes are not
+counted: pixel-static answered through a `pixel classify` child, and its
+0.03 GB is the Python runner's own footprint, not the model's.
 
 Published coding-topic rows (n=56, **not reproduced**, different
 denominator): Jev 0.839, SemIf-4B 0.964, gliformer 0.679, laya 0.589,
@@ -51,6 +57,14 @@ verdict ~0.52, openjev-deberta 0.464.
 | verdict | 0.200 | — | 0.167 | 0.442 | 130 ms | 151 ms |
 | gte-reranker | 0.200 | — | 0.167 | 0.501 | 152 ms | 256 ms |
 
+"—" marks an exact-set of 0/45 in `runs/run1/summary.json`. Every gold set
+in this frozen index is exactly `{by-concept}` (no positive for any
+specialized query, no mixed-query item), so exact-set here counts only items
+with no specialized false positive: a constant `{by-concept}` answer would
+score 45/45. The keyword router's 0.578 is 26 items where none of its
+keyword rules fired, not evidence of specialized recall; the protocol's
+coverage precondition for the integration gate is not met.
+
 Every learned model collapses toward "yes" on routing nouls — verdict said
 yes to all 225 propositions. The task ("does this issue call for dead-code
 analysis?") is a domain-specific multi-label decision the generic models
@@ -68,7 +82,7 @@ serves all three presets via `--remote-preset`:
 
 | Preset | Base URL | Key env | Default model |
 |---|---|---|---|
-| `openrouter` | `openrouter.ai/api/v1` | `OPENROUTER_API_KEY` | `google/gemini-3.5-flash-lite` |
+| `openrouter` | `openrouter.ai/api/v1` | `OPENROUTER_API_KEY` | `deepseek/deepseek-v4.1-flash` |
 | `ollama` | `ollama.com/v1` | `OLLAMA_API_KEY` | `deepseek-v4.1-flash:cloud` |
 | `local` | `localhost:11434/v1` | — | `qwen3.5:4b` |
 
@@ -108,7 +122,7 @@ completion per spec, verbalized probabilities. Run dirs:
 | deepseek-v4.1-flash | Ollama Cloud (`ollama`) | **14/14 = 1.00** | ✅ beats | 1.4 s | 173 |
 | deepseek-v4-flash:0731 | Ollama Cloud (`ollama`) | **13/14 = 0.93** | ✅ beats | 2.0 s | 77 |
 | gpt-oss:120b | Ollama Cloud (`ollama`) | **13/14 = 0.93** | ✅ beats | 2.0 s | 176 |
-| gpt-oss:20b | Ollama Cloud (`ollama`) | **13/14 = 0.93** | ✅ beats | 6.4 s | 99 |
+| gpt-oss:20b | Ollama Cloud (`ollama`) | **13/14 = 0.93**⁴ | ✅ beats | 6.4 s | 99 |
 | nemotron-3-ultra | Ollama Cloud (`ollama`) | **12/14 = 0.86** | ✅ beats | 8.1 s | 72 |
 | google/gemini-3.1-flash-lite | OpenRouter (`openrouter`) | 11/14 = 0.79 | ❌ | 1.1 s | — |
 | qwen3.5:397b | Ollama Cloud (`ollama`) | 10/14, 9/14 | ❌ | 16.2 s¹ | — |
@@ -127,6 +141,11 @@ latest measured run, fetched 2026-09-23).
 
 ³ Jev's published coding-topic accuracy, n=56, all tiers — published
 number, not re-measured here; different denominator than our n=14 subset.
+
+⁴ gpt-oss:20b's one loss was a harness failure, not a wrong answer: on
+`hard-opus-c-long_policy-05` the reply was not JSON (`remote response content
+is not JSON`, `runs/remote-gptoss-20b/remote-cli.raw.jsonl`); all 13 answered
+items were correct.
 
 OpenRouter note: `api.openrouter.ai` was NXDOMAIN during the run; the
 preset now defaults to the working `openrouter.ai/api/v1` base. Keys come
@@ -176,10 +195,19 @@ route; it was excluded here only by the no-training constraint.
 ## Reproduce
 
 ```sh
-scripts/bench-decide/.venv/bin/python scripts/bench-decide/freeze_sets.py   # fixture sets
-scripts/bench-decide/.venv/bin/python scripts/bench-decide/run.py --out runs/run2
-scripts/bench-decide/.venv/bin/python scripts/bench-decide/score.py --run runs/run2 --baseline <model>
+# The ML adapters need a venv with torch, transformers and the model authors'
+# packages (models.py); keyword-router, remote-cli and score.py need only python3.
+scripts/bench-decide/.venv/bin/python scripts/bench-decide/run.py \
+  --models keyword-router,gavel,verdict,laya,gliformer,openjev-deberta,gte-reranker \
+  --out scripts/bench-decide/runs/run2
+python3 scripts/bench-decide/score.py --run scripts/bench-decide/runs/run2 --baseline keyword-router
 ```
+
+`--out` must not exist yet. The `pixel-static` adapter left with the static
+backend, so run1's baseline row cannot be regenerated; `score.py` can still
+rescore a copy of `runs/run1` (it writes `summary.json` into the run
+directory, so do not point it at the committed one). `freeze_sets.py` rewrites the committed
+fixtures from a JevBench checkout (`--jevbench`), so run it only to re-freeze.
 
 The shipped path was verified by piping the frozen fixtures through
 `target/debug/pixel classify --jsonl` (remote; needs a provider key env).

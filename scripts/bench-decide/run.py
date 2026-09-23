@@ -6,8 +6,14 @@ Usage:
 
 Writes <out>/<model>.raw.jsonl — one line per spec:
   {id, set, family, qtype, expected, labels, probs, predicted, ms, ok, error?}
-Plus <out>/manifest.json with run identity: model revisions, script/data
-hashes, platform. Protocol: docs/bench/decide-bakeoff-protocol.md.
+Plus <out>/manifest.json with run identity: script, models.py and set
+hashes, platform, and per model its load time, ok/error counts and
+`runner_peak_rss_bytes`. That RSS is the runner process's cumulative peak
+(`getrusage(RUSAGE_SELF)` after the model's last spec): it includes every
+model loaded earlier in the same run and excludes child processes, so for
+`remote-cli` it does not count the `pixel classify` child at all. Run one
+model per process for a per-model figure. Protocol:
+docs/bench/decide-bakeoff-protocol.md.
 """
 from __future__ import annotations
 
@@ -37,6 +43,18 @@ def sha256(path):
 
 def load_specs(path):
     return [json.loads(l) for l in Path(path).read_text().splitlines() if l.strip()]
+
+
+# `ru_maxrss` is in bytes on macOS and in KiB on Linux (getrusage(2)).
+RU_MAXRSS_UNIT = {"darwin": 1, "linux": 1024}
+
+
+def runner_peak_rss_bytes():
+    """The runner's cumulative peak RSS in bytes; None where the unit is unknown."""
+    unit = RU_MAXRSS_UNIT.get(sys.platform)
+    if unit is None:
+        return None
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * unit
 
 
 def predicted(probs, labels):
@@ -72,7 +90,7 @@ def run_model(name, adapter, specs, out_dir):
             stream.write(json.dumps(rec, ensure_ascii=False) + "\n")
             stream.flush()
     return {"raw": raw_path.name, "load_s": load_s, "n_ok": n_ok, "n_err": n_err,
-            "peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
+            "runner_peak_rss_bytes": runner_peak_rss_bytes()}
 
 
 def main():
@@ -119,7 +137,7 @@ def main():
         except Exception as e:  # noqa: BLE001
             info = {"fatal": f"{type(e).__name__}: {e}"}
             print(f"   FATAL {info['fatal']}", flush=True)
-        for attr in ("preset", "model"):
+        for attr in ("preset", "model", "resolved_model"):
             if hasattr(adapter, attr):
                 info[attr] = getattr(adapter, attr)
         manifest["models"][name] = info

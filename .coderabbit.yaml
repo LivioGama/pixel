@@ -185,6 +185,15 @@ reviews:
         tree it measures must snapshot and restore what it touches and
         refuse to start on a pre-modified target: a lost edit in a bench
         checkout was a real finding on an earlier pull request.
+        Exemption: `scripts/bench-decide/**` is a bake-off of local ML
+        models, whose adapters in `models.py` cannot run without torch,
+        transformers and the model authors' packages. There, third-party
+        imports are allowed only inside the `load()`/`decide()` of the adapter
+        that needs them, never at module level, so `run.py`, `score.py`,
+        `freeze_sets.py` and the `keyword-router`/`remote-cli` adapters still
+        run on the standard library; flag a module-level third-party import.
+        It does not use `bench_common.py`, which resolves the GitNexus CLI
+        for `scripts/bench-vs/` and has nothing this harness needs.
     - path: "{scripts/**/*.sh,.agents/skills/**/*.sh}"
       instructions: |
         Most scripts are POSIX `#!/bin/sh` with `set -eu` and are run from

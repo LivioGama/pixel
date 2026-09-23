@@ -44,13 +44,20 @@ LambdaMART/LightGBM and teacher distillation (require training — out of scope)
    `scripts/fixtures/decide-coding-subset.jsonl` with sha256 recorded at freeze.
    Small — every metric carries its CI; this set anchors comparability to the
    published board, it does not by itself prove anything.
-2. **plan-routing**: `scripts/fixtures/plan-routing-real-gold.jsonl` (47 real
-   GitHub issues, gold multi-label sets over 5 PlanQuery kinds). Decomposed to
-   Jev shape as five independent `noul` questions per item — one per label —
-   using the label descriptions from `crates/pixel-graph/src/plan.rs`
-   (`SOURCE_HASH` checked at run time, like the existing pilot). Exact-set
-   match requires all five binary decisions correct; per-label FP/FN and a
-   weighted omission cost (2×FN) reported as in `bench-plan-routing.py`.
+2. **plan-routing**: `scripts/fixtures/plan-routing-real-gold.jsonl` (45 real
+   GitHub issues, gold label sets over 5 PlanQuery kinds), frozen as
+   `scripts/fixtures/decide-plan-routing.jsonl` (225 specs) plus the item
+   index `decide-plan-routing-index.json`; counts and hashes are in
+   `scripts/fixtures/decide-manifest.json`. Decomposed to Jev shape as five
+   independent `noul` questions per item — one per label — using label
+   descriptions transcribed from the `PlanQuery` docs in
+   `crates/pixel-graph/src/plan.rs`. `freeze_sets.py` records that file's
+   sha256 (`plan_rs_sha256`) at freeze time; nothing re-checks it at run time,
+   and the committed `plan.rs` no longer matches it (checked 2026-09-23), so
+   the frozen descriptions are the reference. Exact-set match requires all
+   five binary decisions correct; `score.py` reports per-label TP/FP/FN and
+   `omissions` (total FN), not the weighted FP+2FN cost of
+   `bench-plan-routing.py`.
 
 Baselines: `pixel-static` (the then-shipped zero-shot backend, since
 removed) on both sets;
@@ -61,10 +68,14 @@ denominator, so Jev-vs-candidate on it is indicative only).
 ## Metrics (same discipline as the plan-routing pilots)
 
 Per set and model: accuracy / exact-set, macro-F1, Brier, ECE (10-bin),
-risk–coverage at min-confidence {0.5, 0.7, 0.9}, resident-model latency
+risk–coverage at top-probability {0.5, 0.7, 0.9}, resident-model latency
 p50/p95 (model loaded once, serial requests, idle machine), cold artifact
-size, peak RSS, license. Bootstrap 95% CI on the accuracy delta vs
-`pixel-static` (2,000 resamples stratified by family where families exist).
+size, peak RSS (the runner process's cumulative peak, see Method), license.
+Paired bootstrap 95% CIs vs `pixel-static`, 2,000 resamples, seed 42, **not
+stratified by family**: `delta_acc_ci95_vs_baseline` resamples specs (per-spec
+accuracy, every set); `delta_exact_set_ci95_vs_baseline` resamples
+plan-routing items, so an item's five label decisions move together — the
+interval the integration gate reads.
 
 ## Pass gates (fixed in advance)
 
@@ -74,6 +85,17 @@ size, peak RSS, license. Bootstrap 95% CI on the accuracy delta vs
 - **Integration gate**: beats `pixel-static` on plan-routing exact-set with
   CI excluding 0, p95 resident latency ≤ 500 ms on CPU, artifact ≤ 2 GB on
   disk, OSI license.
+- **Coverage precondition for the integration gate** (added after the run,
+  see Amendments): the gold set must hold at least five independently
+  adjudicated positives per specialized query (`dead-interactive`,
+  `dead-code`, `hotspots`, `recent-changes`) and at least five mixed-query
+  task families (items whose gold needs more than one label), the adoption
+  conditions of `plan-routing-real-protocol.md`. The frozen set fails it:
+  all 45 gold sets are exactly `{by-concept}`, so there are zero positives
+  for every specialized query and zero mixed-query families, and a constant
+  `{by-concept}` predictor scores 45/45 exact-set. On this set the gate
+  measures specialized false positives only and cannot be evaluated as an
+  adoption gate.
 - A model passing integration but not beating-Jev is reported as
   "best local option, below Jev" — not as a win.
 
@@ -89,10 +111,23 @@ size, peak RSS, license. Bootstrap 95% CI on the accuracy delta vs
   `verdict_local` adapter does).
 - Score-type criteria map list index → label string; noul maps
   `criteria["true"/"false"]` → `yes/no` labels, matching `pixel_local`.
-- Model revisions are pinned by SHA-256 of the resolved snapshot; the harness
-  records script, manifest, and dataset hashes in `manifest.json`.
-- Latency is wall-clock per decision, model resident, single thread batch 1;
-  first (warm-up) decision excluded from percentiles.
+- Model revisions are pinned by Hugging Face snapshot directory, whose name
+  is the upstream revision's git commit id (`SNAPSHOTS` in `models.py`);
+  `gte-reranker` loads by repository id and is not pinned, nor is the
+  Verdict engine checkout (`VERDICT_ENGINE`). No SHA-256 of the
+  weights is taken. `run.py` records the sha256 of `run.py`, `models.py` and
+  each eval set in `manifest.json`, with the platform and Python version.
+- Latency is wall-clock per decision, model resident, one decision at a time
+  (torch intra-op threads set to 4, `THREADS` in `models.py`); first
+  (warm-up) decision excluded from percentiles.
+- Peak RSS is `getrusage(RUSAGE_SELF)` of the runner after a model's last
+  spec, normalised to bytes (`ru_maxrss` is KiB on Linux, bytes on macOS):
+  the cumulative peak of the one process that ran every model in sequence,
+  so it can include memory held from earlier models, and it excludes child
+  processes (the `pixel classify` child behind `pixel-static` and
+  `remote-cli`). `run.py` records it as `runner_peak_rss_bytes`; the
+  committed manifests under `scripts/bench-decide/runs/` predate the rename
+  and call it `peak_rss_bytes` (all macOS, so already in bytes).
 
 ## What this pilot does not claim
 
@@ -100,3 +135,23 @@ size, peak RSS, license. Bootstrap 95% CI on the accuracy delta vs
   set and their latency/cost conventions).
 - Anything about ranking/retrieval quality — reranker candidates here are
   evaluated only on the decision task they were scored on upstream.
+
+## Amendments after the run
+
+The protocol above was frozen before run1; these corrections were made after
+it, in review, and change no measured figure:
+
+- Item count corrected from 47 to 45, the committed gold set.
+- Claims the harness never implemented were replaced by what it does: no
+  run-time `SOURCE_HASH` check, no SHA-256 weight pinning, no
+  family-stratified bootstrap, no FP+2FN cost.
+- `delta_exact_set_ci95_vs_baseline` (item resampling) was added to
+  `score.py`; run1's committed `summary.json` predates it and carries only the
+  per-spec `delta_acc_ci95_vs_baseline`, which `score.py` still reproduces
+  exactly.
+- Risk–coverage now thresholds the top probability; run1's committed
+  `summary.json` used `min(max(p, 1 - p))`, which only equals the top
+  probability for two labels, so its coding-public risk–coverage rows differ
+  from a rescore. Plan-routing rows (two labels) are unchanged.
+- The coverage precondition on the integration gate is post hoc, and the
+  frozen set does not meet it.
