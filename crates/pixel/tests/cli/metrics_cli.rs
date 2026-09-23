@@ -1021,6 +1021,52 @@ fn daemon_reindex_reports_actual_nested_index_counts() {
     assert_eq!(metric_lines(&reindexed).len(), 1);
 }
 
+/// A renamed command's note is rendered output the caller reads, like any
+/// other stderr line: `output_bytes` must count it, or every call through an
+/// old name is priced against less output than it printed.
+#[test]
+fn rename_note_counts_as_rendered_output() {
+    let fixture = Fixture::new();
+    let out = fixture.run(&["inspect", "--json", "."]);
+    assert_success(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("note: 'inspect' is now 'repo-state'"),
+        "{stderr}"
+    );
+    let lines = metric_lines(&out);
+    assert_eq!(lines.len(), 1, "{out:?}");
+    let events = fixture.events("repo-state");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0]["metrics"]["output_bytes"],
+        out.stdout.len() + out.stderr.len() - lines[0].len() - 2
+    );
+}
+
+/// `prepare-repo --json` reports an already-running daemon on stderr
+/// (`daemon_start` in quiet mode, through `eprint!`): that line is rendered
+/// output too, and `output_bytes` must count it like the rename note.
+#[test]
+fn quiet_daemon_report_counts_as_rendered_output() {
+    let fixture = Fixture::new();
+    assert_success(&fixture.run(&["daemon", "start"]));
+    let out = fixture.run(&["prepare-repo", "--json", "."]);
+    // Stop before assertions so a failed one never leaves a daemon behind.
+    assert_success(&fixture.run(&["daemon", "stop"]));
+    assert_success(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("daemon already running"), "{stderr}");
+    let lines = metric_lines(&out);
+    assert_eq!(lines.len(), 1, "{out:?}");
+    let events = fixture.events("prepare-repo");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0]["metrics"]["output_bytes"],
+        out.stdout.len() + out.stderr.len() - lines[0].len() - 2
+    );
+}
+
 /// A slow `actions.jsonl` line is only diagnosable when it says how the
 /// request was served: in process and why (with the open and the handling
 /// timed apart), through a daemon it had to start, or through one already
