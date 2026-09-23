@@ -127,6 +127,18 @@ jobs:
       - name: Doctests
         run: cargo test --workspace --locked --doc
 
+      # Nothing runs pixel in this checkout before the tests, so any action
+      # log here was written by a test that spawned the binary from its own
+      # working directory (`crates/<crate>`) instead of a fixture. The CLI
+      # suite's `support::pixel_command()` starts every run elsewhere.
+      - name: Tests left the checkout's action log alone
+        run: |
+          if [ -e .pixel/actions.jsonl ]; then
+            echo "::error::the test suite wrote $(wc -l < .pixel/actions.jsonl) entries into this checkout's .pixel/actions.jsonl"
+            cat .pixel/actions.jsonl
+            exit 1
+          fi
+
       # `[[bench]]` targets are `harness = false`: criterion owns `main`, so
       # nextest never runs them and the ranking assertions inside would gate
       # nothing. `-- --test` runs the bench bodies once, without criterion's

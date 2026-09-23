@@ -5,7 +5,9 @@
 //! one document, and a malformed version rejected before any file is read.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
+
+use crate::support::pixel_command;
 
 fn fixture(tag: &str) -> PathBuf {
     let dir =
@@ -48,11 +50,10 @@ fn write_lock(dir: &Path, cli_version: &str) {
 }
 
 fn pixel(dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pixel"))
+    pixel_command()
         .args(args)
         .arg("--repo")
         .arg(dir)
-        .env("PIXEL_DAEMON_AUTO_START", "0")
         .output()
         .unwrap()
 }
