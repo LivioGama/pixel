@@ -441,7 +441,8 @@ fn operation_error_precedes_metrics_and_preserves_failure() {
     let output = fixture.run(&["search-content", "(", ".", "--json", "--no-daemon"]);
     assert!(!output.status.success());
     // The failure is machine-readable on stdout (the envelope) and explicit on
-    // stderr (the diagnostic, then the metrics line).
+    // stderr (the diagnostic, the metrics line, then the diagnostic again so
+    // the last stderr line still names the failure under `| tail`).
     let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(doc["ok"], false, "{output:?}");
     assert_eq!(doc["error"]["code"], "INVALID_INPUT", "{doc}");
@@ -449,17 +450,23 @@ fn operation_error_precedes_metrics_and_preserves_failure() {
     let lines = metric_lines(&output);
     assert_eq!(lines.len(), 1);
     assert!(stderr.starts_with("pixel:"), "{stderr}");
-    assert!(stderr.ends_with(&format!("\n{}\n", lines[0])));
-    let diagnostics = stderr.strip_suffix(&format!("\n{}\n", lines[0])).unwrap();
+    let (diagnostics, trailer) = stderr
+        .split_once(&format!("\n{}\n", lines[0]))
+        .expect("the metrics block follows the diagnostic");
     assert!(diagnostics.contains("regex") || diagnostics.contains("pattern"));
+    assert_eq!(
+        trailer, diagnostics,
+        "the error is repeated after the block"
+    );
     let events = fixture.events("search-content");
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["outcome"], "error");
     // Rendered output covers both streams: the failure envelope on stdout and
-    // the diagnostic on stderr (the metrics line itself is not counted).
+    // both copies of the diagnostic on stderr (the metrics line itself is
+    // reporting, not output).
     assert_eq!(
         events[0]["metrics"]["output_bytes"],
-        (output.stdout.len() + diagnostics.len()) as u64
+        (output.stdout.len() + diagnostics.len() + trailer.len()) as u64
     );
     assert!(events[0]["metrics"]["native_workflow_bytes"].is_null());
     assert_metric_identity(&lines[0], &events[0]);
@@ -809,6 +816,70 @@ fn graph_text_and_json_account_for_same_returned_files() {
         );
         assert_eq!(metric_lines(&text_output).len(), 1);
         assert_eq!(metric_lines(&json_output).len(), 1);
+    }
+}
+
+/// An agent reads a failed call through `2>&1 | tail -N`: when the metrics
+/// block is the last thing on stderr, the error scrolls out of that window and
+/// a failed operation (a commit, a push) reads as one that finished. The error
+/// must be the last non-empty stderr line; with metrics off nothing is
+/// repeated, so it appears exactly once.
+#[test]
+fn failure_ends_stderr_on_its_error_and_metrics_off_prints_it_once() {
+    fn last_non_empty(stderr: &str) -> &str {
+        stderr
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or_default()
+    }
+    let fixture = Fixture::new();
+    let args = ["search-content", "fn main", "src/nope", "--no-daemon"];
+
+    let live = fixture.run(&args);
+    assert!(!live.status.success(), "{live:?}");
+    let stderr = String::from_utf8(live.stderr.clone()).unwrap();
+    let error = stderr
+        .lines()
+        .find(|line| line.starts_with("pixel: ") && line.contains("src/nope"))
+        .unwrap_or_else(|| panic!("no diagnostic naming the bad path: {stderr}"));
+    assert_eq!(metric_lines(&live).len(), 1, "{stderr}");
+    assert_eq!(last_non_empty(&stderr), error, "{stderr}");
+    assert_eq!(stderr.matches(error).count(), 2, "{stderr}");
+
+    let flag_off = fixture
+        .command()
+        .arg("--metrics=off")
+        .args(args)
+        .output()
+        .unwrap();
+    let env_off = fixture
+        .command()
+        .env("PIXEL_METRICS", "0")
+        .args(args)
+        .output()
+        .unwrap();
+    let runs = [live, flag_off, env_off];
+    for off in &runs[1..] {
+        assert_eq!(off.status.code(), runs[0].status.code(), "{off:?}");
+        let stderr = String::from_utf8_lossy(&off.stderr);
+        assert!(!stderr.contains("🟩 pixel "), "{stderr}");
+        assert_eq!(stderr.matches(error).count(), 1, "{stderr}");
+        assert_eq!(last_non_empty(&stderr), error, "{stderr}");
+    }
+
+    // Every rendered byte is accounted once: the repeat is output on the live
+    // run, and a run that prints no block records no repeat it never wrote.
+    let events = fixture.events("search-content");
+    assert_eq!(events.len(), runs.len());
+    for (run, event) in runs.iter().zip(&events) {
+        let metrics = &event["metrics"];
+        assert_eq!(
+            metrics["output_bytes"].as_u64().unwrap()
+                + metrics["reporting_bytes"].as_u64().unwrap(),
+            (run.stdout.len() + run.stderr.len()) as u64,
+            "{event}"
+        );
     }
 }
 

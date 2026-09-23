@@ -416,8 +416,10 @@ the recorded evidence at render time — so a replay of the record states the
 same cause.
 
 Ordinary CLI boundaries emit an authoritative metrics line on stderr after the
-result/error without changing JSON stdout. `--metrics=off` and `PIXEL_METRICS=0`
-disable live reporting, not local accounting. Metrics failures cannot change success or safety behavior.
+result/error without changing JSON stdout. On a failure the `pixel: <error>`
+diagnostic is repeated after that line, so the last stderr line still names the
+failure when a caller reads only the tail. `--metrics=off` and `PIXEL_METRICS=0`
+disable live reporting (and the repeat), not local accounting. Metrics failures cannot change success or safety behavior.
 Exact-output search compatibility, hooks, protocol streams and statuslines remain
 untouched; a separate host-supported channel is required for their live relay.
 Protected paths lacking output-volume capture retain unavailable volumes rather

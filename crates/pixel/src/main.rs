@@ -4633,6 +4633,14 @@ fn run() -> Result<(), String> {
         let _ = operation_metrics::Counted(std::io::stderr().lock())
             .write_all(format!("pixel: {error}\n").as_bytes());
     }
+    // A live metrics block would otherwise end stderr, and an agent reading
+    // `2>&1 | tail -N` would see the block without the failure. The error is
+    // repeated after it; with metrics off there is no block and no repeat.
+    let trailer = result
+        .as_ref()
+        .err()
+        .filter(|_| live)
+        .map(|error| format!("pixel: {error}\n"));
     let _ = std::io::stdout().flush();
     let elapsed = started.elapsed();
     // A command that owns its exit code still reports its outcome to the
@@ -4645,7 +4653,10 @@ fn run() -> Result<(), String> {
     let mut event = pixel_actionlog::ActionEvent::new(&command_label, logged_args(&argv[1..]))
         .with_result(&logged_result, elapsed);
     if !protected {
-        let output_bytes = operation_metrics::output_bytes();
+        // The repeated error is rendered output the caller reads, written
+        // after the block: count it here, before the block is sized.
+        let output_bytes = operation_metrics::output_bytes()
+            + trailer.as_ref().map_or(0, |text| text.len() as u64);
         let mut metrics = match operation_metrics::evidence(&command_label, result.is_ok()) {
             Ok(evidence) => {
                 pixel_actionlog::OperationMetrics::new(elapsed, output_bytes, Some(evidence))
@@ -4669,7 +4680,11 @@ fn run() -> Result<(), String> {
         // A blank record creates a distinct terminal block so transcript UIs
         // cannot visually attach the metrics matrix to command output.
         // Reporting bytes include this separator and the trailing newline.
-        let _ = writeln!(std::io::stderr().lock(), "\n{line}");
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "\n{line}");
+        if let Some(trailer) = &trailer {
+            let _ = stderr.write_all(trailer.as_bytes());
+        }
     }
     logger.log(event);
     // The record must be on disk before exit: `pixel action-log`, the
