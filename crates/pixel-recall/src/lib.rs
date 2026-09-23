@@ -179,6 +179,24 @@ pub(crate) mod testutil {
         source_session_id: &str,
         turns: &[(Role, &str)],
     ) -> i64 {
+        let turns: Vec<(Role, Option<IntentSource>, &str)> = turns
+            .iter()
+            .map(|(role, text)| {
+                let intent = (*role == Role::User).then_some(IntentSource::Human);
+                (*role, intent, *text)
+            })
+            .collect();
+        add_session_with_intents(store, agent, source_session_id, &turns)
+    }
+
+    /// `add_session` with each turn's intent source under the caller's
+    /// control, so a fixture can hold a harness-injected user turn.
+    pub(crate) fn add_session_with_intents(
+        store: &mut RecallStore,
+        agent: &'static str,
+        source_session_id: &str,
+        turns: &[(Role, Option<IntentSource>, &str)],
+    ) -> i64 {
         let session = UnifiedSession {
             agent,
             source_session_id: source_session_id.to_string(),
@@ -193,9 +211,9 @@ pub(crate) mod testutil {
         let turns: Vec<UnifiedTurn> = turns
             .iter()
             .enumerate()
-            .map(|(i, (role, text))| UnifiedTurn {
+            .map(|(i, (role, intent_source, text))| UnifiedTurn {
                 role: *role,
-                intent_source: (*role == Role::User).then_some(IntentSource::Human),
+                intent_source: *intent_source,
                 ts: Some(TS + i as i64 * 60_000),
                 text: (*text).to_string(),
                 truncated: false,

@@ -42,7 +42,8 @@ pub enum RecallCmd {
         /// Restrict to a role: user, assistant, or tool.
         #[arg(long)]
         role: Option<String>,
-        /// Only human-authored user turns (skip harness-injected text).
+        /// Drop harness-injected user turns; assistant and tool turns stay.
+        /// Combine with `--role user` for human text only.
         #[arg(long)]
         human_only: bool,
         /// Restrict to one session (numeric id or [agent:]id-prefix).
@@ -109,6 +110,9 @@ pub enum RecallCmd {
         until: Option<String>,
         #[arg(long)]
         role: Option<String>,
+        /// Drop harness-injected user turns (the lexical channel always
+        /// does); assistant and tool turns stay. Combine with `--role user`
+        /// for human text only.
         #[arg(long)]
         human_only: bool,
         /// Session groups to return.
