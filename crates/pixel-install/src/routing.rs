@@ -977,11 +977,26 @@ pub(crate) fn remove_pre_tool_use_guard(
 /// under the repository, not under `$HOME`.
 pub(crate) fn install_project_claude_at(
     repo: &Path,
+    home: &Path,
     exe: &Path,
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
     let shared = repo.join(CLAUDE_SHARED_SETTINGS);
-    let (inherited, migrated) = remove_pre_tool_use_guard(&shared, dry_run)?;
+    let (mut inherited, migrated) = remove_pre_tool_use_guard(&shared, dry_run)?;
+    let global_path = Provider::Claude.path(home);
+    // A repository at `$HOME` has the global file as its shared one, which
+    // was read above.
+    let (global, unreadable) = if same_file(&shared, &global_path) {
+        (Vec::new(), None)
+    } else {
+        global_pre_tool_use(&global_path)
+    };
+    let blocking = blocking_claude_groups(&global);
+    let global_blockers = hook_commands(&blocking);
+    // A guard a full install of an older release left in the global file:
+    // the current global install takes it out.
+    let stale_global_guard = commands(&blocking).any(is_pixel_hook);
+    inherited.extend(global);
     let mut step = install_at_scoped(
         repo,
         &repo.join(CLAUDE_LOCAL_SETTINGS),
@@ -998,7 +1013,87 @@ pub(crate) fn install_project_claude_at(
             shared.display()
         ));
     }
+    if !global_blockers.is_empty() {
+        step.summary = install::dry_run_summary(
+            dry_run,
+            &format!(
+                "claude guard not installed: {} in {} also rewrites shell calls{}",
+                global_blockers.join(", "),
+                global_path.display(),
+                if stale_global_guard {
+                    " — run `pixel install` to take pixel's global guard out"
+                } else {
+                    ""
+                }
+            ),
+        );
+    }
+    if let Some(warning) = unreadable {
+        step.status = install::CheckStatus::Yellow;
+        step.summary = format!("{}; {warning}", step.summary);
+    }
     Ok(step)
+}
+
+/// The `PreToolUse` groups of the user-level settings at `path`, which
+/// Claude Code merges into every project's session. Read only: a repo
+/// install never writes the global file. An unreadable file yields no group
+/// and the reason, so it cannot block the repo install on its own.
+pub(crate) fn global_pre_tool_use(path: &Path) -> (Vec<Value>, Option<String>) {
+    match install::read_settings(path) {
+        Ok(value) => (
+            value
+                .get("hooks")
+                .and_then(|hooks| hooks.get("PreToolUse"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            None,
+        ),
+        Err(e) => (
+            Vec::new(),
+            Some(format!(
+                "{} unreadable ({e}), its PreToolUse hooks were not checked",
+                path.display()
+            )),
+        ),
+    }
+}
+
+/// The groups that cannot run beside the Claude guard: shell rewriters,
+/// the exact RTK group included, since only the file that holds it can hand
+/// it to the guard.
+pub(crate) fn blocking_claude_groups(groups: &[Value]) -> Vec<Value> {
+    groups
+        .iter()
+        .filter(|group| !coexists_with_guard(group, Provider::Claude))
+        .cloned()
+        .collect()
+}
+
+/// Every hook command of `groups`, in order.
+fn commands(groups: &[Value]) -> impl Iterator<Item = &str> {
+    groups
+        .iter()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+}
+
+/// Every hook command of `groups`, backticked, in order.
+pub(crate) fn hook_commands(groups: &[Value]) -> Vec<String> {
+    commands(groups)
+        .map(|command| format!("`{command}`"))
+        .collect()
+}
+
+/// Whether `a` and `b` name the same file, comparing canonical paths when
+/// both resolve.
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// Whether any hook command in a settings value (`{"hooks": {<event>: [...]}}`)
