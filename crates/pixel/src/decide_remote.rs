@@ -66,7 +66,7 @@ impl Preset {
     /// `--remote-model` / `PIXEL_REMOTE_MODEL`.
     fn default_model(&self) -> &'static str {
         match self {
-            Preset::Openrouter => "google/gemini-3.5-flash-lite",
+            Preset::Openrouter => "deepseek/deepseek-v4.1-flash",
             Preset::Ollama => "deepseek-v4.1-flash:cloud",
             Preset::Local => "qwen3.5:4b",
         }

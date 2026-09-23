@@ -69,6 +69,7 @@ fn installed_metrics_guidance_reaches_wrapped_agents_without_rewriting_streams()
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     install(&InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -184,6 +185,7 @@ fn install_creates_config_with_managed_markers() {
     fs::write(home.join("CLAUDE.md"), original.clone()).unwrap();
 
     let options = InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -225,6 +227,7 @@ fn install_is_idempotent() {
     let home = dir.path();
 
     let options = InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -293,6 +296,7 @@ fn install_leaves_codex_config_untouched() {
     .unwrap();
 
     let options = InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -339,6 +343,7 @@ fn install_leaves_settings_json_valid_after_install() {
     fs::write(claude_dir.join("settings.json"), "{}").unwrap();
 
     let options = InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: None,
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -422,6 +427,7 @@ fn dry_run_writes_nothing_on_a_clean_home() {
     let home = dir.path();
 
     let options = InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -466,6 +472,7 @@ fn dry_run_leaves_pre_existing_files_byte_identical() {
 
     // Pre-create real state as if a previous non-dry-run install ran.
     let real_options = InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: None,
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -484,6 +491,7 @@ fn dry_run_leaves_pre_existing_files_byte_identical() {
     // A dry-run install afterwards must not touch anything, even though a
     // real install already exists (idempotent no-op path).
     let dry_options = InstallOptions {
+        repo: None,
         dry_run: true,
         shell: Some(TEST_SHELL.into()),
         ..real_options
@@ -553,6 +561,7 @@ fn reinstall_is_byte_for_byte_idempotent_on_managed_claude_md() {
     let home = dir.path();
     fs::write(home.join("CLAUDE.md"), "# Project\n\nHand-written notes.\n").unwrap();
     let options = InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: None,
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -575,6 +584,7 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
     let home = dir.path();
     // Deliberately do NOT pre-create CLAUDE.md or AGENTS.md.
     let options = InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: None,
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -674,6 +684,7 @@ fn doctor_install_artifact_checks_red_and_green() {
 
     // 2. Run install: deploys agent-prompt + shell wrappers → both go green.
     install(&InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -776,6 +787,7 @@ fn doctor_rule_checks_validate_the_deployed_agent_prompt() {
     // 2. A plain install (no CLAUDE.md, no managed block): both checks read
     //    the deployed prompt and go green.
     install(&InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -906,6 +918,7 @@ fn uninstall_removes_managed_block_and_preserves_user_content() {
 
     // Uninstall
     let uninstall_opts = UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join("pixel")),
         dry_run: false,
@@ -976,6 +989,7 @@ fn uninstall_removes_claude_hooks_and_scripts() {
 
     // Uninstall
     let uninstall_opts = UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join("pixel")),
         dry_run: false,
@@ -1020,6 +1034,7 @@ fn uninstall_removes_binary() {
     fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
 
     let opts = UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         binary_path: Some(bin.clone()),
         dry_run: false,
@@ -1038,6 +1053,7 @@ fn uninstall_is_idempotent() {
     let home = dir.path();
 
     let install_opts = InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -1047,6 +1063,7 @@ fn uninstall_is_idempotent() {
     install(&install_opts).expect("install");
 
     let uninstall_opts = UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join("pixel")),
         dry_run: false,
@@ -1085,6 +1102,7 @@ fn uninstall_dry_run_does_not_modify() {
 
     // Dry-run uninstall
     let uninstall_opts = UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         binary_path: Some(bin.clone()),
         dry_run: true,
@@ -1141,6 +1159,7 @@ fn uninstall_removes_codex_hooks_preserving_others() {
     fs::write(&codex_path, serde_json::to_string_pretty(&initial).unwrap()).unwrap();
 
     let opts = UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join("pixel")),
         dry_run: false,
@@ -1180,6 +1199,7 @@ fn uninstall_removes_rule_source() {
     fs::write(&rule_file, "# pixel rules\n").unwrap();
 
     let opts = UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join("pixel")),
         dry_run: false,
@@ -1203,6 +1223,7 @@ fn routing_full_install_rtk_round_trip_preserves_foreign_hooks() {
     fs::write(&settings, serde_json::to_vec(&original).unwrap()).unwrap();
     let exe = fake_pixel_exe(home);
     let opts = InstallOptions {
+        repo: None,
         home: Some(home.into()),
         executable_path: Some(exe.clone()),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -1241,6 +1262,7 @@ fn routing_full_install_rtk_round_trip_preserves_foreign_hooks() {
         "install must not wire any pixel guard"
     );
     uninstall(&UninstallOptions {
+        repo: None,
         home: Some(home.into()),
         binary_path: Some(exe),
         dry_run: false,
@@ -1295,6 +1317,7 @@ fn routing_isolated_provider_child() {
     fs::write(&exe, "#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s' \"$*\"\n").unwrap();
     fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
     let opts = InstallOptions {
+        repo: None,
         home: Some(home.clone()),
         executable_path: Some(exe),
         claude_executable: Some(fake_claude_exe(&home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -1373,6 +1396,7 @@ fn fish_dropin(home: &std::path::Path) -> std::path::PathBuf {
 
 fn install_for_shell(home: &std::path::Path, shell: &str) {
     install(&InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -1612,6 +1636,7 @@ fn uninstall_wrappers_only_removes_one_shells_block_and_nothing_else() {
     );
 
     let report = uninstall(&UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         shell: Some("/bin/zsh".into()),
         wrappers_only: true,
@@ -1681,6 +1706,7 @@ fn an_unterminated_managed_block_refuses_the_rewrite_and_keeps_the_profile() {
     fs::write(&profile, original).unwrap();
 
     let report = install(&InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -1705,6 +1731,7 @@ fn an_unterminated_managed_block_refuses_the_rewrite_and_keeps_the_profile() {
     );
 
     let report = uninstall(&UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join("pixel")),
         dry_run: false,
@@ -1823,6 +1850,7 @@ fn uninstall_deletes_the_fish_dropin_it_created() {
     );
 
     uninstall(&UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         binary_path: None,
         dry_run: false,
@@ -1921,6 +1949,7 @@ fn dry_run_does_not_write_the_subagent_prompt() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     let report = install(&InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -2265,6 +2294,7 @@ fn install_writes_the_agent_prompt_into_opencode_agents_md_when_opencode_is_pres
 
     // Uninstall strips only the block.
     uninstall(&UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join(".local/bin/pixel")),
         shell: Some(TEST_SHELL.into()),
@@ -2283,6 +2313,7 @@ fn install_refuses_to_rewrite_a_codex_config_it_cannot_parse() {
     let broken = "model = \"gpt\"\n[features\njs_repl = false\n";
     fs::write(codex_config_path(home), broken).unwrap();
     let report = install(&InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -2316,6 +2347,7 @@ fn dry_run_leaves_codex_config_absent_and_untouched() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     let options = InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -2412,6 +2444,7 @@ fn uninstall_takes_only_the_pixel_block_out_of_codex_config() {
     install_for_shell(home, TEST_SHELL);
     assert!(codex_developer_instructions(home).is_some());
     uninstall(&UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         shell: Some(TEST_SHELL.into()),
         ..Default::default()
@@ -2441,6 +2474,7 @@ fn uninstall_takes_only_the_pixel_block_out_of_codex_config() {
     .unwrap();
     install_for_shell(home, TEST_SHELL);
     uninstall(&UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         shell: Some(TEST_SHELL.into()),
         ..Default::default()
@@ -2535,6 +2569,7 @@ fn uninstall_removes_the_subagent_prompt() {
     );
 
     uninstall(&UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         binary_path: None,
         dry_run: false,
@@ -2583,6 +2618,7 @@ fn pi_backups(home: &std::path::Path) -> Vec<std::path::PathBuf> {
 
 fn uninstall_home(home: &std::path::Path) {
     uninstall(&UninstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join("pixel")),
         dry_run: false,
@@ -2708,6 +2744,7 @@ fn install_reports_a_pi_prompt_it_cannot_write_instead_of_greening_it() {
     fs::write(home.join(".pi"), "not a directory\n").unwrap();
 
     let result = install(&InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
@@ -2793,6 +2830,7 @@ fn install_with_claude(
     claude: Option<std::path::PathBuf>,
 ) -> InstallReport {
     install(&InstallOptions {
+        repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: claude,
@@ -3289,4 +3327,273 @@ fn plugin_manifests_parse_and_point_at_files_that_exist() {
         !repo.join("plugin.json").exists(),
         "a root plugin.json shadows .claude-plugin/ and .codex-plugin/"
     );
+}
+
+// ---------------------------------------------------------------------------
+// repo-local install tests (`pixel install --repo <path>`)
+// ---------------------------------------------------------------------------
+
+fn repo_install_options(repo: &std::path::Path, home: &std::path::Path) -> InstallOptions {
+    InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        dry_run: false,
+        repo: Some(repo.to_path_buf()),
+        ..Default::default()
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn repo_install_writes_all_four_artifacts() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+
+    let report = install(&repo_install_options(&repo, &home)).expect("repo install");
+    assert!(report.ok, "{report:?}");
+
+    // .codex/config.toml — developer_instructions managed block.
+    let config = fs::read_to_string(repo.join(".codex/config.toml")).unwrap();
+    assert!(config.contains("developer_instructions"), "{config}");
+    assert!(config.contains(MANAGED_BEGIN), "{config}");
+
+    // .codex/hooks.json — exactly the composed guard group + sidecar backup.
+    let hooks: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo.join(".codex/hooks.json")).unwrap()).unwrap();
+    let pre = hooks["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre.len(), 1, "{hooks}");
+    let command = pre[0]["hooks"][0]["command"].as_str().unwrap();
+    assert!(
+        command.contains("run-hook composed-guard --provider codex --backup"),
+        "{command}"
+    );
+    let sidecar: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repo.join(".codex/pixel-composed-guard-backup.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(sidecar["provider"], "codex");
+    assert!(sidecar["pre_tool_use"].is_array());
+    assert_eq!(
+        sidecar["managed_pre_tool_use"],
+        hooks["hooks"]["PreToolUse"]
+    );
+
+    // .devin/hooks.json — pixel guard group.
+    let devin: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo.join(".devin/hooks.json")).unwrap()).unwrap();
+    let devin_pre = devin["hooks"]["PreToolUse"].as_array().unwrap();
+    assert!(
+        devin_pre.iter().any(|g| {
+            g["hooks"].as_array().is_some_and(|h| {
+                h.iter().any(|hook| {
+                    hook["command"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("run-hook guard --provider devin"))
+                })
+            })
+        }),
+        "{devin}"
+    );
+
+    // .pi/agent/extensions/pixel-guard.ts + AGENTS.md managed block.
+    let ext = fs::read_to_string(repo.join(".pi/agent/extensions/pixel-guard.ts")).unwrap();
+    assert!(ext.contains(MANAGED_BEGIN), "{ext}");
+    assert!(ext.contains("[\"run-hook\", \"guard\"]"), "{ext}");
+    let agents = fs::read_to_string(repo.join(".pi/agent/AGENTS.md")).unwrap();
+    assert!(agents.contains(MANAGED_BEGIN), "{agents}");
+
+    // Nothing global was touched.
+    assert!(!home.join(".local/share/pixel").exists());
+    assert!(!home.join(".codex").exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn repo_install_is_idempotent() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+
+    install(&repo_install_options(&repo, &home)).unwrap();
+    let snapshot = |rel: &str| fs::read(repo.join(rel)).unwrap();
+    let before: Vec<_> = [
+        ".codex/config.toml",
+        ".codex/hooks.json",
+        ".codex/pixel-composed-guard-backup.json",
+        ".devin/hooks.json",
+        ".pi/agent/extensions/pixel-guard.ts",
+        ".pi/agent/AGENTS.md",
+    ]
+    .iter()
+    .map(|rel| snapshot(rel))
+    .collect();
+
+    let report = install(&repo_install_options(&repo, &home)).unwrap();
+    assert!(report.ok);
+    let after: Vec<_> = [
+        ".codex/config.toml",
+        ".codex/hooks.json",
+        ".codex/pixel-composed-guard-backup.json",
+        ".devin/hooks.json",
+        ".pi/agent/extensions/pixel-guard.ts",
+        ".pi/agent/AGENTS.md",
+    ]
+    .iter()
+    .map(|rel| snapshot(rel))
+    .collect();
+    assert_eq!(before, after, "reinstall must be byte-identical");
+}
+
+#[test]
+#[cfg(unix)]
+fn repo_install_preserves_foreign_hooks() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".codex")).unwrap();
+    fs::create_dir_all(repo.join(".devin")).unwrap();
+
+    let foreign = serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":"keep-security-check"}]});
+    fs::write(
+        repo.join(".codex/hooks.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {"PreToolUse": [foreign.clone()]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        repo.join(".devin/hooks.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {"PreToolUse": [foreign.clone()]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    install(&repo_install_options(&repo, &home)).unwrap();
+
+    // Codex: the foreign group moved into the sidecar; the live PreToolUse is
+    // the single composed-guard group.
+    let codex: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo.join(".codex/hooks.json")).unwrap()).unwrap();
+    let sidecar: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repo.join(".codex/pixel-composed-guard-backup.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        sidecar["pre_tool_use"],
+        serde_json::json!([foreign.clone()])
+    );
+    assert!(
+        codex["hooks"]["PreToolUse"].as_array().unwrap()[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("composed-guard")
+    );
+
+    // Devin: foreign group kept, pixel group appended.
+    let devin: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo.join(".devin/hooks.json")).unwrap()).unwrap();
+    let pre = devin["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre[0], foreign, "foreign devin group preserved");
+    assert_eq!(pre.len(), 2);
+}
+
+#[test]
+#[cfg(unix)]
+fn repo_uninstall_removes_only_pixel_artifacts() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".devin")).unwrap();
+    let foreign =
+        serde_json::json!({"matcher":"exec","hooks":[{"type":"command","command":"keep-me"}]});
+    fs::write(
+        repo.join(".devin/hooks.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {"PreToolUse": [foreign.clone()]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    install(&repo_install_options(&repo, &home)).unwrap();
+
+    let report = uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        repo: Some(repo.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(report.ok, "{report:?}");
+
+    // Codex hooks.json: composed group + lifecycle entries + sidecar gone
+    // (there were no pre-existing project hooks to restore).
+    let codex: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo.join(".codex/hooks.json")).unwrap()).unwrap();
+    let mut pixel_commands = Vec::new();
+    if let Some(events) = codex["hooks"].as_object() {
+        for (event, groups) in events {
+            for g in groups.as_array().into_iter().flatten() {
+                for hook in g["hooks"].as_array().into_iter().flatten() {
+                    if let Some(c) = hook["command"].as_str()
+                        && c.contains("pixel")
+                    {
+                        pixel_commands.push(format!("{event}: {c}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        pixel_commands.is_empty(),
+        "no pixel hook commands may survive repo uninstall: {pixel_commands:?} in {codex}"
+    );
+    assert!(
+        !repo
+            .join(".codex/pixel-composed-guard-backup.json")
+            .exists()
+    );
+
+    // config.toml: developer_instructions block gone.
+    let config = fs::read_to_string(repo.join(".codex/config.toml")).unwrap();
+    assert!(!config.contains(MANAGED_BEGIN), "{config}");
+
+    // Devin: only the foreign group remains.
+    let devin: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo.join(".devin/hooks.json")).unwrap()).unwrap();
+    assert_eq!(devin["hooks"]["PreToolUse"], serde_json::json!([foreign]));
+
+    // Pi artifacts gone; AGENTS.md cleaned or removed.
+    assert!(!repo.join(".pi/agent/extensions/pixel-guard.ts").exists());
+    let agents = fs::read_to_string(repo.join(".pi/agent/AGENTS.md")).unwrap_or_default();
+    assert!(!agents.contains(MANAGED_BEGIN));
+}
+
+#[test]
+#[cfg(unix)]
+fn repo_install_dry_run_writes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+
+    let mut options = repo_install_options(&repo, &home);
+    options.dry_run = true;
+    let report = install(&options).unwrap();
+    assert!(report.dry_run);
+    assert!(report.ok, "{report:?}");
+
+    assert!(!repo.join(".codex").exists());
+    assert!(!repo.join(".devin").exists());
+    assert!(!repo.join(".pi").exists());
 }

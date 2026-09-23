@@ -17,7 +17,6 @@ pub(crate) const RTK_BACKUP: &str = ".claude/pixel-rtk-hooks.json";
 /// guard.  It deliberately lives next to the project hook config so a runtime
 /// never has to discover or execute the currently mutable hook configuration.
 pub(crate) const CODEX_COMPOSED_BACKUP: &str = "pixel-composed-guard-backup.json";
-#[allow(dead_code)]
 const CODEX_COMPOSED_BACKUP_VERSION: u64 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,8 +69,8 @@ pub(crate) fn quoted_executable(exe: &Path) -> String {
     format!("'{}'", exe.to_string_lossy().replace('\'', "'\\''"))
 }
 
-/// Recognize our executable commands and legacy script names, not arbitrary
-/// commands merely containing a lifecycle verb.
+/// Recognize our executable commands, not arbitrary commands merely
+/// containing a lifecycle verb.
 pub(crate) fn is_pixel_hook(command: &str) -> bool {
     fn executable_name(executable: &str) -> Option<String> {
         let unquoted = if let Some(inner) = executable
@@ -88,18 +87,6 @@ pub(crate) fn is_pixel_hook(command: &str) -> bool {
         Path::new(&unquoted)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-    }
-    if executable_name(command).is_some_and(|name| {
-        [
-            config::GUARD_HOOK,
-            config::OLD_GUARD_HOOK,
-            config::SESSION_START_HOOK,
-            config::PROMPT_SUBMIT_HOOK,
-            config::POST_COMPACTION_HOOK,
-        ]
-        .contains(&name.as_str())
-    }) {
-        return true;
     }
     // Entries written before the command rename say `pixel hook <verb>`;
     // both spellings are pixel's and both must be recognised so an upgrade
@@ -492,7 +479,7 @@ fn configure(
     Ok((!blocked, adopted))
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))] // exercised by uninstall/routing tests
 pub(crate) fn install_provider(
     home: &Path,
     exe: &Path,
@@ -533,7 +520,6 @@ pub(crate) fn configuration_status(
     Ok(enabled)
 }
 
-#[allow(dead_code)]
 fn composed_backup_path(config_path: &Path) -> Result<PathBuf, String> {
     config_path
         .parent()
@@ -541,7 +527,6 @@ fn composed_backup_path(config_path: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "Codex hook configuration has no parent directory".into())
 }
 
-#[allow(dead_code)]
 fn composed_codex_group(exe: &Path, backup: &Path) -> Value {
     hook_group(
         format!(
@@ -553,7 +538,6 @@ fn composed_codex_group(exe: &Path, backup: &Path) -> Value {
     )
 }
 
-#[allow(dead_code)]
 fn composed_backup(groups: Vec<Value>, managed_pre_tool_use: Value) -> Value {
     json!({
         "version": CODEX_COMPOSED_BACKUP_VERSION,
@@ -563,7 +547,6 @@ fn composed_backup(groups: Vec<Value>, managed_pre_tool_use: Value) -> Value {
     })
 }
 
-#[allow(dead_code)]
 fn read_composed_backup(path: &Path) -> crate::Result<Value> {
     let value: Value = serde_json::from_str(&fs::read_to_string(path)?)?;
     let valid_header = value.get("version").and_then(Value::as_u64)
@@ -594,7 +577,6 @@ fn read_composed_backup(path: &Path) -> crate::Result<Value> {
 /// Persist the immutable runtime input before installing the command that can
 /// consume it. `persist` is an atomic same-directory rename; write mode is
 /// tightened before the file becomes visible.
-#[allow(dead_code)]
 fn write_composed_backup(
     path: &Path,
     groups: &[Value],
@@ -643,7 +625,6 @@ fn write_composed_backup(
 /// deterministic Pixel entrypoint. Reinstalls only accept the exact managed
 /// shape: a user edit to PreToolUse is a hard refusal, never a silent snapshot
 /// refresh that could grant Pixel authority over a newly added command.
-#[allow(dead_code)]
 pub(crate) fn install_project_codex_at(
     _home: &Path,
     path: &Path,
@@ -748,7 +729,7 @@ pub(crate) fn install_project_codex_at(
     })
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))] // exercised by uninstall/routing tests
 pub(crate) fn install_at(
     home: &Path,
     path: &Path,
@@ -792,6 +773,69 @@ pub(crate) fn install_at(
                     "not installed: unknown overlapping hook"
                 }
             ),
+        ),
+        detail: Some(install::with_backup_note(
+            path.display().to_string(),
+            backup,
+        )),
+    })
+}
+
+/// Merge a pixel `run-hook guard --provider devin` PreToolUse group into a
+/// project-local `<repo>/.devin/hooks.json`. Simpler than the Codex composed
+/// install: Devin's PreToolUse accepts multiple independent groups, so the
+/// pixel group is appended after any foreign entries and a reinstall replaces
+/// only pixel's own group.
+pub(crate) fn install_project_devin_at(
+    path: &Path,
+    exe: &Path,
+    dry_run: bool,
+) -> crate::Result<install::InstallStep> {
+    let mut value = install::read_settings(path)?;
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| InstallError::InvalidSettings {
+            path: path.into(),
+            reason: "settings root is not an object".into(),
+        })?;
+    let hooks = root
+        .entry("hooks")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| InstallError::InvalidSettings {
+            path: path.into(),
+            reason: "hooks is not an object".into(),
+        })?;
+    let pixel_group = hook_group(
+        format!(
+            "{} run-hook guard --provider {}",
+            quoted_executable(exe),
+            Provider::Devin.name()
+        ),
+        Some(Provider::Devin.shell()),
+    );
+    let merged = config::merge_hook_entry(
+        hooks.get("PreToolUse"),
+        "run-hook guard --provider devin",
+        pixel_group,
+    );
+    let unchanged = hooks.get("PreToolUse") == Some(&merged);
+    let backup = if unchanged {
+        None
+    } else {
+        hooks.insert("PreToolUse".into(), merged);
+        install::write_settings(path, &value, dry_run)?
+    };
+    Ok(install::InstallStep {
+        id: "hooks.devin".into(),
+        status: install::CheckStatus::Green,
+        summary: install::dry_run_summary(
+            dry_run,
+            if unchanged {
+                "devin project guard verified (live unverified)"
+            } else {
+                "devin project guard configured (live unverified)"
+            },
         ),
         detail: Some(install::with_backup_note(
             path.display().to_string(),

@@ -27,7 +27,7 @@ VERSION=$(grep -m1 '^version' "$ROOT/crates/pixel/Cargo.toml" | sed -E 's/.*"([^
 # Every derived file, relative to the output root.
 FILES="skills/pixel/SKILL.md .agents/skills/pixel/SKILL.md .openclaw/skills/pixel/SKILL.md .cursor/rules/pixel.mdc
 .windsurf/rules/pixel.md .kiro/steering/pixel.md .qoder/rules/pixel.md .clinerules/pixel.md
-PIXEL.md PIXEL-SUBAGENT.md"
+rules/pixel.md PIXEL.md PIXEL-SUBAGENT.md"
 
 # --check mode: render into a scratch dir and compare, without rewriting.
 if [ "${1:-}" = "--check" ]; then
@@ -100,6 +100,11 @@ alwaysApply: true
 ---
 '
 
+DEVIN_RULE_FRONT='---
+trigger: always_on
+---
+'
+
 write_file "skills/pixel/SKILL.md"            "$SKILL_FRONT"  "$SRC" yes
 write_file ".agents/skills/pixel/SKILL.md"    "$SKILL_FRONT"  "$SRC" yes
 write_file ".openclaw/skills/pixel/SKILL.md"  "$SKILL_FRONT"  "$SRC" yes
@@ -108,6 +113,7 @@ write_file ".windsurf/rules/pixel.md"         ""              "$SRC" yes
 write_file ".kiro/steering/pixel.md"          ""              "$SRC" yes
 write_file ".qoder/rules/pixel.md"            ""              "$SRC" yes
 write_file ".clinerules/pixel.md"             ""              "$SRC" yes
+write_file "rules/pixel.md"                   "$DEVIN_RULE_FRONT" "$SRC" yes
 write_file "PIXEL.md"                         ""              "$SRC" yes
 write_file "PIXEL-SUBAGENT.md"                ""              "$SUB_SRC" no
 

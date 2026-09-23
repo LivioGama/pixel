@@ -44,6 +44,11 @@ pub struct UninstallOptions {
     /// never loads it (`pixel doctor` names the file) without losing the
     /// install that works.
     pub wrappers_only: bool,
+    /// Repository root whose project-local artifacts `pixel install --repo`
+    /// wrote (`pixel uninstall --repo <path>`). When set, ONLY repo-local
+    /// removal runs: `.codex/hooks.json` + composed backup,
+    /// `.codex/config.toml`, `.devin/hooks.json`, and `.pi/agent/`.
+    pub repo: Option<PathBuf>,
 }
 
 /// Markers that identify pixel-authored hook entries in any settings file.
@@ -54,8 +59,6 @@ const PIXEL_HOOK_MARKERS: &[&str] = &[
     config::PROMPT_SUBMIT_HOOK,
     config::POST_COMPACTION_HOOK,
     crate::codex_config::METRICS_HOOK_MARKER,
-    // Also clean up the old guard hook from pre-rename installs.
-    config::OLD_GUARD_HOOK,
 ];
 
 /// Run `pixel uninstall`. Idempotent: safe to re-run.
@@ -71,6 +74,9 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         .unwrap_or_else(|| home.join(".local").join("bin").join("pixel"));
 
     let dry_run = options.dry_run;
+    if let Some(repo) = &options.repo {
+        return uninstall_project(repo, &binary_path, dry_run);
+    }
     if options.wrappers_only {
         let step = install::remove_shell_wrappers(&home, options.shell.as_deref(), dry_run)?;
         let summary = InstallSummary {
@@ -147,6 +153,106 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         ok,
         executable_path: binary_path.display().to_string(),
         home: home.display().to_string(),
+        dry_run,
+        steps,
+        summary: InstallSummary { green, yellow, red },
+    })
+}
+
+/// Repo-scoped uninstall (`pixel uninstall --repo <path>`): removes exactly
+/// the artifacts `pixel install --repo` writes, nothing global:
+///   - `<repo>/.codex/hooks.json` — restores the snapshotted PreToolUse groups
+///     from the composed-guard sidecar (or strips pixel entries when no
+///     sidecar exists), preserving a diverged file for manual reconciliation;
+///   - `<repo>/.codex/config.toml` — the `developer_instructions` block;
+///   - `<repo>/.devin/hooks.json` — the pixel guard group only;
+///   - `<repo>/.pi/agent/extensions/pixel-guard.ts` + the managed block in
+///     `<repo>/.pi/agent/AGENTS.md`.
+fn uninstall_project(repo: &Path, binary_path: &Path, dry_run: bool) -> Result<InstallReport> {
+    let codex_hooks = repo.join(".codex").join(crate::codex_config::HOOKS_FILE);
+    let mut patched = Vec::new();
+    let mut conflicts = Vec::new();
+    if codex_hooks.is_file() {
+        match restore_project_codex_composed_guard(&codex_hooks, dry_run)? {
+            ComposedGuardRestore::Restored => {
+                patched.push(codex_hooks.display().to_string());
+                // The composed install also registers lifecycle entries
+                // (PostToolUse, SessionStart, UserPromptSubmit, compaction);
+                // strip them now that PreToolUse holds the restored groups.
+                let (removed, _) = remove_pixel_hooks_from_settings(&codex_hooks, dry_run)?;
+                if removed > 0 {
+                    patched.push(codex_hooks.display().to_string());
+                }
+            }
+            // A snapshot exists but its schema or the managed guard was
+            // edited; preserve both files rather than lose recovery data.
+            ComposedGuardRestore::Conflict => conflicts.push(codex_hooks.display().to_string()),
+            ComposedGuardRestore::NotManaged => {
+                let (removed, _) = remove_pixel_hooks_from_settings(&codex_hooks, dry_run)?;
+                if removed > 0 {
+                    patched.push(codex_hooks.display().to_string());
+                }
+            }
+        }
+    }
+    let codex_summary = if patched.is_empty() && conflicts.is_empty() {
+        "no project .codex/hooks.json needed patching".to_string()
+    } else {
+        format!(
+            "patched {} project .codex/hooks.json file(s); {} composed guard conflict(s) preserved",
+            patched.len(),
+            conflicts.len()
+        )
+    };
+    let steps = vec![
+        InstallStep {
+            id: "hooks.codex_project".into(),
+            status: if conflicts.is_empty() {
+                CheckStatus::Green
+            } else {
+                CheckStatus::Yellow
+            },
+            summary: install::dry_run_summary(dry_run, &codex_summary),
+            detail: Some(format!("config={}", codex_hooks.display())),
+        },
+        crate::codex_config::remove_developer_instructions(&repo.join(".codex"), dry_run)?,
+        {
+            let devin_hooks = repo.join(".devin").join("hooks.json");
+            let (removed, backup_path) = remove_pixel_hooks_from_settings(&devin_hooks, dry_run)?;
+            InstallStep {
+                id: "hooks.devin".into(),
+                status: CheckStatus::Green,
+                summary: install::dry_run_summary(
+                    dry_run,
+                    &format!("removed {removed} Devin hook entry/entries"),
+                ),
+                detail: Some(install::with_backup_note(
+                    format!("config={}", devin_hooks.display()),
+                    backup_path,
+                )),
+            }
+        },
+        remove_pi_extension_dir(&repo.join(config::PI_CONFIG_DIR), dry_run)?,
+    ];
+
+    let green = steps
+        .iter()
+        .filter(|s| s.status == CheckStatus::Green)
+        .count();
+    let yellow = steps
+        .iter()
+        .filter(|s| s.status == CheckStatus::Yellow)
+        .count();
+    let red = steps
+        .iter()
+        .filter(|s| s.status == CheckStatus::Red)
+        .count();
+
+    Ok(InstallReport {
+        version: "v1".into(),
+        ok: red == 0,
+        executable_path: binary_path.display().to_string(),
+        home: repo.display().to_string(),
         dry_run,
         steps,
         summary: InstallSummary { green, yellow, red },
@@ -292,7 +398,6 @@ fn remove_claude_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
         config::SESSION_START_HOOK,
         config::PROMPT_SUBMIT_HOOK,
         config::POST_COMPACTION_HOOK,
-        config::OLD_GUARD_HOOK,
     ];
     let mut scripts_removed = 0usize;
     for name in &hook_files {
@@ -542,7 +647,13 @@ fn remove_cursor_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
 // -------------------------------------------------------------------------
 
 fn remove_pi_extension(home: &Path, dry_run: bool) -> Result<InstallStep> {
-    let config_dir = home.join(config::PI_CONFIG_DIR);
+    remove_pi_extension_dir(&home.join(config::PI_CONFIG_DIR), dry_run)
+}
+
+/// Remove the pi guard extension and the AGENTS.md managed block under one
+/// pi agent config dir (`~/.pi/agent` globally, `<repo>/.pi/agent` for a
+/// project-local install).
+fn remove_pi_extension_dir(config_dir: &Path, dry_run: bool) -> Result<InstallStep> {
     if !config_dir.is_dir() {
         return Ok(InstallStep {
             id: "hooks.pi".into(),
@@ -566,7 +677,7 @@ fn remove_pi_extension(home: &Path, dry_run: bool) -> Result<InstallStep> {
         ext_removed = true;
     }
 
-    // Strip managed block from ~/.pi/agent/AGENTS.md.
+    // Strip managed block from <config_dir>/AGENTS.md.
     let agents_md = config_dir.join("AGENTS.md");
     let mut agents_stripped = false;
     if agents_md.is_file() {

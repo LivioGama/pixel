@@ -536,6 +536,181 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     }
 
     if let Some(root) = &options.repo_root {
+        // Repo-local enforcement (`pixel install --repo <path>`). Absent
+        // artifacts are informational green: a repo where repo-install never
+        // ran is a valid state, not a broken one.
+        checks.push(check_status("repo.codex-config", || {
+            let codex_dir = root.join(".codex");
+            if !codex_dir
+                .join(crate::codex_config::CODEX_CONFIG_FILE)
+                .is_file()
+            {
+                return Ok((
+                    CheckStatus::Green,
+                    DoctorCheckDetail {
+                        summary:
+                            "no .codex/config.toml — repo-local codex instructions not installed"
+                                .into(),
+                        detail: None,
+                    },
+                ));
+            }
+            let (summary, detail) = crate::codex_config::check_developer_instructions(&codex_dir)?;
+            Ok((
+                CheckStatus::Green,
+                DoctorCheckDetail {
+                    summary,
+                    detail: Some(detail),
+                },
+            ))
+        }));
+
+        checks.push(check_status("repo.codex-hooks", || {
+            let hooks_path = root.join(".codex").join(crate::codex_config::HOOKS_FILE);
+            let sidecar = root.join(".codex").join(crate::routing::CODEX_COMPOSED_BACKUP);
+            match (hooks_path.is_file(), sidecar.is_file()) {
+                (false, false) => Ok((
+                    CheckStatus::Green,
+                    DoctorCheckDetail {
+                        summary: "no .codex/hooks.json — repo-local composed guard not installed".into(),
+                        detail: None,
+                    },
+                )),
+                (true, false) => Err(format!(
+                    "{} exists without its composed-guard backup {} — run `pixel install --repo`",
+                    hooks_path.display(),
+                    sidecar.display()
+                )),
+                (false, true) => Err(format!(
+                    "composed-guard backup {} exists but {} is missing — run `pixel install --repo`",
+                    sidecar.display(),
+                    hooks_path.display()
+                )),
+                (true, true) => {
+                    let value = install::read_settings(&hooks_path).map_err(|e| e.to_string())?;
+                    let groups = value
+                        .get("hooks")
+                        .and_then(|h| h.get("PreToolUse"))
+                        .and_then(serde_json::Value::as_array);
+                    let managed = groups.is_some_and(|groups| {
+                        groups.len() == 1
+                            && groups[0]
+                                .get("hooks")
+                                .and_then(serde_json::Value::as_array)
+                                .is_some_and(|hooks| {
+                                    hooks.iter().any(|hook| {
+                                        hook.get("command")
+                                            .and_then(serde_json::Value::as_str)
+                                            .is_some_and(|c| {
+                                                c.contains(
+                                                    "run-hook composed-guard --provider codex --backup ",
+                                                )
+                                            })
+                                    })
+                                })
+                    });
+                    if !managed {
+                        return Err(format!(
+                            "PreToolUse in {} is not the managed composed-guard group — run `pixel install --repo`",
+                            hooks_path.display()
+                        ));
+                    }
+                    Ok((
+                        CheckStatus::Green,
+                        DoctorCheckDetail {
+                            summary: format!(
+                                "composed codex guard configured in {} (backup={})",
+                                hooks_path.display(),
+                                sidecar.display()
+                            ),
+                            detail: Some(serde_json::json!({
+                                "hooks": hooks_path.display().to_string(),
+                                "backup": sidecar.display().to_string(),
+                            })),
+                        },
+                    ))
+                }
+            }
+        }));
+
+        checks.push(check_status("repo.devin-hooks", || {
+            let path = root.join(".devin").join("hooks.json");
+            if !path.is_file() {
+                return Ok((
+                    CheckStatus::Green,
+                    DoctorCheckDetail {
+                        summary: "no .devin/hooks.json — repo-local devin guard not installed"
+                            .into(),
+                        detail: None,
+                    },
+                ));
+            }
+            let value = install::read_settings(&path).map_err(|e| e.to_string())?;
+            let registered = value
+                .get("hooks")
+                .and_then(|h| h.get("PreToolUse"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry
+                            .get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|hooks| {
+                                hooks.iter().any(|hook| {
+                                    hook.get("command")
+                                        .and_then(serde_json::Value::as_str)
+                                        .is_some_and(|c| {
+                                            c.contains("run-hook guard --provider devin")
+                                        })
+                                })
+                            })
+                    })
+                });
+            if !registered {
+                return Err(format!(
+                    "no pixel guard PreToolUse entry in {} — run `pixel install --repo`",
+                    path.display()
+                ));
+            }
+            Ok((
+                CheckStatus::Green,
+                DoctorCheckDetail {
+                    summary: format!("devin guard registered in {}", path.display()),
+                    detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+                },
+            ))
+        }));
+
+        checks.push(check_status("repo.pi-guard", || {
+            let ext = root
+                .join(config::PI_CONFIG_DIR)
+                .join("extensions")
+                .join("pixel-guard.ts");
+            if !ext.is_file() {
+                return Ok((
+                    CheckStatus::Green,
+                    DoctorCheckDetail {
+                        summary: "no .pi/agent/extensions/pixel-guard.ts — repo-local pi guard not installed".into(),
+                        detail: None,
+                    },
+                ));
+            }
+            let content = fs::read_to_string(&ext).map_err(|e| e.to_string())?;
+            if !content.contains(config::MANAGED_BEGIN) || !content.contains("run-hook") {
+                return Err(format!(
+                    "{} is not a pixel-managed guard extension — run `pixel install --repo`",
+                    ext.display()
+                ));
+            }
+            Ok((
+                CheckStatus::Green,
+                DoctorCheckDetail {
+                    summary: format!("pi guard extension installed at {}", ext.display()),
+                    detail: Some(serde_json::json!({ "path": ext.display().to_string() })),
+                },
+            ))
+        }));
+
         checks.push(check(
             "daemon.health",
             || -> std::result::Result<DoctorCheckDetail, String> {

@@ -920,6 +920,12 @@ enum Command {
         /// does not run under your login shell.
         #[arg(long)]
         shell: Option<String>,
+        /// Install project-local enforcement into this repository only:
+        /// `.codex/config.toml` + `.codex/hooks.json` (composed guard),
+        /// `.devin/hooks.json`, `.pi/agent/extensions/pixel-guard.ts` +
+        /// `.pi/agent/AGENTS.md`. Skips all global steps.
+        #[arg(long)]
+        repo: Option<PathBuf>,
     },
     /// Remove everything `pixel install` wrote: managed blocks from
     /// agent-config files, hook entries from all settings files, hook
@@ -943,6 +949,10 @@ enum Command {
         /// profile the login shell never loads.
         #[arg(long)]
         wrappers_only: bool,
+        /// Remove only the project-local artifacts `pixel install --repo`
+        /// wrote in this repository. Skips all global removal steps.
+        #[arg(long)]
+        repo: Option<PathBuf>,
     },
     /// Check that a release tag is consistent with the tree before anything
     /// is built or published: crates/pixel/Cargo.toml carries the version,
@@ -5729,9 +5739,10 @@ fn run_command(
         // -------------------------------------------------------------
         // M5/M6 — install / doctor / migrate / hook
         // -------------------------------------------------------------
-        Command::Install { json, shell } => {
+        Command::Install { json, shell, repo } => {
             let report = pixel_install::install::install(&pixel_install::install::InstallOptions {
                 shell,
+                repo,
                 ..Default::default()
             })
             .map_err(|e| e.to_string())?;
@@ -5746,6 +5757,7 @@ fn run_command(
             binary_path,
             shell,
             wrappers_only,
+            repo,
         } => {
             let report =
                 pixel_install::uninstall::uninstall(&pixel_install::uninstall::UninstallOptions {
@@ -5753,6 +5765,7 @@ fn run_command(
                     dry_run,
                     shell,
                     wrappers_only,
+                    repo,
                     ..Default::default()
                 })
                 .map_err(|e| e.to_string())?;

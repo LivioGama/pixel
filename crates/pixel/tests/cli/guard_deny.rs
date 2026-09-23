@@ -344,12 +344,13 @@ fn noncanonical_shell_shapes_preserve_native_execution() {
         assert!(!stdout.contains("updatedInput"), "{tool}: {stdout}");
         assert!(!stdout.contains("permissionDecision"), "{tool}: {stdout}");
 
-        // A string payload does not make a recursive search equivalent.
+        // A string payload does not make an unsupported search equivalent
+        // (`-l` files-only has no pixel replacement and must pass through).
         let payload = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "tool_name": tool,
             "cwd": repo.to_str().unwrap(),
-            "tool_input": {"command": "grep -rn GUARD_NEEDLE_XYZ ."},
+            "tool_input": {"command": "grep -rl GUARD_NEEDLE_XYZ ."},
         });
         let (code, stdout, stderr) = run_guard_env(&payload, &[]);
         assert_eq!(code, 0, "{tool}: {stderr}");

@@ -212,20 +212,22 @@ JevBench (14 public coding-topic items, protocol in
 [`docs/bench/decide-bakeoff.md`](docs/bench/decide-bakeoff.md)). These
 Ollama Cloud models beat Jev's published coding score:
 
-| Model | Coding score | vs Jev | p50/item | TPS |
+| Model | Coding score | vs Jev | p50/item | TPS² |
 | --- | --- | --- | --- | --- |
-| deepseek-v4.1-flash | **14/14 = 1.00** | ✅ | 1.4 s | 67 (174 solo) |
-| deepseek-v4-flash | **13/14 = 0.93** | ✅ | 2.0 s | 154 |
-| gpt-oss:120b | **13/14 = 0.93** | ✅ | 2.0 s | 57 |
-| gpt-oss:20b | **13/14 = 0.93** | ✅ | 6.4 s | 71 |
-| nemotron-3-ultra | **12/14 = 0.86** | ✅ | 8.1 s | 28 |
+| deepseek-v4.1-flash | **14/14 = 1.00** | ✅ | 1.4 s | 173 |
+| deepseek-v4-flash | **13/14 = 0.93** | ✅ | 2.0 s | 77 |
+| gpt-oss:120b | **13/14 = 0.93** | ✅ | 2.0 s | 176 |
+| gpt-oss:20b | **13/14 = 0.93** | ✅ | 6.4 s | 99 |
+| nemotron-3-ultra | **12/14 = 0.86** | ✅ | 8.1 s | 72 |
 | **Jev** (reference) | **0.839**¹ | — | — | — |
 
 ¹ Jev's published coding-topic accuracy, n=56, all tiers — **published
 number, not re-measured here**; different denominator than our n=14 subset.
 
-No off-the-shelf local model (≤575 M) passed 0.50 on the same set. TPS from
-`llm-tps-benchmark`, 1000-token response, all five concurrent.
+² TPS from [ollamatps.com](https://ollamatps.com) (Ollama Cloud Pro),
+fetched 2026-09-23.
+
+No off-the-shelf local model (≤575 M) passed 0.50 on the same set.
 
 ## 📝 License
 

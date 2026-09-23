@@ -26,9 +26,7 @@ const STALE_BLOCK_MARKERS: &[&str] =
 
 /// The Claude hooks directory (relative to home).
 pub const CLAUDE_HOOKS_DIR: &str = ".claude/hooks";
-/// The old guard hook path that gets replaced.
-pub const OLD_GUARD_HOOK: &str = "gitpixel-targets-guard";
-/// The new guard hook path.
+/// The guard hook path.
 pub const GUARD_HOOK: &str = "pixel-targets-guard";
 /// The SessionStart hook path.
 pub const SESSION_START_HOOK: &str = "pixel-session-start";
@@ -154,11 +152,6 @@ pub struct ScrubOutcome {
     pub existed: bool,
     /// Number of MCP-server entries removed (usable-git/gitpixel/sniper).
     pub mcp_servers_removed: usize,
-    /// Number of old-guard-hook references removed or repointed: either a
-    /// (never actually observed in practice) top-level `hooks.<old-name>`
-    /// key, or — the real case — a nested `hooks.<Event>[].hooks[].command`
-    /// string rewritten from the old guard filename to the new one.
-    pub guard_hooks_removed: usize,
     /// Path to the timestamped backup written before the destructive
     /// rewrite, if anything was actually removed. Never set in dry-run mode.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -375,9 +368,6 @@ pub fn rewrite_agent_config(path: &Path, managed: &str, dry_run: bool) -> Result
 /// tools). `pixel` itself is the only one kept.
 pub const DEPRECATED_MCP_SERVERS: &[&str] = &["usable-git", "gitpixel", "sniper"];
 
-/// Hook names that point at the old guard and must be scrubbed.
-pub const DEPRECATED_GUARD_HOOKS: &[&str] = &["gitpixel-targets-guard"];
-
 /// Per-tool rule-file basenames belonging to tools pixel retired. Each of
 /// these is a standing instruction to use `usable-git`, `gitpixel`,
 /// `gitnexus`, or the hard `sniper` fence — every one of which pixel
@@ -449,16 +439,15 @@ fn sentinel_differing_from(current: &[u8]) -> Vec<u8> {
     sentinel
 }
 
-/// Remove deprecated MCP-server entries and old-guard hook entries from a
-/// Claude `settings.json`. Returns the scrub outcome.
+/// Remove deprecated MCP-server entries from a Claude `settings.json`.
+/// Returns the scrub outcome.
 ///
 /// When `dry_run` is true, computes the same removal counts but performs no
 /// write and no backup.
 ///
 /// The deprecated usable-git/gitpixel/sniper MCP server entries are removed
 /// unconditionally — pixel replaces them via Bash + the guard hook, not via
-/// MCP. The guard-hook command rewrite is unrelated to MCP registration and
-/// always runs.
+/// MCP.
 pub fn scrub_settings_json(path: &Path, dry_run: bool) -> Result<ScrubOutcome> {
     let existed = path.is_file();
     if !existed {
@@ -466,7 +455,6 @@ pub fn scrub_settings_json(path: &Path, dry_run: bool) -> Result<ScrubOutcome> {
             path: path.to_path_buf(),
             existed: false,
             mcp_servers_removed: 0,
-            guard_hooks_removed: 0,
             backup_path: None,
         });
     }
@@ -489,34 +477,8 @@ pub fn scrub_settings_json(path: &Path, dry_run: bool) -> Result<ScrubOutcome> {
         }
     }
 
-    let mut guard_hooks_removed = 0usize;
-    if let Some(hooks) = value
-        .get_mut("hooks")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        // Legacy defensive check: if `hooks` ever literally carried a
-        // top-level key named after the old guard hook, remove it. In
-        // practice real Claude settings never shape hooks this way (event
-        // names like "PreToolUse"/"SessionStart" are the only top-level
-        // keys), so this is expected to be a no-op — the real fix is the
-        // nested command rewrite below.
-        for name in DEPRECATED_GUARD_HOOKS {
-            if hooks.remove(*name).is_some() {
-                guard_hooks_removed += 1;
-            }
-        }
-        // The real fix: the old guard hook is referenced as a `command`
-        // string nested inside `hooks.<Event>[].hooks[]` (confirmed against
-        // a real `~/.claude/settings.json`, e.g. under `PreToolUse`).
-        // Repoint every such command at the new guard hook filename in
-        // place, preserving the entry's matcher/timeout/everything else —
-        // never delete the entry, since deleting would also drop unrelated
-        // fields co-located on the same hook object.
-        guard_hooks_removed += rewrite_guard_hook_commands(hooks);
-    }
-
     let mut backup_path = None;
-    if !dry_run && (mcp_servers_removed > 0 || guard_hooks_removed > 0) {
+    if !dry_run && mcp_servers_removed > 0 {
         let serialized = format!("{}\n", serde_json::to_string_pretty(&value)?);
         backup_path = backup_if_changing(path, serialized.as_bytes())?;
         fs::write(path, serialized)?;
@@ -526,93 +488,8 @@ pub fn scrub_settings_json(path: &Path, dry_run: bool) -> Result<ScrubOutcome> {
         path: path.to_path_buf(),
         existed: true,
         mcp_servers_removed,
-        guard_hooks_removed,
         backup_path,
     })
-}
-
-/// Rewrite every hook `command` string anywhere under `hooks.<Event>[]`
-/// that references the old guard-hook filename.
-///
-/// Under the `PreToolUse` event the command is repointed at the new guard
-/// hook filename **in place** — preserving the entry's matcher, timeout,
-/// and every other field untouched. Under every *other* event (e.g. the
-/// stray legacy `PostToolUse` registration that runs the guard binary per
-/// Bash call for nothing) the guard-hook entry is **removed** instead of
-/// repointed: the guard is a PreToolUse-only hook, so a registration under
-/// any other event is dead weight. Returns the number of command strings
-/// rewritten (PreToolUse) plus the number of guard-hook entries removed
-/// (non-PreToolUse).
-fn rewrite_guard_hook_commands(hooks: &mut serde_json::Map<String, serde_json::Value>) -> usize {
-    let mut changed = 0usize;
-    for (event, entries) in hooks.iter_mut() {
-        let Some(entries) = entries.as_array_mut() else {
-            continue;
-        };
-        if event == "PreToolUse" {
-            // Repoint in place, preserving every other field.
-            for entry in entries.iter_mut() {
-                let Some(inner) = entry
-                    .get_mut("hooks")
-                    .and_then(serde_json::Value::as_array_mut)
-                else {
-                    continue;
-                };
-                for hook in inner {
-                    let Some(hook_obj) = hook.as_object_mut() else {
-                        continue;
-                    };
-                    let Some(command) = hook_obj
-                        .get("command")
-                        .and_then(|c| c.as_str())
-                        .map(str::to_string)
-                    else {
-                        continue;
-                    };
-                    if command.contains(OLD_GUARD_HOOK) {
-                        let new_command = command.replace(OLD_GUARD_HOOK, GUARD_HOOK);
-                        hook_obj.insert(
-                            "command".to_string(),
-                            serde_json::Value::String(new_command),
-                        );
-                        changed += 1;
-                    }
-                }
-            }
-        } else {
-            // Non-PreToolUse event: the guard is a PreToolUse-only hook, so
-            // any registration under another event is dead weight — remove
-            // the guard-hook entries instead of repointing them.
-            let mut kept: Vec<serde_json::Value> = Vec::with_capacity(entries.len());
-            for mut entry in std::mem::take(entries) {
-                let Some(inner) = entry
-                    .get_mut("hooks")
-                    .and_then(serde_json::Value::as_array_mut)
-                else {
-                    kept.push(entry);
-                    continue;
-                };
-                inner.retain(|hook| {
-                    let references_guard = hook
-                        .get("command")
-                        .and_then(|c| c.as_str())
-                        .is_some_and(|c| c.contains(OLD_GUARD_HOOK));
-                    if references_guard {
-                        changed += 1;
-                    }
-                    !references_guard
-                });
-                if inner.is_empty() {
-                    // The outer entry carried nothing but the removed guard
-                    // hook; drop it too so we don't leave an empty shell.
-                    continue;
-                }
-                kept.push(entry);
-            }
-            *entries = kept;
-        }
-    }
-    changed
 }
 
 /// Merge a pixel-authored hook entry into an existing `hooks.<Event>` JSON
@@ -766,8 +643,7 @@ pub fn remove_flat_hook_entries(existing: &serde_json::Value, marker: &str) -> s
 
 /// Remove Pixel's blocking guard from every nested hook event while keeping
 /// all unrelated hook entries intact. Returns the number of event arrays that
-/// changed. Both the current and legacy guard filenames are removed so a
-/// re-install also migrates machines that still reference the old hook.
+/// changed.
 pub fn remove_guard_hook_entries(hooks: &mut serde_json::Map<String, serde_json::Value>) -> usize {
     let mut changed = 0usize;
     let event_keys: Vec<String> = hooks.keys().cloned().collect();
@@ -777,7 +653,6 @@ pub fn remove_guard_hook_entries(hooks: &mut serde_json::Map<String, serde_json:
         };
         let mut filtered = existing.clone();
         filtered = remove_hook_entries(&filtered, GUARD_HOOK);
-        filtered = remove_hook_entries(&filtered, OLD_GUARD_HOOK);
         if filtered != existing {
             changed += 1;
             if filtered.as_array().is_some_and(Vec::is_empty) {
@@ -803,7 +678,6 @@ pub fn remove_flat_guard_hook_entries(
         };
         let mut filtered = existing.clone();
         filtered = remove_flat_hook_entries(&filtered, GUARD_HOOK);
-        filtered = remove_flat_hook_entries(&filtered, OLD_GUARD_HOOK);
         if filtered != existing {
             changed += 1;
             if filtered.as_array().is_some_and(Vec::is_empty) {
@@ -835,69 +709,6 @@ mod tests {
 
     fn hook_entry(command: &str) -> serde_json::Value {
         serde_json::json!({ "matcher": "Bash", "hooks": [{ "type": "command", "command": command }] })
-    }
-
-    #[test]
-    fn non_pretooluse_guard_hooks_are_removed_not_repointed() {
-        let mut hooks = serde_json::Map::new();
-        hooks.insert(
-            "PreToolUse".to_string(),
-            serde_json::Value::Array(vec![hook_entry("~/.claude/hooks/gitpixel-targets-guard")]),
-        );
-        hooks.insert(
-            "PostToolUse".to_string(),
-            serde_json::Value::Array(vec![hook_entry("~/.claude/hooks/gitpixel-targets-guard")]),
-        );
-        hooks.insert(
-            "SessionStart".to_string(),
-            serde_json::Value::Array(vec![hook_entry("~/.claude/hooks/pixel-session-start")]),
-        );
-
-        let changed = rewrite_guard_hook_commands(&mut hooks);
-
-        // PreToolUse guard command repointed to the new filename.
-        let pre = hooks["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap();
-        assert_eq!(pre, "~/.claude/hooks/pixel-targets-guard");
-        // PostToolUse guard entry removed entirely (empty array left behind).
-        assert_eq!(hooks["PostToolUse"].as_array().unwrap().len(), 0);
-        // Unrelated SessionStart entry untouched.
-        let session = hooks["SessionStart"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap();
-        assert_eq!(session, "~/.claude/hooks/pixel-session-start");
-
-        // One repoint (PreToolUse) + one removal (PostToolUse).
-        assert_eq!(changed, 2);
-    }
-
-    #[test]
-    fn non_pretooluse_guard_entry_with_other_hooks_keeps_others() {
-        let mut hooks = serde_json::Map::new();
-        hooks.insert(
-            "PostToolUse".to_string(),
-            serde_json::Value::Array(vec![serde_json::json!({
-                "matcher": "Bash",
-                "hooks": [
-                    { "type": "command", "command": "~/.claude/hooks/gitpixel-targets-guard" },
-                    { "type": "command", "command": "~/.claude/hooks/other-tool" }
-                ]
-            })]),
-        );
-
-        let changed = rewrite_guard_hook_commands(&mut hooks);
-
-        // The outer entry survives, but only the non-guard hook remains.
-        let remaining = hooks["PostToolUse"].as_array().unwrap();
-        assert_eq!(remaining.len(), 1);
-        let inner = remaining[0]["hooks"].as_array().unwrap();
-        assert_eq!(inner.len(), 1);
-        assert_eq!(
-            inner[0]["command"].as_str().unwrap(),
-            "~/.claude/hooks/other-tool"
-        );
-        assert_eq!(changed, 1);
     }
 
     #[test]
@@ -1001,7 +812,7 @@ mod tests {
         );
         hooks.insert(
             "postToolUse".into(),
-            serde_json::json!([flat(&format!("sh {OLD_GUARD_HOOK}"))]),
+            serde_json::json!([flat(&format!("sh {GUARD_HOOK}"))]),
         );
         hooks.insert("stop".into(), serde_json::json!([flat("say done")]));
         assert_eq!(remove_flat_guard_hook_entries(&mut hooks), 2);

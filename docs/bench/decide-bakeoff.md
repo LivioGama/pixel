@@ -105,11 +105,11 @@ completion per spec, verbalized probabilities. Run dirs:
 
 | Model | Provider (preset) | Score | vs Jev 0.839 | p50/item | TPS² |
 |---|---|---|---|---|---|
-| deepseek-v4.1-flash | Ollama Cloud (`ollama`) | **14/14 = 1.00** | ✅ beats | 1.4 s | 67 |
-| deepseek-v4-flash:0731 | Ollama Cloud (`ollama`) | **13/14 = 0.93** | ✅ beats | 2.0 s | 154 |
-| gpt-oss:120b | Ollama Cloud (`ollama`) | **13/14 = 0.93** | ✅ beats | 2.0 s | 57 |
-| gpt-oss:20b | Ollama Cloud (`ollama`) | **13/14 = 0.93** | ✅ beats | 6.4 s | 71 |
-| nemotron-3-ultra | Ollama Cloud (`ollama`) | **12/14 = 0.86** | ✅ beats | 8.1 s | 28 |
+| deepseek-v4.1-flash | Ollama Cloud (`ollama`) | **14/14 = 1.00** | ✅ beats | 1.4 s | 173 |
+| deepseek-v4-flash:0731 | Ollama Cloud (`ollama`) | **13/14 = 0.93** | ✅ beats | 2.0 s | 77 |
+| gpt-oss:120b | Ollama Cloud (`ollama`) | **13/14 = 0.93** | ✅ beats | 2.0 s | 176 |
+| gpt-oss:20b | Ollama Cloud (`ollama`) | **13/14 = 0.93** | ✅ beats | 6.4 s | 99 |
+| nemotron-3-ultra | Ollama Cloud (`ollama`) | **12/14 = 0.86** | ✅ beats | 8.1 s | 72 |
 | google/gemini-3.1-flash-lite | OpenRouter (`openrouter`) | 11/14 = 0.79 | ❌ | 1.1 s | — |
 | qwen3.5:397b | Ollama Cloud (`ollama`) | 10/14, 9/14 | ❌ | 16.2 s¹ | — |
 | gemma4:31b | Ollama Cloud (`ollama`) | 0/14 | ❌ | — | — |
@@ -122,9 +122,8 @@ emitted valid JSON (prose only, confirmed via direct API call).
 nemotron-3-ultra's two losses were timeouts; all 12 answered items were
 correct.
 
-² TPS measured by `llm-tps-benchmark` (`node bench.js ollama`, 1000-token
-response, all five models concurrent — contention lowers the numbers;
-solo runs measured v4.1-flash 174 tps, v4.0-flash 131 tps).
+² TPS from [ollamatps.com](https://ollamatps.com) (Ollama Cloud Pro tier,
+latest measured run, fetched 2026-09-23).
 
 ³ Jev's published coding-topic accuracy, n=56, all tiers — published
 number, not re-measured here; different denominator than our n=14 subset.
