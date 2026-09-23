@@ -45,7 +45,7 @@ pixel commit --files <f>... -m "msg" --request-id "id"   # only when asked
 
 | Call | When |
 | --- | --- |
-| `pixel search-content "re" [path]` | regex search, instead of `grep`/`rg` |
+| `pixel search-content "re" [path] [-g glob] [-t rust] [-l] [-F] [-i]` | regex search, instead of `grep`/`rg`; takes their common flags |
 | `pixel find-code "name"` | function/type by name or concept phrase |
 | `pixel find-symbol "Foo"` | exact symbol definition via the code graph |
 | `pixel search-meaning "how is auth handled?"` | conceptual question, not regex |
@@ -100,7 +100,7 @@ when the host already relayed it.
 
 Run the native command directly when the job is:
 
-- grep flags Pixel lacks: `-l`, `-m`, context flags with unsupported values.
+- grep flags Pixel lacks: `-m`, `-w`, `-v`, context flags with unsupported values.
 - a pipeline (`grep foo | sort | uniq`) — Pixel can't sit in a pipe.
 - files outside the index: git-ignored, binary, or >4 MiB — `pixel status`
   shows coverage.

@@ -40,6 +40,7 @@ clap = { version = "4.5", features = ["derive"] }
 serde = "1"
 serde_json = "1"
 regex = "1.13"
+globset = "0.4"
 ignore = "0.4.33"
 libc = "0.2"
 ureq = { version = "3", default-features = false, features = ["json", "rustls-webpki-roots"] }
