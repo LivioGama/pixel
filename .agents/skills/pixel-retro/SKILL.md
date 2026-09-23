@@ -65,9 +65,9 @@ list before naming a cause: `route` says who answered (`daemon`,
 `daemon_started`, `in_process` with a `reason`), and the phase timings say
 where the seconds went — `probe_ms` (a busy daemon's queue), `start_ms`
 (waiting for a new daemon), `request_ms` (the daemon's answer), `open_ms`
-and `handle_ms` (opening the index, then answering, in process). A line
-without `serve` predates the field: its cause is unknown, and a warm replay
-does not reproduce a cold start.
+and `handle_ms` (opening the index or catching recall up, then answering,
+in process). A line without `serve` predates the field: its cause is
+unknown, and a warm replay does not reproduce a cold start.
 
 Drop the noise before counting (verified 2026-09):
 
