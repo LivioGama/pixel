@@ -31,7 +31,7 @@ so prefer `search` with explicit regexes.
 Read the ledger `~/.local/state/pixel-retro/seen.tsv` (columns:
 `date  fingerprint  verdict  ref`; a missing file means an empty ledger).
 A fingerprint is `<command>|<error normalised: paths, numbers, ids → _>`.
-Anything already `fixed`, `wontfix` or `suggested` less than 7 days ago is
+Anything already `fixed`, `wontfix`, `suggested` or `not-pixel` less than 7 days ago is
 skipped unless its count grew.
 
 ## Step 1 — Collect the raw signal
@@ -41,10 +41,17 @@ transcripts explain what the agent did about it.
 
 **A. Action logs.** Every pixel invocation appends to
 `<root>/.pixel/actions.jsonl` (`ts_ms`, `command`, `args`, `cwd`,
-`outcome`, `error`, `duration_ms`). List the roots touched in the window:
+`outcome`, `error`, `duration_ms`). The roots come from the sessions
+themselves, so a repository outside the usual folders is not missed: take
+every session `cwd` in the window, resolve it to its repository root, and
+keep the roots that have a log. The `find` adds the worktrees and fixtures
+no session ran in:
 
 ```bash
-pixel recall sessions --since $W --limit 200 --json   # cwd of every session
+pixel recall sessions --since $W --limit 500 --json \
+  | python3 -c 'import sys,json; [print(s["cwd"]) for s in json.load(sys.stdin)["sessions"]]' \
+  | sort -u | while read -r d; do git -C "$d" rev-parse --show-toplevel 2>/dev/null; done \
+  | sort -u | while read -r r; do [ -f "$r/.pixel/actions.jsonl" ] && echo "$r"; done
 find ~/code /tmp/pxwt -maxdepth 4 -path '*/.pixel/actions.jsonl' -mtime -1 2>/dev/null   # -mtime -2 for 48h, and so on
 ```
 
@@ -98,9 +105,15 @@ tool.
 
 Session memory and a single log line both lie. For every candidate:
 
-1. **Reproduce on the current binary.** Re-run the same command (read ops
-   only, or a mutation op inside a throwaway `git init` fixture, never in
-   the user's repo). No longer reproduces → check `pixel commit-history` /
+1. **Reproduce on the current binary.** Re-run the same command only when
+   it is a read op (`search-*`, `find-*`, `impact`, `who-calls`,
+   `call-path`, `scope-task`, `pack-context`, `repo-state`, `review-changes`,
+   `diff`, `commit-history`, `action-log` without `--clear`, `recall`
+   `search`/`show`/`sessions`/`status`). A repository mutation (`commit`,
+   `push`, `new-branch`, `fast-forward`, `sync-branch`, `build-index`) runs
+   only inside a throwaway `git init` fixture, never in the user's repo.
+   Never replay a host-wide command (`install`, `uninstall`, `self-update`,
+   `daemon start`/`stop`, `recall setup`): read its code path instead. No longer reproduces → check `pixel commit-history` /
    `pixel search-history '<token>'` for the fix and mark it `fixed` with the
    commit, not as a suggestion.
 2. **Name the cause in the code.** `pixel find-symbol` / `pixel
@@ -154,9 +167,10 @@ CONTRIBUTING.md and the PR doctrine, one branch per suggestion.
 
 - **Transcripts from other repos carry business data.** Quote only pixel
   commands, pixel output and error text. Never copy a customer, subscriber,
-  plate, email, amount or commit message body from a Yespark repo into the
-  report, and never into anything public: an issue or PR on the pixel repo
-  gets a generic reproduction (`git init` fixture, placeholder paths).
+  plate, email, amount or commit message body from any repository other than
+  pixel, neither into the local report nor into anything public: an issue or
+  PR on the pixel repo gets a generic reproduction (`git init` fixture,
+  placeholder paths).
 - **Nothing leaves the machine without the user's go.** No `gh issue
   create`, no PR, no comment until the user picks a suggestion in the chat.
 - **Read-only by default.** Reproductions of mutation ops run in a temp
@@ -166,9 +180,27 @@ CONTRIBUTING.md and the PR doctrine, one branch per suggestion.
 
 ## Ledger
 
-After the user answers, append one line per reported or dropped item:
+After the user answers, append one line per reported or dropped item. The
+values are data, never shell source: a fingerprint is built from error text,
+which can hold `$(…)` or quotes. Put them in the quoted heredoc below (no
+shell expansion happens inside it), one line per item, fields separated by
+` ;; `, and let the script validate and append:
 
 ```bash
-mkdir -p ~/.local/state/pixel-retro
-printf '%s\t%s\t%s\t%s\n' "$(date +%F)" "<fingerprint>" "<suggested|picked|fixed|wontfix|not-pixel>" "<agent:id #turn or PR url>" >> ~/.local/state/pixel-retro/seen.tsv
+python3 - <<'EOF'
+import datetime, os, re
+ROWS = r"""
+<fingerprint> ;; <suggested|picked|fixed|wontfix|not-pixel> ;; <agent:id #turn or PR url>
+"""
+VERDICTS = {"suggested", "picked", "fixed", "wontfix", "not-pixel"}
+REF = re.compile(r"^([a-z]+:[0-9a-f]{6,} #\d+|https://github\.com/\S+)$")
+path = os.path.expanduser("~/.local/state/pixel-retro/seen.tsv")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "a") as f:
+    for line in filter(None, ROWS.strip().splitlines()):
+        fp, verdict, ref = (x.strip() for x in line.split(" ;; "))
+        assert verdict in VERDICTS and REF.match(ref), line
+        fp = re.sub(r"[\t\n]", " ", fp)
+        f.write(f"{datetime.date.today()}\t{fp}\t{verdict}\t{ref}\n")
+EOF
 ```
