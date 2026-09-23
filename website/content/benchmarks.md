@@ -3,7 +3,7 @@ title: "Benchmarks"
 description: "Every number on the home page, with its method, its sample size and the cases where Pixel loses."
 ---
 
-<!-- Figures come from docs/bench/ and the README; every section links its source. crates/pixel/tests/cli/docs_drift.rs reads this page, so every `pixel <command>` quoted here must exist. -->
+<!-- Figures come from docs/bench/; every section links its source. crates/pixel/tests/cli/docs_drift.rs reads this page, so every `pixel <command>` quoted here must exist. -->
 
 Every number below links to its method and raw data in the repository, with the scripts to re-run it on your own code. Losses sit next to wins.
 
@@ -18,7 +18,7 @@ What reaches the agent's context when it needs to know what a file contains, mea
 | Source and test pair | 5,289 | 48,978 tok | 1,890 tok | 96.1% |
 | Code-write context | 5,289 | 48,978 tok | 1,910 tok | 96.1% |
 
-This counts what the agent reads, not your invoice. `pixel token-savings` reports the same ratio from your own sessions: 41 to 83% across 798 operations on the maintainer's machine. [Method](https://github.com/LivioGama/pixel#-token-savings--measured-no-second-model)
+This counts what the agent reads, not your invoice. `pixel token-savings` reports the same ratio from your own sessions: 41 to 83% across 798 operations on the maintainer's machine. The scenarios replay the shape of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark, which reaches a similar ratio by rerouting reads through a paid second model.
 
 ## Against GitNexus
 

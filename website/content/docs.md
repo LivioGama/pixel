@@ -3,7 +3,7 @@ title: "Documentation"
 description: "Install Pixel, wire it into your agents, and read what its answers promise and what they do not."
 ---
 
-<!-- Every `pixel <command>` quoted here must exist: crates/pixel/tests/cli/docs_drift.rs reads this page. Keep it in step with README.md and ARCHITECTURE.md. -->
+<!-- Every `pixel <command>` quoted here must exist: crates/pixel/tests/cli/docs_drift.rs reads this page. The per-repository list must name exactly the files `pixel install --repo` writes (REPO_ARTIFACTS). Keep it in step with ARCHITECTURE.md. -->
 
 ## Install
 
@@ -45,7 +45,15 @@ The index, the code graph and the optional history data live in `.pixel/` at the
 
 ### Per-repository guards
 
-`pixel install --repo <path>` writes project-local enforcement only and skips every global step: a guard hook for Claude Code (in the personal `.claude/settings.local.json`, never the shared settings), Codex, Devin and Pi. Each of those files names this machine's `pixel` binary, so the install lists them in the clone's `.git/info/exclude` and a `git add -A` cannot publish them.
+`pixel install --repo <path>` writes project-local enforcement only and skips every global step:
+
+- `<repo>/.claude/settings.local.json`: the guard hook, in Claude Code's personal project settings (the shared `.claude/settings.json` never carries it); `<repo>/.claude/pixel-rtk-hooks.json` keeps an `rtk hook claude` group the guard takes over
+- `<repo>/.codex/config.toml`: the same `developer_instructions` key as the global install
+- `<repo>/.codex/hooks.json`: the guard hook, with `<repo>/.codex/pixel-composed-guard-backup.json` holding the hooks it replays; left alone when Git tracks `.codex/hooks.json`
+- `<repo>/.devin/config.local.json`: the guard hook for Devin
+- `<repo>/.pi/extensions/pixel-guard.ts`: Pi's guard extension, loaded once Pi trusts the project
+
+Every one of those files except `.codex/config.toml` names this machine's `pixel` binary, so the install lists it in the clone's `.git/info/exclude` and a `git add -A` cannot publish it.
 
 The guard is advisory. It steers agents toward Pixel commands, for example with a notice before an untargeted read of a large source file, and never blocks a tool call. `pixel doctor <repo>` reports the global wiring and the per-repository guards as green, stale or missing.
 
@@ -172,6 +180,6 @@ Pixel does not cover every job. Use the native command for grep flags Pixel lack
 
 ## Token savings
 
-`pixel token-savings` reports, for the retrieval commands you ran, the fraction of the candidate pool the agent did not have to read. It measures what reached the agent's context, not your invoice. The replay of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark on Pixel's own repository is on the [home page](../#savings), and its method in the [README](https://github.com/LivioGama/pixel#-token-savings--measured-no-second-model).
+`pixel token-savings` reports, for the retrieval commands you ran, the fraction of the candidate pool the agent did not have to read. It measures what reached the agent's context, not your invoice. The replay of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark on Pixel's own repository is on the [home page](../#savings), and its method on the [benchmarks page](../benchmarks/#reading-code).
 
 Each Pixel command also prints a `🟩 Pixel` line on stderr with its measured duration and two estimates: tokens saved against the native workflow, and time saved against sequential round trips. Both are estimates, and zero or negative values are valid. `--metrics=off` or `PIXEL_METRICS=0` turns the line off.
