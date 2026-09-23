@@ -457,3 +457,77 @@ fn claude_coordinator_delegates_rtk_exactly_once_only_on_fallback() {
     assert_eq!(delegated["tool_input"]["command"], "printf hello");
     assert_eq!(delegated["tool_input"]["timeout_ms"], 1234);
 }
+
+/// Runs `command` with `input` on a pipe for stdin, the way an agent's shell
+/// tool runs it: never a terminal.
+fn run_with_piped_stdin(mut command: Command, input: &[u8]) -> Output {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// The one documented divergence (module docs of `search_compat`): with no
+/// path and a stdin that is a pipe, native `rg` searches stdin (and, in an
+/// agent's shell tool, blocks until the call times out), while the rewritten
+/// command searches the current directory, as native `rg` does with
+/// `/dev/null` on stdin. The emulation never reads stdin, whether the pipe
+/// carries input or stays open with nothing written to it.
+#[test]
+fn implicit_rg_search_should_search_the_cwd_even_with_a_piped_stdin() {
+    let fixture = Fixture::new(b"needle in the file\n");
+    let stdin = b"needle on stdin\n";
+
+    let mut routed = fixture.command(PIXEL);
+    routed.args(["search-like-rg", "rg", "--", "needle"]);
+    let routed = run_with_piped_stdin(routed, stdin);
+    assert_eq!(
+        String::from_utf8_lossy(&routed.stdout),
+        "a file.rs:needle in the file\n",
+        "{}",
+        String::from_utf8_lossy(&routed.stderr)
+    );
+    assert_eq!(routed.status.code(), Some(0));
+
+    // An agent's shell tool: a pipe held open that nothing writes to. The
+    // rewrite answers without waiting for input; the deadline bounds a
+    // regression that would read stdin.
+    let mut open = fixture.command(PIXEL);
+    let mut child = open
+        .args(["search-like-rg", "rg", "--", "needle"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let held_stdin = child.stdin.take();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let finished = child.try_wait().unwrap().is_some();
+    if !finished {
+        let _ = child.kill();
+    }
+    drop(held_stdin);
+    let open = child.wait_with_output().unwrap();
+    assert!(finished, "the rewrite waited on an open stdin");
+    assert_eq!(open.stdout, routed.stdout);
+    assert_eq!(open.status.code(), Some(0));
+
+    // The premise, where `rg` is installed (GitHub's runners have none):
+    // native `rg` reads the pipe instead, and searches the cwd only when
+    // stdin is not a pipe or a file: `Command::output` gives it `/dev/null`.
+    if Command::new("rg").arg("--version").output().is_ok() {
+        let mut native = fixture.command("rg");
+        native.arg("needle");
+        let native = run_with_piped_stdin(native, stdin);
+        assert_eq!(String::from_utf8_lossy(&native.stdout), "needle on stdin\n");
+        let native = fixture.command("rg").arg("needle").output().unwrap();
+        assert_eq!(native.stdout, routed.stdout);
+    }
+}
