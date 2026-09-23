@@ -40,6 +40,10 @@ pub enum InstallError {
     UnterminatedManagedBlock,
     #[error("invalid settings.json at {path}: {reason}")]
     InvalidSettings { path: PathBuf, reason: String },
+    #[error("unknown doctor check `{0}` — `pixel doctor --list` names every check")]
+    UnknownDoctorCheck(String),
+    #[error("doctor check `{0}` is both selected by --only and excluded by --skip")]
+    ConflictingDoctorSelection(String),
 }
 
 pub type Result<T> = std::result::Result<T, InstallError>;

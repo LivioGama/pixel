@@ -106,6 +106,22 @@ enum RoleArg {
     Callees,
 }
 
+/// `pixel doctor --fail-on`: the lowest check status that exits 1.
+#[derive(Copy, Clone, ValueEnum)]
+enum FailOn {
+    Yellow,
+    Red,
+}
+
+impl FailOn {
+    fn threshold(self) -> pixel_install::doctor::CheckStatus {
+        match self {
+            Self::Yellow => pixel_install::doctor::CheckStatus::Yellow,
+            Self::Red => pixel_install::doctor::CheckStatus::Red,
+        }
+    }
+}
+
 /// One lock for every unit test that mutates process-wide state (`HOME`
 /// and friends): two module-local locks cannot see each other, so all
 /// such tests share this single mutex.
@@ -1006,6 +1022,10 @@ enum Command {
         dry_run: bool,
     },
     /// Health check: install state, daemon, index/graph/facts freshness.
+    ///
+    /// Exits 0 when no check reaches `--fail-on`, 1 when one does, 2 when the
+    /// checks could not run. Every yellow or red check names the command that
+    /// repairs it (`fix`).
     Doctor {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -1014,6 +1034,18 @@ enum Command {
         /// Shell whose wrapper block should be checked (default: $SHELL).
         #[arg(long)]
         shell: Option<String>,
+        /// Run only this check id (repeatable); `--list` names them.
+        #[arg(long, value_name = "ID")]
+        only: Vec<String>,
+        /// Leave out this check id (repeatable).
+        #[arg(long, value_name = "ID")]
+        skip: Vec<String>,
+        /// Lowest status that makes the command exit 1.
+        #[arg(long, value_enum, default_value = "red")]
+        fail_on: FailOn,
+        /// Print every check id with its repair command, then exit.
+        #[arg(long)]
+        list: bool,
     },
     /// Removed: the legacy `.gitpixel/` migration. Hidden and kept only so a
     /// script that still calls it exits 0 with a note instead of failing
@@ -6200,23 +6232,55 @@ fn run_command(
             eprintln!("Upgrade complete: {}", dest.display());
             Ok(())
         }
-        Command::Doctor { path, json, shell } => {
-            let root = discover_root(&path)?;
-            let report = pixel_install::doctor::doctor(&pixel_install::doctor::DoctorOptions {
-                repo_root: Some(root),
-                shell,
-                // Hand the doctor this binary's REAL clap parser so the
-                // rule-vs-binary parity check dry-runs every `pixel …` line
-                // documented in the installed rule text against the actual
-                // CLI definition — documented-but-rejected syntax goes red.
-                syntax_validator: Some(validate_cli_syntax),
-                ..Default::default()
-            })
-            .map_err(|e| e.to_string())?;
-            print_data(
-                &serde_json::to_value(&report).map_err(|e| e.to_string())?,
-                json,
-            )
+        Command::Doctor {
+            path,
+            json,
+            shell,
+            only,
+            skip,
+            fail_on,
+            list,
+        } => {
+            if list {
+                let catalogue = serde_json::to_value(pixel_install::doctor::CHECKS)
+                    .map_err(|e| e.to_string())?;
+                return if json {
+                    print_data(&catalogue, true)
+                } else {
+                    write_stdout(&pixel_install::doctor::render_catalogue(
+                        pixel_install::doctor::CHECKS,
+                    ))
+                };
+            }
+            let report = discover_root(&path).and_then(|root| {
+                pixel_install::doctor::doctor(&pixel_install::doctor::DoctorOptions {
+                    repo_root: Some(root),
+                    shell,
+                    // Hand the doctor this binary's REAL clap parser so the
+                    // rule-vs-binary parity check dry-runs every `pixel …` line
+                    // documented in the installed rule text against the actual
+                    // CLI definition — documented-but-rejected syntax goes red.
+                    syntax_validator: Some(validate_cli_syntax),
+                    only,
+                    skip,
+                    ..Default::default()
+                })
+                .map_err(|e| e.to_string())
+            });
+            // Exit 2 keeps "the checks could not run" apart from exit 1,
+            // "a check found a problem", for a script gating on doctor.
+            let report = report.inspect_err(|_| owned_exit.set(Some(2)))?;
+            let value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+            if json {
+                print_data(&value, true)?;
+            } else {
+                operation_metrics::observe(&value);
+                write_stdout(&report.to_string())?;
+            }
+            if report.fails(fail_on.threshold()) {
+                owned_exit.set(Some(1));
+            }
+            Ok(())
         }
         Command::Migrate { .. } => {
             eprintln!("{MIGRATE_REMOVED_NOTE}");

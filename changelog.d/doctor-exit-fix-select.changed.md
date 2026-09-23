@@ -1,0 +1,1 @@
+**doctor:** `pixel doctor` now exits 1 when a check is red (`--fail-on yellow` to hold yellow too) and 2 when the checks cannot run; it used to exit 0 on a red report. Each yellow or red check names its repair command (`fix`), the terminal output lists only those, and `--only`/`--skip`/`--list` select checks by id.
