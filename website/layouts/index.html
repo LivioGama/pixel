@@ -83,12 +83,18 @@
         <h2 id="tasks-title">Measured on whole agent tasks.</h2>
         <p>Fast answers do not make a fast agent on their own. So we timed Claude Code on real tasks in this repository, with Pixel and against a vanilla agent with no rules or hooks.</p>
       </header>
+      <figure class="demo">
+        <video class="demo__video" data-demo width="1600" height="1000" muted playsinline preload="none" controls
+          poster="{{ "examples/pixel-agent-demo.jpg" | relURL }}" src="{{ "examples/pixel-agent-demo.mp4" | relURL }}"
+          aria-describedby="demo-caption"></video>
+        <figcaption id="demo-caption" class="demo__caption">Claude Code on the same task, eleven times with Pixel 0.5.0 and eleven times without. The replay shows each side's median-time run on one clock at 6&times; speed; every command, time and token count comes from the recording. <a class="link" href="{{ site.Params.github_url }}/tree/main/docs/motion/src/demo" rel="noopener">The traces</a></figcaption>
+      </figure>
       <ul class="ledger">
-        <li class="ledger__win"><strong>&minus;30%</strong><span>Scoping a multi-file task. Two independent designs agree: &minus;31% and &minus;29%.</span></li>
-        <li class="ledger__loss"><strong>+1.5 s</strong><span>A single lookup. Reading the protocol costs more than it saves on a one-shot answer.</span></li>
-        <li class="ledger__loss"><strong>Slower</strong><span>Recovering deleted code from history. Open work.</span></li>
+        <li class="ledger__win"><strong>&minus;30%</strong><span>Scoping a multi-file task: the median of 11 runs per side above, with 38% fewer tokens read. Two earlier designs agree: &minus;31% and &minus;29%.</span></li>
+        <li class="ledger__loss"><strong>+1.5 s</strong><span>A single lookup, in the August runs. Reading the protocol costs more than it saves on a one-shot answer.</span></li>
+        <li class="ledger__loss"><strong>Slower</strong><span>Recovering deleted code from history, in the August runs. Open work.</span></li>
       </ul>
-      <p class="ledger__fine">Three runs per cell: read these as directions, not decimals. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
+      <p class="ledger__fine">The two losses come from three runs per cell: read them as directions, not decimals. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
     </section>
 
     {{/* ---------- six jobs ---------- */}}
@@ -209,7 +215,7 @@
         <details>
           <summary>Will my agent actually use it?</summary>
           <p>Not every time. Agents are trained on <code>grep</code> and fall back to it. Pixel does not wait for the agent to discover a tool: <code>pixel install</code> puts its protocol into every session, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files. The guard advises and never blocks.</p>
-          <p>Given the protocol alone, with no hooks, the agent barely called Pixel and still scoped tasks 29% faster: part of the gain is the protocol's guidance itself. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs</a></p>
+          <p>With Pixel 0.5.0 it did: in each of the 11 recorded runs behind the demo, the agent called Pixel 6 to 17 times. An earlier release fared worse: given its protocol alone, the agent barely ran a Pixel command, yet still scoped tasks 29% faster, so part of the gain is the protocol's guidance itself. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs</a></p>
         </details>
         <details>
           <summary>Why not just grep?</summary>

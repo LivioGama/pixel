@@ -42,11 +42,23 @@ Recall is a tie at this sample size: Pixel finds every caller in Rust and TypeSc
 
 Claude Code on real tasks in this repository, with Pixel and without, against a vanilla agent with no rules or hooks.
 
+The home page's demo, September 2026: Claude Sonnet 5, Pixel 0.5.0, one scoping task ("retry a leased push when the remote branch moved: list the files to change"), 11 runs per side, each pair started together, the same bare setup on both sides except Pixel's agent prompt.
+
+| Median over 11 runs | Without Pixel | With Pixel |
+| --- | --- | --- |
+| Wall time | 86.5 s | **60.7 s** (−30%) |
+| Tokens read into context | 17,268 | **10,655** (−38%) |
+| API cost | $0.394 | **$0.274** (−30%) |
+
+Both sides named `push.rs` among their first two files in every run, and the Pixel side called Pixel in every run, 6 to 17 times. The spread is wide on both sides: 57 to 148 s without Pixel, 33 to 207 s with it. [Every run, its trace and the recording scripts](https://github.com/LivioGama/pixel/tree/main/docs/motion)
+
+The August A/B runs, on an earlier release:
+
 - **About 30% faster** to scope a multi-file task. Two independent A/B designs agree: 31% and 29%.
 - **About 1.5 seconds slower** on a single lookup in the isolated run: the cost of reading the protocol before a one-shot answer.
 - **Still slower** at recovering deleted code from history. Open work.
 
-Three runs per cell, so these are directions, not decimals. The agents also called Pixel less than its protocol asks: given the protocol alone, with no hooks, the agent barely ran a Pixel command and still scoped tasks 29% faster, so part of the gain is the protocol's guidance rather than its answers.
+Three runs per cell, so these are directions, not decimals. The agents of that release also called Pixel less than its protocol asks: given the protocol alone, with no hooks, the agent barely ran a Pixel command and still scoped tasks 29% faster, so part of the gain is the protocol's guidance rather than its answers.
 
 [Agent A/B runs and their caveats](https://github.com/LivioGama/pixel/blob/main/docs/bench/measured-performance.md)
 

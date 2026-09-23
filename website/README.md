@@ -21,9 +21,10 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   read (`data/savings.toml`, first row) and burns down to what the same
   question costs through Pixel once it scrolls into view. The scope board
   draws one pad per indexed file and routes a trace from each P0 pad to its
-  file name. The job tabs load each video only when opened and play it
-  while it is on screen. Videos never autoplay under reduced motion: the
-  poster shows the finished state and the controls are there.
+  file name. The job tabs load each video only when opened, and the agent
+  demo in "Measured on whole agent tasks" plays once when it scrolls into
+  view. Videos never autoplay under reduced motion: the poster shows the
+  finished state and the controls are there.
 - The "Fair questions" block in `layouts/index.html` restates facts from
   `SECURITY.md`, `docs/bench/measured-performance.md` and the graph's
   grammars (`$langs`, from `crates/pixel-graph/src/extract.rs`): change it

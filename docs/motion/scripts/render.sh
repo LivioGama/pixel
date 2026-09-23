@@ -4,7 +4,7 @@
 #   <name>.webp  800x500 animated WebP at 15 fps for the README, which
 #                GitHub renders inline where it would not play a video
 #
-# Usage: scripts/render.sh [CompositionId ...]   (default: all six)
+# Usage: scripts/render.sh [CompositionId ...]   (default: all seven)
 # Needs ffmpeg and img2webp (brew install ffmpeg webp).
 set -euo pipefail
 
@@ -15,6 +15,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 name_of() {
   case $1 in
+    AgentDemo) echo pixel-agent-demo ;;
     PixelComparison) echo pixel-measured-comparison ;;
     PixelImpact) echo pixel-impact-comparison ;;
     PixelScope) echo pixel-scope-comparison ;;
@@ -26,7 +27,7 @@ name_of() {
 }
 
 ids=("$@")
-[ ${#ids[@]} -gt 0 ] || ids=(PixelScope PixelComparison PixelImpact PixelRewrite PixelRollback PixelPublish)
+[ ${#ids[@]} -gt 0 ] || ids=(AgentDemo PixelScope PixelComparison PixelImpact PixelRewrite PixelRollback PixelPublish)
 
 for id in "${ids[@]}"; do
   name=$(name_of "$id")
