@@ -4603,16 +4603,20 @@ fn checks_deployed_prompts(command_label: &str, protected: bool) -> bool {
     !protected && !matches!(command_label, "install" | "doctor" | "uninstall")
 }
 
-/// One stderr line naming the deployed prompts that no longer match this
-/// binary. Nothing outside `pixel doctor` said so, and every agent kept the
+/// One stderr line naming the deployed prompts that differ from this
+/// binary's copies. Nothing outside `pixel doctor` said so, and every agent kept the
 /// old command map after an upgrade until someone reran the install.
 fn stale_prompt_note(stale: &[&str]) -> Option<String> {
     if stale.is_empty() {
         return None;
     }
-    let verb = if stale.len() == 1 { "does" } else { "do" };
+    let (verb, pronoun) = if stale.len() == 1 {
+        ("differs", "it")
+    } else {
+        ("differ", "them")
+    };
     Some(format!(
-        "note: {} from `pixel install` {verb} not match pixel {}; agents still read the old copy — run `pixel install` to update\n",
+        "note: {} deployed by `pixel install` {verb} from the copy in this pixel ({}); agents read the deployed one — run `pixel install` to update {pronoun}\n",
         stale.join(" and "),
         env!("CARGO_PKG_VERSION")
     ))
@@ -8306,15 +8310,15 @@ mod renamed_command_tests {
         assert_eq!(
             one,
             format!(
-                "note: agent-prompt.md from `pixel install` does not match pixel {}; agents still read the old copy — run `pixel install` to update\n",
+                "note: agent-prompt.md deployed by `pixel install` differs from the copy in this pixel ({}); agents read the deployed one — run `pixel install` to update it\n",
                 env!("CARGO_PKG_VERSION")
             )
         );
         let both = stale_prompt_note(&["agent-prompt.md", "subagent-prompt.md"]).unwrap();
         assert!(
             both.starts_with(
-                "note: agent-prompt.md and subagent-prompt.md from `pixel install` do not match"
-            ),
+                "note: agent-prompt.md and subagent-prompt.md deployed by `pixel install` differ from"
+            ) && both.ends_with("update them\n"),
             "{both}"
         );
         assert_eq!(both.lines().count(), 1, "{both}");

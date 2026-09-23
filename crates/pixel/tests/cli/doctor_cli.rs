@@ -179,8 +179,8 @@ fn a_stale_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
         .collect();
     assert_eq!(notes.len(), 1, "{stderr}");
     assert!(
-        notes[0].contains("does not match pixel")
-            && notes[0].ends_with("run `pixel install` to update"),
+        notes[0].contains("differs from the copy in this pixel")
+            && notes[0].ends_with("run `pixel install` to update it"),
         "{}",
         notes[0]
     );
