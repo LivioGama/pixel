@@ -1,7 +1,7 @@
 {{ $desc := .Description | default .Site.Params.description }}
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ if .IsHome }}Pixel: repository answers for coding agents{{ else }}{{ .Title }} | Pixel{{ end }}</title>
+<title>{{ if .IsHome }}Pixel: a local code index for coding agents{{ else }}{{ .Title }} | Pixel{{ end }}</title>
 <meta name="description" content="{{ $desc }}">
 <meta property="og:title" content="{{ if .IsHome }}Pixel{{ else }}{{ .Title }} | Pixel{{ end }}">
 <meta property="og:description" content="{{ $desc }}">

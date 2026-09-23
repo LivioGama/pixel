@@ -46,6 +46,8 @@ Claude Code on real tasks in this repository, with Pixel and without, against a 
 - **About 1.5 seconds slower** on a single lookup in the isolated run: the cost of reading the protocol before a one-shot answer.
 - **Still slower** at recovering deleted code from history. Open work.
 
+Three runs per cell, so these are directions, not decimals. The agents also called Pixel less than its protocol asks: given the protocol alone, with no hooks, the agent barely ran a Pixel command and still scoped tasks 29% faster, so part of the gain is the protocol's guidance rather than its answers.
+
 [Agent A/B runs and their caveats](https://github.com/LivioGama/pixel/blob/main/docs/bench/measured-performance.md)
 
 ## Where a specialist wins

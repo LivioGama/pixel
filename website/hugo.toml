@@ -5,7 +5,7 @@ enableRobotsTXT = true
 disableKinds = ["taxonomy", "term", "RSS", "sitemap", "404"]
 
 [params]
-description = "A local control layer that helps coding agents spend less time on simple repository work."
+description = "A local code index for AI coding agents. Your agent queries Pixel instead of reading files: 95% fewer tokens to learn what a large file contains."
 github_url = "https://github.com/LivioGama/pixel"
 repo = "LivioGama/pixel"
 

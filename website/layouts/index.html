@@ -9,13 +9,15 @@
   {{ $s := hugo.Data.scope }}
   {{ $big := index hugo.Data.savings.row 0 }}
   {{ $bench := "benchmarks/" | relURL }}
+  {{/* The code graph's grammars: crates/pixel-graph/src/extract.rs. The last five use the generic extractor. */}}
+  {{ $langs := slice "TypeScript" "JavaScript" "Rust" "Go" "Java" "Python" "C#" "Ruby" "PHP" "C" "Swift" "Elixir" "Lua" }}
 
   <main id="main">
     {{/* ---------- hero: the token wall ---------- */}}
     <section class="hero wrap">
       <div class="hero__copy">
       <h1 class="hero__title"><span>Read less.</span> <span>Ship more.</span></h1>
-      <p class="hero__lede">Pixel is the local index your coding agent queries instead of reading your repo file by file. Same agent, same prompts. A fraction of the tokens.</p>
+      <p class="hero__lede"><strong>A local code index for AI coding agents.</strong> Your agent queries Pixel instead of reading your repo file by file. Same agent, same prompts. A fraction of the tokens.</p>
       <div class="hero__cta">
         <div class="cmd">
           <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
@@ -75,6 +77,20 @@
       </figure>
     </section>
 
+    {{/* ---------- whole agent tasks ---------- */}}
+    <section class="section wrap" id="tasks" aria-labelledby="tasks-title">
+      <header class="section__head">
+        <h2 id="tasks-title">Measured on whole agent tasks.</h2>
+        <p>Fast answers do not make a fast agent on their own. So we timed Claude Code on real tasks in this repository, with Pixel and against a vanilla agent with no rules or hooks.</p>
+      </header>
+      <ul class="ledger">
+        <li class="ledger__win"><strong>&minus;30%</strong><span>Scoping a multi-file task. Two independent designs agree: &minus;31% and &minus;29%.</span></li>
+        <li class="ledger__loss"><strong>+1.5 s</strong><span>A single lookup. Reading the protocol costs more than it saves on a one-shot answer.</span></li>
+        <li class="ledger__loss"><strong>Slower</strong><span>Recovering deleted code from history. Open work.</span></li>
+      </ul>
+      <p class="ledger__fine">Three runs per cell: read these as directions, not decimals. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
+    </section>
+
     {{/* ---------- six jobs ---------- */}}
     <section class="section wrap" id="jobs" aria-labelledby="jobs-title">
       <header class="section__head">
@@ -99,6 +115,32 @@
       </div>
     </section>
 
+    {{/* ---------- how it works ---------- */}}
+    <section class="section wrap" id="how" aria-labelledby="how-title">
+      <header class="section__head">
+        <h2 id="how-title">How it works.</h2>
+        <p>One binary, one folder in your repository, no server.</p>
+      </header>
+      <ol class="how">
+        <li>
+          <h3>Index</h3>
+          <p><code>.pixel/</code>, at your repository root, holds a text index of every file Git does not ignore and a code graph of symbols, imports and calls parsed with tree-sitter, built on first use.</p>
+        </li>
+        <li>
+          <h3>Stay warm</h3>
+          <p>A local daemon keeps both open and watches the tree, so answers take milliseconds and follow your edits. No daemon? The command runs in-process.</p>
+        </li>
+        <li>
+          <h3>Answer to a budget</h3>
+          <p>The agent gets the symbols, signatures or lines its question needs, fitted to a token budget, with a marker saying whether the answer is complete.</p>
+        </li>
+        <li>
+          <h3>Reach the agent</h3>
+          <p>A CLI plus hooks, not an MCP server. <code>pixel install</code> puts the protocol where each agent reads its instructions, and the agent calls Pixel from the shell it already has.</p>
+        </li>
+      </ol>
+    </section>
+
     {{/* ---------- agents ---------- */}}
     <section class="section wrap" aria-labelledby="agents-title">
       <header class="section__head">
@@ -116,7 +158,7 @@
         <div class="jev__copy">
           <h2 id="jev-title">Beats Jev's published score on coding decisions.</h2>
           <p><code>pixel classify</code> routes a coding decision to the model you pick. With deepseek-v4.1-flash it got all 14 public JevBench coding items right. Jev publishes 0.839.</p>
-          <p class="jev__fine">Jev's score covers 56 items and was not re-measured here. <a class="link" href="{{ $bench }}#coding-decisions">The full bake-off</a></p>
+          <p class="jev__fine">Jev's score covers 56 items and was not re-measured here. <code>pixel classify</code> is opt-in: the only command that sends anything to a model, and only to the one you configure. <a class="link" href="{{ $bench }}#coding-decisions">Every model, the method and its limits</a></p>
         </div>
       </div>
     </section>
@@ -124,22 +166,74 @@
     {{/* ---------- install ---------- */}}
     <section class="section wrap" id="install" aria-labelledby="install-title">
       <header class="section__head">
-        <h2 id="install-title">Three commands. That's the whole setup.</h2>
+        <h2 id="install-title">Two commands. That's the whole setup.</h2>
       </header>
       <div class="term">
         <div class="term__bar" aria-hidden="true"><span></span><span></span><span></span></div>
         <pre class="term__body"><code><span class="term__p">$</span> brew install LivioGama/tap/pixel
 <span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi, OpenCode, Antigravity</span>
-<span class="term__p">$</span> pixel doctor .     <span class="term__c"># everything green? you're done</span></code></pre>
+<span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></code></pre>
         <button class="cmd__copy term__copy" type="button" data-copy="brew install LivioGama/tap/pixel && pixel install && pixel doctor .">Copy all</button>
       </div>
       <ul class="badges">
         <li>Runs 100% on your machine</li>
-        <li>MIT licensed</li>
+        <li><a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" rel="noopener">Zero telemetry</a></li>
         <li>No account, no server</li>
+        <li>MIT licensed</li>
         <li>Gone in one <code>pixel uninstall</code></li>
       </ul>
-      <p class="install__more">No Homebrew? <a class="link" href="{{ "docs/#install" | relURL }}">Use the install script</a>. Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}">Plugins and rules files</a>.</p>
+      <p class="install__alt">No Homebrew? One line does it on macOS and Linux:</p>
+      <div class="cmd install__script">
+        <code><span class="cmd__prompt" aria-hidden="true">$</span> curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh</code>
+        <button class="cmd__copy" type="button" data-copy="curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh">Copy</button>
+      </div>
+      <p class="install__more">Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}">Plugins and rules files</a>.</p>
+      <div class="yours">
+        <h3>Don't take our numbers.</h3>
+        <p>After a few sessions, ask Pixel what it spared your own agent. On the maintainer's machine: 41 to 83% of what it would have read, across 798 operations.</p>
+        <div class="cmd">
+          <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel token-savings</code>
+          <button class="cmd__copy" type="button" data-copy="pixel token-savings">Copy</button>
+        </div>
+      </div>
+    </section>
+
+    {{/* ---------- questions ---------- */}}
+    <section class="section wrap" id="faq" aria-labelledby="faq-title">
+      <header class="section__head">
+        <h2 id="faq-title">Fair questions.</h2>
+      </header>
+      <div class="faq">
+        <details>
+          <summary>Will my agent actually use it?</summary>
+          <p>Not every time. Agents are trained on <code>grep</code> and fall back to it. Pixel does not wait for the agent to discover a tool: <code>pixel install</code> puts its protocol into every session, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files. The guard advises and never blocks.</p>
+          <p>Given the protocol alone, with no hooks, the agent barely called Pixel and still scoped tasks 29% faster: part of the gain is the protocol's guidance itself. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs</a></p>
+        </details>
+        <details>
+          <summary>Why not just grep?</summary>
+          <p>Grep finds the line. The cost is what comes next: the agent opens the whole file to understand the match. On a {{ lang.FormatNumberCustom 0 $big.lines }}-line file that read costs {{ lang.FormatNumberCustom 0 $big.full }} tokens, and Pixel's answer to the same question {{ lang.FormatNumberCustom 0 $big.pixel }}. <code>pixel search-content</code> keeps grep's regex syntax, so the agent changes nothing but the bill.</p>
+        </details>
+        <details>
+          <summary>Why not a language server?</summary>
+          <p>A language server resolves types, so its "who calls this" is more exact than a syntax graph's. It also needs one running server per language and answers one cursor position at a time. Pixel is one binary, covers {{ len $langs }} languages and your Git history, and says when an answer may be incomplete: static analysis never sees every dynamic call, and every graph answer carries that warning.</p>
+        </details>
+        <details>
+          <summary>Why not my editor's index?</summary>
+          <p>It lives inside that editor. Pixel runs from the shell, so every agent on this page gets the same index, and it stays in <code>.pixel/</code> at your repository root.</p>
+        </details>
+        <details>
+          <summary>Pixel or semble?</summary>
+          <p>Both, if you search in plain English a lot. semble puts the right file in its top 10 for 100% of 45 natural-language queries, Pixel for 69%. Pixel adds the call graph, blast radius, Git history and guarded Git writes. Together they cost about 5,100 tokens of context per turn. <a class="link" href="{{ $bench }}#where-a-specialist-wins">Where a specialist wins</a></p>
+        </details>
+        <details>
+          <summary>Does anything leave my machine?</summary>
+          <p>Nothing you did not ask for. The index lives in <code>.pixel/</code> and there is no telemetry. Pixel touches the network for three things only: the embedding model it downloads from Hugging Face on first use, the Git remote operations you run (<code>pixel fetch</code>, <code>pixel push</code>), and <code>pixel classify</code>, which sends its question to the model you configure. <a class="link" href="{{ site.Params.github_url }}/blob/main/SECURITY.md" rel="noopener">Security model</a></p>
+        </details>
+        <details>
+          <summary>Which languages?</summary>
+          <p>Text search covers every file Git does not ignore, up to 4 MiB. The code graph covers {{ delimit $langs ", " ", and " }}. The last five go through a generic extractor rather than a dedicated one.</p>
+        </details>
+      </div>
     </section>
 
     {{/* ---------- closing ---------- */}}

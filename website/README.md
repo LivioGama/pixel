@@ -22,6 +22,10 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   question costs through Pixel once it scrolls into view. The scope board
   draws one pad per indexed file and routes a trace from each P0 pad to its
   file name. The job tabs load each recording only when opened.
+- The "Fair questions" block in `layouts/index.html` restates facts from
+  `SECURITY.md`, `docs/bench/measured-performance.md` and the graph's
+  grammars (`$langs`, from `crates/pixel-graph/src/extract.rs`): change it
+  when they change.
 - `content/benchmarks.md`: the `/benchmarks/` page. Every number the landing
   page shows lives here with its sample size, its source in `docs/bench/`,
   and the cases where Pixel loses. Add a claim to the landing page only once
