@@ -353,11 +353,12 @@ fn bundle_frames<W: Write>(
 }
 
 /// One line of `reader` without its `\n` or `\r\n`, or `None` at EOF. The
-/// cap is enforced while reading: `take` stops one byte past `max`, so a
-/// line that never ends costs `max + 1` bytes, not the whole stream.
+/// cap is enforced while reading: `take` stops two bytes past `max`, room
+/// for a `\r\n` after a line of exactly `max` bytes, so a line that never
+/// ends costs `max + 2` bytes, not the whole stream.
 fn read_bounded_line<R: BufRead>(reader: &mut R, max: usize) -> Result<Option<String>, String> {
     let mut line = Vec::new();
-    let read = std::io::Read::take(&mut *reader, max as u64 + 1)
+    let read = std::io::Read::take(&mut *reader, max as u64 + 2)
         .read_until(b'\n', &mut line)
         .map_err(|error| format!("evidence stdin: {error}"))?;
     if read == 0 {
@@ -379,8 +380,6 @@ fn read_bounded_line<R: BufRead>(reader: &mut R, max: usize) -> Result<Option<St
 
 /// Serve the evidence JSONL protocol. EOF waits for accepted work to produce
 /// its terminal frames, so a short-lived caller does not silently lose output.
-// Delegates to `serve_bounded` with no request bound; the tests drive that one.
-#[cfg_attr(test, mutants::skip)]
 pub fn serve<R: BufRead, W: Write + Send + 'static>(
     root: &Path,
     reader: R,
@@ -733,9 +732,76 @@ mod tests {
         assert_eq!(result, Err("evidence request exceeds 64KiB".to_string()));
         let consumed = read.load(Ordering::Relaxed);
         assert!(
-            consumed <= MAX_REQUEST_LINE + 1 + 4096,
+            consumed <= MAX_REQUEST_LINE + 2 + 4096,
             "read {consumed} bytes"
         );
+    }
+
+    /// The cap is on the request, not on its line ending: exactly `max`
+    /// bytes pass with `\n` or `\r\n`, one more byte does not.
+    #[test]
+    fn read_bounded_line_should_accept_a_line_of_exactly_the_cap_with_either_ending() {
+        for ending in ["\n", "\r\n"] {
+            let mut reader =
+                std::io::Cursor::new(format!("abcd{ending}abcde{ending}").into_bytes());
+            assert_eq!(
+                read_bounded_line(&mut reader, 4),
+                Ok(Some("abcd".into())),
+                "{ending:?}"
+            );
+            assert_eq!(
+                read_bounded_line(&mut reader, 4),
+                Err("evidence request exceeds 64KiB".into()),
+                "{ending:?}"
+            );
+        }
+    }
+
+    /// A writer that keeps the first 1 MiB and drops the rest, so a test
+    /// bridge that spins cannot exhaust memory before its deadline.
+    struct CappedBuffer(Arc<Mutex<Vec<u8>>>);
+    impl Write for CappedBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let mut kept = self.0.lock().unwrap();
+            let room = 1_048_576_usize.saturating_sub(kept.len());
+            kept.extend_from_slice(&bytes[..bytes.len().min(room)]);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The public `serve` has no request bound: it answers more requests than
+    /// the tests' `serve_bounded` limit. It runs on a thread with a
+    /// deadline, so a reader that never reports EOF fails the test instead
+    /// of hanging it.
+    #[test]
+    fn serve_should_answer_more_requests_than_the_test_bound() {
+        let count = TEST_MAX_REQUESTS + 44;
+        let input: String = (0..count)
+            .map(|n| format!("{{\"op\":\"capabilities\",\"version\":1,\"requestId\":\"c{n}\"}}\n"))
+            .collect();
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let writer = CappedBuffer(Arc::clone(&output));
+        std::thread::spawn(move || {
+            let result = serve(
+                Path::new(NO_REPO),
+                std::io::Cursor::new(input.into_bytes()),
+                writer,
+            );
+            let _ = done_tx.send(result);
+        });
+        assert_eq!(
+            done_rx.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(Ok(()))
+        );
+        let capabilities = frames(&output)
+            .iter()
+            .filter(|frame| frame["type"] == "capabilities")
+            .count();
+        assert_eq!(capabilities, count);
     }
 
     #[test]
