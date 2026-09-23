@@ -22,7 +22,10 @@ Loaded when a Rust source file is in play. Companion of `mutation-gate.md`.
   `current_dir` to a fixture: cargo runs a test from `crates/<crate>`, and a
   `pixel` started there with no path (or a missing one) appends its action
   log to this checkout's `.pixel/actions.jsonl`. CI fails the run when
-  that file exists after the tests.
+  that file exists after the tests. It also points `HOME` at an empty
+  directory (`support::neutral_home()`): a test that spawns the binary
+  itself sets `HOME` too, or a machine with another release's
+  `pixel install` adds a stale-prompt note to every stderr it reads.
 - **Compare canonical paths.** macOS's temp dir is a symlink
   (`/var` to `/private/var`); anything that stores `root.canonicalize()`
   will not match `temp_dir().join(..)`. Canonicalize the expectation.
