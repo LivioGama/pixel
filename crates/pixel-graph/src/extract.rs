@@ -255,7 +255,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         "java" => walk_java(&mut w, root, 0),
         "python" => walk_python(&mut w, root, 0),
         "csharp" => walk_csharp(&mut w, root, 0),
-        "ruby" => walk_ruby(&mut w, root, 0),
+        "ruby" => walk_ruby(&mut w, &mut RubyLocals::default(), root, RubyIdent::Expr, 0),
         // Any other wired language — or any future language added to the lang
         // map — falls back to the heuristic node-kind walker. Coarse but better
         // than absent.
@@ -1397,11 +1397,117 @@ fn walk_csharp(w: &mut Walker, node: Node, depth: usize) {
 const RUBY_REQUIRE_METHODS: &[&str] =
     &["require", "require_relative", "require_dependency", "load"];
 
-fn walk_ruby(w: &mut Walker, node: Node, depth: usize) {
+/// How an `identifier` reads in Ruby, decided by the slot it fills in its
+/// parent node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RubyIdent {
+    /// An expression: a method call unless a local of that name is in scope.
+    Expr,
+    /// A name that makes a local variable: assignment target, parameter,
+    /// `for`/`rescue` variable, pattern binding.
+    Binding,
+    /// A method name being defined, called through `call`, or aliased.
+    Name,
+}
+
+/// Role of an `identifier` child sitting in field `field` of a `parent` node.
+fn ruby_identifier_role(parent: &str, field: Option<&str>) -> RubyIdent {
+    match (parent, field) {
+        ("assignment" | "operator_assignment", Some("left"))
+        | ("left_assignment_list" | "rest_assignment" | "destructured_left_assignment", _)
+        | (
+            "method_parameters"
+            | "lambda_parameters"
+            | "block_parameters"
+            | "destructured_parameter",
+            _,
+        )
+        | (
+            "optional_parameter"
+            | "keyword_parameter"
+            | "splat_parameter"
+            | "hash_splat_parameter"
+            | "block_parameter",
+            Some("name"),
+        )
+        | ("for", Some("pattern"))
+        | ("exception_variable" | "array_pattern" | "find_pattern" | "as_pattern", _)
+        | ("in_clause", Some("pattern"))
+        | ("keyword_pattern", Some("value")) => RubyIdent::Binding,
+        ("method" | "singleton_method", Some("name" | "object"))
+        | ("call", Some("method"))
+        | ("setter" | "alias" | "undef", _) => RubyIdent::Name,
+        _ => RubyIdent::Expr,
+    }
+}
+
+/// Whether a Ruby node kind opens a local-variable scope, and which kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RubyScope {
+    /// `def`, `class`, `module`, the file: the enclosing locals are hidden.
+    Gate,
+    /// A block or lambda: the enclosing locals stay visible.
+    Block,
+}
+
+fn ruby_scope_of(kind: &str) -> Option<RubyScope> {
+    match kind {
+        "program" | "method" | "singleton_method" | "class" | "module" | "singleton_class" => {
+            Some(RubyScope::Gate)
+        }
+        "block" | "do_block" | "lambda" => Some(RubyScope::Block),
+        _ => None,
+    }
+}
+
+/// The local variables Ruby's parser knows at the current point of the walk,
+/// one frame per open scope, innermost last.
+///
+/// Ruby's own rule: a name is a local once an assignment to it (or a
+/// parameter of that name) has been parsed earlier in a visible scope;
+/// otherwise the bare name is a method call.
+#[derive(Debug, Default)]
+struct RubyLocals {
+    frames: Vec<(RubyScope, Vec<String>)>,
+}
+
+impl RubyLocals {
+    fn open(&mut self, scope: RubyScope) {
+        self.frames.push((scope, Vec::new()));
+    }
+
+    fn close(&mut self) {
+        self.frames.pop();
+    }
+
+    fn bind(&mut self, name: String) {
+        if let Some((_, names)) = self.frames.last_mut() {
+            names.push(name);
+        }
+    }
+
+    fn is_local(&self, name: &str) -> bool {
+        for (scope, names) in self.frames.iter().rev() {
+            if names.iter().any(|known| known == name) {
+                return true;
+            }
+            if *scope == RubyScope::Gate {
+                return false;
+            }
+        }
+        false
+    }
+}
+
+fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIdent, depth: usize) {
     if depth > MAX_DEPTH {
         return;
     }
     let mut pushed = false;
+    let scope = ruby_scope_of(node.kind());
+    if let Some(scope) = scope {
+        locals.open(scope);
+    }
     match node.kind() {
         "module" => {
             if let Some(name) = field_text(w, node, "name") {
@@ -1469,10 +1575,36 @@ fn walk_ruby(w: &mut Walker, node: Node, depth: usize) {
                 walk_call_arguments(w, node, callee_name);
             }
         }
+        // A name read without receiver or parentheses (`target`, or the
+        // receiver of `target.to_set`) calls the method unless a local of
+        // that name is in scope; tree-sitter cannot tell the two apart.
+        "identifier" => match role {
+            RubyIdent::Binding => locals.bind(w.text(node)),
+            RubyIdent::Expr => {
+                let name = w.text(node);
+                if !locals.is_local(&name) {
+                    w.push_call(name, None, node);
+                }
+            }
+            RubyIdent::Name => {}
+        },
+        // `in {target:}` binds `target` although no identifier is written.
+        "keyword_pattern" if node.child_by_field_name("value").is_none() => {
+            if let Some(key) = field_text(w, node, "key") {
+                locals.bind(key);
+            }
+        }
         _ => {}
     }
-    for child in each_child(node) {
-        walk_ruby(w, child, depth + 1);
+    for (index, child) in each_child(node).into_iter().enumerate() {
+        let field = u32::try_from(index)
+            .ok()
+            .and_then(|index| node.field_name_for_child(index));
+        let child_role = ruby_identifier_role(node.kind(), field);
+        walk_ruby(w, locals, child, child_role, depth + 1);
+    }
+    if scope.is_some() {
+        locals.close();
     }
     if pushed {
         w.stack.pop();
@@ -2249,6 +2381,255 @@ end
                 .iter()
                 .all(|symbol| symbol.kind != SymbolKind::Script)
         );
+    }
+
+    /// Qualified name of the enclosing symbol of every call to `callee` in a
+    /// Ruby source, in source order.
+    fn ruby_callers_of(source: &str, callee: &str) -> Vec<String> {
+        let extraction = extract_file("app/svc.rb", source.as_bytes()).unwrap();
+        extraction
+            .calls
+            .iter()
+            .filter(|call| call.callee_name == callee)
+            .map(|call| {
+                call.enclosing_index
+                    .map_or_else(String::new, |i| extraction.symbols[i].qualified.clone())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ruby_bare_identifier_should_be_a_call_when_no_local_of_that_name_is_in_scope() {
+        // Ruby parses a name that no earlier assignment made local as a method
+        // call. tree-sitter gives it an `identifier` node, not a `call`, and a
+        // caller written `target` or `target.to_set` was invisible to impact.
+        let source = [
+            "class Svc",
+            "  def chained",
+            "    @ids ||= target.to_set",
+            "  end",
+            "  def bare",
+            "    target",
+            "  end",
+            "  def parens",
+            "    target()",
+            "  end",
+            "  def with_self",
+            "    self.target",
+            "  end",
+            "  def as_argument",
+            "    render(target, *target, &target, key: target)",
+            "  end",
+            "  def target",
+            "    [1]",
+            "  end",
+            "end",
+        ]
+        .join("\n");
+        assert_eq!(
+            ruby_callers_of(&source, "target"),
+            [
+                "Svc#chained",
+                "Svc#bare",
+                "Svc#parens",
+                "Svc#with_self",
+                "Svc#as_argument",
+                "Svc#as_argument",
+                "Svc#as_argument",
+                "Svc#as_argument",
+            ],
+            "every form of a call to `target` is an edge, and `def target` itself is not"
+        );
+        let extraction = extract_file("app/svc.rb", source.as_bytes()).unwrap();
+        let to_set: Vec<_> = extraction
+            .calls
+            .iter()
+            .filter(|call| call.callee_name == "to_set")
+            .collect();
+        assert_eq!(
+            to_set.len(),
+            1,
+            "the method of a `call` stays one call, it is not recorded again as a bare name"
+        );
+        assert_eq!(to_set[0].receiver.as_deref(), Some("target"));
+    }
+
+    #[test]
+    fn ruby_identifier_should_not_be_a_call_when_it_names_a_local() {
+        // Every method below reads a local named `target`: an edge from any of
+        // them to `def target` would be a caller that does not exist.
+        let source = [
+            "class Svc",
+            "  def assigned",
+            "    target = 1",
+            "    target",
+            "  end",
+            "  def op_assigned",
+            "    target ||= 1",
+            "    target.succ",
+            "  end",
+            "  def multiple",
+            "    first, target = 1, 2",
+            "    target",
+            "  end",
+            "  def splat_assigned",
+            "    first, *target = 1, 2",
+            "    target",
+            "  end",
+            "  def nested_assigned",
+            "    first, (second, target) = 1, [2, 3]",
+            "    target",
+            "  end",
+            "  def positional(target)",
+            "    target",
+            "  end",
+            "  def optional(target = 1)",
+            "    target",
+            "  end",
+            "  def keyword(target: 1)",
+            "    target",
+            "  end",
+            "  def splat(*target)",
+            "    target",
+            "  end",
+            "  def double_splat(**target)",
+            "    target",
+            "  end",
+            "  def block_arg(&target)",
+            "    target",
+            "  end",
+            "  def block_param",
+            "    [1].each { |target| target }",
+            "  end",
+            "  def block_local",
+            "    [1].each { |x; target| target }",
+            "  end",
+            "  def destructured",
+            "    [[1, 2]].each { |(x, target)| target }",
+            "  end",
+            "  def lambda_param",
+            "    ->(target) { target }",
+            "  end",
+            "  def outer_local_in_block",
+            "    target = 1",
+            "    [1].each do target end",
+            "  end",
+            "  def looped",
+            "    for target in [1]; end",
+            "    target",
+            "  end",
+            "  def rescued",
+            "    raise 'x'",
+            "  rescue => target",
+            "    target",
+            "  end",
+            "  def matched_array(v)",
+            "    case v",
+            "    in [target] then target",
+            "    end",
+            "  end",
+            "  def matched_hash(v)",
+            "    case v",
+            "    in {k: target} then target",
+            "    end",
+            "  end",
+            "  def matched_shorthand(v)",
+            "    case v",
+            "    in {target:} then target",
+            "    end",
+            "  end",
+            "  def matched_as(v)",
+            "    case v",
+            "    in Integer => target then target",
+            "    end",
+            "  end",
+            "  def matched_pin(v, target)",
+            "    case v",
+            "    in ^target then 1",
+            "    end",
+            "  end",
+            "  alias other target",
+            "  def target",
+            "    [1]",
+            "  end",
+            "end",
+        ]
+        .join("\n");
+        assert_eq!(
+            ruby_callers_of(&source, "target"),
+            Vec::<String>::new(),
+            "a local, a parameter or a pattern binding named `target` is not a call"
+        );
+    }
+
+    #[test]
+    fn ruby_local_should_be_visible_only_after_its_assignment_and_inside_its_scope() {
+        // `def`, `class` and `module` start a fresh local table; a block sees
+        // the locals around it but its own die with it; a name read before
+        // its assignment is still a method call.
+        let source = [
+            "target = 1",
+            "module Ns",
+            "  target",
+            "end",
+            "class Svc",
+            "  target = 2",
+            "  def gated",
+            "    target",
+            "  end",
+            "  def not_leaked",
+            "    [1].each { |target| target }",
+            "    [1].each { target = 1 }",
+            "    target",
+            "  end",
+            "  def before_assignment",
+            "    target",
+            "    target = 1",
+            "  end",
+            "  def self.class_side",
+            "    target",
+            "  end",
+            "  def matched_key_with_value(v)",
+            "    case v",
+            "    in {target: 1} then target",
+            "    end",
+            "  end",
+            "  class << self",
+            "    target",
+            "  end",
+            "  def target",
+            "  end",
+            "end",
+        ]
+        .join("\n");
+        assert_eq!(
+            ruby_callers_of(&source, "target"),
+            [
+                "Ns",
+                "Svc#gated",
+                "Svc#not_leaked",
+                "Svc#before_assignment",
+                "Svc.class_side",
+                "Svc#matched_key_with_value",
+                "Svc",
+            ],
+            "only the reads no visible assignment precedes are calls"
+        );
+    }
+
+    #[test]
+    fn ruby_walk_should_stop_at_the_depth_cap() {
+        // The walker recurses once per tree level; the cap is what keeps a
+        // pathological nesting from overflowing the stack.
+        let deep = format!("{}deep_call(){}", "[".repeat(600), "]".repeat(600));
+        let source = format!("shallow_call()\n{deep}\n");
+        let extraction = extract_file("gen.rb", source.as_bytes()).unwrap();
+        let names: Vec<_> = extraction
+            .calls
+            .iter()
+            .map(|call| call.callee_name.as_str())
+            .collect();
+        assert_eq!(names, ["shallow_call"]);
     }
 
     #[test]
