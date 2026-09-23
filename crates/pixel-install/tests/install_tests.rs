@@ -4041,3 +4041,40 @@ fn uninstall_should_remove_the_pre_rename_guard_entry_and_script() {
     let settings = read_json(&home.join(".claude/settings.json"));
     assert_eq!(settings["hooks"]["PreToolUse"], serde_json::json!([keep]));
 }
+
+/// A global RTK backup with no delegating guard is a leftover (an
+/// `install --repo` build once wrote the repository's there): doctor flags
+/// it in yellow with the command that removes it, and stays green once the
+/// file is gone.
+#[test]
+#[cfg(unix)]
+fn doctor_should_flag_a_global_rtk_backup_no_guard_delegates_to() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().to_path_buf();
+    let backup = home.join(".claude/pixel-rtk-hooks.json");
+    fs::create_dir_all(backup.parent().unwrap()).unwrap();
+    fs::write(
+        &backup,
+        r#"[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]"#,
+    )
+    .unwrap();
+    let rtk_check = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "install.rtk-backup").clone()
+    };
+
+    let c = rtk_check();
+    assert_eq!(c.status, CheckStatus::Yellow, "{c:?}");
+    assert!(
+        c.summary.contains(&format!("rm '{}'", backup.display())),
+        "{c:?}"
+    );
+
+    fs::remove_file(&backup).unwrap();
+    let c = rtk_check();
+    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
+}

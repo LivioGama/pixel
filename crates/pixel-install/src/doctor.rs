@@ -374,6 +374,12 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     ));
 
+    // A global RTK backup that no guard delegates to is never applied again;
+    // say so rather than leave a file that looks like a live registration.
+    checks.push(check_status("install.rtk-backup", || {
+        rtk_backup_check(crate::routing::orphan_rtk_backup(&home).map_err(|e| e.to_string())?)
+    }));
+
     // Legacy `claude()` shell wrappers are harmful now: a surviving block
     // double-injects the prompt on every wrapped launch. Any pixel-managed
     // block in ANY candidate profile (the resolved shell's or a stray left
@@ -913,6 +919,33 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         home: home.display().to_string(),
         checks,
         summary: DoctorSummary { green, yellow, red },
+    })
+}
+
+/// `install.rtk-backup`: yellow when `orphan` names a global RTK backup no
+/// pixel guard delegates to, with the command that removes it.
+fn rtk_backup_check(
+    orphan: Option<PathBuf>,
+) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+    Ok(match orphan {
+        None => (
+            CheckStatus::Green,
+            DoctorCheckDetail {
+                summary: "no orphaned RTK backup".into(),
+                detail: None,
+            },
+        ),
+        Some(path) => (
+            CheckStatus::Yellow,
+            DoctorCheckDetail {
+                summary: format!(
+                    "{} holds an RTK hook no pixel guard delegates to; pixel never applies it — remove it: rm '{}'",
+                    path.display(),
+                    path.display()
+                ),
+                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+            },
+        ),
     })
 }
 
