@@ -151,7 +151,7 @@ Then, whatever the channel, refresh the wiring and check it:
 
 ```bash
 pixel install
-pixel doctor .
+pixel doctor . --fix   # runs each repair a flagged check names, then re-checks
 ```
 
 ### Plugin install (per-tool native)

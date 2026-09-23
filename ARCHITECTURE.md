@@ -361,8 +361,13 @@ or protocol-checked hooks from observed live execution. Dormant registration cod
 is not an installed feature. Legacy uninstall behavior remains available.
 Every check is listed in `pixel_install::doctor::CHECKS` with a stable id and
 the command that repairs it (`pixel doctor --list`): `--only`/`--skip` select
-by id, and each yellow or red check reports that command as `fix`. The exit
-code carries the verdict: 0 when no check reaches `--fail-on` (default `red`),
+by id, and each yellow or red check reports that command as `fix`.
+`--fix` runs them: `repair_plan` folds the flagged checks into one run of each
+distinct catalogue command, in catalogue order, `run_repair` executes it with
+the running binary, and the checks are re-run so each repair is judged
+`fixed`, `not_converged` or `failed` from the new report, not from its exit
+code. A command only one outcome names (the `rm` of an orphaned RTK backup)
+is never run. The exit code carries the verdict: 0 when no check reaches `--fail-on` (default `red`),
 1 when one does, 2 when the checks could not run.
 
 ### Invocation accounting and chat delivery
