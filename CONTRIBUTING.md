@@ -325,6 +325,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full map. The short version:
 | `crates/pixel-bench` | Criterion benches. Not shipped. |
 | `scripts/` | install, smoke test, demos, bench wrappers, disk reclamation |
 | `docs/` | user docs, demos, manual setup |
+| `website/` | the Hugo site published to GitHub Pages: landing page and `/docs/` ([website/README.md](website/README.md)) |
 
 ### Adding or changing an op
 

@@ -1,0 +1,36 @@
+baseURL = "https://liviogama.github.io/pixel/"
+locale = "en-us"
+title = "Pixel"
+enableRobotsTXT = true
+disableKinds = ["taxonomy", "term", "RSS", "sitemap", "404"]
+
+[params]
+description = "A local code index for AI coding agents. Your agent queries Pixel instead of reading files: 95% fewer tokens to learn what a large file contains."
+github_url = "https://github.com/LivioGama/pixel"
+repo = "LivioGama/pixel"
+
+[markup.goldmark.renderer]
+unsafe = true
+
+[markup.highlight]
+noClasses = false
+
+[markup.tableOfContents]
+startLevel = 2
+endLevel = 2
+
+[outputs]
+home = ["HTML"]
+
+# The animations live in docs/examples/, rendered by docs/motion. Mounting
+# them keeps one copy of each file instead of two; the page uses the MP4s and
+# their JPEG posters, the README the WebPs. Declaring a static mount drops
+# Hugo's default one, so static/ is mounted again first.
+[[module.mounts]]
+source = "static"
+target = "static"
+
+[[module.mounts]]
+source = "../docs/examples"
+target = "static/examples"
+files = ["**.mp4", "**.jpg"]

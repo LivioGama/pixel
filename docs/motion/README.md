@@ -1,39 +1,73 @@
 # motion
 
-[Remotion](https://www.remotion.dev) sources for the six comparison
-animations in the root README (`docs/examples/pixel-*-comparison.webp`).
-`src/index.ts` registers `src/Root.tsx`, where every composition renders
-`ComparisonScene` (`src/ComparisonScene.tsx`) with one spec from
-`src/PixelComparison.tsx`, at 1600×1000, 30 fps, 240 frames (8 s).
+[Remotion](https://www.remotion.dev) sources for the animations in the root
+README and on the website, all rendered into `docs/examples/`. They share the
+website's identity (`src/theme.ts`: forest-green ground, coral for what an
+agent wastes, green for what Pixel hands back, Handjet for display text);
+`src/fonts.ts` loads the three faces from `public/fonts/` before any frame
+renders.
 
-| Composition ID | Spec | README asset |
+| Composition ID | Source | Output basename |
 |---|---|---|
-| `PixelComparison` | `measuredSavingsSpec` | `pixel-measured-comparison.webp` |
-| `PixelImpact` | `impactSpec` | `pixel-impact-comparison.webp` |
-| `PixelScope` | `scopeSpec` | `pixel-scope-comparison.webp` |
-| `PixelRollback` | `rollbackSpec` | `pixel-rollback-comparison.webp` |
-| `PixelPublish` | `publishSpec` | `pixel-publish-comparison.webp` |
-| `PixelRewrite` | `rewriteSpec` | `pixel-rewrite-comparison.webp` |
+| `AgentDemo` | `src/AgentDemo.tsx` + `src/demo/*.json` | `pixel-agent-demo` |
+| `PixelComparison` | `measuredSavingsSpec` | `pixel-measured-comparison` |
+| `PixelImpact` | `impactSpec` | `pixel-impact-comparison` |
+| `PixelScope` | `scopeSpec` | `pixel-scope-comparison` |
+| `PixelRollback` | `rollbackSpec` | `pixel-rollback-comparison` |
+| `PixelPublish` | `publishSpec` | `pixel-publish-comparison` |
+| `PixelRewrite` | `rewriteSpec` | `pixel-rewrite-comparison` |
 
-Install the dependencies, from this directory:
+The six `Pixel*` compositions render `ComparisonScene` (`src/ComparisonScene.tsx`)
+with one spec from `src/PixelComparison.tsx`, at 1600×1000, 30 fps, 8 s.
+
+## The agent demo
+
+`AgentDemo` replays two recorded Claude Code runs side by side on one clock:
+the same task, the same model and effort, the same bare setup, one side with
+the hooks `pixel install` writes. Nothing in it is written by hand: every
+command, time and token count comes from a recording.
+
+1. `scripts/record-demo.sh <dir> [reps] [model]` (Opus at medium effort by
+   default, what most people run) checks out a pinned ref (`REF`, default
+   `v0.5.0`) in a throwaway worktree without `docs/motion`, so no agent can
+   read the demo's own traces, indexes it, then runs both arms `reps` times,
+   each pair started together, and stores every stream-json event with its
+   arrival time. The script's header lists what the two arms share. Both are
+   told to answer in English: the account's organization instructions would
+   otherwise leak into both.
+2. `bun scripts/trace.ts <dir>` keeps each arm's median-time run (never the
+   best) as `src/demo/{vanilla,pixel}.json`, writes every run to
+   `src/demo/runs.json` and copies the recording's `meta.txt` (commit,
+   model, CLI and Pixel versions, prompt hash, task).
+3. The summary at the end shows the median of each metric over all runs, and
+   its headline follows those medians rather than assuming a win.
+
+The demo published today predates this protocol: Claude Sonnet 5, Pixel
+0.5.0 with its agent prompt appended instead of its hooks, in the source
+tree itself (`src/demo/meta.txt`). Three of its 22 runs read the demo's own
+files, which is why the script now works in a separate worktree. An Opus
+medium re-recording with the hooks gave no gain on this task (median 42.9 s
+without Pixel, 47.6 s with it), and is kept outside the repository with the
+earlier raw runs, pending a task where search dominates.
+
+Re-record after a release that changes the agent prompt or the commands it
+names, with that release installed and `REF` set to its tag, and update
+`recorded` and `modelName` in `src/Root.tsx`.
+
+## Render
 
 ```bash
+cd docs/motion
 bun install
+bunx remotion studio src/index.ts        # preview
+scripts/render.sh                        # every composition
+scripts/render.sh PixelScope AgentDemo   # some of them
 ```
 
-Preview every composition in the Remotion Studio:
+`scripts/render.sh` runs `bun install` first, needs `ffmpeg` and `img2webp`
+(`brew install ffmpeg webp`), and writes three files per composition into `docs/examples/`:
 
-```bash
-bunx remotion studio src/index.ts
-```
-
-Render one composition by its ID (`remotion.config.ts` sets PNG frames and
-overwrites an existing output):
-
-```bash
-bunx remotion render src/index.ts PixelScope out/pixel-scope.mp4
-bunx remotion render src/index.ts PixelScope out/pixel-scope.gif --codec=gif
-```
-
-The committed README assets are 800×500 animated WebPs converted from such a
-render; that conversion step is not scripted here.
+- `<name>.mp4`: 1600×1000 H.264, played by the website;
+- `<name>.jpg`: its last frame, the website's poster;
+- `<name>.webp`: 800×500 at 15 fps, embedded by the root README, since GitHub
+  renders an animated image inline but not a video.

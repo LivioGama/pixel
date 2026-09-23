@@ -184,7 +184,7 @@ If you wrote Pixel commands into your own instructions before the rename
 `<pixel> hook session-start`), you do not have to rewrite them yet: each old
 name is a hidden alias of its new name until 1.0, and `pixel doctor` accepts
 rule text that still uses the old names. Update them when convenient, using
-the table in the [README](../README.md#-renamed-commands).
+the table in [renamed-commands.md](renamed-commands.md).
 
 An old name prints one `note:` line on stderr with the new name. It never
 touches stdout or `--json` output, and `--metrics off` or `PIXEL_METRICS=0`

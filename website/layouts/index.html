@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.Language.Locale }}">
+<head>
+  {{ partial "head.html" . }}
+</head>
+<body class="home">
+  <a href="#main" class="skip">Skip to content</a>
+  {{ partial "nav.html" . }}
+  {{ $s := hugo.Data.scope }}
+  {{ $big := index hugo.Data.savings.row 0 }}
+  {{ $bench := "benchmarks/" | relURL }}
+  {{/* The code graph's grammars: crates/pixel-graph/src/extract.rs. The last five use the generic extractor. */}}
+  {{ $langs := slice "TypeScript" "JavaScript" "Rust" "Go" "Java" "Python" "C#" "Ruby" "PHP" "C" "Swift" "Elixir" "Lua" }}
+
+  <main id="main">
+    {{/* ---------- hero: the token wall ---------- */}}
+    <section class="hero wrap">
+      <div class="hero__copy">
+      <h1 class="hero__title"><span>Read less.</span> <span>Ship more.</span></h1>
+      <p class="hero__lede"><strong>A local code index for AI coding agents.</strong> Your agent queries Pixel instead of reading your repo file by file. Same agent, same prompts. A fraction of the tokens.</p>
+      <div class="hero__cta">
+        <div class="cmd">
+          <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
+          <button class="cmd__copy" type="button" data-copy="brew install LivioGama/tap/pixel">Copy</button>
+        </div>
+        <a class="button button--ghost" href="{{ site.Params.github_url }}" rel="noopener">Star on GitHub</a>
+      </div>
+      </div>
+
+      <figure class="wall" data-wall data-full="{{ $big.full }}" data-pixel="{{ $big.pixel }}" data-per="25">
+        <div class="wall__meter" aria-live="polite">
+          <p class="wall__label" data-wall-label>Your agent reading one {{ lang.FormatNumberCustom 0 $big.lines }}-line file</p>
+          <p class="wall__count"><span data-wall-count>{{ lang.FormatNumberCustom 0 $big.full }}</span> tokens</p>
+        </div>
+        <div class="wall__grid" aria-hidden="true"></div>
+        <figcaption class="wall__caption">
+          <span class="key key--waste">{{ lang.FormatNumberCustom 0 $big.full }} tokens reading the file</span>
+          <span class="key key--kept">{{ lang.FormatNumberCustom 0 $big.pixel }} tokens asking Pixel</span>
+          <span class="wall__unit">One square is 25 tokens. Measured on Pixel's own repository.</span>
+          <button class="wall__replay" type="button" data-wall-replay hidden>Replay</button>
+        </figcaption>
+      </figure>
+    </section>
+
+    {{/* ---------- numbers ---------- */}}
+    <section class="numbers wrap" aria-label="Measured results">
+      <ul class="numbers__list">
+        <li><strong>&minus;95%</strong><span>tokens to learn what a large file contains</span></li>
+        <li><strong>2.8&times;</strong><span>faster than GitNexus at finding a symbol's callers</span></li>
+        <li><strong>4.7&times;</strong><span>less context than GitNexus on every turn</span></li>
+        <li><strong>&minus;30%</strong><span>time for an agent to scope a multi-file task</span></li>
+      </ul>
+      <p class="numbers__more"><a class="link" href="{{ $bench }}">How we measured, and where Pixel loses</a></p>
+    </section>
+
+    {{/* ---------- scope ---------- */}}
+    <section class="section wrap" aria-labelledby="scope-title">
+      <header class="section__head">
+        <h2 id="scope-title">It knows where to look.</h2>
+        <p>Give it a task. Get the {{ len $s.p0 }} files that matter, out of {{ $s.files }}. Your agent starts coding instead of searching.</p>
+      </header>
+      <figure class="board" data-board data-p1="{{ delimit $s.p1 "," }}" data-files="{{ $s.files }}">
+        <p class="board__cmd"><span class="board__prompt" aria-hidden="true">$</span><code>pixel scope-task "{{ $s.task }}"</code></p>
+        <div class="board__pads" aria-hidden="true"></div>
+        <svg class="board__traces" aria-hidden="true"></svg>
+        <ol class="board__files" aria-label="Files to start with">
+          {{ range $s.p0 }}
+          {{ $dir := path.Dir .path }}
+          <li data-at="{{ .at }}"><span class="board__file">{{ path.Base .path }}</span><span class="board__dir">{{ $dir }}/</span></li>
+          {{ end }}
+        </ol>
+        <figcaption class="board__legend">
+          <span class="key key--kept">{{ len $s.p0 }} files to start with</span>
+          <span class="key key--likely">{{ len $s.p1 }} likely needed</span>
+          <span class="key key--pad">{{ $s.files }} files in the index</span>
+        </figcaption>
+      </figure>
+    </section>
+
+    {{/* ---------- whole agent tasks ---------- */}}
+    <section class="section wrap" id="tasks" aria-labelledby="tasks-title">
+      <header class="section__head">
+        <h2 id="tasks-title">Measured on whole agent tasks.</h2>
+        <p>Fast answers do not make a fast agent on their own. So we timed Claude Code on real tasks in this repository, with Pixel and against a vanilla agent with no rules or hooks.</p>
+      </header>
+      <figure class="demo">
+        <video class="demo__video" data-demo width="1600" height="1000" muted playsinline preload="none" controls
+          poster="{{ "examples/pixel-agent-demo.jpg" | relURL }}" src="{{ "examples/pixel-agent-demo.mp4" | relURL }}"
+          aria-describedby="demo-caption"></video>
+        <figcaption id="demo-caption" class="demo__caption">Claude Code on the same task, eleven times with Pixel 0.5.0 and eleven times without. The replay shows each side's median-time run on one clock at 6&times; speed; every command, time and token count comes from the recording. <a class="link" href="{{ site.Params.github_url }}/tree/main/docs/motion/src/demo" rel="noopener">The traces</a></figcaption>
+      </figure>
+      <ul class="ledger">
+        <li class="ledger__win"><strong>&minus;30%</strong><span>Scoping a multi-file task: the median of 11 runs per side above, with 38% fewer tokens read. Two earlier designs agree: &minus;31% and &minus;29%.</span></li>
+        <li class="ledger__loss"><strong>+1.5 s</strong><span>A single lookup, in the August runs. Reading Pixel's guidance costs more than it saves on a one-shot answer.</span></li>
+        <li class="ledger__loss"><strong>Slower</strong><span>Recovering deleted code from history, in the August runs. Open work.</span></li>
+      </ul>
+      <p class="ledger__fine">The two losses come from three runs per cell: read them as directions, not decimals. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
+    </section>
+
+    {{/* ---------- six jobs ---------- */}}
+    <section class="section wrap" id="jobs" aria-labelledby="jobs-title">
+      <header class="section__head">
+        <h2 id="jobs-title">Six things your agent does all day.<br>Now in milliseconds.</h2>
+      </header>
+      <div class="jobs" data-jobs>
+        <div class="jobs__tabs" role="tablist" aria-label="Jobs">
+          {{ range $i, $j := hugo.Data.jobs.job }}
+          <button class="jobs__tab" type="button" role="tab" id="tab-{{ $j.id }}" aria-controls="panel-{{ $j.id }}" aria-selected="{{ if eq $i 0 }}true{{ else }}false{{ end }}"{{ if ne $i 0 }} tabindex="-1"{{ end }}>
+            <span class="jobs__name">{{ $j.name }}</span>
+            <code class="jobs__cmd">{{ $j.command }}</code>
+          </button>
+          {{ end }}
+        </div>
+        {{ range $i, $j := hugo.Data.jobs.job }}
+        <div class="jobs__panel" role="tabpanel" id="panel-{{ $j.id }}" aria-labelledby="tab-{{ $j.id }}"{{ if ne $i 0 }} hidden{{ end }}>
+          <p class="jobs__text">{{ $j.text }}</p>
+          {{ $src := printf "examples/%s.mp4" $j.media | relURL }}
+          <video class="jobs__video" width="1600" height="1000" muted loop playsinline preload="none"
+            poster="{{ printf "examples/%s.jpg" $j.media | relURL }}" aria-label="{{ $j.name }}: the same task without Pixel and with it"
+            {{ if eq $i 0 }}src="{{ $src }}"{{ else }}data-src="{{ $src }}"{{ end }}></video>
+        </div>
+        {{ end }}
+      </div>
+    </section>
+
+    {{/* ---------- how it works ---------- */}}
+    <section class="section wrap" id="how" aria-labelledby="how-title">
+      <header class="section__head">
+        <h2 id="how-title">How it works.</h2>
+        <p>One binary, one folder in your repository, no server.</p>
+      </header>
+      <ol class="how">
+        <li>
+          <h3>Index</h3>
+          <p><code>.pixel/</code>, at your repository root, holds a text index of every file Git does not ignore and a code graph of symbols, imports and calls parsed with tree-sitter, built on first use.</p>
+        </li>
+        <li>
+          <h3>Stay warm</h3>
+          <p>A local daemon keeps both open and watches the tree, so answers take milliseconds and follow your edits. No daemon? The command runs in-process.</p>
+        </li>
+        <li>
+          <h3>Answer to a budget</h3>
+          <p>The agent gets the symbols, signatures or lines its question needs, fitted to a token budget, with a marker saying whether the answer is complete.</p>
+        </li>
+        <li>
+          <h3>Reach the agent</h3>
+          <p>A CLI plus hooks, not an MCP server. <code>pixel install</code> puts the protocol where each agent reads its instructions, and the agent calls Pixel from the shell it already has.</p>
+        </li>
+      </ol>
+    </section>
+
+    {{/* ---------- agents ---------- */}}
+    <section class="section wrap" aria-labelledby="agents-title">
+      <header class="section__head">
+        <h2 id="agents-title">Plugs into the agent you already use.</h2>
+      </header>
+      <ul class="agents">
+        <li>Claude Code</li><li>Codex</li><li>Cursor</li><li>Copilot CLI</li><li>Gemini CLI</li><li>Pi</li><li>OpenCode</li><li>Devin</li><li>Windsurf</li><li>Antigravity</li>
+      </ul>
+    </section>
+
+    {{/* ---------- decisions ---------- */}}
+    <section class="section wrap" aria-labelledby="jev-title">
+      <div class="jev">
+        <p class="jev__score" aria-hidden="true">14/14</p>
+        <div class="jev__copy">
+          <h2 id="jev-title">Beats Jev's published score on coding decisions.</h2>
+          <p><code>pixel classify</code> routes a coding decision to the model you pick. With deepseek-v4.1-flash it got all 14 public JevBench coding items right. Jev publishes 0.839.</p>
+          <p class="jev__fine">Jev's score covers 56 items and was not re-measured here. <code>pixel classify</code> is opt-in: the only command that sends anything to a model, and only to the one you configure. <a class="link" href="{{ $bench }}#coding-decisions">Every model, the method and its limits</a></p>
+        </div>
+      </div>
+    </section>
+
+    {{/* ---------- install ---------- */}}
+    <section class="section wrap" id="install" aria-labelledby="install-title">
+      <header class="section__head">
+        <h2 id="install-title">Two commands. That's the whole setup.</h2>
+      </header>
+      <div class="term">
+        <div class="term__bar" aria-hidden="true"><span></span><span></span><span></span></div>
+        <pre class="term__body"><code><span class="term__p">$</span> brew install LivioGama/tap/pixel
+<span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi, OpenCode, Antigravity</span>
+<span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></code></pre>
+        <button class="cmd__copy term__copy" type="button" data-copy="brew install LivioGama/tap/pixel && pixel install && pixel doctor .">Copy all</button>
+      </div>
+      <ul class="badges">
+        <li>Runs 100% on your machine</li>
+        <li><a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" rel="noopener">Zero telemetry</a></li>
+        <li>No account, no server</li>
+        <li>MIT licensed</li>
+        <li>Hooks gone in one <code>pixel uninstall</code></li>
+      </ul>
+      <p class="install__alt">No Homebrew? One line does it on macOS and Linux:</p>
+      <div class="cmd install__script">
+        <code><span class="cmd__prompt" aria-hidden="true">$</span> curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh</code>
+        <button class="cmd__copy" type="button" data-copy="curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh">Copy</button>
+      </div>
+      <p class="install__more">Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}">Plugins and rules files</a>.</p>
+      <div class="yours">
+        <h3>Don't take our numbers.</h3>
+        <p>After a few sessions, ask Pixel what it spared your own agent. On the maintainer's machine: 41 to 83% of what it would have read, across 798 operations.</p>
+        <div class="cmd">
+          <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel token-savings</code>
+          <button class="cmd__copy" type="button" data-copy="pixel token-savings">Copy</button>
+        </div>
+      </div>
+    </section>
+
+    {{/* ---------- questions ---------- */}}
+    <section class="section wrap" id="faq" aria-labelledby="faq-title">
+      <header class="section__head">
+        <h2 id="faq-title">Fair questions.</h2>
+      </header>
+      <div class="faq">
+        <details>
+          <summary>Will my agent actually use it?</summary>
+          <p>Not every time. Agents are trained on <code>grep</code> and fall back to it. Pixel does not wait for the agent to discover a tool: <code>pixel install</code> puts its protocol into every session, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files. The guard advises and never blocks.</p>
+          <p>With Pixel 0.5.0 it did: in each of the 11 recorded runs behind the demo, the agent called Pixel 6 to 17 times. An earlier release fared worse: given its protocol alone, the agent barely ran a Pixel command, yet still scoped tasks 29% faster, so part of the gain is the protocol's guidance itself. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs</a></p>
+        </details>
+        <details>
+          <summary>Why not just grep?</summary>
+          <p>Grep finds the line. The cost is what comes next: the agent opens the whole file to understand the match. On a {{ lang.FormatNumberCustom 0 $big.lines }}-line file that read costs {{ lang.FormatNumberCustom 0 $big.full }} tokens, and Pixel's answer to the same question {{ lang.FormatNumberCustom 0 $big.pixel }}. <code>pixel search-content</code> keeps grep's regex syntax, so the agent changes nothing but the bill.</p>
+        </details>
+        <details>
+          <summary>Why not a language server?</summary>
+          <p>A language server resolves types, so its "who calls this" is more exact than a syntax graph's. It also needs one running server per language and answers one cursor position at a time. Pixel is one binary, covers {{ len $langs }} languages and your Git history, and says when an answer may be incomplete: static analysis never sees every dynamic call, and every graph answer carries that warning.</p>
+        </details>
+        <details>
+          <summary>Why not my editor's index?</summary>
+          <p>It lives inside that editor. Pixel runs from the shell, so every agent on this page gets the same index, and it stays in <code>.pixel/</code> at your repository root.</p>
+        </details>
+        <details>
+          <summary>Pixel or semble?</summary>
+          <p>Both, if you search in plain English a lot. semble puts the right file in its top 10 for 100% of 45 natural-language queries, Pixel for 69%. Pixel adds the call graph, blast radius, Git history and guarded Git writes. Together they cost about 5,100 tokens of context per turn. <a class="link" href="{{ $bench }}#where-a-specialist-wins">Where a specialist wins</a></p>
+        </details>
+        <details>
+          <summary>Does anything leave my machine?</summary>
+          <p>Nothing you did not ask for. The index lives in <code>.pixel/</code> and there is no telemetry. Pixel touches the network for four things only: the embedding model it downloads from Hugging Face on first use, the Git remote operations you run (<code>pixel fetch</code>, <code>pixel push</code>), <code>pixel classify</code>, which sends its question to the model you configure, and <code>pixel web-search</code>, which sends its query to the SearXNG endpoint you configure or else to DuckDuckGo and Wikipedia. <a class="link" href="{{ site.Params.github_url }}/blob/main/SECURITY.md" rel="noopener">Security model</a></p>
+        </details>
+        <details>
+          <summary>Which languages?</summary>
+          <p>Text search covers every file Git does not ignore, up to 4 MiB. The code graph covers {{ delimit $langs ", " ", and " }}. The last five go through a generic extractor rather than a dedicated one.</p>
+        </details>
+      </div>
+    </section>
+
+    {{/* ---------- closing ---------- */}}
+    <section class="closing wrap" aria-labelledby="closing-title">
+      <h2 id="closing-title" class="closing__title">Give your agent a map.</h2>
+      <div class="closing__cta">
+        <a class="button" href="#install">Install Pixel</a>
+        <a class="button button--ghost" href="{{ "docs/" | relURL }}">Read the docs</a>
+      </div>
+    </section>
+  </main>
+
+  {{ partial "footer.html" . }}
+
+  <script>
+    /* Token wall: one square per 25 tokens of a full file read. On load the
+       wall burns down to what the same question costs through Pixel, the
+       counter follows, and the survivors gather into one block. Reduced
+       motion gets the final state; Replay runs it again. */
+    (function () {
+      var fig = document.querySelector('[data-wall]');
+      if (!fig) return;
+      var grid = fig.querySelector('.wall__grid');
+      var count = fig.querySelector('[data-wall-count]');
+      var label = fig.querySelector('[data-wall-label]');
+      var replay = fig.querySelector('[data-wall-replay]');
+      var full = +fig.dataset.full, kept = +fig.dataset.pixel, per = +fig.dataset.per;
+      var n = Math.round(full / per), k = Math.round(kept / per);
+      var startLabel = label.textContent;
+      var cells = [];
+      var frag = document.createDocumentFragment();
+      for (var i = 0; i < n; i++) { var c = document.createElement('span'); cells.push(c); frag.appendChild(c); }
+      grid.appendChild(frag);
+
+      // A fixed shuffle, so every visit burns the same squares.
+      var order = cells.map(function (_, i) { return i; });
+      var seed = 7;
+      for (var j = order.length - 1; j > 0; j--) {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        var r = seed % (j + 1), t = order[j]; order[j] = order[r]; order[r] = t;
+      }
+      var keep = order.slice(0, k).sort(function (a, b) { return a - b; });
+      var burn = order.slice(k);
+      var fmt = function (v) { return Math.round(v).toLocaleString('en-US'); };
+
+      var gather = function () {
+        var cols = getComputedStyle(grid).gridTemplateColumns.split(' ').length;
+        var rows = Math.ceil(n / cols);
+        var a = cells[0].getBoundingClientRect(), b = cells[1].getBoundingClientRect();
+        var step = b.left - a.left;
+        var bw = Math.ceil(Math.sqrt(k * 1.6)), bh = Math.ceil(k / bw);
+        var c0 = Math.floor((cols - bw) / 2), r0 = Math.floor((rows - bh) / 2);
+        keep.forEach(function (idx, s) {
+          var x = (idx % cols), y = Math.floor(idx / cols);
+          var tx = c0 + (s % bw), ty = r0 + Math.floor(s / bw);
+          cells[idx].style.transform = 'translate(' + (tx - x) * step + 'px,' + (ty - y) * step + 'px)';
+        });
+      };
+      var final = function () {
+        burn.forEach(function (i) { cells[i].className = 'is-gone'; });
+        keep.forEach(function (i) { cells[i].className = 'is-kept'; });
+        count.textContent = fmt(kept);
+        label.textContent = 'The same question, asked through Pixel';
+        fig.classList.add('is-done');
+        gather();
+      };
+      var run = function () {
+        fig.classList.remove('is-done');
+        replay.hidden = true;
+        cells.forEach(function (c) { c.className = ''; c.style.transform = ''; });
+        count.textContent = fmt(full);
+        label.textContent = startLabel;
+        var t0 = null, dur = 1800;
+        var burnt = 0;
+        keep.forEach(function (i) { cells[i].className = 'is-kept is-waiting'; });
+        var tick = function (now) {
+          if (t0 === null) t0 = now;
+          var p = Math.min(1, (now - t0) / dur);
+          var e = 1 - Math.pow(1 - p, 3);
+          var target = Math.floor(e * burn.length);
+          for (; burnt < target; burnt++) cells[burn[burnt]].className = 'is-gone';
+          count.textContent = fmt(full - (full - kept) * e);
+          if (p < 1) return requestAnimationFrame(tick);
+          keep.forEach(function (i) { cells[i].className = 'is-kept'; });
+          label.textContent = 'The same question, asked through Pixel';
+          fig.classList.add('is-done');
+          setTimeout(gather, 250);
+          setTimeout(function () { replay.hidden = false; }, 1400);
+        };
+        setTimeout(function () { requestAnimationFrame(tick); }, 900);
+      };
+      replay.addEventListener('click', run);
+      var t;
+      addEventListener('resize', function () {
+        clearTimeout(t);
+        t = setTimeout(function () { if (fig.classList.contains('is-done')) gather(); }, 120);
+      });
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches) return final();
+      // Burn only once the wall is on screen, so nobody misses it.
+      if (!('IntersectionObserver' in window)) return run();
+      var seen = new IntersectionObserver(function (e) {
+        if (!e[0].isIntersecting) return;
+        seen.disconnect();
+        run();
+      }, { threshold: 0.5 });
+      seen.observe(grid);
+    })();
+
+    /* Scope board: one pad per indexed file. Each P0 file gets a
+       trace from its pad to its label, routed down the gutter beside the
+       pad, then along its own lane, so no two traces cross. The traces
+       draw once, when the board scrolls into view; reduced motion gets the
+       final state. */
+    (function () {
+      var board = document.querySelector('[data-board]');
+      if (!board) return;
+      var padsEl = board.querySelector('.board__pads');
+      var svg = board.querySelector('.board__traces');
+      var list = board.querySelector('.board__files');
+      var NS = 'http://www.w3.org/2000/svg';
+      var total = +board.dataset.files;
+      var p1 = board.dataset.p1.split(',').map(Number);
+      var items = [].slice.call(list.children);
+      var p0 = items.map(function (li) { return +li.dataset.at; });
+      var pads = [];
+      var frag = document.createDocumentFragment();
+      for (var i = 0; i < total; i++) {
+        var c = document.createElement('span');
+        pads.push(c);
+        frag.appendChild(c);
+      }
+      padsEl.appendChild(frag);
+      p1.forEach(function (n) { pads[n].className = 'is-p1'; });
+      p0.forEach(function (n) { pads[n].className = 'is-p0'; });
+
+      var still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      var routed = false;
+
+      var route = function () {
+        while (svg.firstChild) svg.removeChild(svg.firstChild);
+        var box = board.getBoundingClientRect();
+        svg.setAttribute('viewBox', '0 0 ' + box.width + ' ' + box.height);
+        if (getComputedStyle(svg).display === 'none') return;
+        var rel = function (el) {
+          var r = el.getBoundingClientRect();
+          return { l: r.left - box.left, r: r.right - box.left, t: r.top - box.top, b: r.bottom - box.top };
+        };
+        // Each trace leaves its pad through the gutter on the pad's right,
+        // or on its left when a pad in the same column took that gutter.
+        var used = {};
+        var runs = items.map(function (li) {
+          var p = rel(pads[+li.dataset.at]);
+          var gap = 1.5;
+          var gx = Math.round((p.r + gap) * 2) / 2;
+          if (used[Math.round(gx)]) gx = Math.round((p.l - gap) * 2) / 2;
+          used[Math.round(gx)] = true;
+          return { li: li, cx: (p.l + p.r) / 2, cy: (p.t + p.b) / 2, gx: gx };
+        });
+        // Labels take the gutters' left-to-right order, so traces keep it too.
+        runs.sort(function (a, b) { return a.gx - b.gx; });
+        runs.forEach(function (r) { list.appendChild(r.li); });
+        var gridBottom = rel(padsEl).b;
+        var labelTop = rel(list).t;
+        runs.forEach(function (r) {
+          var m = rel(r.li.querySelector('.board__file'));
+          r.lx = m.l + 4;
+          r.ly = m.t - 6;
+        });
+        // Leftward traces: the rightmost one takes the deepest lane; rightward, the reverse.
+        var left = runs.filter(function (r) { return r.lx <= r.gx; });
+        var right = runs.filter(function (r) { return r.lx > r.gx; }).reverse();
+        var lanes = left.concat(right);
+        var top = gridBottom + 14, bottom = labelTop - 18;
+        lanes.forEach(function (r, k) {
+          var y = top + (bottom - top) * (lanes.length === 1 ? 0.5 : k / (lanes.length - 1));
+          var dir = r.lx < r.gx ? -1 : 1;
+          var c = Math.min(8, Math.abs(r.lx - r.gx) / 2);
+          var d0 = Math.abs(r.gx - r.cx);
+          var d = ['M', r.cx, r.cy, 'L', r.gx, r.cy + d0,
+            'L', r.gx, y - c, 'L', r.gx + dir * c, y,
+            'L', r.lx - dir * c, y, 'L', r.lx, y + c,
+            'L', r.lx, r.ly].join(' ');
+          var path = document.createElementNS(NS, 'path');
+          path.setAttribute('d', d);
+          svg.appendChild(path);
+          var end = document.createElementNS(NS, 'rect');
+          end.setAttribute('x', r.lx - 3); end.setAttribute('y', r.ly - 3);
+          end.setAttribute('width', 6); end.setAttribute('height', 6);
+          svg.appendChild(end);
+          if (!routed && !still) {
+            var len = path.getTotalLength();
+            path.style.strokeDasharray = len;
+            path.style.strokeDashoffset = len;
+            path.style.animationDelay = (0.25 + k * 0.12) + 's';
+            end.style.animationDelay = (0.25 + k * 0.12 + 0.7) + 's';
+            r.li.style.animationDelay = (0.25 + k * 0.12 + 0.7) + 's';
+          }
+        });
+        if (!routed && !still) board.classList.add('is-drawing');
+        routed = true;
+      };
+
+      var ready = document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve();
+      ready.then(function () {
+        if (still || !('IntersectionObserver' in window)) return route();
+        var io = new IntersectionObserver(function (e) {
+          if (!e[0].isIntersecting) return;
+          io.disconnect();
+          route();
+        }, { threshold: 0.4 });
+        io.observe(board);
+      });
+      var t;
+      addEventListener('resize', function () {
+        clearTimeout(t);
+        t = setTimeout(route, 120);
+      });
+    })();
+
+    /* Videos play only while on screen, and never on their own under
+       reduced motion: those visitors get the poster (the finished state)
+       and the controls. */
+    var still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var watch = function (video) {
+      if (still) { video.controls = true; return; }
+      if (!('IntersectionObserver' in window)) return;
+      new IntersectionObserver(function (e) {
+        var v = e[0].target;
+        v.dataset.visible = e[0].intersectionRatio >= 0.5 ? '1' : '';
+        if (v.dataset.visible && !v.closest('[hidden]') && v.dataset.ended !== '1') v.play().catch(function () {});
+        else v.pause();
+      }, { threshold: [0, 0.5, 1] }).observe(video);
+    };
+
+    /* Demo: plays once when it scrolls into view; the controls replay it. */
+    (function () {
+      var demo = document.querySelector('[data-demo]');
+      if (!demo) return;
+      demo.addEventListener('ended', function () { demo.dataset.ended = '1'; });
+      demo.addEventListener('play', function () { demo.dataset.ended = ''; });
+      watch(demo);
+    })();
+
+    /* Jobs: a tab list; a recording loads only when its tab is opened. */
+    (function () {
+      var root = document.querySelector('[data-jobs]');
+      if (!root) return;
+      var tabs = [].slice.call(root.querySelectorAll('[role="tab"]'));
+      var videos = [].slice.call(root.querySelectorAll('video'));
+      videos.forEach(watch);
+      var select = function (tab) {
+        tabs.forEach(function (t) {
+          var on = t === tab;
+          t.setAttribute('aria-selected', on);
+          t.tabIndex = on ? 0 : -1;
+          var panel = document.getElementById(t.getAttribute('aria-controls'));
+          panel.hidden = !on;
+          var video = panel.querySelector('video');
+          if (!video) return;
+          if (on && video.dataset.src) { video.src = video.dataset.src; video.removeAttribute('data-src'); }
+          if (on && !still) {
+            video.currentTime = 0;
+            // The panel just became visible, so its observer has not fired yet:
+            // judge the tab list's own visibility instead.
+            var r = root.getBoundingClientRect();
+            if (r.top < innerHeight / 2 && r.bottom > innerHeight / 2) video.play().catch(function () {});
+          }
+          if (!on) video.pause();
+        });
+      };
+      tabs.forEach(function (t, i) {
+        t.addEventListener('click', function () { select(t); });
+        t.addEventListener('keydown', function (e) {
+          var d = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[e.key];
+          if (!d) return;
+          e.preventDefault();
+          var next = tabs[(i + d + tabs.length) % tabs.length];
+          select(next);
+          next.focus();
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

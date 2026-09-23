@@ -294,9 +294,9 @@ pub struct RepoArtifact {
     pub machine_local: bool,
 }
 
-/// Every file `pixel install --repo` may write. The README's per-project
-/// list and the `--repo` help name exactly these paths, which
-/// `docs_drift::` checks.
+/// Every file `pixel install --repo` may write. The per-project list in
+/// `website/content/docs.md` and the `--repo` help name exactly these paths,
+/// which `docs_drift::` checks.
 pub const REPO_ARTIFACTS: &[RepoArtifact] = &[
     RepoArtifact {
         path: crate::routing::CLAUDE_LOCAL_SETTINGS,

@@ -9,7 +9,7 @@
 //!   command cannot linger in prose);
 //! - every subcommand appears in ARCHITECTURE.md's `## Command surface`
 //!   table (a new command cannot ship undocumented);
-//! - the README's per-project list and `pixel install --help` name exactly
+//! - the docs page's per-project list and `pixel install --help` name exactly
 //!   the files `pixel install --repo` writes (`REPO_ARTIFACTS`).
 //!
 //! `pixel doctor` already dry-runs the *installed* prompt's command lines
@@ -79,6 +79,8 @@ const DOCS: &[&str] = &[
     "ARCHITECTURE.md",
     "CONTRIBUTING.md",
     "docs/manual-setup.md",
+    "website/content/docs.md",
+    "website/content/benchmarks.md",
     "crates/pixel-install/assets/pixel-agent-prompt.md",
     "crates/pixel-install/assets/pixel-subagent-prompt.md",
     "AGENTS.md",
@@ -377,11 +379,11 @@ fn repo_artifact_paths() -> BTreeSet<String> {
 
 /// The README once sent readers to `.devin/hooks.json` and `.pi/agent/`,
 /// files the agents never read, and left out the Claude file the install
-/// really writes: the list is now checked against the code.
+/// really writes: the list, now on the docs page, is checked against the code.
 #[test]
-fn readme_per_project_list_should_name_exactly_the_repo_install_files() {
-    let readme = std::fs::read_to_string(repo_root().join("README.md")).unwrap();
-    assert_eq!(repo_paths(&readme), repo_artifact_paths());
+fn docs_per_project_list_should_name_exactly_the_repo_install_files() {
+    let docs = std::fs::read_to_string(repo_root().join("website/content/docs.md")).unwrap();
+    assert_eq!(repo_paths(&docs), repo_artifact_paths());
 }
 
 #[test]
