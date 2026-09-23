@@ -143,3 +143,51 @@ fn doctor_list_should_name_every_check_with_its_fix() {
     assert_eq!(catalogue[0]["id"], "binary.path", "{catalogue}");
     assert_eq!(catalogue[0]["fix"], serde_json::Value::Null);
 }
+
+/// After an upgrade the prompts `pixel install` deployed are the old
+/// release's, and agents keep reading them: every ordinary command names
+/// them in one stderr line, while `doctor`, which reports them itself, and a
+/// home where nothing was ever deployed stay quiet.
+#[test]
+fn a_stale_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
+    let (home, repo) = fixture("stale-prompt");
+    let ordinary = || {
+        pixel_command()
+            .args(["action-log", "--limit", "1"])
+            .env("HOME", &*home)
+            .output()
+            .unwrap()
+    };
+    let never_installed = ordinary();
+    assert!(never_installed.status.success(), "{never_installed:?}");
+    let stderr = String::from_utf8_lossy(&never_installed.stderr).into_owned();
+    assert!(!stderr.contains("pixel install"), "{stderr}");
+
+    let deployed = home.join(".local/share/pixel");
+    std::fs::create_dir_all(&deployed).unwrap();
+    std::fs::write(
+        deployed.join("agent-prompt.md"),
+        "# an older release's prompt\n",
+    )
+    .unwrap();
+    let warned = ordinary();
+    assert!(warned.status.success(), "{warned:?}");
+    let stderr = String::from_utf8_lossy(&warned.stderr).into_owned();
+    let notes: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with("note: agent-prompt.md"))
+        .collect();
+    assert_eq!(notes.len(), 1, "{stderr}");
+    assert!(
+        notes[0].contains("differs from the copy in this pixel")
+            && notes[0].ends_with("run `pixel install` to update it"),
+        "{}",
+        notes[0]
+    );
+
+    let report = doctor(&home, &repo, &["--only", "install.agent-prompt"]);
+    let stderr = String::from_utf8_lossy(&report.stderr).into_owned();
+    assert!(!stderr.contains("note: agent-prompt.md"), "{stderr}");
+    let text = String::from_utf8_lossy(&report.stdout).into_owned();
+    assert!(text.contains("agent-prompt.md is stale"), "{text}");
+}
