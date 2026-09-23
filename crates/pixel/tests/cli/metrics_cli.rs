@@ -1020,6 +1020,79 @@ fn daemon_reindex_reports_actual_nested_index_counts() {
     assert_eq!(metric_lines(&reindexed).len(), 1);
 }
 
+/// A slow `actions.jsonl` line is only diagnosable when it says how the
+/// request was served: in process and why (with the open and the handling
+/// timed apart), through a daemon it had to start, or through one already
+/// running (with the probe and the request timed apart).
+#[test]
+fn action_log_records_how_each_request_was_served() {
+    let fixture = Fixture::new();
+    assert_success(&fixture.run(&["search-content", "login_user", "."]));
+    assert_success(&fixture.run(&["search-content", "login_user", ".", "--no-daemon"]));
+    let started = fixture
+        .command()
+        .env_remove("PIXEL_DAEMON_AUTO_START")
+        .args(["search-content", "login_user", "."])
+        .output()
+        .unwrap();
+    // A start that outlasted its 5 s window still brings the daemon up
+    // later: wait for it (bounded), so the next call is served by it and the
+    // stop below also reaches a late one.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline
+        && !String::from_utf8_lossy(&fixture.run(&["daemon", "status"]).stdout)
+            .starts_with("daemon running")
+    {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let served = fixture.run(&["search-content", "login_user", "."]);
+    // Stop before assertions so a failed one never leaves a daemon behind.
+    assert_success(&fixture.run(&["daemon", "stop"]));
+    assert_success(&started);
+    assert_success(&served);
+
+    let events = fixture.events("search-content");
+    assert_eq!(events.len(), 4, "{events:?}");
+    let steps: Vec<&Value> = events
+        .iter()
+        .map(|event| {
+            let serve = event["serve"].as_array().expect("serve steps");
+            assert_eq!(serve.len(), 1, "{event}");
+            &serve[0]
+        })
+        .collect();
+
+    let disabled = steps[0];
+    assert_eq!(disabled["route"], "in_process");
+    assert_eq!(disabled["reason"], "auto_start_disabled");
+    for phase in ["probe_ms", "open_ms", "handle_ms"] {
+        assert!(disabled[phase].is_u64(), "{phase}: {disabled}");
+    }
+    assert!(disabled.get("start_ms").is_none(), "{disabled}");
+
+    let no_daemon = steps[1];
+    assert_eq!(no_daemon["reason"], "no_daemon");
+    assert!(no_daemon.get("probe_ms").is_none(), "{no_daemon}");
+    assert!(no_daemon["open_ms"].is_u64(), "{no_daemon}");
+
+    // A loaded runner may outlast the start window: either way the start
+    // was attempted and its wait is on the line.
+    let start = steps[2];
+    assert!(
+        start["route"] == "daemon_started" || start["reason"] == "start_timed_out",
+        "{start}"
+    );
+    assert!(start["start_ms"].is_u64(), "{start}");
+
+    let daemon = steps[3];
+    assert_eq!(daemon["route"], "daemon");
+    assert!(
+        daemon["probe_ms"].is_u64() && daemon["request_ms"].is_u64(),
+        "{daemon}"
+    );
+    assert!(daemon.get("open_ms").is_none(), "{daemon}");
+}
+
 /// `pixel action-log . --limit N | head -1`: the reader closes the pipe while
 /// the process still has lines to write. That is a truncated read, not a
 /// failure — the counted `print!` path must absorb EPIPE instead of panicking

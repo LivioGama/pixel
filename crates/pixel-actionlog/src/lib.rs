@@ -20,10 +20,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 mod metrics;
+mod serve;
 pub use metrics::{
     ComparisonGap, OperationMetrics, WorkflowEvidence, WorkflowTimeEstimate, format_metrics_line,
     summarize_metrics,
 };
+pub use serve::{InProcessReason, ServeRoute, ServeStep};
 
 pub const LOG_FILE_NAME: &str = "actions.jsonl";
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
@@ -76,6 +78,10 @@ pub struct ActionEvent {
     /// token-reduction ratio instead of a marketing claim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_chars: Option<u64>,
+    /// How each daemon-or-in-process request of the invocation was served,
+    /// in order, with its phase timings: what `duration_ms` alone cannot say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serve: Vec<ServeStep>,
 }
 
 impl ActionEvent {
@@ -95,6 +101,7 @@ impl ActionEvent {
             duration_ms: 0,
             snippet_cap_chars: None,
             pool_chars: None,
+            serve: Vec::new(),
         }
     }
 
@@ -493,6 +500,36 @@ mod tests {
         assert_eq!(ev.snippet_cap_chars, None);
         assert_eq!(ev.pool_chars, None);
         assert_eq!(ev.savings_ratio(), None);
+        assert!(ev.serve.is_empty());
+    }
+
+    /// The serve steps are what tells a slow cold start from a slow query;
+    /// they must survive the writer and `tail` in order.
+    #[test]
+    fn serve_steps_round_trip_through_the_log() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("actions.jsonl");
+        let mut started = ServeStep::new(ServeRoute::DaemonStarted);
+        started.start_ms = Some(4_200);
+        let mut in_process = ServeStep::in_process(InProcessReason::NoDaemon);
+        in_process.open_ms = Some(900);
+        in_process.handle_ms = Some(15);
+        let mut event = ActionEvent::new("ready", "x");
+        event.serve = vec![started.clone(), in_process.clone()];
+        let mut log = ActionLog::spawn_at(path.clone());
+        log.log(event);
+        log.log(ActionEvent::new("status", "y"));
+        log.finish_flush();
+
+        let events = tail(&path, 10).unwrap();
+        assert_eq!(events[0].serve, vec![started, in_process]);
+        assert!(events[1].serve.is_empty());
+        let raw = fs::read_to_string(&path).unwrap();
+        let second = raw.lines().nth(1).unwrap();
+        assert!(
+            !second.contains("\"serve\""),
+            "empty list omitted: {second}"
+        );
     }
 
     #[test]

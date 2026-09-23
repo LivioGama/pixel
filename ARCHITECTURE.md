@@ -148,7 +148,7 @@ Per repository, under `.pixel/` (git-ignored):
 | `graph.db` | `pixel-graph` | SQLite: files, symbols, edges with resolution tier. Built lazily on first graph command. |
 | `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle. Populated by `pixel build-index --history` or the daemon ingest thread. |
 | `targets.json` | CLI `targets` | Active task map (version 2): tasks with ids, timestamps, and P0/P1/P2 paths. Read by the guard hook and re-injected after compaction. |
-| `actions.jsonl` | `pixel-actionlog` | One line per invocation. |
+| `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
 | `reconcile-conflict.json`, `env-snapshots/` | `pixel-ops` | Conflict marker left by `reconcile` for the guard, and the pre-mutation copies `env` takes. |
 | `user-state.json` | `pixel-install` | Per-repository install state. |
 | `calls.json` | CLI | Circuit breaker counters for repeated identical calls. |
