@@ -66,7 +66,7 @@ missing or contradicts itself:
   the list in step 3, or a user-visible pull request has no entry you can
   write from its body alone;
 - a gate is red and the failure is not provably local (reproduce it with the
-  suspected variable unset, as in step 3's gates note);
+  suspected variable or config unset);
 - a PR check is red or cancelled, or a review left an actionable comment;
 - the merge commit is not on `main`, is not the prepare PR's, or its push
   CI is red;
@@ -215,12 +215,7 @@ It must end with `release-check: all checks passed`. Then:
   config fails tests that CI passes (`blame.ignoreRevsFile`,
   `rerere`/`mergiraf` in the provenance and reconcile tests); a red gate that
   CI does not reproduce is not a release blocker. The verify job reruns the
-  tests, but a red one there costs a tag deletion. `RIPGREP_CONFIG_PATH` set
-  in the environment fails
-  `search_compat::tests::rewrite_accepts_file_directory_and_implicit_cwd_searches`
-  (the rewrite steps aside for a native rg config, by design): rerun it under
-  `env -u RIPGREP_CONFIG_PATH` and, when it passes, carry on (verified 2026-09,
-  0.5.0).
+  tests, but a red one there costs a tag deletion.
 
 ```bash
 pixel commit -m "release: prepare x.y.z" --request-id "release-x.y.z-prepare"

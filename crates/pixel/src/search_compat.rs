@@ -207,6 +207,17 @@ pub fn shell_quote(value: &str) -> String {
 /// Eligibility is repeated at execution time. The hook checks only shape
 /// and an in-repository file/directory path, never starts/builds an index.
 pub fn rewrite(command: &str, cwd: &Path) -> Option<String> {
+    rewrite_with(command, cwd, native_configuration)
+}
+
+/// `rewrite` with the tool-configuration probe as a parameter, so a test
+/// states the environment it assumes instead of inheriting the developer's
+/// (an exported `RIPGREP_CONFIG_PATH` turned every `rg` case native).
+fn rewrite_with(
+    command: &str,
+    cwd: &Path,
+    native_configuration: impl Fn(SearchTool) -> bool,
+) -> Option<String> {
     let argv = shell_argv(command)?;
     let tool = match argv.first()?.as_str() {
         "rg" => SearchTool::Rg,
@@ -706,6 +717,13 @@ mod tests {
         raw.iter().map(ToString::to_string).collect()
     }
 
+    /// `rewrite` as a shell with neither `RIPGREP_CONFIG_PATH` nor
+    /// `GREP_OPTIONS` sees it, whatever the developer running the suite
+    /// exports.
+    fn rewrite_unconfigured(command: &str, cwd: &Path) -> Option<String> {
+        rewrite_with(command, cwd, |_| false)
+    }
+
     struct Repo(PathBuf);
 
     impl Repo {
@@ -799,8 +817,8 @@ mod tests {
             ("grep -r needle .", "grep"),
             ("grep -rn needle src/a.rs", "grep"),
         ] {
-            let rewritten =
-                rewrite(command.0, &repo.0).unwrap_or_else(|| panic!("{} must rewrite", command.0));
+            let rewritten = rewrite_unconfigured(command.0, &repo.0)
+                .unwrap_or_else(|| panic!("{} must rewrite", command.0));
             assert!(
                 rewritten.starts_with(&format!("pixel search-like-rg {} --", command.1)),
                 "{}: {rewritten}",
@@ -824,19 +842,38 @@ mod tests {
             "grep -rn needle .env",       // credential-shaped file
             "env LC_ALL=C rg needle src", // wrapper command
         ] {
-            assert!(rewrite(command, &repo.0).is_none(), "{command}");
+            assert!(
+                rewrite_unconfigured(command, &repo.0).is_none(),
+                "{command}"
+            );
         }
         // A credential-shaped entry inside the searched tree blocks the
         // rewrite: auto-authorization must not widen to secrets.
         std::fs::write(repo.0.join("src/tls.key"), b"needle\n").unwrap();
-        assert!(rewrite("rg needle src", &repo.0).is_none());
+        assert!(rewrite_unconfigured("rg needle src", &repo.0).is_none());
         // cwd outside any indexed repo never rewrites implicitly.
         let bare =
             std::env::temp_dir().join(format!("pixel-search-compat-bare-{}", std::process::id()));
         std::fs::create_dir_all(&bare).unwrap();
         let bare = bare.canonicalize().unwrap();
-        assert!(rewrite("rg needle", &bare).is_none());
+        assert!(rewrite_unconfigured("rg needle", &bare).is_none());
         let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    /// A configured tool keeps its own command native (its output may no
+    /// longer match the emulation), and only its own: an rg config must not
+    /// cost `grep` its rewrite.
+    #[test]
+    fn only_the_configured_tool_stays_native() {
+        let repo = Repo::new();
+        let rg_configured = |tool| tool == SearchTool::Rg;
+        assert!(rewrite_with("rg -n needle src/a.rs", &repo.0, rg_configured).is_none());
+        let grep = rewrite_with("grep -n needle src/a.rs", &repo.0, rg_configured)
+            .expect("an rg config leaves grep rewritable");
+        assert!(grep.starts_with("pixel search-like-rg grep --"), "{grep}");
+        let grep_configured = |tool| tool == SearchTool::Grep;
+        assert!(rewrite_with("grep -n needle src/a.rs", &repo.0, grep_configured).is_none());
+        assert!(rewrite_with("rg -n needle src/a.rs", &repo.0, grep_configured).is_some());
     }
 
     #[test]
