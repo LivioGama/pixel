@@ -57,6 +57,7 @@ names, with that release installed and `REF` set to its tag, and update
 ## Render
 
 ```bash
+cd docs/motion
 bun install
 bunx remotion studio src/index.ts        # preview
 scripts/render.sh                        # every composition

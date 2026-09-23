@@ -18,7 +18,7 @@ What reaches the agent's context when it needs to know what a file contains, mea
 | Source and test pair | 5,289 | 48,978 tok | 1,890 tok | 96.1% |
 | Code-write context | 5,289 | 48,978 tok | 1,910 tok | 96.1% |
 
-This counts what the agent reads, not your invoice. `pixel token-savings` reports the same ratio from your own sessions: 41 to 83% across 798 operations on the maintainer's machine. The scenarios replay the shape of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark, which reaches a similar ratio by rerouting reads through a paid second model.
+This counts what the agent reads, not your invoice. `pixel token-savings` reports the same ratio from your own sessions: 41 to 83% across 798 operations on the maintainer's machine. The scenarios replay the shape of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark, which reaches a similar ratio by rerouting reads through a paid second model. [Method and figures, as first published](https://github.com/LivioGama/pixel/blob/632b3685a97e941476cb42aa75333b79f0ed8955/README.md#-token-savings--measured-no-second-model)
 
 ## Against GitNexus
 
@@ -55,7 +55,7 @@ Both sides named `push.rs` among their first two files in every run, and the Pix
 The August A/B runs, on an earlier release:
 
 - **About 30% faster** to scope a multi-file task. Two independent A/B designs agree: 31% and 29%.
-- **About 1.5 seconds slower** on a single lookup in the isolated run: the cost of reading the protocol before a one-shot answer.
+- **About 1.5 seconds slower** on a single lookup in the isolated run: the cost of reading Pixel's guidance before a one-shot answer, since the task never ran a Pixel command.
 - **Still slower** at recovering deleted code from history. Open work.
 
 Three runs per cell, so these are directions, not decimals. The agents of that release also called Pixel less than its protocol asks: given the protocol alone, with no hooks, the agent barely ran a Pixel command and still scoped tasks 29% faster, so part of the gain is the protocol's guidance rather than its answers.

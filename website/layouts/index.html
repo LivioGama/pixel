@@ -91,7 +91,7 @@
       </figure>
       <ul class="ledger">
         <li class="ledger__win"><strong>&minus;30%</strong><span>Scoping a multi-file task: the median of 11 runs per side above, with 38% fewer tokens read. Two earlier designs agree: &minus;31% and &minus;29%.</span></li>
-        <li class="ledger__loss"><strong>+1.5 s</strong><span>A single lookup, in the August runs. Reading the protocol costs more than it saves on a one-shot answer.</span></li>
+        <li class="ledger__loss"><strong>+1.5 s</strong><span>A single lookup, in the August runs. Reading Pixel's guidance costs more than it saves on a one-shot answer.</span></li>
         <li class="ledger__loss"><strong>Slower</strong><span>Recovering deleted code from history, in the August runs. Open work.</span></li>
       </ul>
       <p class="ledger__fine">The two losses come from three runs per cell: read them as directions, not decimals. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
@@ -188,7 +188,7 @@
         <li><a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" rel="noopener">Zero telemetry</a></li>
         <li>No account, no server</li>
         <li>MIT licensed</li>
-        <li>Gone in one <code>pixel uninstall</code></li>
+        <li>Hooks gone in one <code>pixel uninstall</code></li>
       </ul>
       <p class="install__alt">No Homebrew? One line does it on macOS and Linux:</p>
       <div class="cmd install__script">
@@ -235,7 +235,7 @@
         </details>
         <details>
           <summary>Does anything leave my machine?</summary>
-          <p>Nothing you did not ask for. The index lives in <code>.pixel/</code> and there is no telemetry. Pixel touches the network for three things only: the embedding model it downloads from Hugging Face on first use, the Git remote operations you run (<code>pixel fetch</code>, <code>pixel push</code>), and <code>pixel classify</code>, which sends its question to the model you configure. <a class="link" href="{{ site.Params.github_url }}/blob/main/SECURITY.md" rel="noopener">Security model</a></p>
+          <p>Nothing you did not ask for. The index lives in <code>.pixel/</code> and there is no telemetry. Pixel touches the network for four things only: the embedding model it downloads from Hugging Face on first use, the Git remote operations you run (<code>pixel fetch</code>, <code>pixel push</code>), <code>pixel classify</code>, which sends its question to the model you configure, and <code>pixel web-search</code>, which sends its query to the SearXNG endpoint you configure or else to DuckDuckGo and Wikipedia. <a class="link" href="{{ site.Params.github_url }}/blob/main/SECURITY.md" rel="noopener">Security model</a></p>
         </details>
         <details>
           <summary>Which languages?</summary>
@@ -307,7 +307,6 @@
         label.textContent = 'The same question, asked through Pixel';
         fig.classList.add('is-done');
         gather();
-        replay.hidden = false;
       };
       var run = function () {
         fig.classList.remove('is-done');
@@ -471,9 +470,10 @@
       if (!('IntersectionObserver' in window)) return;
       new IntersectionObserver(function (e) {
         var v = e[0].target;
-        if (e[0].isIntersecting && !v.closest('[hidden]') && v.dataset.ended !== '1') v.play().catch(function () {});
+        v.dataset.visible = e[0].intersectionRatio >= 0.5 ? '1' : '';
+        if (v.dataset.visible && !v.closest('[hidden]') && v.dataset.ended !== '1') v.play().catch(function () {});
         else v.pause();
-      }, { threshold: 0.5 }).observe(video);
+      }, { threshold: [0, 0.5, 1] }).observe(video);
     };
 
     /* Demo: plays once when it scrolls into view; the controls replay it. */
@@ -502,7 +502,13 @@
           var video = panel.querySelector('video');
           if (!video) return;
           if (on && video.dataset.src) { video.src = video.dataset.src; video.removeAttribute('data-src'); }
-          if (on && !still) { video.currentTime = 0; video.play().catch(function () {}); }
+          if (on && !still) {
+            video.currentTime = 0;
+            // The panel just became visible, so its observer has not fired yet:
+            // judge the tab list's own visibility instead.
+            var r = root.getBoundingClientRect();
+            if (r.top < innerHeight / 2 && r.bottom > innerHeight / 2) video.play().catch(function () {});
+          }
           if (!on) video.pause();
         });
       };

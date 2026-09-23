@@ -41,7 +41,7 @@ The index, the code graph and the optional history data live in `.pixel/` at the
 | OpenCode | the prompt appended to `AGENTS.md` |
 | Antigravity | its plugin, hooks and configuration activated |
 
-`pixel uninstall` removes everything `pixel install` wrote, the binary included.
+`pixel uninstall` removes everything `pixel install` wrote, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: `brew uninstall LivioGama/tap/pixel`, or `mise uninstall pixel`.
 
 ### Per-repository guards
 
