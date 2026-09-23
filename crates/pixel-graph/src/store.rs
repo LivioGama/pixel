@@ -392,6 +392,11 @@ pub struct GraphStore {
     conn: Connection,
 }
 
+/// The per-file delete [`GraphStore::replace_file`] and
+/// [`GraphStore::remove_file`] run once for every file of an incremental
+/// batch; `idx_unresolved_file` is what keeps it off a full-table scan.
+const DELETE_FILE_UNRESOLVED_CALLS: &str = "DELETE FROM unresolved_calls WHERE file_id = ?1";
+
 impl GraphStore {
     pub fn open(path: &Path) -> Result<Self> {
         // NOFOLLOW rejects a path with ANY symlinked component (newer SQLite),
@@ -504,10 +509,7 @@ impl GraphStore {
             )?;
             tx.execute("DELETE FROM symbols WHERE file_id = ?1", params![id])?;
             tx.execute("DELETE FROM imports WHERE file_id = ?1", params![id])?;
-            tx.execute(
-                "DELETE FROM unresolved_calls WHERE file_id = ?1",
-                params![id],
-            )?;
+            tx.execute(DELETE_FILE_UNRESOLVED_CALLS, params![id])?;
             tx.execute(
                 "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
                 params![id],
@@ -549,10 +551,7 @@ impl GraphStore {
             )?;
             tx.execute("DELETE FROM symbols WHERE file_id = ?1", params![id])?;
             tx.execute("DELETE FROM imports WHERE file_id = ?1", params![id])?;
-            tx.execute(
-                "DELETE FROM unresolved_calls WHERE file_id = ?1",
-                params![id],
-            )?;
+            tx.execute(DELETE_FILE_UNRESOLVED_CALLS, params![id])?;
             tx.execute(
                 "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
                 params![id],
@@ -1530,6 +1529,10 @@ CREATE TABLE IF NOT EXISTS unresolved_calls (
   receiver TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_unresolved_name ON unresolved_calls(name);
+-- replace_file/remove_file delete a file's unresolved calls by file_id once
+-- per file of an incremental batch; without this index each delete scans the
+-- whole table (552k rows on a 9.6k-file Ruby repository, ~20 ms a file).
+CREATE INDEX IF NOT EXISTS idx_unresolved_file ON unresolved_calls(file_id);
 CREATE TABLE IF NOT EXISTS processes (
   id INTEGER PRIMARY KEY,
   label TEXT NOT NULL,
@@ -1901,6 +1904,96 @@ mod tests {
             Some("y"),
             "the waiting writer's row must be committed"
         );
+    }
+
+    /// The query plan of one statement, joined detail lines.
+    fn query_plan(conn: &Connection, sql: &str) -> String {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let rows = stmt
+            .query_map([1_i64], |row| row.get::<_, String>(3))
+            .unwrap();
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join(" | ")
+    }
+
+    /// An incremental graph update (a checkout's watcher batch, the drift
+    /// delta applied on first use) runs this delete once per changed or
+    /// removed file. On a scan it costs a pass over every unresolved call of
+    /// the repository: ~20 ms a file at 552k rows, 17 s of an 874-file
+    /// update. The plan must seek the file's rows through an index.
+    #[test]
+    fn a_files_unresolved_calls_should_be_deleted_through_an_index_not_a_table_scan() {
+        let store = GraphStore::open_in_memory().unwrap();
+        let plan = query_plan(store.conn(), DELETE_FILE_UNRESOLVED_CALLS);
+        assert!(
+            plan.contains("USING INDEX idx_unresolved_file")
+                || plan.contains("USING COVERING INDEX idx_unresolved_file"),
+            "per-file delete must seek by file_id, plan: {plan}"
+        );
+        assert!(
+            !plan.contains("SCAN unresolved_calls"),
+            "per-file delete must not scan the table, plan: {plan}"
+        );
+    }
+
+    /// Graphs built before the index existed must not need a rebuild to
+    /// stop scanning: the next writable open adds it.
+    #[test]
+    fn a_graph_built_without_the_file_index_should_gain_it_on_the_next_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.db");
+        let store = GraphStore::open(&path).unwrap();
+        store
+            .conn()
+            .execute_batch("DROP INDEX idx_unresolved_file")
+            .unwrap();
+        drop(store);
+
+        let reopened = GraphStore::open(&path).unwrap();
+        let indexes: i64 = reopened
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'index' AND name = 'idx_unresolved_file'
+                    AND tbl_name = 'unresolved_calls'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexes, 1, "reopening an old graph must add the index");
+    }
+
+    /// The index changes how the delete finds rows, never which ones: a
+    /// replaced file loses its own unresolved calls and keeps everyone
+    /// else's, and a removed file's calls go with it.
+    #[test]
+    fn replacing_or_removing_a_file_should_drop_only_that_files_unresolved_calls() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let a = store.replace_file("a.rb", "oid-a", "ruby").unwrap();
+        let b = store.replace_file("b.rb", "oid-b", "ruby").unwrap();
+        store
+            .insert_unresolved_call(a, "from_a", None, 1, None, "calls")
+            .unwrap();
+        store
+            .insert_unresolved_call(b, "from_b", None, 2, None, "calls")
+            .unwrap();
+        let names = |store: &GraphStore| -> Vec<String> {
+            let mut stmt = store
+                .conn()
+                .prepare("SELECT name FROM unresolved_calls ORDER BY name")
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+
+        store.replace_file("a.rb", "oid-a2", "ruby").unwrap();
+        assert_eq!(names(&store), vec!["from_b".to_string()]);
+
+        store.remove_file("b.rb").unwrap();
+        assert!(names(&store).is_empty());
     }
 
     #[test]
