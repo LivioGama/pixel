@@ -3013,12 +3013,12 @@ fn repo_install_writes_all_five_artifacts() {
         "{devin}"
     );
 
-    // .pi/agent/extensions/pixel-guard.ts + AGENTS.md managed block.
-    let ext = fs::read_to_string(repo.join(".pi/agent/extensions/pixel-guard.ts")).unwrap();
+    // .pi/extensions/pixel-guard.ts, the project directory pi discovers
+    // extensions from; nothing under .pi/agent/, which pi reads only in ~.
+    let ext = fs::read_to_string(repo.join(".pi/extensions/pixel-guard.ts")).unwrap();
     assert!(ext.contains(MANAGED_BEGIN), "{ext}");
     assert!(ext.contains("[\"run-hook\", \"guard\"]"), "{ext}");
-    let agents = fs::read_to_string(repo.join(".pi/agent/AGENTS.md")).unwrap();
-    assert!(agents.contains(MANAGED_BEGIN), "{agents}");
+    assert!(!repo.join(".pi/agent").exists());
 
     // Nothing global was touched.
     assert!(!home.join(".local/share/pixel").exists());
@@ -3041,8 +3041,7 @@ fn repo_install_is_idempotent() {
         ".codex/hooks.json",
         ".codex/pixel-composed-guard-backup.json",
         ".devin/config.local.json",
-        ".pi/agent/extensions/pixel-guard.ts",
-        ".pi/agent/AGENTS.md",
+        ".pi/extensions/pixel-guard.ts",
     ];
     let snapshot = |rel: &str| fs::read(repo.join(rel)).unwrap();
     let before: Vec<_> = artifacts.iter().map(|rel| snapshot(rel)).collect();
@@ -3260,10 +3259,9 @@ fn repo_uninstall_removes_only_pixel_artifacts() {
             .unwrap();
     assert_eq!(devin["hooks"]["PreToolUse"], serde_json::json!([foreign]));
 
-    // Pi artifacts gone; AGENTS.md cleaned or removed.
-    assert!(!repo.join(".pi/agent/extensions/pixel-guard.ts").exists());
-    let agents = fs::read_to_string(repo.join(".pi/agent/AGENTS.md")).unwrap_or_default();
-    assert!(!agents.contains(MANAGED_BEGIN));
+    // Pi guard gone, and the directories it alone occupied.
+    assert!(!repo.join(".pi/extensions/pixel-guard.ts").exists());
+    assert!(!repo.join(".pi").exists());
 }
 
 #[test]
@@ -3335,8 +3333,7 @@ const MACHINE_LOCAL: &[&str] = &[
     ".devin/config.local.json",
     ".codex/hooks.json",
     ".codex/pixel-composed-guard-backup.json",
-    ".pi/agent/extensions/pixel-guard.ts",
-    ".pi/agent/AGENTS.md",
+    ".pi/extensions/pixel-guard.ts",
 ];
 
 /// A guard an earlier `--repo` install wrote into the team-shared
@@ -3668,7 +3665,7 @@ fn repo_install_should_keep_machine_local_artifacts_out_of_git() {
         .iter()
         .find(|s| s.id == "repo.git-exclude")
         .unwrap();
-    assert!(dry_step.summary.contains("7 machine-local"), "{dry_step:?}");
+    assert!(dry_step.summary.contains("6 machine-local"), "{dry_step:?}");
 
     let report = install(&repo_install_options(&repo, &home)).unwrap();
     assert!(report.ok, "{report:?}");
@@ -4040,4 +4037,107 @@ fn uninstall_should_remove_the_pre_rename_guard_entry_and_script() {
     assert!(!script.exists(), "the pre-rename guard script is deleted");
     let settings = read_json(&home.join(".claude/settings.json"));
     assert_eq!(settings["hooks"]["PreToolUse"], serde_json::json!([keep]));
+}
+
+/// A guard an older release left in `<repo>/.pi/agent/` never ran, since pi
+/// reads that directory only under `~`: doctor says so in yellow with the
+/// command that moves it, and the move turns the check green. A file at the
+/// guard's path that pixel did not write fails the check.
+#[test]
+#[cfg(unix)]
+fn doctor_pi_guard_should_flag_a_guard_pi_never_loads() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    let legacy = repo.join(".pi/agent/extensions/pixel-guard.ts");
+    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    fs::write(&legacy, format!("// {MANAGED_BEGIN}\n")).unwrap();
+    let pi_check = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.clone()),
+            repo_root: Some(repo.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "repo.pi-guard").clone()
+    };
+
+    let c = pi_check();
+    assert_eq!(c.status, CheckStatus::Yellow, "{c:?}");
+    assert!(c.summary.contains("never loads"), "{c:?}");
+    assert!(
+        c.summary
+            .contains(&format!("pixel install --repo {}", repo.display())),
+        "{c:?}"
+    );
+
+    install(&repo_install_options(&repo, &home)).unwrap();
+    let c = pi_check();
+    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
+    assert!(c.summary.contains(".pi/extensions/pixel-guard.ts"), "{c:?}");
+    assert!(!legacy.exists());
+
+    fs::write(repo.join(".pi/extensions/pixel-guard.ts"), "// mine\n").unwrap();
+    let c = pi_check();
+    assert_eq!(c.status, CheckStatus::Red, "{c:?}");
+    assert!(
+        c.reason
+            .as_deref()
+            .is_some_and(|r| r.contains("not a pixel-managed guard extension")),
+        "{c:?}"
+    );
+}
+
+/// `REPO_ARTIFACTS` is the list the README and `--repo` help are checked
+/// against, so it must name every file the install writes: a file the list
+/// forgets is one the docs cannot mention and `info/exclude` never gets.
+#[test]
+#[cfg(unix)]
+fn repo_artifacts_should_name_every_file_a_repo_install_writes() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".claude")).unwrap();
+    git(&repo, &["init", "-q"]);
+    // An exact RTK group in the personal settings is adopted by the guard,
+    // which makes the install write its backup, the one conditional artifact.
+    fs::write(
+        repo.join(".claude/settings.local.json"),
+        serde_json::to_string_pretty(&serde_json::json!({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "rtk hook claude"}]}
+        ]}}))
+        .unwrap(),
+    )
+    .unwrap();
+    install(&repo_install_options(&repo, &home)).unwrap();
+
+    let mut written = Vec::new();
+    let mut stack = vec![repo.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let rel = path
+                .strip_prefix(&repo)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            if rel == ".git" || rel.contains(".pixel-bak.") {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                written.push(rel);
+            }
+        }
+    }
+    written.sort();
+    let mut listed: Vec<String> = pixel_install::install::REPO_ARTIFACTS
+        .iter()
+        .map(|a| a.path.to_string())
+        .collect();
+    listed.sort();
+    assert_eq!(written, listed);
 }

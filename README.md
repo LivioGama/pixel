@@ -95,10 +95,23 @@ agent system prompt to `~/.local/share/pixel/` (`agent-prompt.md` + the short
 `pixel install --repo <path>` is the **per-project** variant: it writes
 project-local enforcement only and skips all global steps —
 
+- `<repo>/.claude/settings.local.json` — a pixel `run-hook guard --provider claude`
+  `PreToolUse` group, in Claude Code's personal project settings (the shared
+  `.claude/settings.json` never carries it); `<repo>/.claude/pixel-rtk-hooks.json`
+  keeps an exact `rtk hook claude` group the guard takes over
 - `<repo>/.codex/config.toml` — the same `developer_instructions` key
-- `<repo>/.codex/hooks.json` — the composed-guard `PreToolUse` group
-- `<repo>/.devin/hooks.json` — a pixel `run-hook guard --provider devin` hook
-- `<repo>/.pi/agent/extensions/pixel-guard.ts` + `.pi/agent/AGENTS.md`
+- `<repo>/.codex/hooks.json` — the composed-guard `PreToolUse` group, with
+  `<repo>/.codex/pixel-composed-guard-backup.json` holding the hooks it
+  replays; left alone when git tracks `.codex/hooks.json`
+- `<repo>/.devin/config.local.json` — a pixel `run-hook guard --provider devin` hook
+- `<repo>/.pi/extensions/pixel-guard.ts` — pi's guard extension, loaded once
+  pi trusts the project, when pi starts from the repository root
+
+Every one of those files except `.codex/config.toml` names this machine's
+`pixel` binary, so the install lists it in the clone's `.git/info/exclude` and
+a `git add -A` cannot publish it. pi gets its rules from the global install
+(`~/.pi/agent/APPEND_SYSTEM.md`): a project `.pi/APPEND_SYSTEM.md` would
+replace that file instead of adding to it.
 
 The per-repo guard is advisory: it steers agents toward Pixel commands (e.g.
 a soft notice before untargeted reads of large source files) without blocking

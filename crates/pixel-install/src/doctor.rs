@@ -712,33 +712,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         }));
 
         checks.push(check_status("repo.pi-guard", || {
-            let ext = root
-                .join(config::PI_CONFIG_DIR)
-                .join("extensions")
-                .join("pixel-guard.ts");
-            if !ext.is_file() {
-                return Ok((
-                    CheckStatus::Green,
-                    DoctorCheckDetail {
-                        summary: "no .pi/agent/extensions/pixel-guard.ts — repo-local pi guard not installed".into(),
-                        detail: None,
-                    },
-                ));
-            }
-            let content = fs::read_to_string(&ext).map_err(|e| e.to_string())?;
-            if !content.contains(config::MANAGED_BEGIN) || !content.contains("run-hook") {
-                return Err(format!(
-                    "{} is not a pixel-managed guard extension — run `pixel install --repo`",
-                    ext.display()
-                ));
-            }
-            Ok((
-                CheckStatus::Green,
-                DoctorCheckDetail {
-                    summary: format!("pi guard extension installed at {}", ext.display()),
-                    detail: Some(serde_json::json!({ "path": ext.display().to_string() })),
-                },
-            ))
+            pi_guard_check(root, crate::pi_project::guard_state(root))
         }));
 
         checks.push(check(
@@ -913,6 +887,57 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         home: home.display().to_string(),
         checks,
         summary: DoctorSummary { green, yellow, red },
+    })
+}
+
+/// `repo.pi-guard`: where the repository's pi guard stands. A guard left in
+/// `.pi/agent/` by an older release is yellow, since pi never loads it there;
+/// a foreign file at the guard's path fails the check.
+fn pi_guard_check(
+    root: &Path,
+    state: crate::pi_project::GuardState,
+) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+    use crate::pi_project::GuardState;
+    Ok(match state {
+        GuardState::Absent => (
+            CheckStatus::Green,
+            DoctorCheckDetail {
+                summary: format!(
+                    "no {} — repo-local pi guard not installed",
+                    crate::pi_project::EXTENSION
+                ),
+                detail: None,
+            },
+        ),
+        GuardState::Installed(path) => (
+            CheckStatus::Green,
+            DoctorCheckDetail {
+                summary: format!(
+                    "pi guard extension installed at {} (loads once pi trusts the project)",
+                    path.display()
+                ),
+                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+            },
+        ),
+        GuardState::Foreign(path) => {
+            return Err(format!(
+                "{} is not a pixel-managed guard extension — move it aside, then run `pixel install --repo {}`",
+                path.display(),
+                root.display()
+            ));
+        }
+        GuardState::Legacy(path) => (
+            CheckStatus::Yellow,
+            DoctorCheckDetail {
+                summary: format!(
+                    "pi guard at {}, which pi never loads in a project — run `pixel install --repo {}` to move it to {}",
+                    path.display(),
+                    root.display(),
+                    crate::pi_project::EXTENSION
+                ),
+                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+            },
+        ),
     })
 }
 
