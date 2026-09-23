@@ -17,7 +17,7 @@ Make as much repository work deterministic as possible. If something can be answ
 ## ⭐ The Pixel Flow Power
 
 ```text
-task → targets → resolve → impact → edit → changes → review → publish
+task → scope-task → find-code → impact → edit → what-changed → review-changes → commit-and-push
 ```
 
 <p align="center">
@@ -34,6 +34,21 @@ The same repository questions, shown as realistic terminal work. These are workf
   <img src="docs/examples/03-review-changes.svg" width="100%" alt="Comparing manual change review with Pixel changes" />
   <img src="docs/examples/04-history-recovery.svg" width="100%" alt="Comparing manual history searching with Pixel history search" />
 </p>
+
+## 📉 Token savings — measured, no second model
+
+Spotify's [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt) plugin claims 82–94% savings by blocking large reads and rerouting them through a paid worker model (Portal/AiKA). Pixel gets the same effect **locally and deterministically** — `list-signatures`, `find-code`, `pack-context` answer "what's in this file" without any file contents or a second model entering the agent's context.
+
+Replicating shunt's benchmark shape on this repo (138K lines, Rust), same methodology (UTF-8 bytes ÷ 4, what reaches the agent):
+
+| Scenario | Lines | Full reads | With Pixel | Savings |
+| --- | --- | --- | --- | --- |
+| Single large file | 4,661 | 48,465 tok | 2,172 tok | 95.5% |
+| Multi-file cross-read | 7,106 | 68,934 tok | 3,768 tok | 94.5% |
+| Source + test pair | 5,289 | 48,978 tok | 1,890 tok | 96.1% |
+| Code-write context | 5,289 | 48,978 tok | 1,910 tok | 96.1% |
+
+Unlike shunt's headline number, Pixel also self-reports **measured** savings from real sessions via `pixel token-savings` — on this machine: **41–83%** across 798 recorded operations. Same caveat as every tool in this space: these numbers measure what the agent reads, not your invoice — verify against your own usage.
 
 ## 🚀 Start here
 
