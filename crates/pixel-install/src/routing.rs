@@ -402,6 +402,35 @@ pub(crate) fn load_rtk_backup(home: &Path) -> crate::Result<Vec<Value>> {
     Ok(saved)
 }
 
+/// The RTK backup under `home` when no pixel guard in
+/// `~/.claude/settings.json` delegates to it: a leftover that `pixel install`
+/// never applies, such as one an `install --repo` build wrote under `$HOME`
+/// before the repository backup moved into the repository.
+pub(crate) fn orphan_rtk_backup(home: &Path) -> Option<PathBuf> {
+    let backup = home.join(RTK_BACKUP);
+    let in_use = BACKUP_READERS
+        .iter()
+        .any(|rel| delegates_rtk(&home.join(rel)));
+    (backup.is_file() && !in_use).then_some(backup)
+}
+
+/// The settings files, relative to a backup root, whose delegate guard reads
+/// `<root>/.claude/pixel-rtk-hooks.json`. Under `$HOME` both exist when the
+/// repository is `$HOME`: the global file is also its shared one, and the
+/// repo guard sits in `settings.local.json`.
+const BACKUP_READERS: [&str; 2] = [CLAUDE_SHARED_SETTINGS, CLAUDE_LOCAL_SETTINGS];
+
+/// Whether the settings at `path` hold a delegate guard. A file that cannot
+/// be read may hold one, so it counts as delegating: the backup is kept.
+fn delegates_rtk(path: &Path) -> bool {
+    install::read_settings(path).map_or(true, |value| {
+        value
+            .get("hooks")
+            .and_then(Value::as_object)
+            .is_some_and(has_delegate)
+    })
+}
+
 /// Which events a provider install may register. The doctrine reaches every
 /// Claude process through the lifecycle hooks in the user-level settings
 /// (`~/.claude/settings.json`), while enforcement stays repo-local
@@ -466,10 +495,11 @@ fn configure_scoped(
         return Err("RTK delegate backup missing; refusing to lose its registration".into());
     }
     remove_pixel_hooks(hooks);
-    if delegated || (scope == HookScope::LifecycleOnly && !saved.is_empty()) {
-        // Restore the adopted RTK fragment even when only lifecycle hooks
-        // are managed: `remove_pixel_hooks` strips a stale delegate entry,
-        // and leaving it removed would orphan the user's RTK hook.
+    if delegated {
+        // The delegate guard that ran RTK is gone: put RTK back where it was,
+        // whatever the scope. Without a delegate the backup is only a record
+        // of an earlier state and is not applied (the user may have removed
+        // RTK since); `install_at_scoped` retires it.
         restore_rtk(hooks, saved);
     }
     let mut enabled = true;
@@ -856,6 +886,16 @@ pub(crate) fn install_at_scoped(
         install::write_settings(&backup_root.join(RTK_BACKUP), &json!(adopted), dry_run)?;
     }
     let backup = install::write_settings(path, &value, dry_run)?;
+    // Nothing delegates to the backup any more: RTK is back in the settings
+    // or was dropped by the user. Retire it after the settings are written,
+    // unless the other file that reads it still delegates.
+    let read_elsewhere = BACKUP_READERS
+        .iter()
+        .map(|rel| backup_root.join(rel))
+        .any(|other| other != path && delegates_rtk(&other));
+    if adopted.is_empty() && !saved.is_empty() && !dry_run && !read_elsewhere {
+        fs::remove_file(backup_root.join(RTK_BACKUP))?;
+    }
     let summary_text = match scope {
         HookScope::LifecycleOnly => {
             format!(
@@ -954,11 +994,26 @@ pub(crate) fn remove_pre_tool_use_guard(
 /// under the repository, not under `$HOME`.
 pub(crate) fn install_project_claude_at(
     repo: &Path,
+    home: &Path,
     exe: &Path,
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
     let shared = repo.join(CLAUDE_SHARED_SETTINGS);
-    let (inherited, migrated) = remove_pre_tool_use_guard(&shared, dry_run)?;
+    let (mut inherited, migrated) = remove_pre_tool_use_guard(&shared, dry_run)?;
+    let global_path = Provider::Claude.path(home);
+    // A repository at `$HOME` has the global file as its shared one, which
+    // was read above.
+    let (global, unreadable) = if same_file(&shared, &global_path) {
+        (Vec::new(), None)
+    } else {
+        global_pre_tool_use(&global_path)
+    };
+    let blocking = blocking_claude_groups(&global);
+    let global_blockers = hook_commands(&blocking);
+    // A guard a full install of an older release left in the global file:
+    // the current global install takes it out.
+    let stale_global_guard = commands(&blocking).any(is_pixel_hook);
+    inherited.extend(global);
     let mut step = install_at_scoped(
         repo,
         &repo.join(CLAUDE_LOCAL_SETTINGS),
@@ -975,7 +1030,87 @@ pub(crate) fn install_project_claude_at(
             shared.display()
         ));
     }
+    if !global_blockers.is_empty() {
+        step.summary = install::dry_run_summary(
+            dry_run,
+            &format!(
+                "claude guard not installed: {} in {} also rewrites shell calls{}",
+                global_blockers.join(", "),
+                global_path.display(),
+                if stale_global_guard {
+                    " — run `pixel install` to take pixel's global guard out"
+                } else {
+                    ""
+                }
+            ),
+        );
+    }
+    if let Some(warning) = unreadable {
+        step.status = install::CheckStatus::Yellow;
+        step.summary = format!("{}; {warning}", step.summary);
+    }
     Ok(step)
+}
+
+/// The `PreToolUse` groups of the user-level settings at `path`, which
+/// Claude Code merges into every project's session. Read only: a repo
+/// install never writes the global file. An unreadable file yields no group
+/// and the reason, so it cannot block the repo install on its own.
+pub(crate) fn global_pre_tool_use(path: &Path) -> (Vec<Value>, Option<String>) {
+    match install::read_settings(path) {
+        Ok(value) => (
+            value
+                .get("hooks")
+                .and_then(|hooks| hooks.get("PreToolUse"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            None,
+        ),
+        Err(e) => (
+            Vec::new(),
+            Some(format!(
+                "{} unreadable ({e}), its PreToolUse hooks were not checked",
+                path.display()
+            )),
+        ),
+    }
+}
+
+/// The groups that cannot run beside the Claude guard: shell rewriters,
+/// the exact RTK group included, since only the file that holds it can hand
+/// it to the guard.
+pub(crate) fn blocking_claude_groups(groups: &[Value]) -> Vec<Value> {
+    groups
+        .iter()
+        .filter(|group| !coexists_with_guard(group, Provider::Claude))
+        .cloned()
+        .collect()
+}
+
+/// Every hook command of `groups`, in order.
+fn commands(groups: &[Value]) -> impl Iterator<Item = &str> {
+    groups
+        .iter()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+}
+
+/// Every hook command of `groups`, backticked, in order.
+pub(crate) fn hook_commands(groups: &[Value]) -> Vec<String> {
+    commands(groups)
+        .map(|command| format!("`{command}`"))
+        .collect()
+}
+
+/// Whether `a` and `b` name the same file, comparing canonical paths when
+/// both resolve.
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// Whether any hook command in a settings value (`{"hooks": {<event>: [...]}}`)
@@ -1569,5 +1704,138 @@ mod tests {
             read_composed_backup(&sidecar).unwrap()["pre_tool_use"],
             original
         );
+    }
+
+    fn delegate_guard() -> Value {
+        json!({"matcher":"Bash","hooks":[{"type":"command","command":"'/p/pixel' run-hook guard --provider claude --delegate-rtk"}]})
+    }
+
+    /// A home whose `~/.claude/settings.json` holds `pre` and whose backup
+    /// holds the exact RTK group.
+    fn home_with_backup(pre: &[Value]) -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".claude")).unwrap();
+        fs::write(
+            home.path().join(RTK_BACKUP),
+            serde_json::to_string(&json!([rtk_group()])).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            Provider::Claude.path(home.path()),
+            serde_json::to_string(&json!({"hooks":{"PreToolUse": pre}})).unwrap(),
+        )
+        .unwrap();
+        home
+    }
+
+    fn global_install(home: &Path, dry_run: bool) -> Value {
+        install_at_scoped(
+            home,
+            &Provider::Claude.path(home),
+            Path::new("/p/pixel"),
+            Provider::Claude,
+            HookScope::LifecycleOnly,
+            &[],
+            dry_run,
+        )
+        .unwrap();
+        install::read_settings(&Provider::Claude.path(home)).unwrap()
+    }
+
+    /// The backup exists so that a delegation cannot lose RTK. Without one
+    /// it is only a record of the past: a user who removed `rtk hook claude`
+    /// keeps it removed, and the stale file goes.
+    #[test]
+    fn global_install_should_not_bring_back_an_rtk_hook_the_user_removed() {
+        let home = home_with_backup(&[]);
+        let settings = global_install(home.path(), false);
+        assert!(
+            !settings.to_string().contains("rtk hook claude"),
+            "{settings}"
+        );
+        assert!(!home.path().join(RTK_BACKUP).exists());
+    }
+
+    #[test]
+    fn global_install_should_restore_a_delegated_rtk_and_retire_its_backup() {
+        let home = home_with_backup(&[delegate_guard()]);
+        let settings = global_install(home.path(), false);
+        assert_eq!(settings["hooks"]["PreToolUse"], json!([rtk_group()]));
+        assert!(!home.path().join(RTK_BACKUP).exists());
+    }
+
+    #[test]
+    fn global_install_dry_run_should_keep_the_backup() {
+        let home = home_with_backup(&[]);
+        global_install(home.path(), true);
+        assert!(home.path().join(RTK_BACKUP).is_file());
+    }
+
+    /// A guard that adopts RTK again on the same run still needs the backup.
+    #[test]
+    fn repo_install_should_keep_the_backup_while_the_guard_delegates() {
+        let repo = home_with_backup(&[delegate_guard()]);
+        let local = repo.path().join(CLAUDE_LOCAL_SETTINGS);
+        fs::rename(Provider::Claude.path(repo.path()), &local).unwrap();
+        install_at_scoped(
+            repo.path(),
+            &local,
+            Path::new("/p/pixel"),
+            Provider::Claude,
+            HookScope::GuardOnly,
+            &[],
+            false,
+        )
+        .unwrap();
+        let value = install::read_settings(&local).unwrap();
+        assert!(has_delegate(value["hooks"].as_object().unwrap()), "{value}");
+        assert_eq!(
+            load_rtk_backup(repo.path()).unwrap(),
+            vec![rtk_group()],
+            "the delegate's backup must survive"
+        );
+    }
+
+    /// Write `pre` as the `PreToolUse` of `<root>/.claude/settings.local.json`,
+    /// the personal file of a repository at `$HOME`.
+    fn write_local(root: &Path, pre: &[Value]) {
+        fs::write(
+            root.join(CLAUDE_LOCAL_SETTINGS),
+            serde_json::to_string(&json!({"hooks":{"PreToolUse": pre}})).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn orphan_rtk_backup_should_name_a_backup_no_guard_delegates_to() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(orphan_rtk_backup(home.path()), None);
+
+        let home = home_with_backup(&[]);
+        assert_eq!(
+            orphan_rtk_backup(home.path()),
+            Some(home.path().join(RTK_BACKUP))
+        );
+
+        let home = home_with_backup(&[delegate_guard()]);
+        assert_eq!(orphan_rtk_backup(home.path()), None);
+    }
+
+    /// A repository at `$HOME` shares the global backup: a delegate guard in
+    /// its `settings.local.json` still needs it, and a file that cannot be
+    /// read may hold one.
+    #[test]
+    fn a_backup_the_home_repository_guard_delegates_to_should_be_kept() {
+        let home = home_with_backup(&[]);
+        write_local(home.path(), &[delegate_guard()]);
+        assert_eq!(orphan_rtk_backup(home.path()), None);
+        global_install(home.path(), false);
+        assert!(home.path().join(RTK_BACKUP).is_file());
+
+        let home = home_with_backup(&[]);
+        fs::write(home.path().join(CLAUDE_LOCAL_SETTINGS), "{ not json").unwrap();
+        assert_eq!(orphan_rtk_backup(home.path()), None);
+        global_install(home.path(), false);
+        assert!(home.path().join(RTK_BACKUP).is_file());
     }
 }

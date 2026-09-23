@@ -374,6 +374,12 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     ));
 
+    // A global RTK backup that no guard delegates to is never applied again;
+    // say so rather than leave a file that looks like a live registration.
+    checks.push(check_status("install.rtk-backup", || {
+        rtk_backup_check(crate::routing::orphan_rtk_backup(&home))
+    }));
+
     // Legacy `claude()` shell wrappers are harmful now: a surviving block
     // double-injects the prompt on every wrapped launch. Any pixel-managed
     // block in ANY candidate profile (the resolved shell's or a stray left
@@ -702,6 +708,36 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     path.display()
                 ));
             }
+            // Claude Code merges the shared and global settings into the
+            // same session: a shell rewriter there races the guard.
+            let global = crate::routing::Provider::Claude.path(&home);
+            let mut others = vec![&shared];
+            if !crate::routing::same_file(&shared, &global) {
+                others.push(&global);
+            }
+            let mut rivals = Vec::new();
+            for other in others {
+                let (groups, _) = crate::routing::global_pre_tool_use(other);
+                for command in
+                    crate::routing::hook_commands(&crate::routing::blocking_claude_groups(&groups))
+                {
+                    rivals.push(format!("{command} in {}", other.display()));
+                }
+            }
+            if !rivals.is_empty() {
+                return Ok((
+                    CheckStatus::Yellow,
+                    DoctorCheckDetail {
+                        summary: format!(
+                            "claude guard in {} runs beside another shell rewriter ({}) — run `pixel install --repo {}` to hold the guard back",
+                            path.display(),
+                            rivals.join(", "),
+                            crate::routing::quoted_executable(root)
+                        ),
+                        detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+                    },
+                ));
+            }
             Ok((
                 CheckStatus::Green,
                 DoctorCheckDetail {
@@ -923,7 +959,7 @@ fn pi_guard_check(
             return Err(format!(
                 "{} is not a pixel-managed guard extension — move it aside, then run `pixel install --repo {}`",
                 path.display(),
-                root.display()
+                crate::routing::quoted_executable(root)
             ));
         }
         GuardState::Legacy(path) => (
@@ -932,8 +968,34 @@ fn pi_guard_check(
                 summary: format!(
                     "pi guard at {}, which pi never loads in a project — run `pixel install --repo {}` to move it to {}",
                     path.display(),
-                    root.display(),
+                    crate::routing::quoted_executable(root),
                     crate::pi_project::EXTENSION
+                ),
+                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+            },
+        ),
+    })
+}
+/// `install.rtk-backup`: yellow when `orphan` names a global RTK backup no
+/// pixel guard delegates to, with the command that removes it.
+fn rtk_backup_check(
+    orphan: Option<PathBuf>,
+) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+    Ok(match orphan {
+        None => (
+            CheckStatus::Green,
+            DoctorCheckDetail {
+                summary: "no orphaned RTK backup".into(),
+                detail: None,
+            },
+        ),
+        Some(path) => (
+            CheckStatus::Yellow,
+            DoctorCheckDetail {
+                summary: format!(
+                    "{} holds an RTK hook no pixel guard delegates to; pixel never applies it — remove it: rm {}",
+                    path.display(),
+                    crate::routing::quoted_executable(&path)
                 ),
                 detail: Some(serde_json::json!({ "path": path.display().to_string() })),
             },

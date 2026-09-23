@@ -4048,7 +4048,8 @@ fn uninstall_should_remove_the_pre_rename_guard_entry_and_script() {
 fn doctor_pi_guard_should_flag_a_guard_pi_never_loads() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
-    let repo = dir.path().join("repo");
+    // A space in the path: the suggested command is pasted into a shell.
+    let repo = dir.path().join("my repo");
     fs::create_dir_all(&home).unwrap();
     let legacy = repo.join(".pi/agent/extensions/pixel-guard.ts");
     fs::create_dir_all(legacy.parent().unwrap()).unwrap();
@@ -4068,7 +4069,7 @@ fn doctor_pi_guard_should_flag_a_guard_pi_never_loads() {
     assert!(c.summary.contains("never loads"), "{c:?}");
     assert!(
         c.summary
-            .contains(&format!("pixel install --repo {}", repo.display())),
+            .contains(&format!("pixel install --repo '{}'", repo.display())),
         "{c:?}"
     );
 
@@ -4084,7 +4085,8 @@ fn doctor_pi_guard_should_flag_a_guard_pi_never_loads() {
     assert!(
         c.reason
             .as_deref()
-            .is_some_and(|r| r.contains("not a pixel-managed guard extension")),
+            .is_some_and(|r| r.contains("not a pixel-managed guard extension")
+                && r.contains(&format!("pixel install --repo '{}'", repo.display()))),
         "{c:?}"
     );
 }
@@ -4140,4 +4142,260 @@ fn repo_artifacts_should_name_every_file_a_repo_install_writes() {
         .collect();
     listed.sort();
     assert_eq!(written, listed);
+}
+
+/// A global RTK backup with no delegating guard is a leftover (an
+/// `install --repo` build once wrote the repository's there): doctor flags
+/// it in yellow with the command that removes it, and stays green once the
+/// file is gone.
+#[test]
+#[cfg(unix)]
+fn doctor_should_flag_a_global_rtk_backup_no_guard_delegates_to() {
+    let dir = TempDir::new().unwrap();
+    // The command is pasted into a shell: an apostrophe in the path must
+    // come out escaped.
+    let home = dir.path().join("o'neil");
+    let backup = home.join(".claude/pixel-rtk-hooks.json");
+    fs::create_dir_all(backup.parent().unwrap()).unwrap();
+    fs::write(
+        &backup,
+        r#"[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]"#,
+    )
+    .unwrap();
+    let rtk_check = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "install.rtk-backup").clone()
+    };
+
+    let c = rtk_check();
+    assert_eq!(c.status, CheckStatus::Yellow, "{c:?}");
+    let quoted = format!("'{}'", backup.display().to_string().replace('\'', "'\\''"));
+    assert!(quoted.contains("o'\\''neil"), "{quoted}");
+    assert!(c.summary.ends_with(&format!("rm {quoted}")), "{c:?}");
+
+    fs::remove_file(&backup).unwrap();
+    let c = rtk_check();
+    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
+}
+
+/// `rtk hook claude` registered globally (`rtk init -g`) runs in every
+/// project's session: Claude Code merges the global, shared and personal
+/// settings. A repo guard beside it would be a second Bash rewriter, so the
+/// install holds the guard back and names the global hook; the global file
+/// is only read.
+#[test]
+#[cfg(unix)]
+fn repo_install_should_hold_back_the_guard_beside_a_global_rtk_hook() {
+    for with_shared_settings in [true, false] {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(repo.join(".claude")).unwrap();
+        let global = home.join(".claude/settings.json");
+        let global_text =
+            serde_json::to_string_pretty(&serde_json::json!({"hooks": {"PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "rtk hook claude"}]}
+            ]}}))
+            .unwrap();
+        fs::write(&global, &global_text).unwrap();
+        if with_shared_settings {
+            fs::write(
+                repo.join(".claude/settings.json"),
+                r#"{"hooks":{"PreToolUse":[{"matcher":"Write","hooks":[{"type":"command","command":"keep-write-check"}]}]}}"#,
+            )
+            .unwrap();
+        }
+
+        let report = install(&repo_install_options(&repo, &home)).unwrap();
+
+        let step = report
+            .steps
+            .iter()
+            .find(|s| s.id == "hooks.claude")
+            .unwrap();
+        assert_eq!(
+            step.status,
+            pixel_install::install::CheckStatus::Yellow,
+            "{step:?}"
+        );
+        assert!(
+            step.summary.ends_with(&format!(
+                "`rtk hook claude` in {} also rewrites shell calls",
+                global.display()
+            )),
+            "{step:?}"
+        );
+        let local = repo.join(".claude/settings.local.json");
+        let local = if local.is_file() {
+            read_json(&local)
+        } else {
+            serde_json::json!({})
+        };
+        assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
+        assert_eq!(fs::read_to_string(&global).unwrap(), global_text);
+    }
+}
+
+/// An unreadable global settings file must not block the repo install: the
+/// guard goes in and the step says what was not checked.
+#[test]
+#[cfg(unix)]
+fn repo_install_should_install_the_guard_when_the_global_settings_is_unreadable() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(home.join(".claude/settings.json"), "{ not json").unwrap();
+
+    let report = install(&repo_install_options(&repo, &home)).unwrap();
+
+    let step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "hooks.claude")
+        .unwrap();
+    assert_eq!(
+        step.status,
+        pixel_install::install::CheckStatus::Yellow,
+        "{step:?}"
+    );
+    assert!(
+        step.summary
+            .contains("unreadable (json: key must be a string at line 1 column 3), its PreToolUse hooks were not checked"),
+        "{step:?}"
+    );
+    let local = read_json(&repo.join(".claude/settings.local.json"));
+    assert_eq!(pixel_commands(&local, "PreToolUse").len(), 1, "{local}");
+}
+
+/// A repository at `$HOME` has the global file as its shared one. The stale
+/// guard it holds is taken out of it, so a dry run must not count it again as
+/// a global rewriter and predict a held-back guard the real run installs.
+/// The repository is named through a symlink: the two paths differ as
+/// written and only resolve to the same file.
+#[test]
+#[cfg(unix)]
+fn repo_install_at_home_should_read_the_global_file_once() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("home-link");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    std::os::unix::fs::symlink(&home, &repo).unwrap();
+    fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"'/old/pixel' run-hook guard --provider claude","timeout":10}]}]}}"#,
+    )
+    .unwrap();
+    let global_before = fs::read(home.join(".claude/settings.json")).unwrap();
+    for dry_run in [true, false] {
+        let mut options = repo_install_options(&repo, &home);
+        options.dry_run = dry_run;
+        let report = install(&options).unwrap();
+        let step = report
+            .steps
+            .iter()
+            .find(|s| s.id == "hooks.claude")
+            .unwrap();
+        assert_eq!(
+            step.status,
+            pixel_install::install::CheckStatus::Green,
+            "dry_run={dry_run}: {step:?}"
+        );
+        if dry_run {
+            assert_eq!(
+                fs::read(home.join(".claude/settings.json")).unwrap(),
+                global_before,
+                "a dry run writes nothing, the global file included"
+            );
+        }
+    }
+    // The global file is this repository's shared one: the stale guard moves
+    // out of it into the personal file, and only the guard leaves.
+    let global = read_json(&home.join(".claude/settings.json"));
+    assert!(pixel_commands(&global, "PreToolUse").is_empty(), "{global}");
+    let local = read_json(&home.join(".claude/settings.local.json"));
+    assert_eq!(pixel_commands(&local, "PreToolUse").len(), 1, "{local}");
+}
+
+/// A full install of an older release left pixel's own guard in the global
+/// file: the repo guard is held back like beside any rewriter, and the step
+/// names the command that takes the global guard out.
+#[test]
+#[cfg(unix)]
+fn repo_install_should_name_pixel_install_for_a_global_pixel_guard() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"'/old/pixel' run-hook guard --provider claude","timeout":10}]}]}}"#,
+    )
+    .unwrap();
+
+    let report = install(&repo_install_options(&repo, &home)).unwrap();
+
+    let step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "hooks.claude")
+        .unwrap();
+    assert!(
+        step.summary.ends_with(
+            "also rewrites shell calls — run `pixel install` to take pixel's global guard out"
+        ),
+        "{step:?}"
+    );
+}
+
+/// A guard installed before `rtk init -g` (or by a release that did not read
+/// the global file) runs beside the global RTK hook: doctor turns yellow with
+/// the command that holds the guard back, and that command does.
+#[test]
+#[cfg(unix)]
+fn doctor_repo_claude_hooks_should_flag_a_guard_beside_a_global_rewriter() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    // A space in the path: the suggested command is pasted into a shell.
+    let repo = dir.path().join("my repo");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+    install(&repo_install_options(&repo, &home)).unwrap();
+    fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]}}"#,
+    )
+    .unwrap();
+    let claude_check = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.clone()),
+            repo_root: Some(repo.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "repo.claude-hooks").clone()
+    };
+
+    let c = claude_check();
+    assert_eq!(c.status, CheckStatus::Yellow, "{c:?}");
+    assert!(
+        c.summary.contains(&format!(
+            "runs beside another shell rewriter (`rtk hook claude` in {}) — run `pixel install --repo '{}'`",
+            home.join(".claude/settings.json").display(),
+            repo.display()
+        )),
+        "{c:?}"
+    );
+
+    install(&repo_install_options(&repo, &home)).unwrap();
+    let c = claude_check();
+    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
+    assert!(c.summary.contains("not installed"), "{c:?}");
 }
