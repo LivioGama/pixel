@@ -277,7 +277,9 @@ pub fn semantic_fallback_enabled() -> bool {
 ///
 /// Never downloads the model: a daemon request must not block on the
 /// network. With no model on disk (fetched once by `pixel search-meaning`)
-/// or any other embedding error, the fallback is empty.
+/// or any other embedding error, the fallback is empty. This is not the
+/// daemon's `--scope hybrid` model (`potion-code-64M-v2`); each keeps its own
+/// download marker ([`crate::potion_marker`]).
 ///
 /// Returned paths are repo-relative (stripped of `root`) so they join with
 /// index paths, annotations, and evidence maps that are all relative.
