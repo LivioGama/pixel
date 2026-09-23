@@ -28,7 +28,10 @@ export type IconKind =
 	| 'meter'
 	| 'edit'
 	| 'break'
-	| 'shield';
+	| 'shield'
+	| 'clock'
+	| 'target'
+	| 'rocket';
 
 const TILE = 84;
 
@@ -71,6 +74,12 @@ export const Icon = ({kind, color}: {kind: IconKind; color: string}) => {
 			return (<g {...s}><path d="M26 22 l-8 8 8 8"/><path d="M38 22 l8 8 -8 8"/><line x1="34" y1="16" x2="30" y2="46"/></g>);
 		case 'shield':
 			return (<g {...s}><path d="M32 12 l18 7 v12 c0 12 -8 19 -18 23 -10 -4 -18 -11 -18 -23 v-12 z"/><path d="M25 32 l5 5 10 -10"/></g>);
+		case 'clock':
+			return (<g {...s}><circle cx="32" cy="32" r="20"/><line x1="32" y1="20" x2="32" y2="32"/><line x1="32" y1="32" x2="42" y2="38"/><path d="M16 10 a26 26 0 0 1 34 -4" /><path d="M50 6 l0 8 -8 -2" fill="none"/></g>);
+		case 'target':
+			return (<g {...s}><circle cx="32" cy="32" r="20"/><circle cx="32" cy="32" r="12"/><circle cx="32" cy="32" r="4" fill={color} stroke="none"/></g>);
+		case 'rocket':
+			return (<g {...s}><path d="M32 10 c10 4 12 16 8 28 l-8 8 -8 -8 c-4 -12 -2 -24 8 -28 z"/><circle cx="32" cy="26" r="4"/><path d="M24 42 l-6 8 M40 42 l6 8"/></g>);
 	}
 };
 
