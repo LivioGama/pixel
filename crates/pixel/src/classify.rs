@@ -203,26 +203,26 @@ fn clip_text(text: &str) -> (String, bool) {
 }
 
 /// Open the remote decision engine from the resolved preset/model config.
-#[cfg_attr(test, mutants::skip)] // thin adapter; logic lives in decide_remote
+/// A preset that needs a key and has none fails here (see
+/// `decide_remote::resolve_config`), naming the env var to set.
+#[cfg_attr(test, mutants::skip)] // thin adapter over the real env; logic lives in decide_remote
 fn open_engine(
     preset: crate::decide_remote::Preset,
     model: Option<String>,
 ) -> Result<crate::decide_remote::Remote, String> {
-    let config = crate::decide_remote::resolve_config(preset, model, remote_key_value(preset));
-    Ok(crate::decide_remote::Remote::open(config))
+    crate::decide_remote::resolve_config(preset, model, remote_key_value(preset))
+        .map(crate::decide_remote::Remote::open)
 }
 
 /// Read the remote API-key value from the preset's key env var (or
 /// `PIXEL_REMOTE_KEY_ENV` when set) by name. The value is consumed here and
 /// held only inside the `Remote` adapter — it is never logged or written to
-/// a document. A missing key is a hard error for presets that need one, so
-/// the caller learns why the network call did not happen.
+/// a document.
+#[cfg_attr(test, mutants::skip)] // reads the real env and ~/.pixel; the name rule is key_env_name
 fn remote_key_value(preset: crate::decide_remote::Preset) -> Option<String> {
-    let explicit = std::env::var("PIXEL_REMOTE_KEY_ENV")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let name = explicit.or_else(|| preset.key_env().map(str::to_string));
-    name.and_then(|name| std::env::var(name).ok().filter(|v| !v.is_empty()))
+    let explicit = std::env::var("PIXEL_REMOTE_KEY_ENV").ok();
+    crate::decide_remote::key_env_name(preset, explicit)
+        .and_then(|name| std::env::var(name).ok().filter(|v| !v.is_empty()))
         // Env wins; `pixel config remote-key <preset>` is the fallback so a
         // key need not live in every shell's environment.
         .or_else(|| crate::config_cmd::remote_key(preset))
@@ -243,7 +243,7 @@ fn parse_spec_line(line: &str) -> Result<Spec, String> {
     };
     // Dropping a non-string silently would classify a request the caller
     // never sent: `["a", 7, "b"]` would pass validation as two labels, and a
-    // numeric criterion would fall back to embedding the label's own name.
+    // numeric criterion would silently fall back to the label's own name.
     let labels = v
         .get("labels")
         .and_then(Value::as_array)
@@ -374,10 +374,9 @@ fn parse_criteria(pairs: &[String]) -> Result<BTreeMap<String, String>, String> 
 }
 
 /// The `Spec` a one-shot invocation asks for. Separate from `run` so the
-/// argument contract is checked before anything touches the model: on a
-/// fresh install `open_embedder` downloads, and a caller who forgot
-/// `--label` should be told that, not made to wait for a model they will
-/// not use.
+/// argument contract is checked before anything touches the network: a
+/// caller who forgot `--label` should be told that, not made to wait for a
+/// remote call that cannot answer the question they meant to ask.
 fn one_shot_spec(opts: &ClassifyOptions) -> Result<Spec, String> {
     let text = opts
         .text
@@ -444,7 +443,6 @@ pub fn run(opts: ClassifyOptions) -> Result<(), String> {
     )
 }
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::*;

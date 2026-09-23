@@ -30,7 +30,7 @@ use std::time::Duration;
 
 /// A bound on how much of a chat response we are willing to read. A runaway
 /// completion must fail the decision, not exhaust the process.
-const RESPONSE_CAP_BYTES: usize = 1024 * 1024;
+const RESPONSE_CAP_BYTES: usize = 1_048_576; // 1 MiB
 const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Provider presets, selectable with `--remote-preset`.
@@ -106,32 +106,92 @@ impl std::fmt::Debug for Config {
     }
 }
 
+/// The env var the key is read from: `PIXEL_REMOTE_KEY_ENV` when it names
+/// one, else the preset's own.
+pub fn key_env_name(preset: Preset, explicit: Option<String>) -> Option<String> {
+    explicit
+        .filter(|s| !s.is_empty())
+        .or_else(|| preset.key_env().map(str::to_string))
+}
+
 /// Resolve a `Config` from the preset and the per-invocation overrides,
-/// applying `PIXEL_REMOTE_*` env vars on top. Reads the key env var's value
-/// here; callers must not propagate the value into logs or JSON.
+/// applying `PIXEL_REMOTE_*` env vars on top; callers must not propagate
+/// the key value into logs or JSON.
 pub fn resolve_config(
     preset: Preset,
     model_override: Option<String>,
     key_value: Option<String>,
-) -> Config {
-    let base = std::env::var("PIXEL_REMOTE_BASE")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| preset.base().to_string());
+) -> Result<Config, String> {
+    resolve_config_from(preset, model_override, key_value, |name| {
+        std::env::var(name).ok()
+    })
+}
+
+/// [`resolve_config`] with the environment injected. Refuses, before any
+/// network call, the two configurations that would fail or leak remotely:
+/// a preset that needs a key but has none (the provider would answer an
+/// opaque 401), and a key bound for a non-loopback `http://` base (it would
+/// cross the network in clear text).
+fn resolve_config_from(
+    preset: Preset,
+    model_override: Option<String>,
+    key_value: Option<String>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Config, String> {
+    let set = |name: &str| env(name).filter(|s| !s.is_empty());
+    let base_override = set("PIXEL_REMOTE_BASE");
+    let key = key_value.filter(|s| !s.is_empty());
+    if key.is_none()
+        && base_override.is_none()
+        && preset.key_env().is_some()
+        && let Some(var) = key_env_name(preset, set("PIXEL_REMOTE_KEY_ENV"))
+    {
+        let name = preset.display();
+        return Err(format!(
+            "remote preset {name} needs an API key: set {var} or run `pixel config remote-key {name} -`"
+        ));
+    }
+    let base = base_override.unwrap_or_else(|| preset.base().to_string());
+    if key.is_some() && sends_in_clear_text(&base) {
+        return Err(format!(
+            "refusing to send the API key to {base} over cleartext http; use https or a loopback base"
+        ));
+    }
     let model = model_override
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::env::var("PIXEL_REMOTE_MODEL")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
+        .or_else(|| set("PIXEL_REMOTE_MODEL"))
         .unwrap_or_else(|| preset.default_model().to_string());
-    Config {
+    Ok(Config {
         preset,
         base,
         model,
-        key: key_value.filter(|s| !s.is_empty()),
-    }
+        key,
+    })
+}
+
+/// Whether `base` is plain `http://` to a host other than this machine.
+fn sends_in_clear_text(base: &str) -> bool {
+    let Some(rest) = base
+        .get(..7)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("http://"))
+        .map(|_| &base[7..])
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = if let Some(bracketed) = host.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or_default()
+    } else {
+        host.split(':').next().unwrap_or_default()
+    };
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    !loopback
 }
 
 /// The injected HTTP seam: a single chat completion given the config and the
@@ -228,12 +288,7 @@ fn build_request(model: &str, spec: &Spec) -> Value {
                 "strict": true,
                 "schema": {
                     "type": "object",
-                    "properties": {
-                        "probs": {
-                            "type": "object",
-                            "additionalProperties": {"type": "number"}
-                        }
-                    },
+                    "properties": {"probs": probs_schema(&spec.labels)},
                     "required": ["probs"],
                     "additionalProperties": false
                 }
@@ -242,13 +297,40 @@ fn build_request(model: &str, spec: &Spec) -> Value {
     })
 }
 
-/// One POST to `{base}/chat/completions` with the bearer key in the header.
-/// The key value never enters the error string or the body.
-#[cfg_attr(test, mutants::skip)] // thin adapter over ureq; request/parse tested on bodies
+/// The `probs` object as strict structured outputs require it: one number
+/// property per label, all required, nothing else (OpenAI's strict mode
+/// rejects an open `additionalProperties` map).
+fn probs_schema(labels: &[String]) -> Value {
+    let properties: serde_json::Map<String, Value> = labels
+        .iter()
+        .map(|label| (label.clone(), json!({"type": "number"})))
+        .collect();
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": labels,
+        "additionalProperties": false
+    })
+}
+
+/// The production transport: [`http_chat_within`] with the production caps.
+#[cfg_attr(test, mutants::skip)] // passes two constants; the transport is tested through http_chat_within
 fn http_chat(config: &Config, body: &Value) -> Result<Value, String> {
+    http_chat_within(config, body, TIMEOUT, RESPONSE_CAP_BYTES)
+}
+
+/// One POST to `{base}/chat/completions` with the bearer key in the header,
+/// bounded by `timeout` and by `cap` bytes of response. The key value never
+/// enters the error string or the body.
+fn http_chat_within(
+    config: &Config,
+    body: &Value,
+    timeout: Duration,
+    cap: usize,
+) -> Result<Value, String> {
     let url = format!("{}/chat/completions", config.base.trim_end_matches('/'));
     let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
+        .timeout_global(Some(timeout))
         .user_agent("pixel-cli classify-remote")
         .build();
     let agent = ureq::Agent::new_with_config(agent);
@@ -262,7 +344,7 @@ fn http_chat(config: &Config, body: &Value) -> Result<Value, String> {
     let text = response
         .body_mut()
         .with_config()
-        .limit(RESPONSE_CAP_BYTES as u64)
+        .limit(cap as u64)
         .read_to_string()
         .map_err(|e| format!("remote chat read {url}: {e}"))?;
     serde_json::from_str(&text).map_err(|e| format!("remote chat JSON {url}: {e}"))
@@ -286,22 +368,17 @@ fn parse_probs(response: &Value, labels: &[String]) -> Result<BTreeMap<String, f
     // Accept both shapes providers actually emit: the schema-requested
     // `{"probs": {...}}` (OpenRouter/Ollama honouring `response_format`)
     // and the flat `{label: prob}` mapping (what some local/Ollama models
-    // return despite the schema). Prefer the nested form, fall back to the
-    // raw object when there is no `probs` key.
-    let candidate = parsed.get("probs");
-    let probs = if let Some(value) = candidate {
-        if let Some(map) = value.as_object() {
-            map
-        } else {
+    // return despite the schema). Prefer the nested form; a non-object
+    // `probs` is only the flat form when `probs` is itself a label.
+    let probs_is_a_label = labels.iter().any(|label| label == "probs");
+    let probs = match parsed.get("probs") {
+        Some(Value::Object(map)) => map,
+        Some(_) if !probs_is_a_label => {
             return Err("remote response probs is not an object".to_string());
         }
-    } else if let Some(map) = parsed.as_object() {
-        map
-    } else {
-        return Err(
-            "remote response has neither a probs object nor a flat label→probability map"
-                .to_string(),
-        );
+        _ => parsed
+            .as_object()
+            .ok_or("remote response has neither a probs object nor a flat label→probability map")?,
     };
     let mut out: BTreeMap<String, f64> = labels.iter().map(|l| (l.clone(), 0.0)).collect();
     let mut sum = 0.0f64;
@@ -320,8 +397,10 @@ fn parse_probs(response: &Value, labels: &[String]) -> Result<BTreeMap<String, f
         out.insert(label.clone(), p);
         sum += p;
     }
-    if sum <= 0.0 {
-        return Err("remote probs must sum to a positive value".to_string());
+    // Finite values can still overflow the sum (2 × 1e308 = inf), which
+    // would normalize every label to 0 and report success.
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err("remote probs must sum to a finite positive value".to_string());
     }
     for p in out.values_mut() {
         *p /= sum;
@@ -356,14 +435,348 @@ mod tests {
     }
 
     #[test]
-    fn preset_defaults_cover_all_presets() {
-        for preset in [Preset::Openrouter, Preset::Ollama, Preset::Local] {
-            assert!(!preset.base().is_empty());
-            assert!(!preset.default_model().is_empty());
-            assert!(!preset.display().is_empty());
+    fn each_preset_points_at_its_provider_model_and_key_variable() {
+        let table = [
+            (
+                Preset::Openrouter,
+                "https://openrouter.ai/api/v1",
+                "deepseek/deepseek-v4.1-flash",
+                "openrouter",
+                Some("OPENROUTER_API_KEY"),
+            ),
+            (
+                Preset::Ollama,
+                "https://ollama.com/v1",
+                "deepseek-v4.1-flash:cloud",
+                "ollama",
+                Some("OLLAMA_API_KEY"),
+            ),
+            (
+                Preset::Local,
+                "http://localhost:11434/v1",
+                "qwen3.5:4b",
+                "local",
+                None,
+            ),
+        ];
+        for (preset, base, model, display, key_env) in table {
+            assert_eq!(
+                (
+                    preset.base(),
+                    preset.default_model(),
+                    preset.display(),
+                    preset.key_env()
+                ),
+                (base, model, display, key_env),
+                "{preset:?}"
+            );
         }
-        assert_eq!(Preset::Local.key_env(), None);
-        assert!(Preset::Openrouter.key_env().is_some());
+    }
+
+    fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: BTreeMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        move |name| map.get(name).cloned()
+    }
+
+    fn key() -> Option<String> {
+        Some("k".to_string())
+    }
+
+    #[test]
+    fn the_model_is_the_flag_then_the_env_then_the_preset_default() {
+        let env = env_of(&[("PIXEL_REMOTE_MODEL", "from-env")]);
+        let flag = resolve_config_from(Preset::Ollama, Some("flag".into()), key(), &env).unwrap();
+        assert_eq!(flag.model, "flag");
+        let empty_flag =
+            resolve_config_from(Preset::Ollama, Some(String::new()), key(), &env).unwrap();
+        assert_eq!(empty_flag.model, "from-env", "an empty flag does not count");
+        let empty_env = env_of(&[("PIXEL_REMOTE_MODEL", "")]);
+        let default = resolve_config_from(Preset::Ollama, None, key(), empty_env).unwrap();
+        assert_eq!(default.model, "deepseek-v4.1-flash:cloud");
+        assert_eq!(default.base, "https://ollama.com/v1");
+        let based = resolve_config_from(
+            Preset::Ollama,
+            None,
+            key(),
+            env_of(&[("PIXEL_REMOTE_BASE", "https://proxy.example/v1")]),
+        )
+        .unwrap();
+        assert_eq!(based.base, "https://proxy.example/v1");
+    }
+
+    #[test]
+    fn a_missing_key_fails_before_the_request_and_names_what_to_set() {
+        let error = resolve_config_from(Preset::Openrouter, None, Some(String::new()), env_of(&[]))
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "remote preset openrouter needs an API key: set OPENROUTER_API_KEY or run `pixel config remote-key openrouter -`"
+        );
+        let renamed = resolve_config_from(
+            Preset::Ollama,
+            None,
+            None,
+            env_of(&[("PIXEL_REMOTE_KEY_ENV", "MY_KEY")]),
+        )
+        .unwrap_err();
+        assert!(renamed.contains("set MY_KEY"), "{renamed}");
+        // A keyless preset, or a base the user pointed elsewhere, needs none.
+        assert!(resolve_config_from(Preset::Local, None, None, env_of(&[])).is_ok());
+        let proxied = resolve_config_from(
+            Preset::Openrouter,
+            None,
+            None,
+            env_of(&[("PIXEL_REMOTE_BASE", "http://localhost:4000/v1")]),
+        )
+        .unwrap();
+        assert_eq!(proxied.key, None);
+    }
+
+    #[test]
+    fn a_key_never_leaves_the_machine_over_cleartext_http() {
+        let with_base = |base: &str| {
+            resolve_config_from(
+                Preset::Openrouter,
+                None,
+                key(),
+                env_of(&[("PIXEL_REMOTE_BASE", base)]),
+            )
+        };
+        let error = with_base("http://llm.example.com/v1").unwrap_err();
+        assert!(error.contains("cleartext http"), "{error}");
+        assert!(with_base("https://llm.example.com/v1").is_ok());
+        assert!(with_base("http://127.0.0.1:8080/v1").is_ok());
+        let keyless = resolve_config_from(
+            Preset::Local,
+            None,
+            None,
+            env_of(&[("PIXEL_REMOTE_BASE", "http://llm.example.com/v1")]),
+        );
+        assert!(keyless.is_ok(), "no key, nothing to leak");
+    }
+
+    #[test]
+    fn only_plain_http_to_another_host_counts_as_clear_text() {
+        for base in [
+            "http://example.com",
+            "HTTP://example.com/v1",
+            "http://localhost.example.com/v1",
+            "http://localhost@example.com/v1",
+            "http://10.0.0.2:8080/v1",
+        ] {
+            assert!(sends_in_clear_text(base), "{base}");
+        }
+        for base in [
+            "https://example.com/v1",
+            "http://localhost:11434/v1",
+            "http://LOCALHOST/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://127.1.2.3/v1",
+            "http://[::1]:8080/v1",
+            "http://user@localhost/v1",
+            "ftp",
+        ] {
+            assert!(!sends_in_clear_text(base), "{base}");
+        }
+    }
+
+    #[test]
+    fn an_open_remote_reports_its_model_provider_and_nondeterminism() {
+        let config =
+            resolve_config_from(Preset::Ollama, Some("m1".into()), key(), env_of(&[])).unwrap();
+        let remote = Remote::open(config);
+        assert_eq!(remote.model_id(), "m1");
+        assert_eq!(remote.provider(), "ollama");
+        assert!(
+            !remote.deterministic(),
+            "verbalized probabilities are never deterministic"
+        );
+    }
+
+    /// A one-shot HTTP server on loopback: records the request head and
+    /// body, answers `reply` (or nothing, when `None`). Polls with a
+    /// deadline so a client that never connects fails instead of hanging.
+    fn http_once(reply: Option<String>) -> (String, std::thread::JoinHandle<(String, String)>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                let Ok((stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    head.push_str(&line);
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                match reply {
+                    Some(reply) => {
+                        let mut stream = stream;
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                            reply.len()
+                        )
+                        .unwrap();
+                    }
+                    // Hold the connection open past the client's timeout.
+                    None => std::thread::sleep(Duration::from_secs(2)),
+                }
+                return (head, String::from_utf8(body).unwrap());
+            }
+            (String::new(), String::new())
+        });
+        (base, server)
+    }
+
+    fn config_for(base: &str, key: Option<&str>) -> Config {
+        Config {
+            preset: Preset::Local,
+            base: base.to_string(),
+            model: "m".to_string(),
+            key: key.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn the_transport_posts_to_chat_completions_with_the_bearer_key() {
+        let reply = chat_with(r#"{"probs": {"a": 1}}"#).to_string();
+        let (base, server) = http_once(Some(reply.clone()));
+        let body = json!({"model": "m"});
+        let response = http_chat_within(
+            &config_for(&format!("{base}/"), Some("sekret")),
+            &body,
+            Duration::from_secs(5),
+            RESPONSE_CAP_BYTES,
+        )
+        .unwrap();
+        assert_eq!(response.to_string(), reply);
+        let (head, sent) = server.join().unwrap();
+        assert!(
+            head.starts_with("POST /v1/chat/completions HTTP/1.1"),
+            "{head}"
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("authorization: bearer sekret"),
+            "{head}"
+        );
+        assert_eq!(serde_json::from_str::<Value>(&sent).unwrap(), body);
+
+        let (base, server) = http_once(Some(reply));
+        http_chat_within(
+            &config_for(&base, None),
+            &body,
+            Duration::from_secs(5),
+            RESPONSE_CAP_BYTES,
+        )
+        .unwrap();
+        let (head, _) = server.join().unwrap();
+        assert!(
+            !head.to_ascii_lowercase().contains("authorization"),
+            "no key, no header: {head}"
+        );
+    }
+
+    #[test]
+    fn the_transport_is_bounded_in_bytes_and_in_time() {
+        let big = json!({"pad": "x".repeat(4096)}).to_string();
+        let (base, server) = http_once(Some(big.clone()));
+        let capped = http_chat_within(
+            &config_for(&base, None),
+            &json!({}),
+            Duration::from_secs(5),
+            1024,
+        );
+        assert!(capped.is_err(), "a reply over the cap fails the decision");
+        server.join().unwrap();
+        let (base, server) = http_once(Some(big));
+        assert!(
+            http_chat_within(
+                &config_for(&base, None),
+                &json!({}),
+                Duration::from_secs(5),
+                8192
+            )
+            .is_ok(),
+            "the same reply fits a larger cap"
+        );
+        server.join().unwrap();
+
+        let (base, server) = http_once(None);
+        let started = std::time::Instant::now();
+        let slow = http_chat_within(
+            &config_for(&base, None),
+            &json!({}),
+            Duration::from_millis(300),
+            8192,
+        );
+        assert!(slow.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn the_schema_names_every_label_and_nothing_else() {
+        let s = spec("t", "", &["yes", "no"], &[]);
+        let probs = &build_request("m", &s)["response_format"]["json_schema"]["schema"]["properties"]
+            ["probs"];
+        assert_eq!(probs["type"], "object");
+        assert_eq!(
+            probs["properties"],
+            json!({"yes": {"type": "number"}, "no": {"type": "number"}})
+        );
+        assert_eq!(probs["required"], json!(["yes", "no"]));
+        assert_eq!(probs["additionalProperties"], false);
+    }
+
+    #[test]
+    fn a_flat_reply_is_read_even_when_probs_is_one_of_the_labels() {
+        let s = spec("t", "", &["probs", "other"], &[]);
+        let flat = parse_probs(&chat_with(r#"{"probs": 0.4, "other": 0.6}"#), &s.labels).unwrap();
+        assert!((flat["probs"] - 0.4).abs() < 1e-9);
+        let nested = parse_probs(
+            &chat_with(r#"{"probs": {"probs": 0.3, "other": 0.7}}"#),
+            &s.labels,
+        )
+        .unwrap();
+        assert!(
+            (nested["other"] - 0.7).abs() < 1e-9,
+            "the envelope still wins"
+        );
+    }
+
+    #[test]
+    fn finite_values_whose_sum_overflows_are_rejected() {
+        let s = spec("t", "", &["a", "b"], &[]);
+        let e = parse_probs(&chat_with(r#"{"a": 1e308, "b": 1e308}"#), &s.labels).unwrap_err();
+        assert!(e.contains("finite positive"), "{e}");
     }
 
     #[test]
