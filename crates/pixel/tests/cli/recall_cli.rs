@@ -176,6 +176,63 @@ fn search_names_a_failing_recall_daemon_then_answers_in_process() {
     let _ = std::fs::remove_file(pixel_daemon::daemon::socket_path(&recall_dir));
 }
 
+/// A slow `recall` line in `actions.jsonl` must say where its seconds went:
+/// the catch-up and model load (`open_ms`), the query (`handle_ms`), or the
+/// daemon's round trip. The search catches up in process before asking the
+/// daemon, so its daemon step still carries `open_ms`.
+#[test]
+fn recall_commands_record_how_they_were_served_in_the_action_log() {
+    let corpus = Corpus::new("serve-steps");
+    corpus.stdout(&["recall", "search", "streamed needle"]);
+    corpus.stdout(&["recall", "ask", "streamed needle", "--lexical-only"]);
+    corpus.stdout(&["recall", "context", "streamed needle", "--lexical-only"]);
+    let recall_dir = corpus.home.join("recall");
+    let server = fake_recall_daemon(
+        &recall_dir,
+        pixel_daemon::Response::success("recall", serde_json::json!({"text": "from daemon\n"})),
+    );
+    let served = corpus.stdout(&["recall", "search", "streamed needle"]);
+    server.join().unwrap();
+    let _ = std::fs::remove_file(pixel_daemon::daemon::socket_path(&recall_dir));
+    assert_eq!(served, "from daemon\n");
+
+    let log = std::fs::read_to_string(corpus.home.join(".pixel/actions.jsonl")).unwrap();
+    // The fixture's own `recall index` is logged first; it routes nothing.
+    let steps: Vec<Value> = log
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| event["args"] != "recall index --source claude")
+        .map(|event| {
+            let serve = event["serve"]
+                .as_array()
+                .unwrap_or_else(|| panic!("serve steps: {event}"))
+                .clone();
+            assert_eq!(serve.len(), 1, "{event}");
+            serve[0].clone()
+        })
+        .collect();
+    assert_eq!(steps.len(), 4, "{log}");
+    for (step, reason) in steps[..3]
+        .iter()
+        .zip(["daemon_absent", "daemon_absent", "not_routed"])
+    {
+        assert_eq!(step["route"], "in_process", "{step}");
+        assert_eq!(step["reason"], reason, "{step}");
+        assert!(
+            step["open_ms"].is_u64() && step["handle_ms"].is_u64(),
+            "{step}"
+        );
+    }
+    assert!(steps[0]["probe_ms"].is_u64(), "{}", steps[0]);
+    let daemon = &steps[3];
+    assert_eq!(daemon["route"], "daemon", "{daemon}");
+    assert!(
+        daemon["request_ms"].is_u64() && daemon["open_ms"].is_u64(),
+        "{daemon}"
+    );
+    assert!(daemon.get("handle_ms").is_none(), "{daemon}");
+}
+
 /// `recall show --json` is a machine document and travels under the global
 /// stdout cap: at `PIXEL_OUTPUT_CAP_BYTES=4096` a 16 KiB turn must come out
 /// capped, still one JSON object, and marked `truncated` instead of dumping

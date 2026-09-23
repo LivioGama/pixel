@@ -1,6 +1,7 @@
 //! `gitpixel recall` — machine-wide transcript retrieval commands.
 
 use clap::Subcommand;
+use pixel_actionlog::{InProcessReason, ServeRoute, ServeStep};
 use pixel_recall::ingest::{ingest_recent, ingest_source};
 use pixel_recall::model::format_ms;
 use pixel_recall::search::{SearchFilters, search};
@@ -377,6 +378,38 @@ fn try_recall_daemon(
     Ok(Some(resp.into_data()))
 }
 
+/// Ask the recall daemon for `action`, and say how the request was served.
+fn routed_to_recall_daemon(
+    action: &str,
+    params: serde_json::Value,
+) -> (Result<Option<serde_json::Value>, String>, ServeStep) {
+    let (routed, ms) = crate::serve_trace::timed(|| {
+        try_recall_daemon(&pixel_recall::recall_dir(), action, params)
+    });
+    let step = recall_route_step(&routed, ms);
+    (routed, step)
+}
+
+/// The step of a recall request that took `ms` to reach, or miss, the
+/// daemon. A daemon that is absent only cost the probe; one that answered,
+/// even with an error, cost the round trip.
+fn recall_route_step(routed: &Result<Option<serde_json::Value>, String>, ms: u64) -> ServeStep {
+    match routed {
+        Ok(Some(_)) => ServeStep {
+            request_ms: Some(ms),
+            ..ServeStep::new(ServeRoute::Daemon)
+        },
+        Ok(None) => ServeStep {
+            probe_ms: Some(ms),
+            ..ServeStep::in_process(InProcessReason::DaemonAbsent)
+        },
+        Err(_) => ServeStep {
+            request_ms: Some(ms),
+            ..ServeStep::in_process(InProcessReason::DaemonError)
+        },
+    }
+}
+
 fn print_daemon_result(data: &serde_json::Value, json: bool) {
     if json {
         println!("{}", data.get("json").unwrap_or(&serde_json::Value::Null));
@@ -406,6 +439,8 @@ fn run_context(
     if !(100..=200_000).contains(&budget) {
         return Err("--budget must be between 100 and 200000 tokens".to_string());
     }
+    let opening = std::time::Instant::now();
+    let mut step = ServeStep::in_process(InProcessReason::NotRouted);
     let mut store = open_store()?;
     let mut segments = SegmentSet::open(&pixel_recall::segments_dir())?;
     let written = lazy_catch_up(&mut store);
@@ -426,8 +461,13 @@ fn run_context(
     };
     let embedder: Option<&mut (dyn pixel_recall::embed::Embedder + 'static)> =
         embedder_slot.as_deref_mut();
-    let result =
-        pixel_recall::ask::ask(&store, &segments, &vectors, embedder, query, &filters, 10)?;
+    step.open_ms = Some(crate::serve_trace::millis_since(opening));
+    let (result, handle_ms) = crate::serve_trace::timed(|| {
+        pixel_recall::ask::ask(&store, &segments, &vectors, embedder, query, &filters, 10)
+    });
+    step.handle_ms = Some(handle_ms);
+    crate::serve_trace::record(step);
+    let result = result?;
 
     // Greedy layered packing: L0 headers always; L1 snippets; L2 full turns.
     let mut out = String::new();
@@ -563,15 +603,16 @@ fn run_ask(
         session_id: None,
     };
     // The daemon keeps the model warm — ask is much faster through it.
-    match try_recall_daemon(
-        &pixel_recall::recall_dir(),
+    let (routed, mut step) = routed_to_recall_daemon(
         "ask",
         json!({
             "query": query, "k": k, "lexical_only": lexical_only,
             "filters": filters,
         }),
-    ) {
+    );
+    match routed {
         Ok(Some(data)) => {
+            crate::serve_trace::record(step);
             print_daemon_result(&data, json);
             return Ok(());
         }
@@ -579,6 +620,7 @@ fn run_ask(
         Err(e) => eprintln!("recall daemon: {e} — running in-process instead"),
     }
 
+    let opening = std::time::Instant::now();
     let written = lazy_catch_up(&mut store);
     index_after_catch_up(&store, &mut segments, written)?;
     let mut embedder_slot = if lexical_only {
@@ -588,8 +630,14 @@ fn run_ask(
     };
     let embedder: Option<&mut (dyn pixel_recall::embed::Embedder + 'static)> =
         embedder_slot.as_deref_mut();
+    step.open_ms = Some(crate::serve_trace::millis_since(opening));
 
-    let result = pixel_recall::ask::ask(&store, &segments, &vectors, embedder, query, &filters, k)?;
+    let (result, handle_ms) = crate::serve_trace::timed(|| {
+        pixel_recall::ask::ask(&store, &segments, &vectors, embedder, query, &filters, k)
+    });
+    step.handle_ms = Some(handle_ms);
+    crate::serve_trace::record(step);
+    let result = result?;
     if json {
         let out = json!({
             "groups": result.groups.iter().map(|g| json!({
@@ -944,10 +992,12 @@ fn run_search(
     {
         return Err("--role must be user, assistant, or tool".to_string());
     }
+    let opening = std::time::Instant::now();
     let mut store = open_store()?;
     let mut segments = SegmentSet::open(&pixel_recall::segments_dir())?;
     let written = lazy_catch_up(&mut store);
     index_after_catch_up(&store, &mut segments, written)?;
+    let open_ms = crate::serve_trace::millis_since(opening);
     let now = now_ms();
     // Resolve --session after the catch-up: a cold store must not fail a
     // session ref that exists on disk but was never ingested.
@@ -964,22 +1014,30 @@ fn run_search(
         human_only,
         session_id,
     };
-    match try_recall_daemon(
-        &pixel_recall::recall_dir(),
+    // The catch-up above runs in this process whichever route answers.
+    let (routed, mut step) = routed_to_recall_daemon(
         "search",
         json!({
             "pattern": pattern, "word": word, "limit": limit, "offset": offset,
             "filters": filters,
         }),
-    ) {
+    );
+    step.open_ms = Some(open_ms);
+    match routed {
         Ok(Some(data)) => {
+            crate::serve_trace::record(step);
             print_daemon_result(&data, json);
             return Ok(());
         }
         Ok(None) => {}
         Err(e) => eprintln!("recall daemon: {e} — running in-process instead"),
     }
-    let result = search(&store, &segments, pattern, word, &filters, offset, limit)?;
+    let (result, handle_ms) = crate::serve_trace::timed(|| {
+        search(&store, &segments, pattern, word, &filters, offset, limit)
+    });
+    step.handle_ms = Some(handle_ms);
+    crate::serve_trace::record(step);
+    let result = result?;
     if json {
         let out = json!({
             "hits": result.hits.iter().map(|h| json!({
@@ -1657,6 +1715,52 @@ mod tests {
                 }
             }
         })
+    }
+
+    /// Each recall outcome is logged under its own route and phase: an
+    /// absent daemon cost a probe, an answer — even an error — a round trip.
+    #[test]
+    fn recall_route_step_names_the_route_and_times_the_right_phase() {
+        let served = recall_route_step(&Ok(Some(json!({}))), 7);
+        assert_eq!(
+            (
+                served.route,
+                served.reason,
+                served.request_ms,
+                served.probe_ms
+            ),
+            (ServeRoute::Daemon, None, Some(7), None)
+        );
+        let absent = recall_route_step(&Ok(None), 3);
+        assert_eq!(
+            (
+                absent.route,
+                absent.reason,
+                absent.request_ms,
+                absent.probe_ms
+            ),
+            (
+                ServeRoute::InProcess,
+                Some(InProcessReason::DaemonAbsent),
+                None,
+                Some(3)
+            )
+        );
+        let failed = recall_route_step(&Err("corrupt vectors".into()), 9);
+        assert_eq!(
+            (
+                failed.route,
+                failed.reason,
+                failed.request_ms,
+                failed.probe_ms
+            ),
+            (
+                ServeRoute::InProcess,
+                Some(InProcessReason::DaemonError),
+                Some(9),
+                None
+            )
+        );
     }
 
     /// No recall daemon listening: the daemon path declines with no error, so
