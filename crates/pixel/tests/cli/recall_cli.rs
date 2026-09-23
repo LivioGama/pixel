@@ -223,13 +223,14 @@ fn recall_commands_record_how_they_were_served_in_the_action_log() {
             "{step}"
         );
     }
+    // No daemon: the ping was paid, no request was sent.
     assert!(steps[0]["probe_ms"].is_u64(), "{}", steps[0]);
+    assert!(steps[0].get("request_ms").is_none(), "{}", steps[0]);
     let daemon = &steps[3];
     assert_eq!(daemon["route"], "daemon", "{daemon}");
-    assert!(
-        daemon["request_ms"].is_u64() && daemon["open_ms"].is_u64(),
-        "{daemon}"
-    );
+    for phase in ["probe_ms", "request_ms", "open_ms"] {
+        assert!(daemon[phase].is_u64(), "{phase}: {daemon}");
+    }
     assert!(daemon.get("handle_ms").is_none(), "{daemon}");
 }
 

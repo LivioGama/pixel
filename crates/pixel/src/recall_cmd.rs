@@ -344,26 +344,13 @@ fn run_daemon_cmd(cmd: RecallDaemonCmd) -> Result<(), String> {
     }
 }
 
-/// Daemon-first execution for the hot recall ops.
-///
-/// `Ok(None)` = no recall daemon is listening, so the caller takes the
-/// in-process path. `Err` = a daemon answered with a failure envelope, which
-/// the caller names before falling back: a daemon whose vectors are corrupt
-/// or whose model is incompatible is otherwise indistinguishable from "no
-/// daemon", and its work (the model load included) is silently redone.
-///
-/// Only the recall daemon serves `Recall` (`pixel recall daemon start
-/// --foreground`); a repository `Service` answers `Ping` and rejects it. The
-/// probe decides whether to ask at all, and never starts a daemon: `root` is
-/// a parameter rather than `recall_dir()` so tests can drive a fake socket.
-fn try_recall_daemon(
+/// The request half of [`routed_to_recall_daemon_at`], for a daemon that
+/// answered the ping: `Ok(None)` when it cannot serve this protocol after all.
+fn ask_recall_daemon(
     root: &std::path::Path,
     action: &str,
     params: serde_json::Value,
 ) -> Result<Option<serde_json::Value>, String> {
-    if !pixel_daemon::daemon::ping_only(root) {
-        return Ok(None);
-    }
     let req = pixel_daemon::api::Request::Recall {
         action: action.to_string(),
         params,
@@ -383,31 +370,56 @@ fn routed_to_recall_daemon(
     action: &str,
     params: serde_json::Value,
 ) -> (Result<Option<serde_json::Value>, String>, ServeStep) {
-    let (routed, ms) = crate::serve_trace::timed(|| {
-        try_recall_daemon(&pixel_recall::recall_dir(), action, params)
-    });
-    let step = recall_route_step(&routed, ms);
+    routed_to_recall_daemon_at(&pixel_recall::recall_dir(), action, params)
+}
+
+/// Daemon-first execution for the hot recall ops.
+///
+/// `Ok(None)` = no recall daemon is listening, so the caller takes the
+/// in-process path. `Err` = a daemon answered with a failure envelope, which
+/// the caller names before falling back: a daemon whose vectors are corrupt
+/// or whose model is incompatible is otherwise indistinguishable from "no
+/// daemon", and its work (the model load included) is silently redone.
+///
+/// Only the recall daemon serves `Recall` (`pixel recall daemon start
+/// --foreground`); a repository `Service` answers `Ping` and rejects it. The
+/// probe decides whether to ask at all, and never starts a daemon: `root` is
+/// a parameter rather than `recall_dir()` so tests can drive a fake socket.
+///
+/// The ping and the request are timed apart, so a slow probe never reads as
+/// a slow answer.
+fn routed_to_recall_daemon_at(
+    root: &std::path::Path,
+    action: &str,
+    params: serde_json::Value,
+) -> (Result<Option<serde_json::Value>, String>, ServeStep) {
+    let (reachable, probe_ms) = crate::serve_trace::timed(|| pixel_daemon::daemon::ping_only(root));
+    let (routed, request_ms) = if reachable {
+        let (routed, ms) = crate::serve_trace::timed(|| ask_recall_daemon(root, action, params));
+        (routed, Some(ms))
+    } else {
+        (Ok(None), None)
+    };
+    let step = recall_route_step(&routed, probe_ms, request_ms);
     (routed, step)
 }
 
-/// The step of a recall request that took `ms` to reach, or miss, the
-/// daemon. A daemon that is absent only cost the probe; one that answered,
-/// even with an error, cost the round trip.
-fn recall_route_step(routed: &Result<Option<serde_json::Value>, String>, ms: u64) -> ServeStep {
-    match routed {
-        Ok(Some(_)) => ServeStep {
-            request_ms: Some(ms),
-            ..ServeStep::new(ServeRoute::Daemon)
-        },
-        Ok(None) => ServeStep {
-            probe_ms: Some(ms),
-            ..ServeStep::in_process(InProcessReason::DaemonAbsent)
-        },
-        Err(_) => ServeStep {
-            request_ms: Some(ms),
-            ..ServeStep::in_process(InProcessReason::DaemonError)
-        },
-    }
+/// The step of a recall request whose ping took `probe_ms` and whose
+/// request, when one was sent, took `request_ms`: served by the daemon, or
+/// back in process because none answered or it answered with an error.
+fn recall_route_step(
+    routed: &Result<Option<serde_json::Value>, String>,
+    probe_ms: u64,
+    request_ms: Option<u64>,
+) -> ServeStep {
+    let mut step = match routed {
+        Ok(Some(_)) => ServeStep::new(ServeRoute::Daemon),
+        Ok(None) => ServeStep::in_process(InProcessReason::DaemonAbsent),
+        Err(_) => ServeStep::in_process(InProcessReason::DaemonError),
+    };
+    step.probe_ms = Some(probe_ms);
+    step.request_ms = request_ms;
+    step
 }
 
 fn print_daemon_result(data: &serde_json::Value, json: bool) {
@@ -589,9 +601,11 @@ fn run_ask(
     if k == 0 || k > 50 {
         return Err("--k must be between 1 and 50".to_string());
     }
+    let opening = std::time::Instant::now();
     let mut store = open_store()?;
     let mut segments = SegmentSet::open(&pixel_recall::segments_dir())?;
     let vectors = pixel_recall::vector::VectorStore::open(&pixel_recall::vectors_dir())?;
+    let opened_ms = crate::serve_trace::millis_since(opening);
     let now = now_ms();
     let filters = SearchFilters {
         agent,
@@ -610,6 +624,7 @@ fn run_ask(
             "filters": filters,
         }),
     );
+    step.open_ms = Some(opened_ms);
     match routed {
         Ok(Some(data)) => {
             crate::serve_trace::record(step);
@@ -620,9 +635,17 @@ fn run_ask(
         Err(e) => eprintln!("recall daemon: {e} — running in-process instead"),
     }
 
-    let opening = std::time::Instant::now();
+    // The in-process opening resumes after the daemon wait, never counting it.
+    let resumed = std::time::Instant::now();
     let written = lazy_catch_up(&mut store);
-    index_after_catch_up(&store, &mut segments, written)?;
+    let indexed = index_after_catch_up(&store, &mut segments, written);
+    step.open_ms = Some(opened_ms.saturating_add(crate::serve_trace::millis_since(resumed)));
+    if let Err(error) = indexed {
+        // The route is known by now: keep it on the line even though the
+        // command fails.
+        crate::serve_trace::record(step);
+        return Err(error);
+    }
     let mut embedder_slot = if lexical_only {
         None
     } else {
@@ -630,7 +653,7 @@ fn run_ask(
     };
     let embedder: Option<&mut (dyn pixel_recall::embed::Embedder + 'static)> =
         embedder_slot.as_deref_mut();
-    step.open_ms = Some(crate::serve_trace::millis_since(opening));
+    step.open_ms = Some(opened_ms.saturating_add(crate::serve_trace::millis_since(resumed)));
 
     let (result, handle_ms) = crate::serve_trace::timed(|| {
         pixel_recall::ask::ask(&store, &segments, &vectors, embedder, query, &filters, k)
@@ -1721,44 +1744,44 @@ mod tests {
     /// absent daemon cost a probe, an answer — even an error — a round trip.
     #[test]
     fn recall_route_step_names_the_route_and_times_the_right_phase() {
-        let served = recall_route_step(&Ok(Some(json!({}))), 7);
+        let served = recall_route_step(&Ok(Some(json!({}))), 2, Some(7));
         assert_eq!(
             (
                 served.route,
                 served.reason,
-                served.request_ms,
-                served.probe_ms
+                served.probe_ms,
+                served.request_ms
             ),
-            (ServeRoute::Daemon, None, Some(7), None)
+            (ServeRoute::Daemon, None, Some(2), Some(7))
         );
-        let absent = recall_route_step(&Ok(None), 3);
+        let absent = recall_route_step(&Ok(None), 3, None);
         assert_eq!(
             (
                 absent.route,
                 absent.reason,
-                absent.request_ms,
-                absent.probe_ms
+                absent.probe_ms,
+                absent.request_ms
             ),
             (
                 ServeRoute::InProcess,
                 Some(InProcessReason::DaemonAbsent),
-                None,
-                Some(3)
+                Some(3),
+                None
             )
         );
-        let failed = recall_route_step(&Err("corrupt vectors".into()), 9);
+        let failed = recall_route_step(&Err("corrupt vectors".into()), 4, Some(9));
         assert_eq!(
             (
                 failed.route,
                 failed.reason,
-                failed.request_ms,
-                failed.probe_ms
+                failed.probe_ms,
+                failed.request_ms
             ),
             (
                 ServeRoute::InProcess,
                 Some(InProcessReason::DaemonError),
-                Some(9),
-                None
+                Some(4),
+                Some(9)
             )
         );
     }
@@ -1768,9 +1791,13 @@ mod tests {
     #[test]
     fn recall_daemon_path_declines_when_no_daemon_listens() {
         let root = scratch_root("no-daemon");
-        assert_eq!(
-            try_recall_daemon(&root, "search", json!({"pattern": "needle"})),
-            Ok(None)
+        let (routed, step) =
+            routed_to_recall_daemon_at(&root, "search", json!({"pattern": "needle"}));
+        assert_eq!(routed, Ok(None));
+        assert_eq!(step.reason, Some(InProcessReason::DaemonAbsent));
+        assert!(
+            step.probe_ms.is_some() && step.request_ms.is_none(),
+            "{step:?}"
         );
     }
 
@@ -1785,9 +1812,16 @@ mod tests {
                 json!({"json": {"hits": []}, "text": "no matches"}),
             ),
         );
+        let (routed, step) =
+            routed_to_recall_daemon_at(&root, "search", json!({"pattern": "needle"}));
         assert_eq!(
-            try_recall_daemon(&root, "search", json!({"pattern": "needle"})),
+            routed,
             Ok(Some(json!({"json": {"hits": []}, "text": "no matches"})))
+        );
+        assert_eq!(step.route, ServeRoute::Daemon);
+        assert!(
+            step.probe_ms.is_some() && step.request_ms.is_some(),
+            "{step:?}"
         );
         server.join().unwrap();
         let _ = std::fs::remove_file(pixel_daemon::daemon::socket_path(&root));
@@ -1802,7 +1836,9 @@ mod tests {
             &root,
             pixel_daemon::api::failure_response("recall", "vector store is corrupt"),
         );
-        let err = try_recall_daemon(&root, "ask", json!({"query": "needle"})).unwrap_err();
+        let (routed, step) = routed_to_recall_daemon_at(&root, "ask", json!({"query": "needle"}));
+        let err = routed.unwrap_err();
+        assert_eq!(step.reason, Some(InProcessReason::DaemonError));
         assert!(err.contains("vector store is corrupt"), "{err}");
         server.join().unwrap();
         let _ = std::fs::remove_file(pixel_daemon::daemon::socket_path(&root));
