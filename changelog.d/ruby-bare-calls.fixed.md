@@ -1,1 +1,0 @@
-**graph:** Ruby calls written without receiver or parentheses (`target`, or the receiver of `target.to_set`) are now call edges, so `pixel impact` lists those callers instead of missing them silently; a name Ruby already knows as a local (assignment, parameter, block, `for` or `rescue` variable, pattern binding) still calls nothing.

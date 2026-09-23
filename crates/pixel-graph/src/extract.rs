@@ -1432,7 +1432,8 @@ fn ruby_identifier_role(parent: &str, field: Option<&str>) -> RubyIdent {
         )
         | ("for", Some("pattern"))
         | ("exception_variable" | "array_pattern" | "find_pattern" | "as_pattern", _)
-        | ("in_clause", Some("pattern"))
+        | ("in_clause" | "match_pattern" | "test_pattern", Some("pattern"))
+        | ("parenthesized_pattern", _)
         | ("keyword_pattern", Some("value")) => RubyIdent::Binding,
         ("method" | "singleton_method", Some("name" | "object"))
         | ("call", Some("method"))
@@ -1592,6 +1593,14 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
         "keyword_pattern" if node.child_by_field_name("value").is_none() => {
             if let Some(key) = field_text(w, node, "key") {
                 locals.bind(key);
+            }
+        }
+        // `render(target:)` and `{ target: }` read `target` like a bare name.
+        "pair" if node.child_by_field_name("value").is_none() => {
+            if let Some(key) = field_text(w, node, "key")
+                && !locals.is_local(&key)
+            {
+                w.push_call(key, None, node);
             }
         }
         _ => {}
@@ -2614,6 +2623,65 @@ end
                 "Svc",
             ],
             "only the reads no visible assignment precedes are calls"
+        );
+    }
+
+    #[test]
+    fn ruby_standalone_pattern_should_bind_its_names_like_a_case_in() {
+        // `v => target`, `v in target` and `in (target)` bind `target`: the
+        // pattern itself is no call, and neither is any later read.
+        let source = [
+            "class Svc",
+            "  def rightward(v)",
+            "    v => target",
+            "    target",
+            "  end",
+            "  def boolean(v)",
+            "    v in target",
+            "    target",
+            "  end",
+            "  def parenthesized(v)",
+            "    case v",
+            "    in (target) then target",
+            "    end",
+            "  end",
+            "  def target",
+            "  end",
+            "end",
+        ]
+        .join("\n");
+        assert_eq!(ruby_callers_of(&source, "target"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn ruby_hash_shorthand_should_call_the_method_unless_a_local_has_that_name() {
+        // Ruby 3.1 `render(target:)` is `render(target: target)`: a method call
+        // when no local `target` exists, a local read otherwise. A key with a
+        // value (`other: 1`) is only a key.
+        let source = [
+            "class Svc",
+            "  def as_argument",
+            "    render(target:, other: 1)",
+            "  end",
+            "  def as_literal",
+            "    { target: }",
+            "  end",
+            "  def shadowed(target)",
+            "    render(target:)",
+            "  end",
+            "  def target",
+            "  end",
+            "end",
+        ]
+        .join("\n");
+        assert_eq!(
+            ruby_callers_of(&source, "target"),
+            ["Svc#as_argument", "Svc#as_literal"]
+        );
+        assert_eq!(
+            ruby_callers_of(&source, "other"),
+            Vec::<String>::new(),
+            "a key written with its value calls nothing"
         );
     }
 
