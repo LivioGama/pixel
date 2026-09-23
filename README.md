@@ -26,14 +26,14 @@ task → scope-task → find-code → impact → edit → what-changed → revie
 
 ## 💡 See the difference
 
-The same repository questions, shown as realistic terminal work. These are workflow illustrations using actual Pixel command names and local output excerpts—not performance benchmarks.
+Six jobs every coding agent does — shown without Pixel (top rail) and with it
+(bottom rail). The `.pixel/` index is built once, then every session reuses it.
 
-<p align="center">
-  <img src="docs/examples/01-resolve-impact.svg" width="100%" alt="Comparing manual discovery with Pixel resolve and impact" />
-  <img src="docs/examples/02-task-map.svg" width="100%" alt="Comparing unguided exploration with Pixel targets" />
-  <img src="docs/examples/03-review-changes.svg" width="100%" alt="Comparing manual change review with Pixel changes" />
-  <img src="docs/examples/04-history-recovery.svg" width="100%" alt="Comparing manual history searching with Pixel history search" />
-</p>
+| | |
+| --- | --- |
+| **Scope before reading** — `scope-task` returns a closed P0/P1/P2 file list instead of the agent wandering the repo.<br/><img src="docs/examples/pixel-scope-comparison.gif" width="100%" alt="Scope comparison" /> | **Retrieval that measures itself** — skeleton/context commands replace whole-file reads; `token-savings` reports the real number.<br/><img src="docs/examples/pixel-measured-comparison.gif" width="100%" alt="Measured savings comparison" /> |
+| **Impact before edit** — `pixel impact` lists every caller before the agent touches a symbol.<br/><img src="docs/examples/pixel-impact-comparison.gif" width="100%" alt="Impact comparison" /> | **Search stays transparent** — `rg`/`grep` get rewritten to `search-content` by the hook; same command, indexed answer.<br/><img src="docs/examples/pixel-rewrite-comparison.gif" width="100%" alt="Rewrite comparison" /> |
+| **Rescue as a plan** — `plan-rollback` flags the likely-breaking commit and a last-known-good, never resets.<br/><img src="docs/examples/pixel-rollback-comparison.gif" width="100%" alt="Rollback comparison" /> | **Publish without footguns** — `review-changes` → `repo-state` → leased `commit-and-push`; crash-safe and idempotent.<br/><img src="docs/examples/pixel-publish-comparison.gif" width="100%" alt="Publish comparison" /> |
 
 ## 📉 Token savings — measured, no second model
 
@@ -49,10 +49,6 @@ Replicating shunt's benchmark shape on this repo (138K lines, Rust), same method
 | Code-write context | 5,289 | 48,978 tok | 1,910 tok | 96.1% |
 
 Unlike shunt's headline number, Pixel also self-reports **measured** savings from real sessions via `pixel token-savings` — on this machine: **41–83%** across 798 recorded operations. Same caveat as every tool in this space: these numbers measure what the agent reads, not your invoice — verify against your own usage.
-
-<p align="center">
-  <img src="docs/examples/pixel-measured-comparison.gif" width="100%" alt="Without Pixel: blind reads and claimed savings; with Pixel: a git-anchored index and measured token savings" />
-</p>
 
 ## 🚀 Start here
 
