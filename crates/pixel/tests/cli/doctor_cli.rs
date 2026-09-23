@@ -37,7 +37,10 @@ fn doctor_should_exit_1_with_the_fix_when_a_check_is_red() {
         text.contains("  [red] install.agent-prompt: agent-prompt.md not deployed"),
         "{text}"
     );
-    assert!(text.contains("    fix: pixel install\n"), "{text}");
+    assert!(
+        text.contains("    fix: pixel install --shell zsh\n"),
+        "{text}"
+    );
     assert!(
         !text.contains("[green]"),
         "green checks stay in the tally: {text}"
@@ -59,7 +62,8 @@ fn doctor_json_should_keep_the_exit_code_and_carry_the_fix() {
     assert!(find("install.pi-prompt").is_none(), "--skip left it out");
     assert_eq!(
         find("install.agent-prompt").unwrap()["fix"],
-        "pixel install"
+        "pixel install --shell zsh",
+        "the home install reads the profile of the shell the check read"
     );
     // The repo checks judge the path given on the command line, and their
     // fix names it.
@@ -190,4 +194,122 @@ fn a_stale_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
     assert!(!stderr.contains("note: agent-prompt.md"), "{stderr}");
     let text = String::from_utf8_lossy(&report.stdout).into_owned();
     assert!(text.contains("agent-prompt.md is stale"), "{text}");
+}
+
+/// `doctor` with `XDG_CONFIG_HOME` removed, so the `pixel install` a `--fix`
+/// runs writes nothing outside the scratch home.
+fn doctor_fixing(home: &Path, repo: &Path, args: &[&str]) -> Output {
+    pixel_command()
+        .arg("doctor")
+        .arg(repo)
+        .args(["--shell", "zsh"])
+        .args(args)
+        .env("HOME", home)
+        .env("CODEX_HOME", home.join(".codex"))
+        .env_remove("XDG_CONFIG_HOME")
+        .env("PIXEL_METRICS", "0")
+        .output()
+        .unwrap()
+}
+
+/// The reason `--fix` exists: two checks share `pixel install`, which runs
+/// once, with the `--shell` the checks read, and the verdict and exit code
+/// come from the checks re-run afterwards, not from the first pass.
+#[test]
+fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
+    let (home, repo) = fixture("fix");
+    let only = [
+        "--only",
+        "install.agent-prompt",
+        "--only",
+        "install.pi-prompt",
+    ];
+    let before = doctor_fixing(&home, &repo, &only);
+    assert_eq!(before.status.code(), Some(1), "{before:?}");
+    let text = String::from_utf8(before.stdout).unwrap();
+    assert!(
+        text.ends_with("rerun with `--fix` to apply the 1 repair command(s) above\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("    fix: pixel install --shell zsh\n"),
+        "{text}"
+    );
+
+    let fixed = doctor_fixing(&home, &repo, &[only[0], only[1], only[2], only[3], "--fix"]);
+    assert_eq!(fixed.status.code(), Some(0), "{fixed:?}");
+    let text = String::from_utf8(fixed.stdout).unwrap();
+    assert_eq!(
+        text,
+        [
+            "pixel doctor --fix: ran 1 repair(s) — 1 fixed, 0 not converged, 0 failed",
+            "  [fixed] pixel install --shell zsh (install.agent-prompt, install.pi-prompt)",
+            "pixel doctor: ran 2 check(s), skipped 22 — 2 green, 0 yellow, 0 red",
+            "",
+        ]
+        .join("\n")
+    );
+    let stderr = String::from_utf8_lossy(&fixed.stderr);
+    assert_eq!(
+        stderr.matches("pixel doctor --fix: running ").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(home.join(".local/share/pixel/agent-prompt.md").is_file());
+}
+
+/// `--json` carries each repair's verdict beside the re-run report; a repair
+/// that fails is `failed` with the step's error, its check stays flagged, and
+/// the exit code still says unhealthy.
+#[test]
+fn doctor_fix_json_should_report_a_repair_that_failed() {
+    let (home, repo) = fixture("fix-json");
+    // `~/.claude` is a file: `pixel install` cannot write its settings.
+    std::fs::write(home.join(".claude"), "not a directory\n").unwrap();
+    let out = doctor_fixing(
+        &home,
+        &repo,
+        &["--only", "install.claude-hooks", "--fix", "--json"],
+    );
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let repairs = report["repairs"].as_array().expect("repairs");
+    assert_eq!(repairs.len(), 1, "{report}");
+    assert_eq!(repairs[0]["command"], "pixel install --shell zsh");
+    assert_eq!(repairs[0]["status"], "failed", "{report}");
+    assert!(
+        repairs[0]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("`pixel install --shell zsh` failed (exit status: "),
+        "{report}"
+    );
+    assert_eq!(
+        repairs[0]["still_flagged"],
+        serde_json::json!(["install.claude-hooks"])
+    );
+    assert_eq!(report["checks"][0]["status"], "red", "{report}");
+}
+
+/// Without `--fix` nothing runs and the JSON shape is unchanged.
+#[test]
+fn doctor_without_fix_should_leave_the_home_untouched() {
+    let (home, repo) = fixture("no-fix");
+    let out = doctor_fixing(&home, &repo, &["--only", "install.agent-prompt", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(report.get("repairs").is_none(), "{report}");
+    assert!(!home.join(".local/share/pixel/agent-prompt.md").exists());
+}
+
+#[test]
+fn doctor_fix_should_say_so_when_nothing_can_be_repaired_automatically() {
+    let (home, repo) = fixture("fix-none");
+    let out = doctor_fixing(&home, &repo, &["--only", "binary.path", "--fix"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.starts_with("pixel doctor --fix: nothing to repair automatically\n"),
+        "{text}"
+    );
 }

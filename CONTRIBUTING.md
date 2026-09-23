@@ -251,7 +251,7 @@ instead, and `--install-path <path>` overwrites a managed binary on purpose.
 pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-cli"
 pixel build-index --history .   # rebuild facts/history index
 pixel install             # redeploy the agent prompt, shell wrapper, Codex config
-pixel doctor . --fail-on yellow   # must exit 0; report any non-green check in the PR
+pixel doctor . --fix --fail-on yellow   # must exit 0; report any non-green check in the PR
 scripts/pixel-smoke-test.sh   # the installed binary end to end (read-only)
 ```
 

@@ -216,7 +216,7 @@ fn doctor_should_refuse_an_unknown_check_id_before_running_anything() {
 }
 
 /// The fix travels with the finding: a red install check names `pixel
-/// install`, a red repo check names its repository, a green check none.
+/// install --shell <shell>`, a red repo check names its repository, a green check none.
 #[test]
 fn doctor_should_attach_a_fix_to_failing_checks_only() {
     let dir = TempDir::new().unwrap();
@@ -239,7 +239,20 @@ fn doctor_should_attach_a_fix_to_failing_checks_only() {
     );
     let prompt = check(&report, "install.agent-prompt");
     assert_eq!(prompt.status, CheckStatus::Red);
-    assert_eq!(prompt.fix.as_deref(), Some("pixel install"));
+    // The shell the check read travels with the fix, and with the argv
+    // `--fix` runs, so the repair rewrites that same profile.
+    assert_eq!(
+        prompt.fix.as_deref(),
+        Some(format!("pixel install --shell {TEST_SHELL}").as_str())
+    );
+    assert_eq!(
+        prompt.repair,
+        Some(vec![vec![
+            "install".to_owned(),
+            "--shell".to_owned(),
+            TEST_SHELL.to_owned()
+        ]])
+    );
     let index = check(&report, "index.freshness");
     assert_eq!(index.status, CheckStatus::Red, "{index:?}");
     assert_eq!(

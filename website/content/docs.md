@@ -72,7 +72,7 @@ Then, whatever the channel:
 
 ```bash
 pixel install
-pixel doctor .
+pixel doctor . --fix   # runs each repair a flagged check names, then re-checks
 ```
 
 `pixel doctor .` reports the wiring as stale until you do, with the command that repairs each finding, and exits 1 while a check is red.
