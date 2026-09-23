@@ -4,11 +4,13 @@
 //!
 //! The contract is the native tool's bytes and exit status, with one
 //! deliberate divergence: `rg <pattern>` with no path. Native `rg` searches
-//! stdin when stdin is a pipe or a file, and the current directory
-//! otherwise. An agent's shell tool runs commands with a pipe on stdin that
-//! nothing writes to, so native `rg` blocks there until the call times out.
-//! The emulation never reads stdin: it always answers the current-directory
-//! search, which is what `rg` does when stdin has nothing to read. A hook
+//! stdin when stdin is a pipe or a regular file, even an empty one (an
+//! empty pipe gives no match and exit 1), and the current directory when
+//! stdin is a terminal or another device such as `/dev/null`. An agent's
+//! shell tool runs commands with a pipe on stdin that nothing writes to, so
+//! native `rg` blocks there until the call times out. The emulation never
+//! reads stdin: it always answers the current-directory search, which is
+//! what `rg` does with `/dev/null` on stdin. A hook
 //! sees only the command text, not the stdin it will run with, and
 //! [`shell_argv`] refuses pipes and redirections, so `echo x | rg needle`
 //! is never rewritten. When the emulation falls back, [`run`] executes the

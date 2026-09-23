@@ -474,8 +474,9 @@ fn run_with_piped_stdin(mut command: Command, input: &[u8]) -> Output {
 /// The one documented divergence (module docs of `search_compat`): with no
 /// path and a stdin that is a pipe, native `rg` searches stdin (and, in an
 /// agent's shell tool, blocks until the call times out), while the rewritten
-/// command searches the current directory, as native `rg` does when stdin
-/// has nothing to read. The emulation never reads stdin.
+/// command searches the current directory, as native `rg` does with
+/// `/dev/null` on stdin. The emulation never reads stdin, whether the pipe
+/// carries input or stays open with nothing written to it.
 #[test]
 fn implicit_rg_search_should_search_the_cwd_even_with_a_piped_stdin() {
     let fixture = Fixture::new(b"needle in the file\n");
@@ -492,9 +493,35 @@ fn implicit_rg_search_should_search_the_cwd_even_with_a_piped_stdin() {
     );
     assert_eq!(routed.status.code(), Some(0));
 
+    // An agent's shell tool: a pipe held open that nothing writes to. The
+    // rewrite answers without waiting for input; the deadline bounds a
+    // regression that would read stdin.
+    let mut open = fixture.command(PIXEL);
+    let mut child = open
+        .args(["search-like-rg", "rg", "--", "needle"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let held_stdin = child.stdin.take();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let finished = child.try_wait().unwrap().is_some();
+    if !finished {
+        let _ = child.kill();
+    }
+    drop(held_stdin);
+    let open = child.wait_with_output().unwrap();
+    assert!(finished, "the rewrite waited on an open stdin");
+    assert_eq!(open.stdout, routed.stdout);
+    assert_eq!(open.status.code(), Some(0));
+
     // The premise, where `rg` is installed (GitHub's runners have none):
     // native `rg` reads the pipe instead, and searches the cwd only when
-    // stdin is not readable, which `Command::output` gives it.
+    // stdin is not a pipe or a file: `Command::output` gives it `/dev/null`.
     if Command::new("rg").arg("--version").output().is_ok() {
         let mut native = fixture.command("rg");
         native.arg("needle");
