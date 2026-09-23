@@ -25,7 +25,10 @@ export type IconKind =
 	| 'hook'
 	| 'read'
 	| 'context'
-	| 'meter';
+	| 'meter'
+	| 'edit'
+	| 'break'
+	| 'shield';
 
 const TILE = 84;
 
@@ -62,6 +65,12 @@ export const Icon = ({kind, color}: {kind: IconKind; color: string}) => {
 			return (<g {...s}><rect x="18" y="16" width="28" height="34" rx="5"/><rect x="23" y="22" width="18" height="6" rx="2" fill={color} stroke="none"/><line x1="23" y1="34" x2="41" y2="34"/><line x1="23" y1="40" x2="35" y2="40"/></g>);
 		case 'meter':
 			return (<g {...s}><path d="M18 46 a15 15 0 0 1 28 0"/><line x1="32" y1="42" x2="42" y2="28"/><circle cx="32" cy="44" r="3.5" fill={color} stroke="none"/></g>);
+		case 'edit':
+			return (<g {...s}><path d="M40 14 l10 10 -22 22 -12 2 2 -12 z"/><line x1="35" y1="19" x2="45" y2="29"/></g>);
+		case 'break':
+			return (<g {...s}><path d="M26 22 l-8 8 8 8"/><path d="M38 22 l8 8 -8 8"/><line x1="34" y1="16" x2="30" y2="46"/></g>);
+		case 'shield':
+			return (<g {...s}><path d="M32 12 l18 7 v12 c0 12 -8 19 -18 23 -10 -4 -18 -11 -18 -23 v-12 z"/><path d="M25 32 l5 5 10 -10"/></g>);
 	}
 };
 
