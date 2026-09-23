@@ -11,30 +11,36 @@
     {{/* ---------- hero ---------- */}}
     {{ $s := hugo.Data.scope }}
     <section class="hero wrap">
-      <div class="hero__copy">
-        <h1 class="hero__title">Let your coding agent ask the repository instead of reading it.</h1>
+      <h1 class="hero__title">Let your coding agent ask the repository instead of reading it.</h1>
+      <div class="hero__row">
         <p class="hero__lede">Pixel is a local index of your code and its Git history. Agents get a ranked answer with its limits stated, not a pile of files to read, and every Git change goes through a crash-safe path.</p>
-        <div class="cmd cmd--hero">
-          <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
-          <button class="cmd__copy" type="button" data-copy="brew install LivioGama/tap/pixel">Copy</button>
+        <div class="hero__act">
+          <div class="cmd">
+            <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
+            <button class="cmd__copy" type="button" data-copy="brew install LivioGama/tap/pixel">Copy</button>
+          </div>
+          <p class="hero__links">
+            <a class="link" href="#install">Other ways to install</a>
+            <a class="link" href="{{ "docs/" | relURL }}">Read the docs</a>
+          </p>
         </div>
-        <p class="hero__links">
-          <a class="link" href="#install">Other ways to install</a>
-          <a class="link" href="{{ "docs/" | relURL }}">Read the docs</a>
-        </p>
       </div>
 
-      <figure class="scope" data-scope data-p0="{{ range $i, $f := $s.p0 }}{{ if $i }},{{ end }}{{ $f.at }}{{ end }}" data-p1="{{ delimit $s.p1 "," }}" data-files="{{ $s.files }}">
-        <div class="scope__cmd"><span aria-hidden="true">$</span> <code>pixel scope-task "{{ $s.task }}"</code></div>
-        <div class="scope__grid" aria-hidden="true"></div>
-        <ol class="scope__p0">
-          {{ range $s.p0 }}<li><code>{{ .path }}</code></li>{{ end }}
+      <figure class="board" data-board data-p1="{{ delimit $s.p1 "," }}" data-files="{{ $s.files }}">
+        <p class="board__cmd"><span class="board__prompt" aria-hidden="true">$</span><code>pixel scope-task "{{ $s.task }}"</code></p>
+        <div class="board__pads" aria-hidden="true"></div>
+        <svg class="board__traces" aria-hidden="true"></svg>
+        <ol class="board__files" aria-label="Files to start with">
+          {{ range $s.p0 }}
+          {{ $dir := path.Dir .path }}
+          <li data-at="{{ .at }}"><span class="board__file">{{ path.Base .path }}</span><span class="board__dir">{{ $dir }}/</span></li>
+          {{ end }}
         </ol>
-        <figcaption class="scope__caption">
-          <span class="scope__key scope__key--p0">{{ len $s.p0 }} files to start with</span>
-          <span class="scope__key scope__key--p1">{{ len $s.p1 }} likely needed</span>
-          <span class="scope__key scope__key--rest">{{ $s.files }} in the index, one square each</span>
-          <span class="scope__note">A real run on Pixel's own repository.</span>
+        <figcaption class="board__legend">
+          <span class="key key--p0">{{ len $s.p0 }} files to start with</span>
+          <span class="key key--p1">{{ len $s.p1 }} likely needed</span>
+          <span class="key key--pad">{{ $s.files }} indexed files, one pad each, in path order</span>
+          <span class="board__note">A real run on Pixel's own repository.</span>
         </figcaption>
       </figure>
     </section>
@@ -71,13 +77,13 @@
         <p>The agent prompt that <code>pixel install</code> deploys walks every change through the same steps. Only the edit is left to the agent's own tools.</p>
       </header>
       <ol class="flow">
-        <li class="flow__step"><code>scope-task</code><span>Which files to open first</span></li>
-        <li class="flow__step"><code>find-code</code><span>A phrase resolved to the exact symbol</span></li>
-        <li class="flow__step"><code>impact</code><span>Every caller that could break</span></li>
-        <li class="flow__step flow__step--agent"><code>edit</code><span>Your agent's own tools</span></li>
-        <li class="flow__step"><code>what-changed</code><span>The symbols the diff touches</span></li>
-        <li class="flow__step"><code>review-changes</code><span>Staged, unstaged and untracked, structured</span></li>
-        <li class="flow__step"><code>commit-and-push</code><span>Commit, then a leased push</span></li>
+        <li class="flow__step"><span class="flow__pad" aria-hidden="true"></span><code>scope-task</code><span>Which files to open first</span></li>
+        <li class="flow__step"><span class="flow__pad" aria-hidden="true"></span><code>find-code</code><span>A phrase resolved to the exact symbol</span></li>
+        <li class="flow__step"><span class="flow__pad" aria-hidden="true"></span><code>impact</code><span>Every caller that could break</span></li>
+        <li class="flow__step flow__step--agent"><span class="flow__pad" aria-hidden="true"></span><code>edit</code><span>Your agent's own tools</span></li>
+        <li class="flow__step"><span class="flow__pad" aria-hidden="true"></span><code>what-changed</code><span>The symbols the diff touches</span></li>
+        <li class="flow__step"><span class="flow__pad" aria-hidden="true"></span><code>review-changes</code><span>Staged, unstaged and untracked, structured</span></li>
+        <li class="flow__step flow__step--end"><span class="flow__pad" aria-hidden="true"></span><code>commit-and-push</code><span>Commit, then a leased push</span></li>
       </ol>
     </section>
 
@@ -149,39 +155,106 @@
   {{ partial "footer.html" . }}
 
   <script>
-    /* Hero: one square per indexed file; the run's P0 and P1 files light up
-       once, in rank order. Reduced motion gets the final state directly. */
+    /* Hero board: one pad per indexed file. Each P0 file gets a copper
+       trace from its pad to its label, routed down the gutter beside the
+       pad, then along its own lane, so no two traces cross. The traces
+       draw once on load; reduced motion gets the final state. */
     (function () {
-      var fig = document.querySelector('[data-scope]');
-      if (!fig) return;
-      var grid = fig.querySelector('.scope__grid');
-      var total = +fig.dataset.files;
-      var p0 = fig.dataset.p0.split(',').map(Number);
-      var p1 = fig.dataset.p1.split(',').map(Number);
+      var board = document.querySelector('[data-board]');
+      if (!board) return;
+      var padsEl = board.querySelector('.board__pads');
+      var svg = board.querySelector('.board__traces');
+      var list = board.querySelector('.board__files');
+      var NS = 'http://www.w3.org/2000/svg';
+      var total = +board.dataset.files;
+      var p1 = board.dataset.p1.split(',').map(Number);
+      var items = [].slice.call(list.children);
+      var p0 = items.map(function (li) { return +li.dataset.at; });
+      var pads = [];
       var frag = document.createDocumentFragment();
-      var cells = [];
       for (var i = 0; i < total; i++) {
         var c = document.createElement('span');
-        cells.push(c);
+        pads.push(c);
         frag.appendChild(c);
       }
-      grid.appendChild(frag);
-      var light = function () {
-        p1.forEach(function (n) { cells[n].className = 'is-p1'; });
-        p0.forEach(function (n) { cells[n].className = 'is-p0'; });
-        fig.classList.add('is-done');
-      };
-      if (matchMedia('(prefers-reduced-motion: reduce)').matches) return light();
-      fig.classList.add('is-scanning');
-      var order = p0.map(function (n) { return [n, 'is-p0']; })
-        .concat(p1.map(function (n) { return [n, 'is-p1']; }));
-      setTimeout(function () {
-        fig.classList.remove('is-scanning');
-        order.forEach(function (o, k) {
-          setTimeout(function () { cells[o[0]].className = o[1]; }, k * 70);
+      padsEl.appendChild(frag);
+      p1.forEach(function (n) { pads[n].className = 'is-p1'; });
+      p0.forEach(function (n) { pads[n].className = 'is-p0'; });
+
+      var still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      var routed = false;
+
+      var route = function () {
+        while (svg.firstChild) svg.removeChild(svg.firstChild);
+        var box = board.getBoundingClientRect();
+        svg.setAttribute('viewBox', '0 0 ' + box.width + ' ' + box.height);
+        if (getComputedStyle(svg).display === 'none') return;
+        var rel = function (el) {
+          var r = el.getBoundingClientRect();
+          return { l: r.left - box.left, r: r.right - box.left, t: r.top - box.top, b: r.bottom - box.top };
+        };
+        // Each trace leaves its pad through the gutter on the pad's right,
+        // or on its left when a pad in the same column took that gutter.
+        var used = {};
+        var runs = items.map(function (li) {
+          var p = rel(pads[+li.dataset.at]);
+          var gap = 1.5;
+          var gx = Math.round((p.r + gap) * 2) / 2;
+          if (used[Math.round(gx)]) gx = Math.round((p.l - gap) * 2) / 2;
+          used[Math.round(gx)] = true;
+          return { li: li, cx: (p.l + p.r) / 2, cy: (p.t + p.b) / 2, gx: gx };
         });
-        setTimeout(function () { fig.classList.add('is-done'); }, order.length * 70);
-      }, 1100);
+        // Labels take the gutters' left-to-right order, so traces keep it too.
+        runs.sort(function (a, b) { return a.gx - b.gx; });
+        runs.forEach(function (r) { list.appendChild(r.li); });
+        var gridBottom = rel(padsEl).b;
+        var labelTop = rel(list).t;
+        runs.forEach(function (r) {
+          var m = rel(r.li.querySelector('.board__file'));
+          r.lx = m.l + 4;
+          r.ly = m.t - 6;
+        });
+        // Leftward traces: the rightmost one takes the deepest lane; rightward, the reverse.
+        var left = runs.filter(function (r) { return r.lx <= r.gx; });
+        var right = runs.filter(function (r) { return r.lx > r.gx; }).reverse();
+        var lanes = left.concat(right);
+        var top = gridBottom + 14, bottom = labelTop - 18;
+        lanes.forEach(function (r, k) {
+          var y = top + (bottom - top) * (lanes.length === 1 ? 0.5 : k / (lanes.length - 1));
+          var dir = r.lx < r.gx ? -1 : 1;
+          var c = Math.min(8, Math.abs(r.lx - r.gx) / 2);
+          var d0 = Math.abs(r.gx - r.cx);
+          var d = ['M', r.cx, r.cy, 'L', r.gx, r.cy + d0,
+            'L', r.gx, y - c, 'L', r.gx + dir * c, y,
+            'L', r.lx - dir * c, y, 'L', r.lx, y + c,
+            'L', r.lx, r.ly].join(' ');
+          var path = document.createElementNS(NS, 'path');
+          path.setAttribute('d', d);
+          svg.appendChild(path);
+          var end = document.createElementNS(NS, 'rect');
+          end.setAttribute('x', r.lx - 3); end.setAttribute('y', r.ly - 3);
+          end.setAttribute('width', 6); end.setAttribute('height', 6);
+          svg.appendChild(end);
+          if (!routed && !still) {
+            var len = path.getTotalLength();
+            path.style.strokeDasharray = len;
+            path.style.strokeDashoffset = len;
+            path.style.animationDelay = (0.25 + k * 0.12) + 's';
+            end.style.animationDelay = (0.25 + k * 0.12 + 0.7) + 's';
+            r.li.style.animationDelay = (0.25 + k * 0.12 + 0.7) + 's';
+          }
+        });
+        if (!routed && !still) board.classList.add('is-drawing');
+        routed = true;
+      };
+
+      var ready = document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve();
+      ready.then(route);
+      var t;
+      addEventListener('resize', function () {
+        clearTimeout(t);
+        t = setTimeout(route, 120);
+      });
     })();
 
     /* Jobs: a tab list; a recording loads only when its tab is opened. */
