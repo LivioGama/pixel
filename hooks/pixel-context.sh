@@ -44,7 +44,7 @@ emit() { # stdin = context text
 
 if ! command -v pixel >/dev/null 2>&1; then
   emit <<'EOF'
-The pixel plugin is installed but the `pixel` binary is not on PATH, so its retrieval protocol was not loaded. Tell the user if they ask for pixel commands (install instructions: https://github.com/LivioGama/pixel#-start-here) and use the regular tools meanwhile; do not download or run an installer yourself.
+The pixel plugin is installed but the `pixel` binary is not on PATH, so its retrieval protocol was not loaded. Tell the user if they ask for pixel commands (install instructions: https://github.com/LivioGama/pixel#for-ai-agents) and use the regular tools meanwhile; do not download or run an installer yourself.
 EOF
 elif ! pixel repo-state --help >/dev/null 2>&1; then
   version=$(pixel --version 2>/dev/null | awk 'NR == 1 { print $2 }')

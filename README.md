@@ -38,6 +38,29 @@ pixel doctor .     # optional health check
 
 Other channels, per-agent plugins and manual setup are in the [docs](https://liviogama.github.io/pixel/docs/).
 
+### Let your agent install it
+
+Paste this into Claude Code, Codex, Pi or any coding agent with a shell:
+
+```text
+Install Pixel (https://github.com/LivioGama/pixel) for me: follow the
+"For AI agents" section of its README, then tell me what changed and
+whether `pixel doctor .` is green.
+```
+
+## For AI agents
+
+If you are an LLM reading this to set Pixel up for a user, do this, in order:
+
+1. **Check first.** `command -v pixel && pixel --version`. If it prints a version, skip to step 3.
+2. **Install the binary** (macOS or Linux). With Homebrew: `brew install LivioGama/tap/pixel`. Without it: `curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh`, which installs into `~/.local/bin` (override with `PIXEL_INSTALL_DIR`); make sure that directory is on `PATH`.
+3. **Wire the agents.** Tell the user it writes to their home configuration (`~/.local/share/pixel/`, `~/.claude/settings.json`, `~/.codex/config.toml`, `~/.pi/agent/APPEND_SYSTEM.md`), then run `pixel install`. It is idempotent: running it again only refreshes what it wrote.
+4. **Index the current repository** (optional, speeds up the first queries): `pixel prepare-repo .`
+5. **Verify:** `pixel doctor . --json`. Report every check that is not green, with its message; do not claim success otherwise.
+6. **Tell the user to restart the agent session.** The protocol is injected when a session starts, so the current one does not have it yet.
+
+Then use Pixel the way [`PIXEL.md`](PIXEL.md) describes: it is the complete agent protocol, the same text `pixel install` deploys, and it says which command replaces `grep`, `git log`, `git blame` and whole-file reads, and when a native tool is still the right choice. An agent that `pixel install` does not wire (Cursor, Gemini CLI, Copilot…) needs that file in its own rules; see the [plugins table](https://liviogama.github.io/pixel/docs/#plugins).
+
 ## The flow
 
 ```text

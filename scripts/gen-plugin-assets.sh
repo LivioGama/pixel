@@ -57,7 +57,7 @@ bootstrap() {
 Pixel is a CLI, not just instructions. Before relying on any command below,
 check that it exists with `command -v pixel`. If it does not, tell the user
 that the pixel plugin needs the `pixel` binary (install instructions:
-https://github.com/LivioGama/pixel#-start-here) and work without the commands
+https://github.com/LivioGama/pixel#for-ai-agents) and work without the commands
 below; do not download or run an installer yourself.
 
 Make sure the repo is indexed (once per clone/worktree):
