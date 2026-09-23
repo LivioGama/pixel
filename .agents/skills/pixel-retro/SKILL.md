@@ -73,8 +73,10 @@ python3 .agents/skills/pixel-retro/slow.py $W <root>/.pixel/actions.jsonl ...   
 ```
 
 It keeps read ops (`search-*`, `find-*`, `impact`, `who-calls`,
-`call-path`, `scope-task`, `pack-context`, `recall`, `status`,
-`repo-state`) over the threshold, leaves the test suite out, and groups them
+`call-path`, `scope-task`, `pack-context`, `status`, `repo-state`, and
+`recall` only for `search`/`ask`/`context`/`show`/`sessions`/`status`: a slow
+`recall index` is an ingest, not an answer) over the threshold, leaves the
+test suite out (cwd under `crates/` or the temp dir, `/tmp/pxwt/` kept), and groups them
 on (command, route, reason, dominant phase) with count, total, worst, and
 the three worst `invocation_id`s. Each line's `serve` list (#241, #242)
 records who answered each request and where its milliseconds went; name a
@@ -180,7 +182,7 @@ Session memory and a single log line both lie. For every candidate:
 | Agent misuse of a flag or command | the prompt pixel installs: `crates/pixel-install/assets/pixel-agent-prompt.md` (and `pixel-subagent-prompt.md`), or the clap help text |
 | Agent bypassed pixel because the answer was worse | the command's output (truth markers, caps, ranking) — not the prompt; a stronger "MUST" does not fix a weak answer |
 | Slow read op | profile first, suggest only with a measured number |
-| Install, doctor or daemon drift | first check whether `pixel install` (or `pixel install --repo <root>` for a `repo.*` check) clears it. If it does, the install is fine and the friction is that nobody reran it: an upgrade path that skips it, a note nobody read. Propose a change to `pixel-install` only when the install itself leaves the check red, or a `pixel doctor` check when nothing reported the drift at all |
+| Install, doctor or daemon drift | first check whether a rerun of the install would clear it, without running it on the user's machine (Step 2 forbids replaying host-wide commands, and `--repo` writes into their repository): run it against a copy, `HOME=<scratch> CODEX_HOME=<scratch>/.codex XDG_CONFIG_HOME=<scratch>/.config pixel install --shell <shell>` then `pixel doctor` with the same three variables (all on the command line: `CODEX_HOME` and `XDG_CONFIG_HOME` otherwise point the install back at the real files), or for a `repo.*` check `pixel install --repo <fixture>` on a `git init` fixture seeded with the drifted file; failing that, read the install code path. If a rerun clears it, the install is fine and the friction is that nobody reran it: an upgrade path that skips it, a note nobody read. Propose a change to `pixel-install` only when the install itself leaves the check red, or a `pixel doctor` check when nothing reported the drift at all |
 | Repo rule or skill gap | `.agents/rules/*.md` or `.agents/skills/*/SKILL.md` |
 | Not pixel's (user repo, git, another tool) | one line in the report, then drop it |
 

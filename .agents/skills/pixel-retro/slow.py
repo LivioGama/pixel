@@ -11,15 +11,35 @@ so every number in the report can be re-opened. A line without `serve`
 predates the field and lands in the `unattributed` group: its cause is
 unknown, and a warm replay will not reproduce a cold start.
 
-Runs of pixel's own test suite (cwd under a `crates/` directory or the
-system temp dir) are counted apart, never mixed into the groups.
+`recall` counts only for its read subcommands (`search`, `ask`,
+`context`, `show`, `sessions`, `status`): `index`, `embed`, `setup`,
+`export` and `daemon` write, and a slow ingest is not a slow answer.
+
+Runs of pixel's own test suite are counted apart, never mixed into the
+groups: a cwd under a `crates/` directory, or in the system temp dir
+(`/var/folders/` on macOS, `/tmp/` on Linux) except the `/tmp/pxwt/`
+worktrees the skill reads on purpose.
 """
 import collections, datetime, json, re, sys
 
 UTC = datetime.timezone.utc
 READ_OPS = re.compile(r"(search-|find-).*|impact|who-calls|call-path|scope-task|pack-context|recall|status|repo-state")
+RECALL_READS = {"search", "ask", "context", "show", "sessions", "status"}
 PHASES = ("probe_ms", "start_ms", "request_ms", "open_ms", "handle_ms")
-TEST_CWD = re.compile(r"/crates/|^/(private/)?var/folders/")
+TEST_CWD = re.compile(r"/crates/|^/(private/)?var/folders/|^/(private/)?tmp/(?!pxwt/)")
+
+
+def is_read_op(event):
+    """A read op by command, and for `recall` by the subcommand in `args`
+    (`args` may open on global flags: `--metrics off recall show …`)."""
+    command = event.get("command", "")
+    if not READ_OPS.fullmatch(command):
+        return False
+    if command != "recall":
+        return True
+    words = event.get("args", "").split()
+    after = words[words.index("recall") + 1:] if "recall" in words else []
+    return bool(after) and after[0] in RECALL_READS
 
 
 def parse_window(arg, now):
@@ -65,7 +85,7 @@ def main(argv):
                     continue
                 if (event.get("ts_ms", 0) < since_ms
                         or event.get("duration_ms", 0) < min_ms
-                        or not READ_OPS.fullmatch(event.get("command", ""))):
+                        or not is_read_op(event)):
                     continue
                 if TEST_CWD.search(event.get("cwd", "")):
                     skipped += 1
