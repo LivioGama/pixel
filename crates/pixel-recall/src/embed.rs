@@ -300,7 +300,16 @@ pub mod potion {
             return Err("potion model produced empty embeddings".to_string());
         }
         if download {
-            let _ = std::fs::write(crate::potion_marker(cache_dir, repo), repo);
+            // The model is loaded and usable either way: a marker that cannot
+            // be written only costs a later cache check, so it is reported,
+            // not turned into a load failure.
+            let marker = crate::potion_marker(cache_dir, repo);
+            if let Err(error) = std::fs::write(&marker, repo) {
+                eprintln!(
+                    "pixel: potion model loaded, but its download marker {} could not be written: {error}",
+                    marker.display()
+                );
+            }
         }
         Ok(dims)
     }
@@ -544,7 +553,12 @@ mod potion_gate_tests {
     fn finish_load_should_mark_only_a_successful_download() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(finish_load(dir.path(), CODE_64M, true, 256), Ok(256));
-        assert!(crate::potion_cached(dir.path(), CODE_64M));
+        assert_eq!(
+            std::fs::read_to_string(crate::potion_marker(dir.path(), CODE_64M)).unwrap(),
+            CODE_64M,
+            "the repository's own marker, not the shared legacy one"
+        );
+        assert!(!dir.path().join(crate::LEGACY_POTION_MARKER).exists());
         assert!(!crate::potion_cached(dir.path(), CODE_16M));
 
         assert_eq!(finish_load(dir.path(), CODE_16M, false, 256), Ok(256));
