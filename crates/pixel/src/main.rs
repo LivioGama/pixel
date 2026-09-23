@@ -28,8 +28,6 @@ mod classify;
 mod claude_controller;
 mod config_cmd;
 mod coverage_cmd;
-#[cfg(feature = "fastembed")]
-mod decide_onnx;
 mod decide_remote;
 mod evaluate_cmd;
 mod execution_brief;
@@ -577,11 +575,12 @@ enum Command {
         #[command(subcommand)]
         cmd: sniper_cmd::SniperCmd,
     },
-    /// Zero-shot decision over a bounded label set: embed the text and each
-    /// option's criterion, cosine → fixed-temperature softmax. The
-    /// probability distribution a Jev-class decision model returns, computed
-    /// deterministically with no LLM. `--jsonl` serves one decision per
-    /// stdin line with the model resident.
+    /// Decision over a bounded label set through a remote LLM: one
+    /// OpenAI-compatible chat completion maps the state, shared framing,
+    /// labels and criteria onto a probability distribution — the shape a
+    /// Jev-class decision model returns. Non-deterministic and
+    /// network-bound; `--remote-preset` picks the provider. `--jsonl`
+    /// serves one decision per stdin line.
     Classify(classify::ClassifyOptions),
     /// Deterministic web lookup for terms the index cannot know — the
     /// refine step of a gated `pixel plan`. No LLM, no daemon.
@@ -1474,6 +1473,20 @@ enum ConfigCmd {
         global: bool,
         #[arg(default_value = ".")]
         path: PathBuf,
+    },
+    /// API key for a `pixel classify` remote preset: `pixel config
+    /// remote-key ollama <key>` stores it in `~/.pixel/config.json`
+    /// (never the repo config, never printed back). The provider env var
+    /// (`OLLAMA_API_KEY`, `OPENROUTER_API_KEY`) still wins when set.
+    RemoteKey {
+        /// Remote provider preset the key belongs to.
+        #[arg(value_enum)]
+        preset: decide_remote::Preset,
+        /// The key value; omit to report set/unset, `--clear` to remove.
+        value: Option<String>,
+        /// Remove the stored key for this preset.
+        #[arg(long)]
+        clear: bool,
     },
 }
 
@@ -6048,6 +6061,11 @@ fn run_command(
                 global,
                 path,
             } => config_cmd::run_metrics(&path, global, value.as_deref().map(|v| v == "on")),
+            ConfigCmd::RemoteKey {
+                preset,
+                value,
+                clear,
+            } => config_cmd::run_remote_key(preset, value, clear),
         },
         Command::TaskState { cmd } => match cmd {
             TaskCmd::Begin {

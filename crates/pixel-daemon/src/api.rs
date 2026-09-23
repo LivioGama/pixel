@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -23,7 +24,7 @@ use pixel_index::indexset::{IndexSet, IndexSetError, RefreshOutcome};
 use pixel_proto::{Envelope, Epistemics, ErrorCode, PixelError, SnapshotInfo, Warning};
 use pixel_recall::embed::{EmbedKind, Embedder, open_default_embedder};
 
-pub const GRAPH_DB_FILE: &str = "graph.db";
+pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// Increment whenever the daemon request/response contract changes in a way
 /// that an older process cannot safely serve to a newer CLI. Bumped from 6
 /// to 7 with the Envelope v2 migration: the wire shape changed from
@@ -31,15 +32,15 @@ pub const GRAPH_DB_FILE: &str = "graph.db";
 /// snapshot, epistemics, budget, result, error, warnings`), gated by
 /// `pixel_proto::ENVELOPE_PROTOCOL_VERSION`. 10: the `plan` op, which a
 /// daemon of an older build rejects as an unknown variant.
-pub const PROTOCOL_VERSION: u64 = 10;
+pub const PROTOCOL_VERSION: u64 = 11;
 
 /// The potion model the daemon warms; the `potion.ok` marker carries the
 /// repo name so a stale v1 marker cannot pass for v2.
-const POTION_V2_REPO: &str = "minishlab/potion-code-16M-v2";
+const POTION_V2_REPO: &str = "minishlab/potion-code-64M-v2";
 
 // `targets` (S3 probes, graph expansion and evidence): the caps keep the op
 // ms-scale; every cap that fires is named in the epistemics envelope.
-const CONTENT_PROBE_LIMIT: usize = 500;
+const CONTENT_PROBE_LIMIT: usize = 1000;
 const MAX_SEED_FILES: usize = 8;
 const MAX_SEED_SYMBOLS: usize = 24;
 /// P0 is the only tier the doctrine mandates checking before the first
@@ -175,7 +176,10 @@ pub fn failure_response(op: &str, msg: impl Into<String>) -> Response {
 
 pub struct Service {
     root: PathBuf,
-    index: IndexSet,
+    index: Arc<RwLock<IndexSet>>,
+    pub(crate) publication: Arc<RwLock<Publication>>,
+    read_only: bool,
+    reader_generation: u64,
     graph: Option<GraphStore>,
     /// Watcher-driven graph updates that failed (a locked db, an unreadable
     /// row). Counted so `status` shows a daemon that is serving an index it
@@ -199,6 +203,13 @@ pub struct Service {
     /// facts-consuming request, not at daemon start — users who never touch
     /// history commands never pay for the index.
     facts_warmer_started: AtomicBool,
+}
+
+/// Version of a coherently published index/graph pair, not a filesystem snapshot.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Publication {
+    pub generation: u64,
+    pub healthy: bool,
 }
 
 /// Counts watcher-side failures and decides which ones are logged: the
@@ -241,7 +252,13 @@ impl Service {
         let index = IndexSet::open_or_build(&root, Box::new(TrigramExtractor))?;
         Ok(Service {
             root,
-            index,
+            index: Arc::new(RwLock::new(index)),
+            publication: Arc::new(RwLock::new(Publication {
+                generation: 1,
+                healthy: true,
+            })),
+            read_only: false,
+            reader_generation: 0,
             graph: None,
             graph_failures: FailureLog::default(),
             watcher_failures: FailureLog::default(),
@@ -254,6 +271,68 @@ impl Service {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// A persistent reader shares the warm text index, but never a SQLite connection.
+    pub(crate) fn read_replica(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            index: Arc::clone(&self.index),
+            publication: Arc::clone(&self.publication),
+            read_only: true,
+            reader_generation: 0,
+            graph: None,
+            graph_failures: FailureLog::default(),
+            watcher_failures: FailureLog::default(),
+            embedder: None,
+            embedder_unavailable: true,
+            embedder_download_started: false,
+            facts_warmer_started: AtomicBool::new(true),
+        }
+    }
+
+    /// Read-plane allowlist: no writes, model downloads, history ingest, or repo snapshot subprocesses.
+    pub(crate) fn read_evidence(
+        &mut self,
+        kind: &str,
+        query: &str,
+        limit: usize,
+    ) -> (Publication, Result<Value, String>) {
+        let publication = Arc::clone(&self.publication);
+        let state = publication.read().expect("publication lock poisoned");
+        if !state.healthy {
+            return (
+                *state,
+                Err("index/graph publication unhealthy; retry after refresh".into()),
+            );
+        }
+        if self.reader_generation != state.generation {
+            self.graph = None;
+            self.reader_generation = state.generation;
+        }
+        if self.graph.is_none() {
+            self.graph = GraphStore::open_read_only(&self.graph_db_path()).ok();
+        }
+        if let Some(graph) = &self.graph
+            && let Err(error) = graph.conn().execute_batch("BEGIN")
+        {
+            return (*state, Err(error.to_string()));
+        }
+        let result = match kind {
+            "execution_brief" => self.op_targets(query, Some(limit), Some("P1"), false),
+            "search" => self.op_search(query, Some(limit), None, None, None),
+            "resolve" => self.op_resolve(query, Some(limit)),
+            "impact" => self.op_impact(query, "upstream", Some(2)),
+            _ => Err(format!("unsupported evidence query kind: {kind}")),
+        };
+        if let Some(graph) = &self.graph {
+            let _ = graph.conn().execute_batch("ROLLBACK");
+        }
+        (*state, result)
+    }
+
+    pub(crate) fn admitted_paths(&self) -> Vec<String> {
+        self.index.read().expect("index lock poisoned").paths()
     }
 
     pub fn graph_db_path(&self) -> PathBuf {
@@ -269,14 +348,7 @@ impl Service {
 
     /// Watcher hook: file deleted.
     pub fn remove_file(&mut self, rel: &str) {
-        self.index.remove_file(rel);
-        let db = self.graph_db_path();
-        if db.exists() {
-            if let Ok(mut store) = GraphStore::open(&db) {
-                let _ = store.remove_file(rel);
-            }
-            self.graph = None;
-        }
+        self.refresh_files(&[(rel, true)]);
     }
 
     /// Watcher hook: refresh a batch of files in index + graph.
@@ -284,7 +356,14 @@ impl Service {
         if files.is_empty() {
             return;
         }
-        let graph_changes = self.index.refresh_files(files);
+        let publication = Arc::clone(&self.publication);
+        let mut state = publication.write().expect("publication lock poisoned");
+        state.healthy = false;
+        let graph_changes = self
+            .index
+            .write()
+            .expect("index lock poisoned")
+            .refresh_files(files);
         let graph_files: Vec<(&str, bool)> = graph_changes
             .iter()
             .map(|(path, outcome)| (path.as_str(), *outcome == RefreshOutcome::Excluded))
@@ -296,9 +375,13 @@ impl Service {
                     &format!("batch of {} file(s) from {}", files.len(), files[0].0),
                     &error,
                 );
+                self.graph = None;
+                return;
             }
             self.graph = None;
         }
+        state.generation += 1;
+        state.healthy = true;
     }
 
     /// Count a watcher-driven graph update that failed. The cached handle is
@@ -336,6 +419,23 @@ impl Service {
         if self.graph.is_some() {
             return Ok(None);
         }
+        if self.read_only {
+            return Err(
+                "graph unavailable in read plane; build it through the maintenance lane".into(),
+            );
+        }
+        let publication = Arc::clone(&self.publication);
+        let mut state = publication.write().expect("publication lock poisoned");
+        state.healthy = false;
+        let result = self.ensure_graph_inner();
+        if result.is_ok() {
+            state.generation += 1;
+            state.healthy = true;
+        }
+        result
+    }
+
+    fn ensure_graph_inner(&mut self) -> Result<Option<Value>, String> {
         let db = self.graph_db_path();
         let gitless = pixel_index::gitsync::rev_parse_head(&self.root).is_none();
         let mut built = None;
@@ -465,7 +565,7 @@ impl Service {
     fn open_graph_for_ranking(&self) -> Option<GraphStore> {
         let db = self.graph_db_path();
         if db.exists() {
-            GraphStore::open(&db).ok()
+            GraphStore::open_read_only(&db).ok()
         } else {
             None
         }
@@ -944,6 +1044,8 @@ impl Service {
             const RANK_CANDIDATE_CAP: usize = MAX_LIMIT;
             let (pool, pool_stats) = self
                 .index
+                .read()
+                .expect("index lock poisoned")
                 .search_page_in(pattern, 0, Some(RANK_CANDIDATE_CAP), paths)
                 .map_err(|e| e.to_string())?;
             if pool_stats.truncated {
@@ -975,6 +1077,8 @@ impl Service {
             (ranked_pool[start..].to_vec(), stats)
         } else {
             self.index
+                .read()
+                .expect("index lock poisoned")
                 .search_page_in(pattern, offset, Some(row_limit), paths)
                 .map_err(|e| e.to_string())?
         };
@@ -1076,7 +1180,7 @@ impl Service {
         let graph_available = ensured.is_ok();
         let build_info = ensured.ok().flatten();
 
-        let all_paths = self.index.paths();
+        let all_paths = self.admitted_paths();
         // S6: explicit file paths named in the task, matched against the
         // live tree before any lexical probe runs.
         let path_hits = engine::path_rank(&all_paths, &query.path_tokens);
@@ -1104,9 +1208,11 @@ impl Service {
             // Keywords are [a-z0-9_]+ by construction (tokenize_task), but
             // escape defensively anyway.
             let pattern = format!(r"(?i)\b{}\b", regex_escape_keyword(kw));
-            if let Ok((matches, probe_stats)) =
-                self.index
-                    .search_page_in(&pattern, 0, Some(CONTENT_PROBE_LIMIT), None)
+            if let Ok((matches, probe_stats)) = self
+                .index
+                .read()
+                .expect("index lock poisoned")
+                .search_page_in(&pattern, 0, Some(CONTENT_PROBE_LIMIT), None)
             {
                 if probe_stats.truncated {
                     probe_caps.push(format!(
@@ -1312,7 +1418,13 @@ impl Service {
         }
         if let Some(stats) = out.get_mut("stats") {
             stats["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
-            stats["commit_oid"] = json!(self.index.status().commit_oid);
+            stats["commit_oid"] = json!(
+                self.index
+                    .read()
+                    .expect("index lock poisoned")
+                    .status()
+                    .commit_oid
+            );
         }
         merge_build_info(&mut out, build_info);
         Ok(out)
@@ -1913,7 +2025,12 @@ impl Service {
     }
 
     fn op_graph(&mut self) -> Result<Value, String> {
+        let publication = Arc::clone(&self.publication);
+        let mut state = publication.write().expect("publication lock poisoned");
+        state.healthy = false;
         let (stats, build_ms) = self.rebuild_graph()?;
+        state.generation += 1;
+        state.healthy = true;
         Ok(json!({
             "files": stats.get("files").cloned().unwrap_or(Value::Null),
             "symbols": stats.get("symbols").cloned().unwrap_or(Value::Null),
@@ -2013,7 +2130,7 @@ impl Service {
     }
 
     fn op_status(&mut self) -> Result<Value, String> {
-        let s = self.index.status();
+        let s = self.index.read().expect("index lock poisoned").status();
         let db = self.graph_db_path();
         let graph = if db.exists() {
             match GraphStore::open(&db) {
@@ -2056,6 +2173,9 @@ impl Service {
     /// Force-rebuild the text index shard via the daemon (singleton path:
     /// no concurrent build races because the daemon serializes requests).
     fn op_reindex(&mut self) -> Result<Value, String> {
+        let publication = Arc::clone(&self.publication);
+        let mut state = publication.write().expect("publication lock poisoned");
+        state.healthy = false;
         // Remove the existing shard so open_or_build is forced to rebuild.
         let gpx = self.root.join(pixel_index::index::SHARD_DIR);
         let base = gpx.join(pixel_index::index::SHARD_FILE);
@@ -2070,8 +2190,10 @@ impl Service {
         let new_index =
             pixel_index::indexset::IndexSet::open_or_build_bypass_cache(&self.root, extractor)
                 .map_err(|e| e.to_string())?;
-        self.index = new_index;
-        let s = self.index.status();
+        *self.index.write().expect("index lock poisoned") = new_index;
+        let s = self.index.read().expect("index lock poisoned").status();
+        state.generation += 1;
+        state.healthy = true;
         Ok(json!({
             "root": self.root.display().to_string(),
             "index": {
@@ -2294,7 +2416,7 @@ impl Service {
         };
         // Phase 1c: feed activity-only rerank signals (git churn) over the
         // candidate universe; session/error channels land in Phase 3.
-        let all_paths = self.index.paths();
+        let all_paths = self.admitted_paths();
         let signals = self.engine_signals(&all_paths);
         let opts = pixel_graph::concept_resolve::ResolveOptions {
             limit: limit.unwrap_or(8),
@@ -2732,6 +2854,14 @@ impl Service {
     /// is named in `SignalBundle::activity_unavailable` (the reranker then
     /// applies only the per-path test penalty).
     fn engine_signals(&self, candidates: &[String]) -> pixel_rank::signals::SignalBundle {
+        if self.read_only {
+            return pixel_rank::signals::SignalBundle {
+                activity_unavailable: Some(
+                    "history enrichment excluded from interactive evidence reads".into(),
+                ),
+                ..Default::default()
+            };
+        }
         use pixel_rank::signals::{SignalOptions, compute_signals};
         let runner = pixel_git::GitRunner::new(&self.root);
         let dirty: Vec<String> = pixel_index::gitsync::status_porcelain(&self.root)
@@ -4350,6 +4480,27 @@ mod tests {
     use pixel_graph::Tier;
     use pixel_graph::concept_resolve::{RankedCandidate, Reranker, SignalBundle};
     use std::path::PathBuf;
+
+    #[test]
+    fn read_plane_shares_index_and_observes_published_refresh() {
+        let root = tmpdir("read-plane-shared");
+        std::fs::write(root.join("app.rs"), "fn initial_name() {}\n").unwrap();
+        let mut writer = Service::open(&root).unwrap();
+        let mut first = writer.read_replica();
+        let mut second = writer.read_replica();
+        assert!(Arc::ptr_eq(&writer.index, &first.index));
+        assert!(Arc::ptr_eq(&first.index, &second.index));
+        let (before, result) = first.read_evidence("search", "initial_name", 8);
+        assert!(result.unwrap().to_string().contains("initial_name"));
+        std::fs::write(root.join("app.rs"), "fn updated_name() {}\n").unwrap();
+        writer.refresh_file("app.rs");
+        let (after, result) = second.read_evidence("search", "updated_name", 8);
+        assert!(after.generation > before.generation);
+        assert!(result.unwrap().to_string().contains("updated_name"));
+        writer.publication.write().unwrap().healthy = false;
+        assert!(first.read_evidence("search", "updated_name", 8).1.is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
@@ -6322,15 +6473,15 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
     }
 
-    /// Phase 3 item 2 — targets honesty: when the 500-match content probe
+    /// Phase 3 item 2 — targets honesty: when the bounded content probe
     /// cap fires for a keyword, the targets envelope must say lower_bound
     /// and NAME the cap; the "exhaustive" sentence must not be emitted.
     #[test]
     fn targets_probe_cap_sets_lower_bound_and_names_the_cap() {
         let root = tmpdir("targets-probe-cap");
-        // 6 files x 100 lines = 600 word-bounded matches of "needle" —
-        // comfortably beyond the 500-match probe cap.
-        for f in 0..6 {
+        // 12 files x 100 lines = 1,200 word-bounded matches of "needle" —
+        // comfortably beyond CONTENT_PROBE_LIMIT (currently 1,000).
+        for f in 0..12 {
             let body: String = (0..100)
                 .map(|i| format!("// needle occurrence {f}-{i}\n"))
                 .collect();
@@ -6358,7 +6509,8 @@ mod tests {
         assert!(
             caps.iter().any(|c| {
                 let s = c.as_str().unwrap_or_default();
-                s.contains("content probe truncated at 500") && s.contains("'needle'")
+                s.contains(&format!("content probe truncated at {CONTENT_PROBE_LIMIT}"))
+                    && s.contains("'needle'")
             }),
             "the fired probe cap must be NAMED with its keyword: {caps:?}"
         );
@@ -6368,13 +6520,17 @@ mod tests {
             "capped probe must not claim exhaustiveness: {closed_world}"
         );
         assert!(
-            closed_world.contains("content probe truncated at 500"),
+            closed_world.contains(&format!("content probe truncated at {CONTENT_PROBE_LIMIT}")),
             "the bounded phrasing must name the cap: {closed_world}"
         );
         // And the envelope-level epistemics must agree.
         let epistemics = resp.epistemics.as_ref().unwrap();
         assert!(!epistemics.closed_world && epistemics.lower_bound);
-        assert!(epistemics.basis.contains("content probe truncated at 500"));
+        assert!(
+            epistemics
+                .basis
+                .contains(&format!("content probe truncated at {CONTENT_PROBE_LIMIT}"))
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -6651,15 +6807,17 @@ mod tests {
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
         git(&root, &["commit", "-qm", "init"]);
-        let db = root.join(".pixel/graph.db");
+        let mut svc = Service::open(&root).unwrap();
+        let db = svc.graph_db_path();
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         pixel_graph::build::build_graph(&root, &db).unwrap();
-        let mut svc = Service::open(&root).unwrap();
 
         std::fs::write(root.join("secret.rb"), "def watcherSecretNeedle\nend\n").unwrap();
         svc.refresh_file("secret.rb");
         assert_eq!(
             svc.index
+                .read()
+                .unwrap()
                 .search("watcherSecretNeedle", None)
                 .unwrap()
                 .0
@@ -6678,6 +6836,8 @@ mod tests {
         svc.refresh_file(".gitignore");
         assert!(
             svc.index
+                .read()
+                .unwrap()
                 .search("watcherSecretNeedle", None)
                 .unwrap()
                 .0
@@ -6695,6 +6855,8 @@ mod tests {
         svc.refresh_file(".gitignore");
         assert_eq!(
             svc.index
+                .read()
+                .unwrap()
                 .search("watcherSecretNeedle", None)
                 .unwrap()
                 .0
@@ -6713,6 +6875,8 @@ mod tests {
         svc.refresh_file(".git/info/exclude");
         assert!(
             svc.index
+                .read()
+                .unwrap()
                 .search("watcherSecretNeedle", None)
                 .unwrap()
                 .0
@@ -6729,6 +6893,8 @@ mod tests {
         svc.refresh_file(".git/info/exclude");
         assert_eq!(
             svc.index
+                .read()
+                .unwrap()
                 .search("watcherSecretNeedle", None)
                 .unwrap()
                 .0
@@ -6755,12 +6921,12 @@ mod tests {
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
         git(&root, &["commit", "-qm", "init"]);
-        // `.pixel/graph.db` exists but is not a database (it is a
+        let mut svc = Service::open(&root).unwrap();
+        let graph_db = svc.graph_db_path();
+        // The daemon graph path exists but is not a database (it is a
         // directory), so the update fails the way a locked or corrupt db
         // does while `graph_db_path().exists()` stays true.
-        std::fs::create_dir_all(root.join(".pixel/graph.db")).unwrap();
-
-        let mut svc = Service::open(&root).unwrap();
+        std::fs::create_dir_all(graph_db).unwrap();
         svc.refresh_file("login.rs");
         svc.refresh_files(&[("login.rs", false)]);
         // Through the transport hook the daemon loop calls, so the counting

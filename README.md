@@ -188,6 +188,30 @@ with a note and does nothing.
 | `upgrade` | `self-update` |
 | `uses` | `who-calls` |
 
+## 🧠 Decision backends — measured vs Jev
+
+`pixel classify` runs decisions through a remote LLM (the only backend —
+`--remote-preset` picks OpenRouter, Ollama Cloud, or localhost). The
+scores below are **coding decisions only** — the frozen coding subset of
+JevBench (14 public coding-topic items, protocol in
+[`docs/bench/decide-bakeoff.md`](docs/bench/decide-bakeoff.md)). These
+Ollama Cloud models beat Jev's published coding score:
+
+| Model | Coding score | vs Jev | p50/item | TPS |
+| --- | --- | --- | --- | --- |
+| deepseek-v4.1-flash | **14/14 = 1.00** | ✅ | 1.4 s | 67 (174 solo) |
+| deepseek-v4-flash | **13/14 = 0.93** | ✅ | 2.0 s | 154 |
+| gpt-oss:120b | **13/14 = 0.93** | ✅ | 2.0 s | 57 |
+| gpt-oss:20b | **13/14 = 0.93** | ✅ | 6.4 s | 71 |
+| nemotron-3-ultra | **12/14 = 0.86** | ✅ | 8.1 s | 28 |
+| **Jev** (reference) | **0.839**¹ | — | — | — |
+
+¹ Jev's published coding-topic accuracy, n=56, all tiers — **published
+number, not re-measured here**; different denominator than our n=14 subset.
+
+No off-the-shelf local model (≤575 M) passed 0.50 on the same set. TPS from
+`llm-tps-benchmark`, 1000-token response, all five concurrent.
+
 ## 📝 License
 
 MIT. See [`NOTICE`](NOTICE) for attribution details.

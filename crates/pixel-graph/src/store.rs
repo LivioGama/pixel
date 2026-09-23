@@ -425,6 +425,23 @@ impl GraphStore {
         Ok(Self { conn })
     }
 
+    /// Open an existing graph without migrations or write privileges.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let path = match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => parent
+                .canonicalize()
+                .map_or_else(|_| path.to_path_buf(), |parent| parent.join(name)),
+            _ => path.to_path_buf(),
+        };
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        conn.pragma_update(None, "busy_timeout", 1000)?;
+        conn.pragma_update(None, "query_only", true)?;
+        Ok(Self { conn })
+    }
+
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
@@ -1667,6 +1684,33 @@ fn migrate(conn: &Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn read_only_should_pin_snapshot_and_reject_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("read-only.db");
+        let writer = GraphStore::open(&path).unwrap();
+        writer.meta_set("generation", "one").unwrap();
+        let reader = GraphStore::open_read_only(&path).unwrap();
+        reader.conn().execute_batch("BEGIN").unwrap();
+        assert_eq!(
+            reader.meta_get("generation").unwrap().as_deref(),
+            Some("one")
+        );
+        writer.meta_set("generation", "two").unwrap();
+        assert_eq!(
+            reader.meta_get("generation").unwrap().as_deref(),
+            Some("one")
+        );
+        assert!(reader.meta_set("generation", "bad").is_err());
+        reader.conn().execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            reader.meta_get("generation").unwrap().as_deref(),
+            Some("two")
+        );
+        assert!(GraphStore::open_read_only(&dir.path().join("missing.db")).is_err());
+        assert!(!dir.path().join("missing.db").exists());
+    }
+
     /// A graph.db written before `symbols.trait_impl` existed opens with the
     /// column added (default 0), and marking a symbol sets it.
     #[test]

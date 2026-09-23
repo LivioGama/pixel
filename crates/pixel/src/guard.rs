@@ -52,6 +52,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
+use pixel_daemon::api::GRAPH_DB_FILE;
+
 const COMPOSED_MAX_INPUT: usize = 1024 * 1024;
 const COMPOSED_MAX_OUTPUT: usize = 1024 * 1024;
 const COMPOSED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -1082,7 +1084,7 @@ fn post_tool_use_blast_radius(abs: &Path, idx_root: Option<&Path>, tool: &str) {
     let Some(root) = idx_root.map(PathBuf::from) else {
         return;
     };
-    let db = root.join(".pixel").join("graph.db");
+    let db = root.join(".pixel").join(GRAPH_DB_FILE);
     if !db.exists() {
         return;
     }
