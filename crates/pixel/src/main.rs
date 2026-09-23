@@ -7,7 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
@@ -42,6 +42,7 @@ mod prompt_submit;
 mod recall_cmd;
 mod rescue_cmd;
 mod search_compat;
+mod serve_trace;
 mod sniper_cmd;
 mod task_plan;
 mod task_runtime;
@@ -49,6 +50,7 @@ mod task_sandbox;
 mod task_scheduler;
 mod web_search;
 mod workspace_cmd;
+use pixel_actionlog::{InProcessReason, ServeRoute, ServeStep};
 use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service, failure_response};
 use pixel_daemon::daemon;
 use pixel_index::index::{build, shard_path};
@@ -1777,25 +1779,59 @@ fn roundtrip(stream: &mut UnixStream, req: &Request) -> Option<Response> {
 
 /// Daemon path: only if the socket answers Ping within ~100ms.
 fn try_daemon(root: &Path, req: &Request) -> Option<Response> {
-    match try_daemon_inner(root, req) {
-        DaemonRoute::Served(response) => Some(*response),
-        // A newer daemon belongs to a newer CLI still using it: leave it
-        // running and serve this command in process, without starting ours.
-        DaemonRoute::Declined => None,
-        DaemonRoute::Absent => auto_start_daemon(root, req),
-    }
+    let (response, step) = route_through_daemon(root, req);
+    serve_trace::record(step);
+    response
 }
 
-fn auto_start_daemon(root: &Path, req: &Request) -> Option<Response> {
+/// Route one request through the daemon, starting one when none answers,
+/// and say how it went; `None` leaves the request to this process, and the
+/// step then names why.
+fn route_through_daemon(root: &Path, req: &Request) -> (Option<Response>, ServeStep) {
+    let clock = Instant::now();
+    let probed = probe_route(root);
+    let probe_ms = serve_trace::millis_since(clock);
+    let mut request_ms = None;
+    let route = probed.unwrap_or_else(|| {
+        let clock = Instant::now();
+        let route = send_to_daemon(root, req);
+        request_ms = Some(serve_trace::millis_since(clock));
+        route
+    });
+    let (response, mut step) = match route {
+        DaemonRoute::Served(response) => (Some(*response), ServeStep::new(ServeRoute::Daemon)),
+        // A newer daemon belongs to a newer CLI still using it: leave it
+        // running and serve this command in process, without starting ours.
+        DaemonRoute::Declined => (None, ServeStep::in_process(InProcessReason::NewerDaemon)),
+        DaemonRoute::Absent => {
+            let clock = Instant::now();
+            let started = auto_start_daemon(root, req);
+            let start_ms = serve_trace::millis_since(clock);
+            let (response, mut step) = match started {
+                Ok(response) => (Some(response), ServeStep::new(ServeRoute::DaemonStarted)),
+                Err(reason) => (None, ServeStep::in_process(reason)),
+            };
+            if step.reason != Some(InProcessReason::AutoStartDisabled) {
+                step.start_ms = Some(start_ms);
+            }
+            (response, step)
+        }
+    };
+    step.probe_ms = Some(probe_ms);
+    step.request_ms = request_ms;
+    (response, step)
+}
+
+fn auto_start_daemon(root: &Path, req: &Request) -> Result<Response, InProcessReason> {
     {
         // Auto-start: socket connection failed. Spawn the daemon in the
         // background and retry once. This makes the fast path transparent —
         // no need for the user to run `pixel daemon start` manually.
         // `PIXEL_DAEMON_AUTO_START=0` disables auto-start.
         if env_flag_off("PIXEL_DAEMON_AUTO_START") {
-            return None;
+            return Err(InProcessReason::AutoStartDisabled);
         }
-        let exe = std::env::current_exe().ok()?;
+        let exe = std::env::current_exe().map_err(|_| InProcessReason::StartFailed)?;
         let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let mut command = std::process::Command::new(exe);
         command
@@ -1807,15 +1843,15 @@ fn auto_start_daemon(root: &Path, req: &Request) -> Option<Response> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .process_group(0);
-        command.spawn().ok()?;
+        command.spawn().map_err(|_| InProcessReason::StartFailed)?;
         // Wait up to 5s for the socket to come up.
         for _ in 0..50 {
             if let DaemonRoute::Served(resp) = try_daemon_inner(root, req) {
-                return Some(*resp);
+                return Ok(*resp);
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        None
+        Err(InProcessReason::StartTimedOut)
     }
 }
 
@@ -1889,16 +1925,26 @@ enum DaemonRoute {
 }
 
 fn try_daemon_inner(root: &Path, req: &Request) -> DaemonRoute {
+    probe_route(root).unwrap_or_else(|| send_to_daemon(root, req))
+}
+
+/// The route the probe settles by itself; `None` when a current daemon
+/// answered and the request can be sent to it.
+fn probe_route(root: &Path) -> Option<DaemonRoute> {
     match probe_daemon(root) {
-        DaemonProbe::Current => {}
-        DaemonProbe::Newer => return DaemonRoute::Declined,
+        DaemonProbe::Current => None,
+        DaemonProbe::Newer => Some(DaemonRoute::Declined),
         DaemonProbe::Stale => {
             // An old daemon must not serve stale schemas to a newer CLI.
             retire_stale_daemon_within(root, STALE_DAEMON_EXIT_CAP);
-            return DaemonRoute::Absent;
+            Some(DaemonRoute::Absent)
         }
-        DaemonProbe::Absent => return DaemonRoute::Absent,
+        DaemonProbe::Absent => Some(DaemonRoute::Absent),
     }
+}
+
+/// Send `req` to the daemon a probe found current.
+fn send_to_daemon(root: &Path, req: &Request) -> DaemonRoute {
     // Each request gets its own connection. Besides removing a head-of-line
     // wait behind the Ping handshake, this keeps the client compatible with
     // a daemon that intentionally serves one request per connection.
@@ -1927,11 +1973,28 @@ fn env_flag_off(name: &str) -> bool {
 /// pointing any command at a subdirectory or file just works.
 fn execute(path: &Path, req: Request, no_daemon: bool) -> Result<Value, String> {
     let root = discover_root(path)?;
-    if !no_daemon && let Some(resp) = try_daemon(&root, &req) {
-        return unwrap_response(resp);
-    }
-    let mut svc = Service::open(&root).map_err(|e| e.to_string())?;
-    unwrap_response(svc.handle(req))
+    let mut step = if no_daemon {
+        ServeStep::in_process(InProcessReason::NoDaemon)
+    } else {
+        match route_through_daemon(&root, &req) {
+            (Some(resp), step) => {
+                serve_trace::record(step);
+                return unwrap_response(resp);
+            }
+            (None, step) => step,
+        }
+    };
+    let clock = Instant::now();
+    let opened = Service::open(&root);
+    step.open_ms = Some(serve_trace::millis_since(clock));
+    let resp = opened.map(|mut svc| {
+        let clock = Instant::now();
+        let resp = svc.handle(req);
+        step.handle_ms = Some(serve_trace::millis_since(clock));
+        resp
+    });
+    serve_trace::record(step);
+    unwrap_response(resp.map_err(|e| e.to_string())?)
 }
 
 fn unwrap_response(resp: Response) -> Result<Value, String> {
@@ -3685,6 +3748,44 @@ mod daemon_ping_tests {
         })
     }
 
+    /// A current daemon's answer is logged as a daemon route with both its
+    /// phases timed: the probe (the queue ahead) and the request itself.
+    #[test]
+    fn route_through_daemon_times_the_probe_and_the_request_of_a_current_daemon() {
+        let root = scratch_root("route-current");
+        let server = fake_daemon(&root, PROTOCOL_VERSION, 2, Duration::ZERO);
+        let (response, step) = route_through_daemon(&root, &Request::Status {});
+        assert!(response.is_some_and(|r| r.ok));
+        assert_eq!(step.route, ServeRoute::Daemon);
+        assert_eq!(step.reason, None);
+        assert!(
+            step.probe_ms.is_some() && step.request_ms.is_some(),
+            "{step:?}"
+        );
+        assert_eq!((step.start_ms, step.open_ms), (None, None), "{step:?}");
+        assert_eq!(
+            server.join().unwrap(),
+            vec![Request::Ping, Request::Status {}]
+        );
+        let _ = std::fs::remove_file(daemon::socket_path(&root));
+    }
+
+    /// A newer daemon sends the request back to this process without a
+    /// start attempt: the step says so, and times only the probe.
+    #[test]
+    fn route_through_daemon_names_a_newer_daemon_as_the_in_process_reason() {
+        let root = scratch_root("route-newer");
+        let server = fake_daemon(&root, PROTOCOL_VERSION + 1, 1, Duration::ZERO);
+        let (response, step) = route_through_daemon(&root, &Request::Status {});
+        assert!(response.is_none());
+        assert_eq!(step.route, ServeRoute::InProcess);
+        assert_eq!(step.reason, Some(InProcessReason::NewerDaemon));
+        assert!(step.probe_ms.is_some(), "{step:?}");
+        assert_eq!((step.request_ms, step.start_ms), (None, None), "{step:?}");
+        assert_eq!(server.join().unwrap(), vec![Request::Ping]);
+        let _ = std::fs::remove_file(daemon::socket_path(&root));
+    }
+
     #[test]
     fn a_newer_daemon_is_left_running_and_declines_without_a_restart() {
         let root = scratch_root("newer");
@@ -4684,6 +4785,7 @@ fn run() -> Result<(), String> {
     };
     let mut event = pixel_actionlog::ActionEvent::new(&command_label, logged_args(&argv[1..]))
         .with_result(&logged_result, elapsed);
+    event.serve = serve_trace::take();
     if !protected {
         // The repeated error is rendered output the caller reads, written
         // after the block: count it here, before the block is sized.

@@ -41,7 +41,7 @@ transcripts explain what the agent did about it.
 
 **A. Action logs.** Every pixel invocation appends to
 `<root>/.pixel/actions.jsonl` (`ts_ms`, `command`, `args`, `cwd`,
-`outcome`, `error`, `duration_ms`). The roots come from the sessions
+`outcome`, `error`, `duration_ms`, `serve`). The roots come from the sessions
 themselves, so a repository outside the usual folders is not missed: take
 every session `cwd` in the window, resolve it to its repository root, and
 keep the roots that have a log. `pixel recall sessions` caps `--limit` at
@@ -60,7 +60,14 @@ keeping entries whose `ts_ms` falls in the window. Also pull the slow
 successes: `pixel action-log --json --limit 2000 <root>` filtered on
 `duration_ms` above 5 000 for read ops (`search-*`, `find-*`, `impact`,
 `scope-task`, `pack-context`, `recall`) — a read op that takes seconds is a
-friction even when it succeeds.
+friction even when it succeeds. Attribute each slow one from its `serve`
+list before naming a cause: `route` says who answered (`daemon`,
+`daemon_started`, `in_process` with a `reason`), and the phase timings say
+where the seconds went — `probe_ms` (a busy daemon's queue), `start_ms`
+(waiting for a new daemon), `request_ms` (the daemon's answer), `open_ms`
+and `handle_ms` (opening the index, then answering, in process). A line
+without `serve` predates the field: its cause is unknown, and a warm replay
+does not reproduce a cold start.
 
 Drop the noise before counting (verified 2026-09):
 
