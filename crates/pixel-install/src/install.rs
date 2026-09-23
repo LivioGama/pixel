@@ -79,8 +79,8 @@ pub struct InstallOptions {
     /// (`pixel install --repo <path>`). When set, ONLY repo-local steps run:
     /// `.codex/config.toml` + `.codex/hooks.json`, `.devin/config.local.json`,
     /// `.claude/settings.local.json` (PreToolUse guard), and
-    /// `.pi/agent/extensions/pixel-guard.ts` + `.pi/agent/AGENTS.md` — none
-    /// of the global prompt/lifecycle-hook deploys.
+    /// `.pi/extensions/pixel-guard.ts` ([`REPO_ARTIFACTS`]) — none of the
+    /// global prompt/lifecycle-hook deploys.
     pub repo: Option<PathBuf>,
 }
 
@@ -225,8 +225,8 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
 ///     --provider claude` PreToolUse group merged alongside any foreign
 ///     entries (the personal project settings: the command names this
 ///     machine's binary, so the shared `settings.json` never carries it);
-///   - `<repo>/.pi/agent/extensions/pixel-guard.ts` + the managed block in
-///     `<repo>/.pi/agent/AGENTS.md` — pi's guard extension and usage rules.
+///   - `<repo>/.pi/extensions/pixel-guard.ts` — pi's guard extension
+///     ([`crate::pi_project`]).
 ///
 /// Every one of those files is then listed in the clone's `info/exclude`
 /// ([`crate::repo_git`]). Codex has no personal project file, so a
@@ -253,7 +253,7 @@ fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Resul
         crate::codex_config::install_developer_instructions(&codex_dir, dry_run)?,
         codex_step,
         crate::routing::install_project_devin_at(repo, exe, dry_run)?,
-        install_project_pi(home, repo, exe, dry_run)?,
+        crate::pi_project::install(repo, exe, dry_run)?,
         exclude_project_artifacts(repo, dry_run)?,
     ];
 
@@ -284,22 +284,63 @@ fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Resul
 /// The Codex project hook file, relative to the repository.
 const CODEX_PROJECT_HOOKS: &str = ".codex/hooks.json";
 
-/// Every repo artifact that names this machine's pixel binary, relative to
-/// the repository: the files `pixel install --repo` keeps out of commits.
-const MACHINE_LOCAL_ARTIFACTS: &[&str] = &[
-    crate::routing::CLAUDE_LOCAL_SETTINGS,
-    crate::routing::RTK_BACKUP,
-    crate::routing::DEVIN_LOCAL_CONFIG,
-    CODEX_PROJECT_HOOKS,
-    ".codex/pixel-composed-guard-backup.json",
-    ".pi/agent/extensions/pixel-guard.ts",
-    ".pi/agent/AGENTS.md",
+/// A file `pixel install --repo` may write, relative to the repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepoArtifact {
+    /// Path relative to the repository root.
+    pub path: &'static str,
+    /// Whether the file names this machine's pixel binary, so the install
+    /// lists it in the clone's `info/exclude` to keep it out of commits.
+    pub machine_local: bool,
+}
+
+/// Every file `pixel install --repo` may write. The README's per-project
+/// list and the `--repo` help name exactly these paths, which
+/// `docs_drift::` checks.
+pub const REPO_ARTIFACTS: &[RepoArtifact] = &[
+    RepoArtifact {
+        path: crate::routing::CLAUDE_LOCAL_SETTINGS,
+        machine_local: true,
+    },
+    RepoArtifact {
+        path: crate::routing::RTK_BACKUP,
+        machine_local: true,
+    },
+    RepoArtifact {
+        path: ".codex/config.toml",
+        machine_local: false,
+    },
+    RepoArtifact {
+        path: CODEX_PROJECT_HOOKS,
+        machine_local: true,
+    },
+    RepoArtifact {
+        path: ".codex/pixel-composed-guard-backup.json",
+        machine_local: true,
+    },
+    RepoArtifact {
+        path: crate::routing::DEVIN_LOCAL_CONFIG,
+        machine_local: true,
+    },
+    RepoArtifact {
+        path: crate::pi_project::EXTENSION,
+        machine_local: true,
+    },
 ];
 
-/// List [`MACHINE_LOCAL_ARTIFACTS`] in the clone's `info/exclude`, so a
+/// The [`REPO_ARTIFACTS`] that name this machine's pixel binary.
+fn machine_local_artifacts() -> Vec<&'static str> {
+    REPO_ARTIFACTS
+        .iter()
+        .filter(|artifact| artifact.machine_local)
+        .map(|artifact| artifact.path)
+        .collect()
+}
+
+/// List the machine-local [`REPO_ARTIFACTS`] in the clone's `info/exclude`, so a
 /// `git add -A` cannot publish a hook that points at this machine's binary.
 fn exclude_project_artifacts(repo: &Path, dry_run: bool) -> Result<InstallStep> {
-    let added = crate::repo_git::exclude_locally(repo, MACHINE_LOCAL_ARTIFACTS, dry_run)?;
+    let added = crate::repo_git::exclude_locally(repo, &machine_local_artifacts(), dry_run)?;
     Ok(InstallStep {
         id: "repo.git-exclude".into(),
         status: CheckStatus::Green,
@@ -311,157 +352,6 @@ fn exclude_project_artifacts(repo: &Path, dry_run: bool) -> Result<InstallStep> 
             ),
         ),
         detail: (!added.is_empty()).then(|| added.join(" ")),
-    })
-}
-
-/// Install the pixel guard extension into a repo-local pi config
-/// (`<repo>/.pi/agent/extensions/pixel-guard.ts`) plus the pixel rules into
-/// `<repo>/.pi/agent/AGENTS.md`. pi auto-discovers extensions from
-/// `.pi/agent/extensions/*.ts`; its `tool_call` event can rewrite a tool
-/// call by mutating `event.input`, so the extension shells out to
-/// `pixel run-hook guard` and applies any `updatedInput` the guard emits.
-/// A non-zero guard exit is advisory only — the tool call stays allowed.
-fn install_project_pi(home: &Path, repo: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let config_dir = repo.join(config::PI_CONFIG_DIR);
-    let extensions_dir = config_dir.join("extensions");
-    let ext_file = extensions_dir.join("pixel-guard.ts");
-    let agents_md = config_dir.join("AGENTS.md");
-
-    let exe_path = exe.display().to_string();
-
-    let extension_body = format!(
-        r#"// pixel-guard extension — managed by `pixel install`
-// {begin}
-// {end}
-import {{ spawnSync }} from "child_process";
-
-const PIXEL_BIN = {exe_path:?};
-const GUARD_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls", "sed", "awk", "perl", "ag", "ack", "egrep", "fgrep", "head", "tail", "cat", "xargs",
-  // Antigravity/Gemini tool names
-  "run_command", "view_file", "replace_file_content", "write_to_file", "grep_search", "find_by_name", "list_dir", "file_search", "edit_file"]);
-
-export default function activate(pi) {{
-  pi.on("tool_call", async (event, ctx) => {{
-    const toolName = event.toolName;
-    if (!GUARD_TOOLS.has(toolName)) return;
-
-    // Build the PreToolUse-compatible payload that `pixel run-hook guard`
-    // expects on stdin.
-    const cwd = ctx?.cwd ?? process.cwd();
-    const payload = {{
-      hook_event_name: "PreToolUse",
-      tool_name: toolName,
-      tool_input: event.input ?? {{}},
-      cwd,
-    }};
-
-    try {{
-      const result = spawnSync(PIXEL_BIN, ["run-hook", "guard"], {{
-        input: JSON.stringify(payload),
-        timeout: 5000,
-        encoding: "utf-8",
-      }});
-
-      // Keep the tool available even if a legacy guard path returns exit 2.
-      if (result.status === 2) {{
-        const reason = (result.stderr || "").trim() || "blocked by pixel guard";
-        console.warn(`[pixel] advisory: ${{reason}}`);
-        return;
-      }}
-
-      // exit 0 with stdout = possibly a rewrite (hookSpecificOutput.updatedInput).
-      // pi docs: "Mutations to event.input affect the actual tool execution"
-      // — mutate in place rather than returning a separate object.
-      if (result.status === 0 && result.stdout) {{
-        try {{
-          const parsed = JSON.parse(result.stdout);
-          const updated = parsed?.hookSpecificOutput?.updatedInput;
-          if (updated && typeof updated === "object") {{
-            Object.assign(event.input, updated);
-            return;
-          }}
-        }} catch {{
-          // stdout wasn't JSON — that's fine, the guard just allowed the call
-        }}
-      }}
-
-      // Any other exit (including crash/timeout) = allow, don't block the
-      // agent on a guard failure.
-      return;
-    }} catch {{
-      // spawn failure — allow, don't block the agent.
-      return;
-    }}
-  }});
-}}
-"#,
-        begin = config::MANAGED_BEGIN,
-        end = config::MANAGED_END,
-        exe_path = exe_path,
-    );
-
-    // The canonical rules file lives under home, same as the historical
-    // install; when absent, fall back to the short built-in summary.
-    let rules_path = home.join(config::PIXEL_RULES_REL);
-    let rules_content = fs::read_to_string(&rules_path).unwrap_or_default();
-    let managed_body = if rules_content.is_empty() {
-        format!(
-            "pixel is the unified retrieval + git engine. Use `pixel <verb>` for\n\
-             search, resolve, targets, history, and safe git ops.\n\
-             Binary: {}\n",
-            exe.display()
-        )
-    } else if rules_content.starts_with("---") {
-        rules_content
-            .splitn(3, "---")
-            .nth(2)
-            .unwrap_or("")
-            .trim_start()
-            .to_string()
-    } else {
-        rules_content
-    };
-
-    if dry_run {
-        return Ok(InstallStep {
-            id: "hooks.pi".into(),
-            status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "pi guard extension + AGENTS.md rules installed"),
-            detail: Some(format!(
-                "would write {} + {}",
-                ext_file.display(),
-                agents_md.display()
-            )),
-        });
-    }
-
-    fs::create_dir_all(&extensions_dir)?;
-    let ext_backup = config::backup_if_changing(&ext_file, extension_body.as_bytes())?;
-    fs::write(&ext_file, &extension_body)?;
-
-    // Write AGENTS.md with managed markers (idempotent replace of pixel's block).
-    let agents_backup = if !managed_body.is_empty() {
-        let existing = fs::read_to_string(&agents_md).unwrap_or_default();
-        let rewritten = config::apply_managed_markers(&existing, &managed_body);
-        if let Some(parent) = agents_md.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let bk = config::backup_if_changing(&agents_md, rewritten.as_bytes())?;
-        fs::write(&agents_md, &rewritten)?;
-        bk
-    } else {
-        None
-    };
-
-    let backup_path = ext_backup.or(agents_backup);
-    Ok(InstallStep {
-        id: "hooks.pi".into(),
-        status: CheckStatus::Green,
-        summary: "pi guard extension + AGENTS.md rules installed".into(),
-        detail: Some(with_backup_note(
-            format!("wrote {} + {}", ext_file.display(), agents_md.display()),
-            backup_path,
-        )),
     })
 }
 

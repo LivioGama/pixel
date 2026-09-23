@@ -920,10 +920,13 @@ enum Command {
         /// does not run under your login shell.
         #[arg(long)]
         shell: Option<String>,
-        /// Install project-local enforcement into this repository only:
-        /// `.codex/config.toml` + `.codex/hooks.json` (composed guard),
-        /// `.devin/hooks.json`, `.pi/agent/extensions/pixel-guard.ts` +
-        /// `.pi/agent/AGENTS.md`. Skips all global steps.
+        /// Install project-local enforcement into this repository only,
+        /// skipping every global step: `.claude/settings.local.json` (Claude
+        /// guard; `.claude/pixel-rtk-hooks.json` keeps an RTK hook it takes
+        /// over), `.codex/config.toml`, `.codex/hooks.json` (composed guard,
+        /// skipped when git tracks it) + `.codex/pixel-composed-guard-backup.json`,
+        /// `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts`. Files
+        /// naming this machine's binary go into the clone's `info/exclude`.
         #[arg(long)]
         repo: Option<PathBuf>,
     },

@@ -48,7 +48,8 @@ pub struct UninstallOptions {
     /// wrote (`pixel uninstall --repo <path>`). When set, ONLY repo-local
     /// removal runs: `.codex/hooks.json` + composed backup,
     /// `.codex/config.toml`, `.claude/settings.local.json`,
-    /// `.devin/config.local.json`, and `.pi/agent/`.
+    /// `.devin/config.local.json`, and `.pi/extensions/pixel-guard.ts`
+    /// (plus pixel's files in the `.pi/agent/` older releases used).
     pub repo: Option<PathBuf>,
 }
 
@@ -172,8 +173,8 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
 ///     `settings.json`;
 ///   - `<repo>/.devin/config.local.json` (and the legacy `.devin/hooks.json`)
 ///     — the pixel guard group only;
-///   - `<repo>/.pi/agent/extensions/pixel-guard.ts` + the managed block in
-///     `<repo>/.pi/agent/AGENTS.md`.
+///   - `<repo>/.pi/extensions/pixel-guard.ts`, and pixel's files in the
+///     `<repo>/.pi/agent/` an older release used ([`crate::pi_project`]).
 fn uninstall_project(repo: &Path, binary_path: &Path, dry_run: bool) -> Result<InstallReport> {
     let codex_hooks = repo.join(".codex").join(crate::codex_config::HOOKS_FILE);
     let mut patched = Vec::new();
@@ -242,7 +243,7 @@ fn uninstall_project(repo: &Path, binary_path: &Path, dry_run: bool) -> Result<I
                 )),
             }
         },
-        remove_pi_extension_dir(&repo.join(config::PI_CONFIG_DIR), dry_run)?,
+        crate::pi_project::uninstall(repo, dry_run)?,
     ];
 
     let green = steps
@@ -720,9 +721,8 @@ fn remove_pi_extension(home: &Path, dry_run: bool) -> Result<InstallStep> {
     remove_pi_extension_dir(&home.join(config::PI_CONFIG_DIR), dry_run)
 }
 
-/// Remove the pi guard extension and the AGENTS.md managed block under one
-/// pi agent config dir (`~/.pi/agent` globally, `<repo>/.pi/agent` for a
-/// project-local install).
+/// Remove the pi guard extension and the AGENTS.md managed block from the
+/// global pi agent config dir (`~/.pi/agent`).
 fn remove_pi_extension_dir(config_dir: &Path, dry_run: bool) -> Result<InstallStep> {
     if !config_dir.is_dir() {
         return Ok(InstallStep {

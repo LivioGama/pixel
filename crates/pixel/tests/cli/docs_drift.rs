@@ -8,7 +8,9 @@
 //!   bundled agent prompts names a real subcommand (a removed or renamed
 //!   command cannot linger in prose);
 //! - every subcommand appears in ARCHITECTURE.md's `## Command surface`
-//!   table (a new command cannot ship undocumented).
+//!   table (a new command cannot ship undocumented);
+//! - the README's per-project list and `pixel install --help` name exactly
+//!   the files `pixel install --repo` writes (`REPO_ARTIFACTS`).
 //!
 //! `pixel doctor` already dry-runs the *installed* prompt's command lines
 //! against the parser at run time; this test does it for the tree at build
@@ -344,4 +346,61 @@ fn guideline_rule_ids_should_read_only_heading_ids() {
     let text = "## Panic on bug (M-PANIC-ON-BUG) { #M-PANIC-ON-BUG }\nSee M-FROM-ERROR in prose.\n### Sub (M-NOT-A-RULE)\n";
     let got: Vec<String> = guideline_rule_ids(text).into_iter().collect();
     assert_eq!(got, ["M-PANIC-ON-BUG"]);
+}
+
+/// Every backticked `` `<repo>/<path>` `` in `text`, without the prefix.
+fn repo_paths(text: &str) -> BTreeSet<String> {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .filter_map(|token| token.strip_prefix("<repo>/"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Every backticked relative path (`` `.codex/hooks.json` ``) in `text`.
+fn dot_paths(text: &str) -> BTreeSet<String> {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|token| token.starts_with('.') && token.contains('/') && !token.contains(' '))
+        .map(str::to_string)
+        .collect()
+}
+
+fn repo_artifact_paths() -> BTreeSet<String> {
+    pixel_install::install::REPO_ARTIFACTS
+        .iter()
+        .map(|artifact| artifact.path.to_string())
+        .collect()
+}
+
+/// The README once sent readers to `.devin/hooks.json` and `.pi/agent/`,
+/// files the agents never read, and left out the Claude file the install
+/// really writes: the list is now checked against the code.
+#[test]
+fn readme_per_project_list_should_name_exactly_the_repo_install_files() {
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).unwrap();
+    assert_eq!(repo_paths(&readme), repo_artifact_paths());
+}
+
+#[test]
+fn install_repo_help_should_name_exactly_the_repo_install_files() {
+    let out = Command::new(env!("CARGO_BIN_EXE_pixel"))
+        .args(["install", "--help"])
+        .env("PIXEL_DAEMON_AUTO_START", "0")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let help = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(dot_paths(&help), repo_artifact_paths(), "{help}");
+}
+
+#[test]
+fn repo_paths_should_read_only_backticked_repo_prefixed_tokens() {
+    let text = "`<repo>/.a/b` and <repo>/.c/d, `.e/f`, `<repo>/.g/h`";
+    let got: Vec<String> = repo_paths(text).into_iter().collect();
+    assert_eq!(got, [".a/b", ".g/h"]);
+    let got: Vec<String> = dot_paths(text).into_iter().collect();
+    assert_eq!(got, [".e/f"]);
 }
