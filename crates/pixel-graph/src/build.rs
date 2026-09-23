@@ -577,6 +577,10 @@ pub struct TreeHashCache {
     pub rehashed: u64,
 }
 
+/// One walked file: repo-relative path, content hash, `(mtime, mtime_nsec,
+/// size)` stat, and whether the hash came from the stat memo.
+type HashedFile = (String, u64, (i64, i64, u64), bool);
+
 /// [`tree_hashes`] driven by `cache`: stat-only for files whose
 /// `(mtime, len)` is unchanged since the last walk, read + hash for the
 /// rest. The returned entries are identical to `tree_hashes`'s whenever
@@ -599,7 +603,7 @@ fn tree_hashes_cached(root: &Path, cache: &mut TreeHashCache) -> Vec<(String, u6
         .collect();
     let previous = std::mem::take(&mut cache.seen);
     let previous = &previous;
-    let hashed: Vec<(String, u64, (i64, i64, u64), bool)> = candidates
+    let hashed: Vec<HashedFile> = candidates
         .into_par_iter()
         .filter_map(|(rel, path)| {
             let meta = std::fs::metadata(&path).ok()?;

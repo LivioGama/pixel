@@ -543,6 +543,13 @@ fn flush_pending(
 }
 
 fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool) {
+    // The listener is non-blocking, and on macOS/BSD the accepted socket
+    // inherits `O_NONBLOCK`: without this reset a request line that has not
+    // arrived yet reads as `WouldBlock` (the connection closes unanswered)
+    // and a reply larger than the send buffer is cut short.
+    if stream.set_nonblocking(false).is_err() {
+        return;
+    }
     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(s) => s,
@@ -733,6 +740,55 @@ mod tests {
         fn sweep(&mut self) {
             self.sweeps.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    /// A corpus whose every answer is larger than a unix socket's default
+    /// send buffer (8 KiB on macOS), so a short write is observable.
+    struct BulkyCorpus(PathBuf);
+
+    const BULKY_PAYLOAD: usize = 262_144; // 256 KiB
+
+    impl Corpus for BulkyCorpus {
+        fn root(&self) -> &Path {
+            &self.0
+        }
+        fn handle(&mut self, _req: Request) -> Response {
+            Response::success(
+                "bulky",
+                serde_json::json!({"blob": "a".repeat(BULKY_PAYLOAD)}),
+            )
+        }
+        fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+    }
+
+    #[test]
+    fn a_connection_inheriting_nonblocking_still_waits_for_a_late_request_and_writes_it_all() {
+        let (server, client) = UnixStream::pair().unwrap();
+        // What `accept` on the non-blocking listener hands back on macOS/BSD.
+        server.set_nonblocking(true).unwrap();
+        let client_thread = std::thread::spawn(move || {
+            let mut client = client;
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            // The request arrives after the daemon starts reading.
+            std::thread::sleep(Duration::from_millis(100));
+            writeln!(client, "{}", serde_json::to_string(&Request::Ping).unwrap()).unwrap();
+            let mut line = String::new();
+            BufReader::new(&client).read_line(&mut line).unwrap();
+            line
+        });
+        let mut corpus = BulkyCorpus(scratch_root("bulky"));
+        let mut shutdown = false;
+        handle_conn(&mut corpus, server, &mut shutdown);
+        let line = client_thread.join().unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&line)
+            .unwrap_or_else(|e| panic!("one complete JSON reply ({e}), got {} bytes", line.len()));
+        assert_eq!(
+            reply["result"]["blob"].as_str().map(str::len),
+            Some(BULKY_PAYLOAD),
+            "the whole reply reaches the client"
+        );
     }
 
     fn scratch_root(tag: &str) -> PathBuf {

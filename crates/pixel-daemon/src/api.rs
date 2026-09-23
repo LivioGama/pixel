@@ -235,6 +235,32 @@ const ACTIVITY_CACHE_TTL: Duration = Duration::from_secs(60);
 pub(crate) struct Publication {
     pub generation: u64,
     pub healthy: bool,
+    /// A graph write failed after the index moved on: the graph on disk may
+    /// not match the index until the writer's next graph op repairs it, so
+    /// readers answer from the text index alone.
+    pub graph_lagging: bool,
+}
+
+impl Publication {
+    /// A write that kept index and graph in step.
+    fn publish(&mut self) {
+        self.generation += 1;
+        self.healthy = true;
+    }
+
+    /// A graph (re)build whose drift check left the graph matching the tree.
+    fn publish_fresh_graph(&mut self) {
+        self.publish();
+        self.graph_lagging = false;
+    }
+
+    /// A write that failed part-way still publishes: readers must not be
+    /// refused until some later write happens to succeed. The index they
+    /// share stays usable; the graph is marked lagging.
+    fn publish_after_failure(&mut self) {
+        self.publish();
+        self.graph_lagging = true;
+    }
 }
 
 /// Counts watcher-side failures and decides which ones are logged: the
@@ -281,6 +307,7 @@ impl Service {
             publication: Arc::new(RwLock::new(Publication {
                 generation: 1,
                 healthy: true,
+                graph_lagging: false,
             })),
             read_only: false,
             reader_generation: 0,
@@ -341,7 +368,7 @@ impl Service {
             self.graph = None;
             self.reader_generation = state.generation;
         }
-        if self.graph.is_none() {
+        if self.graph.is_none() && !state.graph_lagging {
             self.graph = GraphStore::open_read_only(&self.graph_db_path()).ok();
         }
         if let Some(graph) = &self.graph
@@ -360,6 +387,23 @@ impl Service {
             let _ = graph.conn().execute_batch("ROLLBACK");
         }
         (*state, result)
+    }
+
+    /// Semantic leads for a lexical miss. The read plane never embeds: a
+    /// corpus embed is the heavy, cache-writing work its allowlist keeps on
+    /// the maintenance lane, so a replica reports the fallback as disabled.
+    fn semantic_fallback(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> pixel_recall::code_search::SemanticFallback {
+        if self.read_only {
+            return pixel_recall::code_search::SemanticFallback {
+                disabled: true,
+                ..Default::default()
+            };
+        }
+        pixel_recall::code_search::semantic_fallback(&self.root, query, limit)
     }
 
     pub(crate) fn admitted_paths(&self) -> Vec<String> {
@@ -410,12 +454,12 @@ impl Service {
                     &error,
                 );
                 self.graph = None;
+                state.publish_after_failure();
                 return;
             }
             self.graph = None;
         }
-        state.generation += 1;
-        state.healthy = true;
+        state.publish();
     }
 
     /// Count a watcher-driven graph update that failed. The cached handle is
@@ -463,8 +507,9 @@ impl Service {
         state.healthy = false;
         let result = self.ensure_graph_inner();
         if result.is_ok() {
-            state.generation += 1;
-            state.healthy = true;
+            state.publish_fresh_graph();
+        } else {
+            state.publish_after_failure();
         }
         result
     }
@@ -1414,8 +1459,7 @@ impl Service {
             .any(|t| matches!(t.tier.as_str(), "P0" | "P1"));
         if semantic_fallback_wanted(has_p0_p1, max_tier) {
             let eff_limit = limit.unwrap_or(engine::DEFAULT_LIMIT);
-            let fallback =
-                pixel_recall::code_search::semantic_fallback(&self.root, task, eff_limit);
+            let fallback = self.semantic_fallback(task, eff_limit);
             apply_semantic_leads(&mut report, &fallback, eff_limit);
         }
         let mut out = serde_json::to_value(&report).map_err(|e| e.to_string())?;
@@ -2080,9 +2124,13 @@ impl Service {
         let publication = Arc::clone(&self.publication);
         let mut state = publication.write().expect("publication lock poisoned");
         state.healthy = false;
-        let (stats, build_ms) = self.rebuild_graph()?;
-        state.generation += 1;
-        state.healthy = true;
+        let rebuilt = self.rebuild_graph();
+        if rebuilt.is_ok() {
+            state.publish_fresh_graph();
+        } else {
+            state.publish_after_failure();
+        }
+        let (stats, build_ms) = rebuilt?;
         Ok(json!({
             "files": stats.get("files").cloned().unwrap_or(Value::Null),
             "symbols": stats.get("symbols").cloned().unwrap_or(Value::Null),
@@ -2239,13 +2287,19 @@ impl Service {
         // concurrent CLI also tries to build).
         let extractor: Box<dyn pixel_index::GramExtractor> =
             Box::new(pixel_index::TrigramExtractor);
-        let new_index =
-            pixel_index::indexset::IndexSet::open_or_build_bypass_cache(&self.root, extractor)
-                .map_err(|e| e.to_string())?;
+        let rebuilt =
+            pixel_index::indexset::IndexSet::open_or_build_bypass_cache(&self.root, extractor);
+        let new_index = match rebuilt {
+            Ok(index) => index,
+            Err(error) => {
+                // Nothing was swapped in: readers keep the index they had.
+                state.healthy = true;
+                return Err(error.to_string());
+            }
+        };
         *self.index.write().expect("index lock poisoned") = new_index;
         let s = self.index.read().expect("index lock poisoned").status();
-        state.generation += 1;
-        state.healthy = true;
+        state.publish();
         Ok(json!({
             "root": self.root.display().to_string(),
             "index": {
@@ -2414,11 +2468,7 @@ impl Service {
                 // Graph unavailable (e.g. non-git dir where build was refused
                 // or capped). The semantic fallback needs no graph — try it
                 // before returning the empty unresolved outcome.
-                let semantic = pixel_recall::code_search::semantic_fallback(
-                    &self.root,
-                    phrase,
-                    limit.unwrap_or(8),
-                );
+                let semantic = self.semantic_fallback(phrase, limit.unwrap_or(8));
                 let matches: Vec<Value> = semantic
                     .hits
                     .iter()
@@ -2499,8 +2549,7 @@ impl Service {
         if matches_empty {
             // A zero limit asks for no match: nothing to embed.
             if let Some(limit) = std::num::NonZeroUsize::new(limit.unwrap_or(8)) {
-                let fallback =
-                    pixel_recall::code_search::semantic_fallback(&self.root, phrase, limit.get());
+                let fallback = self.semantic_fallback(phrase, limit.get());
                 let hits = &fallback.hits;
                 if !hits.is_empty() {
                     // Emit the full ConceptMatch shape so downstream consumers
@@ -2908,6 +2957,7 @@ impl Service {
     /// is named in `SignalBundle::activity_unavailable` (the reranker then
     /// applies only the per-path test penalty).
     fn engine_signals(&mut self, candidates: &[String]) -> pixel_rank::signals::SignalBundle {
+        use pixel_rank::signals::{SignalOptions, compute_signals};
         if self.read_only {
             return pixel_rank::signals::SignalBundle {
                 activity_unavailable: Some(
@@ -2916,7 +2966,6 @@ impl Service {
                 ..Default::default()
             };
         }
-        use pixel_rank::signals::{SignalOptions, compute_signals};
         let runner = pixel_git::GitRunner::new(&self.root);
         // The dirty set is the same `status_porcelain` walk `repo_snapshot`
         // already pays for on this request path — reuse its cache instead
@@ -4578,6 +4627,120 @@ mod tests {
         assert!(result.unwrap().to_string().contains("updated_name"));
         writer.publication.write().unwrap().healthy = false;
         assert!(first.read_evidence("search", "updated_name", 8).1.is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn publication_outcomes_advance_the_generation_and_track_the_graph() {
+        let mut state = Publication {
+            generation: 7,
+            healthy: false,
+            graph_lagging: false,
+        };
+        state.publish_after_failure();
+        assert_eq!(
+            (state.generation, state.healthy, state.graph_lagging),
+            (8, true, true),
+            "a failed write still publishes, with the graph marked lagging"
+        );
+        state.healthy = false;
+        state.publish();
+        assert_eq!(
+            (state.generation, state.healthy, state.graph_lagging),
+            (9, true, true),
+            "an index-only write cannot vouch for a lagging graph"
+        );
+        state.publish_fresh_graph();
+        assert_eq!(
+            (state.generation, state.healthy, state.graph_lagging),
+            (10, true, false)
+        );
+    }
+
+    fn login_repo(tag: &str) -> PathBuf {
+        let root = tmpdir(tag);
+        std::fs::write(
+            root.join("login.rs"),
+            "pub fn login(user: &str) -> bool { !user.is_empty() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("caller.rs"),
+            "use crate::login::login;\npub fn go() { login(\"a\"); }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        root
+    }
+
+    #[test]
+    fn read_plane_answers_each_allowed_kind_and_refuses_any_other() {
+        let root = login_repo("read-plane-kinds");
+        let mut writer = Service::open(&root).unwrap();
+        writer.ensure_graph().unwrap();
+        let mut reader = writer.read_replica();
+        for kind in ["search", "resolve", "impact", "execution_brief"] {
+            let (_, result) = reader.read_evidence(kind, "login", 4);
+            let value = result.unwrap_or_else(|e| panic!("{kind}: {e}"));
+            assert!(value.to_string().contains("login.rs"), "{kind}: {value}");
+        }
+        let (_, refused) = reader.read_evidence("reindex", "login", 4);
+        assert_eq!(
+            refused,
+            Err("unsupported evidence query kind: reindex".to_string())
+        );
+        assert!(
+            reader.semantic_fallback("login", 4).disabled,
+            "a replica never embeds the corpus"
+        );
+        assert!(
+            reader
+                .engine_signals(&["login.rs".into()])
+                .activity_unavailable
+                .is_some(),
+            "a replica never runs history enrichment"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_graph_update_leaves_readers_text_answers_until_the_graph_is_repaired() {
+        let root = login_repo("read-plane-lagging");
+        let mut writer = Service::open(&root).unwrap();
+        writer.ensure_graph().unwrap();
+        let mut reader = writer.read_replica();
+        let (before, impact) = reader.read_evidence("impact", "login", 4);
+        assert!(impact.is_ok(), "{impact:?}");
+
+        // The next graph write fails: graph.db is no longer a database.
+        writer.graph = None;
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", writer.graph_db_path().display()));
+        }
+        std::fs::write(writer.graph_db_path(), b"not a sqlite database").unwrap();
+        std::fs::write(root.join("login.rs"), "pub fn login_v2() {}\n").unwrap();
+        writer.refresh_file("login.rs");
+
+        let (after, search) = reader.read_evidence("search", "login_v2", 4);
+        assert!(
+            after.healthy,
+            "readers are not refused after a failed write"
+        );
+        assert!(after.generation > before.generation);
+        assert!(after.graph_lagging);
+        assert!(search.unwrap().to_string().contains("login_v2"));
+        let (_, impact) = reader.read_evidence("impact", "login", 4);
+        assert!(
+            impact.is_err_and(|e| e.contains("graph unavailable")),
+            "the cached graph from the previous generation is not reused"
+        );
+
+        writer.ensure_graph().unwrap();
+        let (repaired, impact) = reader.read_evidence("impact", "login_v2", 4);
+        assert!(!repaired.graph_lagging);
+        assert!(impact.is_ok(), "{impact:?}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
