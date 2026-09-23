@@ -3,12 +3,13 @@
 //!
 //! Every check is listed in [`CHECKS`] with the command that repairs it, so a
 //! caller can select checks by id (`--only`, `--skip`) and act on a finding
-//! without parsing its prose.
+//! without parsing its prose. [`repair_plan`] folds the flagged checks into
+//! one run of each distinct command, which `pixel doctor --fix` executes.
 
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -124,6 +125,11 @@ pub struct DoctorCheck {
     /// Shell command that repairs this check; only on a yellow or red one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<String>,
+    /// The argv after `pixel` of each command in `fix`, when `fix` is the
+    /// catalogue command `--fix` may run by itself; `None` for a command only
+    /// one outcome names (a path to remove), which stays the user's call.
+    #[serde(skip)]
+    pub repair: Option<Vec<Vec<String>>>,
 }
 
 /// The full doctor report.
@@ -255,6 +261,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         only: &options.only,
         skip: &options.skip,
         root: options.repo_root.as_deref(),
+        shell: options.shell.as_deref(),
         checks: Vec::new(),
         skipped: 0,
     };
@@ -1190,6 +1197,8 @@ struct Runner<'a> {
     only: &'a [String],
     skip: &'a [String],
     root: Option<&'a Path>,
+    /// The `--shell` override, handed on to the `pixel install` a fix runs.
+    shell: Option<&'a str>,
     checks: Vec<DoctorCheck>,
     skipped: usize,
 }
@@ -1242,7 +1251,8 @@ impl Runner<'_> {
                 summary: d.summary,
                 reason: None,
                 detail: d.detail,
-                fix: fix_for(spec, status, remedy, self.root),
+                repair: repair_for(spec, status, &remedy, self.root, self.shell),
+                fix: fix_for(spec, status, remedy, self.root, self.shell),
             },
             Err(reason) => DoctorCheck {
                 id: id.into(),
@@ -1252,7 +1262,20 @@ impl Runner<'_> {
                 summary: "check failed".into(),
                 reason: Some(reason),
                 detail: None,
-                fix: fix_for(spec, CheckStatus::Red, Remedy::Catalogue, self.root),
+                repair: repair_for(
+                    spec,
+                    CheckStatus::Red,
+                    &Remedy::Catalogue,
+                    self.root,
+                    self.shell,
+                ),
+                fix: fix_for(
+                    spec,
+                    CheckStatus::Red,
+                    Remedy::Catalogue,
+                    self.root,
+                    self.shell,
+                ),
             },
         };
         self.checks.push(check);
@@ -1295,26 +1318,269 @@ fn validate_selection(only: &[String], skip: &[String]) -> Result<()> {
 
 /// The repair command a check reports: none on green, otherwise what the
 /// outcome names, with `{root}` in a catalogue command replaced by the quoted
-/// repository root (`.` when there is none).
+/// repository root (`.` when there is none) and `shell` handed to a
+/// home-wide `pixel install`.
 fn fix_for(
     spec: &CheckSpec,
     status: CheckStatus,
     remedy: Remedy,
     root: Option<&Path>,
+    shell: Option<&str>,
 ) -> Option<String> {
     if status == CheckStatus::Green {
         return None;
     }
     match remedy {
         Remedy::Catalogue => spec.fix.map(|template| {
-            template.replace(
-                "{root}",
-                &root.map_or_else(|| ".".to_owned(), crate::routing::quoted_executable),
-            )
+            let root = root.map_or_else(|| ".".to_owned(), crate::routing::quoted_executable);
+            let shell = shell.map(shell_word);
+            catalogue_steps(template, &root, shell.as_deref())
+                .iter()
+                .map(|argv| format!("pixel {}", argv.join(" ")))
+                .collect::<Vec<_>>()
+                .join(" && ")
         }),
         Remedy::Command(command) => Some(command),
         Remedy::Manual => None,
     }
+}
+
+/// The argv `--fix` runs for a check: the same commands as [`fix_for`], with
+/// the root unquoted, and only for a flagged check whose outcome kept the
+/// catalogue command.
+fn repair_for(
+    spec: &CheckSpec,
+    status: CheckStatus,
+    remedy: &Remedy,
+    root: Option<&Path>,
+    shell: Option<&str>,
+) -> Option<Vec<Vec<String>>> {
+    if status == CheckStatus::Green || *remedy != Remedy::Catalogue {
+        return None;
+    }
+    let root = root.map_or_else(|| ".".to_owned(), |r| r.to_string_lossy().into_owned());
+    spec.fix
+        .map(|template| catalogue_steps(template, &root, shell))
+}
+
+/// The argv after `pixel` of each `&&`-joined command in `template`, with
+/// `{root}` replaced by `root`. The home-wide `pixel install` also gets
+/// `--shell <shell>` when one was given, so the repair reads the profile the
+/// check read.
+fn catalogue_steps(template: &str, root: &str, shell: Option<&str>) -> Vec<Vec<String>> {
+    template
+        .split(" && ")
+        .map(|command| {
+            let mut argv: Vec<String> = command
+                .split_whitespace()
+                .skip(1)
+                .map(|word| {
+                    if word == "{root}" {
+                        root.to_owned()
+                    } else {
+                        word.to_owned()
+                    }
+                })
+                .collect();
+            if let Some(shell) = shell
+                && argv == ["install"]
+            {
+                argv.extend(["--shell".to_owned(), shell.to_owned()]);
+            }
+            argv
+        })
+        .collect()
+}
+
+/// `shell` as one shell word: bare when it holds only path-safe characters,
+/// single-quoted otherwise.
+fn shell_word(shell: &str) -> String {
+    if !shell.is_empty()
+        && shell
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
+    {
+        shell.to_owned()
+    } else {
+        crate::routing::quoted_executable(Path::new(shell))
+    }
+}
+
+/// One command `pixel doctor --fix` runs, and the flagged checks it repairs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Repair {
+    /// The command as the report prints it in `fix`.
+    pub command: String,
+    /// The argv after `pixel` of each `&&`-joined step.
+    #[serde(skip)]
+    pub steps: Vec<Vec<String>>,
+    /// Ids of the flagged checks this command repairs, in report order.
+    pub checks: Vec<String>,
+}
+
+/// The repairs `--fix` runs for `report`: one per distinct catalogue command
+/// among the flagged checks, in catalogue order (home install, repo install,
+/// daemon, index), so a command shared by twelve checks runs once. A check
+/// whose fix only its outcome can name (a file to remove) or that has none is
+/// left out and keeps its `fix:` line.
+#[must_use]
+pub fn repair_plan(report: &DoctorReport) -> Vec<Repair> {
+    let mut plan: Vec<Repair> = Vec::new();
+    for check in &report.checks {
+        let (Some(steps), Some(command)) = (&check.repair, &check.fix) else {
+            continue;
+        };
+        if let Some(repair) = plan.iter_mut().find(|r| r.steps == *steps) {
+            repair.checks.push(check.id.clone());
+        } else {
+            plan.push(Repair {
+                command: command.clone(),
+                steps: steps.clone(),
+                checks: vec![check.id.clone()],
+            });
+        }
+    }
+    plan
+}
+
+/// Run `repair`'s steps in order with `exe` (the pixel binary), stopping at
+/// the first that fails, as `&&` would. Output is captured: stdout belongs to
+/// the report, and a failure quotes the step's stderr.
+///
+/// # Errors
+///
+/// The failing step, its exit status and an excerpt of its stderr, or why it
+/// could not start.
+pub fn run_repair(exe: &Path, repair: &Repair) -> std::result::Result<(), String> {
+    for argv in &repair.steps {
+        let step = format!("pixel {}", argv.join(" "));
+        let out = Command::new(exe)
+            .args(argv)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("`{step}` could not start: {e}"))?;
+        if !out.status.success() {
+            let stderr = capped(
+                &one_line(&String::from_utf8_lossy(&out.stderr)),
+                STDERR_EXCERPT_CHARS,
+            );
+            let excerpt = if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            };
+            return Err(format!("`{step}` failed ({}){excerpt}", out.status));
+        }
+    }
+    Ok(())
+}
+
+/// How a repair ended, judged against the report taken after every repair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairStatus {
+    /// It succeeded and every check it targeted is green now.
+    Fixed,
+    /// It succeeded, yet a check it targeted is still yellow or red.
+    NotConverged,
+    /// A step exited non-zero or could not start.
+    Failed,
+}
+
+impl fmt::Display for RepairStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Fixed => "fixed",
+            Self::NotConverged => "not converged",
+            Self::Failed => "failed",
+        })
+    }
+}
+
+/// A repair `--fix` ran and what the checks said afterwards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RepairOutcome {
+    pub command: String,
+    pub checks: Vec<String>,
+    pub status: RepairStatus,
+    /// Targeted checks still yellow or red (or no longer reported) after
+    /// every repair ran.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub still_flagged: Vec<String>,
+    /// Why the repair failed, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Judge `repair` from its run and the report `after` it. A command that
+/// exits 0 is not taken at its word: it is `fixed` only when the checks it
+/// targeted re-run green.
+#[must_use]
+pub fn judge_repair(
+    repair: Repair,
+    run: std::result::Result<(), String>,
+    after: &DoctorReport,
+) -> RepairOutcome {
+    let still_flagged: Vec<String> = repair
+        .checks
+        .iter()
+        .filter(|id| {
+            after
+                .checks
+                .iter()
+                .find(|c| c.id == **id)
+                .is_none_or(|c| c.status != CheckStatus::Green)
+        })
+        .cloned()
+        .collect();
+    let (status, error) = match run {
+        Err(error) => (RepairStatus::Failed, Some(error)),
+        Ok(()) if still_flagged.is_empty() => (RepairStatus::Fixed, None),
+        Ok(()) => (RepairStatus::NotConverged, None),
+    };
+    RepairOutcome {
+        command: repair.command,
+        checks: repair.checks,
+        status,
+        still_flagged,
+        error,
+    }
+}
+
+/// The terminal form of a `--fix` run: a tally line, then one line per
+/// repair with the checks it targeted, and what is left when it did not end
+/// `fixed`.
+#[must_use]
+pub fn render_repairs(outcomes: &[RepairOutcome]) -> String {
+    if outcomes.is_empty() {
+        return "pixel doctor --fix: nothing to repair automatically\n".to_owned();
+    }
+    let count = |status| outcomes.iter().filter(|o| o.status == status).count();
+    let mut text = format!(
+        "pixel doctor --fix: ran {} repair(s) — {} fixed, {} not converged, {} failed\n",
+        outcomes.len(),
+        count(RepairStatus::Fixed),
+        count(RepairStatus::NotConverged),
+        count(RepairStatus::Failed),
+    );
+    for outcome in outcomes {
+        text.push_str(&format!(
+            "  [{}] {} ({})\n",
+            outcome.status,
+            outcome.command,
+            outcome.checks.join(", ")
+        ));
+        if let Some(error) = &outcome.error {
+            text.push_str(&format!("    error: {error}\n"));
+        }
+        if !outcome.still_flagged.is_empty() {
+            text.push_str(&format!(
+                "    still flagged: {}\n",
+                outcome.still_flagged.join(", ")
+            ));
+        }
+    }
+    text
 }
 
 /// `text` on one line: whitespace runs and control characters (a child's
@@ -1587,10 +1853,11 @@ mod tests {
 
     use super::facts_dead_reason;
     use super::{
-        CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary, Remedy, age_secs,
-        capped, extract_rule_commands, fix_for, normalize_rule_command, one_line,
-        probe_daemon_epistemics, render_catalogue, rtk_backup_check, scenario_mismatches, selected,
-        spec, validate_selection,
+        CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary, Remedy, Repair,
+        RepairOutcome, RepairStatus, age_secs, capped, catalogue_steps, extract_rule_commands,
+        fix_for, judge_repair, normalize_rule_command, one_line, probe_daemon_epistemics,
+        render_catalogue, render_repairs, repair_for, repair_plan, rtk_backup_check, run_repair,
+        scenario_mismatches, selected, shell_word, spec, validate_selection,
     };
     use crate::InstallError;
 
@@ -1609,7 +1876,20 @@ mod tests {
             reason: reason.map(Into::into),
             detail: None,
             fix: fix.map(Into::into),
+            repair: None,
         }
+    }
+
+    /// A flagged check carrying the catalogue repair `steps`.
+    fn repairable(id: &str, status: CheckStatus, fix: &str, steps: &[&[&str]]) -> DoctorCheck {
+        DoctorCheck {
+            repair: Some(argv(steps)),
+            ..finding(id, status, None, Some(fix))
+        }
+    }
+
+    fn argv(steps: &[&[&str]]) -> Vec<Vec<String>> {
+        steps.iter().map(|step| ids(step)).collect()
     }
 
     fn report(checks: Vec<DoctorCheck>, skipped: usize) -> DoctorReport {
@@ -1808,15 +2088,21 @@ mod tests {
         };
         let root = Path::new("/tmp/it's here");
         assert_eq!(
-            fix_for(&repo, CheckStatus::Green, Remedy::Catalogue, Some(root)),
+            fix_for(
+                &repo,
+                CheckStatus::Green,
+                Remedy::Catalogue,
+                Some(root),
+                None
+            ),
             None
         );
         assert_eq!(
-            fix_for(&repo, CheckStatus::Red, Remedy::Catalogue, Some(root)).as_deref(),
+            fix_for(&repo, CheckStatus::Red, Remedy::Catalogue, Some(root), None).as_deref(),
             Some("pixel install --repo '/tmp/it'\\''s here'")
         );
         assert_eq!(
-            fix_for(&repo, CheckStatus::Yellow, Remedy::Catalogue, None).as_deref(),
+            fix_for(&repo, CheckStatus::Yellow, Remedy::Catalogue, None, None).as_deref(),
             Some("pixel install --repo .")
         );
         assert_eq!(
@@ -1824,13 +2110,14 @@ mod tests {
                 &repo,
                 CheckStatus::Yellow,
                 Remedy::Command("rm x".into()),
-                Some(root)
+                Some(root),
+                None
             )
             .as_deref(),
             Some("rm x")
         );
         assert_eq!(
-            fix_for(&repo, CheckStatus::Red, Remedy::Manual, Some(root)),
+            fix_for(&repo, CheckStatus::Red, Remedy::Manual, Some(root), None),
             None
         );
         let bare = CheckSpec {
@@ -1838,8 +2125,353 @@ mod tests {
             fix: None,
         };
         assert_eq!(
-            fix_for(&bare, CheckStatus::Red, Remedy::Catalogue, Some(root)),
+            fix_for(&bare, CheckStatus::Red, Remedy::Catalogue, Some(root), None),
             None
+        );
+    }
+
+    /// `--fix` runs a catalogue command by dropping its leading word, so a
+    /// template that did not start with `pixel` would run the wrong program.
+    #[test]
+    fn every_catalogue_command_should_be_a_chain_of_pixel_invocations() {
+        for check in CHECKS {
+            for command in check.fix.iter().flat_map(|fix| fix.split(" && ")) {
+                assert!(command.starts_with("pixel "), "{}: {command}", check.id);
+            }
+        }
+    }
+
+    #[test]
+    fn catalogue_steps_should_split_chains_and_substitute_the_root() {
+        assert_eq!(
+            catalogue_steps(
+                "pixel daemon stop {root} && pixel daemon start {root}",
+                "/r",
+                None
+            ),
+            argv(&[&["daemon", "stop", "/r"], &["daemon", "start", "/r"]])
+        );
+    }
+
+    /// The home install reads the shell profile, so the repair must target
+    /// the shell the check was told about; the repo install and every other
+    /// command take no `--shell`.
+    #[test]
+    fn catalogue_steps_should_hand_the_shell_to_the_home_install_only() {
+        assert_eq!(
+            catalogue_steps("pixel install", "/r", Some("fish")),
+            argv(&[&["install", "--shell", "fish"]])
+        );
+        assert_eq!(
+            catalogue_steps("pixel install", "/r", None),
+            argv(&[&["install"]])
+        );
+        assert_eq!(
+            catalogue_steps("pixel install --repo {root}", "/r", Some("fish")),
+            argv(&[&["install", "--repo", "/r"]])
+        );
+    }
+
+    #[test]
+    fn fix_for_should_print_the_shell_the_repair_will_use() {
+        let install = spec("install.agent-prompt");
+        assert_eq!(
+            fix_for(
+                install,
+                CheckStatus::Red,
+                Remedy::Catalogue,
+                None,
+                Some("fish")
+            )
+            .as_deref(),
+            Some("pixel install --shell fish")
+        );
+        assert_eq!(
+            fix_for(
+                install,
+                CheckStatus::Red,
+                Remedy::Catalogue,
+                None,
+                Some("my sh")
+            )
+            .as_deref(),
+            Some("pixel install --shell 'my sh'")
+        );
+        assert_eq!(
+            fix_for(
+                spec("daemon.epistemics"),
+                CheckStatus::Yellow,
+                Remedy::Catalogue,
+                Some(Path::new("/r")),
+                Some("fish")
+            )
+            .as_deref(),
+            Some("pixel daemon stop '/r' && pixel daemon start '/r'")
+        );
+    }
+
+    #[test]
+    fn shell_word_should_quote_only_what_a_shell_would_split() {
+        assert_eq!(shell_word("fish"), "fish");
+        assert_eq!(
+            shell_word("/opt/homebrew/bin/fish-3.7_x"),
+            "/opt/homebrew/bin/fish-3.7_x"
+        );
+        assert_eq!(shell_word("a b"), "'a b'");
+        assert_eq!(shell_word(""), "''");
+    }
+
+    /// `--fix` runs only the catalogue command of a flagged check, with the
+    /// root as one raw argument (no shell quoting: nothing parses it again).
+    #[test]
+    fn repair_for_should_carry_argv_only_for_a_flagged_catalogue_fix() {
+        let repo = spec("repo.pi-guard");
+        let root = Path::new("/tmp/it's here");
+        assert_eq!(
+            repair_for(
+                repo,
+                CheckStatus::Yellow,
+                &Remedy::Catalogue,
+                Some(root),
+                None
+            ),
+            Some(argv(&[&["install", "--repo", "/tmp/it's here"]]))
+        );
+        assert_eq!(
+            repair_for(repo, CheckStatus::Red, &Remedy::Catalogue, None, None),
+            Some(argv(&[&["install", "--repo", "."]]))
+        );
+        assert_eq!(
+            repair_for(
+                repo,
+                CheckStatus::Green,
+                &Remedy::Catalogue,
+                Some(root),
+                None
+            ),
+            None
+        );
+        assert_eq!(
+            repair_for(
+                repo,
+                CheckStatus::Red,
+                &Remedy::Command("rm x".into()),
+                Some(root),
+                None
+            ),
+            None,
+            "a command one outcome names stays the user's call"
+        );
+        assert_eq!(
+            repair_for(repo, CheckStatus::Red, &Remedy::Manual, Some(root), None),
+            None
+        );
+        assert_eq!(
+            repair_for(
+                spec("binary.path"),
+                CheckStatus::Red,
+                &Remedy::Catalogue,
+                Some(root),
+                None
+            ),
+            None
+        );
+    }
+
+    /// Twelve checks share `pixel install`: the plan runs it once, lists
+    /// every check it repairs, and keeps the report's order.
+    #[test]
+    fn repair_plan_should_run_each_command_once_in_report_order() {
+        let install: &[&[&str]] = &[&["install"]];
+        let prepare: &[&[&str]] = &[&["prepare-repo", "/r"]];
+        let plan = repair_plan(&report(
+            vec![
+                finding("binary.path", CheckStatus::Green, None, None),
+                repairable(
+                    "install.agent-prompt",
+                    CheckStatus::Red,
+                    "pixel install",
+                    install,
+                ),
+                finding(
+                    "install.rtk-backup",
+                    CheckStatus::Yellow,
+                    None,
+                    Some("rm '/h/rtk.json'"),
+                ),
+                repairable("rule.parity", CheckStatus::Yellow, "pixel install", install),
+                repairable(
+                    "index.freshness",
+                    CheckStatus::Yellow,
+                    "pixel prepare-repo '/r'",
+                    prepare,
+                ),
+                repairable(
+                    "graph.freshness",
+                    CheckStatus::Red,
+                    "pixel prepare-repo '/r'",
+                    prepare,
+                ),
+            ],
+            0,
+        ));
+        assert_eq!(
+            plan,
+            vec![
+                Repair {
+                    command: "pixel install".into(),
+                    steps: argv(install),
+                    checks: ids(&["install.agent-prompt", "rule.parity"]),
+                },
+                Repair {
+                    command: "pixel prepare-repo '/r'".into(),
+                    steps: argv(prepare),
+                    checks: ids(&["index.freshness", "graph.freshness"]),
+                },
+            ]
+        );
+    }
+
+    fn sh_repair(steps: &[&[&str]]) -> Repair {
+        Repair {
+            command: "c".into(),
+            steps: argv(steps),
+            checks: vec![],
+        }
+    }
+
+    #[test]
+    fn run_repair_should_run_every_step_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log");
+        let append = |word: &str| format!("echo {word} >> '{}'", log.display());
+        let (first, second) = (append("one"), append("two"));
+        let repair = sh_repair(&[&["-c", &first], &["-c", &second]]);
+        assert_eq!(run_repair(Path::new("/bin/sh"), &repair), Ok(()));
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "one\ntwo\n");
+    }
+
+    /// Like `&&`: once a step fails the rest of the repair does not run, and
+    /// the error names the step and quotes its stderr.
+    #[test]
+    fn run_repair_should_stop_at_the_first_failing_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker");
+        let touch = format!("touch '{}'", marker.display());
+        let repair = sh_repair(&[&["-c", "echo boom >&2; exit 3"], &["-c", &touch]]);
+        let error = run_repair(Path::new("/bin/sh"), &repair).unwrap_err();
+        assert_eq!(
+            error,
+            "`pixel -c echo boom >&2; exit 3` failed (exit status: 3): boom"
+        );
+        assert!(!marker.exists(), "the step after the failure ran");
+        let silent = run_repair(Path::new("/bin/sh"), &sh_repair(&[&["-c", "exit 4"]]));
+        assert_eq!(
+            silent,
+            Err("`pixel -c exit 4` failed (exit status: 4)".into())
+        );
+    }
+
+    #[test]
+    fn run_repair_should_report_a_binary_that_cannot_start() {
+        let error =
+            run_repair(Path::new("/nonexistent/pixel"), &sh_repair(&[&["install"]])).unwrap_err();
+        assert!(
+            error.starts_with("`pixel install` could not start: "),
+            "{error}"
+        );
+    }
+
+    /// A command that exits 0 is not proof: the verdict comes from the checks
+    /// re-run after every repair.
+    #[test]
+    fn judge_repair_should_trust_the_rerun_checks_over_the_exit_code() {
+        let after = report(
+            vec![
+                finding("install.agent-prompt", CheckStatus::Green, None, None),
+                finding("index.freshness", CheckStatus::Green, None, None),
+                finding("graph.freshness", CheckStatus::Yellow, None, None),
+            ],
+            0,
+        );
+        let repair = |checks: &[&str]| Repair {
+            command: "pixel x".into(),
+            steps: vec![],
+            checks: ids(checks),
+        };
+        let fixed = judge_repair(repair(&["install.agent-prompt"]), Ok(()), &after);
+        assert_eq!(
+            (fixed.status, fixed.still_flagged),
+            (RepairStatus::Fixed, vec![])
+        );
+        let stuck = judge_repair(
+            repair(&["index.freshness", "graph.freshness"]),
+            Ok(()),
+            &after,
+        );
+        assert_eq!(
+            (stuck.status, stuck.still_flagged, stuck.error),
+            (RepairStatus::NotConverged, ids(&["graph.freshness"]), None)
+        );
+        let vanished = judge_repair(repair(&["daemon.health"]), Ok(()), &after);
+        assert_eq!(
+            (vanished.status, vanished.still_flagged),
+            (RepairStatus::NotConverged, ids(&["daemon.health"]))
+        );
+        let failed = judge_repair(
+            repair(&["install.agent-prompt"]),
+            Err("boom".into()),
+            &after,
+        );
+        assert_eq!(
+            (failed.status, failed.error.as_deref()),
+            (RepairStatus::Failed, Some("boom"))
+        );
+    }
+
+    #[test]
+    fn render_repairs_should_tally_and_detail_every_outcome() {
+        let outcome =
+            |status, checks: &[&str], still: &[&str], error: Option<&str>| RepairOutcome {
+                command: format!("pixel {status}"),
+                checks: ids(checks),
+                status,
+                still_flagged: ids(still),
+                error: error.map(Into::into),
+            };
+        let text = render_repairs(&[
+            outcome(RepairStatus::Fixed, &["a", "b"], &[], None),
+            outcome(RepairStatus::NotConverged, &["c", "d"], &["d"], None),
+            outcome(
+                RepairStatus::Failed,
+                &["e"],
+                &["e"],
+                Some("`pixel e` failed"),
+            ),
+        ]);
+        let expected = [
+            "pixel doctor --fix: ran 3 repair(s) — 1 fixed, 1 not converged, 1 failed",
+            "  [fixed] pixel fixed (a, b)",
+            "  [not converged] pixel not converged (c, d)",
+            "    still flagged: d",
+            "  [failed] pixel failed (e)",
+            "    error: `pixel e` failed",
+            "    still flagged: e",
+            "",
+        ]
+        .join("\n");
+        assert_eq!(text, expected);
+        assert_eq!(
+            render_repairs(&[]),
+            "pixel doctor --fix: nothing to repair automatically\n"
+        );
+    }
+
+    #[test]
+    fn repair_status_should_serialize_in_snake_case() {
+        assert_eq!(
+            serde_json::to_value(RepairStatus::NotConverged).unwrap(),
+            "not_converged"
         );
     }
 

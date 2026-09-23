@@ -1030,7 +1030,7 @@ enum Command {
     ///
     /// Exits 0 when no check reaches `--fail-on`, 1 when one does, 2 when the
     /// checks could not run. Every yellow or red check names the command that
-    /// repairs it (`fix`).
+    /// repairs it (`fix`); `--fix` runs those commands.
     Doctor {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -1051,6 +1051,12 @@ enum Command {
         /// Print every check id with its repair command, then exit.
         #[arg(long)]
         list: bool,
+        /// Run each distinct repair command the flagged checks name, once
+        /// and in catalogue order, then re-run the checks: the report and the
+        /// exit code are the ones after the repairs. A command only one
+        /// outcome can name (a file to remove) is left to you.
+        #[arg(long, conflicts_with = "list")]
+        fix: bool,
     },
     /// Removed: the legacy `.gitpixel/` migration. Hidden and kept only so a
     /// script that still calls it exits 0 with a note instead of failing
@@ -6447,6 +6453,7 @@ fn run_command(
             skip,
             fail_on,
             list,
+            fix,
         } => {
             if list {
                 let catalogue = serde_json::to_value(pixel_install::doctor::CHECKS)
@@ -6459,30 +6466,69 @@ fn run_command(
                     ))
                 };
             }
-            let report = discover_root(&path).and_then(|root| {
-                pixel_install::doctor::doctor(&pixel_install::doctor::DoctorOptions {
-                    repo_root: Some(root),
-                    shell,
-                    // Hand the doctor this binary's REAL clap parser so the
-                    // rule-vs-binary parity check dry-runs every `pixel …` line
-                    // documented in the installed rule text against the actual
-                    // CLI definition — documented-but-rejected syntax goes red.
-                    syntax_validator: Some(validate_cli_syntax),
-                    only,
-                    skip,
-                    ..Default::default()
-                })
-                .map_err(|e| e.to_string())
+            let options = discover_root(&path).map(|root| pixel_install::doctor::DoctorOptions {
+                repo_root: Some(root),
+                shell,
+                // Hand the doctor this binary's REAL clap parser so the
+                // rule-vs-binary parity check dry-runs every `pixel …` line
+                // documented in the installed rule text against the actual
+                // CLI definition — documented-but-rejected syntax goes red.
+                syntax_validator: Some(validate_cli_syntax),
+                only,
+                skip,
+                ..Default::default()
             });
+            let run = |options: &pixel_install::doctor::DoctorOptions| {
+                pixel_install::doctor::doctor(options).map_err(|e| e.to_string())
+            };
             // Exit 2 keeps "the checks could not run" apart from exit 1,
             // "a check found a problem", for a script gating on doctor.
-            let report = report.inspect_err(|_| owned_exit.set(Some(2)))?;
-            let value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+            let options = options.inspect_err(|_| owned_exit.set(Some(2)))?;
+            let mut report = run(&options).inspect_err(|_| owned_exit.set(Some(2)))?;
+            let plan = pixel_install::doctor::repair_plan(&report);
+            let mut outcomes = None;
+            if fix {
+                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                let runs: Vec<_> = plan
+                    .iter()
+                    .map(|repair| {
+                        eprintln!("pixel doctor --fix: running {}", repair.command);
+                        pixel_install::doctor::run_repair(&exe, repair)
+                    })
+                    .collect();
+                if !plan.is_empty() {
+                    report = run(&options).inspect_err(|_| owned_exit.set(Some(2)))?;
+                }
+                outcomes = Some(
+                    plan.iter()
+                        .cloned()
+                        .zip(runs)
+                        .map(|(repair, ran)| {
+                            pixel_install::doctor::judge_repair(repair, ran, &report)
+                        })
+                        .collect::<Vec<_>>(),
+                );
+            }
+            let mut value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+            if let Some(outcomes) = &outcomes {
+                value["repairs"] = serde_json::to_value(outcomes).map_err(|e| e.to_string())?;
+            }
             if json {
                 print_data(&value, true)?;
             } else {
                 operation_metrics::observe(&value);
-                write_stdout(&report.to_string())?;
+                let mut text = String::new();
+                if let Some(outcomes) = &outcomes {
+                    text.push_str(&pixel_install::doctor::render_repairs(outcomes));
+                }
+                text.push_str(&report.to_string());
+                if outcomes.is_none() && !plan.is_empty() {
+                    text.push_str(&format!(
+                        "rerun with `--fix` to apply the {} repair command(s) above\n",
+                        plan.len()
+                    ));
+                }
+                write_stdout(&text)?;
             }
             if report.fails(fail_on.threshold()) {
                 owned_exit.set(Some(1));
