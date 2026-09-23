@@ -16,6 +16,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use pixel_daemon::api::GRAPH_DB_FILE;
 use pixel_index::index::SHARD_DIR;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -27,9 +28,10 @@ const PACK_FORMAT: u32 = 1;
 const FETCH_CAP: u64 = 2 * 1024 * 1024 * 1024;
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Index-bearing files packed by default. Journals, locks, targets, and
-/// plan/workspace state are local and never travel.
-const INDEX_FILES: &[&str] = &["graph.db", "base.shard", "calls.json", "state.json"];
+/// Index-bearing files packed by default, besides the graph db itself
+/// (`GRAPH_DB_FILE`, whose name moves with its schema). Journals, locks,
+/// targets, and plan/workspace state are local and never travel.
+const INDEX_FILES: &[&str] = &["base.shard", "calls.json", "state.json"];
 
 #[derive(clap::Subcommand)]
 pub enum IndexCmd {
@@ -76,23 +78,23 @@ fn xxh3_of(bytes: &[u8]) -> String {
     format!("{:016x}", xxhash_rust::xxh3::xxh3_64(bytes))
 }
 
-/// The files `pack` captures: INDEX_FILES plus `-wal`/`-shm` SQLite
-/// sidecars when present, so a WAL-mode graph.db travels complete.
+/// The files `pack` captures: the current graph db, INDEX_FILES, and the
+/// `-wal`/`-shm` SQLite sidecars when present, so a WAL-mode graph travels
+/// complete. A graph left under an older schema's name stays behind.
 fn pack_list(shard_dir: &Path, include_history: bool) -> Vec<PathBuf> {
-    let mut names: Vec<String> = INDEX_FILES.iter().map(ToString::to_string).collect();
+    let mut names: Vec<String> = vec![GRAPH_DB_FILE.to_string()];
+    names.extend(INDEX_FILES.iter().map(ToString::to_string));
     if include_history {
         names.push("history.db".to_string());
     }
     // SQLite sidecars must travel with their db or the pack loses pages.
-    for extra in [
-        "graph.db-wal",
-        "graph.db-shm",
-        "history.db-wal",
-        "history.db-shm",
-    ] {
-        if include_history || !extra.starts_with("history") {
-            names.push(extra.to_string());
-        }
+    let mut dbs = vec![GRAPH_DB_FILE];
+    if include_history {
+        dbs.push("history.db");
+    }
+    for db in dbs {
+        names.push(format!("{db}-wal"));
+        names.push(format!("{db}-shm"));
     }
     names
         .into_iter()
@@ -316,7 +318,7 @@ mod tests {
     fn pack_then_unpack_round_trips_with_hashes_verified() {
         let src = scratch("src");
         let dst = scratch("dst");
-        std::fs::write(src.join(SHARD_DIR).join("graph.db"), b"graph-bytes").unwrap();
+        std::fs::write(src.join(SHARD_DIR).join(GRAPH_DB_FILE), b"graph-bytes").unwrap();
         std::fs::write(src.join(SHARD_DIR).join("state.json"), b"{}").unwrap();
         let pack_file = src.join("index.pxpack");
         pack(&src, &pack_file, false).unwrap();
@@ -324,7 +326,7 @@ mod tests {
         let report = unpack(&dst, pack_file.to_str().unwrap(), true).unwrap();
         assert_eq!(report["installed"].as_array().map(Vec::len), Some(2));
         assert_eq!(
-            std::fs::read(dst.join(SHARD_DIR).join("graph.db")).unwrap(),
+            std::fs::read(dst.join(SHARD_DIR).join(GRAPH_DB_FILE)).unwrap(),
             b"graph-bytes"
         );
         // A byte-flipped pack must be refused by the manifest hash.
@@ -343,7 +345,7 @@ mod tests {
         let dst2 = scratch("dst2");
         let refused = unpack(&dst2, bad.to_str().unwrap(), true);
         assert!(refused.is_err());
-        assert!(!dst2.join(SHARD_DIR).join("graph.db").exists());
+        assert!(!dst2.join(SHARD_DIR).join(GRAPH_DB_FILE).exists());
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&dst);
         let _ = std::fs::remove_dir_all(&dst2);
@@ -370,14 +372,26 @@ mod tests {
     fn pack_list_gates_history_sidecars_on_the_flag() {
         let root = scratch("list");
         let shard = root.join(SHARD_DIR);
-        for name in ["graph.db", "graph.db-wal", "history.db", "history.db-wal"] {
+        let graph_wal = format!("{GRAPH_DB_FILE}-wal");
+        for name in [
+            GRAPH_DB_FILE,
+            &graph_wal,
+            "history.db",
+            "history.db-wal",
+            "graph.db",
+        ] {
             std::fs::write(shard.join(name), b"x").unwrap();
         }
         let plain: Vec<String> = pack_list(&shard, false)
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
-        assert!(plain.contains(&"graph.db-wal".to_string()), "{plain:?}");
+        assert!(plain.contains(&GRAPH_DB_FILE.to_string()), "{plain:?}");
+        assert!(plain.contains(&graph_wal), "{plain:?}");
+        assert!(
+            !plain.contains(&"graph.db".to_string()),
+            "a graph under the old schema's name is not the index: {plain:?}"
+        );
         assert!(!plain.iter().any(|n| n.starts_with("history")), "{plain:?}");
         let full: Vec<String> = pack_list(&shard, true)
             .iter()
@@ -462,7 +476,7 @@ mod tests {
             "-m",
             "x",
         ]);
-        std::fs::write(root.join(SHARD_DIR).join("graph.db"), b"g").unwrap();
+        std::fs::write(root.join(SHARD_DIR).join(GRAPH_DB_FILE), b"g").unwrap();
         let pack_file = root.join("p.pxpack");
         pack(&root, &pack_file, false).unwrap();
         let report = unpack(&root, pack_file.to_str().unwrap(), true).unwrap();
@@ -476,7 +490,7 @@ mod tests {
     fn unpack_without_force_proceeds_when_no_daemon_runs() {
         let dst = scratch("nodae");
         let src = scratch("nodae-src");
-        std::fs::write(src.join(SHARD_DIR).join("graph.db"), b"g").unwrap();
+        std::fs::write(src.join(SHARD_DIR).join(GRAPH_DB_FILE), b"g").unwrap();
         let pack_file = src.join("p.pxpack");
         pack(&src, &pack_file, false).unwrap();
         unpack(&dst, pack_file.to_str().unwrap(), false).unwrap();
@@ -499,14 +513,17 @@ mod tests {
                 if BufReader::new(&stream).read_line(&mut line).is_ok() {
                     let reply = pixel_daemon::api::Response::success(
                         "ping",
-                        serde_json::json!({"pong": true}),
+                        serde_json::json!({
+                            "pong": true,
+                            "protocol_version": pixel_daemon::api::PROTOCOL_VERSION,
+                        }),
                     );
                     let _ = writeln!(stream, "{}", serde_json::to_string(&reply).unwrap());
                 }
             }
         });
         let src = scratch("live-src");
-        std::fs::write(src.join(SHARD_DIR).join("graph.db"), b"g").unwrap();
+        std::fs::write(src.join(SHARD_DIR).join(GRAPH_DB_FILE), b"g").unwrap();
         let pack_file = src.join("p.pxpack");
         pack(&src, &pack_file, false).unwrap();
         let err = unpack(&root, pack_file.to_str().unwrap(), false).unwrap_err();

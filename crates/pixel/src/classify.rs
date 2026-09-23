@@ -1,39 +1,27 @@
-//! `pixel classify` — deterministic zero-shot label decision, no LLM.
+//! `pixel classify` — bounded label decision through a remote LLM.
 //!
-//! The decision half of the refinement contract: embed the text to judge and
-//! each option's criterion with the shared static embedding model, then map
-//! cosine similarities through a fixed-temperature softmax. The output is a
-//! probability distribution over the caller's labels — the same shape a
-//! Jev-class decision model returns, produced deterministically and offline.
-//! No daemon, no index required.
+//! The decision half of the refinement contract: one OpenAI-compatible chat
+//! completion (OpenRouter, Ollama Cloud, or a local llama-server) maps the
+//! state, shared framing, labels and criteria onto a probability
+//! distribution over the caller's labels — the shape a Jev-class decision
+//! model returns. Non-deterministic and network-bound by design: the local
+//! static/verdict backends were removed because no off-the-shelf local
+//! model beat Jev on the coding benchmark (see
+//! `docs/bench/decide-bakeoff.md`).
 //!
-//! # Why `context` is a field and not a prefix on `text`
+//! `context` stays a separate field — it is the shared framing every
+//! candidate sees, never prefixed into the state text.
 //!
-//! The model is a static embedding (Model2Vec): a document's vector is the
-//! mean of its token vectors, so framing prefixed to `text` changes the query
-//! and dilutes the state that varies between decisions. `context` keeps that
-//! state query untouched and instead replicates the shared framing into each
-//! candidate before its own criterion. This placement is not mathematical
-//! cancellation; it is an explicit choice of which representations carry the
-//! shared words.
-//!
-//! On the 231 public JevBench items scored under v1.3, moving the shared
-//! instructions from `text` to `context` changed the measured tiers from
-//! 64.6 / 36.1 / 45.0 % to 89.6 / 54.2 / 47.8 % and chance-corrected
-//! Intelligence from 19.5 to 38.3 (`docs/bench/jevbench.md`). These are
-//! historical measurements, not results from every later code revision.
-//!
-//! `pixel classify --jsonl` serves one decision per stdin line with the
-//! model resident, so per-decision latency never includes model load.
+//! `pixel classify --jsonl` serves one decision per stdin line on one
+//! connection, so per-decision latency excludes setup.
 
-use pixel_recall::embed::{EmbedKind, Embedder};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::BufRead;
 
-/// Softmax temperature over cosine similarities. Fixed a priori — CLIP's
-/// learned temperature — never tuned on any benchmark item.
-pub const TAU: f64 = 0.07;
+/// Disclosed basis for every remote decision — probabilities are verbalized
+/// by the model, not a calibration-head output.
+const REMOTE_BASIS: &str = "remote LLM, non-deterministic, verbalized probabilities (self-reported, renormalized to sum 1)";
 /// Per-component character cap for state, context, and criterion/fallback text.
 /// Components stay separate so context truncation cannot erase a criterion.
 const TEXT_CAP_CHARS: usize = 32_768;
@@ -54,7 +42,7 @@ pub struct Spec {
 }
 
 impl Spec {
-    /// Validate identities, then cap every component used by the embedder.
+    /// Validate identities, then cap every component sent to the model.
     pub fn checked(
         text: String,
         context: String,
@@ -116,84 +104,34 @@ impl Spec {
     }
 }
 
-/// Build one candidate from separately bounded context and criterion/fallback.
-/// Explicit empty criteria remain empty; omitted short criteria use the label.
-fn candidate_text(label: &str, spec: &Spec) -> String {
-    let base = spec.criteria.get(label).map_or(label, String::as_str);
-    if spec.context.is_empty() {
-        return base.to_string();
-    }
-    let context = &spec.context;
-    format!("{context} {base}")
+/// The decision engine seam behind one invocation: production is the remote
+/// chat adapter; tests inject a fake with the same surface — a probability
+/// distribution over the caller's labels.
+trait DecisionEngine {
+    fn model_id(&self) -> String;
+    /// Provider preset surfaced in the snapshot (`None` for test engines).
+    fn provider(&self) -> Option<&'static str>;
+    /// Remote decisions are verbalized, so this is always false in production.
+    fn deterministic(&self) -> bool;
+    fn decide(&mut self, spec: &Spec) -> Result<BTreeMap<String, f64>, String>;
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
-    for (x, y) in a.iter().zip(b.iter()) {
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
+impl DecisionEngine for crate::decide_remote::Remote {
+    fn model_id(&self) -> String {
+        self.model_id().to_string()
     }
-    if na == 0.0 || nb == 0.0 {
-        return 0.0;
-    }
-    dot / (na.sqrt() * nb.sqrt())
-}
 
-/// Softmax over similarities with the fixed temperature. Subtracting the
-/// max keeps exp() finite for any input.
-fn softmax(sims: &[f64]) -> Vec<f64> {
-    let max = sims.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let exps: Vec<f64> = sims.iter().map(|s| ((s - max) / TAU).exp()).collect();
-    let sum: f64 = exps.iter().sum();
-    exps.iter().map(|e| e / sum).collect()
-}
+    fn provider(&self) -> Option<&'static str> {
+        Some(self.provider())
+    }
 
-/// The decision core over an embedding seam: tests inject a fake Embedder.
-/// Returns label → probability in the caller's label order.
-///
-/// `Embedder` promises nothing about the shape of what it returns, and every
-/// way it can disagree with the request is silent downstream: a short
-/// candidate batch drops labels off the end of the `zip`, leaving `predicted`
-/// to index a probability that is not there — a panic — while a long one
-/// feeds `softmax` candidates that are then discarded, so what is returned
-/// does not sum to one. Both are checked here instead.
-fn decide(embedder: &mut dyn Embedder, spec: &Spec) -> Result<BTreeMap<String, f64>, String> {
-    let candidates: Vec<String> = spec
-        .labels
-        .iter()
-        .map(|l| candidate_text(l, spec))
-        .collect();
-    // Kind is per-batch, so question and candidates embed in two calls:
-    // E5-family models prefix queries and passages differently.
-    let mut queries = embedder.embed_batch(&[spec.text.as_str()], EmbedKind::Query)?;
-    if queries.len() != 1 {
-        return Err(format!(
-            "embedder returned {} vectors for 1 query text",
-            queries.len()
-        ));
+    fn deterministic(&self) -> bool {
+        self.deterministic()
     }
-    let query = queries.remove(0);
-    let refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
-    let cand_vecs = embedder.embed_batch(&refs, EmbedKind::Passage)?;
-    if cand_vecs.len() != spec.labels.len() {
-        return Err(format!(
-            "embedder returned {} vectors for {} labels",
-            cand_vecs.len(),
-            spec.labels.len()
-        ));
+
+    fn decide(&mut self, spec: &Spec) -> Result<BTreeMap<String, f64>, String> {
+        crate::decide_remote::Remote::decide(self, spec)
     }
-    // `cosine` zips, so a shorter candidate vector would silently compare on
-    // a prefix and score higher than it should.
-    if let Some(v) = cand_vecs.iter().find(|v| v.len() != query.len()) {
-        return Err(format!(
-            "embedder returned a {}-dim candidate vector against a {}-dim query",
-            v.len(),
-            query.len()
-        ));
-    }
-    let sims: Vec<f64> = cand_vecs.iter().map(|v| cosine(&query, v) as f64).collect();
-    Ok(spec.labels.iter().cloned().zip(softmax(&sims)).collect())
 }
 
 /// The argmax label — first in the caller's label order on a tie
@@ -209,9 +147,8 @@ fn predicted<'a>(probs: &BTreeMap<String, f64>, labels: &'a [String]) -> &'a str
 }
 
 /// Build the per-decision JSON document and disclose any input clipping.
-fn document(model: &str, spec: &Spec, probs: &BTreeMap<String, f64>) -> Value {
-    let mut basis =
-        "zero-shot embedding similarity (cosine + softmax), not a trained classifier".to_string();
+fn document(engine: &dyn DecisionEngine, spec: &Spec, probs: &BTreeMap<String, f64>) -> Value {
+    let mut basis = REMOTE_BASIS.to_string();
     if spec.was_clipped() {
         basis.push_str(&format!(
             "; caps: {TEXT_CAP_CHARS} characters per input component; affected fields: {}",
@@ -234,11 +171,15 @@ fn document(model: &str, spec: &Spec, probs: &BTreeMap<String, f64>) -> Value {
             "confidence": marker,
         },
         "snapshot": {
-            "model": model,
-            "temperature": TAU,
+            "model": engine.model_id(),
+            "temperature": 0.0,
             "labels": spec.labels,
+            "deterministic": engine.deterministic(),
         },
     });
+    if let Some(provider) = engine.provider() {
+        out["snapshot"]["provider"] = json!(provider);
+    }
     if spec.was_clipped() {
         let message = format!(
             "input capped at {TEXT_CAP_CHARS} characters per component; affected fields: {}",
@@ -261,10 +202,30 @@ fn clip_text(text: &str) -> (String, bool) {
     (clipped, chars.next().is_some())
 }
 
-/// Open the shared embedding model; first call may download it.
-#[cfg_attr(test, mutants::skip)] // thin adapter over the model cache; logic lives in `decide`
-fn open_embedder() -> Result<Box<dyn Embedder>, String> {
-    pixel_recall::embed::open_default_embedder(true)
+/// Open the remote decision engine from the resolved preset/model config.
+/// A preset that needs a key and has none fails here (see
+/// `decide_remote::resolve_config`), naming the env var to set.
+#[cfg_attr(test, mutants::skip)] // thin adapter over the real env; logic lives in decide_remote
+fn open_engine(
+    preset: crate::decide_remote::Preset,
+    model: Option<String>,
+) -> Result<crate::decide_remote::Remote, String> {
+    crate::decide_remote::resolve_config(preset, model, remote_key_value(preset))
+        .map(crate::decide_remote::Remote::open)
+}
+
+/// Read the remote API-key value from the preset's key env var (or
+/// `PIXEL_REMOTE_KEY_ENV` when set) by name. The value is consumed here and
+/// held only inside the `Remote` adapter — it is never logged or written to
+/// a document.
+#[cfg_attr(test, mutants::skip)] // reads the real env and ~/.pixel; the name rule is key_env_name
+fn remote_key_value(preset: crate::decide_remote::Preset) -> Option<String> {
+    let explicit = std::env::var("PIXEL_REMOTE_KEY_ENV").ok();
+    crate::decide_remote::key_env_name(preset, explicit)
+        .and_then(|name| std::env::var(name).ok().filter(|v| !v.is_empty()))
+        // Env wins; `pixel config remote-key <preset>` is the fallback so a
+        // key need not live in every shell's environment.
+        .or_else(|| crate::config_cmd::remote_key(preset))
 }
 
 /// Parse one JSONL spec line (serve mode and tests share this path).
@@ -282,7 +243,7 @@ fn parse_spec_line(line: &str) -> Result<Spec, String> {
     };
     // Dropping a non-string silently would classify a request the caller
     // never sent: `["a", 7, "b"]` would pass validation as two labels, and a
-    // numeric criterion would fall back to embedding the label's own name.
+    // numeric criterion would silently fall back to the label's own name.
     let labels = v
         .get("labels")
         .and_then(Value::as_array)
@@ -313,13 +274,13 @@ fn parse_spec_line(line: &str) -> Result<Spec, String> {
 /// carries no decision and so produces no result; a bad line answers `{"ok":
 /// false}` rather than ending the stream, because one malformed item must not
 /// abort a run of several hundred.
-fn serve_line(embedder: &mut dyn Embedder, model: &str, line: &str) -> Option<String> {
+fn serve_line(engine: &mut dyn DecisionEngine, line: &str) -> Option<String> {
     if line.trim().is_empty() {
         return None;
     }
-    let out = match parse_spec_line(line).and_then(|s| decide(embedder, &s).map(|p| (s, p))) {
+    let out = match parse_spec_line(line).and_then(|s| engine.decide(&s).map(|p| (s, p))) {
         Ok((spec, probs)) => {
-            let mut doc = document(model, &spec, &probs);
+            let mut doc = document(engine, &spec, &probs);
             doc["ok"] = json!(true);
             doc
         }
@@ -354,13 +315,12 @@ impl ClassifyOutput for ProductionOutput {
 /// Stream stdin lines through one resident model and preserve line framing.
 fn serve_jsonl(
     reader: impl BufRead,
-    embedder: &mut dyn Embedder,
+    engine: &mut dyn DecisionEngine,
     output: &mut dyn ClassifyOutput,
 ) -> Result<(), String> {
-    let model = embedder.model_id().to_string();
     for line in reader.lines() {
         let line = line.map_err(|error| format!("stdin read: {error}"))?;
-        if let Some(line_output) = serve_line(embedder, &model, &line) {
+        if let Some(line_output) = serve_line(engine, &line) {
             output.write_text(&line_output)?;
             output.write_text("\n")?;
         }
@@ -387,6 +347,13 @@ pub struct ClassifyOptions {
     /// Criterion text per label: --criterion label="description".
     #[arg(long = "criterion")]
     pub criteria: Vec<String>,
+    /// Remote provider preset: `openrouter`, `ollama`, or `local`.
+    /// Selects the base URL and the API-key env var; see `PIXEL_REMOTE_*`.
+    #[arg(long, value_enum, default_value_t = crate::decide_remote::Preset::Openrouter)]
+    pub remote_preset: crate::decide_remote::Preset,
+    /// Remote model id (overrides the preset default and `PIXEL_REMOTE_MODEL`).
+    #[arg(long)]
+    pub remote_model: Option<String>,
     /// Serve mode: JSONL spec lines on stdin, one result per line.
     #[arg(long)]
     pub jsonl: bool,
@@ -407,10 +374,9 @@ fn parse_criteria(pairs: &[String]) -> Result<BTreeMap<String, String>, String> 
 }
 
 /// The `Spec` a one-shot invocation asks for. Separate from `run` so the
-/// argument contract is checked before anything touches the model: on a
-/// fresh install `open_embedder` downloads, and a caller who forgot
-/// `--label` should be told that, not made to wait for a model they will
-/// not use.
+/// argument contract is checked before anything touches the network: a
+/// caller who forgot `--label` should be told that, not made to wait for a
+/// remote call that cannot answer the question they meant to ask.
 fn one_shot_spec(opts: &ClassifyOptions) -> Result<Spec, String> {
     let text = opts
         .text
@@ -444,20 +410,20 @@ fn render_probs(probs: &BTreeMap<String, f64>, spec: &Spec) -> String {
 
 fn run_with(
     opts: ClassifyOptions,
-    opener: impl FnOnce() -> Result<Box<dyn Embedder>, String>,
+    opener: impl FnOnce() -> Result<Box<dyn DecisionEngine>, String>,
     reader: impl BufRead,
     output: &mut dyn ClassifyOutput,
 ) -> Result<(), String> {
     if opts.jsonl {
-        let mut embedder = opener()?;
-        return serve_jsonl(reader, embedder.as_mut(), output);
+        let mut engine = opener()?;
+        return serve_jsonl(reader, engine.as_mut(), output);
     }
 
     let spec = one_shot_spec(&opts)?;
-    let mut embedder = opener()?;
-    let probs = decide(embedder.as_mut(), &spec)?;
+    let mut engine = opener()?;
+    let probs = engine.decide(&spec)?;
     if opts.json {
-        output.print_document(&document(embedder.model_id(), &spec, &probs))
+        output.print_document(&document(engine.as_ref(), &spec, &probs))
     } else {
         output.write_text(&render_probs(&probs, &spec))
     }
@@ -465,9 +431,16 @@ fn run_with(
 
 #[cfg_attr(test, mutants::skip)] // thin environment adapter over model, stdin, and stdout
 pub fn run(opts: ClassifyOptions) -> Result<(), String> {
+    let remote_preset = opts.remote_preset;
+    let remote_model = opts.remote_model.clone();
     let stdin = std::io::stdin();
     let mut output = ProductionOutput;
-    run_with(opts, open_embedder, stdin.lock(), &mut output)
+    run_with(
+        opts,
+        move || open_engine(remote_preset, remote_model).map(|e| Box::new(e) as _),
+        stdin.lock(),
+        &mut output,
+    )
 }
 
 #[cfg(test)]
@@ -477,75 +450,54 @@ mod tests {
     use std::io::{self, Cursor, Read};
     use std::sync::{Arc, Mutex};
 
-    /// Deterministic fake: vector = one-hot on which keyword the text
-    /// contains ("alpha"→dim0, "beta"→dim1, else zeros).
-    struct FakeEmbedder;
-    impl Embedder for FakeEmbedder {
-        fn model_id(&self) -> &str {
-            "fake"
-        }
-        fn dims(&self) -> usize {
-            2
-        }
-        fn embed_batch(
-            &mut self,
-            texts: &[&str],
-            _kind: EmbedKind,
-        ) -> Result<Vec<Vec<f32>>, String> {
-            Ok(texts
-                .iter()
-                .map(|t| {
-                    if t.contains("alpha") {
-                        vec![1.0, 0.0]
-                    } else if t.contains("beta") {
-                        vec![0.0, 1.0]
-                    } else {
-                        vec![0.0, 0.0]
-                    }
-                })
-                .collect())
-        }
+    /// Deterministic fake engine: "yes" wins when the spec mentions "alpha",
+    /// "no" wins on "beta"; `fail_next` turns the next decide into an error.
+    struct FakeEngine {
+        calls: Arc<Mutex<Vec<Spec>>>,
+        fail_next: bool,
     }
 
-    type RecordedCalls = Arc<Mutex<Vec<(EmbedKind, Vec<String>)>>>;
-
-    struct RecordingEmbedder {
-        calls: RecordedCalls,
-        fail_next_passage: bool,
-    }
-
-    impl Embedder for RecordingEmbedder {
-        fn model_id(&self) -> &str {
-            "recording"
-        }
-
-        fn dims(&self) -> usize {
-            2
-        }
-
-        fn embed_batch(
-            &mut self,
-            texts: &[&str],
-            kind: EmbedKind,
-        ) -> Result<Vec<Vec<f32>>, String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((kind, texts.iter().map(|text| (*text).to_string()).collect()));
-            if kind == EmbedKind::Passage && self.fail_next_passage {
-                self.fail_next_passage = false;
-                return Err("embedding failed".to_string());
+    impl FakeEngine {
+        fn new(calls: Arc<Mutex<Vec<Spec>>>) -> Self {
+            FakeEngine {
+                calls,
+                fail_next: false,
             }
-            Ok(texts
+        }
+    }
+
+    impl DecisionEngine for FakeEngine {
+        fn model_id(&self) -> String {
+            "fake".to_string()
+        }
+
+        fn provider(&self) -> Option<&'static str> {
+            None
+        }
+
+        fn deterministic(&self) -> bool {
+            true
+        }
+
+        fn decide(&mut self, spec: &Spec) -> Result<BTreeMap<String, f64>, String> {
+            self.calls.lock().unwrap().push(spec.clone());
+            if self.fail_next {
+                self.fail_next = false;
+                return Err("decision failed".to_string());
+            }
+            let top = spec.text.contains("alpha");
+            Ok(spec
+                .labels
                 .iter()
-                .map(|text| {
-                    if text.contains("alpha") {
-                        vec![1.0, 0.0]
-                    } else if text.contains("beta") {
-                        vec![0.0, 1.0]
-                    } else {
-                        vec![0.0, 0.0]
-                    }
+                .map(|l| {
+                    let p = match (l.as_str(), top) {
+                        ("yes", true) => 0.9,
+                        ("yes", false) => 0.1,
+                        (_, true) => 0.1 / (spec.labels.len() - 1) as f64,
+                        (_, false) if l.as_str() == "no" => 0.9,
+                        (_, false) => 0.1 / (spec.labels.len() - 1) as f64,
+                    };
+                    (l.clone(), p)
                 })
                 .collect())
         }
@@ -593,41 +545,8 @@ mod tests {
         fn consume(&mut self, _amount: usize) {}
     }
 
-    /// Mean-pooling fake, the property that makes placement matter: a text's
-    /// vector is the mean of its whitespace tokens, "alpha"/"beta" carrying
-    /// one dimension each and every other word a shared third one. Any
-    /// static embedding behaves this way, which is why shared framing in
-    /// `text` competes with the state for the same budget.
-    struct MeanPoolEmbedder;
-    impl Embedder for MeanPoolEmbedder {
-        fn model_id(&self) -> &str {
-            "mean-pool"
-        }
-        fn dims(&self) -> usize {
-            3
-        }
-        fn embed_batch(
-            &mut self,
-            texts: &[&str],
-            _kind: EmbedKind,
-        ) -> Result<Vec<Vec<f32>>, String> {
-            Ok(texts
-                .iter()
-                .map(|t| {
-                    let mut v = [0.0f32; 3];
-                    let words: Vec<&str> = t.split_whitespace().collect();
-                    for w in &words {
-                        match *w {
-                            "alpha" => v[0] += 1.0,
-                            "beta" => v[1] += 1.0,
-                            _ => v[2] += 1.0,
-                        }
-                    }
-                    let n = words.len().max(1) as f32;
-                    v.iter().map(|x| x / n).collect()
-                })
-                .collect())
-        }
+    fn fake_engine(calls: Arc<Mutex<Vec<Spec>>>) -> Result<Box<dyn DecisionEngine>, String> {
+        Ok(Box::new(FakeEngine::new(calls)))
     }
 
     fn parse_classify(args: &[&str]) -> ClassifyOptions {
@@ -673,97 +592,7 @@ mod tests {
         assert!(Spec::checked("t".into(), String::new(), labels(&["a", "b"]), stray).is_err());
     }
 
-    #[test]
-    fn candidate_text_prefers_criterion_over_label_name() {
-        let s = spec("t", "", &["yes", "no"], &[("yes", "Every condition holds")]);
-        assert_eq!(candidate_text("yes", &s), "Every condition holds");
-        assert_eq!(candidate_text("no", &s), "no");
-    }
-
-    #[test]
-    fn candidate_text_prefixes_every_candidate_with_the_context() {
-        let s = spec(
-            "t",
-            "Under the policy,",
-            &["yes", "no"],
-            &[("yes", "it holds")],
-        );
-        assert_eq!(candidate_text("yes", &s), "Under the policy, it holds");
-        assert_eq!(candidate_text("no", &s), "Under the policy, no");
-    }
-
-    /// The contract the `context` field exists for. Shared framing is long
-    /// and says nothing about which label is right, so mean-pooled into
-    /// `text` it swamps the state and hands the decision to whichever
-    /// criterion happens to be wordiest. Replicating it into each candidate
-    /// leaves the state query untouched. Same words, same model, opposite
-    /// answers — so this fails if placement regresses.
-    #[test]
-    fn shared_framing_belongs_in_context_not_in_text() {
-        let framing = "under the stated policy decide whether the action is permitted";
-        let criteria: &[(&str, &str)] = &[
-            ("yes", "alpha"),
-            ("no", "beta and otherwise a great many qualifying words"),
-        ];
-        let mut e = MeanPoolEmbedder;
-
-        // Framing concatenated onto the state, as the first mapping did.
-        let diluted = spec(&format!("{framing} alpha"), "", &["yes", "no"], criteria);
-        let probs = decide(&mut e, &diluted).unwrap();
-        assert_eq!(
-            predicted(&probs, &diluted.labels),
-            "no",
-            "shared framing in `text` is expected to swamp the state here"
-        );
-
-        // Same words, moved to the candidate representations.
-        let framed = spec("alpha", framing, &["yes", "no"], criteria);
-        let probs = decide(&mut e, &framed).unwrap();
-        assert_eq!(predicted(&probs, &framed.labels), "yes");
-    }
-
-    #[test]
-    fn cosine_is_scale_invariant_and_zero_safe() {
-        assert_eq!(cosine(&[1.0, 0.0], &[5.0, 0.0]), 1.0);
-        assert_eq!(cosine(&[1.0, 0.0], &[0.0, 1.0]), 0.0);
-        assert_eq!(cosine(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
-    }
-
-    #[test]
-    fn softmax_is_normalized_and_orders_by_similarity() {
-        let p = softmax(&[0.5, -0.5]);
-        assert!((p.iter().sum::<f64>() - 1.0).abs() < 1e-9);
-        assert!(p[0] > p[1]);
-        // Identical sims → uniform distribution.
-        let u = softmax(&[0.3, 0.3, 0.3]);
-        assert!((u[0] - 1.0 / 3.0).abs() < 1e-6);
-    }
-
-    /// The gap is the contract, not the ranking: at `TAU`, a 0.6 cosine
-    /// difference is a factor `exp(0.6 / TAU)` in probability, and that is
-    /// what the caller thresholds on. Ordering survives almost any
-    /// arithmetic on `(s - max) / TAU`; the value does not.
-    #[test]
-    fn softmax_scales_the_gap_by_the_fixed_temperature() {
-        let p = softmax(&[0.9, 0.3]);
-        let top = 1.0 / (1.0 + (-0.6f64 / TAU).exp());
-        assert!((p[0] - top).abs() < 1e-12, "{p:?}");
-        assert!((p[1] - (1.0 - top)).abs() < 1e-12, "{p:?}");
-    }
-
-    /// Subtracting the max is what keeps `exp()` finite. It is invisible on
-    /// cosines, which live in [-1, 1], so it takes an input no cosine would
-    /// produce to show it: added instead of subtracted, both exponentials
-    /// overflow and every probability comes back NaN.
-    #[test]
-    fn softmax_stays_finite_on_extreme_similarities() {
-        let p = softmax(&[900.0, 0.0]);
-        assert!(p.iter().all(|x| x.is_finite()), "{p:?}");
-        assert_eq!(p[0], 1.0, "{p:?}");
-        assert!((p.iter().sum::<f64>() - 1.0).abs() < 1e-12, "{p:?}");
-    }
-
-    /// The cap bounds worst-case latency, and it counts characters rather
+    /// The cap bounds worst-case request size, and it counts characters rather
     /// than bytes so a multi-byte character is never cut in half.
     #[test]
     fn clip_text_bounds_long_input_and_reports_only_removed_characters() {
@@ -776,20 +605,6 @@ mod tests {
         assert!(was_clipped);
         assert_eq!(clipped.chars().count(), TEXT_CAP_CHARS);
         assert!(clipped.chars().all(|character| character == 'é'));
-    }
-
-    #[test]
-    fn decide_picks_the_semantically_matching_criterion() {
-        let mut e = FakeEmbedder;
-        let s = spec(
-            "alpha happens here",
-            "",
-            &["no", "yes"],
-            &[("no", "beta outcome"), ("yes", "alpha outcome")],
-        );
-        let probs = decide(&mut e, &s).unwrap();
-        assert!(probs["yes"] > probs["no"]);
-        assert_eq!(predicted(&probs, &s.labels), "yes");
     }
 
     #[test]
@@ -838,122 +653,6 @@ mod tests {
     }
 
     #[test]
-    fn document_carries_probs_argmax_and_envelope() {
-        let s = spec("t", "", &["a", "b"], &[]);
-        let probs = BTreeMap::from([("a".to_string(), 0.9f64), ("b".to_string(), 0.1f64)]);
-        let doc = document("potion-multilingual-128m", &s, &probs);
-        assert_eq!(doc["marker"], "complete");
-        assert_eq!(doc["predicted"], "a");
-        assert_eq!(doc["probs"]["a"], 0.9);
-        assert_eq!(
-            doc["epistemics"]["basis"],
-            json!("zero-shot embedding similarity (cosine + softmax), not a trained classifier")
-        );
-        assert_eq!(doc["snapshot"]["temperature"], 0.07);
-        assert_eq!(doc["snapshot"]["labels"], json!(["a", "b"]));
-    }
-
-    #[test]
-    fn parse_criteria_requires_key_value_pairs() {
-        assert!(parse_criteria(&["a=desc".to_string()]).is_ok());
-        assert!(parse_criteria(&["missing-eq".to_string()]).is_err());
-    }
-
-    /// An embedder that answers with the wrong shape. `decide` has to say so:
-    /// a short batch used to drop labels off the `zip` and leave `predicted`
-    /// indexing a probability that was never inserted, which panics.
-    struct ShapeEmbedder {
-        n_query: usize,
-        n_cand: usize,
-        dims: usize,
-    }
-    impl Embedder for ShapeEmbedder {
-        fn model_id(&self) -> &str {
-            "shape"
-        }
-        fn dims(&self) -> usize {
-            self.dims
-        }
-        fn embed_batch(
-            &mut self,
-            _texts: &[&str],
-            kind: EmbedKind,
-        ) -> Result<Vec<Vec<f32>>, String> {
-            let (n, d) = match kind {
-                EmbedKind::Query => (self.n_query, 3),
-                EmbedKind::Passage => (self.n_cand, self.dims),
-            };
-            Ok((0..n).map(|i| vec![i as f32 + 1.0; d]).collect())
-        }
-    }
-
-    #[test]
-    fn decide_rejects_an_embedder_that_answers_with_the_wrong_shape() {
-        let s = spec("t", "", &["a", "b", "c"], &[]);
-        // One candidate short: the old zip dropped "c" and `predicted` panicked.
-        let err = decide(
-            &mut ShapeEmbedder {
-                n_query: 1,
-                n_cand: 2,
-                dims: 3,
-            },
-            &s,
-        )
-        .unwrap_err();
-        assert!(err.contains("2 vectors for 3 labels"), "{err}");
-
-        // One candidate too many: softmax would normalise over a candidate
-        // the zip then throws away, so the probabilities would not sum to 1.
-        let err = decide(
-            &mut ShapeEmbedder {
-                n_query: 1,
-                n_cand: 4,
-                dims: 3,
-            },
-            &s,
-        )
-        .unwrap_err();
-        assert!(err.contains("4 vectors for 3 labels"), "{err}");
-
-        // More than one query vector: which one was the question?
-        let err = decide(
-            &mut ShapeEmbedder {
-                n_query: 2,
-                n_cand: 3,
-                dims: 3,
-            },
-            &s,
-        )
-        .unwrap_err();
-        assert!(err.contains("2 vectors for 1 query"), "{err}");
-
-        // Mismatched width: `cosine` zips, so it would score on a prefix.
-        let err = decide(
-            &mut ShapeEmbedder {
-                n_query: 1,
-                n_cand: 3,
-                dims: 2,
-            },
-            &s,
-        )
-        .unwrap_err();
-        assert!(err.contains("2-dim candidate vector"), "{err}");
-
-        // The well-shaped case still answers.
-        assert!(
-            decide(
-                &mut ShapeEmbedder {
-                    n_query: 1,
-                    n_cand: 3,
-                    dims: 3
-                },
-                &s
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
     fn parse_spec_line_rejects_non_string_labels_and_criteria() {
         // Silently dropping the 7 would classify a two-label request the
         // caller never sent.
@@ -969,13 +668,42 @@ mod tests {
     }
 
     #[test]
+    fn document_carries_probs_argmax_and_remote_envelope() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let engine = FakeEngine::new(calls);
+        let s = spec("t", "", &["a", "b"], &[]);
+        let probs = BTreeMap::from([("a".to_string(), 0.9f64), ("b".to_string(), 0.1f64)]);
+        let doc = document(&engine, &s, &probs);
+        assert_eq!(doc["marker"], "complete");
+        assert_eq!(doc["predicted"], "a");
+        assert_eq!(doc["probs"]["a"], 0.9);
+        assert!(
+            doc["epistemics"]["basis"]
+                .as_str()
+                .unwrap()
+                .contains("remote LLM")
+        );
+        assert_eq!(doc["snapshot"]["model"], "fake");
+        assert_eq!(doc["snapshot"]["temperature"], 0.0);
+        assert_eq!(doc["snapshot"]["deterministic"], true);
+        assert_eq!(doc["snapshot"]["labels"], json!(["a", "b"]));
+    }
+
+    #[test]
+    fn parse_criteria_requires_key_value_pairs() {
+        assert!(parse_criteria(&["a=desc".to_string()]).is_ok());
+        assert!(parse_criteria(&["missing-eq".to_string()]).is_err());
+    }
+
+    #[test]
     fn serve_line_skips_blanks_and_isolates_a_bad_line() {
-        let mut e = FakeEmbedder;
-        assert_eq!(serve_line(&mut e, "fake", ""), None);
-        assert_eq!(serve_line(&mut e, "fake", "   \t "), None);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut e = FakeEngine::new(calls);
+        assert_eq!(serve_line(&mut e, ""), None);
+        assert_eq!(serve_line(&mut e, "   \t "), None);
 
         // A bad line answers on that line; the caller keeps serving.
-        let out = serve_line(&mut e, "fake", "not json").unwrap();
+        let out = serve_line(&mut e, "not json").unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["ok"], json!(false));
         assert!(v["error"].as_str().unwrap().contains("invalid spec JSON"));
@@ -983,7 +711,7 @@ mod tests {
         // A good line carries the full envelope plus `ok`.
         let line =
             r#"{"text":"alpha","labels":["no","yes"],"criteria":{"yes":"alpha","no":"beta"}}"#;
-        let out = serve_line(&mut e, "fake", line).unwrap();
+        let out = serve_line(&mut e, line).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["ok"], json!(true));
         assert_eq!(v["predicted"], json!("yes"));
@@ -993,12 +721,14 @@ mod tests {
     }
 
     #[test]
-    fn one_shot_spec_validates_before_any_model_is_opened() {
+    fn one_shot_spec_validates_before_any_engine_is_opened() {
         let opts = |text: Option<&str>, labels: &[&str], criteria: &[&str]| ClassifyOptions {
             text: text.map(str::to_string),
             context: Some("the rubric".to_string()),
             labels: labels.iter().map(ToString::to_string).collect(),
             criteria: criteria.iter().map(ToString::to_string).collect(),
+            remote_preset: crate::decide_remote::Preset::Openrouter,
+            remote_model: None,
             jsonl: false,
             json: false,
         };
@@ -1063,33 +793,18 @@ mod tests {
         assert_eq!(capped.labels[0], long_label);
         assert_eq!(capped.criteria[&capped.labels[0]].len(), TEXT_CAP_CHARS);
         assert_eq!(
-            candidate_text(&capped.labels[0], &capped).len(),
-            TEXT_CAP_CHARS
-        );
-        assert_eq!(
             capped.clipped_fields,
             [format!("label_fallback.{}", capped.labels[0])]
         );
-
-        let explicit_empty = Spec::checked(
-            "state".to_string(),
-            String::new(),
-            vec![capped.labels[0].clone(), "short".to_string()],
-            BTreeMap::from([(capped.labels[0].clone(), String::new())]),
-        )
-        .unwrap();
-        assert_eq!(
-            candidate_text(&explicit_empty.labels[0], &explicit_empty),
-            ""
-        );
-        assert!(!explicit_empty.was_clipped());
     }
 
     #[test]
     fn disclosure_changes_only_capped_json_jsonl_and_human_output() {
         let probs = BTreeMap::from([("no".to_string(), 0.25), ("yes".to_string(), 0.75)]);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let engine = FakeEngine::new(Arc::clone(&calls));
         let uncapped = spec("t", "", &["no", "yes"], &[]);
-        let uncapped_doc = document("fake", &uncapped, &probs);
+        let uncapped_doc = document(&engine, &uncapped, &probs);
         assert_eq!(uncapped_doc["marker"], "complete");
         assert!(uncapped_doc.get("caps").is_none());
         assert!(uncapped_doc.get("warnings").is_none());
@@ -1099,7 +814,7 @@ mod tests {
         );
 
         let capped = spec(&"x".repeat(TEXT_CAP_CHARS + 1), "", &["no", "yes"], &[]);
-        let capped_doc = document("fake", &capped, &probs);
+        let capped_doc = document(&engine, &capped, &probs);
         assert_eq!(capped_doc["marker"], "capped");
         assert_eq!(capped_doc["epistemics"]["confidence"], "capped");
         assert_eq!(capped_doc["caps"][0]["limit"], TEXT_CAP_CHARS);
@@ -1115,20 +830,19 @@ mod tests {
         assert!(human.contains("marker: capped\nconfidence: capped\n"));
         assert!(human.contains("affected fields: text"));
 
-        let mut embedder = FakeEmbedder;
+        let mut engine = FakeEngine::new(calls);
         let line = format!(
             r#"{{"text":"{}","labels":["no","yes"],"criteria":{{"yes":"alpha","no":"beta"}}}}"#,
             "x".repeat(TEXT_CAP_CHARS + 1)
         );
-        let jsonl: Value =
-            serde_json::from_str(&serve_line(&mut embedder, "fake", &line).unwrap()).unwrap();
+        let jsonl: Value = serde_json::from_str(&serve_line(&mut engine, &line).unwrap()).unwrap();
         assert_eq!(jsonl["ok"], true);
         assert_eq!(jsonl["marker"], "capped");
         assert_eq!(jsonl["caps"][0]["affected_fields"], json!(["text"]));
     }
 
     #[test]
-    fn parsed_one_shot_payload_runs_offline_and_preserves_placement() {
+    fn parsed_one_shot_payload_runs_offline() {
         let options = parse_classify(&[
             "pixel",
             "classify",
@@ -1152,12 +866,7 @@ mod tests {
         let mut output = RecordingOutput::default();
         run_with(
             options,
-            move || {
-                Ok(Box::new(RecordingEmbedder {
-                    calls: recorded,
-                    fail_next_passage: false,
-                }))
-            },
+            move || fake_engine(recorded),
             Cursor::new(Vec::<u8>::new()),
             &mut output,
         )
@@ -1165,20 +874,9 @@ mod tests {
         assert!(output.text.contains("predicted: yes"));
         assert!(output.documents.is_empty());
         let calls = calls.lock().unwrap();
-        assert_eq!(
-            calls[0],
-            (EmbedKind::Query, vec!["state alpha".to_string()])
-        );
-        assert_eq!(
-            calls[1],
-            (
-                EmbedKind::Passage,
-                vec![
-                    "the rubric alpha".to_string(),
-                    "the rubric beta".to_string()
-                ]
-            )
-        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].text, "state alpha");
+        assert_eq!(calls[0].context, "the rubric");
     }
 
     #[test]
@@ -1216,6 +914,28 @@ mod tests {
     }
 
     #[test]
+    fn parser_rejects_the_removed_backend_flag() {
+        const PARSER_TEST_STACK: usize = 16_777_216;
+        std::thread::Builder::new()
+            .stack_size(PARSER_TEST_STACK)
+            .spawn(move || {
+                assert!(
+                    crate::Cli::try_parse_from([
+                        "pixel",
+                        "classify",
+                        "--backend",
+                        "remote",
+                        "--jsonl"
+                    ])
+                    .is_err()
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
     fn run_with_validates_before_open_and_selects_json_output() {
         let opens = Arc::new(Mutex::new(0usize));
         let opened = Arc::clone(&opens);
@@ -1224,6 +944,8 @@ mod tests {
             context: None,
             labels: vec!["yes".to_string(), "no".to_string()],
             criteria: Vec::new(),
+            remote_preset: crate::decide_remote::Preset::Openrouter,
+            remote_model: None,
             jsonl: false,
             json: false,
         };
@@ -1232,7 +954,7 @@ mod tests {
             invalid,
             move || {
                 *opened.lock().unwrap() += 1;
-                Ok(Box::new(FakeEmbedder))
+                fake_engine(Arc::new(Mutex::new(Vec::new())))
             },
             Cursor::new(Vec::<u8>::new()),
             &mut output,
@@ -1248,12 +970,14 @@ mod tests {
             context: None,
             labels: vec!["yes".to_string(), "no".to_string()],
             criteria: vec!["yes=alpha".to_string(), "no=beta".to_string()],
+            remote_preset: crate::decide_remote::Preset::Openrouter,
+            remote_model: None,
             jsonl: false,
             json: true,
         };
         run_with(
             options,
-            || Ok(Box::new(FakeEmbedder)),
+            || fake_engine(Arc::new(Mutex::new(Vec::new()))),
             Cursor::new(Vec::<u8>::new()),
             &mut output,
         )
@@ -1281,6 +1005,8 @@ mod tests {
             context: None,
             labels: Vec::new(),
             criteria: Vec::new(),
+            remote_preset: crate::decide_remote::Preset::Openrouter,
+            remote_model: None,
             jsonl: true,
             json: false,
         };
@@ -1289,10 +1015,7 @@ mod tests {
             options,
             move || {
                 *opened.lock().unwrap() += 1;
-                Ok(Box::new(RecordingEmbedder {
-                    calls: recorded,
-                    fail_next_passage: false,
-                }))
+                fake_engine(recorded)
             },
             Cursor::new(input),
             &mut output,
@@ -1312,18 +1035,12 @@ mod tests {
         assert_eq!(lines[2]["ok"], true);
         assert_eq!(lines[2]["predicted"], "no");
         let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 4);
-        assert_eq!(
-            calls[1],
-            (
-                EmbedKind::Passage,
-                vec!["rubric alpha".to_string(), "rubric beta".to_string()]
-            )
-        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].context, "rubric");
     }
 
     #[test]
-    fn jsonl_embedding_error_is_a_line_error_and_next_request_continues() {
+    fn jsonl_decide_error_is_a_line_error_and_next_request_continues() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let input = [
             r#"{"text":"alpha","labels":["yes","no"],"criteria":{"yes":"alpha","no":"beta"}}"#,
@@ -1331,11 +1048,11 @@ mod tests {
         ]
         .join("\n");
         let mut output = RecordingOutput::default();
-        let mut embedder = RecordingEmbedder {
+        let mut engine = FakeEngine {
             calls,
-            fail_next_passage: true,
+            fail_next: true,
         };
-        serve_jsonl(Cursor::new(input), &mut embedder, &mut output).unwrap();
+        serve_jsonl(Cursor::new(input), &mut engine, &mut output).unwrap();
         let lines: Vec<Value> = output
             .text
             .lines()
@@ -1343,7 +1060,7 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0]["ok"], false);
-        assert_eq!(lines[0]["error"], "embedding failed");
+        assert_eq!(lines[0]["error"], "decision failed");
         assert_eq!(lines[1]["ok"], true);
         assert_eq!(lines[1]["predicted"], "no");
     }
@@ -1355,6 +1072,8 @@ mod tests {
             context: None,
             labels: Vec::new(),
             criteria: Vec::new(),
+            remote_preset: crate::decide_remote::Preset::Openrouter,
+            remote_model: None,
             jsonl: true,
             json: false,
         };
@@ -1370,7 +1089,7 @@ mod tests {
 
         let error = run_with(
             jsonl_options(),
-            || Ok(Box::new(FakeEmbedder)),
+            || fake_engine(Arc::new(Mutex::new(Vec::new()))),
             FailingReader,
             &mut output,
         )
@@ -1382,7 +1101,7 @@ mod tests {
             r#"{"text":"alpha","labels":["yes","no"],"criteria":{"yes":"alpha","no":"beta"}}"#;
         let error = run_with(
             jsonl_options(),
-            || Ok(Box::new(FakeEmbedder)),
+            || fake_engine(Arc::new(Mutex::new(Vec::new()))),
             Cursor::new(line),
             &mut output,
         )
@@ -1399,10 +1118,12 @@ mod tests {
                 context: None,
                 labels: vec!["yes".to_string(), "no".to_string()],
                 criteria: vec!["yes=alpha".to_string(), "no=beta".to_string()],
+                remote_preset: crate::decide_remote::Preset::Openrouter,
+                remote_model: None,
                 jsonl: false,
                 json: true,
             },
-            || Ok(Box::new(FakeEmbedder)),
+            || fake_engine(Arc::new(Mutex::new(Vec::new()))),
             Cursor::new(Vec::<u8>::new()),
             &mut output,
         )

@@ -1,0 +1,19 @@
+{
+  "name": "motion",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.3.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.527",
+    "@remotion/gif": "^4.0.527",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "remotion": "^4.0.527"
+  }
+}

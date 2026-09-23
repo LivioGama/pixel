@@ -52,9 +52,50 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
+use pixel_daemon::api::GRAPH_DB_FILE;
+
 const COMPOSED_MAX_INPUT: usize = 1024 * 1024;
 const COMPOSED_MAX_OUTPUT: usize = 1024 * 1024;
 const COMPOSED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Path, under `$HOME`, of the deployed agent prompt `pixel install` writes
+/// and `install.agent-prompt` verifies byte-for-byte.
+const AGENT_PROMPT_REL: &str = ".local/share/pixel/agent-prompt.md";
+
+/// Read the deployed agent prompt for SessionStart injection. `None` when
+/// the file is absent, unreadable, or empty — the capability block is still
+/// emitted, so a missing prompt degrades to the pre-hook behavior instead of
+/// a failed hook.
+fn deployed_agent_prompt() -> Option<String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let content = std::fs::read_to_string(home.join(AGENT_PROMPT_REL)).ok()?;
+    (!content.trim().is_empty()).then_some(content)
+}
+
+/// Claude's SessionStart contract: the doctrine reaches EVERY Claude process
+/// — including `claude` launched directly by cmux, agents and cron, which
+/// never saw the retired shell wrapper — because the hook injects the
+/// deployed agent prompt itself as `hookSpecificOutput.additionalContext`.
+/// The structured `pixel` capability block stays top-level for consumers
+/// that parse it, and its JSON is appended to the context text.
+pub fn session_start_output(pixel_block: &Value) -> Value {
+    session_start_envelope(pixel_block, deployed_agent_prompt().as_deref())
+}
+
+fn session_start_envelope(pixel_block: &Value, agent_prompt: Option<&str>) -> Value {
+    let mut context = String::new();
+    if let Some(prompt) = agent_prompt {
+        context.push_str(prompt.trim_end());
+        context.push_str("\n\n");
+    }
+    context.push_str(&serde_json::to_string_pretty(pixel_block).unwrap_or_default());
+    let mut output = pixel_block.clone();
+    output["hookSpecificOutput"] = serde_json::json!({
+        "hookEventName": "SessionStart",
+        "additionalContext": context,
+    });
+    output
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Provider {
@@ -887,11 +928,19 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
             // reading source files. Advisory only — the read proceeds. This
             // catches the "massive token waste via redundant reads" failure
             // mode where agents read entire files instead of using pixel search-content.
+            // Size-gated (shunt-style): files at or under PIXEL_GUARD_READ_LINES
+            // (default 350) and targeted reads (offset/limit set) pass silently —
+            // the agent is already doing the cheap thing, so advising would be
+            // noise. Only a whole-file read of a large source file gets the nudge.
             if idx_root.is_some() && manifest.is_none() && !manifest_expired && is_read_tool(tool)
+                && !read_is_targeted(tool_input)
                 && let Some(p) = resolve(raw_path, &cwd)
                     && p.is_file() && is_source_file(&p) && !is_exempt(&p, idx_root.as_deref().unwrap())
                         && !env_flag_off("PIXEL_GUARD_READ") {
-                            read_scoping_advisory(&p, idx_root.as_deref().unwrap());
+                            let lines = file_line_count(&p);
+                            if lines > read_advisory_min_lines() {
+                                read_scoping_advisory(&p, lines, idx_root.as_deref().unwrap());
+                            }
                         }
             if let Some(m) = &manifest {
                 let p = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
@@ -1082,7 +1131,7 @@ fn post_tool_use_blast_radius(abs: &Path, idx_root: Option<&Path>, tool: &str) {
     let Some(root) = idx_root.map(PathBuf::from) else {
         return;
     };
-    let db = root.join(".pixel").join("graph.db");
+    let db = root.join(".pixel").join(GRAPH_DB_FILE);
     if !db.exists() {
         return;
     }
@@ -1725,23 +1774,70 @@ fn is_source_file(p: &Path) -> bool {
     )
 }
 
-/// Advisory note for reading a source file in an indexed repo with no active
-/// manifest. Non-blocking — the read proceeds. Suggests `pixel scope-task` first
-/// to scope the work, and `pixel search-content --context` as a cheaper alternative
-/// to reading the entire file.
-fn read_scoping_advisory_lines(abs: &Path, idx_root: &Path) -> Vec<String> {
+/// Advisory note for a whole-file Read of a source file above the line
+/// threshold in an indexed repo with no active manifest. Non-blocking — the
+/// read proceeds. Names the measured size and the cheaper alternatives:
+/// `pixel list-signatures` for the skeleton, `pixel search-content` for the
+/// relevant region, or a targeted Read (offset/limit) for a known range.
+fn read_scoping_advisory_lines(abs: &Path, lines: usize, idx_root: &Path) -> Vec<String> {
     let rel = rel_of(abs, idx_root);
     vec![
-        format!("pixel-guard advisory: reading source file '{rel}' in an indexed repo with no active targets manifest."),
-        "Consider scoping first to identify the relevant files:".into(),
-        format!("  pixel scope-task \"<one-line task description>\" {}", idx_root.display()),
-        "Or use `pixel search-content '<pattern>' --context 5` to get the relevant code with surrounding context — no full-file Read needed.".into(),
+        format!(
+            "pixel-guard advisory: '{rel}' is {lines} lines — a whole-file read costs ~{} tokens.",
+            lines * 35 / 4
+        ),
+        "Cheaper paths that answer most questions without the file contents:".into(),
+        format!("  pixel list-signatures {rel}    # skeleton: every signature, ~10% of Read cost"),
+        "  pixel search-content '<pattern>' --context 5    # the relevant region only".into(),
+        "  Read with offset/limit        # when you already know the line range".into(),
         "Proceeding with this read.".into(),
     ]
 }
 
-fn read_scoping_advisory(abs: &Path, idx_root: &Path) -> ! {
-    advise(&read_scoping_advisory_lines(abs, idx_root));
+fn read_scoping_advisory(abs: &Path, lines: usize, idx_root: &Path) -> ! {
+    advise(&read_scoping_advisory_lines(abs, lines, idx_root));
+}
+
+/// True when the Read-style call already targets a range — offset/limit,
+/// line_range, StartLine/EndLine (Antigravity view_file). Targeted reads are
+/// the behaviour the advisory recommends, so they pass silently.
+fn read_is_targeted(tool_input: &serde_json::Map<String, Value>) -> bool {
+    const RANGE_KEYS: &[&str] = &[
+        "offset",
+        "limit",
+        "line_range",
+        "StartLine",
+        "EndLine",
+        "start_line",
+        "end_line",
+    ];
+    RANGE_KEYS
+        .iter()
+        .any(|k| tool_input.get(*k).is_some_and(|v| !v.is_null()))
+}
+
+/// Newline count via buffered read — one sequential pass, cheap even on
+/// multi-MB sources. Returns 0 on unreadable files (the read itself will
+/// surface the error).
+fn file_line_count(p: &Path) -> usize {
+    use std::io::BufRead;
+    let Ok(f) = std::fs::File::open(p) else {
+        return 0;
+    };
+    std::io::BufReader::new(f)
+        .lines()
+        .map_while(Result::ok)
+        .count()
+}
+
+/// Line threshold above which an untargeted source-file Read gets the
+/// advisory. `PIXEL_GUARD_READ_LINES` overrides; default 350 (shunt's
+/// MIN_LINES — the point where delegation cost beats full-read cost).
+fn read_advisory_min_lines() -> usize {
+    std::env::var("PIXEL_GUARD_READ_LINES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(350)
 }
 
 /// Check if an env var is explicitly set to "0"/"false"/"off" (kill-switch
@@ -4655,5 +4751,97 @@ mod tests {
             None,
             "config off silences the relay exactly like stderr"
         );
+    }
+
+    #[test]
+    fn read_is_targeted_detects_every_range_key_shape() {
+        let targeted = [
+            serde_json::json!({"file_path": "a.rs", "offset": 10}),
+            serde_json::json!({"file_path": "a.rs", "limit": 50}),
+            serde_json::json!({"file_path": "a.rs", "line_range": [1, 20]}),
+            serde_json::json!({"AbsolutePath": "a.rs", "StartLine": 5}),
+            serde_json::json!({"TargetFile": "a.rs", "end_line": 99}),
+        ];
+        for input in targeted {
+            let map = input.as_object().unwrap().clone();
+            assert!(read_is_targeted(&map), "{input}");
+        }
+        let untargeted = [
+            serde_json::json!({"file_path": "a.rs"}),
+            serde_json::json!({"file_path": "a.rs", "offset": null}),
+            serde_json::json!({}),
+        ];
+        for input in untargeted {
+            let map = input.as_object().unwrap().clone();
+            assert!(!read_is_targeted(&map), "{input}");
+        }
+    }
+
+    #[test]
+    fn file_line_count_measures_real_newlines() {
+        let dir = scratch_repo("linecount");
+        let f = dir.join("src/big.rs");
+        std::fs::write(&f, "fn a() {}\n".repeat(400)).unwrap();
+        assert_eq!(file_line_count(&f), 400);
+        assert_eq!(
+            file_line_count(&dir.join("src/missing.rs")),
+            0,
+            "unreadable files report 0 so the Read error surfaces unadvised"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_advisory_min_lines_defaults_to_shunt_threshold() {
+        // Env-free default only — PIXEL_GUARD_READ_LINES is user-controlled
+        // and may be set in the host environment, so this asserts the
+        // fallback is either 350 or the configured override parses.
+        match std::env::var("PIXEL_GUARD_READ_LINES") {
+            Ok(v) => assert_eq!(read_advisory_min_lines(), v.parse().unwrap_or(350)),
+            Err(_) => assert_eq!(read_advisory_min_lines(), 350),
+        }
+    }
+
+    #[test]
+    fn read_scoping_advisory_names_the_size_and_the_alternatives() {
+        let root = scratch_repo("advisory");
+        let f = root.join("src/guard.rs");
+        let lines = read_scoping_advisory_lines(&f, 4661, &root);
+        let text = lines.join("\n");
+        assert!(text.contains("4661 lines"), "{text}");
+        assert!(text.contains("list-signatures src/guard.rs"), "{text}");
+        assert!(text.contains("search-content"), "{text}");
+        assert!(text.contains("offset/limit"), "{text}");
+        assert!(text.contains("Proceeding"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn session_start_envelope_wraps_the_prompt_in_claude_contract() {
+        let block =
+            serde_json::json!({"pixel": {"capabilities": ["search-content"], "usage": "u"}});
+        let out = session_start_envelope(&block, Some("# Pixel doctrine\nuse pixel"));
+        assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        let context = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(
+            context.starts_with("# Pixel doctrine\nuse pixel"),
+            "{context}"
+        );
+        assert!(context.contains("\"capabilities\""), "{context}");
+        // The structured block survives for consumers that parse it.
+        assert_eq!(out["pixel"]["capabilities"][0], "search-content");
+    }
+
+    #[test]
+    fn session_start_envelope_without_prompt_still_emits_the_block() {
+        let block = serde_json::json!({"pixel": {"capabilities": []}});
+        let out = session_start_envelope(&block, None);
+        let context = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.contains("\"pixel\""), "{context}");
+        assert!(!context.starts_with('\n'), "{context}");
     }
 }

@@ -10,6 +10,7 @@
 //! (global). Both are flat `{"metrics": "on"|"off"}` objects; unknown keys
 //! are preserved on write so the file can grow new settings.
 
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -70,13 +71,13 @@ fn metrics_resolution(root: Option<&Path>) -> (bool, Source) {
     (true, Source::Default)
 }
 
-fn write_metrics(path: &Path, on: bool) -> Result<(), String> {
+fn write_doc(path: &Path, mutate: impl FnOnce(&mut Value)) -> Result<(), String> {
     let mut doc: Value = std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .filter(|v: &Value| v.is_object())
         .unwrap_or_else(|| json!({}));
-    doc["metrics"] = Value::String(if on { "on" } else { "off" }.to_string());
+    mutate(&mut doc);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
@@ -90,7 +91,7 @@ fn write_metrics(path: &Path, on: bool) -> Result<(), String> {
             .unwrap_or("config.json"),
         std::process::id(),
     ));
-    if let Err(e) = std::fs::write(&tmp, format!("{doc}\n")) {
+    if let Err(e) = write_private(&tmp, format!("{doc}\n").as_bytes()) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("write {}: {e}", tmp.display()));
     }
@@ -99,6 +100,103 @@ fn write_metrics(path: &Path, on: bool) -> Result<(), String> {
         return Err(format!("rename {}: {e}", path.display()));
     }
     Ok(())
+}
+
+/// Write `bytes` to a new file only its owner can read. The global config
+/// holds provider API keys and the rename keeps the new inode's mode, so
+/// every write — not only the one storing a key — must create it 0600.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // A leftover tmp from a crashed run would keep its old mode.
+    let _ = std::fs::remove_file(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(bytes)
+}
+
+/// The key a `pixel config remote-key` value stands for: `-` reads the
+/// first line of `stdin`, which keeps the secret out of shell history and
+/// `ps`; anything else is the key itself.
+pub fn key_from_arg(
+    value: Option<String>,
+    stdin: &mut dyn BufRead,
+) -> Result<Option<String>, String> {
+    if value.as_deref() != Some("-") {
+        return Ok(value);
+    }
+    let mut line = String::new();
+    stdin
+        .read_line(&mut line)
+        .map_err(|e| format!("remote-key: read stdin: {e}"))?;
+    Ok(Some(line.trim().to_string()))
+}
+
+fn write_metrics(path: &Path, on: bool) -> Result<(), String> {
+    write_doc(path, |doc| {
+        doc["metrics"] = Value::String(if on { "on" } else { "off" }.to_string());
+    })
+}
+
+/// The stored API key for a remote decision preset, if the global config
+/// carries one. Keys live only in `~/.pixel/config.json` under
+/// `remote_keys` — never in the repo layer, never echoed back by the CLI.
+pub fn remote_key(preset: crate::decide_remote::Preset) -> Option<String> {
+    let path = global_config_path()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc: Value = serde_json::from_str(&text).ok()?;
+    doc.get("remote_keys")?
+        .get(preset.display())?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// `pixel config remote-key <preset> [key]`: with a value, persist it to
+/// `~/.pixel/config.json` (created 0600 on unix — it holds secrets);
+/// without one, report whether a key is stored. `--clear` removes it.
+/// The key itself is never printed.
+pub fn run_remote_key(
+    preset: crate::decide_remote::Preset,
+    value: Option<String>,
+    clear: bool,
+) -> Result<(), String> {
+    let name = preset.display();
+    let path = global_config_path().ok_or("no HOME for the global config")?;
+    if clear {
+        write_doc(&path, |doc| {
+            if let Some(keys) = doc.get_mut("remote_keys").and_then(Value::as_object_mut) {
+                keys.remove(name);
+            }
+        })?;
+        println!("remote-key {name}: cleared — wrote {}", path.display());
+        return Ok(());
+    }
+    match value {
+        Some(key) if !key.is_empty() => {
+            write_doc(&path, |doc| {
+                if !doc.get("remote_keys").is_some_and(Value::is_object) {
+                    doc["remote_keys"] = json!({});
+                }
+                doc["remote_keys"][name] = Value::String(key);
+            })?;
+            println!("remote-key {name}: set — wrote {}", path.display());
+            Ok(())
+        }
+        Some(_) => Err("remote-key: empty key".to_string()),
+        None => {
+            let state = if remote_key(preset).is_some() {
+                "set"
+            } else {
+                "unset"
+            };
+            println!("remote-key {name}: {state} — {}", path.display());
+            Ok(())
+        }
+    }
 }
 
 /// `pixel config metrics [on|off] [--global]`: without a value, report the
@@ -249,6 +347,55 @@ mod tests {
         restore_home(saved);
     }
 
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_config_write_leaves_the_stored_keys_owner_only() {
+        let home = HomeGuard::set();
+        let cfg = home.0.join(".pixel/config.json");
+        write(&cfg, "{\"remote_keys\": {\"openrouter\": \"sk-secret\"}}");
+        // A world-readable leftover tmp from a crashed write must not lend
+        // its mode to the next one.
+        let tmp = cfg.with_file_name(format!("config.json.{}.tmp", std::process::id()));
+        write(&tmp, "{}");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        write_metrics(&cfg, false).unwrap();
+        assert_eq!(
+            mode(&cfg),
+            0o600,
+            "an unrelated write keeps the keys private"
+        );
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert!(
+            text.contains("sk-secret") && text.contains("\"off\""),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_dash_reads_the_key_from_stdin_and_anything_else_is_the_key() {
+        let mut stdin = std::io::Cursor::new(b"sk-from-stdin\nignored\n".to_vec());
+        assert_eq!(
+            key_from_arg(Some("-".into()), &mut stdin),
+            Ok(Some("sk-from-stdin".into()))
+        );
+        let mut untouched = std::io::Cursor::new(b"never read\n".to_vec());
+        assert_eq!(
+            key_from_arg(Some("sk-inline".into()), &mut untouched),
+            Ok(Some("sk-inline".into()))
+        );
+        assert_eq!(key_from_arg(None, &mut untouched), Ok(None));
+        assert_eq!(untouched.position(), 0, "stdin is read only for `-`");
+    }
+
     #[test]
     fn write_metrics_preserves_unknown_keys_and_roundtrips() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
@@ -314,6 +461,39 @@ mod tests {
             (true, Source::Repo),
             "repo on overrides a global off"
         );
+
+        restore_home(saved);
+    }
+
+    #[test]
+    fn remote_key_roundtrips_masked_and_env_free() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        let preset = crate::decide_remote::Preset::Ollama;
+
+        assert!(remote_key(preset).is_none(), "nothing stored → unset");
+        run_remote_key(preset, Some("sk-test-secret".to_string()), false).unwrap();
+        assert_eq!(remote_key(preset).as_deref(), Some("sk-test-secret"));
+
+        let cfg: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.0.join(".pixel/config.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cfg["remote_keys"]["ollama"], "sk-test-secret");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(home.0.join(".pixel/config.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "config holds secrets: {mode:o}");
+        }
+
+        run_remote_key(preset, None, true).unwrap();
+        assert!(remote_key(preset).is_none(), "clear removes the key");
 
         restore_home(saved);
     }

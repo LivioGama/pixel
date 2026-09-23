@@ -285,150 +285,134 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     ));
 
-    let shell_override = options.shell.clone();
-    let claude = install::probe_claude(options.claude_executable.as_deref());
-    checks.push(check_status(
-        "install.shell-wrappers",
-        || -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
-            let shell = install::resolve_shell(shell_override.as_deref());
-            let (kind, profile) = install::shell_profile_for(&shell, &home);
-            let content = fs::read_to_string(&profile).unwrap_or_default();
-            let Some(block) = install::extract_managed_block(&content) else {
+    // The doctrine now reaches every Claude process through the lifecycle
+    // hooks in ~/.claude/settings.json — SessionStart injects the deployed
+    // agent prompt itself. Verify the whole lifecycle contract: matchers,
+    // commands and the executable this binary's install would write, not
+    // just a `pixel` substring.
+    checks.push(check(
+        "install.claude-hooks",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            let path = home.join(".claude/settings.json");
+            if !path.is_file() {
                 return Err(format!(
-                    "shell wrappers not found in {} — run `pixel install`",
-                    profile.display()
-                ));
-            };
-            // Compared against the block this binary would write for the
-            // Claude Code found now, not against loose substrings: a block
-            // left in a POSIX profile by an install that ran under a
-            // different $SHELL, or written by an older pixel, is stale — and
-            // reporting it green is how a fish user ends up with wrappers
-            // their shell never loads. The sub-agent flag is checked the same
-            // way in both directions: a block that carries it in front of a
-            // Claude Code older than 2.1.261 breaks every `claude -p`, and one
-            // that lacks it in front of a newer Claude Code silently drops
-            // the sub-agent rules until `pixel install` is re-run.
-            let with_flag = block == install::expected_wrapper_block(kind, true);
-            let without_flag = block == install::expected_wrapper_block(kind, false);
-            // No usable `claude`: the block can still be validated as one of
-            // ours, but the flag decision cannot be re-checked. Yellow, not
-            // red — a red here would send the user to `pixel install`, which
-            // has no better evidence and must not strip a working flag.
-            if claude.support() == install::SubagentSupport::Unknown {
-                if !with_flag && !without_flag {
-                    return Err(format!(
-                        "shell wrappers in {} are stale or written for another shell — run `pixel install`",
-                        profile.display()
-                    ));
-                }
-                return Ok((
-                    CheckStatus::Yellow,
-                    DoctorCheckDetail {
-                        summary: format!(
-                            "{} shell wrappers installed in {}{}; cannot verify the sub-agent prompt flag ({})",
-                            kind.as_str(),
-                            profile.display(),
-                            if with_flag {
-                                ""
-                            } else {
-                                " without the sub-agent prompt"
-                            },
-                            claude.explanation()
-                        ),
-                        detail: Some(serde_json::json!({
-                            "profile": profile.display().to_string(),
-                            "shell": kind.as_str(),
-                            "subagent_prompt": with_flag,
-                            "claude": claude.explanation(),
-                        })),
-                    },
+                    "{} not found — run `pixel install`",
+                    path.display()
                 ));
             }
-            let with_subagent_prompt = claude.supports_subagent_prompt();
-            if block == install::expected_wrapper_block(kind, !with_subagent_prompt) {
-                return Err(if with_subagent_prompt {
-                    format!(
-                        "shell wrappers in {} lack the sub-agent prompt flag but {} — run `pixel install`",
-                        profile.display(),
-                        claude.explanation()
-                    )
-                } else {
-                    format!(
-                        "shell wrappers in {} pass the sub-agent prompt flag but {} — run `pixel install`",
-                        profile.display(),
-                        claude.explanation()
-                    )
-                });
-            }
-            if block != install::expected_wrapper_block(kind, with_subagent_prompt) {
-                return Err(format!(
-                    "shell wrappers in {} are stale or written for another shell — run `pixel install`",
-                    profile.display()
-                ));
-            }
-            let installed = format!(
-                "{} shell wrappers installed in {}{}",
-                kind.as_str(),
-                profile.display(),
-                if with_subagent_prompt {
-                    ""
-                } else {
-                    " without the sub-agent prompt"
-                }
-            );
-            // A block in another shell's profile is the residue of an install
-            // that targeted the wrong shell; the resolved shell never loads
-            // it. Yellow, not red: a machine that deliberately runs `claude`
-            // from a second shell keeps a valid install here.
-            let strays = install::stray_wrapper_profiles(&home, &profile);
-            if !strays.is_empty() {
-                let fixes: Vec<String> = strays
-                    .iter()
-                    .map(|(shell, path)| {
-                        format!(
-                            "{} ({shell}, not loaded by {}; run `pixel uninstall --wrappers-only --shell {shell}`, or pass `--shell {shell}` if that is the shell you launch `claude` from)",
-                            path.display(),
-                            kind.as_str()
-                        )
+            let value = install::read_settings(&path).map_err(|e| e.to_string())?;
+            let hooks = value
+                .get("hooks")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| format!("no hooks object in {}", path.display()))?;
+            let has = |event: &str, verb: &str| {
+                hooks
+                    .get(event)
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|groups| {
+                        groups.iter().any(|group| {
+                            group
+                                .get("hooks")
+                                .and_then(serde_json::Value::as_array)
+                                .is_some_and(|inner| {
+                                    inner.iter().any(|hook| {
+                                        hook.get("command")
+                                            .and_then(serde_json::Value::as_str)
+                                            .is_some_and(|c| {
+                                                c.contains(&format!("run-hook {verb}"))
+                                                    && c.contains("pixel")
+                                            })
+                                    })
+                                })
+                        })
                     })
-                    .collect();
-                return Ok((
-                    CheckStatus::Yellow,
-                    DoctorCheckDetail {
-                        summary: format!(
-                            "{installed}; a pixel block also sits in {}",
-                            fixes.join(" and ")
-                        ),
-                        detail: Some(serde_json::json!({
-                            "profile": profile.display().to_string(),
-                            "shell": kind.as_str(),
-                            "subagent_prompt": with_subagent_prompt,
-                            "claude": claude.explanation(),
-                            "stray_profiles": strays
-                                .iter()
-                                .map(|(shell, path)| serde_json::json!({
-                                    "shell": shell,
-                                    "profile": path.display().to_string(),
-                                }))
-                                .collect::<Vec<_>>(),
-                        })),
-                    },
+            };
+            // Claude runs post-compaction through SessionStart with matcher
+            // "compact" — verify the verb AND its matcher, not just presence.
+            let has_compact = hooks
+                .get("SessionStart")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|groups| {
+                    groups.iter().any(|group| {
+                        group.get("matcher").and_then(serde_json::Value::as_str) == Some("compact")
+                            && group
+                                .get("hooks")
+                                .and_then(serde_json::Value::as_array)
+                                .is_some_and(|inner| {
+                                    inner.iter().any(|hook| {
+                                        hook.get("command")
+                                            .and_then(serde_json::Value::as_str)
+                                            .is_some_and(|c| {
+                                                c.contains("run-hook post-compaction")
+                                                    && c.contains("pixel")
+                                            })
+                                    })
+                                })
+                    })
+                });
+            let mut missing = Vec::new();
+            if !has("SessionStart", "session-start") {
+                missing.push("SessionStart→session-start");
+            }
+            if !has("UserPromptSubmit", "prompt-submit") {
+                missing.push("UserPromptSubmit→prompt-submit");
+            }
+            if !has_compact {
+                missing.push("SessionStart(compact)→post-compaction");
+            }
+            if !missing.is_empty() {
+                return Err(format!(
+                    "missing pixel lifecycle hooks in {}: {} — run `pixel install`",
+                    path.display(),
+                    missing.join(", ")
                 ));
             }
-            Ok((
-                CheckStatus::Green,
-                DoctorCheckDetail {
-                    summary: installed,
-                    detail: Some(serde_json::json!({
-                        "profile": profile.display().to_string(),
-                        "shell": kind.as_str(),
-                        "subagent_prompt": with_subagent_prompt,
-                        "claude": claude.explanation(),
-                        "stray_profiles": [],
-                    })),
-                },
-            ))
+            Ok(DoctorCheckDetail {
+                summary: format!("claude lifecycle hooks configured in {}", path.display()),
+                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+            })
+        },
+    ));
+
+    // Legacy `claude()` shell wrappers are harmful now: a surviving block
+    // double-injects the prompt on every wrapped launch. Any pixel-managed
+    // block in ANY candidate profile (the resolved shell's or a stray left
+    // by an install that ran under the wrong $SHELL) is red.
+    let shell_override = options.shell.clone();
+    checks.push(check(
+        "install.legacy-wrappers",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            let shell = install::resolve_shell(shell_override.as_deref());
+            let (_, resolved) = install::shell_profile_for(&shell, &home);
+            let mut profiles = vec![resolved.clone()];
+            profiles.extend(
+                install::stray_wrapper_profiles(&home, &resolved)
+                    .into_iter()
+                    .map(|(_, path)| path),
+            );
+            let mut blocks = Vec::new();
+            for profile in &profiles {
+                if fs::read_to_string(profile)
+                    .ok()
+                    .and_then(|content| install::extract_managed_block(&content))
+                    .is_some()
+                {
+                    blocks.push(profile.display().to_string());
+                }
+            }
+            if !blocks.is_empty() {
+                return Err(format!(
+                    "stale pixel shell wrapper in {} — run `pixel install` to remove it (the SessionStart hook now injects the prompt; the wrapper double-injects)",
+                    blocks.join(", ")
+                ));
+            }
+            Ok(DoctorCheckDetail {
+                summary: "no legacy shell wrappers — SessionStart hook injects the prompt".into(),
+                detail: Some(serde_json::json!({ "profiles_checked": profiles
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>() })),
+            })
         },
     ));
 
@@ -536,6 +520,227 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     }
 
     if let Some(root) = &options.repo_root {
+        // Repo-local enforcement (`pixel install --repo <path>`). A check is
+        // red only when the file carries evidence of a Pixel install (a
+        // Pixel entry, marker or sidecar) and that install is broken. An
+        // absent file, or one the project keeps for itself with nothing of
+        // Pixel's in it, is informational green: a repo where repo-install
+        // never ran is a valid state, not a broken one.
+        checks.push(check_status("repo.codex-config", || {
+            let codex_dir = root.join(".codex");
+            if !crate::codex_config::carries_pixel_block(&codex_dir)? {
+                return Ok((
+                    CheckStatus::Green,
+                    DoctorCheckDetail {
+                        summary: "no pixel block in .codex/config.toml — repo-local codex instructions not installed"
+                            .into(),
+                        detail: None,
+                    },
+                ));
+            }
+            let (summary, detail) = crate::codex_config::check_developer_instructions(&codex_dir)?;
+            Ok((
+                CheckStatus::Green,
+                DoctorCheckDetail {
+                    summary,
+                    detail: Some(detail),
+                },
+            ))
+        }));
+
+        checks.push(check_status("repo.codex-hooks", || {
+            let hooks_path = root.join(".codex").join(crate::codex_config::HOOKS_FILE);
+            let sidecar = root.join(".codex").join(crate::routing::CODEX_COMPOSED_BACKUP);
+            match (hooks_path.is_file(), sidecar.is_file()) {
+                (false, false) => Ok((
+                    CheckStatus::Green,
+                    DoctorCheckDetail {
+                        summary: "no .codex/hooks.json — repo-local composed guard not installed".into(),
+                        detail: None,
+                    },
+                )),
+                (true, false) => {
+                    let value = install::read_settings(&hooks_path).map_err(|e| e.to_string())?;
+                    if !crate::routing::has_pixel_hook(&value) {
+                        return Ok((
+                            CheckStatus::Green,
+                            DoctorCheckDetail {
+                                summary: "no pixel hook in .codex/hooks.json — repo-local composed guard not installed".into(),
+                                detail: None,
+                            },
+                        ));
+                    }
+                    Err(format!(
+                        "{} carries pixel hooks without their composed-guard backup {} — run `pixel install --repo`",
+                        hooks_path.display(),
+                        sidecar.display()
+                    ))
+                }
+                (false, true) => Err(format!(
+                    "composed-guard backup {} exists but {} is missing — run `pixel install --repo`",
+                    sidecar.display(),
+                    hooks_path.display()
+                )),
+                (true, true) => {
+                    let value = install::read_settings(&hooks_path).map_err(|e| e.to_string())?;
+                    let groups = value
+                        .get("hooks")
+                        .and_then(|h| h.get("PreToolUse"))
+                        .and_then(serde_json::Value::as_array);
+                    let managed = groups.is_some_and(|groups| {
+                        groups.len() == 1
+                            && groups[0]
+                                .get("hooks")
+                                .and_then(serde_json::Value::as_array)
+                                .is_some_and(|hooks| {
+                                    hooks.iter().any(|hook| {
+                                        hook.get("command")
+                                            .and_then(serde_json::Value::as_str)
+                                            .is_some_and(|c| {
+                                                c.contains(
+                                                    "run-hook composed-guard --provider codex --backup ",
+                                                )
+                                            })
+                                    })
+                                })
+                    });
+                    if !managed {
+                        return Err(format!(
+                            "PreToolUse in {} is not the managed composed-guard group — run `pixel install --repo`",
+                            hooks_path.display()
+                        ));
+                    }
+                    Ok((
+                        CheckStatus::Green,
+                        DoctorCheckDetail {
+                            summary: format!(
+                                "composed codex guard configured in {} (backup={})",
+                                hooks_path.display(),
+                                sidecar.display()
+                            ),
+                            detail: Some(serde_json::json!({
+                                "hooks": hooks_path.display().to_string(),
+                                "backup": sidecar.display().to_string(),
+                            })),
+                        },
+                    ))
+                }
+            }
+        }));
+
+        checks.push(check_status("repo.devin-hooks", || {
+            let path = root.join(crate::routing::DEVIN_LOCAL_CONFIG);
+            let value = if path.is_file() {
+                install::read_settings(&path).map_err(|e| e.to_string())?
+            } else {
+                serde_json::Value::Null
+            };
+            if !crate::routing::has_pixel_hook(&value) {
+                return Ok((
+                    CheckStatus::Green,
+                    DoctorCheckDetail {
+                        summary: format!(
+                            "no pixel hook in {} — repo-local devin guard not installed",
+                            crate::routing::DEVIN_LOCAL_CONFIG
+                        ),
+                        detail: None,
+                    },
+                ));
+            }
+            if !crate::routing::has_pixel_guard(&value, "run-hook guard --provider devin") {
+                return Err(format!(
+                    "pixel hooks in {} but no pixel guard PreToolUse entry — run `pixel install --repo`",
+                    path.display()
+                ));
+            }
+            Ok((
+                CheckStatus::Green,
+                DoctorCheckDetail {
+                    summary: format!("devin guard registered in {}", path.display()),
+                    detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+                },
+            ))
+        }));
+
+        checks.push(check_status("repo.claude-hooks", || {
+            // The shared settings.json is committed: a pixel guard there
+            // runs this machine's binary path on every teammate's clone.
+            let shared = root.join(crate::routing::CLAUDE_SHARED_SETTINGS);
+            if shared.is_file() {
+                let value = install::read_settings(&shared).map_err(|e| e.to_string())?;
+                if crate::routing::has_pixel_guard(&value, "run-hook guard") {
+                    return Err(format!(
+                        "pixel guard in the shared {} names this machine's binary — run `pixel install --repo` to move it to {}",
+                        shared.display(),
+                        crate::routing::CLAUDE_LOCAL_SETTINGS
+                    ));
+                }
+            }
+            let path = root.join(crate::routing::CLAUDE_LOCAL_SETTINGS);
+            let value = if path.is_file() {
+                install::read_settings(&path).map_err(|e| e.to_string())?
+            } else {
+                serde_json::Value::Null
+            };
+            let rtk_backup = root.join(crate::routing::RTK_BACKUP);
+            if !crate::routing::has_pixel_hook(&value) && !rtk_backup.is_file() {
+                return Ok((
+                    CheckStatus::Green,
+                    DoctorCheckDetail {
+                        summary: format!(
+                            "no pixel hook in {} — repo-local claude guard not installed",
+                            crate::routing::CLAUDE_LOCAL_SETTINGS
+                        ),
+                        detail: None,
+                    },
+                ));
+            }
+            if !crate::routing::has_pixel_guard(&value, "run-hook guard --provider claude") {
+                return Err(format!(
+                    "pixel install evidence (hook or {}) but no pixel guard PreToolUse entry in {} — run `pixel install --repo`",
+                    rtk_backup.display(),
+                    path.display()
+                ));
+            }
+            Ok((
+                CheckStatus::Green,
+                DoctorCheckDetail {
+                    summary: format!("claude guard registered in {}", path.display()),
+                    detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+                },
+            ))
+        }));
+
+        checks.push(check_status("repo.pi-guard", || {
+            let ext = root
+                .join(config::PI_CONFIG_DIR)
+                .join("extensions")
+                .join("pixel-guard.ts");
+            if !ext.is_file() {
+                return Ok((
+                    CheckStatus::Green,
+                    DoctorCheckDetail {
+                        summary: "no .pi/agent/extensions/pixel-guard.ts — repo-local pi guard not installed".into(),
+                        detail: None,
+                    },
+                ));
+            }
+            let content = fs::read_to_string(&ext).map_err(|e| e.to_string())?;
+            if !content.contains(config::MANAGED_BEGIN) || !content.contains("run-hook") {
+                return Err(format!(
+                    "{} is not a pixel-managed guard extension — run `pixel install --repo`",
+                    ext.display()
+                ));
+            }
+            Ok((
+                CheckStatus::Green,
+                DoctorCheckDetail {
+                    summary: format!("pi guard extension installed at {}", ext.display()),
+                    detail: Some(serde_json::json!({ "path": ext.display().to_string() })),
+                },
+            ))
+        }));
+
         checks.push(check(
             "daemon.health",
             || -> std::result::Result<DoctorCheckDetail, String> {
@@ -603,7 +808,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         checks.push(check(
             "graph.freshness",
             || -> std::result::Result<DoctorCheckDetail, String> {
-                let db = root.join(pixel_index::index::SHARD_DIR).join("graph.db");
+                let db = root
+                    .join(pixel_index::index::SHARD_DIR)
+                    .join(pixel_daemon::api::GRAPH_DB_FILE);
                 if !db.is_file() {
                     return Err("graph not built".into());
                 }

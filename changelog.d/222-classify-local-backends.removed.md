@@ -1,0 +1,1 @@
+**cli:** the deterministic `static` and `verdict` backends of `pixel classify`, and its `--backend` flag, are gone: no off-the-shelf local model matched the remote path on the decision benchmark. ([#222](https://github.com/LivioGama/pixel/pull/222))

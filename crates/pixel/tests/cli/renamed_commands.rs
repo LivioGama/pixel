@@ -123,10 +123,19 @@ fn ready_answers_with_the_json_of_prepare_repo() {
         args.extend(FLAGS);
         let out = pixel(&dir, &args, &[]);
         assert!(out.status.success(), "{name}: {out:?}");
-        assert!(
-            out.stderr.is_empty(),
-            "--metrics off silences both the metrics line and the rename note: {}",
+        // `--metrics off` silences the metrics line, never the rename note:
+        // the CI job running `ready` must still learn the new name.
+        let expected = if name == "ready" {
+            vec!["note: 'ready' is now 'prepare-repo'; the old name stays accepted until 1.0"]
+        } else {
+            vec![]
+        };
+        assert_eq!(
             String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .collect::<Vec<_>>(),
+            expected,
+            "{name}: stderr carries the rename note and nothing else"
         );
         let mut doc: serde_json::Value = serde_json::from_slice(&out.stdout)
             .unwrap_or_else(|e| panic!("{name} stdout is one JSON document ({e}): {out:?}"));
@@ -147,16 +156,21 @@ fn ready_answers_with_the_json_of_prepare_repo() {
 }
 
 #[test]
-fn an_old_name_announces_its_new_name_once_on_stderr_only_when_live() {
+fn an_old_name_announces_its_new_name_once_on_every_unprotected_stream() {
     let dir = fixture("note");
+    // An empty HOME keeps the machine's real `~/.pixel/config.json` out of
+    // the metrics resolution: a persistent `metrics: off` there must not
+    // decide whether this test sees the note.
+    let home = Scratch::for_test("pixel-renamed", "note-home");
+    let home_env = [("HOME", home.to_str().unwrap())];
     let warm = pixel(
         &dir,
         &["prepare-repo", "--no-daemon", "--metrics", "off"],
-        &[],
+        &home_env,
     );
     assert!(warm.status.success(), "{warm:?}");
 
-    let live = pixel(&dir, &["ready", "--no-daemon", "--json"], &[]);
+    let live = pixel(&dir, &["ready", "--no-daemon", "--json"], &home_env);
     assert!(live.status.success(), "{live:?}");
     assert_eq!(
         stderr_notes(&live),
@@ -166,30 +180,34 @@ fn an_old_name_announces_its_new_name_once_on_stderr_only_when_live() {
         .unwrap_or_else(|e| panic!("the note must never reach stdout ({e}): {live:?}"));
     assert!(stdout.get("graph").is_some(), "{stdout}");
 
-    let current = pixel(&dir, &["prepare-repo", "--no-daemon", "--json"], &[]);
+    let current = pixel(&dir, &["prepare-repo", "--no-daemon", "--json"], &home_env);
     assert!(stderr_notes(&current).is_empty(), "{current:?}");
 
     let env_off = pixel(
         &dir,
         &["ready", "--no-daemon", "--json"],
-        &[("PIXEL_METRICS", "0")],
+        &[("HOME", home.to_str().unwrap()), ("PIXEL_METRICS", "0")],
     );
     assert!(env_off.status.success(), "{env_off:?}");
-    assert!(
-        stderr_notes(&env_off).is_empty(),
+    // The metrics opt-outs silence reporting, not the teaching signal: an
+    // agent running with metrics off would otherwise never learn the name.
+    assert_eq!(
+        stderr_notes(&env_off),
+        stderr_notes(&live),
         "PIXEL_METRICS=0: {env_off:?}"
     );
 
-    let flag_off = pixel(&dir, &["--metrics=off", "ready", "--no-daemon"], &[]);
+    let flag_off = pixel(&dir, &["--metrics=off", "ready", "--no-daemon"], &home_env);
     assert!(flag_off.status.success(), "{flag_off:?}");
-    assert!(
-        stderr_notes(&flag_off).is_empty(),
+    assert_eq!(
+        stderr_notes(&flag_off),
+        stderr_notes(&live),
         "--metrics=off: {flag_off:?}"
     );
 
     // A hook response is a protected stream: the old `pixel hook …` entries
     // every 0.2.x install wrote must keep answering without extra output.
-    let hook = pixel(&dir, &["hook", "session-start", "."], &[]);
+    let hook = pixel(&dir, &["hook", "session-start", "."], &home_env);
     assert!(hook.status.success(), "{hook:?}");
     assert!(stderr_notes(&hook).is_empty(), "hook: {hook:?}");
 }

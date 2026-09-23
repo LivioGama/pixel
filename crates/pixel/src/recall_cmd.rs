@@ -363,9 +363,10 @@ fn try_recall_daemon(
         action: action.to_string(),
         params,
     };
-    let Some(resp) = crate::try_daemon_inner(root, &req) else {
+    let crate::DaemonRoute::Served(resp) = crate::try_daemon_inner(root, &req) else {
         return Ok(None);
     };
+    let resp = *resp;
     if !resp.ok {
         return Err(resp.error_message());
     }

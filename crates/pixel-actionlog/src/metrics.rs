@@ -845,7 +845,9 @@ mod tests {
                         );
                         log.log(event);
                     }
-                    log.finish();
+                    // The records are read back below: `finish` returns before
+                    // the writer drains, so under load some would be missing.
+                    log.finish_flush();
                 });
             }
         });

@@ -28,7 +28,9 @@ mod classify;
 mod claude_controller;
 mod config_cmd;
 mod coverage_cmd;
+mod decide_remote;
 mod evaluate_cmd;
+mod execution_brief;
 mod guard;
 mod index_cmd;
 mod mcp_cmd;
@@ -240,6 +242,40 @@ enum Command {
         /// score gap after P0. Improves precision on simple tasks.
         #[arg(long)]
         precision: bool,
+    },
+    /// Build a deterministic, bounded execution brief from scope-task evidence.
+    #[command(hide = true)]
+    ExecutionBrief {
+        /// Task/feature description.
+        task: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+        /// Maximum files in the scope evidence (default 20, max 100).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Drop files above this tier: "P0" = P0 only, "P1" = P0+P1.
+        #[arg(long)]
+        max_tier: Option<String>,
+        /// Precision mode: drop low-score P1 files after a sharp score gap.
+        #[arg(long)]
+        precision: bool,
+        /// Accepted for parity with scope-task; execution-brief never writes a manifest.
+        #[arg(long)]
+        no_manifest: bool,
+        /// Skip the daemon and use the in-process service.
+        #[arg(long)]
+        no_daemon: bool,
+    },
+    /// Persistent JSONL evidence protocol for a local coding harness.
+    #[command(hide = true)]
+    Evidence {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Preserve stdin/stdout JSONL framing; required to avoid prose output.
+        #[arg(long)]
+        jsonl: bool,
     },
     /// Surgical revert planner: locate the files a problem points at, list
     /// recent versions with the likely-breaking commit flagged, recommend a
@@ -539,11 +575,12 @@ enum Command {
         #[command(subcommand)]
         cmd: sniper_cmd::SniperCmd,
     },
-    /// Zero-shot decision over a bounded label set: embed the text and each
-    /// option's criterion, cosine → fixed-temperature softmax. The
-    /// probability distribution a Jev-class decision model returns, computed
-    /// deterministically with no LLM. `--jsonl` serves one decision per
-    /// stdin line with the model resident.
+    /// Decision over a bounded label set through a remote LLM: one
+    /// OpenAI-compatible chat completion maps the state, shared framing,
+    /// labels and criteria onto a probability distribution — the shape a
+    /// Jev-class decision model returns. Non-deterministic and
+    /// network-bound; `--remote-preset` picks the provider. `--jsonl`
+    /// serves one decision per stdin line.
     Classify(classify::ClassifyOptions),
     /// Deterministic web lookup for terms the index cannot know — the
     /// refine step of a gated `pixel plan`. No LLM, no daemon.
@@ -883,6 +920,12 @@ enum Command {
         /// does not run under your login shell.
         #[arg(long)]
         shell: Option<String>,
+        /// Install project-local enforcement into this repository only:
+        /// `.codex/config.toml` + `.codex/hooks.json` (composed guard),
+        /// `.devin/hooks.json`, `.pi/agent/extensions/pixel-guard.ts` +
+        /// `.pi/agent/AGENTS.md`. Skips all global steps.
+        #[arg(long)]
+        repo: Option<PathBuf>,
     },
     /// Remove everything `pixel install` wrote: managed blocks from
     /// agent-config files, hook entries from all settings files, hook
@@ -906,6 +949,10 @@ enum Command {
         /// profile the login shell never loads.
         #[arg(long)]
         wrappers_only: bool,
+        /// Remove only the project-local artifacts `pixel install --repo`
+        /// wrote in this repository. Skips all global removal steps.
+        #[arg(long)]
+        repo: Option<PathBuf>,
     },
     /// Check that a release tag is consistent with the tree before anything
     /// is built or published: crates/pixel/Cargo.toml carries the version,
@@ -1437,6 +1484,22 @@ enum ConfigCmd {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// API key for a `pixel classify` remote preset: `pixel config
+    /// remote-key ollama <key>` stores it in `~/.pixel/config.json`
+    /// (never the repo config, never printed back). The provider env var
+    /// (`OLLAMA_API_KEY`, `OPENROUTER_API_KEY`) still wins when set.
+    RemoteKey {
+        /// Remote provider preset the key belongs to.
+        #[arg(value_enum)]
+        preset: decide_remote::Preset,
+        /// The key value, or `-` to read it from stdin (keeps it out of
+        /// shell history and `ps`); omit to report set/unset, `--clear` to
+        /// remove.
+        value: Option<String>,
+        /// Remove the stored key for this preset.
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1679,7 +1742,17 @@ fn roundtrip(stream: &mut UnixStream, req: &Request) -> Option<Response> {
 
 /// Daemon path: only if the socket answers Ping within ~100ms.
 fn try_daemon(root: &Path, req: &Request) -> Option<Response> {
-    try_daemon_inner(root, req).or_else(|| {
+    match try_daemon_inner(root, req) {
+        DaemonRoute::Served(response) => Some(*response),
+        // A newer daemon belongs to a newer CLI still using it: leave it
+        // running and serve this command in process, without starting ours.
+        DaemonRoute::Declined => None,
+        DaemonRoute::Absent => auto_start_daemon(root, req),
+    }
+}
+
+fn auto_start_daemon(root: &Path, req: &Request) -> Option<Response> {
+    {
         // Auto-start: socket connection failed. Spawn the daemon in the
         // background and retry once. This makes the fast path transparent —
         // no need for the user to run `pixel daemon start` manually.
@@ -1702,18 +1775,18 @@ fn try_daemon(root: &Path, req: &Request) -> Option<Response> {
         command.spawn().ok()?;
         // Wait up to 5s for the socket to come up.
         for _ in 0..50 {
-            if let Some(resp) = try_daemon_inner(root, req) {
-                return Some(resp);
+            if let DaemonRoute::Served(resp) = try_daemon_inner(root, req) {
+                return Some(*resp);
             }
             std::thread::sleep(Duration::from_millis(100));
         }
         None
-    })
+    }
 }
 
-fn try_daemon_inner(root: &Path, req: &Request) -> Option<Response> {
+fn open_daemon_stream(root: &Path) -> Option<UnixStream> {
     let sock = daemon::socket_path(root);
-    let mut stream = UnixStream::connect(&sock).ok()?;
+    let stream = UnixStream::connect(&sock).ok()?;
     // The daemon drains its debounced watcher batch before serving a
     // connection; on a cold or loaded host that drain can outlast a short
     // probe timeout. 5s covers the drain without masking a dead daemon.
@@ -1723,24 +1796,90 @@ fn try_daemon_inner(root: &Path, req: &Request) -> Option<Response> {
     stream
         .set_write_timeout(Some(Duration::from_millis(5000)))
         .ok()?;
-    let ping = roundtrip(&mut stream, &Request::Ping)?;
-    if !ping.ok
-        || ping.data().get("protocol_version").and_then(Value::as_u64) != Some(PROTOCOL_VERSION)
-    {
-        // Old daemons must not serve stale schemas to a newer CLI. They all
-        // understand Shutdown; close them and use the current in-process
-        // service for this command. A later explicit start launches current.
-        let _ = roundtrip(&mut stream, &Request::Shutdown);
-        return None;
+    Some(stream)
+}
+
+/// What answers on a root's daemon socket, from this CLI's point of view.
+#[derive(Debug, PartialEq, Eq)]
+enum DaemonProbe {
+    /// Nothing answers a Ping.
+    Absent,
+    /// A healthy daemon on this CLI's protocol.
+    Current,
+    /// An older protocol, no protocol at all, or a failed Ping: it must not
+    /// serve this CLI, and every daemon ever shipped understands Shutdown.
+    Stale,
+    /// A newer protocol: a newer CLI started it and may still be using it.
+    Newer,
+}
+
+fn classify_ping(ping: &Response) -> DaemonProbe {
+    match ping.data().get("protocol_version").and_then(Value::as_u64) {
+        Some(version) if version > PROTOCOL_VERSION => DaemonProbe::Newer,
+        Some(PROTOCOL_VERSION) if ping.ok => DaemonProbe::Current,
+        _ => DaemonProbe::Stale,
     }
-    // Real request may legitimately take a while (lazy graph build).
-    stream
-        .set_read_timeout(Some(Duration::from_secs(600)))
-        .ok()?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(30)))
-        .ok()?;
-    roundtrip(&mut stream, req)
+}
+
+fn probe_daemon(root: &Path) -> DaemonProbe {
+    open_daemon_stream(root)
+        .and_then(|mut stream| roundtrip(&mut stream, &Request::Ping))
+        .map_or(DaemonProbe::Absent, |ping| classify_ping(&ping))
+}
+
+/// How long a stale daemon gets to release its socket after Shutdown.
+const STALE_DAEMON_EXIT_CAP: Duration = Duration::from_secs(2);
+
+/// Shut a stale daemon down and wait (up to `cap`) until it stops
+/// answering, so a replacement started right after does not die on the
+/// lock the old one still holds.
+fn retire_stale_daemon_within(root: &Path, cap: Duration) {
+    if let Some(mut stream) = open_daemon_stream(root) {
+        let _ = roundtrip(&mut stream, &Request::Shutdown);
+    }
+    let deadline = std::time::Instant::now() + cap;
+    while std::time::Instant::now() < deadline && probe_daemon(root) == DaemonProbe::Stale {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Outcome of routing one request through the daemon.
+#[derive(Debug)]
+enum DaemonRoute {
+    Served(Box<Response>),
+    /// No daemon can serve it now; starting a current one may help.
+    Absent,
+    /// A newer daemon is running: serve in process, start nothing.
+    Declined,
+}
+
+fn try_daemon_inner(root: &Path, req: &Request) -> DaemonRoute {
+    match probe_daemon(root) {
+        DaemonProbe::Current => {}
+        DaemonProbe::Newer => return DaemonRoute::Declined,
+        DaemonProbe::Stale => {
+            // An old daemon must not serve stale schemas to a newer CLI.
+            retire_stale_daemon_within(root, STALE_DAEMON_EXIT_CAP);
+            return DaemonRoute::Absent;
+        }
+        DaemonProbe::Absent => return DaemonRoute::Absent,
+    }
+    // Each request gets its own connection. Besides removing a head-of-line
+    // wait behind the Ping handshake, this keeps the client compatible with
+    // a daemon that intentionally serves one request per connection.
+    let served = open_daemon_stream(root).and_then(|mut stream| {
+        // Real request may legitimately take a while (lazy graph build).
+        stream
+            .set_read_timeout(Some(Duration::from_secs(600)))
+            .ok()?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(30)))
+            .ok()?;
+        roundtrip(&mut stream, req)
+    });
+    served.map_or(DaemonRoute::Absent, |response| {
+        DaemonRoute::Served(Box::new(response))
+    })
 }
 
 /// Check if an env var is explicitly set to "0"/"false"/"off".
@@ -3323,7 +3462,19 @@ fn run_search_one(
 /// turns a `status` or a `daemon start` check (the recall daemon's included)
 /// into a spurious service — with `.pixel/` artifacts — on that root.
 fn daemon_ping(root: &Path) -> bool {
-    pixel_daemon::daemon::ping_only(root)
+    // Startup readiness and command routing must agree: a daemon that answers
+    // Ping but cannot serve this CLI's protocol would otherwise be reported
+    // ready, then make `build-index` silently use its in-process fallback.
+    // A stale one is retired here too, so the start that usually follows a
+    // `false` is not refused by the lock it still holds.
+    match probe_daemon(root) {
+        DaemonProbe::Current => true,
+        DaemonProbe::Stale => {
+            retire_stale_daemon_within(root, STALE_DAEMON_EXIT_CAP);
+            false
+        }
+        DaemonProbe::Absent | DaemonProbe::Newer => false,
+    }
 }
 
 #[cfg(test)]
@@ -3386,7 +3537,10 @@ mod daemon_ping_tests {
                             Request::Ping,
                             "the probe asks with a Ping"
                         );
-                        let reply = Response::success("ping", json!({"pong": true}));
+                        let reply = Response::success(
+                            "ping",
+                            json!({"pong": true, "protocol_version": PROTOCOL_VERSION}),
+                        );
                         writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
                         return;
                     }
@@ -3399,6 +3553,149 @@ mod daemon_ping_tests {
         });
         assert!(daemon_ping(&root));
         server.join().unwrap();
+        let _ = std::fs::remove_file(daemon::socket_path(&root));
+    }
+
+    fn ping_reply(ok: bool, version: Option<u64>) -> Response {
+        let mut reply = Response::success("ping", json!({"pong": true}));
+        if let Some(version) = version {
+            reply = Response::success("ping", json!({"pong": true, "protocol_version": version}));
+        }
+        reply.ok = ok;
+        reply
+    }
+
+    #[test]
+    fn only_a_healthy_ping_on_this_protocol_may_serve_and_only_a_newer_one_is_spared() {
+        assert_eq!(
+            classify_ping(&ping_reply(true, Some(PROTOCOL_VERSION))),
+            DaemonProbe::Current
+        );
+        assert_eq!(
+            classify_ping(&ping_reply(false, Some(PROTOCOL_VERSION))),
+            DaemonProbe::Stale,
+            "a failing daemon on our protocol is replaced, not used"
+        );
+        assert_eq!(
+            classify_ping(&ping_reply(true, Some(PROTOCOL_VERSION - 1))),
+            DaemonProbe::Stale
+        );
+        assert_eq!(classify_ping(&ping_reply(true, None)), DaemonProbe::Stale);
+        assert_eq!(
+            classify_ping(&ping_reply(true, Some(PROTOCOL_VERSION + 1))),
+            DaemonProbe::Newer
+        );
+    }
+
+    /// A fake daemon answering Ping with `version` and recording every
+    /// request, for at most `connections` connections. After a Shutdown it
+    /// keeps answering for `linger` (a real daemon takes a moment to exit),
+    /// then removes its socket and answers whatever is still queued.
+    fn fake_daemon(
+        root: &Path,
+        version: u64,
+        connections: usize,
+        linger: Duration,
+    ) -> std::thread::JoinHandle<Vec<Request>> {
+        fn answer(mut stream: UnixStream, version: u64) -> Option<Request> {
+            let _ = stream.set_nonblocking(false);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut line = String::new();
+            if BufReader::new(&stream).read_line(&mut line).unwrap_or(0) == 0 {
+                return None;
+            }
+            let request: Request = serde_json::from_str(&line).unwrap();
+            let reply = match request {
+                Request::Ping => ping_reply(true, Some(version)),
+                _ => Response::success("ok", json!({})),
+            };
+            writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+            Some(request)
+        }
+        let sock = daemon::socket_path(root);
+        let listener = UnixListener::bind(&sock).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut exit_at: Option<Instant> = None;
+            while Instant::now() < deadline
+                && seen.len() < connections
+                && exit_at.is_none_or(|at| Instant::now() < at)
+            {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if let Some(request) = answer(stream, version) {
+                            if request == Request::Shutdown {
+                                exit_at = Some(Instant::now() + linger);
+                            }
+                            seen.push(request);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+            if exit_at.is_some() {
+                let _ = std::fs::remove_file(&sock);
+                // Answer what connected before the socket went away, so no
+                // client waits out its read timeout.
+                while let Ok((stream, _)) = listener.accept() {
+                    let _ = answer(stream, version);
+                }
+            }
+            seen
+        })
+    }
+
+    #[test]
+    fn a_newer_daemon_is_left_running_and_declines_without_a_restart() {
+        let root = scratch_root("newer");
+        let server = fake_daemon(&root, PROTOCOL_VERSION + 1, 1, Duration::ZERO);
+        assert!(matches!(
+            try_daemon_inner(&root, &Request::Status {}),
+            DaemonRoute::Declined
+        ));
+        assert_eq!(
+            server.join().unwrap(),
+            vec![Request::Ping],
+            "no Shutdown sent"
+        );
+        let _ = std::fs::remove_file(daemon::socket_path(&root));
+    }
+
+    #[test]
+    fn a_stale_daemon_is_shut_down_so_a_current_one_can_start() {
+        let root = scratch_root("stale");
+        let server = fake_daemon(&root, PROTOCOL_VERSION - 1, 100, Duration::from_millis(200));
+        let started = Instant::now();
+        assert!(
+            !daemon_ping(&root),
+            "a stale daemon is never reported ready"
+        );
+        let waited = started.elapsed();
+        assert!(
+            !daemon::socket_path(&root).exists(),
+            "retirement waits until the old daemon let its socket go"
+        );
+        assert!(
+            waited < STALE_DAEMON_EXIT_CAP,
+            "and returns as soon as it is gone: {waited:?}"
+        );
+        let seen = server.join().unwrap();
+        assert_eq!(seen[..2], [Request::Ping, Request::Shutdown]);
+        assert!(seen[2..].iter().all(|r| *r == Request::Ping), "{seen:?}");
+    }
+
+    #[test]
+    fn daemon_start_refuses_to_fight_a_newer_daemon() {
+        let root = scratch_root("start-newer");
+        let server = fake_daemon(&root, PROTOCOL_VERSION + 1, 1, Duration::ZERO);
+        let error = daemon_start(root.clone(), false, true).unwrap_err();
+        assert!(error.contains("newer pixel daemon"), "{error}");
+        assert_eq!(server.join().unwrap(), vec![Request::Ping]);
         let _ = std::fs::remove_file(daemon::socket_path(&root));
     }
 }
@@ -3415,12 +3712,23 @@ fn daemon_start(path: PathBuf, foreground: bool, quiet: bool) -> Result<(), Stri
     if foreground {
         return daemon::run(&path).map_err(|e| e.to_string());
     }
-    if daemon_ping(&path) {
-        report(&format!(
-            "daemon already running ({})\n",
-            daemon::socket_path(&path).display()
-        ))?;
-        return Ok(());
+    match probe_daemon(&path) {
+        DaemonProbe::Current => {
+            report(&format!(
+                "daemon already running ({})\n",
+                daemon::socket_path(&path).display()
+            ))?;
+            return Ok(());
+        }
+        DaemonProbe::Newer => {
+            return Err(format!(
+                "a newer pixel daemon serves {} (its protocol is above {PROTOCOL_VERSION}); \
+                 upgrade this pixel or run `pixel daemon stop` first",
+                path.display()
+            ));
+        }
+        DaemonProbe::Stale => retire_stale_daemon_within(&path, STALE_DAEMON_EXIT_CAP),
+        DaemonProbe::Absent => {}
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let abs = path
@@ -3457,7 +3765,11 @@ fn daemon_start(path: PathBuf, foreground: bool, quiet: bool) -> Result<(), Stri
 }
 
 fn daemon_stop(path: PathBuf) -> Result<(), String> {
-    match try_daemon(&path, &Request::Shutdown) {
+    // Straight to the socket: every protocol understands Shutdown, and
+    // routing it through `try_daemon` would start a daemon just to stop it.
+    let stopped =
+        open_daemon_stream(&path).and_then(|mut stream| roundtrip(&mut stream, &Request::Shutdown));
+    match stopped {
         Some(r) if r.ok => {
             write_stdout("daemon stopped\n")?;
             Ok(())
@@ -4210,13 +4522,35 @@ fn renamed_invocation(argv: &[String]) -> Option<(&str, &'static str)> {
     None
 }
 
+/// The arguments as the action log records them. An API key is a secret:
+/// the log is plain text under `.pixel/`, so every positional after
+/// `config remote-key <preset>` is masked.
+fn logged_args(args: &[String]) -> String {
+    let secret_from = args
+        .windows(2)
+        .position(|pair| pair[0] == "config" && pair[1] == "remote-key")
+        .map(|at| at + 3);
+    args.iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            if secret_from.is_some_and(|from| i >= from) && !arg.starts_with("--") {
+                "<redacted>"
+            } else {
+                arg.as_str()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The one stderr line announcing that an old command name was used, or
-/// `None` when the name is current or live reporting is off. `live` is the
-/// metrics gate: `--metrics off`, `PIXEL_METRICS=0` and the protected
-/// streams (hooks, `search-like-rg`, the statusline) silence both alike, so
-/// the note never lands in a hook response or a byte-compatible rg output.
-fn rename_note(argv: &[String], live: bool) -> Option<String> {
-    if !live {
+/// `None` when the name is current or the stream is protected (hooks,
+/// `search-like-rg`, the statusline), so the note never lands in a hook
+/// response or a byte-compatible rg output. The note is not a metrics line:
+/// `--metrics off`, `PIXEL_METRICS=0` and the persistent `metrics` opt-out
+/// silence reporting, not the rename teaching signal.
+fn rename_note(argv: &[String], unprotected: bool) -> Option<String> {
+    if !unprotected {
         return None;
     }
     let (old, new) = renamed_invocation(argv)?;
@@ -4260,7 +4594,7 @@ fn run() -> Result<(), String> {
         && cli.metrics != "off"
         && std::env::var_os("PIXEL_METRICS").is_none_or(|v| v != "0")
         && config_cmd::metrics_enabled(root.as_deref().ok());
-    if let Some(note) = rename_note(&argv, live) {
+    if let Some(note) = rename_note(&argv, !protected) {
         eprint!("{note}");
     }
     operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
@@ -4305,7 +4639,7 @@ fn run() -> Result<(), String> {
         Some(code) if code != 0 => Err(format!("{command_label} exited {code}")),
         _ => result.clone(),
     };
-    let mut event = pixel_actionlog::ActionEvent::new(&command_label, argv[1..].join(" "))
+    let mut event = pixel_actionlog::ActionEvent::new(&command_label, logged_args(&argv[1..]))
         .with_result(&logged_result, elapsed);
     if !protected {
         let output_bytes = operation_metrics::output_bytes();
@@ -4335,7 +4669,10 @@ fn run() -> Result<(), String> {
         let _ = writeln!(std::io::stderr().lock(), "\n{line}");
     }
     logger.log(event);
-    logger.finish();
+    // The record must be on disk before exit: `pixel action-log`, the
+    // metrics history and the next invocation's footer read it back.
+    // `finish` would drop it whenever the process exits first.
+    logger.finish_flush();
     if let Some(code) = owned_exit {
         std::process::exit(code);
     }
@@ -4523,6 +4860,33 @@ fn run_command(
                 );
             }
             Ok(())
+        }
+        Command::ExecutionBrief {
+            task,
+            path,
+            json,
+            limit,
+            max_tier,
+            precision,
+            no_manifest: _,
+            no_daemon,
+        } => {
+            let data = execute(
+                &path,
+                Request::Targets {
+                    task: task.clone(),
+                    limit,
+                    max_tier,
+                    precision,
+                },
+                no_daemon,
+            )?;
+            let brief = execution_brief::from_scope_task(&task, &data);
+            if json {
+                print_data(&brief, true)
+            } else {
+                write_stdout(&execution_brief::pretty(&brief))
+            }
         }
         Command::PlanRollback {
             problem,
@@ -5098,7 +5462,7 @@ fn run_command(
                 "graph built in {} ms -> {}",
                 v.get("elapsed_ms").and_then(Value::as_u64).unwrap_or(0),
                 path.join(pixel_index::index::SHARD_DIR)
-                    .join("graph.db")
+                    .join(pixel_daemon::api::GRAPH_DB_FILE)
                     .display()
             );
             print_data(&v, json)?;
@@ -5279,6 +5643,13 @@ fn run_command(
             no_daemon,
             json,
         } => ready(path, no_daemon, json),
+        Command::Evidence { path, jsonl } => {
+            if !jsonl {
+                return Err("evidence requires --jsonl".into());
+            }
+            let root = discover_root(&path)?;
+            pixel_daemon::evidence::serve(&root, std::io::stdin().lock(), std::io::stdout())
+        }
         Command::IndexStats { path } => {
             let path = discover_root(&path)?;
             let shard = Shard::open(&shard_path(&path)).map_err(|e| e.to_string())?;
@@ -5617,9 +5988,10 @@ fn run_command(
         // -------------------------------------------------------------
         // M5/M6 — install / doctor / migrate / hook
         // -------------------------------------------------------------
-        Command::Install { json, shell } => {
+        Command::Install { json, shell, repo } => {
             let report = pixel_install::install::install(&pixel_install::install::InstallOptions {
                 shell,
+                repo,
                 ..Default::default()
             })
             .map_err(|e| e.to_string())?;
@@ -5634,6 +6006,7 @@ fn run_command(
             binary_path,
             shell,
             wrappers_only,
+            repo,
         } => {
             let report =
                 pixel_install::uninstall::uninstall(&pixel_install::uninstall::UninstallOptions {
@@ -5641,6 +6014,7 @@ fn run_command(
                     dry_run,
                     shell,
                     wrappers_only,
+                    repo,
                     ..Default::default()
                 })
                 .map_err(|e| e.to_string())?;
@@ -5914,7 +6288,14 @@ fn run_command(
                     pixel["repo"] = Value::Object(repo);
                 }
                 let block = serde_json::json!({ "pixel": pixel });
-                write_stdout(&serde_json::to_string_pretty(&block).map_err(|e| e.to_string())?)?;
+                // Claude's SessionStart contract: wrap the block so the hook
+                // injects the deployed agent prompt itself as
+                // hookSpecificOutput.additionalContext — the doctrine reaches
+                // every `claude` process, not just wrapper-launched shells.
+                write_stdout(
+                    &serde_json::to_string_pretty(&guard::session_start_output(&block))
+                        .map_err(|e| e.to_string())?,
+                )?;
                 Ok(())
             }
             HookCmd::PromptSubmit { provider } => {
@@ -5949,6 +6330,12 @@ fn run_command(
                 global,
                 path,
             } => config_cmd::run_metrics(&path, global, value.as_deref().map(|v| v == "on")),
+            ConfigCmd::RemoteKey {
+                preset,
+                value,
+                clear,
+            } => config_cmd::key_from_arg(value, &mut std::io::stdin().lock())
+                .and_then(|key| config_cmd::run_remote_key(preset, key, clear)),
         },
         Command::TaskState { cmd } => match cmd {
             TaskCmd::Begin {
@@ -7680,7 +8067,7 @@ mod prompt_asset_parity {
 
 #[cfg(test)]
 mod renamed_command_tests {
-    use super::{Cli, rename_note, renamed_invocation};
+    use super::{Cli, logged_args, rename_note, renamed_invocation};
     use clap::CommandFactory;
     use std::collections::BTreeSet;
 
@@ -7771,7 +8158,33 @@ mod renamed_command_tests {
     }
 
     #[test]
-    fn rename_note_is_one_line_and_follows_the_metrics_gate() {
+    fn a_remote_key_never_reaches_the_action_log() {
+        let args = |words: &[&str]| words.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            logged_args(&args(&[
+                "--metrics",
+                "off",
+                "config",
+                "remote-key",
+                "openrouter",
+                "sk-secret"
+            ])),
+            "--metrics off config remote-key openrouter <redacted>"
+        );
+        assert_eq!(
+            logged_args(&args(&["config", "remote-key", "ollama", "--clear"])),
+            "config remote-key ollama --clear",
+            "flags stay readable"
+        );
+        assert_eq!(
+            logged_args(&args(&["search-content", "config", "src"])),
+            "search-content config src",
+            "other commands are logged verbatim"
+        );
+    }
+
+    #[test]
+    fn rename_note_is_one_line_and_skips_only_protected_streams() {
         assert_eq!(
             rename_note(&argv(&["pixel", "ready", "--json"]), true).as_deref(),
             Some("note: 'ready' is now 'prepare-repo'; the old name stays accepted until 1.0\n")

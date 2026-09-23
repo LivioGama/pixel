@@ -14,26 +14,61 @@ Make as much repository work deterministic as possible. If something can be answ
   <img src="docs/pixel-line.svg" alt="A direct line from a repository to a highlighted answer" width="760" />
 </p>
 
-## ⭐ The Pixel Flow Power
-
-```text
-task → targets → resolve → impact → edit → changes → review → publish
-```
-
-<p align="center">
-  <img src="docs/examples/pixel-workflow-comparison.gif" width="100%" alt="Animated comparison of manual repository rediscovery and Pixel’s bounded evidence workflow" />
-</p>
-
 ## 💡 See the difference
 
-The same repository questions, shown as realistic terminal work. These are workflow illustrations using actual Pixel command names and local output excerpts—not performance benchmarks.
+Six jobs every coding agent does. Red rail: without Pixel. Blue rail: with it.
+The `.pixel/` index is built once — every session, every agent reuses it.
 
-<p align="center">
-  <img src="docs/examples/01-resolve-impact.svg" width="100%" alt="Comparing manual discovery with Pixel resolve and impact" />
-  <img src="docs/examples/02-task-map.svg" width="100%" alt="Comparing unguided exploration with Pixel targets" />
-  <img src="docs/examples/03-review-changes.svg" width="100%" alt="Comparing manual change review with Pixel changes" />
-  <img src="docs/examples/04-history-recovery.svg" width="100%" alt="Comparing manual history searching with Pixel history search" />
-</p>
+### Scope before reading
+`scope-task` returns a closed P0/P1/P2 file list instead of the agent wandering the repo.
+
+<p align="center"><img src="docs/examples/pixel-scope-comparison.webp" width="100%" alt="Scope comparison" /></p>
+
+### Retrieval that measures itself
+Skeleton and context commands replace whole-file reads — and `token-savings` reports the real number, not a claimed one.
+
+<p align="center"><img src="docs/examples/pixel-measured-comparison.webp" width="100%" alt="Measured savings comparison" /></p>
+
+### Impact before edit
+`pixel impact` lists every caller before the agent touches a symbol.
+
+<p align="center"><img src="docs/examples/pixel-impact-comparison.webp" width="100%" alt="Impact comparison" /></p>
+
+### Search stays transparent
+`rg`/`grep` get rewritten to `search-content` by the hook — same command, indexed answer.
+
+<p align="center"><img src="docs/examples/pixel-rewrite-comparison.webp" width="100%" alt="Rewrite comparison" /></p>
+
+### Rescue as a plan
+`plan-rollback` flags the likely-breaking commit and a last-known-good candidate — it never resets anything.
+
+<p align="center"><img src="docs/examples/pixel-rollback-comparison.webp" width="100%" alt="Rollback comparison" /></p>
+
+### Publish without footguns
+`review-changes` → `repo-state` → leased `commit-and-push`: crash-safe, idempotent, never a raw `--force`.
+
+<p align="center"><img src="docs/examples/pixel-publish-comparison.webp" width="100%" alt="Publish comparison" /></p>
+
+## ⭐ The Pixel Flow
+
+```text
+task → scope-task → find-code → impact → edit → what-changed → review-changes → commit-and-push
+```
+
+## 📉 Token savings — measured, no second model
+
+Spotify's [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt) plugin claims 82–94% savings by blocking large reads and rerouting them through a paid worker model (Portal/AiKA). Pixel gets the same effect **locally and deterministically** — `list-signatures`, `find-code`, `pack-context` answer "what's in this file" without any file contents or a second model entering the agent's context.
+
+Replicating shunt's benchmark shape on this repo (138K lines, Rust), same methodology (UTF-8 bytes ÷ 4, what reaches the agent):
+
+| Scenario | Lines | Full reads | With Pixel | Savings |
+| --- | --- | --- | --- | --- |
+| Single large file | 4,661 | 48,465 tok | 2,172 tok | 95.5% |
+| Multi-file cross-read | 7,106 | 68,934 tok | 3,768 tok | 94.5% |
+| Source + test pair | 5,289 | 48,978 tok | 1,890 tok | 96.1% |
+| Code-write context | 5,289 | 48,978 tok | 1,910 tok | 96.1% |
+
+Unlike shunt's headline number, Pixel also self-reports **measured** savings from real sessions via `pixel token-savings` — on this machine: **41–83%** across 798 recorded operations. Same caveat as every tool in this space: these numbers measure what the agent reads, not your invoice — verify against your own usage.
 
 ## 🚀 Start here
 
@@ -45,13 +80,30 @@ pixel doctor .      # optional health check
 pixel install       # let your agent use Pixel
 ```
 
-`pixel install` deploys the agent system prompt and wires it into the agents it knows:
+`pixel install` is **global**: run it once, from anywhere. It deploys the
+agent system prompt to `~/.local/share/pixel/` (`agent-prompt.md` + the short
+`subagent-prompt.md`) and wires it into the agents it knows:
 
 | Agent | How the prompt reaches it |
 | --- | --- |
-| Claude Code | a `claude` shell function adds `--append-system-prompt-file` (and the short sub-agent prompt in print mode) |
-| Codex | the `developer_instructions` key of `~/.codex/config.toml`, so every front end gets it |
+| Claude Code | `SessionStart`/`SubagentStart` lifecycle hooks in `~/.claude/settings.json` inject the prompt as context — no shell wrapper, never blocks |
+| Codex | the `developer_instructions` key of `~/.codex/config.toml` (every front end gets it) + a metrics `PostToolUse` hook in `~/.codex/hooks.json` |
 | Pi | `~/.pi/agent/APPEND_SYSTEM.md`, read automatically |
+| OpenCode | the prompt appended to `AGENTS.md` |
+| Antigravity | its plugin, hooks and configuration activated |
+
+`pixel install --repo <path>` is the **per-project** variant: it writes
+project-local enforcement only and skips all global steps —
+
+- `<repo>/.codex/config.toml` — the same `developer_instructions` key
+- `<repo>/.codex/hooks.json` — the composed-guard `PreToolUse` group
+- `<repo>/.devin/hooks.json` — a pixel `run-hook guard --provider devin` hook
+- `<repo>/.pi/agent/extensions/pixel-guard.ts` + `.pi/agent/AGENTS.md`
+
+The per-repo guard is advisory: it steers agents toward Pixel commands (e.g.
+a soft notice before untargeted reads of large source files) without blocking
+tool calls. `pixel doctor <repo>` reports both global wiring and per-repo
+guards as green/stale/missing.
 
 > [!NOTE]
 > Any other agent (Cursor, Gemini CLI, Copilot, ...) is not wired by `pixel install` and will not know about Pixel on its own. Give it the same prompt through its own rules or system-prompt mechanism; see [Other agents and manual setup](#-other-agents-and-manual-setup).
@@ -123,70 +175,36 @@ system prompt and wire it into your agent by hand — see
 For architecture and the full command surface, see [ARCHITECTURE.md](ARCHITECTURE.md) and `pixel --help`.
 To build from source, run the gates, or open a pull request (with or without an AI agent), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## 🔁 Renamed commands
+Renamed commands: every subcommand got a verb-first name after 0.2.4; the
+old names stay accepted as hidden aliases until 1.0. Full mapping in
+[docs/renamed-commands.md](docs/renamed-commands.md).
 
-Every subcommand got a verb-first name after 0.2.4 (for example `prepare-repo`
-instead of `ready`). The old names stay accepted as hidden aliases until
-**1.0**, so scripts, hook entries and agent prompts written for 0.2.x keep
-working. Invoking an old name prints one line on stderr naming the new one:
 
-```
-note: 'ready' is now 'prepare-repo'; the old name stays accepted until 1.0
-```
+## 🧠 Decision backends — measured vs Jev
 
-The note is never written to stdout, so `--json` output is unchanged. Like
-the metrics line, it is silenced by `--metrics off` or `PIXEL_METRICS=0`,
-and never appears in hook responses or `search-like-rg` output. Protocol op
-names and JSON fields did not change. `migrate` was removed: it now exits 0
-with a note and does nothing.
+`pixel classify` runs decisions through a remote LLM (the only backend —
+`--remote-preset` picks OpenRouter, Ollama Cloud, or localhost). The
+scores below are **coding decisions only** — the frozen coding subset of
+JevBench (14 public coding-topic items, protocol in
+[`docs/bench/decide-bakeoff.md`](docs/bench/decide-bakeoff.md)). These
+Ollama Cloud models beat Jev's published coding score:
 
-| Old name | New name |
-| --- | --- |
-| `ask` | `search-meaning` |
-| `branch` | `new-branch` |
-| `branches` | `list-branches` |
-| `changes` | `what-changed` |
-| `clusters` | `list-areas` |
-| `context` | `pack-context` |
-| `env` | `edit-env` |
-| `excavate` | `dig-history` |
-| `flow` | `replay-flow` |
-| `graph` | `rebuild-graph` |
-| `history` | `commit-history` |
-| `history-search` | `search-history` |
-| `hook` | `run-hook` |
-| `index` | `build-index` |
-| `inspect` | `repo-state` |
-| `journal` | `record-event` |
-| `lifecycle` | `file-history` |
-| `log` | `action-log` |
-| `map` | `repo-map` |
-| `processes` | `list-flows` |
-| `provenance` | `who-wrote` |
-| `publish` | `commit` |
-| `query` | `run-recipe` |
-| `ready` | `prepare-repo` |
-| `reconcile` | `sync-branch` |
-| `release-check` | `check-release` |
-| `rescue` | `plan-rollback` |
-| `resolve` | `find-code` |
-| `review` | `review-changes` |
-| `rewrite` | `squash-branch` |
-| `savings` | `token-savings` |
-| `search` | `search-content` |
-| `search-compat` | `search-like-rg` |
-| `ship` | `commit-and-push` |
-| `skeleton` | `list-signatures` |
-| `sniper` | `list-errors` |
-| `stats` | `index-stats` |
-| `symbol` | `find-symbol` |
-| `sync` | `fetch` |
-| `targets` | `scope-task` |
-| `task` | `task-state` |
-| `trace` | `call-path` |
-| `update` | `fast-forward` |
-| `upgrade` | `self-update` |
-| `uses` | `who-calls` |
+| Model | Coding score | vs Jev | p50/item | TPS² |
+| --- | --- | --- | --- | --- |
+| deepseek-v4.1-flash | **14/14 = 1.00** | ✅ | 1.4 s | 173 |
+| deepseek-v4-flash | **13/14 = 0.93** | ✅ | 2.0 s | 77 |
+| gpt-oss:120b | **13/14 = 0.93** | ✅ | 2.0 s | 176 |
+| gpt-oss:20b | **13/14 = 0.93** | ✅ | 6.4 s | 99 |
+| nemotron-3-ultra | **12/14 = 0.86** | ✅ | 8.1 s | 72 |
+| **Jev** (reference) | **0.839**¹ | — | — | — |
+
+¹ Jev's published coding-topic accuracy, n=56, all tiers — **published
+number, not re-measured here**; different denominator than our n=14 subset.
+
+² TPS from [ollamatps.com](https://ollamatps.com) (Ollama Cloud Pro),
+fetched 2026-09-23.
+
+No off-the-shelf local model (≤575 M) passed 0.50 on the same set.
 
 ## 📝 License
 

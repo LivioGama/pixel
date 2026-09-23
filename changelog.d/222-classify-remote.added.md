@@ -1,0 +1,1 @@
+**cli:** `pixel classify` decides through an OpenAI-compatible chat completion: `--remote-preset openrouter | ollama | local`, `--remote-model`, `PIXEL_REMOTE_*` overrides, and `pixel config remote-key <preset> -` to store a key (0600, never logged). Output discloses `snapshot.deterministic=false` and `snapshot.provider`. ([#222](https://github.com/LivioGama/pixel/pull/222))

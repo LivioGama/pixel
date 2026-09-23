@@ -1,4 +1,5 @@
 //! Post-edit hook runs against an existing graph snapshot, never a refreshed source scan.
+use pixel_daemon::api::GRAPH_DB_FILE;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
@@ -175,7 +176,7 @@ fn non_edit_missing_file_and_missing_graph_are_silent_allow() {
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
     }
-    fs::remove_file(fixture.0.join(".pixel/graph.db")).unwrap();
+    fs::remove_file(fixture.0.join(".pixel").join(GRAPH_DB_FILE)).unwrap();
     let output = fixture.hook("Edit", "src/lib.rs");
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
@@ -185,7 +186,8 @@ fn non_edit_missing_file_and_missing_graph_are_silent_allow() {
 #[test]
 fn unresolved_receiver_evidence_stays_uncertain_without_inflating_known_callers() {
     let fixture = Fixture::new(1);
-    let store = pixel_graph::GraphStore::open(&fixture.0.join(".pixel/graph.db")).unwrap();
+    let store =
+        pixel_graph::GraphStore::open(&fixture.0.join(".pixel").join(GRAPH_DB_FILE)).unwrap();
     let caller = store.file_by_path("src/caller_00.rs").unwrap().unwrap();
     store
         .insert_unresolved_call(
