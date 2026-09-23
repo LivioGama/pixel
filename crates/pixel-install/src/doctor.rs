@@ -520,21 +520,20 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     }
 
     if let Some(root) = &options.repo_root {
-        // Repo-local enforcement (`pixel install --repo <path>`). Absent
-        // artifacts are informational green: a repo where repo-install never
-        // ran is a valid state, not a broken one.
+        // Repo-local enforcement (`pixel install --repo <path>`). A check is
+        // red only when the file carries evidence of a Pixel install (a
+        // Pixel entry, marker or sidecar) and that install is broken. An
+        // absent file, or one the project keeps for itself with nothing of
+        // Pixel's in it, is informational green: a repo where repo-install
+        // never ran is a valid state, not a broken one.
         checks.push(check_status("repo.codex-config", || {
             let codex_dir = root.join(".codex");
-            if !codex_dir
-                .join(crate::codex_config::CODEX_CONFIG_FILE)
-                .is_file()
-            {
+            if !crate::codex_config::carries_pixel_block(&codex_dir)? {
                 return Ok((
                     CheckStatus::Green,
                     DoctorCheckDetail {
-                        summary:
-                            "no .codex/config.toml — repo-local codex instructions not installed"
-                                .into(),
+                        summary: "no pixel block in .codex/config.toml — repo-local codex instructions not installed"
+                            .into(),
                         detail: None,
                     },
                 ));
@@ -560,11 +559,23 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                         detail: None,
                     },
                 )),
-                (true, false) => Err(format!(
-                    "{} exists without its composed-guard backup {} — run `pixel install --repo`",
-                    hooks_path.display(),
-                    sidecar.display()
-                )),
+                (true, false) => {
+                    let value = install::read_settings(&hooks_path).map_err(|e| e.to_string())?;
+                    if !crate::routing::has_pixel_hook(&value) {
+                        return Ok((
+                            CheckStatus::Green,
+                            DoctorCheckDetail {
+                                summary: "no pixel hook in .codex/hooks.json — repo-local composed guard not installed".into(),
+                                detail: None,
+                            },
+                        ));
+                    }
+                    Err(format!(
+                        "{} carries pixel hooks without their composed-guard backup {} — run `pixel install --repo`",
+                        hooks_path.display(),
+                        sidecar.display()
+                    ))
+                }
                 (false, true) => Err(format!(
                     "composed-guard backup {} exists but {} is missing — run `pixel install --repo`",
                     sidecar.display(),
@@ -618,41 +629,27 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         }));
 
         checks.push(check_status("repo.devin-hooks", || {
-            let path = root.join(".devin").join("hooks.json");
-            if !path.is_file() {
+            let path = root.join(crate::routing::DEVIN_LOCAL_CONFIG);
+            let value = if path.is_file() {
+                install::read_settings(&path).map_err(|e| e.to_string())?
+            } else {
+                serde_json::Value::Null
+            };
+            if !crate::routing::has_pixel_hook(&value) {
                 return Ok((
                     CheckStatus::Green,
                     DoctorCheckDetail {
-                        summary: "no .devin/hooks.json — repo-local devin guard not installed"
-                            .into(),
+                        summary: format!(
+                            "no pixel hook in {} — repo-local devin guard not installed",
+                            crate::routing::DEVIN_LOCAL_CONFIG
+                        ),
                         detail: None,
                     },
                 ));
             }
-            let value = install::read_settings(&path).map_err(|e| e.to_string())?;
-            let registered = value
-                .get("hooks")
-                .and_then(|h| h.get("PreToolUse"))
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|entries| {
-                    entries.iter().any(|entry| {
-                        entry
-                            .get("hooks")
-                            .and_then(serde_json::Value::as_array)
-                            .is_some_and(|hooks| {
-                                hooks.iter().any(|hook| {
-                                    hook.get("command")
-                                        .and_then(serde_json::Value::as_str)
-                                        .is_some_and(|c| {
-                                            c.contains("run-hook guard --provider devin")
-                                        })
-                                })
-                            })
-                    })
-                });
-            if !registered {
+            if !crate::routing::has_pixel_guard(&value, "run-hook guard --provider devin") {
                 return Err(format!(
-                    "no pixel guard PreToolUse entry in {} — run `pixel install --repo`",
+                    "pixel hooks in {} but no pixel guard PreToolUse entry — run `pixel install --repo`",
                     path.display()
                 ));
             }
@@ -666,41 +663,42 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         }));
 
         checks.push(check_status("repo.claude-hooks", || {
-            let path = root.join(".claude").join("settings.json");
-            if !path.is_file() {
+            // The shared settings.json is committed: a pixel guard there
+            // runs this machine's binary path on every teammate's clone.
+            let shared = root.join(crate::routing::CLAUDE_SHARED_SETTINGS);
+            if shared.is_file() {
+                let value = install::read_settings(&shared).map_err(|e| e.to_string())?;
+                if crate::routing::has_pixel_guard(&value, "run-hook guard") {
+                    return Err(format!(
+                        "pixel guard in the shared {} names this machine's binary — run `pixel install --repo` to move it to {}",
+                        shared.display(),
+                        crate::routing::CLAUDE_LOCAL_SETTINGS
+                    ));
+                }
+            }
+            let path = root.join(crate::routing::CLAUDE_LOCAL_SETTINGS);
+            let value = if path.is_file() {
+                install::read_settings(&path).map_err(|e| e.to_string())?
+            } else {
+                serde_json::Value::Null
+            };
+            let rtk_backup = root.join(crate::routing::RTK_BACKUP);
+            if !crate::routing::has_pixel_hook(&value) && !rtk_backup.is_file() {
                 return Ok((
                     CheckStatus::Green,
                     DoctorCheckDetail {
-                        summary: "no .claude/settings.json — repo-local claude guard not installed"
-                            .into(),
+                        summary: format!(
+                            "no pixel hook in {} — repo-local claude guard not installed",
+                            crate::routing::CLAUDE_LOCAL_SETTINGS
+                        ),
                         detail: None,
                     },
                 ));
             }
-            let value = install::read_settings(&path).map_err(|e| e.to_string())?;
-            let registered = value
-                .get("hooks")
-                .and_then(|h| h.get("PreToolUse"))
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|entries| {
-                    entries.iter().any(|entry| {
-                        entry
-                            .get("hooks")
-                            .and_then(serde_json::Value::as_array)
-                            .is_some_and(|hooks| {
-                                hooks.iter().any(|hook| {
-                                    hook.get("command")
-                                        .and_then(serde_json::Value::as_str)
-                                        .is_some_and(|c| {
-                                            c.contains("run-hook guard --provider claude")
-                                        })
-                                })
-                            })
-                    })
-                });
-            if !registered {
+            if !crate::routing::has_pixel_guard(&value, "run-hook guard --provider claude") {
                 return Err(format!(
-                    "no pixel guard PreToolUse entry in {} — run `pixel install --repo`",
+                    "pixel install evidence (hook or {}) but no pixel guard PreToolUse entry in {} — run `pixel install --repo`",
+                    rtk_backup.display(),
                     path.display()
                 ));
             }
@@ -810,7 +808,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         checks.push(check(
             "graph.freshness",
             || -> std::result::Result<DoctorCheckDetail, String> {
-                let db = root.join(pixel_index::index::SHARD_DIR).join("graph.db");
+                let db = root
+                    .join(pixel_index::index::SHARD_DIR)
+                    .join(pixel_daemon::api::GRAPH_DB_FILE);
                 if !db.is_file() {
                     return Err("graph not built".into());
                 }

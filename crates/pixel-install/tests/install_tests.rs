@@ -1601,7 +1601,7 @@ fn doctor_reports_a_clean_home_and_a_stale_wrapper_block() {
         "install removes the stale block"
     );
     assert!(
-        !fs::read_to_string(&home.join(".zshrc"))
+        !fs::read_to_string(home.join(".zshrc"))
             .unwrap()
             .contains("pixel-managed"),
         "the stray zsh block is gone"
@@ -2933,11 +2933,18 @@ fn repo_install_writes_all_five_artifacts() {
     let report = install(&repo_install_options(&repo, &home)).expect("repo install");
     assert!(report.ok, "{report:?}");
 
-    // .claude/settings.json — repo-local guard only: a pixel PreToolUse
+    // .claude/settings.local.json — repo-local guard only: a pixel PreToolUse
     // group, no lifecycle events (those live in the user-level settings).
-    let claude: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(repo.join(".claude/settings.json")).unwrap())
-            .unwrap();
+    // The command names this machine's binary, so the team-shared
+    // settings.json is never created for it.
+    assert!(
+        !repo.join(".claude/settings.json").exists(),
+        "the shared settings.json must not carry a machine-local guard"
+    );
+    let claude: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repo.join(".claude/settings.local.json")).unwrap(),
+    )
+    .unwrap();
     let claude_hooks = claude["hooks"].as_object().unwrap();
     let pre = claude_hooks["PreToolUse"].as_array().unwrap();
     assert!(
@@ -2951,7 +2958,7 @@ fn repo_install_writes_all_five_artifacts() {
                     })
                 })
         }),
-        "repo .claude/settings.json must carry the pixel guard: {claude}"
+        "repo .claude/settings.local.json must carry the pixel guard: {claude}"
     );
     for event in ["SessionStart", "UserPromptSubmit", "PostToolUse"] {
         assert!(
@@ -2986,9 +2993,12 @@ fn repo_install_writes_all_five_artifacts() {
         hooks["hooks"]["PreToolUse"]
     );
 
-    // .devin/hooks.json — pixel guard group.
+    // .devin/config.local.json — pixel guard group, in the personal config
+    // Devin CLI reads (it never reads .devin/hooks.json).
+    assert!(!repo.join(".devin/hooks.json").exists());
     let devin: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(repo.join(".devin/hooks.json")).unwrap()).unwrap();
+        serde_json::from_str(&fs::read_to_string(repo.join(".devin/config.local.json")).unwrap())
+            .unwrap();
     let devin_pre = devin["hooks"]["PreToolUse"].as_array().unwrap();
     assert!(
         devin_pre.iter().any(|g| {
@@ -3026,11 +3036,11 @@ fn repo_install_is_idempotent() {
 
     install(&repo_install_options(&repo, &home)).unwrap();
     let artifacts = [
-        ".claude/settings.json",
+        ".claude/settings.local.json",
         ".codex/config.toml",
         ".codex/hooks.json",
         ".codex/pixel-composed-guard-backup.json",
-        ".devin/hooks.json",
+        ".devin/config.local.json",
         ".pi/agent/extensions/pixel-guard.ts",
         ".pi/agent/AGENTS.md",
     ];
@@ -3054,9 +3064,9 @@ fn repo_install_preserves_foreign_hooks() {
     fs::create_dir_all(repo.join(".codex")).unwrap();
     fs::create_dir_all(repo.join(".devin")).unwrap();
 
-    // .claude/settings.json: a foreign lifecycle hook and a foreign
-    // PreToolUse group that does not overlap the shell (a shell-overlapping
-    // unknown hook is a routing blocker by design). Both must survive.
+    // .claude/settings.json (team-shared): a foreign lifecycle hook and a
+    // foreign PreToolUse group that does not overlap the shell. The install
+    // must not write a byte into it.
     let claude_foreign_lifecycle = serde_json::json!({"matcher":"startup","hooks":[{"type":"command","command":"keep-session-check"}]});
     let claude_foreign_guard = serde_json::json!({"matcher":"Write","hooks":[{"type":"command","command":"keep-write-check"}]});
     fs::write(
@@ -3066,6 +3076,19 @@ fn repo_install_preserves_foreign_hooks() {
                 "SessionStart": [claude_foreign_lifecycle.clone()],
                 "PreToolUse": [claude_foreign_guard.clone()],
             }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let shared_before = fs::read(repo.join(".claude/settings.json")).unwrap();
+    // .claude/settings.local.json (personal): the user's own permissions and
+    // a non-shell PreToolUse group; both survive next to the pixel guard.
+    let claude_local_foreign = serde_json::json!({"matcher":"Edit","hooks":[{"type":"command","command":"keep-edit-check"}]});
+    fs::write(
+        repo.join(".claude/settings.local.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "permissions": {"allow": ["Bash(ls:*)"]},
+            "hooks": {"PreToolUse": [claude_local_foreign.clone()]}
         }))
         .unwrap(),
     )
@@ -3081,8 +3104,9 @@ fn repo_install_preserves_foreign_hooks() {
     )
     .unwrap();
     fs::write(
-        repo.join(".devin/hooks.json"),
+        repo.join(".devin/config.local.json"),
         serde_json::to_string_pretty(&serde_json::json!({
+            "permissions": {"allow": ["read"]},
             "hooks": {"PreToolUse": [foreign.clone()]}
         }))
         .unwrap(),
@@ -3091,18 +3115,22 @@ fn repo_install_preserves_foreign_hooks() {
 
     install(&repo_install_options(&repo, &home)).unwrap();
 
-    // Claude: both foreign groups intact, the pixel guard appended, and no
-    // lifecycle events added — those live in the user-level settings.
-    let claude: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(repo.join(".claude/settings.json")).unwrap())
-            .unwrap();
     assert_eq!(
-        claude["hooks"]["SessionStart"],
-        serde_json::json!([claude_foreign_lifecycle]),
-        "foreign SessionStart preserved"
+        fs::read(repo.join(".claude/settings.json")).unwrap(),
+        shared_before,
+        "the shared settings.json is not rewritten"
     );
+    // Claude local: the user's keys and group intact, the pixel guard
+    // appended, and no lifecycle events added — those live in the
+    // user-level settings.
+    let claude: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repo.join(".claude/settings.local.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(claude["permissions"]["allow"][0], "Bash(ls:*)");
+    assert!(claude["hooks"].get("SessionStart").is_none(), "{claude}");
     let claude_pre = claude["hooks"]["PreToolUse"].as_array().unwrap();
-    assert_eq!(claude_pre[0], claude_foreign_guard);
+    assert_eq!(claude_pre[0], claude_local_foreign);
     assert_eq!(claude_pre.len(), 2, "{claude}");
     assert!(
         claude_pre[1]["hooks"].as_array().is_some_and(|h| {
@@ -3134,9 +3162,11 @@ fn repo_install_preserves_foreign_hooks() {
             .contains("composed-guard")
     );
 
-    // Devin: foreign group kept, pixel group appended.
+    // Devin: foreign group and keys kept, pixel group appended.
     let devin: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(repo.join(".devin/hooks.json")).unwrap()).unwrap();
+        serde_json::from_str(&fs::read_to_string(repo.join(".devin/config.local.json")).unwrap())
+            .unwrap();
+    assert_eq!(devin["permissions"]["allow"][0], "read");
     let pre = devin["hooks"]["PreToolUse"].as_array().unwrap();
     assert_eq!(pre[0], foreign, "foreign devin group preserved");
     assert_eq!(pre.len(), 2);
@@ -3153,7 +3183,7 @@ fn repo_uninstall_removes_only_pixel_artifacts() {
     fs::create_dir_all(repo.join(".devin")).unwrap();
     let claude_foreign = serde_json::json!({"matcher":"Write","hooks":[{"type":"command","command":"keep-write-check"}]});
     fs::write(
-        repo.join(".claude/settings.json"),
+        repo.join(".claude/settings.local.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "hooks": {"PreToolUse": [claude_foreign.clone()]}
         }))
@@ -3163,7 +3193,7 @@ fn repo_uninstall_removes_only_pixel_artifacts() {
     let foreign =
         serde_json::json!({"matcher":"exec","hooks":[{"type":"command","command":"keep-me"}]});
     fs::write(
-        repo.join(".devin/hooks.json"),
+        repo.join(".devin/config.local.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "hooks": {"PreToolUse": [foreign.clone()]}
         }))
@@ -3214,9 +3244,10 @@ fn repo_uninstall_removes_only_pixel_artifacts() {
     assert!(!config.contains(MANAGED_BEGIN), "{config}");
 
     // Claude: only the foreign group remains — the pixel guard is gone.
-    let claude: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(repo.join(".claude/settings.json")).unwrap())
-            .unwrap();
+    let claude: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repo.join(".claude/settings.local.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         claude["hooks"]["PreToolUse"],
         serde_json::json!([claude_foreign]),
@@ -3225,7 +3256,8 @@ fn repo_uninstall_removes_only_pixel_artifacts() {
 
     // Devin: only the foreign group remains.
     let devin: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(repo.join(".devin/hooks.json")).unwrap()).unwrap();
+        serde_json::from_str(&fs::read_to_string(repo.join(".devin/config.local.json")).unwrap())
+            .unwrap();
     assert_eq!(devin["hooks"]["PreToolUse"], serde_json::json!([foreign]));
 
     // Pi artifacts gone; AGENTS.md cleaned or removed.
@@ -3253,4 +3285,759 @@ fn repo_install_dry_run_writes_nothing() {
     assert!(!repo.join(".codex").exists());
     assert!(!repo.join(".devin").exists());
     assert!(!repo.join(".pi").exists());
+}
+
+// ---------------------------------------------------------------------------
+// repo-local artifacts stay machine-local (review of #222)
+// ---------------------------------------------------------------------------
+
+/// `git` in `dir` with a fixed identity and no global configuration, so the
+/// developer's own excludes or hooks cannot change what the fixture sees.
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .output()
+        .expect("git runs");
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8(out.stdout).unwrap()
+}
+
+fn read_json(path: &std::path::Path) -> serde_json::Value {
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+fn pixel_commands(value: &serde_json::Value, event: &str) -> Vec<String> {
+    value["hooks"][event]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|group| group["hooks"].as_array())
+        .flatten()
+        .filter_map(|hook| hook["command"].as_str())
+        .filter(|command| command.contains("pixel"))
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// The machine-local paths `pixel install --repo` writes, as `git status`
+/// prints them relative to the work tree root.
+const MACHINE_LOCAL: &[&str] = &[
+    ".claude/settings.local.json",
+    ".claude/pixel-rtk-hooks.json",
+    ".devin/config.local.json",
+    ".codex/hooks.json",
+    ".codex/pixel-composed-guard-backup.json",
+    ".pi/agent/extensions/pixel-guard.ts",
+    ".pi/agent/AGENTS.md",
+];
+
+/// A guard an earlier `--repo` install wrote into the team-shared
+/// `settings.json` runs this machine's binary path on every clone: the
+/// install takes it out of that file and registers it in the personal one,
+/// leaving the file's other hooks, lifecycle included, as they were.
+#[test]
+#[cfg(unix)]
+fn repo_install_should_move_a_guard_left_in_shared_settings_to_the_local_file() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".claude")).unwrap();
+    fs::create_dir_all(repo.join(".devin")).unwrap();
+    let write = serde_json::json!({"matcher":"Write","hooks":[{"type":"command","command":"keep-write-check"}]});
+    let start = serde_json::json!({"hooks":[{"type":"command","command":"keep-session-check"}]});
+    let stale_guard = serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":"'/Users/someone/.local/bin/pixel' run-hook guard --provider claude","timeout":10}]});
+    fs::write(
+        repo.join(".claude/settings.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {"PreToolUse": [write.clone(), stale_guard], "SessionStart": [start.clone()]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    // The Devin guard of that earlier install sat in .devin/hooks.json,
+    // which Devin CLI never reads; a foreign group there stays.
+    let devin_foreign =
+        serde_json::json!({"matcher":"exec","hooks":[{"type":"command","command":"keep-me"}]});
+    let devin_stale = serde_json::json!({"matcher":"exec","hooks":[{"type":"command","command":"'/Users/someone/.local/bin/pixel' run-hook guard --provider devin"}]});
+    fs::write(
+        repo.join(".devin/hooks.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {"PreToolUse": [devin_foreign.clone(), devin_stale]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let report = install(&repo_install_options(&repo, &home)).unwrap();
+    assert!(report.ok, "{report:?}");
+    let claude_step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "hooks.claude")
+        .unwrap();
+    assert_eq!(
+        claude_step.status,
+        pixel_install::install::CheckStatus::Green,
+        "{claude_step:?}"
+    );
+    assert!(
+        claude_step
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.contains("pixel guard removed from shared")),
+        "the move is reported: {claude_step:?}"
+    );
+
+    let shared = read_json(&repo.join(".claude/settings.json"));
+    assert_eq!(shared["hooks"]["PreToolUse"], serde_json::json!([write]));
+    assert_eq!(shared["hooks"]["SessionStart"], serde_json::json!([start]));
+    let local = read_json(&repo.join(".claude/settings.local.json"));
+    assert_eq!(pixel_commands(&local, "PreToolUse").len(), 1, "{local}");
+
+    let devin_legacy = read_json(&repo.join(".devin/hooks.json"));
+    assert_eq!(
+        devin_legacy["hooks"]["PreToolUse"],
+        serde_json::json!([devin_foreign])
+    );
+    let devin = read_json(&repo.join(".devin/config.local.json"));
+    assert_eq!(pixel_commands(&devin, "PreToolUse").len(), 1, "{devin}");
+
+    let doctor_report = doctor(&DoctorOptions {
+        home: Some(home.clone()),
+        repo_root: Some(repo.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    for id in ["repo.claude-hooks", "repo.devin-hooks"] {
+        let c = check(&doctor_report, id);
+        assert_eq!(c.status, CheckStatus::Green, "{id}: {c:?}");
+        assert!(c.summary.contains("registered"), "{id}: {c:?}");
+    }
+}
+
+/// The shared settings.json keeps running in the same Claude session as the
+/// personal file. A shell rewriter there (here the RTK group an earlier
+/// delegate guard had adopted, now restored) would race the guard, so the
+/// guard is not installed and the step says why.
+#[test]
+#[cfg(unix)]
+fn repo_install_should_hold_back_the_guard_beside_a_shell_rewriter_in_shared_settings() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".claude")).unwrap();
+    fs::write(
+        repo.join(".claude/settings.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {"PreToolUse": [{"matcher":"Bash","hooks":[{"type":"command","command":"'/old/pixel' run-hook guard --provider claude --delegate-rtk"}]}]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let report = install(&repo_install_options(&repo, &home)).unwrap();
+    let claude_step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "hooks.claude")
+        .unwrap();
+    assert_eq!(
+        claude_step.status,
+        pixel_install::install::CheckStatus::Yellow,
+        "{claude_step:?}"
+    );
+    assert!(
+        claude_step.summary.contains("unknown overlapping hook"),
+        "{claude_step:?}"
+    );
+    let shared = read_json(&repo.join(".claude/settings.json"));
+    assert_eq!(
+        shared["hooks"]["PreToolUse"],
+        serde_json::json!([{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]),
+        "the RTK group the delegate had adopted runs again"
+    );
+    let local = read_json(&repo.join(".claude/settings.local.json"));
+    assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
+}
+
+/// An RTK group adopted from the repo's own settings belongs to the repo:
+/// backed up under `<repo>/.claude/`, never in `$HOME`, where the next global
+/// install would inject it into `~/.claude/settings.json`. Uninstalling the
+/// repo puts it back and deletes the repo backup.
+#[test]
+#[cfg(unix)]
+fn repo_rtk_adoption_should_stay_in_the_repo_and_come_back_on_repo_uninstall() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".claude")).unwrap();
+    let rtk = serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]});
+    fs::write(
+        repo.join(".claude/settings.local.json"),
+        serde_json::to_string_pretty(&serde_json::json!({"hooks": {"PreToolUse": [rtk.clone()]}}))
+            .unwrap(),
+    )
+    .unwrap();
+
+    install(&repo_install_options(&repo, &home)).unwrap();
+    assert!(
+        !home.join(".claude/pixel-rtk-hooks.json").exists(),
+        "the repo's adoption must not land in the global backup"
+    );
+    assert_eq!(
+        read_json(&repo.join(".claude/pixel-rtk-hooks.json")),
+        serde_json::json!([rtk.clone()])
+    );
+    let local = read_json(&repo.join(".claude/settings.local.json"));
+    let guard = pixel_commands(&local, "PreToolUse");
+    assert_eq!(guard.len(), 1, "{local}");
+    assert!(guard[0].ends_with("--delegate-rtk"), "{guard:?}");
+
+    // A reinstall reads the repo backup back (the delegate requires it).
+    install(&repo_install_options(&repo, &home)).expect("reinstall finds the repo backup");
+    // A global install afterwards leaves ~/.claude/settings.json without RTK.
+    install(&InstallOptions {
+        home: Some(home.clone()),
+        executable_path: Some(fake_pixel_exe(&home)),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let global = read_json(&home.join(".claude/settings.json"));
+    assert!(
+        !global.to_string().contains("rtk hook claude"),
+        "global settings gained the repo's RTK group: {global}"
+    );
+
+    uninstall(&UninstallOptions {
+        home: Some(home.clone()),
+        repo: Some(repo.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        read_json(&repo.join(".claude/settings.local.json"))["hooks"]["PreToolUse"],
+        serde_json::json!([rtk])
+    );
+    assert!(!repo.join(".claude/pixel-rtk-hooks.json").exists());
+}
+
+/// A delegate guard whose repo backup is gone cannot be uninstalled without
+/// losing the RTK registration it replaced: refuse and name the backup.
+#[test]
+#[cfg(unix)]
+fn repo_uninstall_should_refuse_a_delegate_guard_without_its_repo_backup() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".claude")).unwrap();
+    let local_path = repo.join(".claude/settings.local.json");
+    fs::write(
+        &local_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {"PreToolUse": [{"matcher":"Bash","hooks":[{"type":"command","command":"'/p/pixel' run-hook guard --provider claude --delegate-rtk"}]}]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let before = fs::read(&local_path).unwrap();
+    let err = uninstall(&UninstallOptions {
+        home: Some(home.clone()),
+        repo: Some(repo.clone()),
+        ..Default::default()
+    })
+    .expect_err("a delegate without its backup is refused");
+    assert!(err.to_string().contains("pixel-rtk-hooks.json"), "{err}");
+    assert_eq!(fs::read(&local_path).unwrap(), before);
+}
+
+/// Repo uninstall also takes out a guard an earlier install left in the
+/// shared settings.json and in .devin/hooks.json, and leaves a local file
+/// without a delegate free of any `PreToolUse` event it did not have.
+#[test]
+#[cfg(unix)]
+fn repo_uninstall_should_clean_guards_left_in_shared_and_legacy_files() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".claude")).unwrap();
+    fs::create_dir_all(repo.join(".devin")).unwrap();
+    let stale = |provider: &str| serde_json::json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":format!("'/old/pixel' run-hook guard --provider {provider}")}]}]}});
+    fs::write(
+        repo.join(".claude/settings.json"),
+        serde_json::to_string_pretty(&stale("claude")).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        repo.join(".devin/hooks.json"),
+        serde_json::to_string_pretty(&stale("devin")).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        repo.join(".claude/settings.local.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "permissions": {"allow": ["Bash(ls:*)"]},
+            "hooks": {"SessionStart": [{"hooks":[{"type":"command","command":"'/p/pixel' run-hook session-start"}]}]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let report = uninstall(&UninstallOptions {
+        home: Some(home.clone()),
+        repo: Some(repo.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    let claude_step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "hooks.claude")
+        .unwrap();
+    assert!(
+        claude_step
+            .summary
+            .contains("from 2 Claude settings file(s)"),
+        "{claude_step:?}"
+    );
+    let devin_step = report.steps.iter().find(|s| s.id == "hooks.devin").unwrap();
+    assert!(
+        devin_step.summary.contains("removed 1 Devin"),
+        "the legacy file counts: {devin_step:?}"
+    );
+    let shared = read_json(&repo.join(".claude/settings.json"));
+    assert!(pixel_commands(&shared, "PreToolUse").is_empty(), "{shared}");
+    let legacy = read_json(&repo.join(".devin/hooks.json"));
+    assert!(pixel_commands(&legacy, "PreToolUse").is_empty(), "{legacy}");
+    let local = read_json(&repo.join(".claude/settings.local.json"));
+    assert_eq!(
+        local,
+        serde_json::json!({"permissions": {"allow": ["Bash(ls:*)"]}, "hooks": {}}),
+        "no PreToolUse event is created where none was"
+    );
+}
+
+/// Every repo artifact names this machine's binary. In a git clone the
+/// install lists them in the clone's own `info/exclude` (never shared), so
+/// `git status` offers none of them for a commit, and it leaves a
+/// `.codex/hooks.json` the project tracks untouched: Codex has no personal
+/// project file, and the composed guard would put this machine's path into a
+/// file every clone runs.
+#[test]
+#[cfg(unix)]
+fn repo_install_should_keep_machine_local_artifacts_out_of_git() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".codex")).unwrap();
+    git(&repo, &["init", "-q"]);
+    let team_hooks = serde_json::to_string_pretty(&serde_json::json!({
+        "hooks": {"PreToolUse": [{"matcher":"Bash","hooks":[{"type":"command","command":"./scripts/team-check.sh"}]}]}
+    }))
+    .unwrap();
+    fs::write(repo.join(".codex/hooks.json"), &team_hooks).unwrap();
+    git(&repo, &["add", "-f", ".codex/hooks.json"]);
+    git(&repo, &["commit", "-q", "-m", "team codex hooks"]);
+    // No info/ directory at all: the install creates what it needs.
+    let git_dir = repo.join(".git");
+    fs::remove_dir_all(git_dir.join("info")).unwrap();
+
+    let mut dry = repo_install_options(&repo, &home);
+    dry.dry_run = true;
+    let dry_report = install(&dry).unwrap();
+    assert!(
+        !git_dir.join("info/exclude").exists(),
+        "a dry run writes no exclude"
+    );
+    let dry_step = dry_report
+        .steps
+        .iter()
+        .find(|s| s.id == "repo.git-exclude")
+        .unwrap();
+    assert!(dry_step.summary.contains("7 machine-local"), "{dry_step:?}");
+
+    let report = install(&repo_install_options(&repo, &home)).unwrap();
+    assert!(report.ok, "{report:?}");
+    let codex_step = report.steps.iter().find(|s| s.id == "hooks.codex").unwrap();
+    assert_eq!(
+        codex_step.status,
+        pixel_install::install::CheckStatus::Yellow,
+        "{codex_step:?}"
+    );
+    assert!(
+        codex_step.summary.contains("tracked by git"),
+        "{codex_step:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join(".codex/hooks.json")).unwrap(),
+        team_hooks,
+        "a tracked Codex hook file is not rewritten"
+    );
+    assert!(
+        !repo
+            .join(".codex/pixel-composed-guard-backup.json")
+            .exists()
+    );
+
+    let exclude = fs::read_to_string(git_dir.join("info/exclude")).unwrap();
+    assert!(
+        exclude.starts_with("# pixel install --repo"),
+        "no blank line before the block in a new file: {exclude:?}"
+    );
+    for rel in MACHINE_LOCAL {
+        let pattern = format!("/{rel}");
+        assert_eq!(
+            exclude.lines().filter(|line| *line == pattern).count(),
+            1,
+            "{pattern} in {exclude}"
+        );
+    }
+    let status = git(&repo, &["status", "--porcelain", "--untracked-files=all"]);
+    for rel in MACHINE_LOCAL {
+        assert!(
+            !status.lines().any(|line| line.ends_with(rel)),
+            "{rel} is offered for a commit:\n{status}"
+        );
+    }
+    assert!(
+        status.contains(".codex/config.toml"),
+        "the portable Codex instructions stay visible to git:\n{status}"
+    );
+
+    // A second install adds nothing to the exclude file.
+    let again = install(&repo_install_options(&repo, &home)).unwrap();
+    assert_eq!(
+        fs::read_to_string(git_dir.join("info/exclude")).unwrap(),
+        exclude
+    );
+    let again_step = again
+        .steps
+        .iter()
+        .find(|s| s.id == "repo.git-exclude")
+        .unwrap();
+    assert!(
+        again_step.summary.starts_with("0 machine-local"),
+        "{again_step:?}"
+    );
+    assert!(again_step.detail.is_none(), "{again_step:?}");
+}
+
+/// A repository below the work-tree root gets patterns anchored at its own
+/// path, appended after the clone's existing excludes on a line of their own.
+#[test]
+#[cfg(unix)]
+fn repo_install_should_anchor_excludes_at_a_nested_repo_path() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let top = dir.path().join("top");
+    let repo = top.join("sub");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+    git(&top, &["init", "-q"]);
+    fs::write(top.join(".git/info/exclude"), "*.log").unwrap();
+
+    install(&repo_install_options(&repo, &home)).unwrap();
+
+    let exclude = fs::read_to_string(top.join(".git/info/exclude")).unwrap();
+    assert!(
+        exclude.starts_with("*.log\n# pixel install --repo"),
+        "{exclude:?}"
+    );
+    assert!(
+        exclude
+            .lines()
+            .any(|l| l == "/sub/.claude/settings.local.json"),
+        "{exclude}"
+    );
+    let status = git(&top, &["status", "--porcelain", "--untracked-files=all"]);
+    assert!(
+        !status.contains("settings.local.json") && !status.contains("pixel-guard.ts"),
+        "{status}"
+    );
+}
+
+/// Many repositories keep their own `.claude/settings.json`,
+/// `.claude/settings.local.json`, `.devin/config.local.json` and `.codex/`
+/// files. With nothing of Pixel's in them, the repo was never repo-installed,
+/// which is a valid state: `doctor` must not go red on it.
+#[test]
+#[cfg(unix)]
+fn doctor_repo_checks_should_stay_green_on_a_project_with_its_own_configs() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    for sub in [".claude", ".devin", ".codex"] {
+        fs::create_dir_all(repo.join(sub)).unwrap();
+    }
+    let foreign = serde_json::json!({
+        "permissions": {"allow": ["Bash(ls:*)"]},
+        "hooks": {"PreToolUse": [{"matcher":"Bash","hooks":[{"type":"command","command":"./scripts/check.sh"}]}]}
+    });
+    for rel in [
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".devin/config.local.json",
+        ".codex/hooks.json",
+    ] {
+        fs::write(
+            repo.join(rel),
+            serde_json::to_string_pretty(&foreign).unwrap(),
+        )
+        .unwrap();
+    }
+    fs::write(
+        repo.join(".codex/config.toml"),
+        "model = \"o3\"\ndeveloper_instructions = \"Follow CONTRIBUTING.md.\"\n",
+    )
+    .unwrap();
+
+    let report = doctor(&DoctorOptions {
+        home: Some(home.clone()),
+        repo_root: Some(repo.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    for id in [
+        "repo.codex-config",
+        "repo.codex-hooks",
+        "repo.devin-hooks",
+        "repo.claude-hooks",
+    ] {
+        let c = check(&report, id);
+        assert_eq!(c.status, CheckStatus::Green, "{id}: {c:?}");
+        assert!(c.summary.contains("not installed"), "{id}: {c:?}");
+    }
+}
+
+/// Evidence of a Pixel install that is broken stays red: a Pixel hook without
+/// the guard, an RTK backup without the guard, a Pixel block gone stale, a
+/// Pixel hook without its composed-guard sidecar, or a guard sitting in the
+/// shared settings.json where it runs this machine's path on every clone.
+#[test]
+#[cfg(unix)]
+fn doctor_repo_checks_should_go_red_on_a_broken_pixel_install() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    for sub in [".claude", ".devin", ".codex"] {
+        fs::create_dir_all(repo.join(sub)).unwrap();
+    }
+    let lifecycle_only = serde_json::json!({
+        "hooks": {"SessionStart": [{"hooks":[{"type":"command","command":"'/p/pixel' run-hook session-start"}]}]}
+    });
+    for rel in [
+        ".claude/settings.local.json",
+        ".devin/config.local.json",
+        ".codex/hooks.json",
+    ] {
+        fs::write(
+            repo.join(rel),
+            serde_json::to_string_pretty(&lifecycle_only).unwrap(),
+        )
+        .unwrap();
+    }
+    fs::write(
+        repo.join(".codex/config.toml"),
+        format!("developer_instructions = '''\n{MANAGED_BEGIN}\nold prompt\n{MANAGED_END}\n'''\n"),
+    )
+    .unwrap();
+    let doctor_options = DoctorOptions {
+        home: Some(home.clone()),
+        repo_root: Some(repo.clone()),
+        ..Default::default()
+    };
+
+    let report = doctor(&doctor_options).unwrap();
+    for id in [
+        "repo.codex-config",
+        "repo.codex-hooks",
+        "repo.devin-hooks",
+        "repo.claude-hooks",
+    ] {
+        let c = check(&report, id);
+        assert_eq!(c.status, CheckStatus::Red, "{id}: {c:?}");
+    }
+
+    // An RTK backup alone is evidence too.
+    fs::write(repo.join(".claude/settings.local.json"), "{}").unwrap();
+    fs::write(
+        repo.join(".claude/pixel-rtk-hooks.json"),
+        r#"[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]"#,
+    )
+    .unwrap();
+    let report = doctor(&doctor_options).unwrap();
+    assert_eq!(check(&report, "repo.claude-hooks").status, CheckStatus::Red);
+
+    // A correct local guard does not excuse one left in the shared file.
+    fs::remove_file(repo.join(".claude/pixel-rtk-hooks.json")).unwrap();
+    let guard = serde_json::to_string_pretty(&serde_json::json!({
+        "hooks": {"PreToolUse": [{"matcher":"Bash","hooks":[{"type":"command","command":"'/p/pixel' run-hook guard --provider claude"}]}]}
+    }))
+    .unwrap();
+    fs::write(repo.join(".claude/settings.local.json"), &guard).unwrap();
+    let report = doctor(&doctor_options).unwrap();
+    assert_eq!(
+        check(&report, "repo.claude-hooks").status,
+        CheckStatus::Green
+    );
+    fs::write(repo.join(".claude/settings.json"), &guard).unwrap();
+    let report = doctor(&doctor_options).unwrap();
+    let claude = check(&report, "repo.claude-hooks");
+    assert_eq!(claude.status, CheckStatus::Red, "{claude:?}");
+    assert!(
+        claude
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains("shared")),
+        "{claude:?}"
+    );
+}
+
+/// The code graph is `.pixel/graph.v2.db` since the graph schema bump; a
+/// doctor still looking for `graph.db` reports a freshly built graph as
+/// missing, and a leftover `graph.db` from an older build as present.
+#[test]
+fn doctor_graph_freshness_should_read_the_file_the_daemon_builds() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".pixel")).unwrap();
+    let doctor_options = DoctorOptions {
+        home: Some(home.clone()),
+        repo_root: Some(repo.clone()),
+        ..Default::default()
+    };
+    fs::write(repo.join(".pixel/graph.db"), b"old schema").unwrap();
+    let report = doctor(&doctor_options).unwrap();
+    assert_eq!(
+        check(&report, "graph.freshness").status,
+        CheckStatus::Red,
+        "a pre-bump graph.db is not the graph"
+    );
+    assert_eq!(pixel_daemon::api::GRAPH_DB_FILE, "graph.v2.db");
+    fs::write(repo.join(".pixel/graph.v2.db"), b"built").unwrap();
+    let report = doctor(&doctor_options).unwrap();
+    let graph = check(&report, "graph.freshness");
+    assert_eq!(graph.status, CheckStatus::Green, "{graph:?}");
+}
+
+/// Installs before `pixel run-hook` wrote bare scripts into
+/// `~/.claude/settings.json`. The global install must replace them, not add
+/// a `run-hook` entry beside them: two SessionStart hooks inject the prompt
+/// twice. A foreign command that merely mentions a Pixel verb is kept.
+#[test]
+#[cfg(unix)]
+fn install_should_replace_legacy_script_hooks_instead_of_stacking_new_ones() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    let foreign = serde_json::json!({"hooks":[{"type":"command","command":"notify --on pixel-session-start"}]});
+    fs::write(
+        home.join(".claude/settings.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher":"Bash","hooks":[{"type":"command","command":"~/.claude/hooks/gitpixel-targets-guard"}]},
+                    {"matcher":"Bash","hooks":[{"type":"command","command":"~/.claude/hooks/pixel-targets-guard"}]}
+                ],
+                "SessionStart": [
+                    {"hooks":[{"type":"command","command":"~/.claude/hooks/pixel-session-start"}]},
+                    {"matcher":"compact","hooks":[{"type":"command","command":"~/.claude/hooks/pixel-post-compaction"}]},
+                    foreign.clone()
+                ],
+                "UserPromptSubmit": [
+                    {"hooks":[{"type":"command","command":"~/.claude/hooks/pixel-prompt-submit"}]}
+                ]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let settings = read_json(&home.join(".claude/settings.json"));
+    assert!(
+        !settings.to_string().contains("/.claude/hooks/"),
+        "legacy scripts left: {settings}"
+    );
+    let session = pixel_commands(&settings, "SessionStart");
+    for verb in ["run-hook session-start", "run-hook post-compaction"] {
+        assert_eq!(
+            session.iter().filter(|c| c.contains(verb)).count(),
+            1,
+            "exactly one {verb}: {session:?}"
+        );
+    }
+    assert_eq!(pixel_commands(&settings, "UserPromptSubmit").len(), 1);
+    assert!(
+        settings["hooks"].get("PreToolUse").is_none(),
+        "the global install registers no guard: {settings}"
+    );
+    assert!(
+        settings["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap()
+            .contains(&foreign),
+        "a foreign command naming a pixel verb is kept: {settings}"
+    );
+}
+
+/// The guard script from before the `gitpixel` → `pixel` rename: uninstall
+/// removes its settings entry and deletes the script itself.
+#[test]
+#[cfg(unix)]
+fn uninstall_should_remove_the_pre_rename_guard_entry_and_script() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    fs::create_dir_all(home.join(".claude/hooks")).unwrap();
+    let script = home.join(".claude/hooks/gitpixel-targets-guard");
+    fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    let keep = serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":"keep-security-check"}]});
+    fs::write(
+        home.join(".claude/settings.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {"PreToolUse": [
+                keep.clone(),
+                {"matcher":"Bash","hooks":[{"type":"command","command":"~/.claude/hooks/gitpixel-targets-guard"}]}
+            ]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        binary_path: Some(home.join("pixel")),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+
+    assert!(!script.exists(), "the pre-rename guard script is deleted");
+    let settings = read_json(&home.join(".claude/settings.json"));
+    assert_eq!(settings["hooks"]["PreToolUse"], serde_json::json!([keep]));
 }

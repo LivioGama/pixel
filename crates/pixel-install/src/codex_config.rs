@@ -428,6 +428,19 @@ pub(crate) fn remove_developer_instructions(
 }
 
 /// `pixel doctor` check: the managed block is present and current.
+/// Whether `codex_home`'s config.toml holds pixel's begin marker in
+/// `developer_instructions`: the evidence that `pixel install` wrote there.
+/// A missing file, a missing key, or a value without the marker is none, so
+/// a project that keeps its own Codex config is not a broken install.
+///
+/// # Errors
+///
+/// The file cannot be read or parsed, or the key is not a string.
+pub(crate) fn carries_pixel_block(codex_home: &Path) -> std::result::Result<bool, String> {
+    let doc = read_document(&codex_home.join(CODEX_CONFIG_FILE))?;
+    Ok(current_value(&doc)?.is_some_and(|value| value.contains(MANAGED_BEGIN)))
+}
+
 pub(crate) fn check_developer_instructions(
     codex_home: &Path,
 ) -> std::result::Result<(String, serde_json::Value), String> {

@@ -77,8 +77,8 @@ pub struct InstallOptions {
     pub dry_run: bool,
     /// Repository root to install project-local enforcement into
     /// (`pixel install --repo <path>`). When set, ONLY repo-local steps run:
-    /// `.codex/config.toml` + `.codex/hooks.json`, `.devin/hooks.json`,
-    /// `.claude/settings.json` (PreToolUse guard), and
+    /// `.codex/config.toml` + `.codex/hooks.json`, `.devin/config.local.json`,
+    /// `.claude/settings.local.json` (PreToolUse guard), and
     /// `.pi/agent/extensions/pixel-guard.ts` + `.pi/agent/AGENTS.md` — none
     /// of the global prompt/lifecycle-hook deploys.
     pub repo: Option<PathBuf>,
@@ -159,6 +159,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
             &exe,
             crate::routing::Provider::Claude,
             crate::routing::HookScope::LifecycleOnly,
+            &[],
             dry_run,
         )?,
         // The zsh `claude()` wrapper only ever fired for human login shells
@@ -218,38 +219,42 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
 ///   - `<repo>/.codex/hooks.json` — the composed-guard PreToolUse group plus
 ///     its `pixel-composed-guard-backup.json` sidecar, which snapshots any
 ///     pre-existing project hooks so the composed runtime can replay them;
-///   - `<repo>/.devin/hooks.json` — a pixel `run-hook guard --provider devin`
-///     PreToolUse group merged alongside any foreign entries;
-///   - `<repo>/.claude/settings.json` — a pixel `run-hook guard --provider
-///     claude` PreToolUse group merged alongside any foreign entries (Claude
-///     Code reads project settings; enforcement stays repo-local, lifecycle
-///     stays global);
+///   - `<repo>/.devin/config.local.json` — a pixel `run-hook guard --provider
+///     devin` PreToolUse group merged alongside any foreign entries;
+///   - `<repo>/.claude/settings.local.json` — a pixel `run-hook guard
+///     --provider claude` PreToolUse group merged alongside any foreign
+///     entries (the personal project settings: the command names this
+///     machine's binary, so the shared `settings.json` never carries it);
 ///   - `<repo>/.pi/agent/extensions/pixel-guard.ts` + the managed block in
 ///     `<repo>/.pi/agent/AGENTS.md` — pi's guard extension and usage rules.
+///
+/// Every one of those files is then listed in the clone's `info/exclude`
+/// ([`crate::repo_git`]). Codex has no personal project file, so a
+/// `.codex/hooks.json` the repository tracks is left alone: the composed
+/// guard would put this machine's path into a file every clone runs.
 fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Result<InstallReport> {
     let codex_dir = repo.join(".codex");
+    let codex_hooks = codex_dir.join(crate::codex_config::HOOKS_FILE);
+    let codex_step = if crate::repo_git::is_tracked(repo, CODEX_PROJECT_HOOKS) {
+        InstallStep {
+            id: "hooks.codex".into(),
+            status: CheckStatus::Yellow,
+            summary: dry_run_summary(
+                dry_run,
+                "codex project guard not installed: .codex/hooks.json is tracked by git, and the guard would carry this machine's pixel path into every clone",
+            ),
+            detail: Some(codex_hooks.display().to_string()),
+        }
+    } else {
+        crate::routing::install_project_codex_at(home, &codex_hooks, exe, dry_run)?
+    };
     let steps = vec![
-        crate::routing::install_at_scoped(
-            home,
-            &repo.join(".claude").join("settings.json"),
-            exe,
-            crate::routing::Provider::Claude,
-            crate::routing::HookScope::GuardOnly,
-            dry_run,
-        )?,
+        crate::routing::install_project_claude_at(repo, exe, dry_run)?,
         crate::codex_config::install_developer_instructions(&codex_dir, dry_run)?,
-        crate::routing::install_project_codex_at(
-            home,
-            &codex_dir.join(crate::codex_config::HOOKS_FILE),
-            exe,
-            dry_run,
-        )?,
-        crate::routing::install_project_devin_at(
-            &repo.join(".devin").join("hooks.json"),
-            exe,
-            dry_run,
-        )?,
+        codex_step,
+        crate::routing::install_project_devin_at(repo, exe, dry_run)?,
         install_project_pi(home, repo, exe, dry_run)?,
+        exclude_project_artifacts(repo, dry_run)?,
     ];
 
     let green = steps
@@ -273,6 +278,39 @@ fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Resul
         dry_run,
         steps,
         summary: InstallSummary { green, yellow, red },
+    })
+}
+
+/// The Codex project hook file, relative to the repository.
+const CODEX_PROJECT_HOOKS: &str = ".codex/hooks.json";
+
+/// Every repo artifact that names this machine's pixel binary, relative to
+/// the repository: the files `pixel install --repo` keeps out of commits.
+const MACHINE_LOCAL_ARTIFACTS: &[&str] = &[
+    crate::routing::CLAUDE_LOCAL_SETTINGS,
+    crate::routing::RTK_BACKUP,
+    crate::routing::DEVIN_LOCAL_CONFIG,
+    CODEX_PROJECT_HOOKS,
+    ".codex/pixel-composed-guard-backup.json",
+    ".pi/agent/extensions/pixel-guard.ts",
+    ".pi/agent/AGENTS.md",
+];
+
+/// List [`MACHINE_LOCAL_ARTIFACTS`] in the clone's `info/exclude`, so a
+/// `git add -A` cannot publish a hook that points at this machine's binary.
+fn exclude_project_artifacts(repo: &Path, dry_run: bool) -> Result<InstallStep> {
+    let added = crate::repo_git::exclude_locally(repo, MACHINE_LOCAL_ARTIFACTS, dry_run)?;
+    Ok(InstallStep {
+        id: "repo.git-exclude".into(),
+        status: CheckStatus::Green,
+        summary: dry_run_summary(
+            dry_run,
+            &format!(
+                "{} machine-local path(s) added to the clone's info/exclude",
+                added.len()
+            ),
+        ),
+        detail: (!added.is_empty()).then(|| added.join(" ")),
     })
 }
 

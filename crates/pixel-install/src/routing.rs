@@ -13,6 +13,17 @@ use serde_json::{Map, Value, json};
 use crate::{InstallError, config, install};
 
 pub(crate) const RTK_BACKUP: &str = ".claude/pixel-rtk-hooks.json";
+/// Claude Code's team-shared project settings, usually committed.
+pub(crate) const CLAUDE_SHARED_SETTINGS: &str = ".claude/settings.json";
+/// Claude Code's personal per-project settings (gitignored by its convention):
+/// the repo guard carries this machine's binary path, so it lives here.
+pub(crate) const CLAUDE_LOCAL_SETTINGS: &str = ".claude/settings.local.json";
+/// Devin CLI's personal per-project config; its `hooks` key is read like
+/// `.devin/hooks.v1.json`, but it is not shared with the team.
+pub(crate) const DEVIN_LOCAL_CONFIG: &str = ".devin/config.local.json";
+/// Where an earlier `pixel install --repo` wrote the Devin guard. Devin CLI
+/// never reads this file; install and uninstall take pixel's entry out of it.
+pub(crate) const DEVIN_LEGACY_HOOKS: &str = ".devin/hooks.json";
 /// Project-local snapshot of Codex `PreToolUse` groups adopted by the composed
 /// guard.  It deliberately lives next to the project hook config so a runtime
 /// never has to discover or execute the currently mutable hook configuration.
@@ -69,8 +80,8 @@ pub(crate) fn quoted_executable(exe: &Path) -> String {
     format!("'{}'", exe.to_string_lossy().replace('\'', "'\\''"))
 }
 
-/// Recognize our executable commands, not arbitrary commands merely
-/// containing a lifecycle verb.
+/// Recognize our executable commands and legacy script names, not arbitrary
+/// commands merely containing a lifecycle verb.
 pub(crate) fn is_pixel_hook(command: &str) -> bool {
     fn executable_name(executable: &str) -> Option<String> {
         let unquoted = if let Some(inner) = executable
@@ -87,6 +98,21 @@ pub(crate) fn is_pixel_hook(command: &str) -> bool {
         Path::new(&unquoted)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
+    }
+    // Installs before `pixel run-hook` registered standalone scripts under
+    // `~/.claude/hooks/`. An install that does not recognise them keeps the
+    // script entry next to the new `run-hook` one: two SessionStart hooks.
+    if executable_name(command).is_some_and(|name| {
+        [
+            config::GUARD_HOOK,
+            config::OLD_GUARD_HOOK,
+            config::SESSION_START_HOOK,
+            config::PROMPT_SUBMIT_HOOK,
+            config::POST_COMPACTION_HOOK,
+        ]
+        .contains(&name.as_str())
+    }) {
+        return true;
     }
     // Entries written before the command rename say `pixel hook <verb>`;
     // both spellings are pixel's and both must be recognised so an upgrade
@@ -263,8 +289,13 @@ fn inactive_orca_observer(group: &Value, provider: Provider) -> bool {
         && !Path::new(path).is_file()
 }
 
+/// The one RTK registration pixel adopts: `rtk hook claude` on `Bash`.
+fn rtk_group() -> Value {
+    json!({"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]})
+}
+
 fn exact_rtk(group: &Value) -> bool {
-    group == &json!({"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]})
+    group == &rtk_group()
 }
 
 /// Vibe Island's generated Claude bridge is a passive observer for the
@@ -396,15 +427,31 @@ fn configure(
     exe: &Path,
     saved: &[Value],
 ) -> Result<(bool, Vec<Value>), String> {
-    configure_scoped(value, provider, exe, saved, HookScope::All)
+    configure_scoped(value, provider, exe, saved, HookScope::All, &[])
 }
 
+/// A PreToolUse group that can run beside Pixel's guard: it cannot touch a
+/// shell call, or it is one of the known observers that never rewrite one.
+fn coexists_with_guard(group: &Value, provider: Provider) -> bool {
+    !shell_overlap(group, provider)
+        || passive_vibe_claude_bridge(group, provider)
+        || passive_gitnexus_claude_hook(group, provider)
+        || passive_cmux_codex_feed(group, provider)
+        || inactive_orca_observer(group, provider)
+}
+
+/// `inherited` holds the PreToolUse groups another settings file contributes
+/// to the same session (the shared project file when the guard goes into the
+/// personal one). The harness merges them, so an unknown shell rewriter there
+/// blocks the guard as surely as one in `value`; an exact RTK group there
+/// blocks too, since it cannot be adopted from a file this call does not own.
 fn configure_scoped(
     value: &mut Value,
     provider: Provider,
     exe: &Path,
     saved: &[Value],
     scope: HookScope,
+    inherited: &[Value],
 ) -> Result<(bool, Vec<Value>), String> {
     let root = value
         .as_object_mut()
@@ -434,13 +481,11 @@ fn configure_scoped(
             .as_array_mut()
             .ok_or("PreToolUse is not an array")?;
         let blocked = pre.iter().any(|group| {
-            !(!shell_overlap(group, provider)
-                || passive_vibe_claude_bridge(group, provider)
-                || passive_gitnexus_claude_hook(group, provider)
-                || passive_cmux_codex_feed(group, provider)
-                || inactive_orca_observer(group, provider)
+            !(coexists_with_guard(group, provider)
                 || provider == Provider::Claude && exact_rtk(group))
-        });
+        }) || inherited
+            .iter()
+            .any(|group| !coexists_with_guard(group, provider));
         if !blocked {
             if provider == Provider::Claude {
                 pre.retain(|group| {
@@ -774,37 +819,41 @@ pub(crate) fn install_at(
     provider: Provider,
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
-    install_at_scoped(home, path, exe, provider, HookScope::All, dry_run)
+    install_at_scoped(home, path, exe, provider, HookScope::All, &[], dry_run)
 }
 
 /// Scoped install: lifecycle hooks only (global Claude doctrine delivery) or
 /// the PreToolUse guard only (repo-local Claude enforcement). Same merge and
 /// foreign-hook preservation rules as the full install.
+///
+/// `backup_root` is the directory whose `.claude/pixel-rtk-hooks.json` holds
+/// an adopted RTK group: `$HOME` for the global install, the repository for
+/// `pixel install --repo`, so a repo's adoption never reaches the global
+/// settings. `inherited` is passed through to [`configure_scoped`].
 pub(crate) fn install_at_scoped(
-    home: &Path,
+    backup_root: &Path,
     path: &Path,
     exe: &Path,
     provider: Provider,
     scope: HookScope,
+    inherited: &[Value],
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
     let mut value = install::read_settings(path)?;
     let saved = if provider == Provider::Claude {
-        load_rtk_backup(home)?
+        load_rtk_backup(backup_root)?
     } else {
         Vec::new()
     };
-    let (enabled, adopted) =
-        configure_scoped(&mut value, provider, exe, &saved, scope).map_err(|reason| {
-            InstallError::InvalidSettings {
-                path: path.into(),
-                reason,
-            }
+    let (enabled, adopted) = configure_scoped(&mut value, provider, exe, &saved, scope, inherited)
+        .map_err(|reason| InstallError::InvalidSettings {
+            path: path.into(),
+            reason,
         })?;
     // Persist only the adopted fragment, never restore a whole settings file
     // over later user edits. Save before changing its active registration.
     if !adopted.is_empty() {
-        install::write_settings(&home.join(RTK_BACKUP), &json!(adopted), dry_run)?;
+        install::write_settings(&backup_root.join(RTK_BACKUP), &json!(adopted), dry_run)?;
     }
     let backup = install::write_settings(path, &value, dry_run)?;
     let summary_text = match scope {
@@ -848,16 +897,135 @@ pub(crate) fn install_at_scoped(
     })
 }
 
-/// Merge a pixel `run-hook guard --provider devin` PreToolUse group into a
-/// project-local `<repo>/.devin/hooks.json`. Simpler than the Codex composed
-/// install: Devin's PreToolUse accepts multiple independent groups, so the
-/// pixel group is appended after any foreign entries and a reinstall replaces
-/// only pixel's own group.
-pub(crate) fn install_project_devin_at(
+/// Take Pixel's guard out of the `PreToolUse` event of a settings file and
+/// return the groups left there, plus whether the file changed.
+///
+/// Only `PreToolUse` is touched, so a lifecycle entry the global install
+/// wrote survives even when the repository is `$HOME`. A delegate guard gets
+/// the RTK group it adopted back: that group has exactly one accepted shape
+/// ([`rtk_group`]), so no backup file is needed to restore it.
+pub(crate) fn remove_pre_tool_use_guard(
     path: &Path,
+    dry_run: bool,
+) -> crate::Result<(Vec<Value>, bool)> {
+    if !path.is_file() {
+        return Ok((Vec::new(), false));
+    }
+    let mut value = install::read_settings(path)?;
+    let Some(hooks) = value.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return Ok((Vec::new(), false));
+    };
+    let Some(before) = hooks.get("PreToolUse").cloned() else {
+        return Ok((Vec::new(), false));
+    };
+    let mut event = Map::new();
+    event.insert("PreToolUse".into(), before.clone());
+    let delegated = has_delegate(&event);
+    remove_pixel_hooks(&mut event);
+    if delegated {
+        restore_rtk(&mut event, &[rtk_group()]);
+    }
+    let after = event.remove("PreToolUse");
+    let left = after
+        .as_ref()
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if after.as_ref() == Some(&before) {
+        return Ok((left, false));
+    }
+    match after {
+        Some(groups) => {
+            hooks.insert("PreToolUse".into(), groups);
+        }
+        None => {
+            hooks.remove("PreToolUse");
+        }
+    }
+    install::write_settings(path, &value, dry_run)?;
+    Ok((left, true))
+}
+
+/// Repo-local Claude guard: `<repo>/.claude/settings.local.json`, never the
+/// team-shared `settings.json`, because the command names this machine's
+/// binary. A guard an earlier install left in `settings.json` is taken out
+/// first; whatever else that file registers on `PreToolUse` still runs in the
+/// same session and is checked for overlap. An adopted RTK group is backed up
+/// under the repository, not under `$HOME`.
+pub(crate) fn install_project_claude_at(
+    repo: &Path,
     exe: &Path,
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
+    let shared = repo.join(CLAUDE_SHARED_SETTINGS);
+    let (inherited, migrated) = remove_pre_tool_use_guard(&shared, dry_run)?;
+    let mut step = install_at_scoped(
+        repo,
+        &repo.join(CLAUDE_LOCAL_SETTINGS),
+        exe,
+        Provider::Claude,
+        HookScope::GuardOnly,
+        &inherited,
+        dry_run,
+    )?;
+    if migrated {
+        step.detail = Some(format!(
+            "{}; pixel guard removed from shared {}",
+            step.detail.unwrap_or_default(),
+            shared.display()
+        ));
+    }
+    Ok(step)
+}
+
+/// Whether any hook command in a settings value (`{"hooks": {<event>: [...]}}`)
+/// is one of Pixel's: the evidence that Pixel was installed into that file.
+pub(crate) fn has_pixel_hook(value: &Value) -> bool {
+    value
+        .get("hooks")
+        .and_then(Value::as_object)
+        .is_some_and(|events| {
+            events
+                .values()
+                .filter_map(Value::as_array)
+                .flatten()
+                .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+                .flatten()
+                .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+                .any(is_pixel_hook)
+        })
+}
+
+/// Whether a Pixel `PreToolUse` command in a settings value contains `verb`
+/// (`run-hook guard --provider claude`): the guard is registered, not merely
+/// some other Pixel hook.
+pub(crate) fn has_pixel_guard(value: &Value, verb: &str) -> bool {
+    value
+        .get("hooks")
+        .and_then(|hooks| hooks.get("PreToolUse"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+        .any(|command| is_pixel_hook(command) && command.contains(verb))
+}
+
+/// Merge a pixel `run-hook guard --provider devin` PreToolUse group into the
+/// repository's personal Devin config, `<repo>/.devin/config.local.json`
+/// (the command names this machine's binary, so not the shared
+/// `.devin/config.json`). Devin's PreToolUse accepts multiple independent
+/// groups, so the pixel group is appended after any foreign entries and a
+/// reinstall replaces only pixel's own group. A guard an earlier install
+/// wrote into `.devin/hooks.json`, a file Devin CLI does not read, is removed.
+pub(crate) fn install_project_devin_at(
+    repo: &Path,
+    exe: &Path,
+    dry_run: bool,
+) -> crate::Result<install::InstallStep> {
+    remove_pre_tool_use_guard(&repo.join(DEVIN_LEGACY_HOOKS), dry_run)?;
+    let path = &repo.join(DEVIN_LOCAL_CONFIG);
     let mut value = install::read_settings(path)?;
     let root = value
         .as_object_mut()
@@ -939,6 +1107,194 @@ mod tests {
             "'/tmp/pixel' run-hook prompt-submit > user-log",
         ] {
             assert!(!is_pixel_hook(foreign), "{foreign}");
+        }
+    }
+
+    /// Installs before `pixel run-hook` registered bare scripts under
+    /// `~/.claude/hooks/`; each must read as Pixel's so a reinstall replaces
+    /// it instead of leaving it beside the new `run-hook` entry.
+    #[test]
+    fn is_pixel_hook_should_recognise_script_entries_of_pre_run_hook_installs() {
+        for legacy in [
+            "~/.claude/hooks/pixel-session-start",
+            "/Users/dev/.claude/hooks/pixel-prompt-submit",
+            "/Users/dev/.claude/hooks/pixel-post-compaction",
+            "~/.claude/hooks/pixel-targets-guard",
+            "~/.claude/hooks/gitpixel-targets-guard",
+            "'/Users/a dev/.claude/hooks/pixel-session-start'",
+        ] {
+            assert!(is_pixel_hook(legacy), "{legacy}");
+        }
+        for foreign in [
+            "~/.claude/hooks/pixel-session-start-audit",
+            "my-tool ~/.claude/hooks/pixel-session-start",
+            "/usr/local/bin/session-start",
+        ] {
+            assert!(!is_pixel_hook(foreign), "{foreign}");
+        }
+    }
+
+    #[test]
+    fn has_pixel_guard_should_need_a_pixel_command_carrying_the_verb() {
+        let settings = |command: &str| json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":command}]}]}});
+        let verb = "run-hook guard --provider claude";
+        assert!(has_pixel_guard(
+            &settings("'/p/pixel' run-hook guard --provider claude"),
+            verb
+        ));
+        assert!(
+            !has_pixel_guard(&settings("echo run-hook guard --provider claude"), verb),
+            "a foreign command merely naming the verb is not the guard"
+        );
+        assert!(
+            !has_pixel_guard(
+                &settings("'/p/pixel' run-hook guard --provider devin"),
+                verb
+            ),
+            "another provider's guard is not this one"
+        );
+        let lifecycle_only = json!({"hooks":{"SessionStart":[{"hooks":[{"command":"'/p/pixel' run-hook guard --provider claude"}]}]}});
+        assert!(
+            !has_pixel_guard(&lifecycle_only, verb),
+            "only PreToolUse registers a guard"
+        );
+        assert!(has_pixel_hook(&lifecycle_only));
+        assert!(!has_pixel_hook(&settings("keep-security-check")));
+        assert!(!has_pixel_hook(&Value::Null));
+    }
+
+    #[test]
+    fn remove_pre_tool_use_guard_should_keep_lifecycle_and_foreign_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        assert_eq!(
+            remove_pre_tool_use_guard(&path, false).unwrap(),
+            (Vec::new(), false),
+            "an absent file is left absent"
+        );
+        assert!(!path.exists());
+        let write = json!({"matcher":"Write","hooks":[{"type":"command","command":"keep-write"}]});
+        let guard = json!({"matcher":"Bash","hooks":[{"type":"command","command":"'/old/pixel' run-hook guard --provider claude"}]});
+        let start =
+            json!({"hooks":[{"type":"command","command":"'/p/pixel' run-hook session-start"}]});
+        let original =
+            json!({"hooks":{"PreToolUse":[write.clone(), guard],"SessionStart":[start.clone()]}});
+        install::write_settings(&path, &original, false).unwrap();
+
+        let (left, changed) = remove_pre_tool_use_guard(&path, true).unwrap();
+        assert!(changed);
+        assert_eq!(left, vec![write.clone()]);
+        assert_eq!(
+            install::read_settings(&path).unwrap(),
+            original,
+            "a dry run reports without writing"
+        );
+
+        let (left, changed) = remove_pre_tool_use_guard(&path, false).unwrap();
+        assert!(changed);
+        assert_eq!(left, vec![write.clone()]);
+        let after = install::read_settings(&path).unwrap();
+        assert_eq!(after["hooks"]["PreToolUse"], json!([write.clone()]));
+        assert_eq!(
+            after["hooks"]["SessionStart"],
+            json!([start]),
+            "a lifecycle entry is never touched, even Pixel's own"
+        );
+        assert_eq!(
+            remove_pre_tool_use_guard(&path, false).unwrap(),
+            (vec![write], false),
+            "nothing left to remove"
+        );
+    }
+
+    #[test]
+    fn remove_pre_tool_use_guard_should_drop_an_emptied_event_and_restore_a_delegated_rtk() {
+        let dir = tempfile::tempdir().unwrap();
+        let only_guard = dir.path().join("only.json");
+        install::write_settings(
+            &only_guard,
+            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"'/p/pixel' run-hook guard --provider claude"}]}]}}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            remove_pre_tool_use_guard(&only_guard, false).unwrap(),
+            (Vec::new(), true)
+        );
+        assert_eq!(
+            install::read_settings(&only_guard).unwrap(),
+            json!({"hooks":{}})
+        );
+
+        let delegated = dir.path().join("delegated.json");
+        install::write_settings(
+            &delegated,
+            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"'/p/pixel' run-hook guard --provider claude --delegate-rtk"}]}]}}),
+            false,
+        )
+        .unwrap();
+        let (left, changed) = remove_pre_tool_use_guard(&delegated, false).unwrap();
+        assert!(changed);
+        assert_eq!(
+            left,
+            vec![rtk_group()],
+            "the RTK group the delegate adopted runs again"
+        );
+        assert_eq!(
+            install::read_settings(&delegated).unwrap()["hooks"]["PreToolUse"],
+            json!([rtk_group()])
+        );
+
+        let no_pre = dir.path().join("no-pre.json");
+        let lifecycle = json!({"hooks":{"SessionStart":[{"hooks":[{"command":"x"}]}]}});
+        install::write_settings(&no_pre, &lifecycle, false).unwrap();
+        assert_eq!(
+            remove_pre_tool_use_guard(&no_pre, false).unwrap(),
+            (Vec::new(), false)
+        );
+        let no_hooks = dir.path().join("no-hooks.json");
+        install::write_settings(&no_hooks, &json!({"theme":"dark"}), false).unwrap();
+        assert_eq!(
+            remove_pre_tool_use_guard(&no_hooks, false).unwrap(),
+            (Vec::new(), false)
+        );
+    }
+
+    /// A shell rewriter the shared project settings register runs in the
+    /// same Claude session as the personal file's guard: two rewriters of one
+    /// command race, so the guard stays out, exactly as when both sit in one
+    /// file. A group that cannot touch a shell call blocks nothing.
+    #[test]
+    fn configure_scoped_should_treat_inherited_shell_rewriters_as_blocking() {
+        let exe = Path::new("/tmp/pixel");
+        let security =
+            json!({"matcher":"Bash","hooks":[{"type":"command","command":"keep-security-check"}]});
+        let write = json!({"matcher":"Write","hooks":[{"type":"command","command":"keep-write"}]});
+        let gitnexus = json!({"matcher":"Grep|Glob|Bash","hooks":[{"type":"command","command":"node \"/Users/dev/.claude/hooks/gitnexus/gitnexus-hook.cjs\""}]});
+        for (inherited, expect_enabled) in [
+            (vec![security.clone()], false),
+            (vec![rtk_group()], false),
+            (vec![write.clone()], true),
+            (vec![gitnexus], true),
+            (Vec::new(), true),
+        ] {
+            let mut value = json!({});
+            let (enabled, adopted) = configure_scoped(
+                &mut value,
+                Provider::Claude,
+                exe,
+                &[],
+                HookScope::GuardOnly,
+                &inherited,
+            )
+            .unwrap();
+            assert_eq!(enabled, expect_enabled, "{inherited:?}");
+            assert!(adopted.is_empty(), "an inherited group is never adopted");
+            assert_eq!(
+                has_pixel_guard(&value, "run-hook guard --provider claude"),
+                expect_enabled,
+                "{value}"
+            );
         }
     }
 

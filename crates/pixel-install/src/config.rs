@@ -26,6 +26,9 @@ const STALE_BLOCK_MARKERS: &[&str] =
 
 /// The Claude hooks directory (relative to home).
 pub const CLAUDE_HOOKS_DIR: &str = ".claude/hooks";
+/// The guard script name used before the `gitpixel` → `pixel` rename; still
+/// recognised so an install or uninstall cleans machines that carry it.
+pub const OLD_GUARD_HOOK: &str = "gitpixel-targets-guard";
 /// The guard hook path.
 pub const GUARD_HOOK: &str = "pixel-targets-guard";
 /// The SessionStart hook path.
