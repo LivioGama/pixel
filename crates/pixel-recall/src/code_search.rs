@@ -222,11 +222,20 @@ pub struct SemanticFallback {
     pub searched_files: usize,
     /// The scan stopped at [`SEMANTIC_FALLBACK_MAX_FILES`].
     pub file_limit_reached: bool,
+    /// The fallback was gated off (`PIXEL_SEMANTIC_FALLBACK` unset): no
+    /// model load and no corpus embed ran. Named so a caller can report
+    /// "disabled" rather than "searched, found nothing".
+    pub disabled: bool,
 }
 
 impl SemanticFallback {
     /// Caps a caller names in its epistemics when it shows these hits.
     pub fn caps(&self) -> Vec<String> {
+        if self.disabled {
+            return vec![
+                "semantic fallback disabled: set PIXEL_SEMANTIC_FALLBACK=1 to enable".to_string(),
+            ];
+        }
         if self.hits.is_empty() {
             return Vec::new();
         }
@@ -244,6 +253,26 @@ impl SemanticFallback {
     }
 }
 
+/// Whether the semantic fallback may run. Default OFF: a lexical miss used
+/// to load the embedding model and embed up to
+/// [`SEMANTIC_FALLBACK_MAX_FILES`] files inside the daemon request — the
+/// worst tail on the hot path. `PIXEL_SEMANTIC_FALLBACK=1` (or `true`,
+/// `yes`, `on`) re-enables it; any other value keeps it off. Read once per
+/// process.
+pub fn semantic_fallback_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("PIXEL_SEMANTIC_FALLBACK")
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
 /// Semantic fallback for cross-lingual concept resolution: embeds the query
 /// with the multilingual `potion-code-16M-v2` model and ranks code files by
 /// the best-matching chunk.
@@ -254,8 +283,17 @@ impl SemanticFallback {
 ///
 /// Returned paths are repo-relative (stripped of `root`) so they join with
 /// index paths, annotations, and evidence maps that are all relative.
+///
+/// Gated by [`semantic_fallback_enabled`]: default OFF, so a lexical miss
+/// returns a `disabled` fallback instead of paying for the embed.
 #[cfg_attr(test, mutants::skip)] // adapter over the on-disk model; `fallback_from` holds the logic and is tested
 pub fn semantic_fallback(root: &Path, query: &str, limit: usize) -> SemanticFallback {
+    if !semantic_fallback_enabled() {
+        return SemanticFallback {
+            disabled: true,
+            ..Default::default()
+        };
+    }
     ask_with_embedder(root, query, limit, SEMANTIC_FALLBACK_MAX_FILES, false).map_or_else(
         |_| SemanticFallback::default(),
         |result| fallback_from(root, result),
@@ -282,6 +320,7 @@ fn fallback_from(root: &Path, result: AskResult) -> SemanticFallback {
             .collect(),
         searched_files: result.coverage.searched_files,
         file_limit_reached: result.coverage.file_limit_reached,
+        disabled: false,
     }
 }
 
@@ -756,6 +795,7 @@ mod tests {
             hits: vec![("a.rs".to_string(), 0.3)],
             searched_files: 2000,
             file_limit_reached: false,
+            disabled: false,
         };
         let caps = fallback.caps();
         assert_eq!(caps.len(), 1);

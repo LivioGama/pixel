@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -203,7 +203,32 @@ pub struct Service {
     /// facts-consuming request, not at daemon start — users who never touch
     /// history commands never pay for the index.
     facts_warmer_started: AtomicBool,
+    /// Short-TTL cache of the `repo_snapshot` triple (HEAD, branch, dirty
+    /// list). Every snapshot-carrying op used to pay 3 git subprocesses;
+    /// a burst of scope-task+impact+find-code now costs one round-trip.
+    /// Invalidated by watcher batches and every writing op.
+    snapshot_cache: Option<(Instant, SnapshotInfo)>,
+    /// Short-TTL cache of the `git log --since=90.days` activity map behind
+    /// `engine_signals`. The decay weights shift negligibly over the TTL;
+    /// only successful scans are cached so a transient git failure still
+    /// reports `activity_unavailable` on the next call.
+    activity_cache: Option<(Instant, std::collections::HashMap<String, f64>)>,
+    /// Per-file stat→hash memo for `tree_delta`: after a watcher batch
+    /// drops the graph handle, the re-walk hashes only files whose
+    /// (mtime, len) changed instead of the whole tree.
+    hash_cache: pixel_graph::build::TreeHashCache,
 }
+
+/// How long a cached [`SnapshotInfo`] may be served. One concurrent burst
+/// of retrieval ops (scope-task + impact + find-code back to back) shares
+/// one git round-trip; dirty-state staleness inside the window is the
+/// accepted trade, and writing ops + watcher batches invalidate anyway.
+const SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(1000);
+
+/// How long the `git log` activity map may be served. Churn decays on a
+/// 14-day half-life, so a minute of reuse never moves a ranking; the TTL
+/// only bounds how fast a just-landed commit starts counting.
+const ACTIVITY_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// Version of a coherently published index/graph pair, not a filesystem snapshot.
 #[derive(Clone, Copy, Debug)]
@@ -266,6 +291,9 @@ impl Service {
             embedder_unavailable: false,
             embedder_download_started: false,
             facts_warmer_started: AtomicBool::new(false),
+            snapshot_cache: None,
+            activity_cache: None,
+            hash_cache: pixel_graph::build::TreeHashCache::default(),
         })
     }
 
@@ -288,6 +316,9 @@ impl Service {
             embedder_unavailable: true,
             embedder_download_started: false,
             facts_warmer_started: AtomicBool::new(true),
+            snapshot_cache: None,
+            activity_cache: None,
+            hash_cache: pixel_graph::build::TreeHashCache::default(),
         }
     }
 
@@ -356,6 +387,9 @@ impl Service {
         if files.is_empty() {
             return;
         }
+        // A watcher batch means the working tree changed: the cached
+        // snapshot's dirty list is stale as of right now.
+        self.snapshot_cache = None;
         let publication = Arc::clone(&self.publication);
         let mut state = publication.write().expect("publication lock poisoned");
         state.healthy = false;
@@ -443,7 +477,9 @@ impl Service {
             built = Some(self.full_rebuild_info("missing")?);
         } else {
             // One walk answers both "fresh?" and "which files drifted?".
-            match bridge::tree_delta(&self.root, &db) {
+            // The stat→hash memo keeps files unchanged since the last walk
+            // from being re-read and re-hashed (the post-edit hot path).
+            match bridge::tree_delta_cached(&self.root, &db, &mut self.hash_cache) {
                 Ok(Some(delta)) if delta.fresh => {}
                 Ok(Some(delta)) => {
                     let pct = incremental_max_pct();
@@ -737,8 +773,17 @@ impl Service {
         // answer needs to say WHICH tree state it was computed against, not
         // enumerate 15 000 untracked `vendor/bundle` paths on every call.
         let full_dirty_list = matches!(op_name, "inspect" | "review");
+        // Ops that write repo state (commit/push/branch/sync/rename/…) make
+        // any cached HEAD/branch/dirty triple stale the moment they return.
+        let mutates_repo = matches!(
+            op_name,
+            "publish" | "push" | "ship" | "branch_op" | "update" | "sync" | "rename" | "reindex"
+        );
         match self.dispatch(req) {
             Ok(v) => {
+                if mutates_repo {
+                    self.snapshot_cache = None;
+                }
                 let mut env = Envelope::success(op_name, v);
                 if attach_snapshot {
                     let snapshot = self.repo_snapshot();
@@ -773,20 +818,27 @@ impl Service {
     /// state: HEAD oid, branch name, and the list of dirty (modified /
     /// staged / untracked) repo-relative paths. `token` is left `None`
     /// here — pixel-ops computes the validated snapshot token separately.
-    fn repo_snapshot(&self) -> SnapshotInfo {
+    fn repo_snapshot(&mut self) -> SnapshotInfo {
+        if let Some((at, snapshot)) = &self.snapshot_cache
+            && at.elapsed() < SNAPSHOT_CACHE_TTL
+        {
+            return snapshot.clone();
+        }
         let head = pixel_index::gitsync::rev_parse_head(&self.root);
         let branch = pixel_index::gitsync::current_branch(&self.root);
         let dirty: Vec<String> = pixel_index::gitsync::status_porcelain(&self.root)
             .into_iter()
             .map(|(_xy, path)| path)
             .collect();
-        SnapshotInfo {
+        let snapshot = SnapshotInfo {
             token: None,
             head,
             branch,
             dirty,
             dirty_count: None,
-        }
+        };
+        self.snapshot_cache = Some((Instant::now(), snapshot.clone()));
+        snapshot
     }
 
     fn dispatch(&mut self, req: Request) -> Result<Value, String> {
@@ -1986,7 +2038,7 @@ impl Service {
         if !db.exists() {
             return Ok(Err(wire::Reason::GraphUnavailable));
         }
-        let delta = match bridge::tree_delta(&self.root, &db) {
+        let delta = match bridge::tree_delta_cached(&self.root, &db, &mut self.hash_cache) {
             Ok(delta) => delta,
             Err(error) => return Err(format!("evaluate: {error}")),
         };
@@ -2350,6 +2402,12 @@ impl Service {
     fn op_resolve(&mut self, phrase: &str, limit: Option<usize>) -> Result<Value, String> {
         let ensured = self.ensure_graph();
         let build_info = ensured.ok().flatten();
+        // Phase 1c: feed activity-only rerank signals (git churn) over the
+        // candidate universe; session/error channels land in Phase 3.
+        // Computed BEFORE borrowing `self.graph`: `engine_signals` needs
+        // `&mut self` for its snapshot/activity caches.
+        let all_paths = self.admitted_paths();
+        let signals = self.engine_signals(&all_paths);
         let store = match self.graph.as_ref() {
             Some(s) => s,
             None => {
@@ -2414,10 +2472,6 @@ impl Service {
                 }));
             }
         };
-        // Phase 1c: feed activity-only rerank signals (git churn) over the
-        // candidate universe; session/error channels land in Phase 3.
-        let all_paths = self.admitted_paths();
-        let signals = self.engine_signals(&all_paths);
         let opts = pixel_graph::concept_resolve::ResolveOptions {
             limit: limit.unwrap_or(8),
             // Phase 1c: wire the real Engine-3 reranker (per-path test
@@ -2853,7 +2907,7 @@ impl Service {
     /// capped activity scan degrades to an empty `activity` map whose reason
     /// is named in `SignalBundle::activity_unavailable` (the reranker then
     /// applies only the per-path test penalty).
-    fn engine_signals(&self, candidates: &[String]) -> pixel_rank::signals::SignalBundle {
+    fn engine_signals(&mut self, candidates: &[String]) -> pixel_rank::signals::SignalBundle {
         if self.read_only {
             return pixel_rank::signals::SignalBundle {
                 activity_unavailable: Some(
@@ -2864,13 +2918,34 @@ impl Service {
         }
         use pixel_rank::signals::{SignalOptions, compute_signals};
         let runner = pixel_git::GitRunner::new(&self.root);
-        let dirty: Vec<String> = pixel_index::gitsync::status_porcelain(&self.root)
-            .into_iter()
-            .map(|(p, _)| p)
-            .collect();
+        // The dirty set is the same `status_porcelain` walk `repo_snapshot`
+        // already pays for on this request path — reuse its cache instead
+        // of spawning a second git subprocess per op.
+        let dirty: Vec<String> = self.repo_snapshot().dirty;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
+        // `git log --since=90.days` used to run on EVERY signals call; the
+        // decay weights it feeds move on a 14-day half-life, so a short
+        // reuse window changes nothing observable while saving a
+        // subprocess per find-code/scope-task. Only a successful scan is
+        // cached — a failed one keeps reporting `activity_unavailable`
+        // instead of latching.
+        let activity = match &self.activity_cache {
+            Some((at, map)) if at.elapsed() < ACTIVITY_CACHE_TTL => Some(map.clone()),
+            _ => {
+                let scanned = pixel_rank::signals::activity_from_git_log(
+                    &runner,
+                    now_ms,
+                    SignalOptions::default().activity_half_life_days,
+                )
+                .ok();
+                if let Some(map) = &scanned {
+                    self.activity_cache = Some((Instant::now(), map.clone()));
+                }
+                scanned
+            }
+        };
         // Fan-in (in-degree): count incoming `calls` edges per candidate
         // file via the graph.db escape hatch (`GraphStore::conn`). The graph
         // is lazily built by `ensure_graph` earlier in the request; if it is
@@ -2889,7 +2964,7 @@ impl Service {
             &runner,
             None,
             &[],
-            None,
+            activity.as_ref(),
             &dirty,
             &fan_in_raw,
             candidates,
@@ -3945,11 +4020,15 @@ mod bridge {
 
     /// One walk of `root`: freshness verdict plus the files that drifted
     /// from the on-disk graph. `None` when the db has no signature to trust.
-    pub fn tree_delta(
+    /// [`pixel_graph::build::tree_delta`] backed by the daemon's per-file
+    /// stat→hash memo: same
+    /// delta, but unchanged files are not re-read or re-hashed.
+    pub fn tree_delta_cached(
         root: &Path,
         db: &Path,
+        cache: &mut pixel_graph::build::TreeHashCache,
     ) -> Result<Option<pixel_graph::build::TreeDelta>, String> {
-        pixel_graph::build::tree_delta(root, db).map_err(es)
+        pixel_graph::build::tree_delta_cached(root, db, cache).map_err(es)
     }
 
     /// Re-extract the drifted files only and publish the delta's signature.
@@ -5395,6 +5474,7 @@ mod tests {
             ],
             searched_files: 2,
             file_limit_reached: false,
+            disabled: false,
         };
         let present = pixel_rank::TargetFile {
             path: "src/b.rs".to_string(),
@@ -5470,6 +5550,7 @@ mod tests {
             ],
             searched_files: 2000,
             file_limit_reached: true,
+            disabled: false,
         };
         let mut report = report_with(vec![p2("src/a.rs")], Some(json!(["probe capped"])));
         apply_semantic_leads(&mut report, &fallback, 3);
@@ -6777,7 +6858,7 @@ mod tests {
     #[test]
     fn engine_signals_scores_activity_for_files_with_history() {
         let root = signals_repo("engine-signals");
-        let svc = Service::open(&root).unwrap();
+        let mut svc = Service::open(&root).unwrap();
         let bundle = svc.engine_signals(&["login.rs".to_string(), "caller.rs".to_string()]);
         let login = bundle.activity.get("login.rs").copied().unwrap_or(0.0);
         let caller = bundle.activity.get("caller.rs").copied().unwrap_or(0.0);

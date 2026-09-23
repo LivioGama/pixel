@@ -553,6 +553,87 @@ fn hash_candidates(candidates: Vec<(String, std::path::PathBuf)>) -> Vec<(String
     entries
 }
 
+/// In-process memo of the last `tree_hashes` walk: `rel path → (mtime_sec,
+/// mtime_nsec, len, xxh3)`. A daemon that re-walks after a watcher batch
+/// stats every file but only re-reads and re-hashes the ones whose
+/// `(mtime, len)` moved — unchanged files reuse their content hash, so the
+/// resulting signature is byte-identical to a full re-hash.
+///
+/// Held per `Service` (daemon lifetime), never persisted: the on-disk
+/// signature format is unchanged. Accepted trade, documented by
+/// `freshness_signature`: a same-size edit that also restores mtime
+/// (`touch -t`) is invisible to the stat check inside this process — the
+/// same edit to a file the watcher reported is still caught, because the
+/// watcher's batch is what invalidated the graph handle in the first place.
+#[derive(Debug, Default)]
+pub struct TreeHashCache {
+    seen: HashMap<String, (i64, i64, u64, u64)>,
+    /// Files whose cached stat matched on the last walk — hash reused, no
+    /// read. Diagnostic; lets tests prove the stat-only path ran.
+    #[doc(hidden)]
+    pub stat_hits: u64,
+    /// Files the last walk had to open and hash (new or stat-changed).
+    #[doc(hidden)]
+    pub rehashed: u64,
+}
+
+/// [`tree_hashes`] driven by `cache`: stat-only for files whose
+/// `(mtime, len)` is unchanged since the last walk, read + hash for the
+/// rest. The returned entries are identical to `tree_hashes`'s whenever
+/// file content follows file stat — which is the invariant this cache
+/// exists to exploit. Entries for vanished/binary/oversized files are
+/// dropped, so the memo can never resurrect a file the walk would exclude.
+fn tree_hashes_cached(root: &Path, cache: &mut TreeHashCache) -> Vec<(String, u64)> {
+    let walker = pixel_index::index::policy_walk(root);
+    let candidates: Vec<(String, std::path::PathBuf)> = walker
+        .flatten()
+        .filter_map(|entry| {
+            let is_file = entry.file_type().is_some_and(|t| t.is_file());
+            if !is_file {
+                return None;
+            }
+            let rel = rel_path(root, entry.path())?;
+            lang_of(&rel)?;
+            Some((rel, entry.into_path()))
+        })
+        .collect();
+    let previous = std::mem::take(&mut cache.seen);
+    let previous = &previous;
+    let hashed: Vec<(String, u64, (i64, i64, u64), bool)> = candidates
+        .into_par_iter()
+        .filter_map(|(rel, path)| {
+            let meta = std::fs::metadata(&path).ok()?;
+            let stat = (meta.mtime(), meta.mtime_nsec(), meta.size());
+            if let Some(&(mtime, nsec, len, hash)) = previous.get(rel.as_str())
+                && (mtime, nsec, len) == stat
+            {
+                return Some((rel, hash, stat, true));
+            }
+            let content = read_source_file(&path)?;
+            if is_binary(&content) {
+                return None;
+            }
+            Some((rel, xxh3_64(&content), stat, false))
+        })
+        .collect();
+    cache.stat_hits = hashed.iter().filter(|e| e.3).count() as u64;
+    cache.rehashed = hashed.iter().filter(|e| !e.3).count() as u64;
+    // Rebuild the memo from what THIS walk actually produced: stat-matched
+    // files keep their hash, stat-changed files were re-hashed, and
+    // anything dropped (binary, vanished, unreadable) is absent — so a
+    // later walk cannot hit a stale entry for a file that no longer hashes.
+    cache.seen = hashed
+        .iter()
+        .map(|(rel, hash, (m, n, l), _)| (rel.clone(), (*m, *n, *l, *hash)))
+        .collect();
+    let mut entries: Vec<(String, u64)> = hashed
+        .into_iter()
+        .map(|(rel, hash, _, _)| (rel, hash))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+}
+
 fn signature_of(entries: &[(String, u64)]) -> String {
     let mut hasher_buf: Vec<u8> = Vec::with_capacity(entries.len() * 24);
     for (rel, hash) in entries {
@@ -605,6 +686,25 @@ impl TreeDelta {
 /// written by another extractor version: the caller cannot trust its rows
 /// and must rebuild.
 pub fn tree_delta(root: &Path, db_path: &Path) -> Result<Option<TreeDelta>, BoxErr> {
+    tree_delta_with(root, db_path, tree_hashes)
+}
+
+/// [`tree_delta`] with a [`TreeHashCache`]: the walk stats every file but
+/// only re-reads and re-hashes the ones whose `(mtime, len)` moved since
+/// the last cached walk. Same delta, same signature — less work.
+pub fn tree_delta_cached(
+    root: &Path,
+    db_path: &Path,
+    cache: &mut TreeHashCache,
+) -> Result<Option<TreeDelta>, BoxErr> {
+    tree_delta_with(root, db_path, |root| tree_hashes_cached(root, cache))
+}
+
+fn tree_delta_with(
+    root: &Path,
+    db_path: &Path,
+    hashes: impl FnOnce(&Path) -> Vec<(String, u64)>,
+) -> Result<Option<TreeDelta>, BoxErr> {
     let store = GraphStore::open(db_path)?;
     let Some(stored) = store.meta_get(FRESHNESS_KEY)? else {
         return Ok(None);
@@ -612,7 +712,7 @@ pub fn tree_delta(root: &Path, db_path: &Path) -> Result<Option<TreeDelta>, BoxE
     if !extractor_is_current(&store)? {
         return Ok(None);
     }
-    let current = tree_hashes(root);
+    let current = hashes(root);
     let signature = signature_of(&current);
     let known: HashMap<String, String> = store
         .files()?
@@ -1391,6 +1491,52 @@ mod tests {
         assert!(store.symbols_by_name("gamma", None, 5).unwrap().is_empty());
         assert_eq!(store.symbols_by_name("delta", None, 5).unwrap().len(), 1);
         drop(store);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `tree_delta_cached` must produce the SAME delta as `tree_delta` while
+    /// hashing only the files whose stat moved — the post-edit hot path.
+    #[test]
+    fn tree_delta_cached_matches_uncached_and_rehashes_only_changed_files() {
+        let root = tmpdir("delta-cached");
+        std::fs::write(root.join("a.ts"), "export function alpha() { return 1 }\n").unwrap();
+        std::fs::write(root.join("b.ts"), "export function beta() { return 1 }\n").unwrap();
+        std::fs::write(root.join("c.ts"), "export function gamma() { return 1 }\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+
+        let mut cache = TreeHashCache::default();
+        // First cached walk: cold — every file is hashed once.
+        let d1 = tree_delta_cached(&root, &db, &mut cache)
+            .unwrap()
+            .expect("signed db");
+        assert!(d1.fresh);
+        assert_eq!(cache.rehashed, 3, "cold cache hashes everything");
+        assert_eq!(cache.stat_hits, 0);
+
+        // Second walk, nothing changed: identical verdict, zero rehashes —
+        // the stat-only path is what makes a post-watcher-batch op cheap.
+        let d2 = tree_delta_cached(&root, &db, &mut cache)
+            .unwrap()
+            .expect("signed db");
+        assert!(d2.fresh);
+        assert_eq!(d2.signature, d1.signature);
+        assert_eq!(cache.rehashed, 0, "unchanged tree must not re-read files");
+        assert_eq!(cache.stat_hits, 3);
+
+        // One same-size edit: only that file is re-hashed, and the delta
+        // still names it exactly as the uncached walk does.
+        std::fs::write(root.join("b.ts"), "export function beta() { return 2 }\n").unwrap();
+        let uncached = tree_delta(&root, &db).unwrap().expect("signed db");
+        let d3 = tree_delta_cached(&root, &db, &mut cache)
+            .unwrap()
+            .expect("signed db");
+        assert_eq!(d3.changed, uncached.changed);
+        assert_eq!(d3.removed, uncached.removed);
+        assert_eq!(d3.signature, uncached.signature);
+        assert_eq!(cache.rehashed, 1, "only the stat-changed file is re-read");
+        assert_eq!(cache.stat_hits, 2);
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -29,6 +29,9 @@ pub const LOG_FILE_NAME: &str = "actions.jsonl";
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_KEPT_LINES: usize = 5000;
 const ROTATE_CHECK_EVERY: u32 = 50;
+/// Upper bound `finish_flush` waits for the writer to drain — kept for the
+/// durability callers (tests, anything that reads the log right after).
+/// `finish` itself never waits.
 const SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_millis(300);
 const MAX_ARGS_LEN: usize = 4000;
 const MAX_ERROR_LEN: usize = 2000;
@@ -217,10 +220,29 @@ impl ActionLog {
         }
     }
 
-    /// Close the channel and give the writer thread a bounded window to
-    /// drain and flush before returning. Call this right before process
-    /// exit. Safe to call multiple times (subsequent calls are no-ops).
+    /// Close the channel and return WITHOUT waiting for the writer to
+    /// drain: fire-and-forget. The writer thread keeps running and still
+    /// flushes whatever it manages before process teardown; a line that
+    /// arrives after exit is simply lost — the documented contract of this
+    /// observability log, and the reason CLI exit no longer pays up to
+    /// `SHUTDOWN_FLUSH_TIMEOUT` on a slow disk.
+    ///
+    /// Callers that must observe the events on disk (tests, anything that
+    /// reads the log after finishing) use [`Self::finish_flush`], which
+    /// keeps the old bounded-wait behavior.
     pub fn finish(&mut self) {
+        self.tx.take(); // drop the sender: closes the channel
+        // Do not wait on done_rx and do not join: the point of this path
+        // is that exit cost is zero. The channel close still orders every
+        // already-queued event ahead of the writer's own drain.
+        self.done_rx.take();
+        self.handle.take();
+    }
+
+    /// [`Self::finish`] plus a bounded wait (≤ `SHUTDOWN_FLUSH_TIMEOUT`)
+    /// for the writer to drain and flush — the old `finish` behavior, for
+    /// callers that need the events durably on disk before returning.
+    pub fn finish_flush(&mut self) {
         self.tx.take(); // drop the sender: closes the channel
         if let Some(done_rx) = self.done_rx.take() {
             let _ = done_rx.recv_timeout(SHUTDOWN_FLUSH_TIMEOUT);
@@ -379,7 +401,7 @@ mod tests {
             ActionEvent::new("rescue", "problem=bar")
                 .with_result(&Err("boom".to_string()), Duration::from_millis(12)),
         );
-        log.finish();
+        log.finish_flush();
 
         let events = tail(&path, 10).unwrap();
         assert_eq!(events.len(), 2);
@@ -396,7 +418,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut log = ActionLog::spawn_for_root(dir.path());
         log.log(ActionEvent::new("targets", "task=x"));
-        log.finish();
+        log.finish_flush();
 
         let path = ActionLog::path_for_root(dir.path());
         assert!(path.exists());
@@ -422,7 +444,7 @@ mod tests {
         for i in 0..5 {
             log.log(ActionEvent::new("search", format!("n={i}")));
         }
-        log.finish();
+        log.finish_flush();
 
         let events = tail(&path, 2).unwrap();
         assert_eq!(events.len(), 2);
