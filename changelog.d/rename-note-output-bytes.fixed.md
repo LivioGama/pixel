@@ -1,0 +1,1 @@
+**metrics:** the `note: 'x' is now 'y'` line printed for a renamed command now counts in `output_bytes`, as does the `daemon start` message in quiet mode. Both went to stderr uncounted, so a call through an old name was priced against less output than it printed.

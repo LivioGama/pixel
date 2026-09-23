@@ -23,6 +23,9 @@ macro_rules! eprintln {
     () => { crate::operation_metrics::print_error(format_args!("\n")) };
     ($($arg:tt)*) => { crate::operation_metrics::print_error(format_args!("{}\n", format_args!($($arg)*))) };
 }
+macro_rules! eprint {
+    ($($arg:tt)*) => { crate::operation_metrics::print_error(format_args!($($arg)*)) };
+}
 mod call_guard;
 mod classify;
 mod claude_controller;
@@ -4823,17 +4826,18 @@ fn run() -> Result<(), String> {
         && cli.metrics != "off"
         && std::env::var_os("PIXEL_METRICS").is_none_or(|v| v != "0")
         && config_cmd::metrics_enabled(root.as_deref().ok());
+    operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
+    // After `begin`, which zeroes the byte counters: both notes are rendered
+    // output the caller reads.
     if let Some(note) = rename_note(&argv, !protected) {
         eprint!("{note}");
     }
-    operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
-    // After `begin`: the note is rendered output the caller reads.
     if checks_deployed_prompts(&command_label, protected)
         && let Some(home) = std::env::var_os("HOME")
         && let Some(note) =
             stale_prompt_note(&pixel_install::install::stale_prompts(Path::new(&home)))
     {
-        operation_metrics::print_error(format_args!("{note}"));
+        eprint!("{note}");
     }
     // Compatibility fallback must exec the original before any logging changes
     // its search corpus; its successful Pixel branch retains existing logging.
