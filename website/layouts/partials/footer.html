@@ -1,0 +1,52 @@
+<footer class="footer">
+  <div class="wrap footer__inner">
+    <a class="brand brand--small" href="{{ "" | relURL }}">
+      <span class="brand__pixel" aria-hidden="true"></span>
+      <span class="brand__name">pixel</span>
+    </a>
+    <ul class="footer__links">
+      <li><a href="{{ "docs/" | relURL }}">Docs</a></li>
+      <li><a href="{{ .Site.Params.github_url }}" rel="noopener">Source on GitHub</a></li>
+      <li><a href="{{ .Site.Params.github_url }}/releases" rel="noopener">Releases</a></li>
+      <li><a href="{{ .Site.Params.github_url }}/blob/main/CONTRIBUTING.md" rel="noopener">Contributing</a></li>
+    </ul>
+    <p class="footer__license">MIT licensed. Runs on your machine; nothing leaves it.</p>
+  </div>
+</footer>
+<script>
+  /* GitHub star count in the nav: shown only once the API answers. */
+  (function () {
+    var el = document.querySelector('[data-gh-stars]');
+    if (!el) return;
+    var repo = el.getAttribute('data-gh-stars');
+    var key = 'gh-stars:' + repo;
+    var show = function (n) {
+      if (typeof n !== 'number') return;
+      el.textContent = n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+      el.setAttribute('aria-label', n + ' stars');
+      el.hidden = false;
+    };
+    try { show(JSON.parse(sessionStorage.getItem(key))); } catch (_) {}
+    fetch('https://api.github.com/repos/' + repo)
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d) return;
+        show(d.stargazers_count);
+        try { sessionStorage.setItem(key, JSON.stringify(d.stargazers_count)); } catch (_) {}
+      })
+      .catch(function () {});
+  })();
+
+  /* Copy buttons on every command block. */
+  (function () {
+    document.querySelectorAll('[data-copy]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var text = btn.getAttribute('data-copy');
+        navigator.clipboard.writeText(text).then(function () {
+          btn.textContent = 'Copied';
+          setTimeout(function () { btn.textContent = 'Copy'; }, 1600);
+        });
+      });
+    });
+  })();
+</script>

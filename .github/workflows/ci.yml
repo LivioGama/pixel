@@ -9,7 +9,8 @@ on:
     # A pull request that only touches documentation no test reads -- prose
     # under docs/, the licence files, a Markdown file outside the list below
     # -- cannot change a test result, so it skips the two-and-a-half-minute
-    # run. Later patterns win: the negations drop the docs first, then the
+    # run; the Hugo site under website/ has its own workflow, pages.yml.
+    # Later patterns win: the negations drop the docs first, then the
     # re-includes put back what the suite actually reads:
     #   - crates/**: the bundled agent prompts, checked by the install tests;
     #   - the files crates/pixel/tests/cli/docs_drift.rs reads: it asserts
@@ -30,6 +31,8 @@ on:
       - "**"
       - "!**.md"
       - "!docs/**"
+      - "!website/**"
+      - "!.github/workflows/pages.yml"
       - "!LICENSE"
       - "!NOTICE"
       - "crates/**"
@@ -41,6 +44,7 @@ on:
       - "CHANGELOG.md"
       - "changelog.d/**"
       - "docs/manual-setup.md"
+      - "website/content/docs.md"
       - ".agents/rules/**"
       - ".agents/skills/rust-guidelines/**"
       - "scripts/README.md"

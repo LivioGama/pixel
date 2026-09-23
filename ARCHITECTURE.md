@@ -64,7 +64,7 @@ commands that never touch the daemon (install, flow, actionlog, release-check).
 Every subcommand of the built binary, one line each, in `pixel --help`
 order. `crates/pixel/tests/cli/docs_drift.rs` fails when a command listed
 by `--help` is missing here, or when any `` `pixel <name>` `` in README,
-ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md` or the bundled agent prompts
+ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/docs.md` or the bundled agent prompts
 (`crates/pixel-install/assets/pixel-agent-prompt.md`,
 `pixel-subagent-prompt.md`) names a command the binary does not have. The 45 names renamed after 0.2.4 still parse as hidden aliases until 1.0 (table in `pixel_proto::commands::RENAMED_COMMANDS`, README "Renamed commands"); `--help` and this table list only the current names.
 

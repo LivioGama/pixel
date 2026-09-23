@@ -1,0 +1,24 @@
+# README "Token savings": shunt's benchmark shape replayed on this repository.
+[[row]]
+scenario = "Single large file"
+full = 48465
+pixel = 2172
+saved = 95.5
+
+[[row]]
+scenario = "Multi-file cross-read"
+full = 68934
+pixel = 3768
+saved = 94.5
+
+[[row]]
+scenario = "Source and test pair"
+full = 48978
+pixel = 1890
+saved = 96.1
+
+[[row]]
+scenario = "Code-write context"
+full = 48978
+pixel = 1910
+saved = 96.1

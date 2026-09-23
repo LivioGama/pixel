@@ -1,0 +1,35 @@
+baseURL = "https://liviogama.github.io/pixel/"
+locale = "en-us"
+title = "Pixel"
+enableRobotsTXT = true
+disableKinds = ["taxonomy", "term", "RSS", "sitemap", "404"]
+
+[params]
+description = "A local control layer that helps coding agents spend less time on simple repository work."
+github_url = "https://github.com/LivioGama/pixel"
+repo = "LivioGama/pixel"
+
+[markup.goldmark.renderer]
+unsafe = true
+
+[markup.highlight]
+noClasses = false
+
+[markup.tableOfContents]
+startLevel = 2
+endLevel = 2
+
+[outputs]
+home = ["HTML"]
+
+# The six before/after recordings live in docs/examples/ for the README.
+# Mounting them keeps one copy of each 5 MB file instead of two. Declaring a
+# static mount drops Hugo's default one, so static/ is mounted again first.
+[[module.mounts]]
+source = "static"
+target = "static"
+
+[[module.mounts]]
+source = "../docs/examples"
+target = "static/examples"
+files = ["**.webp"]

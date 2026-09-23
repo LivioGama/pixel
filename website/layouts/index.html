@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.Language.Locale }}">
+<head>
+  {{ partial "head.html" . }}
+</head>
+<body>
+  <a href="#main" class="skip">Skip to content</a>
+  {{ partial "nav.html" . }}
+
+  <main id="main">
+    {{/* ---------- hero ---------- */}}
+    {{ $s := hugo.Data.scope }}
+    <section class="hero wrap">
+      <div class="hero__copy">
+        <h1 class="hero__title">Let your coding agent ask the repository instead of reading it.</h1>
+        <p class="hero__lede">Pixel is a local index of your code and its Git history. Agents get a ranked answer with its limits stated, not a pile of files to read, and every Git change goes through a crash-safe path.</p>
+        <div class="cmd cmd--hero">
+          <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
+          <button class="cmd__copy" type="button" data-copy="brew install LivioGama/tap/pixel">Copy</button>
+        </div>
+        <p class="hero__links">
+          <a class="link" href="#install">Other ways to install</a>
+          <a class="link" href="{{ "docs/" | relURL }}">Read the docs</a>
+        </p>
+      </div>
+
+      <figure class="scope" data-scope data-p0="{{ range $i, $f := $s.p0 }}{{ if $i }},{{ end }}{{ $f.at }}{{ end }}" data-p1="{{ delimit $s.p1 "," }}" data-files="{{ $s.files }}">
+        <div class="scope__cmd"><span aria-hidden="true">$</span> <code>pixel scope-task "{{ $s.task }}"</code></div>
+        <div class="scope__grid" aria-hidden="true"></div>
+        <ol class="scope__p0">
+          {{ range $s.p0 }}<li><code>{{ .path }}</code></li>{{ end }}
+        </ol>
+        <figcaption class="scope__caption">
+          <span class="scope__key scope__key--p0">{{ len $s.p0 }} files to start with</span>
+          <span class="scope__key scope__key--p1">{{ len $s.p1 }} likely needed</span>
+          <span class="scope__key scope__key--rest">{{ $s.files }} in the index, one square each</span>
+          <span class="scope__note">A real run on Pixel's own repository.</span>
+        </figcaption>
+      </figure>
+    </section>
+
+    {{/* ---------- six jobs ---------- */}}
+    <section class="section wrap" id="jobs" aria-labelledby="jobs-title">
+      <header class="section__head">
+        <h2 id="jobs-title">Six jobs every coding agent does</h2>
+        <p>Each recording runs the same task twice: first the agent on its own, then the agent with Pixel. The index is built once, and every session reuses it.</p>
+      </header>
+      <div class="jobs" data-jobs>
+        <div class="jobs__tabs" role="tablist" aria-label="Jobs">
+          {{ range $i, $j := hugo.Data.jobs.job }}
+          <button class="jobs__tab" type="button" role="tab" id="tab-{{ $j.id }}" aria-controls="panel-{{ $j.id }}" aria-selected="{{ if eq $i 0 }}true{{ else }}false{{ end }}"{{ if ne $i 0 }} tabindex="-1"{{ end }}>
+            <span class="jobs__name">{{ $j.name }}</span>
+            <code class="jobs__cmd">{{ $j.command }}</code>
+          </button>
+          {{ end }}
+        </div>
+        {{ range $i, $j := hugo.Data.jobs.job }}
+        <div class="jobs__panel" role="tabpanel" id="panel-{{ $j.id }}" aria-labelledby="tab-{{ $j.id }}"{{ if ne $i 0 }} hidden{{ end }}>
+          <p class="jobs__text">{{ $j.text }}</p>
+          <img class="jobs__img" width="800" height="500" alt="{{ $j.name }}: the same task without Pixel and with it"
+            {{ if eq $i 0 }}src="{{ printf "examples/%s" $j.image | relURL }}"{{ else }}data-src="{{ printf "examples/%s" $j.image | relURL }}"{{ end }}>
+        </div>
+        {{ end }}
+      </div>
+    </section>
+
+    {{/* ---------- the flow ---------- */}}
+    <section class="section wrap" id="flow" aria-labelledby="flow-title">
+      <header class="section__head">
+        <h2 id="flow-title">One path from a task to a pushed commit</h2>
+        <p>The agent prompt that <code>pixel install</code> deploys walks every change through the same steps. Only the edit is left to the agent's own tools.</p>
+      </header>
+      <ol class="flow">
+        <li class="flow__step"><code>scope-task</code><span>Which files to open first</span></li>
+        <li class="flow__step"><code>find-code</code><span>A phrase resolved to the exact symbol</span></li>
+        <li class="flow__step"><code>impact</code><span>Every caller that could break</span></li>
+        <li class="flow__step flow__step--agent"><code>edit</code><span>Your agent's own tools</span></li>
+        <li class="flow__step"><code>what-changed</code><span>The symbols the diff touches</span></li>
+        <li class="flow__step"><code>review-changes</code><span>Staged, unstaged and untracked, structured</span></li>
+        <li class="flow__step"><code>commit-and-push</code><span>Commit, then a leased push</span></li>
+      </ol>
+    </section>
+
+    {{/* ---------- savings ---------- */}}
+    <section class="section wrap" id="savings" aria-labelledby="savings-title">
+      <header class="section__head">
+        <h2 id="savings-title">Fewer tokens, with a second model nowhere in the loop</h2>
+        <p>Pixel answers "what is in this file" from its index, so no file contents reach the agent's context and no paid worker model reads them instead. Measured on this repository (138K lines of Rust), counting UTF-8 bytes divided by four.</p>
+      </header>
+      <div class="savings">
+        <table class="savings__table">
+          <thead>
+            <tr><th scope="col">Scenario</th><th scope="col">Full reads</th><th scope="col">With Pixel</th><th scope="col">Saved</th></tr>
+          </thead>
+          <tbody>
+            {{ range hugo.Data.savings.row }}
+            <tr>
+              <th scope="row">{{ .scenario }}</th>
+              <td>{{ lang.FormatNumberCustom 0 .full }} tok</td>
+              <td>{{ lang.FormatNumberCustom 0 .pixel }} tok</td>
+              <td><span class="bar" style="--v: {{ .saved }}%"><span>{{ .saved }}%</span></span></td>
+            </tr>
+            {{ end }}
+          </tbody>
+        </table>
+        <p class="savings__note">These numbers measure what the agent reads, not your invoice. <code>pixel token-savings</code> reports the fraction from your own sessions: 41 to 83% across 798 recorded operations on the maintainer's machine. Check it against your own usage.</p>
+      </div>
+    </section>
+
+    {{/* ---------- install ---------- */}}
+    <section class="section wrap" id="install" aria-labelledby="install-title">
+      <header class="section__head">
+        <h2 id="install-title">Install in three commands</h2>
+        <p>macOS and Linux. <code>pixel install</code> is global: run it once, from anywhere.</p>
+      </header>
+      <ol class="install">
+        <li class="install__step">
+          <h3>Get the binary</h3>
+          <div class="cmd">
+            <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
+            <button class="cmd__copy" type="button" data-copy="brew install LivioGama/tap/pixel">Copy</button>
+          </div>
+          <p>Without Homebrew:</p>
+          <div class="cmd">
+            <code><span class="cmd__prompt" aria-hidden="true">$</span> curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh</code>
+            <button class="cmd__copy" type="button" data-copy="curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh">Copy</button>
+          </div>
+        </li>
+        <li class="install__step">
+          <h3>Wire it into your agents</h3>
+          <div class="cmd">
+            <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel install</code>
+            <button class="cmd__copy" type="button" data-copy="pixel install">Copy</button>
+          </div>
+          <p>Deploys the agent prompt to Claude Code, Codex, Pi, OpenCode and Antigravity. Copilot CLI, Gemini CLI, Devin and Cursor take it as a <a class="link" href="{{ "docs/#plugins" | relURL }}">plugin or rules file</a>.</p>
+        </li>
+        <li class="install__step">
+          <h3>Check the wiring</h3>
+          <div class="cmd">
+            <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel doctor .</code>
+            <button class="cmd__copy" type="button" data-copy="pixel doctor .">Copy</button>
+          </div>
+          <p>Reports the global wiring and this repository's index as green, stale or missing. The first command that needs the index builds it.</p>
+        </li>
+      </ol>
+    </section>
+  </main>
+
+  {{ partial "footer.html" . }}
+
+  <script>
+    /* Hero: one square per indexed file; the run's P0 and P1 files light up
+       once, in rank order. Reduced motion gets the final state directly. */
+    (function () {
+      var fig = document.querySelector('[data-scope]');
+      if (!fig) return;
+      var grid = fig.querySelector('.scope__grid');
+      var total = +fig.dataset.files;
+      var p0 = fig.dataset.p0.split(',').map(Number);
+      var p1 = fig.dataset.p1.split(',').map(Number);
+      var frag = document.createDocumentFragment();
+      var cells = [];
+      for (var i = 0; i < total; i++) {
+        var c = document.createElement('span');
+        cells.push(c);
+        frag.appendChild(c);
+      }
+      grid.appendChild(frag);
+      var light = function () {
+        p1.forEach(function (n) { cells[n].className = 'is-p1'; });
+        p0.forEach(function (n) { cells[n].className = 'is-p0'; });
+        fig.classList.add('is-done');
+      };
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches) return light();
+      fig.classList.add('is-scanning');
+      var order = p0.map(function (n) { return [n, 'is-p0']; })
+        .concat(p1.map(function (n) { return [n, 'is-p1']; }));
+      setTimeout(function () {
+        fig.classList.remove('is-scanning');
+        order.forEach(function (o, k) {
+          setTimeout(function () { cells[o[0]].className = o[1]; }, k * 70);
+        });
+        setTimeout(function () { fig.classList.add('is-done'); }, order.length * 70);
+      }, 1100);
+    })();
+
+    /* Jobs: a tab list; a recording loads only when its tab is opened. */
+    (function () {
+      var root = document.querySelector('[data-jobs]');
+      if (!root) return;
+      var tabs = [].slice.call(root.querySelectorAll('[role="tab"]'));
+      var select = function (tab) {
+        tabs.forEach(function (t) {
+          var on = t === tab;
+          t.setAttribute('aria-selected', on);
+          t.tabIndex = on ? 0 : -1;
+          var panel = document.getElementById(t.getAttribute('aria-controls'));
+          panel.hidden = !on;
+          var img = panel.querySelector('img[data-src]');
+          if (on && img) { img.src = img.dataset.src; img.removeAttribute('data-src'); }
+        });
+      };
+      tabs.forEach(function (t, i) {
+        t.addEventListener('click', function () { select(t); });
+        t.addEventListener('keydown', function (e) {
+          var d = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[e.key];
+          if (!d) return;
+          e.preventDefault();
+          var next = tabs[(i + d + tabs.length) % tabs.length];
+          select(next);
+          next.focus();
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

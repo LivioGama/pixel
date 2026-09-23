@@ -1,0 +1,1 @@
+**docs:** Pixel has a website at <https://liviogama.github.io/pixel/>: a landing page that replays a real `pixel scope-task` run and the six before/after recordings, and a `/docs/` page for install, agent wiring, plugins and the command map. It is built from `website/` by a new Pages workflow, and the docs drift test now checks its commands.

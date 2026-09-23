@@ -1,0 +1,15 @@
+{{ $desc := .Description | default .Site.Params.description }}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ if .IsHome }}Pixel: repository answers for coding agents{{ else }}{{ .Title }} | Pixel{{ end }}</title>
+<meta name="description" content="{{ $desc }}">
+<meta property="og:title" content="{{ if .IsHome }}Pixel{{ else }}{{ .Title }} | Pixel{{ end }}">
+<meta property="og:description" content="{{ $desc }}">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" type="image/svg+xml" href="{{ "favicon.svg" | relURL }}">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Martian+Mono:wght@400;500;600&family=Pixelify+Sans:wght@500;700&family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..700&display=swap">
+{{ $css := resources.Get "css/main.css" }}
+{{ if hugo.IsProduction }}{{ $css = $css | minify | fingerprint }}{{ end }}
+<link rel="stylesheet" href="{{ $css.RelPermalink }}"{{ if hugo.IsProduction }} integrity="{{ $css.Data.Integrity }}"{{ end }}>

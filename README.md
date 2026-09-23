@@ -6,6 +6,8 @@ Pixel is not just a search box. It is the control layer for the whole path from 
 
 Pixel runs locally, connects repository structure with repository history, and returns evidence with boundaries. When it cannot prove that an answer is complete, it says so.
 
+**Website and docs:** <https://liviogama.github.io/pixel/>
+
 ## 🎯 The goal
 
 Make as much repository work deterministic as possible. If something can be answered or carried out from repository state, history, structure, or a proven flow, Pixel should do it directly—with evidence, clear boundaries, and safe recovery. Genuine ambiguity is where the agent should spend its time.

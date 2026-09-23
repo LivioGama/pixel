@@ -1,0 +1,4 @@
+# The site's only tool. Plain CSS, so the standard (non-extended) Hugo build
+# is enough; the Pages workflow installs this same pin through mise-action.
+[tools]
+"aqua:gohugoio/hugo" = "0.166.0"

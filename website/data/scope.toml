@@ -1,0 +1,27 @@
+# The hero grid replays one real `pixel scope-task` run on this repository
+# (index at 7e8dda5, 2026-09-23). `files` is the index size `pixel status`
+# reported; each `at` is the file's position in the sorted list of tracked
+# files, which is how the grid lays squares out. Refresh all of it together.
+task = "retry a leased push when the remote branch moved"
+files = 555
+p1 = [318, 311, 215, 243, 219, 70, 137, 476, 202, 119, 478, 480, 225, 224, 231]
+
+[[p0]]
+path = "crates/pixel-ops/src/push.rs"
+at = 214
+
+[[p0]]
+path = "crates/pixel-ops/src/branch.rs"
+at = 201
+
+[[p0]]
+path = "crates/pixel/src/decide_remote.rs"
+at = 315
+
+[[p0]]
+path = "crates/pixel/src/main.rs"
+at = 320
+
+[[p0]]
+path = "crates/pixel-ops/src/journal.rs"
+at = 209
