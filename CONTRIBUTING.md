@@ -129,8 +129,11 @@ gate; push and read its output rather than reproducing it locally (a
 diff's mutants and splits them into consecutive slices. Each `Mutants shard
 k/n` job runs one slice (`--shard k/n`, numbered from 0). `Mutants in diff`
 then totals the slices and fails when a mutant survived or a shard left its
-slice unjudged. Its summary names every survivor. To reproduce one finding
-locally, scope the run to the function:
+slice unjudged. Its summary names every survivor. A pull request merged
+without a verdict gets one afterwards from a manual run on its range, which
+mutates the tree of the range's right end:
+`gh workflow run mutants.yml -f diff_range=<base>...<head>`. To reproduce one
+finding locally, scope the run to the function:
 
 ```bash
 cargo mutants --in-diff <(git diff main...HEAD) -F '<function name>'
@@ -205,7 +208,7 @@ Read the summary line and `mutants.out/missed.txt`:
 | --- | --- | --- |
 | `caught` | a test failed under the mutation | none |
 | `MISSED` | tests still pass with the function broken | add a test that fails on that mutation, or skip it (below) |
-| `unviable` | the mutant does not compile | none, it is not counted |
+| `unviable` | the mutant does not compile | none, it is not counted — unless its build log says `No space left on device`: the gate reports it `disk-full`, never judged, and fails |
 | `TIMEOUT` | tests hung under the mutation | usually a loop-bound mutant; treat as missed |
 
 Exit codes: `0` all caught, `2` missed, `3` timeout, `4` baseline tests

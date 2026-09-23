@@ -13,6 +13,12 @@ name: Mutants
 # has always reported ("Mutants in diff"). Mutants used to run one after the
 # other in a single job: 77 `pixel-cli` mutants took about 35 minutes, and a
 # 658-mutant diff could not fit the 90-minute limit at all.
+#
+# `workflow_dispatch` runs the same three jobs on a past range instead of a
+# pull request: `gh workflow run mutants.yml -f diff_range=e8a4d14...372e1c4`
+# mutates the `crates/` part of that range in the tree of its right end, so
+# the diff still matches the source even after `main` moved on. It is how a
+# pull request merged without a verdict gets one afterwards (#222).
 on:
   pull_request:
     paths:
@@ -21,6 +27,12 @@ on:
       - "Cargo.*"
       - "crates/**"
       - "scripts/mutants-gate.py"
+  workflow_dispatch:
+    inputs:
+      diff_range:
+        description: "Three-dot range whose crates/ changes to mutate, e.g. e8a4d14...372e1c4"
+        required: true
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -40,6 +52,9 @@ jobs:
     outputs:
       mutants: ${{ steps.size.outputs.mutants }}
       shards: ${{ steps.size.outputs.shards }}
+      # The commit the shards mutate: the range's right end on a dispatch,
+      # empty on a pull request (the checkout's default, its merge commit).
+      ref: ${{ steps.diff.outputs.ref }}
     steps:
       # Full history so the merge base with the target branch is available.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -69,14 +84,39 @@ jobs:
       # shards and the gate reuse this exact file through the artifact below
       # rather than recomputing it against a target branch that may have
       # moved since.
+      #
+      # On a dispatch the range is the input, restricted to `crates/`, and
+      # its right end is checked out beside this tree: the listing must come
+      # from the code the diff describes, while the gate script and config
+      # stay this branch's.
       - name: Diff against the target branch
-        run: git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
+        id: diff
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          DIFF_RANGE: ${{ inputs.diff_range }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ]; then
+            git diff "origin/$BASE_REF...HEAD" > pr.diff
+            echo "src=." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! [[ "$DIFF_RANGE" =~ ^[0-9a-f]{7,40}\.\.\.[0-9a-f]{7,40}$ ]]; then
+            echo "::error title=Bad diff_range::expected <sha>...<sha>, got '$DIFF_RANGE'"
+            exit 1
+          fi
+          tip=$(git rev-parse --verify "${DIFF_RANGE#*...}^{commit}")
+          git diff "$DIFF_RANGE" -- crates/ > pr.diff
+          git worktree add --detach "$RUNNER_TEMP/tip" "$tip"
+          echo "ref=$tip" >> "$GITHUB_OUTPUT"
+          echo "src=$RUNNER_TEMP/tip" >> "$GITHUB_OUTPUT"
 
       # `cargo mutants` exits 0 both when every mutant was caught and when it
       # produced none at all, and the run's own output cannot tell those
       # apart after the fact. `--list` builds nothing, so this costs seconds.
       - name: List the mutants the diff produces
-        run: cargo mutants --list --in-diff pr.diff > mutants-list.txt
+        env:
+          SRC: ${{ steps.diff.outputs.src }}
+        run: cargo mutants --list --dir "$SRC" --in-diff "$PWD/pr.diff" > mutants-list.txt
 
       # One shard per 20 mutants, at most 10 (the reasoning sits beside
       # MUTANTS_PER_SHARD and MAX_SHARDS in the script). No mutants means an
@@ -84,9 +124,11 @@ jobs:
       # to test nothing.
       - name: Size the shard matrix
         id: size
+        env:
+          SRC: ${{ steps.diff.outputs.src }}
         run: >
           python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt
-          --github-output "$GITHUB_OUTPUT"
+          --config "$SRC/.cargo/mutants.toml" --github-output "$GITHUB_OUTPUT"
 
       - name: Upload the diff and the listing
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -115,9 +157,21 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     steps:
+      # A shard's `target/` grows with every mutant it rebuilds. PR #222's
+      # single job filled the runner's disk at its 101st mutant, and the 546
+      # builds after that failed at the link step and came back `unviable`.
+      # The preinstalled .NET, Android and GHC toolchains are never used here
+      # and hold most of the image's free space.
+      - name: Free the runner's disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          ref: ${{ needs.plan.outputs.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -168,6 +222,11 @@ jobs:
       # and the build is where a 60-mutant run spends most of its time).
       # Dependencies are never built incrementally, so the restored cache
       # stays valid.
+      # What the shard starts from and what it ends with, in the log: the
+      # first thing to read when mutants turn `unviable` in a block.
+      - name: Disk before the mutants
+        run: df -h / && sudo du -sh target ~/.cache/pixel "$RUNNER_TEMP" /tmp 2>&1 || true
+
       - name: Run this shard's mutants
         # The explicit shell adds pipefail: `tee` must not mask the exit code.
         shell: bash
@@ -176,6 +235,10 @@ jobs:
         run: >
           cargo mutants -vV -C --locked --no-shuffle --in-place --in-diff pr.diff
           --shard ${{ matrix.shard }} -- --all-targets 2>&1 | tee results.txt
+
+      - name: Disk after the mutants
+        if: always()
+        run: df -h / && sudo du -sh target ~/.cache/pixel "$RUNNER_TEMP" /tmp 2>&1 || true
 
       - name: Post job summary
         if: always()
