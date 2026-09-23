@@ -21,7 +21,15 @@ pixel recall index --stats          # incremental, a few seconds
 pixel recall status                 # last ingest must be minutes old, per agent
 pixel --version                     # the binary the suggestions are judged against
 pixel commit-history                # what main gained inside the window
+pixel --metrics off doctor . --only install.agent-prompt --only install.pi-prompt
 ```
+
+The last line says which prompt the agents in the transcripts were
+reading (`--only` is newer than 0.4.0: on an older binary, run `pixel
+doctor .` and read those two checks). A stale one — red, or the `note:
+agent-prompt.md deployed by \`pixel install\` differs…` line every command
+prints since #243 — means the misuses in the window may follow an older
+release's command map: judge them against that prompt, not the current one.
 
 Stop and say so if an agent's last ingest predates the window: a quiet
 window on a stale corpus is not a quiet window. Semantic search may be off
@@ -56,18 +64,36 @@ find ~/code /tmp/pxwt -maxdepth 4 -path '*/.pixel/actions.jsonl' -mtime -1 2>/de
 ```
 
 then per root `pixel action-log --errors-only --json --limit 500 <root>`,
-keeping entries whose `ts_ms` falls in the window. Also pull the slow
-successes: `pixel action-log --json --limit 2000 <root>` filtered on
-`duration_ms` above 5 000 for read ops (`search-*`, `find-*`, `impact`,
-`scope-task`, `pack-context`, `recall`) — a read op that takes seconds is a
-friction even when it succeeds. Attribute each slow one from its `serve`
-list before naming a cause: `route` says who answered (`daemon`,
-`daemon_started`, `in_process` with a `reason`), and the phase timings say
-where the seconds went — `probe_ms` (a busy daemon's queue), `start_ms`
-(waiting for a new daemon), `request_ms` (the daemon's answer), `open_ms`
-and `handle_ms` (opening the index or catching recall up, then answering,
-in process). A line without `serve` predates the field: its cause is
-unknown, and a warm replay does not reproduce a cold start.
+keeping entries whose `ts_ms` falls in the window. A read op that takes
+seconds is a friction even when it succeeds; group the slow ones by how
+they were served:
+
+```bash
+python3 .agents/skills/pixel-retro/slow.py $W <root>/.pixel/actions.jsonl ...   # --min-ms 5000 by default
+```
+
+It keeps read ops (`search-*`, `find-*`, `impact`, `who-calls`,
+`call-path`, `scope-task`, `pack-context`, `status`, `repo-state`, and
+`recall` only for `search`/`ask`/`context`/`show`/`sessions`/`status`: a slow
+`recall index` is an ingest, not an answer) over the threshold, leaves the
+test suite out (cwd under `crates/` or the temp dir, `/tmp/pxwt/` kept), and groups them
+on (command, route, reason, dominant phase) with count, total, worst, and
+the three worst `invocation_id`s. Each line's `serve` list (#241, #242)
+records who answered each request and where its milliseconds went; name a
+cause from it, never from the command alone:
+
+| `serve` shows | Where the time went | Look at |
+| --- | --- | --- |
+| `daemon`, `probe_ms` dominant | the queue ahead: the daemon serves one request at a time and flushes its watcher batch first | a concurrent call in the same seconds (another agent, a hook), a large pending batch after a checkout (`daemon.rs` `flush_pending`) |
+| `daemon`, `request_ms` dominant | the op itself, lazy graph or index work included | profile the op on that repo |
+| `daemon_started`, `start_ms` dominant | a cold start: no daemon (30 min idle exit, reboot, upgrade) | how long `Service::open` takes there; retiring a stale daemon after an upgrade counts here too |
+| `in_process` `start_timed_out`, `start_ms` ≈ 5 000 then `open_ms` | the start outlasted the 5 s wait and the CLI opened the index a second time, in process, next to the starting daemon | daemon startup order (`daemon::run` opens the `Service` before taking the lock); PE-01 in `docs/audit/pixel-retro-2026-09-23` |
+| `in_process` `auto_start_disabled` / `no_daemon`, `open_ms` | every call opens the index itself, by configuration | `PIXEL_DAEMON_AUTO_START=0` or `--no-daemon` in that agent's setup: a config finding, not a pixel bug |
+| `in_process` `newer_daemon` | two pixel binaries on one root, the older one declining the newer daemon | install drift (Step 3) |
+| recall `daemon_absent` / `not_routed`, `open_ms` | the transcript catch-up and the model load, in process (`context` has no daemon route) | the recall daemon was not running (`pixel recall daemon status`) |
+| recall `daemon`, `open_ms` dominant | `search` catches up in process before it asks the daemon | the catch-up itself, not the daemon |
+| recall `daemon_error` | the daemon answered with an error and the query was redone in process | the error on the stderr of that call |
+| `unattributed` | the line predates `serve` | nothing to conclude: say so, and do not read a warm replay under 2 s as "not reproduced" |
 
 Drop the noise before counting (verified 2026-09):
 
@@ -76,6 +102,9 @@ Drop the noise before counting (verified 2026-09):
   those runs land in the real repo's `actions.jsonl` (37 of 40 errors in one
   sample were `check-release`/`classify` test cases). Exclude them from the
   counts; report the leak itself once as a finding while it lasts.
+- **A dev build's own notes.** A `pixel-dev` built from `main` prints the
+  stale-prompt note on every call while the deployed prompts come from the
+  installed release: expected on a pixel developer's machine, not drift.
 - **Refusals that are the contract.** `fast-forward` refusing a non-ff,
   `commit` refusing a dirty or empty stage, a `--request-id` replay: an
   error is a friction only if the agent had to work around it (Step 2 says
@@ -93,6 +122,8 @@ Drop the noise before counting (verified 2026-09):
 | empty or truncated answer | `pixel recall search '\b(unresolved|capped)\b' --role tool --since $W` |
 | human complaint | `pixel recall search 'pixel' --role user --human-only --since $W` (`--human-only` alone keeps assistant and tool turns, it only drops injected user text), read for "marche pas", "lent", "pourquoi", "bug", "encore", "wrong" |
 | harness or install drift | `pixel recall search '(doctor|install\.|daemon (lock|not running)|stale)' --role tool --since $W` |
+| prompts older than the binary | `pixel recall search 'deployed by .pixel install. differs? from' --role tool --since $W` (#243): how many sessions ran on a stale prompt, and whether the agent or the user acted on it |
+| old command names | `pixel recall search "note: '[a-z-]+' is now '" --role tool --since $W`: an agent still calling pre-rename names, i.e. a prompt, skill or script that was never updated; outside the pixel repo only, where the string also sits in `rename_note`'s tests |
 
 Sessions that ran in the pixel repo itself are mostly about pixel's code:
 there, "capped" or "error" usually sits in a diff or a test, not in a
@@ -123,6 +154,13 @@ Session memory and a single log line both lie. For every candidate:
    `daemon start`/`stop`, `recall setup`): read its code path instead. No longer reproduces → check `pixel commit-history` /
    `pixel search-history '<token>'` for the fix and mark it `fixed` with the
    commit, not as a suggestion.
+   Judge it against the binary that produced the log, not only `main`: a
+   fix merged after the installed release (`pixel --version` on that
+   machine, `git tag --contains <sha>`) is reported as « corrigé sur `main`
+   (#N), pas encore publié », with what the user runs until the release.
+   The 2026-09-23 retro of a 0.4.0 machine proposed three changes that
+   `main` already carried: the pi guard location (#224), the checkout
+   slowdown (#238), `doctor`'s fixes (#240).
 2. **Name the cause in the code.** `pixel find-symbol` / `pixel
    search-content` on the error string, then `pixel pack-context` on the
    function that emits it. A suggestion names the file and function to
@@ -144,7 +182,7 @@ Session memory and a single log line both lie. For every candidate:
 | Agent misuse of a flag or command | the prompt pixel installs: `crates/pixel-install/assets/pixel-agent-prompt.md` (and `pixel-subagent-prompt.md`), or the clap help text |
 | Agent bypassed pixel because the answer was worse | the command's output (truth markers, caps, ranking) — not the prompt; a stronger "MUST" does not fix a weak answer |
 | Slow read op | profile first, suggest only with a measured number |
-| Install, doctor or daemon drift | `pixel-install` / `pixel doctor` check that would have caught it |
+| Install, doctor or daemon drift | first check whether a rerun of the install would clear it, without running it on the user's machine (Step 2 forbids replaying host-wide commands, and `--repo` writes into their repository): run it against a copy, `HOME=<scratch> CODEX_HOME=<scratch>/.codex XDG_CONFIG_HOME=<scratch>/.config pixel install --shell <shell>` then `pixel doctor` with the same three variables (all on the command line: `CODEX_HOME` and `XDG_CONFIG_HOME` otherwise point the install back at the real files), or for a `repo.*` check `pixel install --repo <fixture>` on a `git init` fixture seeded with the drifted file; failing that, read the install code path. If a rerun clears it, the install is fine and the friction is that nobody reran it: an upgrade path that skips it, a note nobody read. Propose a change to `pixel-install` only when the install itself leaves the check red, or a `pixel doctor` check when nothing reported the drift at all |
 | Repo rule or skill gap | `.agents/rules/*.md` or `.agents/skills/*/SKILL.md` |
 | Not pixel's (user repo, git, another tool) | one line in the report, then drop it |
 
@@ -160,7 +198,8 @@ Terminal output, in French, one block per suggestion:
 ### N. <titre court> — <kind>, score S
 Symptôme : ce que l'agent a vu (la commande, le message d'erreur exact)
 Preuves : <n> occurrences, <s> sessions, <r> repos · agent:id #turn, invocation_id
-Reproduit sur <version> : oui / non (corrigé par <sha>)
+Reproduit sur <version> : oui / non (corrigé par <sha>) / corrigé sur main (#N), pas encore publié
+Route (lente) : <route> <reason> · <phase dominante> <ms> — ligne `slow.py`
 Cause : <fichier>:<fonction> — une phrase
 Proposition : le changement, où, et le test qui le prouverait
 Effort : S / M / L
