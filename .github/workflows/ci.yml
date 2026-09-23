@@ -21,7 +21,11 @@ on:
     #     against the release script's contract, in the repository itself and
     #     not only in its fixtures;
     #   - the generated plugin surfaces, which install_tests.rs compares
-    #     against the prompts (scripts/gen-plugin-assets.sh --check).
+    #     against the prompts (scripts/gen-plugin-assets.sh --check),
+    #     .agents/skills/pixel/ among them;
+    #   - .agents/skills/release/: prepare.sh, which scripts/test-prepare.py
+    #     and pixel-release's tests run or read.
+    # Every other skill is excluded: no test reads it.
     # Add a path here when a test starts reading one. Pushes to main stay
     # unfiltered so every merge there keeps a complete run. No branch
     # rule requires this check today; if one is added, the excluded paths
@@ -32,6 +36,9 @@ on:
       - "!docs/**"
       - "!LICENSE"
       - "!NOTICE"
+      # A skill no test reads (pixel-retro's scripts, say) is documentation
+      # too; the skills the suite does read are put back below.
+      - "!.agents/skills/**"
       - "crates/**"
       # docs_drift.rs:
       - "README.md"
@@ -43,12 +50,15 @@ on:
       - "docs/manual-setup.md"
       - ".agents/rules/**"
       - ".agents/skills/rust-guidelines/**"
+      # scripts/test-prepare.py and pixel-release's tests read prepare.sh:
+      - ".agents/skills/release/**"
       - "scripts/README.md"
       - "js/sniper/README.md"
       # gen-plugin-assets.sh --check:
       - "PIXEL.md"
       - "PIXEL-SUBAGENT.md"
       - "skills/**"
+      - ".agents/skills/pixel/**"
       - ".openclaw/**"
       - ".clinerules/**"
       - ".kiro/**"
