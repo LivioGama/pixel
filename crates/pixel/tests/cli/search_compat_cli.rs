@@ -457,3 +457,50 @@ fn claude_coordinator_delegates_rtk_exactly_once_only_on_fallback() {
     assert_eq!(delegated["tool_input"]["command"], "printf hello");
     assert_eq!(delegated["tool_input"]["timeout_ms"], 1234);
 }
+
+/// Runs `command` with `input` on a pipe for stdin, the way an agent's shell
+/// tool runs it: never a terminal.
+fn run_with_piped_stdin(mut command: Command, input: &[u8]) -> Output {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// The one documented divergence (module docs of `search_compat`): with no
+/// path and a stdin that is a pipe, native `rg` searches stdin (and, in an
+/// agent's shell tool, blocks until the call times out), while the rewritten
+/// command searches the current directory, as native `rg` does when stdin
+/// has nothing to read. The emulation never reads stdin.
+#[test]
+fn implicit_rg_search_should_search_the_cwd_even_with_a_piped_stdin() {
+    let fixture = Fixture::new(b"needle in the file\n");
+    let stdin = b"needle on stdin\n";
+
+    let mut routed = fixture.command(PIXEL);
+    routed.args(["search-like-rg", "rg", "--", "needle"]);
+    let routed = run_with_piped_stdin(routed, stdin);
+    assert_eq!(
+        String::from_utf8_lossy(&routed.stdout),
+        "a file.rs:needle in the file\n",
+        "{}",
+        String::from_utf8_lossy(&routed.stderr)
+    );
+    assert_eq!(routed.status.code(), Some(0));
+
+    // The premise, where `rg` is installed (GitHub's runners have none):
+    // native `rg` reads the pipe instead, and searches the cwd only when
+    // stdin is not readable, which `Command::output` gives it.
+    if Command::new("rg").arg("--version").output().is_ok() {
+        let mut native = fixture.command("rg");
+        native.arg("needle");
+        let native = run_with_piped_stdin(native, stdin);
+        assert_eq!(String::from_utf8_lossy(&native.stdout), "needle on stdin\n");
+        let native = fixture.command("rg").arg("needle").output().unwrap();
+        assert_eq!(native.stdout, routed.stdout);
+    }
+}

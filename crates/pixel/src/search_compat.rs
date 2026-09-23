@@ -1,6 +1,18 @@
 //! Exact, deliberately narrow native-search compatibility for hook routing.
 //! Unsupported inputs execute the original search; ordinary `pixel search`
 //! keeps its richer, bounded interface. Never emit a partial native result.
+//!
+//! The contract is the native tool's bytes and exit status, with one
+//! deliberate divergence: `rg <pattern>` with no path. Native `rg` searches
+//! stdin when stdin is a pipe or a file, and the current directory
+//! otherwise. An agent's shell tool runs commands with a pipe on stdin that
+//! nothing writes to, so native `rg` blocks there until the call times out.
+//! The emulation never reads stdin: it always answers the current-directory
+//! search, which is what `rg` does when stdin has nothing to read. A hook
+//! sees only the command text, not the stdin it will run with, and
+//! [`shell_argv`] refuses pipes and redirections, so `echo x | rg needle`
+//! is never rewritten. When the emulation falls back, [`run`] executes the
+//! original `rg` with the inherited stdin, native behaviour included.
 
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
