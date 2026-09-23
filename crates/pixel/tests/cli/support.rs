@@ -34,12 +34,21 @@ pub fn pixel_command() -> Command {
     command
 }
 
-/// A directory outside every repository, shared by the whole suite: where a
-/// command given no path, or a path that does not exist, records itself.
-pub fn neutral_cwd() -> PathBuf {
-    let dir = std::env::temp_dir().join("pixel-cli-neutral-cwd");
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A directory outside every repository, one per test process and created
+/// once: where a command given no path, or a path that does not exist,
+/// records itself. The process id keeps it from colliding with a file or a
+/// directory another process left at a fixed name. It is not removed: a test
+/// binary has no teardown hook, and under nextest each test is its own
+/// process, so the next one could not know when the last user has exited.
+pub fn neutral_cwd() -> &'static Path {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("pixel-cli-neutral-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|e| panic!("create neutral cwd {}: {e}", dir.display()));
+        dir
+    })
 }
 
 /// `ps` lines of every `pixel daemon start <root> --foreground` process whose
@@ -335,7 +344,7 @@ fn action_log_of_an_unresolvable_path_lands_in_the_neutral_cwd_not_the_checkout(
     };
     let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     assert_eq!(
-        logged(&neutral_cwd()),
+        logged(neutral_cwd()),
         1,
         "the probe is recorded once, in the neutral directory"
     );
