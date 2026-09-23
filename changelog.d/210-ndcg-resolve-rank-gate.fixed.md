@@ -1,1 +1,0 @@
-**bench:** the NDCG `resolve` lane no longer fails a probe whose labelled file is not ranked first. It asks that the file be retrieved and sit within rank 3 of the corpus, reports a retrieval failure apart from a ranking regression, and prints every probe's rank; success@1 remains the published number ([#210](https://github.com/LivioGama/pixel/pull/210)).

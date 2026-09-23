@@ -1,1 +1,0 @@
-**daemon:** the evidence bridge (`pixel evidence --jsonl`) checks its 64 KiB request cap while reading a line, not after: a client that sends a line without a newline is refused after 64 KiB instead of making the bridge read and hold the whole line. ([#230](https://github.com/LivioGama/pixel/pull/230))

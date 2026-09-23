@@ -1,1 +1,0 @@
-**cli:** `self-update`/`upgrade` now detect a stopped daemon by its unlinked socket instead of a `Ping`, which could connect during teardown and time out with no reply. ([#208](https://github.com/LivioGama/pixel/pull/208))

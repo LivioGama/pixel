@@ -1,1 +1,0 @@
-**release:** a release section can now open on its own narrative. An optional `changelog.d/_highlights.md` — a lead paragraph and a `### Highlights` list — is folded above the change sections at cut time, and so leads the GitHub release body too, which keeps that narrative out of the individual entries. ([#197](https://github.com/LivioGama/pixel/pull/197))
