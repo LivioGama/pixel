@@ -34,8 +34,8 @@ pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// daemon of an older build rejects as an unknown variant.
 pub const PROTOCOL_VERSION: u64 = 11;
 
-/// The potion model the daemon warms; the `potion.ok` marker carries the
-/// repo name so a stale v1 marker cannot pass for v2.
+/// The potion model the daemon warms. Its download leaves its own marker
+/// ([`pixel_recall::potion_marker`]), which another model's cannot overwrite.
 const POTION_V2_REPO: &str = "minishlab/potion-code-64M-v2";
 
 // `targets` (S3 probes, graph expansion and evidence): the caps keep the op
@@ -683,11 +683,9 @@ impl Service {
             return;
         }
 
-        // Check if the v2 model is cached. The marker file contains the
-        // repo name, so a stale v1 marker won't cause a false positive.
-        let marker = pixel_recall::models_dir().join("potion.ok");
-        let is_cached =
-            std::fs::read_to_string(&marker).is_ok_and(|content| content.trim() == POTION_V2_REPO);
+        // Cached means this model's own marker, or the legacy shared one
+        // while it still names this model.
+        let is_cached = pixel_recall::potion_cached(&pixel_recall::models_dir(), POTION_V2_REPO);
 
         if is_cached {
             // Cached — load now (fast, no network).

@@ -266,6 +266,54 @@ pub mod potion {
         }
     }
 
+    /// Refuse a load that may not download when `repo` was never set up.
+    /// Set up means its download finished, or a legacy marker exists at all:
+    /// that marker proved some model was set up and named only the last one,
+    /// so it keeps admitting every model as it did before per-repository
+    /// markers.
+    pub(crate) fn require_set_up(
+        cache_dir: &Path,
+        repo: &str,
+        download: bool,
+    ) -> Result<(), String> {
+        if download
+            || crate::potion_cached(cache_dir, repo)
+            || cache_dir.join(crate::LEGACY_POTION_MARKER).is_file()
+        {
+            Ok(())
+        } else {
+            Err("embedding model not present — run `pixel recall setup` first".to_string())
+        }
+    }
+
+    /// The step after a model loaded with `dims`-wide embeddings: refuse a
+    /// model that embeds nothing, then, for a download, write `repo`'s own
+    /// marker, the one [`crate::potion_cached`] reads. A load that failed
+    /// never reaches it, so it leaves no marker.
+    pub(crate) fn finish_load(
+        cache_dir: &Path,
+        repo: &str,
+        download: bool,
+        dims: usize,
+    ) -> Result<usize, String> {
+        if dims == 0 {
+            return Err("potion model produced empty embeddings".to_string());
+        }
+        if download {
+            // The model is loaded and usable either way: a marker that cannot
+            // be written only costs a later cache check, so it is reported,
+            // not turned into a load failure.
+            let marker = crate::potion_marker(cache_dir, repo);
+            if let Err(error) = std::fs::write(&marker, repo) {
+                eprintln!(
+                    "pixel: potion model loaded, but its download marker {} could not be written: {error}",
+                    marker.display()
+                );
+            }
+        }
+        Ok(dims)
+    }
+
     impl PotionEmbedder {
         pub fn open(cache_dir: &Path, download: bool) -> Result<Self, String> {
             Self::open_repo(cache_dir, download, &resolved_repo())
@@ -277,12 +325,7 @@ pub mod potion {
             download: bool,
             repo: &str,
         ) -> Result<Self, String> {
-            let marker = cache_dir.join("potion.ok");
-            if !download && !marker.exists() {
-                return Err(
-                    "embedding model not present — run `pixel recall setup` first".to_string(),
-                );
-            }
+            require_set_up(cache_dir, repo, download)?;
             let _ = std::fs::create_dir_all(cache_dir);
             // Route the HF hub cache under pixel's model dir.
             // SAFETY: set_var is process-global; both CLI and daemon call this
@@ -292,13 +335,12 @@ pub mod potion {
             }
             let model = model2vec_rs::model::StaticModel::from_pretrained(repo, None, None, None)
                 .map_err(|e| format!("potion model load: {e}"))?;
-            let dims = model.encode_single("probe").len();
-            if dims == 0 {
-                return Err("potion model produced empty embeddings".to_string());
-            }
-            if download {
-                let _ = std::fs::write(&marker, repo);
-            }
+            let dims = finish_load(
+                cache_dir,
+                repo,
+                download,
+                model.encode_single("probe").len(),
+            )?;
             Ok(Self {
                 model,
                 dims,
@@ -482,6 +524,57 @@ mod tests {
             assert!(w[1].0 < w[0].1, "windows must overlap");
         }
         assert_eq!(chunk_offsets("short"), vec![(0, 5)]);
+    }
+}
+
+#[cfg(all(test, feature = "model2vec"))]
+mod potion_gate_tests {
+    use super::potion::{finish_load, require_set_up};
+
+    const CODE_16M: &str = "minishlab/potion-code-16M-v2";
+    const CODE_64M: &str = "minishlab/potion-code-64M-v2";
+
+    #[test]
+    fn require_set_up_should_refuse_only_a_model_never_set_up_without_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = require_set_up(dir.path(), CODE_16M, false).unwrap_err();
+        assert!(err.contains("run `pixel recall setup`"), "{err}");
+        assert_eq!(require_set_up(dir.path(), CODE_16M, true), Ok(()));
+
+        std::fs::write(crate::potion_marker(dir.path(), CODE_16M), CODE_16M).unwrap();
+        assert_eq!(require_set_up(dir.path(), CODE_16M, false), Ok(()));
+        assert!(require_set_up(dir.path(), CODE_64M, false).is_err());
+    }
+
+    /// A download that loaded writes this repository's marker, which is what
+    /// makes the daemon see its model as cached; a load without download,
+    /// or one that produced no embedding, writes none.
+    #[test]
+    fn finish_load_should_mark_only_a_successful_download() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(finish_load(dir.path(), CODE_64M, true, 256), Ok(256));
+        assert_eq!(
+            std::fs::read_to_string(crate::potion_marker(dir.path(), CODE_64M)).unwrap(),
+            CODE_64M,
+            "the repository's own marker, not the shared legacy one"
+        );
+        assert!(!dir.path().join(crate::LEGACY_POTION_MARKER).exists());
+        assert!(!crate::potion_cached(dir.path(), CODE_16M));
+
+        assert_eq!(finish_load(dir.path(), CODE_16M, false, 256), Ok(256));
+        assert!(!crate::potion_cached(dir.path(), CODE_16M));
+
+        assert!(finish_load(dir.path(), CODE_16M, true, 0).is_err());
+        assert!(!crate::potion_cached(dir.path(), CODE_16M));
+    }
+
+    /// Before per-repository markers, one `potion.ok` admitted every model;
+    /// an upgrade must not refuse a model that loaded the day before.
+    #[test]
+    fn a_legacy_marker_should_still_admit_any_model() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(crate::LEGACY_POTION_MARKER), CODE_16M).unwrap();
+        assert_eq!(require_set_up(dir.path(), CODE_64M, false), Ok(()));
     }
 }
 

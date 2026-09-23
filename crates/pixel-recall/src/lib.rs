@@ -20,7 +20,7 @@ pub mod sources;
 pub mod store;
 pub mod vector;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Corpus root: `$PIXEL_RECALL_DIR`, else `~/.local/share/pixel/recall`.
 /// Falls back to the legacy `~/.local/share/gitpixel/recall` path if it
@@ -78,6 +78,78 @@ pub fn models_dir() -> PathBuf {
         return legacy_path;
     }
     new_path
+}
+
+/// The marker releases up to 0.4.0 left in [`models_dir`] after any potion
+/// download. It names the last repository downloaded, so the models sharing
+/// the directory overwrote each other's.
+pub const LEGACY_POTION_MARKER: &str = "potion.ok";
+
+/// The marker a finished download of the potion model `repo` leaves under
+/// `models`: one per repository, since several share the directory (the
+/// daemon's `potion-code-64M-v2`, `search-meaning`'s `potion-code-16M-v2`,
+/// transcript recall's multilingual model).
+pub fn potion_marker(models: &Path, repo: &str) -> PathBuf {
+    models.join(format!("potion-{}.ok", repo.replace('/', "--")))
+}
+
+/// Whether the potion model `repo` finished a download under `models`: its
+/// own marker, or the legacy shared one while it still names `repo`, so an
+/// upgrade does not download it again.
+pub fn potion_cached(models: &Path, repo: &str) -> bool {
+    potion_marker(models, repo).is_file()
+        || std::fs::read_to_string(models.join(LEGACY_POTION_MARKER))
+            .is_ok_and(|content| content.trim() == repo)
+}
+
+#[cfg(test)]
+mod potion_marker_tests {
+    use super::*;
+
+    const CODE_64M: &str = "minishlab/potion-code-64M-v2";
+    const CODE_16M: &str = "minishlab/potion-code-16M-v2";
+
+    #[test]
+    fn potion_marker_should_be_one_file_per_repository() {
+        let models = Path::new("/m");
+        assert_eq!(
+            potion_marker(models, CODE_64M),
+            Path::new("/m/potion-minishlab--potion-code-64M-v2.ok")
+        );
+        assert_ne!(
+            potion_marker(models, CODE_64M),
+            potion_marker(models, CODE_16M)
+        );
+    }
+
+    /// The daemon's model stays cached when another model is downloaded
+    /// after it: the flip-flop that sent the daemon back to a background
+    /// download on every `search-meaning`.
+    #[test]
+    fn a_second_model_should_not_uncache_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        for repo in [CODE_64M, CODE_16M] {
+            std::fs::write(potion_marker(dir.path(), repo), repo).unwrap();
+        }
+        assert!(potion_cached(dir.path(), CODE_64M));
+        assert!(potion_cached(dir.path(), CODE_16M));
+        assert!(!potion_cached(
+            dir.path(),
+            "minishlab/potion-multilingual-128M"
+        ));
+    }
+
+    #[test]
+    fn the_legacy_marker_should_count_only_for_the_repository_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(LEGACY_POTION_MARKER),
+            format!("{CODE_64M}\n"),
+        )
+        .unwrap();
+        assert!(potion_cached(dir.path(), CODE_64M));
+        assert!(!potion_cached(dir.path(), CODE_16M));
+    }
 }
 
 /// Store fixtures shared by the unit tests: sessions inserted straight
