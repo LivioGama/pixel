@@ -23,13 +23,18 @@ with one spec from `src/PixelComparison.tsx`, at 1600×1000, 30 fps, 8 s.
 ## The agent demo
 
 `AgentDemo` replays two recorded Claude Code runs side by side on one clock:
-the same task, the same model, the same bare setup, one side with the agent
-prompt `pixel install` deploys. Nothing in it is written by hand: every
+the same task, the same model and effort, the same bare setup, one side with
+the hooks `pixel install` writes. Nothing in it is written by hand: every
 command, time and token count comes from a recording.
 
-1. `scripts/record-demo.sh <dir> [reps] [model]` runs both arms `reps` times,
+1. `scripts/record-demo.sh <dir> [reps] [model]` (Opus at medium effort by
+   default, what most people run) checks out a pinned ref (`REF`, default
+   `v0.5.0`) in a throwaway worktree without `docs/motion`, so no agent can
+   read the demo's own traces, indexes it, then runs both arms `reps` times,
    each pair started together, and stores every stream-json event with its
-   arrival time. The script's header lists what the two arms share.
+   arrival time. The script's header lists what the two arms share. Both are
+   told to answer in English: the account's organization instructions would
+   otherwise leak into both.
 2. `bun scripts/trace.ts <dir>` keeps each arm's median-time run (never the
    best) as `src/demo/{vanilla,pixel}.json`, writes every run to
    `src/demo/runs.json` and copies the recording's `meta.txt` (commit,
@@ -37,8 +42,17 @@ command, time and token count comes from a recording.
 3. The summary at the end shows the median of each metric over all runs, and
    its headline follows those medians rather than assuming a win.
 
-Re-record after a change to the agent prompt or to the commands it names,
-and update `recorded` in `src/Root.tsx`.
+The demo published today predates this protocol: Claude Sonnet 5, Pixel
+0.5.0 with its agent prompt appended instead of its hooks, in the source
+tree itself (`src/demo/meta.txt`). Three of its 22 runs read the demo's own
+files, which is why the script now works in a separate worktree. An Opus
+medium re-recording with the hooks gave no gain on this task (median 42.9 s
+without Pixel, 47.6 s with it), and is kept outside the repository with the
+earlier raw runs, pending a task where search dominates.
+
+Re-record after a release that changes the agent prompt or the commands it
+names, with that release installed and `REF` set to its tag, and update
+`recorded` and `modelName` in `src/Root.tsx`.
 
 ## Render
 
@@ -49,8 +63,8 @@ scripts/render.sh                        # every composition
 scripts/render.sh PixelScope AgentDemo   # some of them
 ```
 
-`scripts/render.sh` needs `ffmpeg` and `img2webp` (`brew install ffmpeg webp`)
-and writes three files per composition into `docs/examples/`:
+`scripts/render.sh` runs `bun install` first, needs `ffmpeg` and `img2webp`
+(`brew install ffmpeg webp`), and writes three files per composition into `docs/examples/`:
 
 - `<name>.mp4`: 1600×1000 H.264, played by the website;
 - `<name>.jpg`: its last frame, the website's poster;

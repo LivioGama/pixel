@@ -9,6 +9,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# A fresh clone or a `just clean` leaves no node_modules; the lockfile pins
+# the Remotion version every render uses.
+bun install --frozen-lockfile --silent
 examples=../examples
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
