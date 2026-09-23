@@ -18,6 +18,11 @@ Loaded when a Rust source file is in play. Companion of `mutation-gate.md`.
   comment, or takes the crate-wide mutex when the variable has one owner
   (`store::ENV_MUTEX` for `PIXEL_FLOW_DIR`). Never read `PATH`, `HOME` or
   a config path inside the function under test when a parameter can carry it.
+- **Spawn the CLI through `support::pixel_command()`**, or set
+  `current_dir` to a fixture: cargo runs a test from `crates/<crate>`, and a
+  `pixel` started there with no path (or a missing one) appends its action
+  log to this checkout's `.pixel/actions.jsonl`. CI fails the run when
+  that file exists after the tests.
 - **Compare canonical paths.** macOS's temp dir is a symlink
   (`/var` to `/private/var`); anything that stores `root.canonicalize()`
   will not match `temp_dir().join(..)`. Canonicalize the expectation.

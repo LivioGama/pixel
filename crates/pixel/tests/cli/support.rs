@@ -10,16 +10,36 @@
 //! 2. Every fixture root checks on drop that no daemon is serving it, and
 //!    fails the test when one is. A test that starts a daemon on purpose
 //!    stops it before the fixture goes out of scope.
+//! 3. The binary never runs from the test's own working directory. Cargo
+//!    starts a test in `crates/pixel`, inside this checkout, and the CLI
+//!    appends every invocation to the action log of the repository around
+//!    its path, falling back to its working directory when the path does not
+//!    resolve: a `pixel classify` or a `check-release --repo <missing dir>`
+//!    spawned from there landed in the checkout's own `.pixel/actions.jsonl`
+//!    and drowned the real errors in `pixel action-log --errors-only`.
 
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The built `pixel` binary with daemon auto-start disabled.
+/// The built `pixel` binary with daemon auto-start disabled, started from
+/// [`neutral_cwd`] so its action log never reaches this checkout. A test that
+/// needs another working directory sets it after this call (the last
+/// `current_dir` wins).
 pub fn pixel_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pixel"));
-    command.env("PIXEL_DAEMON_AUTO_START", "0");
     command
+        .env("PIXEL_DAEMON_AUTO_START", "0")
+        .current_dir(neutral_cwd());
+    command
+}
+
+/// A directory outside every repository, shared by the whole suite: where a
+/// command given no path, or a path that does not exist, records itself.
+pub fn neutral_cwd() -> PathBuf {
+    let dir = std::env::temp_dir().join("pixel-cli-neutral-cwd");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 /// `ps` lines of every `pixel daemon start <root> --foreground` process whose
@@ -286,4 +306,43 @@ fn leak_guard_fails_the_test_when_a_daemon_outlives_the_fixture() {
     wait_until("leaked daemon to be terminated by the guard", 10, || {
         daemons_serving(&repo).is_empty()
     });
+}
+
+/// Rule 3: a command whose path does not resolve records itself in the
+/// neutral directory, never in the checkout the suite runs from. The probe's
+/// unique marker keeps both reads immune to anything else writing either log
+/// meanwhile (other tests, a developer's own `pixel` in this checkout).
+#[test]
+fn action_log_of_an_unresolvable_path_lands_in_the_neutral_cwd_not_the_checkout() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let marker = format!("pixel-neutral-cwd-probe-{}-{nanos}", std::process::id());
+    let missing = std::env::temp_dir().join(&marker);
+    let out = pixel_command()
+        .args(["check-release", "release-candidate", "--repo"])
+        .arg(&missing)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let logged = |root: &Path| {
+        std::fs::read_to_string(root.join(".pixel/actions.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains(&marker))
+            .count()
+    };
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    assert_eq!(
+        logged(&neutral_cwd()),
+        1,
+        "the probe is recorded once, in the neutral directory"
+    );
+    assert_eq!(
+        logged(&checkout),
+        0,
+        "the probe leaked into {}",
+        checkout.display()
+    );
 }
