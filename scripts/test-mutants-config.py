@@ -328,6 +328,20 @@ class ShardedMutantsGate(unittest.TestCase):
         self.assertIn("4 judged: 3 caught, 0 missed, 0 timeout, 1 unviable", result.stdout)
         self.assertIn("**gate:** passed", result.stdout)
 
+    def test_a_single_shard_extracted_at_the_root_is_totalled(self):
+        """`download-artifact` puts a lone matching artifact straight into its path.
+
+        With one shard there is no `shards/mutants-out-0/` directory: the
+        artifact's files land in `shards/` itself. Reading only
+        `shards/*/outcomes.json` then totals nothing, and every PR of 20
+        mutants or fewer failed with "0 reached a verdict" (#225).
+        """
+        with tempfile.TemporaryDirectory(prefix="pixel-mutants-shards-") as tmp:
+            self.write_shard(Path(tmp), "shards", "CaughtMutant", "Unviable")
+            result, _ = self.run_gate(2, "--outcomes-root", f"{tmp}/shards")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("2 judged: 1 caught, 0 missed, 0 timeout, 1 unviable", result.stdout)
+
     def test_a_survivor_in_any_shard_fails_the_gate_and_is_named(self):
         for summary, label in (("MissedMutant", "MISSED"), ("Timeout", "TIMEOUT")):
             with self.subTest(summary=summary):
