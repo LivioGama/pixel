@@ -377,7 +377,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     // A global RTK backup that no guard delegates to is never applied again;
     // say so rather than leave a file that looks like a live registration.
     checks.push(check_status("install.rtk-backup", || {
-        rtk_backup_check(crate::routing::orphan_rtk_backup(&home).map_err(|e| e.to_string())?)
+        rtk_backup_check(crate::routing::orphan_rtk_backup(&home))
     }));
 
     // Legacy `claude()` shell wrappers are harmful now: a surviving block
@@ -963,9 +963,9 @@ fn rtk_backup_check(
             CheckStatus::Yellow,
             DoctorCheckDetail {
                 summary: format!(
-                    "{} holds an RTK hook no pixel guard delegates to; pixel never applies it — remove it: rm '{}'",
+                    "{} holds an RTK hook no pixel guard delegates to; pixel never applies it — remove it: rm {}",
                     path.display(),
-                    path.display()
+                    crate::routing::quoted_executable(&path)
                 ),
                 detail: Some(serde_json::json!({ "path": path.display().to_string() })),
             },

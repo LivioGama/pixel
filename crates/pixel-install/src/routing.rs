@@ -406,17 +406,29 @@ pub(crate) fn load_rtk_backup(home: &Path) -> crate::Result<Vec<Value>> {
 /// `~/.claude/settings.json` delegates to it: a leftover that `pixel install`
 /// never applies, such as one an `install --repo` build wrote under `$HOME`
 /// before the repository backup moved into the repository.
-pub(crate) fn orphan_rtk_backup(home: &Path) -> crate::Result<Option<PathBuf>> {
+pub(crate) fn orphan_rtk_backup(home: &Path) -> Option<PathBuf> {
     let backup = home.join(RTK_BACKUP);
-    if !backup.is_file() {
-        return Ok(None);
-    }
-    let settings = install::read_settings(&Provider::Claude.path(home))?;
-    let delegated = settings
-        .get("hooks")
-        .and_then(Value::as_object)
-        .is_some_and(has_delegate);
-    Ok((!delegated).then_some(backup))
+    let in_use = BACKUP_READERS
+        .iter()
+        .any(|rel| delegates_rtk(&home.join(rel)));
+    (backup.is_file() && !in_use).then_some(backup)
+}
+
+/// The settings files, relative to a backup root, whose delegate guard reads
+/// `<root>/.claude/pixel-rtk-hooks.json`. Under `$HOME` both exist when the
+/// repository is `$HOME`: the global file is also its shared one, and the
+/// repo guard sits in `settings.local.json`.
+const BACKUP_READERS: [&str; 2] = [CLAUDE_SHARED_SETTINGS, CLAUDE_LOCAL_SETTINGS];
+
+/// Whether the settings at `path` hold a delegate guard. A file that cannot
+/// be read may hold one, so it counts as delegating: the backup is kept.
+fn delegates_rtk(path: &Path) -> bool {
+    install::read_settings(path).map_or(true, |value| {
+        value
+            .get("hooks")
+            .and_then(Value::as_object)
+            .is_some_and(has_delegate)
+    })
 }
 
 /// Which events a provider install may register. The doctrine reaches every
@@ -875,8 +887,13 @@ pub(crate) fn install_at_scoped(
     }
     let backup = install::write_settings(path, &value, dry_run)?;
     // Nothing delegates to the backup any more: RTK is back in the settings
-    // or was dropped by the user. Retire it after the settings are written.
-    if adopted.is_empty() && !saved.is_empty() && !dry_run {
+    // or was dropped by the user. Retire it after the settings are written,
+    // unless the other file that reads it still delegates.
+    let read_elsewhere = BACKUP_READERS
+        .iter()
+        .map(|rel| backup_root.join(rel))
+        .any(|other| other != path && delegates_rtk(&other));
+    if adopted.is_empty() && !saved.is_empty() && !dry_run && !read_elsewhere {
         fs::remove_file(backup_root.join(RTK_BACKUP))?;
     }
     let summary_text = match scope {
@@ -1684,18 +1701,46 @@ mod tests {
         );
     }
 
+    /// Write `pre` as the `PreToolUse` of `<root>/.claude/settings.local.json`,
+    /// the personal file of a repository at `$HOME`.
+    fn write_local(root: &Path, pre: &[Value]) {
+        fs::write(
+            root.join(CLAUDE_LOCAL_SETTINGS),
+            serde_json::to_string(&json!({"hooks":{"PreToolUse": pre}})).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn orphan_rtk_backup_should_name_a_backup_no_guard_delegates_to() {
         let home = tempfile::tempdir().unwrap();
-        assert_eq!(orphan_rtk_backup(home.path()).unwrap(), None);
+        assert_eq!(orphan_rtk_backup(home.path()), None);
 
         let home = home_with_backup(&[]);
         assert_eq!(
-            orphan_rtk_backup(home.path()).unwrap(),
+            orphan_rtk_backup(home.path()),
             Some(home.path().join(RTK_BACKUP))
         );
 
         let home = home_with_backup(&[delegate_guard()]);
-        assert_eq!(orphan_rtk_backup(home.path()).unwrap(), None);
+        assert_eq!(orphan_rtk_backup(home.path()), None);
+    }
+
+    /// A repository at `$HOME` shares the global backup: a delegate guard in
+    /// its `settings.local.json` still needs it, and a file that cannot be
+    /// read may hold one.
+    #[test]
+    fn a_backup_the_home_repository_guard_delegates_to_should_be_kept() {
+        let home = home_with_backup(&[]);
+        write_local(home.path(), &[delegate_guard()]);
+        assert_eq!(orphan_rtk_backup(home.path()), None);
+        global_install(home.path(), false);
+        assert!(home.path().join(RTK_BACKUP).is_file());
+
+        let home = home_with_backup(&[]);
+        fs::write(home.path().join(CLAUDE_LOCAL_SETTINGS), "{ not json").unwrap();
+        assert_eq!(orphan_rtk_backup(home.path()), None);
+        global_install(home.path(), false);
+        assert!(home.path().join(RTK_BACKUP).is_file());
     }
 }

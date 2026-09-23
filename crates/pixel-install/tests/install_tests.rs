@@ -4150,7 +4150,9 @@ fn repo_artifacts_should_name_every_file_a_repo_install_writes() {
 #[cfg(unix)]
 fn doctor_should_flag_a_global_rtk_backup_no_guard_delegates_to() {
     let dir = TempDir::new().unwrap();
-    let home = dir.path().to_path_buf();
+    // The command is pasted into a shell: an apostrophe in the path must
+    // come out escaped.
+    let home = dir.path().join("o'neil");
     let backup = home.join(".claude/pixel-rtk-hooks.json");
     fs::create_dir_all(backup.parent().unwrap()).unwrap();
     fs::write(
@@ -4169,10 +4171,9 @@ fn doctor_should_flag_a_global_rtk_backup_no_guard_delegates_to() {
 
     let c = rtk_check();
     assert_eq!(c.status, CheckStatus::Yellow, "{c:?}");
-    assert!(
-        c.summary.contains(&format!("rm '{}'", backup.display())),
-        "{c:?}"
-    );
+    let quoted = format!("'{}'", backup.display().to_string().replace('\'', "'\\''"));
+    assert!(quoted.contains("o'\\''neil"), "{quoted}");
+    assert!(c.summary.ends_with(&format!("rm {quoted}")), "{c:?}");
 
     fs::remove_file(&backup).unwrap();
     let c = rtk_check();
