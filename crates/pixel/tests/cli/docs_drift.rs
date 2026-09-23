@@ -232,7 +232,7 @@ fn rename_table_rows(text: &str) -> Vec<(String, String)> {
 
 #[test]
 fn renamed_command_tables_list_exactly_the_accepted_aliases() {
-    // The README and the changelog tell users which old names still work;
+    // The rename doc and the changelog tell users which old names still work;
     // the CLI registers those aliases from `RENAMED_COMMANDS`. A table that
     // drops a row or keeps a stale one sends a user to a name that fails.
     let expected: Vec<(String, String)> = pixel_proto::commands::RENAMED_COMMANDS
@@ -240,7 +240,7 @@ fn renamed_command_tables_list_exactly_the_accepted_aliases() {
         .map(|(old, new)| ((*old).to_string(), (*new).to_string()))
         .collect();
     let root = repo_root();
-    for doc in ["README.md", "CHANGELOG.md"] {
+    for doc in ["docs/renamed-commands.md", "CHANGELOG.md"] {
         let text = std::fs::read_to_string(root.join(doc)).unwrap();
         assert_eq!(
             rename_table_rows(&text),
