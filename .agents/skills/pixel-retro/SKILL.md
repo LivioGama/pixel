@@ -44,14 +44,13 @@ transcripts explain what the agent did about it.
 `outcome`, `error`, `duration_ms`). The roots come from the sessions
 themselves, so a repository outside the usual folders is not missed: take
 every session `cwd` in the window, resolve it to its repository root, and
-keep the roots that have a log. The `find` adds the worktrees and fixtures
-no session ran in:
+keep the roots that have a log. `pixel recall sessions` caps `--limit` at
+200, so `roots.py` pages with `--until` until the window is covered
+(subagent sessions included). The `find` adds the worktrees and fixtures no
+session ran in:
 
 ```bash
-pixel recall sessions --since $W --limit 500 --json \
-  | python3 -c 'import sys,json; [print(s["cwd"]) for s in json.load(sys.stdin)["sessions"]]' \
-  | sort -u | while read -r d; do git -C "$d" rev-parse --show-toplevel 2>/dev/null; done \
-  | sort -u | while read -r r; do [ -f "$r/.pixel/actions.jsonl" ] && echo "$r"; done
+python3 .agents/skills/pixel-retro/roots.py $W
 find ~/code /tmp/pxwt -maxdepth 4 -path '*/.pixel/actions.jsonl' -mtime -1 2>/dev/null   # -mtime -2 for 48h, and so on
 ```
 
@@ -180,27 +179,19 @@ CONTRIBUTING.md and the PR doctrine, one branch per suggestion.
 
 ## Ledger
 
-After the user answers, append one line per reported or dropped item. The
-values are data, never shell source: a fingerprint is built from error text,
-which can hold `$(…)` or quotes. Put them in the quoted heredoc below (no
-shell expansion happens inside it), one line per item, fields separated by
-` ;; `, and let the script validate and append:
+After the user answers, append one row per reported or dropped item. The
+values are data, never source: a fingerprint is built from error text,
+which can hold `$(…)`, quotes or newlines. Write the items as a JSON list
+with the file-writing tool (not through a shell command), in the scratchpad,
+then hand the file to `ledger.py`, which validates every item (verdict one of
+`suggested`, `picked`, `fixed`, `wontfix`, `not-pixel`; ref an `agent:id
+#turn` or a GitHub URL), refuses the whole file on one bad item, and appends
+with tabs and newlines flattened:
+
+```json
+[{"fingerprint": "<command>|<normalised error>", "verdict": "suggested", "ref": "claude:5e6585e2 #300"}]
+```
 
 ```bash
-python3 - <<'EOF'
-import datetime, os, re
-ROWS = r"""
-<fingerprint> ;; <suggested|picked|fixed|wontfix|not-pixel> ;; <agent:id #turn or PR url>
-"""
-VERDICTS = {"suggested", "picked", "fixed", "wontfix", "not-pixel"}
-REF = re.compile(r"^([a-z]+:[0-9a-f]{6,} #\d+|https://github\.com/\S+)$")
-path = os.path.expanduser("~/.local/state/pixel-retro/seen.tsv")
-os.makedirs(os.path.dirname(path), exist_ok=True)
-with open(path, "a") as f:
-    for line in filter(None, ROWS.strip().splitlines()):
-        fp, verdict, ref = (x.strip() for x in line.split(" ;; "))
-        assert verdict in VERDICTS and REF.match(ref), line
-        fp = re.sub(r"[\t\n]", " ", fp)
-        f.write(f"{datetime.date.today()}\t{fp}\t{verdict}\t{ref}\n")
-EOF
+python3 .agents/skills/pixel-retro/ledger.py <scratchpad>/pixel-retro-items.json
 ```
