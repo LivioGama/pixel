@@ -1035,6 +1035,16 @@ fn action_log_records_how_each_request_was_served() {
         .args(["search-content", "login_user", "."])
         .output()
         .unwrap();
+    // A start that outlasted its 5 s window still brings the daemon up
+    // later: wait for it (bounded), so the next call is served by it and the
+    // stop below also reaches a late one.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline
+        && !String::from_utf8_lossy(&fixture.run(&["daemon", "status"]).stdout)
+            .starts_with("daemon running")
+    {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     let served = fixture.run(&["search-content", "login_user", "."]);
     // Stop before assertions so a failed one never leaves a daemon behind.
     assert_success(&fixture.run(&["daemon", "stop"]));

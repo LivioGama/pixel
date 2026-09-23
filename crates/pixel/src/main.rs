@@ -1788,14 +1788,28 @@ fn try_daemon(root: &Path, req: &Request) -> Option<Response> {
 /// and say how it went; `None` leaves the request to this process, and the
 /// step then names why.
 fn route_through_daemon(root: &Path, req: &Request) -> (Option<Response>, ServeStep) {
+    route_through_daemon_with(root, req, auto_start_daemon)
+}
+
+/// [`route_through_daemon`] with the auto-start as a parameter, so a test can
+/// reach the start arm without spawning a process.
+fn route_through_daemon_with(
+    root: &Path,
+    req: &Request,
+    auto_start: impl FnOnce(&Path, &Request) -> Result<Response, InProcessReason>,
+) -> (Option<Response>, ServeStep) {
     let clock = Instant::now();
-    let probed = probe_route(root);
+    let probe = probe_daemon(root);
     let probe_ms = serve_trace::millis_since(clock);
+    // Retiring a stale daemon is the first part of starting its replacement,
+    // not a queue at the probe: `start_ms` counts it.
+    let mut start_clock = Instant::now();
     let mut request_ms = None;
-    let route = probed.unwrap_or_else(|| {
+    let route = route_for_probe(root, probe).unwrap_or_else(|| {
         let clock = Instant::now();
         let route = send_to_daemon(root, req);
         request_ms = Some(serve_trace::millis_since(clock));
+        start_clock = Instant::now();
         route
     });
     let (response, mut step) = match route {
@@ -1804,9 +1818,8 @@ fn route_through_daemon(root: &Path, req: &Request) -> (Option<Response>, ServeS
         // running and serve this command in process, without starting ours.
         DaemonRoute::Declined => (None, ServeStep::in_process(InProcessReason::NewerDaemon)),
         DaemonRoute::Absent => {
-            let clock = Instant::now();
-            let started = auto_start_daemon(root, req);
-            let start_ms = serve_trace::millis_since(clock);
+            let started = auto_start(root, req);
+            let start_ms = serve_trace::millis_since(start_clock);
             let (response, mut step) = match started {
                 Ok(response) => (Some(response), ServeStep::new(ServeRoute::DaemonStarted)),
                 Err(reason) => (None, ServeStep::in_process(reason)),
@@ -1931,7 +1944,12 @@ fn try_daemon_inner(root: &Path, req: &Request) -> DaemonRoute {
 /// The route the probe settles by itself; `None` when a current daemon
 /// answered and the request can be sent to it.
 fn probe_route(root: &Path) -> Option<DaemonRoute> {
-    match probe_daemon(root) {
+    route_for_probe(root, probe_daemon(root))
+}
+
+/// [`probe_route`] for a probe already made; a stale daemon is retired here.
+fn route_for_probe(root: &Path, probe: DaemonProbe) -> Option<DaemonRoute> {
+    match probe {
         DaemonProbe::Current => None,
         DaemonProbe::Newer => Some(DaemonRoute::Declined),
         DaemonProbe::Stale => {
@@ -3784,6 +3802,54 @@ mod daemon_ping_tests {
         assert_eq!((step.request_ms, step.start_ms), (None, None), "{step:?}");
         assert_eq!(server.join().unwrap(), vec![Request::Ping]);
         let _ = std::fs::remove_file(daemon::socket_path(&root));
+    }
+
+    /// A stale daemon's retirement is timed as the start of its replacement:
+    /// on the first call after an upgrade the probe itself is quick, and a
+    /// `probe_ms` holding the retirement would read as a busy daemon.
+    #[test]
+    fn retiring_a_stale_daemon_counts_toward_the_start_not_the_probe() {
+        let root = scratch_root("route-stale");
+        let server = fake_daemon(&root, PROTOCOL_VERSION - 1, 100, Duration::from_millis(400));
+        let (response, step) = route_through_daemon_with(&root, &Request::Status {}, |_, _| {
+            Err(InProcessReason::StartTimedOut)
+        });
+        assert!(response.is_none());
+        assert_eq!(step.reason, Some(InProcessReason::StartTimedOut));
+        let (probe_ms, start_ms) = (step.probe_ms.unwrap(), step.start_ms.unwrap());
+        assert!(
+            start_ms >= 300,
+            "the retirement waited on the linger: {step:?}"
+        );
+        assert!(probe_ms < start_ms, "{step:?}");
+        let seen = server.join().unwrap();
+        assert_eq!(seen[..2], [Request::Ping, Request::Shutdown]);
+    }
+
+    /// No daemon answers: the started one's answer is returned and logged as
+    /// `daemon_started`; a refused start sends the request back to this
+    /// process under the start's own reason, untimed when it never ran.
+    #[test]
+    fn an_absent_daemon_is_started_or_names_why_it_was_not() {
+        let root = scratch_root("route-absent");
+        let (response, step) = route_through_daemon_with(&root, &Request::Status {}, |_, _| {
+            Ok(Response::success("status", json!({"started": true})))
+        });
+        assert_eq!(response.unwrap().data()["started"], true);
+        assert_eq!(step.route, ServeRoute::DaemonStarted);
+        assert!(
+            step.start_ms.is_some() && step.probe_ms.is_some(),
+            "{step:?}"
+        );
+        assert_eq!(step.request_ms, None, "{step:?}");
+
+        let (response, step) = route_through_daemon_with(&root, &Request::Status {}, |_, _| {
+            Err(InProcessReason::AutoStartDisabled)
+        });
+        assert!(response.is_none());
+        assert_eq!(step.route, ServeRoute::InProcess);
+        assert_eq!(step.reason, Some(InProcessReason::AutoStartDisabled));
+        assert_eq!(step.start_ms, None, "{step:?}");
     }
 
     #[test]
