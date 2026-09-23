@@ -18,7 +18,7 @@ Make as much repository work deterministic as possible. If something can be answ
 
 ## 💡 See the difference
 
-Six jobs every coding agent does. Red rail: without Pixel. Blue rail: with it.
+Six jobs every coding agent does. Coral rail: without Pixel. Green rail: with it.
 The `.pixel/` index is built once — every session, every agent reuses it.
 
 ### Scope before reading

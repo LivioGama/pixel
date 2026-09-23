@@ -1,7 +1,8 @@
 import {ComparisonSpec} from './ComparisonScene';
+import {C} from './theme';
 
-const RED = '#ff7b72';
-const GREEN = '#3fb950';
+const RED = C.coral;
+const GREEN = C.green;
 
 
 const topY = 150;

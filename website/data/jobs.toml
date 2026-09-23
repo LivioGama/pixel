@@ -1,43 +1,45 @@
-# The six before/after recordings from the README, in its order. `image` is
-# a file in docs/examples/, mounted at /examples/ by hugo.toml.
+# The six before/after animations from the README, in its order. `media` is
+# a basename in docs/examples/ (mounted at /examples/ by hugo.toml): the page
+# plays <media>.mp4 with <media>.jpg as its poster, and the README shows
+# <media>.webp. docs/motion/scripts/render.sh writes all three.
 [[job]]
 id = "scope"
 name = "Scope before reading"
 command = "pixel scope-task"
 text = "A closed P0/P1/P2 file list instead of an agent wandering the repository."
-image = "pixel-scope-comparison.webp"
+media = "pixel-scope-comparison"
 
 [[job]]
 id = "measured"
 name = "Read skeletons, not files"
 command = "pixel list-signatures"
 text = "Signatures and budget-fitted context replace whole-file reads, and pixel token-savings reports what that saved."
-image = "pixel-measured-comparison.webp"
+media = "pixel-measured-comparison"
 
 [[job]]
 id = "impact"
 name = "Impact before edit"
 command = "pixel impact"
 text = "Every caller of a symbol, listed before the agent touches it."
-image = "pixel-impact-comparison.webp"
+media = "pixel-impact-comparison"
 
 [[job]]
 id = "rewrite"
 name = "Search stays familiar"
 command = "pixel search-content"
 text = "The hook rewrites rg and grep to the indexed search: same command, indexed answer."
-image = "pixel-rewrite-comparison.webp"
+media = "pixel-rewrite-comparison"
 
 [[job]]
 id = "rollback"
 name = "Rescue as a plan"
 command = "pixel plan-rollback"
 text = "Flags the likely breaking commit and a last-known-good candidate. It never resets anything."
-image = "pixel-rollback-comparison.webp"
+media = "pixel-rollback-comparison"
 
 [[job]]
 id = "publish"
 name = "Publish without footguns"
 command = "pixel commit-and-push"
 text = "Review, then a leased push that is crash-safe and idempotent. Never a raw --force."
-image = "pixel-publish-comparison.webp"
+media = "pixel-publish-comparison"

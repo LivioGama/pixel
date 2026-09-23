@@ -21,7 +21,9 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   read (`data/savings.toml`, first row) and burns down to what the same
   question costs through Pixel once it scrolls into view. The scope board
   draws one pad per indexed file and routes a trace from each P0 pad to its
-  file name. The job tabs load each recording only when opened.
+  file name. The job tabs load each video only when opened and play it
+  while it is on screen. Videos never autoplay under reduced motion: the
+  poster shows the finished state and the controls are there.
 - The "Fair questions" block in `layouts/index.html` restates facts from
   `SECURITY.md`, `docs/bench/measured-performance.md` and the graph's
   grammars (`$langs`, from `crates/pixel-graph/src/extract.rs`): change it
@@ -36,13 +38,14 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   wiring changes.
 - `data/scope.toml`: the real `pixel scope-task` run the hero grid replays.
   Refresh the task, the index size and every position together.
-- `data/jobs.toml`, `data/savings.toml`: the six recordings and the token
+- `data/jobs.toml`, `data/savings.toml`: the six animations and the token
   table, both from the README.
 - `assets/css/main.css`: one stylesheet, tokens first, dark only. Headlines
   use Handjet, a variable pixel face (`ELSH` 2 draws square elements; the
   hero title animates it from 0 once). Coral means tokens wasted, green
   means what Pixel returns: keep that split when adding anything.
-- The recordings are not copied: `hugo.toml` mounts `../docs/examples/` at
-  `/examples/`.
+- The videos are not copied: `hugo.toml` mounts the MP4s and JPEG posters
+  of `../docs/examples/` at `/examples/`. `docs/motion/` renders them
+  (`scripts/render.sh`), along with the WebPs the root README embeds.
 
 `public/` and `resources/` are build output and are ignored.

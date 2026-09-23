@@ -1,4 +1,5 @@
 import {AbsoluteFill, useCurrentFrame} from 'remotion';
+import {C, F, PX} from './theme';
 import {Badge, Defs, dotX, halo, LocalMark, LoopArrow, Node, NodeSpec, Panel, Rail, RailProgress, TravelDot} from './parts';
 
 export type ComparisonSpec = {
@@ -57,10 +58,10 @@ export const ComparisonScene = ({spec}: {spec: ComparisonSpec}) => {
 	const lastSetup = panelB.setup?.nodes[setupXs.length - 1];
 
 	return (
-		<AbsoluteFill style={{background: '#0d1117'}}>
+		<AbsoluteFill style={{background: C.ground}}>
 			<svg width={spec.width} height={spec.height} viewBox={`0 0 ${spec.width} ${spec.height}`}>
 				<Defs/>
-				<rect width={spec.width} height={spec.height} fill="#0d1117"/>
+				<rect width={spec.width} height={spec.height} fill={C.ground}/>
 				<rect width={spec.width} height={spec.height} fill="url(#bgGlow)"/>
 				<rect width={spec.width} height={spec.height} fill="url(#dotgrid)"/>
 				{/* ambient glows tuned to each panel's accent */}
@@ -69,7 +70,7 @@ export const ComparisonScene = ({spec}: {spec: ComparisonSpec}) => {
 
 				{/* ── WITHOUT ── */}
 				<Panel x={40} y={46} w={spec.width - 80} h={300} title={panelA.title} color={spec.accentA}/>
-				<Rail nodes={panelA.nodes} color="#8a5a52"/>
+				<Rail nodes={panelA.nodes} color={C.coralDim}/>
 				<RailProgress nodes={panelA.nodes} color={spec.accentA} x={dotX(frame, topXs, topDur)}/>
 				<g transform={`translate(0, ${topY})`}>
 					<TravelDot frame={frame} xs={topXs} duration={topDur} color={spec.accentA}/>
@@ -95,8 +96,8 @@ export const ComparisonScene = ({spec}: {spec: ComparisonSpec}) => {
 						y={424}
 						width={466}
 						height={52}
-						rx={16}
-						fill="#0e1319"
+						rx={4}
+						fill={C.ground2}
 						fillOpacity={0.85}
 						stroke={spec.accentB}
 						strokeOpacity={0.35}
@@ -106,11 +107,11 @@ export const ComparisonScene = ({spec}: {spec: ComparisonSpec}) => {
 					<text
 						x={spec.width - 40 - 24 - 466 + 50}
 						y={457}
-						fontFamily="Inter,Arial,sans-serif"
-						fontSize={17}
-						fontWeight={650}
-						letterSpacing={1.8}
-						fill="#9aa7b4"
+						fontFamily={F.mono}
+						fontSize={15}
+						fontWeight={600}
+						letterSpacing={1.4}
+						fill={C.inkSoft}
 					>
 						RUNS LOCALLY · DETERMINISTIC · NO LLM
 					</text>
@@ -119,9 +120,9 @@ export const ComparisonScene = ({spec}: {spec: ComparisonSpec}) => {
 				{panelB.leftText.length > 0 && (
 					<g>
 						<rect x={104} y={490} width={5} height={130} rx={2.5} fill={spec.accentB} opacity={0.9}/>
-						<text x={132} y={534} fontFamily="Inter,Arial,sans-serif" fontSize={35} fontWeight={800} fill="#4a545f" letterSpacing={1}>
+						<text x={132} y={538} fontFamily={F.display} fontSize={48} fontWeight={700} style={PX} fill={C.inkFaint} letterSpacing={1}>
 							{panelB.leftText.map((line, i) => (
-								<tspan key={line} x={132} dy={i === 0 ? 0 : 44}>
+								<tspan key={line} x={132} dy={i === 0 ? 0 : 46}>
 									{line}
 								</tspan>
 							))}
@@ -131,7 +132,7 @@ export const ComparisonScene = ({spec}: {spec: ComparisonSpec}) => {
 
 				{panelB.setup && lastSetup && (
 					<>
-						<Rail nodes={panelB.setup.nodes} color="#2d4a38"/>
+						<Rail nodes={panelB.setup.nodes} color={C.cellEdge}/>
 						{frame <= setupDur && (
 							<RailProgress nodes={panelB.setup.nodes} color={spec.dotColor} x={dotX(frame, setupXs, setupDur)}/>
 						)}
@@ -140,11 +141,11 @@ export const ComparisonScene = ({spec}: {spec: ComparisonSpec}) => {
 							y1={setupY}
 							x2={sessXs[0] + 50}
 							y2={sessY - 42}
-							color="#2d4a38"
+							color={C.cellEdge}
 							frame={frame}
 						/>
 						{panelB.setup.badge && (
-							<Badge x={sessXs[0] - 20} y={656} text={panelB.setup.badge} color="#8b949e"/>
+							<Badge x={sessXs[0] - 20} y={656} text={panelB.setup.badge} color={C.inkSoft}/>
 						)}
 						<g transform={`translate(0, ${setupY})`}>
 							{frame <= setupDur && (
@@ -157,7 +158,7 @@ export const ComparisonScene = ({spec}: {spec: ComparisonSpec}) => {
 					</>
 				)}
 
-				<Rail nodes={panelB.session.nodes} color="#2d4a38"/>
+				<Rail nodes={panelB.session.nodes} color={C.cellEdge}/>
 				<RailProgress nodes={panelB.session.nodes} color={spec.dotColor} x={dotX(frame, sessXs, sessDur)}/>
 				<g transform={`translate(0, ${sessY})`}>
 					<TravelDot frame={frame} xs={sessXs} duration={sessDur} color={spec.dotColor}/>

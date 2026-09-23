@@ -1,39 +1,37 @@
 # motion
 
-[Remotion](https://www.remotion.dev) sources for the six comparison
-animations in the root README (`docs/examples/pixel-*-comparison.webp`).
-`src/index.ts` registers `src/Root.tsx`, where every composition renders
-`ComparisonScene` (`src/ComparisonScene.tsx`) with one spec from
-`src/PixelComparison.tsx`, at 1600×1000, 30 fps, 240 frames (8 s).
+[Remotion](https://www.remotion.dev) sources for the animations in the root
+README and on the website, all rendered into `docs/examples/`. They share the
+website's identity (`src/theme.ts`: forest-green ground, coral for what an
+agent wastes, green for what Pixel hands back, Handjet for display text);
+`src/fonts.ts` loads the three faces from `public/fonts/` before any frame
+renders.
 
-| Composition ID | Spec | README asset |
+| Composition ID | Source | Output basename |
 |---|---|---|
-| `PixelComparison` | `measuredSavingsSpec` | `pixel-measured-comparison.webp` |
-| `PixelImpact` | `impactSpec` | `pixel-impact-comparison.webp` |
-| `PixelScope` | `scopeSpec` | `pixel-scope-comparison.webp` |
-| `PixelRollback` | `rollbackSpec` | `pixel-rollback-comparison.webp` |
-| `PixelPublish` | `publishSpec` | `pixel-publish-comparison.webp` |
-| `PixelRewrite` | `rewriteSpec` | `pixel-rewrite-comparison.webp` |
+| `PixelComparison` | `measuredSavingsSpec` | `pixel-measured-comparison` |
+| `PixelImpact` | `impactSpec` | `pixel-impact-comparison` |
+| `PixelScope` | `scopeSpec` | `pixel-scope-comparison` |
+| `PixelRollback` | `rollbackSpec` | `pixel-rollback-comparison` |
+| `PixelPublish` | `publishSpec` | `pixel-publish-comparison` |
+| `PixelRewrite` | `rewriteSpec` | `pixel-rewrite-comparison` |
 
-Install the dependencies, from this directory:
+The six `Pixel*` compositions render `ComparisonScene` (`src/ComparisonScene.tsx`)
+with one spec from `src/PixelComparison.tsx`, at 1600×1000, 30 fps, 8 s.
+
+## Render
 
 ```bash
 bun install
+bunx remotion studio src/index.ts        # preview
+scripts/render.sh                        # every composition
+scripts/render.sh PixelScope PixelImpact # some of them
 ```
 
-Preview every composition in the Remotion Studio:
+`scripts/render.sh` needs `ffmpeg` and `img2webp` (`brew install ffmpeg webp`)
+and writes three files per composition into `docs/examples/`:
 
-```bash
-bunx remotion studio src/index.ts
-```
-
-Render one composition by its ID (`remotion.config.ts` sets PNG frames and
-overwrites an existing output):
-
-```bash
-bunx remotion render src/index.ts PixelScope out/pixel-scope.mp4
-bunx remotion render src/index.ts PixelScope out/pixel-scope.gif --codec=gif
-```
-
-The committed README assets are 800×500 animated WebPs converted from such a
-render; that conversion step is not scripted here.
+- `<name>.mp4`: 1600×1000 H.264, played by the website;
+- `<name>.jpg`: its last frame, the website's poster;
+- `<name>.webp`: 800×500 at 15 fps, embedded by the root README, since GitHub
+  renders an animated image inline but not a video.
