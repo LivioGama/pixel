@@ -80,6 +80,7 @@ const DOCS: &[&str] = &[
     "CONTRIBUTING.md",
     "docs/manual-setup.md",
     "website/content/docs.md",
+    "website/content/benchmarks.md",
     "crates/pixel-install/assets/pixel-agent-prompt.md",
     "crates/pixel-install/assets/pixel-subagent-prompt.md",
     "AGENTS.md",

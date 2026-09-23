@@ -16,22 +16,28 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
 
 ## Where things live
 
-- `layouts/index.html`: the whole landing page, with its two small scripts
-  inline at the bottom. The hero board draws one pad per indexed file and
-  routes a copper trace from each P0 pad to its file name; the routing is in
-  that script. The job tabs load each recording only when opened.
+- `layouts/index.html`: the whole landing page, with its scripts inline at
+  the bottom. The token wall draws one square per 25 tokens of a full file
+  read (`data/savings.toml`, first row) and burns down to what the same
+  question costs through Pixel once it scrolls into view. The scope board
+  draws one pad per indexed file and routes a trace from each P0 pad to its
+  file name. The job tabs load each recording only when opened.
+- `content/benchmarks.md`: the `/benchmarks/` page. Every number the landing
+  page shows lives here with its sample size, its source in `docs/bench/`,
+  and the cases where Pixel loses. Add a claim to the landing page only once
+  it is on this page.
 - `content/docs.md`: the `/docs/` page, rendered by `layouts/_default/single.html`.
-  `crates/pixel/tests/cli/docs_drift.rs` reads it, so every `` `pixel <command>` ``
-  quoted there must exist. Keep it in step with `README.md` when install or
+  `crates/pixel/tests/cli/docs_drift.rs` reads it and `benchmarks.md`, so
+  every `` `pixel <command>` `` quoted in either must exist. Keep it in step with `README.md` when install or
   wiring changes.
 - `data/scope.toml`: the real `pixel scope-task` run the hero grid replays.
   Refresh the task, the index size and every position together.
 - `data/jobs.toml`, `data/savings.toml`: the six recordings and the token
   table, both from the README.
-- `assets/css/main.css`: one stylesheet, tokens first. Dark is the default;
-  a light system preference redefines the tokens only. Copper marks
-  structure (pads, traces, steps), the brand green marks answers: keep that
-  split when adding anything.
+- `assets/css/main.css`: one stylesheet, tokens first, dark only. Headlines
+  use Handjet, a variable pixel face (`ELSH` 2 draws square elements; the
+  hero title animates it from 0 once). Coral means tokens wasted, green
+  means what Pixel returns: keep that split when adding anything.
 - The recordings are not copied: `hugo.toml` mounts `../docs/examples/` at
   `/examples/`.
 

@@ -45,6 +45,7 @@ on:
       - "changelog.d/**"
       - "docs/manual-setup.md"
       - "website/content/docs.md"
+      - "website/content/benchmarks.md"
       - ".agents/rules/**"
       - ".agents/skills/rust-guidelines/**"
       - "scripts/README.md"
