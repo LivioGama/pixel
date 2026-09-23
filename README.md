@@ -50,6 +50,8 @@ whether `pixel doctor .` is green.
 
 ## For AI agents
 
+Looking for something specific? [`llms.txt`](https://liviogama.github.io/pixel/llms.txt) maps every page of the docs and benchmarks to its raw Markdown.
+
 If you are an LLM reading this to set Pixel up for a user, do this, in order:
 
 1. **Check first.** `command -v pixel && pixel --version`. If it prints a version, skip to step 3.

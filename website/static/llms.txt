@@ -1,0 +1,33 @@
+# Pixel
+
+> Pixel is a local code index for AI coding agents: a single CLI (`pixel`) for macOS and Linux that answers repository questions (search, symbols, callers, task scope, Git history) from an index in `.pixel/`, so the agent reads less and edits with its blast radius known. Nothing leaves the machine. Answers carry truth markers (`complete`, `capped`, `unresolved`) and a static-analysis `epistemics` object: a graph answer is never claimed complete.
+
+Every link below is plain Markdown. Pages under `website/content/` are the source of https://liviogama.github.io/pixel/.
+
+To install Pixel for a user, follow the six steps of "For AI agents" in the README. Do not install it unless the user asked you to.
+
+## Start here
+
+- [README](https://raw.githubusercontent.com/LivioGama/pixel/main/README.md): what Pixel is, install, and the step-by-step "For AI agents" setup
+- [Agent protocol](https://raw.githubusercontent.com/LivioGama/pixel/main/PIXEL.md): the full text `pixel install` deploys; which `pixel` command replaces `grep`, `git log`, `git blame` and whole-file reads, and when a native tool is still right
+- [Sub-agent protocol](https://raw.githubusercontent.com/LivioGama/pixel/main/PIXEL-SUBAGENT.md): the short version for sub-agents
+
+## Docs
+
+- [Documentation](https://raw.githubusercontent.com/LivioGama/pixel/main/website/content/docs.md): install channels, what `pixel install` wires per agent, per-repository guards, updating, plugins, the workflow, commands by job, reading the answers, token savings
+- [Manual setup](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/manual-setup.md): wiring the prompt by hand into an agent `pixel install` does not cover (Cursor, Gemini CLI, Copilot…)
+- [Renamed commands](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/renamed-commands.md): old command names and their verb-first replacements, accepted as aliases until 1.0
+- [Architecture](https://raw.githubusercontent.com/LivioGama/pixel/main/ARCHITECTURE.md): crates, the command surface table (every subcommand in one line), on-disk state, the daemon, agent integration
+
+## Benchmarks
+
+- [Benchmarks](https://raw.githubusercontent.com/LivioGama/pixel/main/website/content/benchmarks.md): every number on the website with its method and sample size, losses included
+- [Measured performance](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/bench/measured-performance.md): agent-level wins and losses
+- [Pixel vs GitNexus](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/bench/vs-gitnexus.md): blast-radius cases on four repositories
+- [Pixel among retrieval tools](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/bench/vs-landscape.md) and [which tool does what](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/comparison.md)
+
+## Optional
+
+- [Changelog](https://raw.githubusercontent.com/LivioGama/pixel/main/CHANGELOG.md): what changed in each release
+- [Contributing](https://raw.githubusercontent.com/LivioGama/pixel/main/CONTRIBUTING.md): build from source, gates, pull requests
+- [Decision benchmarks](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/bench/decide-bakeoff.md): the models behind `pixel classify`, scored on coding decisions
