@@ -1,0 +1,1 @@
+**daemon:** an idle daemon sleeps instead of polling its socket every 10 ms: connections come from a blocking accept thread, and the loop wakes only for them, watcher events, its timers and the 5 s root check. Over 10 s idle, context switches went from about 900 to 2. ([#231](https://github.com/LivioGama/pixel/pull/231))

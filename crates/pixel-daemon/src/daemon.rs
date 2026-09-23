@@ -1,6 +1,7 @@
 //! Unix-socket NDJSON daemon: one JSON `Request` per line, one JSON
-//! `Response` line back. Single-threaded request handling: the event loop owns
-//! a nonblocking listener while a notify watcher feeds one mpsc channel, so a long mutation (a
+//! `Response` line back. Single-threaded request handling: an accept thread
+//! blocked on the listener and a notify watcher feed one mpsc channel, and
+//! the event loop sleeps on that channel alone, so a long mutation (a
 //! `sync-branch` is several git commands of up to 120 s each) delays every
 //! other request on this root. The loop therefore drains the debounced
 //! watcher batch before it serves a connection: a request following a
@@ -13,7 +14,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
@@ -29,9 +31,6 @@ const DEBOUNCE: Duration = Duration::from_millis(500);
 /// for the rest of `IDLE_TIMEOUT`: auto-started daemons are detached from
 /// their parent, so nothing else would ever reap them.
 const ROOT_POLL: Duration = Duration::from_secs(5);
-/// The listener is nonblocking, so cap watcher waits to keep new local socket
-/// requests responsive without a separately-owned accept thread.
-const ACCEPT_POLL: Duration = Duration::from_millis(10);
 /// Idle poll interval for the facts ingest thread once fresh. A ref move
 /// re-triggers ingest on the next poll without blocking queries.
 const INGEST_IDLE_POLL: Duration = Duration::from_secs(5);
@@ -171,6 +170,10 @@ fn probe_ping(stream: &mut UnixStream) -> bool {
 }
 
 enum Msg {
+    /// A connection the accept thread took off the listener.
+    Conn(UnixStream),
+    /// The listener failed; the loop exits as it did on an accept error.
+    AcceptFailed,
     Fs(notify::Event),
     /// A `notify` callback error, forwarded to the loop (the single owner of
     /// the corpus) so a watch that stopped reporting is counted and logged
@@ -346,11 +349,13 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
     let _ = std::fs::remove_file(&sock); // stale leftover
 
     let listener = UnixListener::bind(&sock)?;
-    listener.set_nonblocking(true)?;
+    let bound = socket_identity(&sock);
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
     std::fs::write(pid_path(&root), std::process::id().to_string())?;
 
     let (tx, rx) = mpsc::channel::<Msg>();
+    let stop = Arc::new(AtomicBool::new(false));
+    let acceptor = spawn_acceptor(listener, tx.clone(), Arc::clone(&stop));
 
     // Watcher: raw notify events into the channel; debounced below. A
     // backend error goes through the same channel: a watch that stopped
@@ -393,34 +398,6 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
     let mut next_sweep = sweep_every.map(|every| Instant::now() + every);
 
     while !shutdown {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                last_activity = Instant::now();
-                // The watcher may have queued a mutation just before this
-                // accept. Drain those events before the request so the first
-                // post-mutation read never sees the preceding publication.
-                while let Ok(message) = rx.try_recv() {
-                    match message {
-                        Msg::Fs(ev) => {
-                            record_event(&root, &ev, &mut pending);
-                            if !pending.is_empty() {
-                                flush_at = Some(Instant::now() + DEBOUNCE);
-                            }
-                        }
-                        Msg::WatcherError(error) => service.watcher_error(&error),
-                    }
-                }
-                // Apply the debounced batch before serving the connection:
-                // the debounce coalesces bursts between requests, it must
-                // not let a request read the index from before a mutation.
-                flush_pending(&mut service, &mut pending, &mut flush_at);
-                handle_conn(&mut service, stream, &mut shutdown);
-                continue;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => break,
-        }
-
         let now = Instant::now();
         let idle_left = IDLE_TIMEOUT
             .checked_sub(now.duration_since(last_activity))
@@ -435,16 +412,41 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
             None => timeout,
         };
 
-        match rx.recv_timeout(timeout.min(ACCEPT_POLL).max(Duration::from_millis(1))) {
-            Ok(Msg::Fs(ev)) => {
-                record_event(&root, &ev, &mut pending);
-                if !pending.is_empty() {
-                    flush_at = Some(Instant::now() + DEBOUNCE);
+        match rx.recv_timeout(timeout.max(Duration::from_millis(1))) {
+            Ok(Msg::Conn(stream)) => {
+                last_activity = Instant::now();
+                // The watcher may have queued a mutation just before this
+                // connection. Drain those events before the request so the
+                // first post-mutation read never sees the preceding
+                // publication; connections drained meanwhile wait their turn.
+                let mut streams = vec![stream];
+                let mut failed = false;
+                while let Ok(message) = rx.try_recv() {
+                    match message {
+                        Msg::Conn(stream) => streams.push(stream),
+                        Msg::AcceptFailed => failed = true,
+                        Msg::Fs(ev) => note_event(&root, &ev, &mut pending, &mut flush_at),
+                        Msg::WatcherError(error) => service.watcher_error(&error),
+                    }
                 }
+                // Apply the debounced batch before serving the connections:
+                // the debounce coalesces bursts between requests, it must
+                // not let a request read the index from before a mutation.
+                flush_pending(&mut service, &mut pending, &mut flush_at);
+                for stream in streams {
+                    if !shutdown {
+                        handle_conn(&mut service, stream, &mut shutdown);
+                    }
+                }
+                if failed {
+                    break;
+                }
+                continue;
             }
+            Ok(Msg::AcceptFailed) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(Msg::Fs(ev)) => note_event(&root, &ev, &mut pending, &mut flush_at),
             Ok(Msg::WatcherError(error)) => service.watcher_error(&error),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
         if let Some(at) = flush_at
@@ -473,10 +475,66 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
         }
     }
 
+    let _ = stop_acceptor(&sock, bound, &stop, acceptor);
     let _ = std::fs::remove_file(&sock);
     let _ = std::fs::remove_file(pid_path(&root));
     let _ = std::fs::remove_file(&lock_path);
     Ok(())
+}
+
+/// Accept connections on a blocking listener and hand them to the loop, so
+/// an idle daemon sleeps instead of polling the listener. The thread ends on
+/// `stop` (checked after each accept), on an accept error, or once the loop
+/// has dropped its receiver.
+fn spawn_acceptor(
+    listener: UnixListener,
+    tx: mpsc::Sender<Msg>,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            let Ok(stream) = stream else {
+                let _ = tx.send(Msg::AcceptFailed);
+                return;
+            };
+            if tx.send(Msg::Conn(stream)).is_err() {
+                return;
+            }
+        }
+    })
+}
+
+/// The `(device, inode)` of the socket file at `path`, `None` when it is gone.
+fn socket_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
+/// Wake the accept thread with a connection of our own, after `stop` is set,
+/// and wait for it to exit; returns whether it did. The wake-up goes out only
+/// while `sock` is still the socket this daemon bound (`bound`): once the
+/// file was removed, or replaced by another daemon's socket for the same
+/// root, a connection would never reach this thread, so it is left to end
+/// with the process instead of `join` waiting forever.
+fn stop_acceptor(
+    sock: &Path,
+    bound: Option<(u64, u64)>,
+    stop: &AtomicBool,
+    acceptor: std::thread::JoinHandle<()>,
+) -> bool {
+    stop.store(true, Ordering::Release);
+    if bound.is_none() || socket_identity(sock) != bound {
+        return false;
+    }
+    if UnixStream::connect(sock).is_err() {
+        return false;
+    }
+    acceptor.join().is_ok()
 }
 
 /// The served root has been deleted (or replaced by a non-directory): every
@@ -526,6 +584,20 @@ fn record_event(root: &Path, ev: &notify::Event, pending: &mut BTreeMap<PathBuf,
     }
 }
 
+/// Record one watcher event and, when a change is pending afterwards, push
+/// the debounce deadline back to `DEBOUNCE` from now.
+fn note_event(
+    root: &Path,
+    ev: &notify::Event,
+    pending: &mut BTreeMap<PathBuf, bool>,
+    flush_at: &mut Option<Instant>,
+) {
+    record_event(root, ev, pending);
+    if !pending.is_empty() {
+        *flush_at = Some(Instant::now() + DEBOUNCE);
+    }
+}
+
 /// Apply the debounced watcher batch now, when there is one. The loop calls
 /// this before every connection so a request following a mutation cannot
 /// read an index built before it, and again on the debounce timer.
@@ -543,10 +615,12 @@ fn flush_pending(
 }
 
 fn handle_conn(service: &mut dyn Corpus, stream: UnixStream, shutdown: &mut bool) {
-    // The listener is non-blocking, and on macOS/BSD the accepted socket
-    // inherits `O_NONBLOCK`: without this reset a request line that has not
-    // arrived yet reads as `WouldBlock` (the connection closes unanswered)
-    // and a reply larger than the send buffer is cut short.
+    // On macOS/BSD a socket accepted from a non-blocking listener inherits
+    // `O_NONBLOCK`. The listener blocks now, but the reset keeps the reads
+    // below independent of how the stream was accepted: a non-blocking one
+    // reads a request line that has not arrived yet as `WouldBlock` (the
+    // connection closes unanswered) and cuts short a reply larger than the
+    // send buffer.
     if stream.set_nonblocking(false).is_err() {
         return;
     }
@@ -926,6 +1000,123 @@ mod tests {
             daemon.is_finished()
         });
         daemon.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The accept thread hands each connection to the loop's channel and
+    /// stops when told to: the daemon's own wake-up connection ends it, so
+    /// `run_corpus` returns without a thread still blocked in `accept`.
+    #[test]
+    fn acceptor_should_forward_connections_and_stop_when_woken() {
+        let root = scratch_root("acceptor");
+        let sock = root.join("a.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let acceptor = spawn_acceptor(listener, tx, Arc::clone(&stop));
+
+        let _client = UnixStream::connect(&sock).unwrap();
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(5)),
+            Ok(Msg::Conn(_))
+        ));
+
+        assert!(stop_acceptor(
+            &sock,
+            socket_identity(&sock),
+            &stop,
+            acceptor
+        ));
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the wake-up connection must not reach the loop"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A change starts the debounce timer a full `DEBOUNCE` from now; an
+    /// event that leaves nothing pending (a read) does not start it.
+    #[test]
+    fn note_event_should_start_the_debounce_only_for_a_pending_change() {
+        use notify::event::{AccessKind, CreateKind, EventKind};
+        let root = scratch_root("note-event");
+        let file = root.join("a.rs");
+        std::fs::write(&file, "fn a() {}\n").unwrap();
+        let mut pending = BTreeMap::new();
+        let mut flush_at = None;
+
+        let read = notify::Event::new(EventKind::Access(AccessKind::Any)).add_path(file.clone());
+        note_event(&root, &read, &mut pending, &mut flush_at);
+        assert_eq!(flush_at, None);
+
+        let before = Instant::now();
+        let create = notify::Event::new(EventKind::Create(CreateKind::File)).add_path(file.clone());
+        note_event(&root, &create, &mut pending, &mut flush_at);
+        assert_eq!(pending.get(&file), Some(&false));
+        let at = flush_at.expect("a pending change starts the debounce");
+        assert!(
+            at >= before + DEBOUNCE,
+            "the debounce must wait DEBOUNCE from now"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With its socket gone nothing can wake the accept thread, so stopping
+    /// reports that it was left running instead of blocking on `join`.
+    #[test]
+    fn stop_acceptor_should_not_wait_on_a_removed_socket() {
+        let root = scratch_root("acceptor-gone");
+        let sock = root.join("a.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let acceptor = spawn_acceptor(listener, tx, Arc::clone(&stop));
+        let bound = socket_identity(&sock);
+        std::fs::remove_file(&sock).unwrap();
+
+        assert!(!stop_acceptor(&sock, bound, &stop, acceptor));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The socket file was removed and another daemon for the same root bound
+    /// the same path: a wake-up connection would reach that daemon, never
+    /// this thread, and `join` would wait forever. Stopping must notice the
+    /// replaced socket and return. The call runs on a thread with a deadline,
+    /// so a regression fails the test instead of hanging it.
+    #[test]
+    fn stop_acceptor_should_not_wait_on_a_socket_another_daemon_bound() {
+        let root = scratch_root("acceptor-replaced");
+        let sock = root.join("a.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let acceptor = spawn_acceptor(listener, tx, Arc::clone(&stop));
+        let bound = socket_identity(&sock);
+        std::fs::remove_file(&sock).unwrap();
+        let _other_daemon = UnixListener::bind(&sock).unwrap();
+        assert_ne!(socket_identity(&sock), bound);
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let sock_for_stop = sock.clone();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(stop_acceptor(&sock_for_stop, bound, &stop, acceptor));
+        });
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(5)), Ok(false));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn socket_identity_should_follow_the_file_not_the_path() {
+        let root = scratch_root("socket-identity");
+        let sock = root.join("a.sock");
+        assert_eq!(socket_identity(&sock), None);
+        let first = UnixListener::bind(&sock).unwrap();
+        let identity = socket_identity(&sock);
+        assert!(identity.is_some());
+        drop(first);
+        std::fs::remove_file(&sock).unwrap();
+        let _second = UnixListener::bind(&sock).unwrap();
+        assert!(socket_identity(&sock).is_some());
         let _ = std::fs::remove_dir_all(&root);
     }
 
