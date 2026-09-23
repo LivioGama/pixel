@@ -221,7 +221,10 @@ export const railBounds = (nodes: NodeSpec[]) => {
 /// Baseline rail: soft under-glow + a gradient line that fades out at both ends.
 export const Rail = ({nodes, color}: {nodes: NodeSpec[]; color: string}) => {
 	const {x1, x2, y} = railBounds(nodes);
-	const gid = `railfade-${color.replace('#', '')}`;
+	// Keyed by geometry as well as colour: two rails of one colour (setup and
+	// session) would otherwise share an id, and `url(#id)` resolves to the first,
+	// fading the second rail over the first one's x-span.
+	const gid = `railfade-${color.replace('#', '')}-${Math.round(x1)}-${Math.round(x2)}-${Math.round(y)}`;
 	return (
 		<g>
 			<defs>
