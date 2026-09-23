@@ -14,10 +14,15 @@
 # --settings, so it measures Pixel as a user installs it.
 #
 # Usage: [ARMS="vanilla pixel"] [PAR=n] [REF=v0.5.0] [EFFORT=medium] \
-#        [TASK="..."] [CANDIDATE_PROMPT=file] \
+#        [TASK="..."] [CANDIDATE_PROMPT=file] [CANDIDATE_BIN=path/to/pixel] \
 #          scripts/record-demo.sh <out-dir> [reps] [model]
 # Both arms of a rep always start together; PAR caps how many reps run at
-# once (default: all), so a rate limit or a busy machine hits both arms alike.
+# once (default: 3), so a rate limit or a busy machine hits both arms alike.
+# Keep it low: on an 8-core laptop 22 simultaneous sessions saturate the CPU,
+# the task-packet query of the prompt-submit hook then takes 500-900 ms
+# instead of ~150 ms, and every run past its 750 ms deadline starts without a
+# packet. packets.txt records, per Pixel run, whether its packet was
+# delivered (the session is in its copy's .pixel/task-runtime.json).
 #
 # TASK replaces the default task (the English-answer instruction still
 # follows it). CANDIDATE_PROMPT adds a `candidate` arm to compare two agent
@@ -28,12 +33,21 @@
 # with a copy of the installed prompt, so the two arms differ by the prompt
 # text alone. Use ARMS="pixel candidate" for that comparison.
 #
+# CANDIDATE_BIN compares two Pixel binaries instead: the `candidate` arm's
+# hooks, its index and the `pixel` its agent runs are that binary (first on
+# its PATH); every other input stays the installed one's. Setting both
+# CANDIDATE_* options changes two variables at once, and meta.txt says so.
+#
 # The repository is a fresh one holding REF's history only (objects are
 # borrowed from the source repository through alternates): no branch, tag or
 # later commit of the source is reachable, so `git log --all` or a history
-# search cannot find the change a task asks for. Every run gets its own
-# PIXEL_SESSION_ID, so one run's Pixel calls never feed another run's
-# repeated-call notes.
+# search cannot find the change a task asks for. Every run then works in its
+# own copy of it (an APFS clone where available), indexed with its arm's
+# binary and served by its own daemon: the daemon answers one request at a
+# time, so 22 sessions sharing one queued their task-packet queries past the
+# prompt-submit hook's 750 ms deadline and a third of the runs got no packet.
+# Every run also gets its own PIXEL_SESSION_ID, so one run's Pixel calls
+# never feed another run's repeated-call notes.
 # Writes <arm>-<rep>.jsonl: one stream-json event per line, each wrapped as
 # {"t": <ms since epoch when the line arrived>, "e": <event>}.
 set -euo pipefail
@@ -49,6 +63,8 @@ prompt_file=$HOME/.local/share/pixel/agent-prompt.md
 task=${TASK:-'Task: retry a leased push when the remote branch moved. Before anyone edits anything, find the files that would need to change and list them, most important first, with one line each on why. Do not edit any file.'}
 candidate=${CANDIDATE_PROMPT:-}
 if [ -n "$candidate" ]; then candidate=$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate"); fi
+cand_bin=${CANDIDATE_BIN:-}
+if [ -n "$cand_bin" ]; then cand_bin=$(cd "$(dirname "$cand_bin")" && pwd)/$(basename "$cand_bin"); fi
 english='Always write your final answer in English.'
 
 mkdir -p "$out"
@@ -58,7 +74,13 @@ out=$(cd "$out" && pwd)
 # any clock starts: REF's history only, see the header.
 work=$(mktemp -d)
 repo="$work/pixel"
-trap '"$pixel_bin" daemon stop "$repo" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+stop_daemons() {
+  for d in "$work"/*/; do
+    "$pixel_bin" daemon stop "$d" >/dev/null 2>&1 || true
+    if [ -n "$cand_bin" ]; then "$cand_bin" daemon stop "$d" >/dev/null 2>&1 || true; fi
+  done
+}
+trap 'stop_daemons; rm -rf "$work"' EXIT
 ref_commit=$(git -C "$source_repo" rev-parse "$ref^{commit}")
 git init --quiet "$repo"
 echo "$(git -C "$source_repo" rev-parse --path-format=absolute --git-common-dir)/objects" > "$repo/.git/objects/info/alternates"
@@ -72,13 +94,14 @@ git -C "$repo" diff --cached --quiet ||
 (cd "$repo" && pixel prepare-repo . >/dev/null 2>&1)
 
 # The hooks of a Pixel arm; $1 prefixes the SessionStart command (an
-# environment assignment, or nothing).
+# environment assignment, or nothing), $2 is the binary.
 settings_for() {
+  local bin=${2:-$pixel_bin}
   cat <<JSON
 {"hooks": {
-  "SessionStart": [{"hooks": [{"type": "command", "command": "$1'$pixel_bin' run-hook session-start"}]}],
-  "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "'$pixel_bin' run-hook prompt-submit --provider claude"}]}],
-  "PostToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "'$pixel_bin' run-hook post-tool-use --provider claude"}]}]
+  "SessionStart": [{"hooks": [{"type": "command", "command": "$1'$bin' run-hook session-start"}]}],
+  "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "'$bin' run-hook prompt-submit --provider claude"}]}],
+  "PostToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "'$bin' run-hook post-tool-use --provider claude"}]}]
 }}
 JSON
 }
@@ -89,10 +112,35 @@ prompt_home() {
   echo "HOME='$work/home-$1' "
 }
 settings=$(settings_for "")
+candidate_settings=$(settings_for "" "${cand_bin:-$pixel_bin}")
 if [ -n "$candidate" ]; then
   settings=$(settings_for "$(prompt_home pixel "$prompt_file")")
-  candidate_settings=$(settings_for "$(prompt_home candidate "$candidate")")
+  candidate_settings=$(settings_for "$(prompt_home candidate "$candidate")" "${cand_bin:-$pixel_bin}")
 fi
+cand_path=$PATH
+if [ -n "$cand_bin" ]; then
+  mkdir -p "$work/bin-candidate"
+  ln -s "$cand_bin" "$work/bin-candidate/pixel"
+  cand_path="$work/bin-candidate:$PATH"
+fi
+
+# One copy of the prepared repository per run, indexed by its arm's binary
+# before any clock starts; the template's own daemon is stopped.
+"$pixel_bin" daemon stop "$repo" >/dev/null 2>&1 || true
+for rep in $(seq 1 "$reps"); do
+  for arm in ${ARMS:-vanilla pixel}; do
+    cp -c -R "$repo" "$work/$arm-$rep" 2>/dev/null || cp -R "$repo" "$work/$arm-$rep"
+    case $arm in
+      pixel) bin=$pixel_bin ;;
+      candidate) bin=${cand_bin:-$pixel_bin} ;;
+      *) continue ;;
+    esac
+    # Index, then one query so the daemon has the index loaded when the
+    # hook asks for the task packet: a cold daemon misses the deadline.
+    (cd "$work/$arm-$rep" && "$bin" prepare-repo . >/dev/null 2>&1 &&
+      "$bin" scope-task "warm up the index" --metrics off >/dev/null 2>&1) || true
+  done
+done
 
 {
   echo "ref=$ref ($(git -C "$source_repo" rev-parse "$ref^{commit}"))"
@@ -100,11 +148,15 @@ fi
   echo "claude=$(claude --version)"
   echo "pixel=$("$pixel_bin" --version | head -2 | tr '\n' ' ')"
   echo "prompt_sha256=$(shasum -a 256 "$prompt_file" | cut -d' ' -f1)"
+  if [ -n "$cand_bin" ]; then
+    echo "candidate_bin=$cand_bin ($("$cand_bin" --version | head -2 | tr '\n' ' '))"
+    [ -z "$candidate" ] || echo "warning=CANDIDATE_PROMPT and CANDIDATE_BIN both set: two variables change"
+  fi
   if [ -n "$candidate" ]; then
     echo "candidate_prompt=$candidate"
     echo "candidate_prompt_sha256=$(shasum -a 256 "$candidate" | cut -d' ' -f1)"
   fi
-  echo "isolation=fresh repository with REF's history only, per-run PIXEL_SESSION_ID"
+  echo "isolation=fresh repository with REF's history only, one copy and daemon per run, per-run PIXEL_SESSION_ID"
   echo "task=$task"
   echo "arms=${ARMS:-vanilla pixel} reps=$reps started=$(date -u +%FT%TZ)"
 } > "$out/meta.txt"
@@ -124,14 +176,14 @@ for line in sys.stdin:
 
 run() {
   local arm=$1 rep=$2
-  local extra=()
+  local extra=() path=$PATH
   case $arm in
     pixel) extra=(--settings "$settings") ;;
     candidate)
-      [ -n "$candidate" ] || { echo "arm candidate needs CANDIDATE_PROMPT" >&2; return 1; }
-      extra=(--settings "$candidate_settings") ;;
+      [ -n "$candidate$cand_bin" ] || { echo "arm candidate needs CANDIDATE_PROMPT or CANDIDATE_BIN" >&2; return 1; }
+      extra=(--settings "$candidate_settings"); path=$cand_path ;;
   esac
-  (cd "$repo" && env -u CLAUDECODE PIXEL_SESSION_ID="demo-$arm-$rep" claude -p "$task" \
+  (cd "$work/$arm-$rep" && env -u CLAUDECODE PATH="$path" PIXEL_SESSION_ID="demo-$arm-$rep" claude -p "$task" \
     --model "$model" --effort "$effort" \
     --setting-sources "" --disable-slash-commands --strict-mcp-config \
     --append-system-prompt "$english" \
@@ -141,9 +193,27 @@ run() {
     ${extra[@]+"${extra[@]}"} < /dev/null) | stamp > "$out/$arm-$rep.jsonl"
 }
 
-par=${PAR:-$reps}
+par=${PAR:-3}
 for rep in $(seq 1 "$reps"); do
   for arm in ${ARMS:-vanilla pixel}; do run "$arm" "$rep" & done
   if [ $((rep % par)) -eq 0 ]; then wait; fi
 done
 wait
+
+# Whether each Pixel run's prompt-submit hook delivered its task packet:
+# stream-json shows no UserPromptSubmit event, but the hook records the
+# session in the copy's task runtime before it prints the packet.
+for f in "$out"/*.jsonl; do
+  run=$(basename "$f" .jsonl)
+  case $run in vanilla-*) continue ;; esac
+  python3 - "$f" "$work/$run/.pixel/task-runtime.json" <<'PY'
+import json, os, sys
+f, runtime = sys.argv[1:]
+sid = next((json.loads(l)["e"].get("session_id") for l in open(f) if '"init"' in l), None)
+try:
+    sessions = {s.get("session_id") for s in json.load(open(runtime)).get("sessions", [])}
+except (OSError, ValueError):
+    sessions = set()
+print(f"{os.path.basename(f)[:-6]} packet={'yes' if sid in sessions else 'no'}")
+PY
+done | sort -V > "$out/packets.txt"
