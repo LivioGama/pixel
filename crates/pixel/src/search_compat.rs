@@ -209,16 +209,21 @@ pub fn rewrite(command: &str, cwd: &Path) -> Option<String> {
         // only `rg` and `grep -r` have directory semantics to emulate.
         Some(raw) if tool == SearchTool::Rg || parsed.recursive => Some(checked_dir(raw, cwd)?.1),
         Some(_) => return None,
-        // Implicit cwd search: only inside an indexed repo. Canonicalize so
-        // `checked_dir` resolves an absolute directory even for a relative
-        // or symlinked `cwd`.
-        None => Some(checked_dir(cwd.canonicalize().ok()?.to_str()?, cwd)?.1),
+        // Implicit cwd search: `rg` only, inside an indexed repo. A
+        // no-operand `grep -r` names files `./a` on BSD and `a` on GNU, so
+        // no single emulation matches it. Canonicalize so `checked_dir`
+        // resolves an absolute directory even for a relative or symlinked
+        // `cwd`.
+        None if tool == SearchTool::Rg => {
+            Some(checked_dir(cwd.canonicalize().ok()?.to_str()?, cwd)?.1)
+        }
+        None => return None,
     };
     // A rewrite can auto-authorize the command, so the credential boundary
     // is enforced on every entry the native tool would open, not just the
     // named directory. Names only — content stays for the execution side.
     if let Some(dir) = dir
-        && dir_entries(tool, &dir)
+        && dir_entries(tool, &dir, DIR_EMULATION_MAX_FILES)
             .ok()
             .map(|paths| paths.iter().any(|path| credential_path(path)))
             != Some(false)
@@ -427,30 +432,61 @@ fn file_output(
 /// `rg` skips hidden entries and honors ignore files (the `ignore` walk is
 /// its own crate, so the filters agree by construction); `grep -r` opens
 /// everything recursively and follows no symlink below the argument.
-fn dir_entries(tool: SearchTool, dir: &Path) -> Result<Vec<PathBuf>, &'static str> {
+/// Most files a directory emulation reads, refreshes and re-stats. Past it
+/// the native tool is faster than proving every file current, and the
+/// PreToolUse hook's own walk must stay inside the hook timeout.
+const DIR_EMULATION_MAX_FILES: usize = 2_000;
+
+/// Most bytes a directory emulation reads before handing the search back.
+const DIR_EMULATION_MAX_BYTES: u64 = 33_554_432; // 32 MiB
+
+/// Every file the native tool would open under `dir`, or an error as soon
+/// as there are more than `max_files` of them.
+fn dir_entries(
+    tool: SearchTool,
+    dir: &Path,
+    max_files: usize,
+) -> Result<Vec<PathBuf>, &'static str> {
     let mut paths = Vec::new();
     match tool {
         SearchTool::Rg => {
             for entry in ignore::WalkBuilder::new(dir).build() {
                 let entry = entry.map_err(|_| "walk-failed")?;
                 if entry.file_type().is_some_and(|kind| kind.is_file()) {
-                    paths.push(entry.into_path());
+                    push_bounded(&mut paths, entry.into_path(), max_files)?;
                 }
             }
         }
-        SearchTool::Grep => grep_walk(dir, &mut paths)?,
+        SearchTool::Grep => grep_walk(dir, &mut paths, max_files)?,
     }
     Ok(paths)
 }
 
-fn grep_walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), &'static str> {
+fn push_bounded(
+    out: &mut Vec<PathBuf>,
+    path: PathBuf,
+    max_files: usize,
+) -> Result<(), &'static str> {
+    if out.len() >= max_files {
+        return Err("tree-too-large");
+    }
+    out.push(path);
+    Ok(())
+}
+
+fn grep_walk(dir: &Path, out: &mut Vec<PathBuf>, max_files: usize) -> Result<(), &'static str> {
     for entry in std::fs::read_dir(dir).map_err(|_| "walk-failed")? {
         let entry = entry.map_err(|_| "walk-failed")?;
         let kind = entry.file_type().map_err(|_| "walk-failed")?;
-        if kind.is_dir() {
-            grep_walk(&entry.path(), out)?;
+        if kind.is_dir() && entry.file_name() == ".git" {
+            // `grep -r` reads git's object store too, whose compressed
+            // objects always hold NUL bytes: hand the search back now
+            // instead of after reading the whole store.
+            return Err("vcs-dir-in-tree");
+        } else if kind.is_dir() {
+            grep_walk(&entry.path(), out, max_files)?;
         } else if kind.is_file() {
-            out.push(entry.path());
+            push_bounded(out, entry.path(), max_files)?;
         } else {
             // Symlinks, fifos, sockets: `grep -r` opens them for real; the
             // emulation has no answer, so the command stays native.
@@ -479,6 +515,8 @@ fn dir_output(
     let raw = args.path.as_deref();
     let (root, dir, dir_rel) = match raw {
         Some(raw) => checked_dir(raw, cwd),
+        // See `rewrite`: a no-operand `grep -r` prints platform-specific names.
+        None if tool == SearchTool::Grep => return Err("implicit-grep-cwd"),
         None => checked_dir(
             cwd.canonicalize()
                 .ok()
@@ -491,7 +529,8 @@ fn dir_output(
     .ok_or("unsupported-directory")?;
     let mut files = Vec::new();
     let mut clean = HashMap::new();
-    for path in dir_entries(tool, &dir)? {
+    let mut read_bytes: u64 = 0;
+    for path in dir_entries(tool, &dir, DIR_EMULATION_MAX_FILES)? {
         let rel = path
             .strip_prefix(&root)
             .ok()
@@ -506,6 +545,10 @@ fn dir_output(
         let bytes =
             pixel_index::index::read_regular_bounded(&path, pixel_index::index::MAX_FILE_BYTES)
                 .map_err(|_| "unreadable-file")?;
+        read_bytes += bytes.len() as u64;
+        if read_bytes > DIR_EMULATION_MAX_BYTES {
+            return Err("tree-too-large");
+        }
         // NUL anywhere can hide a post-quit match or a "binary file matches"
         // notice the emulation cannot reproduce — strict fail-open.
         if bytes.contains(&0) {
@@ -562,6 +605,7 @@ fn dir_output(
         SearchTool::Grep => !args.no_filename,
     };
     let mut output = Vec::new();
+    let mut printed = 0usize;
     for m in &matches {
         // Matches can also come from indexed files the tool would not open
         // (hidden, ignored, policy-pruned): the native search skips them,
@@ -577,11 +621,10 @@ fn dir_output(
             .map_err(|_| "outside-root")?;
         let display = match raw {
             Some(raw) => format!("{}/{}", raw.trim_end_matches('/'), sub.display()),
-            // `grep -r` defaults to searching `.` and echoes `./` prefixes;
-            // `rg`'s implicit search prints bare relative paths.
-            None if tool == SearchTool::Grep => format!("./{}", sub.display()),
+            // Only `rg` reaches an implicit cwd search: bare relative paths.
             None => sub.display().to_string(),
         };
+        printed += 1;
         if show_name {
             output.extend_from_slice(display.as_bytes());
             output.push(b':');
@@ -596,11 +639,9 @@ fn dir_output(
             return Err("output-cap");
         }
     }
-    Ok((
-        output,
-        i32::from(matches.is_empty()),
-        "equivalent-literal-dir",
-    ))
+    // The status follows what was printed: matches dropped above are
+    // files the native tool never opens, so they cannot make it exit 0.
+    Ok((output, i32::from(printed == 0), "equivalent-literal-dir"))
 }
 
 fn record(cwd: &Path, backend: &str, reason: &str) {
@@ -610,7 +651,8 @@ fn record(cwd: &Path, backend: &str, reason: &str) {
             "search-compat",
             format!("backend={backend} reason={reason}"),
         ));
-        logger.finish();
+        // `run` exits right after: only a flushed record is observable.
+        logger.finish_flush();
     }
 }
 
@@ -741,7 +783,6 @@ mod tests {
             ("rg needle", "rg"),
             ("grep -rn needle src", "grep"),
             ("grep -r needle .", "grep"),
-            ("grep -rn needle", "grep"),
             ("grep -rn needle src/a.rs", "grep"),
         ] {
             let rewritten =
@@ -760,6 +801,7 @@ mod tests {
         for command in [
             "grep -n needle src",         // bare grep on a dir errors natively
             "grep needle",                // stdin
+            "grep -rn needle",            // `./a` on BSD, `a` on GNU
             "rg -l needle src",           // unsupported flag
             "rg -n needle src | wc -l",   // pipeline
             "rg needle missing",          // nonexistent path
@@ -781,5 +823,46 @@ mod tests {
         let bare = bare.canonicalize().unwrap();
         assert!(rewrite("rg needle", &bare).is_none());
         let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    #[test]
+    fn a_walk_past_the_file_budget_hands_the_search_back() {
+        let repo = Repo::new();
+        let src = repo.0.join("src");
+        // Two files under src: a budget of two fits, one does not.
+        for tool in [SearchTool::Rg, SearchTool::Grep] {
+            assert_eq!(dir_entries(tool, &src, 2).map(|p| p.len()), Ok(2));
+            assert_eq!(dir_entries(tool, &src, 1), Err("tree-too-large"));
+        }
+    }
+
+    #[test]
+    fn a_match_only_in_a_file_rg_skips_prints_nothing_and_exits_one() {
+        let repo = Repo::new();
+        std::fs::create_dir_all(repo.0.join(".hidden")).unwrap();
+        std::fs::write(repo.0.join(".hidden/x.rs"), b"lonely_marker\n").unwrap();
+        let lonely = parse_args(SearchTool::Rg, &args(&["lonely_marker"])).unwrap();
+        let (output, status, _) = dir_output(SearchTool::Rg, &lonely, &repo.0).unwrap();
+        assert_eq!(
+            (String::from_utf8_lossy(&output).into_owned(), status),
+            (String::new(), 1),
+            "native rg skips `.hidden/`, so it finds nothing and exits 1"
+        );
+        let found = parse_args(SearchTool::Rg, &args(&["needle"])).unwrap();
+        let (output, status, _) = dir_output(SearchTool::Rg, &found, &repo.0).unwrap();
+        assert_eq!(status, 0, "{}", String::from_utf8_lossy(&output));
+    }
+
+    #[test]
+    fn grep_r_over_a_git_directory_goes_native_before_reading_it() {
+        let repo = Repo::new();
+        std::fs::create_dir_all(repo.0.join(".git/objects")).unwrap();
+        std::fs::write(repo.0.join(".git/config"), b"needle\n").unwrap();
+        assert_eq!(
+            dir_entries(SearchTool::Grep, &repo.0, DIR_EMULATION_MAX_FILES),
+            Err("vcs-dir-in-tree")
+        );
+        // rg skips hidden directories natively, so its walk is unaffected.
+        assert!(dir_entries(SearchTool::Rg, &repo.0, DIR_EMULATION_MAX_FILES).is_ok());
     }
 }

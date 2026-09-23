@@ -97,6 +97,13 @@ pub fn from_scope_task(task: &str, data: &Value) -> Value {
             "targets": group.targets,
         }));
     }
+    // The groups come out ordered by area; order them P0 first before the
+    // cap so a truncation drops read-only context, never a write workstream.
+    workstreams.sort_by(|left, right| {
+        tier_rank(left)
+            .cmp(&tier_rank(right))
+            .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+    });
     if workstreams.len() > MAX_WORKSTREAMS {
         workstreams.truncate(MAX_WORKSTREAMS);
         caps.insert(format!(
@@ -211,6 +218,11 @@ pub fn pretty(brief: &Value) -> String {
                                 item.get("line").and_then(Value::as_u64).unwrap_or(0),
                                 item.get("text").and_then(Value::as_str).unwrap_or("")
                             ));
+                        }
+                    }
+                    if let Some(reasons) = target.get("reasons").and_then(Value::as_array) {
+                        for reason in reasons.iter().filter_map(Value::as_str) {
+                            output.push_str(&format!("    reason: {reason}\n"));
                         }
                     }
                 }
@@ -361,5 +373,151 @@ fn tier_rank(target: &Value) -> u8 {
         Some("P0") => 0,
         Some("P1") => 1,
         _ => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(tier: &str, path: &str) -> Value {
+        json!({"tier": tier, "path": path})
+    }
+
+    fn brief_of(targets: Vec<Value>) -> Value {
+        from_scope_task("task", &json!({"targets": targets}))
+    }
+
+    fn caps_of(brief: &Value) -> Vec<String> {
+        brief["uncertainty"]["caps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cap| cap.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn target_count(brief: &Value) -> usize {
+        brief["workstreams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|workstream| workstream["targets"].as_array().unwrap().len())
+            .sum()
+    }
+
+    #[test]
+    fn targets_are_capped_at_one_hundred_and_the_cap_is_disclosed() {
+        let make = |n: usize| {
+            (0..n)
+                .map(|i| target("P1", &format!("src/f{i:03}.rs")))
+                .collect()
+        };
+        let exact = brief_of(make(MAX_TARGETS));
+        assert_eq!(target_count(&exact), 100);
+        assert!(caps_of(&exact).is_empty(), "{:?}", caps_of(&exact));
+        let over = brief_of(make(MAX_TARGETS + 1));
+        assert_eq!(target_count(&over), 100);
+        assert_eq!(caps_of(&over), ["execution brief targets capped at 100"]);
+    }
+
+    #[test]
+    fn a_workstream_cap_drops_read_context_before_any_write_workstream() {
+        // 64 P1 areas named before the one P0 area: an area-ordered cap
+        // would keep them all and lose the only write workstream.
+        let mut targets: Vec<Value> = (0..MAX_WORKSTREAMS)
+            .map(|i| target("P1", &format!("a{i:02}/x.rs")))
+            .collect();
+        targets.push(target("P0", "zz/edit.rs"));
+        let brief = brief_of(targets);
+        let workstreams = brief["workstreams"].as_array().unwrap();
+        assert_eq!(workstreams.len(), 64);
+        assert_eq!(workstreams[0]["id"], "workstream:zz:P0");
+        assert_eq!(workstreams[0]["ownership"], "write");
+        assert_eq!(
+            caps_of(&brief),
+            ["execution brief workstreams capped at 64"]
+        );
+        assert!(
+            !brief["validation"].to_string().contains("No P0 target"),
+            "{}",
+            brief["validation"]
+        );
+
+        let exact: Vec<Value> = (0..MAX_WORKSTREAMS)
+            .map(|i| target("P1", &format!("a{i:02}/x.rs")))
+            .collect();
+        let brief = brief_of(exact);
+        assert_eq!(brief["workstreams"].as_array().unwrap().len(), 64);
+        assert!(caps_of(&brief).is_empty());
+    }
+
+    #[test]
+    fn per_target_lists_and_texts_are_cut_exactly_at_their_limits() {
+        let symbols = |n: usize| -> Vec<Value> {
+            (0..n)
+                .map(|i| json!({"kind": "fn", "name": format!("s{i}")}))
+                .collect()
+        };
+        let at_limit = brief_of(vec![json!({
+            "tier": "P0", "path": "a.rs",
+            "symbols": symbols(MAX_SYMBOLS_PER_TARGET),
+            "evidence": [{"keyword": "k", "line": 1, "text": "x".repeat(MAX_TEXT_CHARS)}],
+        })]);
+        let projected = &at_limit["workstreams"][0]["targets"][0];
+        assert_eq!(projected["symbols"].as_array().unwrap().len(), 32);
+        assert_eq!(
+            projected["evidence"][0]["text"].as_str().unwrap().len(),
+            320
+        );
+        assert!(caps_of(&at_limit).is_empty(), "{:?}", caps_of(&at_limit));
+
+        let over = brief_of(vec![json!({
+            "tier": "P0", "path": "a.rs",
+            "symbols": symbols(MAX_SYMBOLS_PER_TARGET + 1),
+            "evidence": [{"keyword": "k", "line": 1, "text": "x".repeat(MAX_TEXT_CHARS + 1)}],
+        })]);
+        let projected = &over["workstreams"][0]["targets"][0];
+        assert_eq!(projected["symbols"].as_array().unwrap().len(), 32);
+        assert_eq!(
+            projected["evidence"][0]["text"].as_str().unwrap().len(),
+            320
+        );
+        assert_eq!(
+            caps_of(&over),
+            [
+                "evidence text capped at 320 characters",
+                "symbols per target capped at 32",
+            ]
+        );
+    }
+
+    #[test]
+    fn more_than_thirty_two_caps_keep_thirty_two_plus_a_marker() {
+        let source = |n: usize| -> Value {
+            json!({
+                "targets": [],
+                "envelope": {"caps": (0..n).map(|i| format!("cap {i:02}")).collect::<Vec<_>>()},
+            })
+        };
+        // The empty targets array adds no cap of its own.
+        let exact = from_scope_task("t", &source(MAX_CAPS));
+        assert_eq!(caps_of(&exact).len(), 32);
+        let over = from_scope_task("t", &source(MAX_CAPS + 1));
+        let caps = caps_of(&over);
+        assert_eq!(caps.len(), 33);
+        assert_eq!(caps[32], "execution brief caps capped at 32");
+    }
+
+    #[test]
+    fn the_pretty_brief_carries_each_targets_reasons() {
+        let brief = brief_of(vec![json!({
+            "tier": "P0", "path": "src/login.rs", "reasons": ["defines login_user"],
+        })]);
+        let text = pretty(&brief);
+        assert!(
+            text.contains("  src/login.rs\n    reason: defines login_user\n"),
+            "{text}"
+        );
     }
 }

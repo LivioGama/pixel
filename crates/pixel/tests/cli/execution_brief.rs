@@ -97,6 +97,50 @@ fn json_brief_preserves_p0_p1_scope_evidence_and_marks_unknown_dependencies() {
             assert!(target["evidence"].is_array());
         }
     }
+
+    // The projection carries scope-task's own evidence for the target, not
+    // just arrays of the right type.
+    let scoped = scope_json["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|target| target["path"] == "src/login.rs")
+        .expect("scope-task targets src/login.rs");
+    let projected = json["workstreams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|workstream| workstream["targets"].as_array().unwrap())
+        .find(|target| target["path"] == "src/login.rs")
+        .expect("the brief projects src/login.rs");
+    let field = |target: &Value, list: &str, key: &str| -> Vec<String> {
+        target[list].as_array().map_or_else(Vec::new, |items| {
+            items.iter().map(|item| item[key].to_string()).collect()
+        })
+    };
+    let scoped_symbols = field(scoped, "symbols", "name");
+    assert!(
+        scoped_symbols.contains(&"\"login_user\"".to_string()),
+        "fixture: scope-task found the symbol: {scoped}"
+    );
+    assert_eq!(field(projected, "symbols", "name"), scoped_symbols);
+    assert_eq!(
+        field(projected, "symbols", "uid"),
+        field(scoped, "symbols", "uid")
+    );
+    assert_eq!(
+        field(projected, "symbols", "line"),
+        field(scoped, "symbols", "line")
+    );
+    assert_eq!(
+        field(projected, "evidence", "text"),
+        field(scoped, "evidence", "text")
+    );
+    assert!(
+        !scoped["reasons"].as_array().unwrap().is_empty(),
+        "fixture: scope-task gave reasons: {scoped}"
+    );
+    assert_eq!(projected["reasons"], scoped["reasons"]);
 }
 
 #[test]

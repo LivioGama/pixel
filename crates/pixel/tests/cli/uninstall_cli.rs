@@ -24,11 +24,14 @@ fn wrappers_only_removes_one_block_and_keeps_the_rest_installed() {
     run(&home, &["install", "--shell", "zsh", "--json"]);
     let prompt = home.join(".local/share/pixel/agent-prompt.md");
     assert!(prompt.is_file(), "fixture: install wrote the prompt");
-    assert!(
-        std::fs::read_to_string(home.join(".zshrc"))
-            .unwrap()
-            .contains("pixel-managed")
-    );
+    // `install` no longer writes a wrapper (the prompt travels through the
+    // lifecycle hooks); the block `--wrappers-only` exists for is the residue
+    // of an older install, so the fixture writes one after installing.
+    std::fs::write(
+        home.join(".zshrc"),
+        "export KEEP=1\n# >>> pixel-managed >>>\nclaude() { command claude \"$@\"; }\n# <<< pixel-managed <<<\n",
+    )
+    .unwrap();
 
     let report = run(
         &home,
@@ -38,11 +41,10 @@ fn wrappers_only_removes_one_block_and_keeps_the_rest_installed() {
     assert_eq!(steps.len(), 1, "{report}");
     assert_eq!(steps[0]["id"], "shell-wrappers");
     assert_eq!(report["ok"], true, "{report}");
-    assert!(
-        !std::fs::read_to_string(home.join(".zshrc"))
-            .unwrap()
-            .contains("pixel-managed"),
-        "the zsh block is gone"
+    assert_eq!(
+        std::fs::read_to_string(home.join(".zshrc")).unwrap(),
+        "export KEEP=1\n",
+        "the zsh block is gone and the user's own lines stay"
     );
     assert!(
         prompt.is_file(),
