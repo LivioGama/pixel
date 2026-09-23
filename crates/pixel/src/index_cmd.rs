@@ -499,7 +499,10 @@ mod tests {
                 if BufReader::new(&stream).read_line(&mut line).is_ok() {
                     let reply = pixel_daemon::api::Response::success(
                         "ping",
-                        serde_json::json!({"pong": true}),
+                        serde_json::json!({
+                            "pong": true,
+                            "protocol_version": pixel_daemon::api::PROTOCOL_VERSION,
+                        }),
                     );
                     let _ = writeln!(stream, "{}", serde_json::to_string(&reply).unwrap());
                 }

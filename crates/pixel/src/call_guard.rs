@@ -486,15 +486,21 @@ mod tests {
 
     #[test]
     fn fails_open_without_pixel_dir() {
-        let dir = std::env::temp_dir().join(format!("pixel-no-dotdir-{}", now_unix()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // `/tmp` may itself be a legitimate indexed root, so a child of it is
+        // not evidence of the no-index path. A nonexistent child of `/` has
+        // no `.pixel` ancestor on this test host and cannot receive a log.
+        let dir = Path::new("/").join(format!(
+            "pixel-no-dotdir-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst),
+        ));
+        assert!(!dir.exists());
         with_session(None, || {
             match check_and_record("search-content", "foo .", &dir) {
                 CallGuardResult::Allow => {}
                 CallGuardResult::Warn(msg) => panic!("must fail open without .pixel/: {msg}"),
             }
         });
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

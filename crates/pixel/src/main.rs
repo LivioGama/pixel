@@ -28,7 +28,11 @@ mod classify;
 mod claude_controller;
 mod config_cmd;
 mod coverage_cmd;
+#[cfg(feature = "fastembed")]
+mod decide_onnx;
+mod decide_remote;
 mod evaluate_cmd;
+mod execution_brief;
 mod guard;
 mod index_cmd;
 mod mcp_cmd;
@@ -240,6 +244,40 @@ enum Command {
         /// score gap after P0. Improves precision on simple tasks.
         #[arg(long)]
         precision: bool,
+    },
+    /// Build a deterministic, bounded execution brief from scope-task evidence.
+    #[command(hide = true)]
+    ExecutionBrief {
+        /// Task/feature description.
+        task: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+        /// Maximum files in the scope evidence (default 20, max 100).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Drop files above this tier: "P0" = P0 only, "P1" = P0+P1.
+        #[arg(long)]
+        max_tier: Option<String>,
+        /// Precision mode: drop low-score P1 files after a sharp score gap.
+        #[arg(long)]
+        precision: bool,
+        /// Accepted for parity with scope-task; execution-brief never writes a manifest.
+        #[arg(long)]
+        no_manifest: bool,
+        /// Skip the daemon and use the in-process service.
+        #[arg(long)]
+        no_daemon: bool,
+    },
+    /// Persistent JSONL evidence protocol for a local coding harness.
+    #[command(hide = true)]
+    Evidence {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Preserve stdin/stdout JSONL framing; required to avoid prose output.
+        #[arg(long)]
+        jsonl: bool,
     },
     /// Surgical revert planner: locate the files a problem points at, list
     /// recent versions with the likely-breaking commit flagged, recommend a
@@ -1711,7 +1749,7 @@ fn try_daemon(root: &Path, req: &Request) -> Option<Response> {
     })
 }
 
-fn try_daemon_inner(root: &Path, req: &Request) -> Option<Response> {
+fn open_daemon_stream(root: &Path) -> Option<UnixStream> {
     let sock = daemon::socket_path(root);
     let mut stream = UnixStream::connect(&sock).ok()?;
     // The daemon drains its debounced watcher batch before serving a
@@ -1723,16 +1761,37 @@ fn try_daemon_inner(root: &Path, req: &Request) -> Option<Response> {
     stream
         .set_write_timeout(Some(Duration::from_millis(5000)))
         .ok()?;
+    Some(stream)
+}
+
+fn daemon_protocol_matches(root: &Path) -> Option<bool> {
+    let mut stream = open_daemon_stream(root)?;
     let ping = roundtrip(&mut stream, &Request::Ping)?;
-    if !ping.ok
-        || ping.data().get("protocol_version").and_then(Value::as_u64) != Some(PROTOCOL_VERSION)
-    {
-        // Old daemons must not serve stale schemas to a newer CLI. They all
-        // understand Shutdown; close them and use the current in-process
-        // service for this command. A later explicit start launches current.
-        let _ = roundtrip(&mut stream, &Request::Shutdown);
-        return None;
+    Some(
+        ping.ok
+            && ping.data().get("protocol_version").and_then(Value::as_u64)
+                == Some(PROTOCOL_VERSION),
+    )
+}
+
+fn try_daemon_inner(root: &Path, req: &Request) -> Option<Response> {
+    match daemon_protocol_matches(root) {
+        Some(true) => {}
+        Some(false) => {
+            // Old daemons must not serve stale schemas to a newer CLI. They all
+            // understand Shutdown; close them and use the current in-process
+            // service for this command. A later explicit start launches current.
+            if let Some(mut stream) = open_daemon_stream(root) {
+                let _ = roundtrip(&mut stream, &Request::Shutdown);
+            }
+            return None;
+        }
+        None => return None,
     }
+    // Each request gets its own connection. Besides removing a head-of-line
+    // wait behind the Ping handshake, this keeps the client compatible with
+    // a daemon that intentionally serves one request per connection.
+    let mut stream = open_daemon_stream(root)?;
     // Real request may legitimately take a while (lazy graph build).
     stream
         .set_read_timeout(Some(Duration::from_secs(600)))
@@ -3323,7 +3382,10 @@ fn run_search_one(
 /// turns a `status` or a `daemon start` check (the recall daemon's included)
 /// into a spurious service — with `.pixel/` artifacts — on that root.
 fn daemon_ping(root: &Path) -> bool {
-    pixel_daemon::daemon::ping_only(root)
+    // Startup readiness and command routing must agree: a daemon that answers
+    // Ping but cannot serve this CLI's protocol would otherwise be reported
+    // ready, then make `build-index` silently use its in-process fallback.
+    daemon_protocol_matches(root) == Some(true)
 }
 
 #[cfg(test)]
@@ -3386,7 +3448,10 @@ mod daemon_ping_tests {
                             Request::Ping,
                             "the probe asks with a Ping"
                         );
-                        let reply = Response::success("ping", json!({"pong": true}));
+                        let reply = Response::success(
+                            "ping",
+                            json!({"pong": true, "protocol_version": PROTOCOL_VERSION}),
+                        );
                         writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
                         return;
                     }
@@ -4524,6 +4589,33 @@ fn run_command(
             }
             Ok(())
         }
+        Command::ExecutionBrief {
+            task,
+            path,
+            json,
+            limit,
+            max_tier,
+            precision,
+            no_manifest: _,
+            no_daemon,
+        } => {
+            let data = execute(
+                &path,
+                Request::Targets {
+                    task: task.clone(),
+                    limit,
+                    max_tier,
+                    precision,
+                },
+                no_daemon,
+            )?;
+            let brief = execution_brief::from_scope_task(&task, &data);
+            if json {
+                print_data(&brief, true)
+            } else {
+                write_stdout(&execution_brief::pretty(&brief))
+            }
+        }
         Command::PlanRollback {
             problem,
             path,
@@ -5279,6 +5371,13 @@ fn run_command(
             no_daemon,
             json,
         } => ready(path, no_daemon, json),
+        Command::Evidence { path, jsonl } => {
+            if !jsonl {
+                return Err("evidence requires --jsonl".into());
+            }
+            let root = discover_root(&path)?;
+            pixel_daemon::evidence::serve(&root, std::io::stdin().lock(), std::io::stdout())
+        }
         Command::IndexStats { path } => {
             let path = discover_root(&path)?;
             let shard = Shard::open(&shard_path(&path)).map_err(|e| e.to_string())?;

@@ -1,6 +1,6 @@
 //! Unix-socket NDJSON daemon: one JSON `Request` per line, one JSON
-//! `Response` line back. Single-threaded request handling: an accept thread
-//! and a notify watcher feed one mpsc channel, so a long mutation (a
+//! `Response` line back. Single-threaded request handling: the event loop owns
+//! a nonblocking listener while a notify watcher feeds one mpsc channel, so a long mutation (a
 //! `sync-branch` is several git commands of up to 120 s each) delays every
 //! other request on this root. The loop therefore drains the debounced
 //! watcher batch before it serves a connection: a request following a
@@ -29,6 +29,9 @@ const DEBOUNCE: Duration = Duration::from_millis(500);
 /// for the rest of `IDLE_TIMEOUT`: auto-started daemons are detached from
 /// their parent, so nothing else would ever reap them.
 const ROOT_POLL: Duration = Duration::from_secs(5);
+/// The listener is nonblocking, so cap watcher waits to keep new local socket
+/// requests responsive without a separately-owned accept thread.
+const ACCEPT_POLL: Duration = Duration::from_millis(10);
 /// Idle poll interval for the facts ingest thread once fresh. A ref move
 /// re-triggers ingest on the next poll without blocking queries.
 const INGEST_IDLE_POLL: Duration = Duration::from_secs(5);
@@ -168,7 +171,6 @@ fn probe_ping(stream: &mut UnixStream) -> bool {
 }
 
 enum Msg {
-    Conn(UnixStream),
     Fs(notify::Event),
     /// A `notify` callback error, forwarded to the loop (the single owner of
     /// the corpus) so a watch that stopped reporting is counted and logged
@@ -344,47 +346,37 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
     let _ = std::fs::remove_file(&sock); // stale leftover
 
     let listener = UnixListener::bind(&sock)?;
+    listener.set_nonblocking(true)?;
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
     std::fs::write(pid_path(&root), std::process::id().to_string())?;
 
     let (tx, rx) = mpsc::channel::<Msg>();
 
-    // Accept thread: forwards connections into the single-threaded loop.
-    let tx_conn = tx.clone();
-    let accept_listener = listener.try_clone()?;
-    std::thread::spawn(move || {
-        for stream in accept_listener.incoming() {
-            match stream {
-                Ok(s) => {
-                    if tx_conn.send(Msg::Conn(s)).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
     // Watcher: raw notify events into the channel; debounced below. A
     // backend error goes through the same channel: a watch that stopped
     // reporting is exactly the failure that leaves the index stale, so it
     // must not be dropped here.
-    let tx_fs = tx.clone();
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        let msg = match res {
-            Ok(ev) => Msg::Fs(ev),
-            Err(error) => Msg::WatcherError(error.to_string()),
-        };
-        // The only send failure is a dropped receiver: the loop is exiting.
-        let _ = tx_fs.send(msg);
-    })
-    .map_err(|e| ServeError::Msg(format!("watcher init: {e}")))?;
     let watch_paths = service.watch_paths();
-    for wp in &watch_paths {
-        watcher
-            .watch(wp, RecursiveMode::Recursive)
-            .map_err(|e| ServeError::Msg(format!("watch {}: {e}", wp.display())))?;
-    }
+    let _watcher = if watch_paths.is_empty() {
+        None
+    } else {
+        let tx_fs = tx.clone();
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let msg = match res {
+                Ok(ev) => Msg::Fs(ev),
+                Err(error) => Msg::WatcherError(error.to_string()),
+            };
+            // The only send failure is a dropped receiver: the loop is exiting.
+            let _ = tx_fs.send(msg);
+        })
+        .map_err(|e| ServeError::Msg(format!("watcher init: {e}")))?;
+        for wp in &watch_paths {
+            watcher
+                .watch(wp, RecursiveMode::Recursive)
+                .map_err(|e| ServeError::Msg(format!("watch {}: {e}", wp.display())))?;
+        }
+        Some(watcher)
+    };
 
     eprintln!(
         "pixel daemon: root={} socket={}",
@@ -401,6 +393,34 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
     let mut next_sweep = sweep_every.map(|every| Instant::now() + every);
 
     while !shutdown {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                last_activity = Instant::now();
+                // The watcher may have queued a mutation just before this
+                // accept. Drain those events before the request so the first
+                // post-mutation read never sees the preceding publication.
+                while let Ok(message) = rx.try_recv() {
+                    match message {
+                        Msg::Fs(ev) => {
+                            record_event(&root, &ev, &mut pending);
+                            if !pending.is_empty() {
+                                flush_at = Some(Instant::now() + DEBOUNCE);
+                            }
+                        }
+                        Msg::WatcherError(error) => service.watcher_error(&error),
+                    }
+                }
+                // Apply the debounced batch before serving the connection:
+                // the debounce coalesces bursts between requests, it must
+                // not let a request read the index from before a mutation.
+                flush_pending(&mut service, &mut pending, &mut flush_at);
+                handle_conn(&mut service, stream, &mut shutdown);
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => break,
+        }
+
         let now = Instant::now();
         let idle_left = IDLE_TIMEOUT
             .checked_sub(now.duration_since(last_activity))
@@ -415,15 +435,7 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
             None => timeout,
         };
 
-        match rx.recv_timeout(timeout.max(Duration::from_millis(10))) {
-            Ok(Msg::Conn(stream)) => {
-                last_activity = Instant::now();
-                // Apply the debounced batch before serving the connection:
-                // the debounce coalesces bursts between requests, it must
-                // not let a request read the index from before a mutation.
-                flush_pending(&mut service, &mut pending, &mut flush_at);
-                handle_conn(&mut service, stream, &mut shutdown);
-            }
+        match rx.recv_timeout(timeout.min(ACCEPT_POLL).max(Duration::from_millis(1))) {
             Ok(Msg::Fs(ev)) => {
                 record_event(&root, &ev, &mut pending);
                 if !pending.is_empty() {
@@ -712,6 +724,9 @@ mod tests {
             failure_response("stub", "stub corpus")
         }
         fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+        fn watch_paths(&self) -> Vec<PathBuf> {
+            Vec::new()
+        }
         fn sweep_interval(&self) -> Option<Duration> {
             self.every
         }
