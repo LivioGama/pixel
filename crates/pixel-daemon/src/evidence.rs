@@ -352,12 +352,50 @@ fn bundle_frames<W: Write>(
     }
 }
 
+/// One line of `reader` without its `\n` or `\r\n`, or `None` at EOF. The
+/// cap is enforced while reading: `take` stops two bytes past `max`, room
+/// for a `\r\n` after a line of exactly `max` bytes, so a line that never
+/// ends costs `max + 2` bytes, not the whole stream.
+fn read_bounded_line<R: BufRead>(reader: &mut R, max: usize) -> Result<Option<String>, String> {
+    let mut line = Vec::new();
+    let read = std::io::Read::take(&mut *reader, max as u64 + 2)
+        .read_until(b'\n', &mut line)
+        .map_err(|error| format!("evidence stdin: {error}"))?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if line.last() == Some(&b'\n') {
+        line.pop();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+    }
+    if line.len() > max {
+        return Err("evidence request exceeds 64KiB".into());
+    }
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|_| "evidence stdin: stream did not contain valid UTF-8".into())
+}
+
 /// Serve the evidence JSONL protocol. EOF waits for accepted work to produce
 /// its terminal frames, so a short-lived caller does not silently lose output.
 pub fn serve<R: BufRead, W: Write + Send + 'static>(
     root: &Path,
     reader: R,
     writer: W,
+) -> Result<(), String> {
+    serve_bounded(root, reader, writer, usize::MAX)
+}
+
+/// [`serve`] for at most `max_requests` request lines. Tests pass a small
+/// bound, so a reader that never reports EOF ends the loop instead of the
+/// test's time budget.
+fn serve_bounded<R: BufRead, W: Write + Send + 'static>(
+    root: &Path,
+    mut reader: R,
+    writer: W,
+    max_requests: usize,
 ) -> Result<(), String> {
     // Capability negotiation must be independent of index construction: Pi
     // gives this bridge only 500ms to answer before it takes the legacy path.
@@ -368,12 +406,11 @@ pub fn serve<R: BufRead, W: Write + Send + 'static>(
     let in_flight = Arc::new(AtomicUsize::new(0));
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
 
-    for line in reader.lines() {
+    for _ in 0..max_requests {
+        let Some(line) = read_bounded_line(&mut reader, MAX_REQUEST_LINE)? else {
+            break;
+        };
         reap_finished_workers(&mut workers);
-        let line = line.map_err(|error| format!("evidence stdin: {error}"))?;
-        if line.len() > MAX_REQUEST_LINE {
-            return Err("evidence request exceeds 64KiB".into());
-        }
         let request: Request = match serde_json::from_str(&line) {
             Ok(request) => request,
             Err(error) => {
@@ -475,6 +512,9 @@ pub fn serve<R: BufRead, W: Write + Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Request lines a test bridge serves at most (see `serve_bounded`).
+    const TEST_MAX_REQUESTS: usize = 256;
     use std::io::Write;
 
     #[derive(Clone)]
@@ -536,10 +576,11 @@ mod tests {
     fn capability_handshake_does_not_open_the_repository_service() {
         let input = b"{\"op\":\"capabilities\",\"version\":1,\"requestId\":\"cap-1\"}\n";
         let output = Arc::new(Mutex::new(Vec::new()));
-        serve(
+        serve_bounded(
             Path::new("/definitely-not-an-indexed-repository"),
             std::io::Cursor::new(input),
             SharedBuffer(Arc::clone(&output)),
+            TEST_MAX_REQUESTS,
         )
         .unwrap();
         let value: Value = serde_json::from_slice(&output.lock().unwrap()).unwrap();
@@ -586,10 +627,11 @@ mod tests {
             .map(|line| format!("{line}\n"))
             .collect::<String>();
         let output = Arc::new(Mutex::new(Vec::new()));
-        let result = serve(
+        let result = serve_bounded(
             root,
             std::io::Cursor::new(input.into_bytes()),
             SharedBuffer(Arc::clone(&output)),
+            TEST_MAX_REQUESTS,
         );
         (result, frames(&output))
     }
@@ -652,6 +694,129 @@ mod tests {
         assert_eq!(terminal(&frames, "unknown")["status"], "error");
         // Cancelling a request that is not running is acknowledged, not an error.
         assert_eq!(terminal(&frames, "c")["status"], "complete");
+    }
+
+    /// A reader that counts the bytes the bridge pulls from it.
+    struct Counting<R> {
+        inner: R,
+        read: Arc<AtomicUsize>,
+    }
+
+    impl<R: std::io::Read> std::io::Read for Counting<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.read.fetch_add(n, Ordering::Relaxed);
+            Ok(n)
+        }
+    }
+
+    /// A client that never sends a newline cannot make the bridge hold the
+    /// whole line: the cap is enforced while reading, so 1 MiB without a
+    /// newline is refused after the first 64 KiB + 1 byte (plus one buffer).
+    #[test]
+    fn a_line_without_newline_should_be_refused_after_the_cap_not_after_the_line() {
+        let read = Arc::new(AtomicUsize::new(0));
+        let reader = std::io::BufReader::with_capacity(
+            4096,
+            Counting {
+                inner: std::io::Read::take(std::io::repeat(b'x'), 1_048_576),
+                read: Arc::clone(&read),
+            },
+        );
+        let result = serve_bounded(
+            Path::new(NO_REPO),
+            reader,
+            SharedBuffer(Arc::default()),
+            TEST_MAX_REQUESTS,
+        );
+        assert_eq!(result, Err("evidence request exceeds 64KiB".to_string()));
+        let consumed = read.load(Ordering::Relaxed);
+        assert!(
+            consumed <= MAX_REQUEST_LINE + 2 + 4096,
+            "read {consumed} bytes"
+        );
+    }
+
+    /// The cap is on the request, not on its line ending: exactly `max`
+    /// bytes pass with `\n` or `\r\n`, one more byte does not.
+    #[test]
+    fn read_bounded_line_should_accept_a_line_of_exactly_the_cap_with_either_ending() {
+        for ending in ["\n", "\r\n"] {
+            let mut reader =
+                std::io::Cursor::new(format!("abcd{ending}abcde{ending}").into_bytes());
+            assert_eq!(
+                read_bounded_line(&mut reader, 4),
+                Ok(Some("abcd".into())),
+                "{ending:?}"
+            );
+            assert_eq!(
+                read_bounded_line(&mut reader, 4),
+                Err("evidence request exceeds 64KiB".into()),
+                "{ending:?}"
+            );
+        }
+    }
+
+    /// A writer that keeps the first 1 MiB and drops the rest, so a test
+    /// bridge that spins cannot exhaust memory before its deadline.
+    struct CappedBuffer(Arc<Mutex<Vec<u8>>>);
+    impl Write for CappedBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let mut kept = self.0.lock().unwrap();
+            let room = 1_048_576_usize.saturating_sub(kept.len());
+            kept.extend_from_slice(&bytes[..bytes.len().min(room)]);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The public `serve` has no request bound: it answers more requests than
+    /// the tests' `serve_bounded` limit. It runs on a thread with a
+    /// deadline, so a reader that never reports EOF fails the test instead
+    /// of hanging it.
+    #[test]
+    fn serve_should_answer_more_requests_than_the_test_bound() {
+        let count = TEST_MAX_REQUESTS + 44;
+        let input: String = (0..count)
+            .map(|n| format!("{{\"op\":\"capabilities\",\"version\":1,\"requestId\":\"c{n}\"}}\n"))
+            .collect();
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let writer = CappedBuffer(Arc::clone(&output));
+        std::thread::spawn(move || {
+            let result = serve(
+                Path::new(NO_REPO),
+                std::io::Cursor::new(input.into_bytes()),
+                writer,
+            );
+            let _ = done_tx.send(result);
+        });
+        assert_eq!(
+            done_rx.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(Ok(()))
+        );
+        let capabilities = frames(&output)
+            .iter()
+            .filter(|frame| frame["type"] == "capabilities")
+            .count();
+        assert_eq!(capabilities, count);
+    }
+
+    #[test]
+    fn read_bounded_line_should_strip_the_line_ending_and_stop_at_eof() {
+        let mut reader = std::io::Cursor::new(b"one\r\ntwo\nthree".to_vec());
+        assert_eq!(read_bounded_line(&mut reader, 8), Ok(Some("one".into())));
+        assert_eq!(read_bounded_line(&mut reader, 8), Ok(Some("two".into())));
+        assert_eq!(read_bounded_line(&mut reader, 8), Ok(Some("three".into())));
+        assert_eq!(read_bounded_line(&mut reader, 8), Ok(None));
+
+        let mut reader = std::io::Cursor::new(b"\xff\n".to_vec());
+        assert_eq!(
+            read_bounded_line(&mut reader, 8),
+            Err("evidence stdin: stream did not contain valid UTF-8".into())
+        );
     }
 
     #[test]
@@ -816,7 +981,14 @@ mod tests {
         let bridge = std::thread::spawn({
             let root = root.clone();
             let output = Arc::clone(&output);
-            move || serve(&root, std::io::BufReader::new(server), SharedBuffer(output))
+            move || {
+                serve_bounded(
+                    &root,
+                    std::io::BufReader::new(server),
+                    SharedBuffer(output),
+                    TEST_MAX_REQUESTS,
+                )
+            }
         });
         let mut client = client;
         let search = |id: &str| {
