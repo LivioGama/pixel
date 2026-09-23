@@ -45,8 +45,9 @@ transcripts explain what the agent did about it.
 themselves, so a repository outside the usual folders is not missed: take
 every session `cwd` in the window, resolve it to its repository root, and
 keep the roots that have a log. `pixel recall sessions` caps `--limit` at
-200, so `roots.py` pages with `--until` until the window is covered
-(subagent sessions included). The `find` adds the worktrees and fixtures no
+200 and has no offset, so `roots.py` cuts the window into time slices and
+halves any slice that comes back full; it dedupes by session id, includes
+subagent sessions, and warns if 200 sessions overlap a single second. The `find` adds the worktrees and fixtures no
 session ran in:
 
 ```bash

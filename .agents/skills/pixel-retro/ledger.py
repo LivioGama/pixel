@@ -8,16 +8,31 @@ with tabs and newlines replaced, never pasted into shell or Python source.
 import datetime, json, os, re, sys
 
 VERDICTS = {"suggested", "picked", "fixed", "wontfix", "not-pixel"}
-REF = re.compile(r"^([a-z]+:[0-9a-f]{6,} #\d+|https://github\.com/\S+)$")
+REF = re.compile(r"[a-z]+:[A-Za-z0-9._-]+ #\d+|https://github\.com/\S+")
 
 
 def clean(value):
     return re.sub(r"[\t\r\n]", " ", value)
 
 
-items = json.load(open(sys.argv[1]))
+FIELDS = ("fingerprint", "verdict", "ref")
+
+
+def valid(item):
+    return (
+        isinstance(item, dict)
+        and all(isinstance(item.get(k), str) and item[k] for k in FIELDS)
+        and item["verdict"] in VERDICTS
+        and REF.fullmatch(item["ref"]) is not None
+    )
+
+
+with open(sys.argv[1]) as src:
+    items = json.load(src)
+if not isinstance(items, list) or not items:
+    sys.exit("refused, nothing written: the file must hold a non-empty JSON list")
 for item in items:
-    if item["verdict"] not in VERDICTS or not REF.match(item["ref"]):
+    if not valid(item):
         sys.exit(f"refused, nothing written: {item!r}")
 path = os.path.expanduser("~/.local/state/pixel-retro/seen.tsv")
 os.makedirs(os.path.dirname(path), exist_ok=True)
