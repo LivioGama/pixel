@@ -402,6 +402,23 @@ pub(crate) fn load_rtk_backup(home: &Path) -> crate::Result<Vec<Value>> {
     Ok(saved)
 }
 
+/// The RTK backup under `home` when no pixel guard in
+/// `~/.claude/settings.json` delegates to it: a leftover that `pixel install`
+/// never applies, such as one an `install --repo` build wrote under `$HOME`
+/// before the repository backup moved into the repository.
+pub(crate) fn orphan_rtk_backup(home: &Path) -> crate::Result<Option<PathBuf>> {
+    let backup = home.join(RTK_BACKUP);
+    if !backup.is_file() {
+        return Ok(None);
+    }
+    let settings = install::read_settings(&Provider::Claude.path(home))?;
+    let delegated = settings
+        .get("hooks")
+        .and_then(Value::as_object)
+        .is_some_and(has_delegate);
+    Ok((!delegated).then_some(backup))
+}
+
 /// Which events a provider install may register. The doctrine reaches every
 /// Claude process through the lifecycle hooks in the user-level settings
 /// (`~/.claude/settings.json`), while enforcement stays repo-local
@@ -466,10 +483,11 @@ fn configure_scoped(
         return Err("RTK delegate backup missing; refusing to lose its registration".into());
     }
     remove_pixel_hooks(hooks);
-    if delegated || (scope == HookScope::LifecycleOnly && !saved.is_empty()) {
-        // Restore the adopted RTK fragment even when only lifecycle hooks
-        // are managed: `remove_pixel_hooks` strips a stale delegate entry,
-        // and leaving it removed would orphan the user's RTK hook.
+    if delegated {
+        // The delegate guard that ran RTK is gone: put RTK back where it was,
+        // whatever the scope. Without a delegate the backup is only a record
+        // of an earlier state and is not applied (the user may have removed
+        // RTK since); `install_at_scoped` retires it.
         restore_rtk(hooks, saved);
     }
     let mut enabled = true;
@@ -856,6 +874,11 @@ pub(crate) fn install_at_scoped(
         install::write_settings(&backup_root.join(RTK_BACKUP), &json!(adopted), dry_run)?;
     }
     let backup = install::write_settings(path, &value, dry_run)?;
+    // Nothing delegates to the backup any more: RTK is back in the settings
+    // or was dropped by the user. Retire it after the settings are written.
+    if adopted.is_empty() && !saved.is_empty() && !dry_run {
+        fs::remove_file(backup_root.join(RTK_BACKUP))?;
+    }
     let summary_text = match scope {
         HookScope::LifecycleOnly => {
             format!(
@@ -1569,5 +1592,110 @@ mod tests {
             read_composed_backup(&sidecar).unwrap()["pre_tool_use"],
             original
         );
+    }
+
+    fn delegate_guard() -> Value {
+        json!({"matcher":"Bash","hooks":[{"type":"command","command":"'/p/pixel' run-hook guard --provider claude --delegate-rtk"}]})
+    }
+
+    /// A home whose `~/.claude/settings.json` holds `pre` and whose backup
+    /// holds the exact RTK group.
+    fn home_with_backup(pre: &[Value]) -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".claude")).unwrap();
+        fs::write(
+            home.path().join(RTK_BACKUP),
+            serde_json::to_string(&json!([rtk_group()])).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            Provider::Claude.path(home.path()),
+            serde_json::to_string(&json!({"hooks":{"PreToolUse": pre}})).unwrap(),
+        )
+        .unwrap();
+        home
+    }
+
+    fn global_install(home: &Path, dry_run: bool) -> Value {
+        install_at_scoped(
+            home,
+            &Provider::Claude.path(home),
+            Path::new("/p/pixel"),
+            Provider::Claude,
+            HookScope::LifecycleOnly,
+            &[],
+            dry_run,
+        )
+        .unwrap();
+        install::read_settings(&Provider::Claude.path(home)).unwrap()
+    }
+
+    /// The backup exists so that a delegation cannot lose RTK. Without one
+    /// it is only a record of the past: a user who removed `rtk hook claude`
+    /// keeps it removed, and the stale file goes.
+    #[test]
+    fn global_install_should_not_bring_back_an_rtk_hook_the_user_removed() {
+        let home = home_with_backup(&[]);
+        let settings = global_install(home.path(), false);
+        assert!(
+            !settings.to_string().contains("rtk hook claude"),
+            "{settings}"
+        );
+        assert!(!home.path().join(RTK_BACKUP).exists());
+    }
+
+    #[test]
+    fn global_install_should_restore_a_delegated_rtk_and_retire_its_backup() {
+        let home = home_with_backup(&[delegate_guard()]);
+        let settings = global_install(home.path(), false);
+        assert_eq!(settings["hooks"]["PreToolUse"], json!([rtk_group()]));
+        assert!(!home.path().join(RTK_BACKUP).exists());
+    }
+
+    #[test]
+    fn global_install_dry_run_should_keep_the_backup() {
+        let home = home_with_backup(&[]);
+        global_install(home.path(), true);
+        assert!(home.path().join(RTK_BACKUP).is_file());
+    }
+
+    /// A guard that adopts RTK again on the same run still needs the backup.
+    #[test]
+    fn repo_install_should_keep_the_backup_while_the_guard_delegates() {
+        let repo = home_with_backup(&[delegate_guard()]);
+        let local = repo.path().join(CLAUDE_LOCAL_SETTINGS);
+        fs::rename(Provider::Claude.path(repo.path()), &local).unwrap();
+        install_at_scoped(
+            repo.path(),
+            &local,
+            Path::new("/p/pixel"),
+            Provider::Claude,
+            HookScope::GuardOnly,
+            &[],
+            false,
+        )
+        .unwrap();
+        let value = install::read_settings(&local).unwrap();
+        assert!(has_delegate(value["hooks"].as_object().unwrap()), "{value}");
+        assert_eq!(
+            load_rtk_backup(repo.path()).unwrap(),
+            vec![rtk_group()],
+            "the delegate's backup must survive"
+        );
+    }
+
+    #[test]
+    fn orphan_rtk_backup_should_name_a_backup_no_guard_delegates_to() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(orphan_rtk_backup(home.path()).unwrap(), None);
+
+        let home = home_with_backup(&[]);
+        assert_eq!(
+            orphan_rtk_backup(home.path()).unwrap(),
+            Some(home.path().join(RTK_BACKUP))
+        );
+
+        let home = home_with_backup(&[delegate_guard()]);
+        assert_eq!(orphan_rtk_backup(home.path()).unwrap(), None);
     }
 }
