@@ -9,6 +9,12 @@ name: Cross-build
 # skips it. The release workflow's build job builds the same lane again
 # from the tag. No branch rule requires this check today; if one is added,
 # the excluded paths need a twin workflow that reports success.
+#
+# A release-prepare pull request into main (`release-x.y.z` branch) skips
+# the job: its diff is version bumps, Cargo.lock and the changelog, and the
+# release skill tags only once the push run on the merge commit is green,
+# so the pull request run would build the same tree twice. A maintenance
+# release into `release/x.y` keeps it: no push run covers that branch.
 on:
   push:
     branches: [main]
@@ -37,6 +43,10 @@ env:
 jobs:
   cross-build:
     name: Cross-build ${{ matrix.target }}
+    if: >-
+      github.event_name != 'pull_request'
+      || github.base_ref != 'main'
+      || !startsWith(github.head_ref, 'release-')
     runs-on: ubuntu-26.04
     strategy:
       fail-fast: true
