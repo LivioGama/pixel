@@ -67,7 +67,7 @@ After finishing any implementation turn in this repo (code edit + verify cycle):
    - **Track B:** `build-agent-config && pixel install` — propagate rule edits to tool directories, then reinstall hooks and managed blocks.
 3. **Run `pixel doctor . --fail-on yellow`** and confirm it exits 0 (or explicitly report each non-green check with the `fix:` command it names).
 
-Both commands target the account's login shell (from the user database, not `$SHELL`, which an agent's command tool overrides: Claude Code's runs under `/bin/zsh` on a fish machine). The wrappers are a `claude` function a human runs from that shell. If `doctor` still reports `install.shell-wrappers` for the wrong profile, pass the shell a human launches `claude` from to both commands: `--shell fish`.
+Both commands target the account's login shell (from the user database, not `$SHELL`, which an agent's command tool overrides: Claude Code's runs under `/bin/zsh` on a fish machine). The wrappers are a `claude` function a human runs from that shell. If `doctor` still reports `install.legacy-wrappers` for the wrong profile, pass the shell a human launches `claude` from to both commands: `--shell fish`.
 
 ### When to skip
 
