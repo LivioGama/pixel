@@ -344,6 +344,19 @@ class ShardedMutantsGate(unittest.TestCase):
                 self.assertIn(f"{label} crates/pixel/src/main.rs:2:5: mutants-out-1 #2", result.stdout)
                 self.assertIn("::error title=Mutation gate failed::", result.stdout)
 
+    def test_an_outcome_the_gate_does_not_know_fails_closed(self):
+        """A summary a later cargo-mutants adds must not count as caught."""
+        result, _ = self.run_gate(
+            2,
+            "--outcomes-root",
+            "{root}/shards",
+            shards=[("mutants-out-0", ("CaughtMutant", "Failure"))],
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("1 mutant(s) ended with an outcome the gate does not know (Failure)", result.stdout)
+        self.assertIn("FAILURE crates/pixel/src/main.rs:2:5: mutants-out-0 #2", result.stdout)
+        self.assertIn("**gate:** failed", result.stdout)
+
     def test_a_shard_that_left_no_outcomes_fails_the_gate(self):
         """Two shards caught everything they ran; the third never reported."""
         result, _ = self.run_gate(

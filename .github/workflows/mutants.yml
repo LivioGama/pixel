@@ -95,6 +95,9 @@ jobs:
           path: |
             pr.diff
             mutants-list.txt
+          # A re-run of the whole workflow uploads it again under the same
+          # name; without this the second upload is refused.
+          overwrite: true
 
   shard:
     # The matrix value is the literal `--shard` argument, so the job name is
@@ -192,6 +195,10 @@ jobs:
           name: mutants-out-${{ strategy.job-index }}
           path: mutants.out
           if-no-files-found: ignore
+          # Re-running a failed shard replaces its previous attempt's
+          # outcomes instead of failing on the name, or leaving the gate to
+          # total a stale result.
+          overwrite: true
 
   gate:
     # The check name the workflow reported before it was sharded, so links,

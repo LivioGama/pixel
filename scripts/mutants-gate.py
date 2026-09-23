@@ -59,6 +59,10 @@ OUTCOME_NAMES = {
     "Timeout": "timeout",
     "Unviable": "unviable",
 }
+#: The only outcomes that pass: a test failed under the mutant, or the
+#: mutant did not compile. Anything else fails the gate, including a summary
+#: this script does not know (a later cargo-mutants may add one).
+HELD = ("caught", "unviable")
 #: Outcomes that fail the gate: the mutant survived or never finished.
 SURVIVING = ("missed", "timeout")
 
@@ -141,7 +145,8 @@ def tally(root: Path) -> tuple[Counter[str], list[str]]:
 
     A mutant with a summary outside `OUTCOME_NAMES` still counts, under its
     raw summary, so the total always accounts for every scenario the shard
-    reported. The baseline is not a mutant and is not counted.
+    reported. Every mutant outside `HELD` is named. The baseline is not a
+    mutant and is not counted.
     """
     counts: Counter[str] = Counter()
     survivors = []
@@ -152,7 +157,7 @@ def tally(root: Path) -> tuple[Counter[str], list[str]]:
                 continue
             name = OUTCOME_NAMES.get(outcome["summary"], outcome["summary"])
             counts[name] += 1
-            if name in SURVIVING:
+            if name not in HELD:
                 survivors.append(f"{name.upper()} {scenario['Mutant']['name']}")
     return counts, survivors
 
@@ -169,6 +174,13 @@ def outcome_failure(listed: int, counts: Counter[str]) -> str | None:
     surviving = sum(counts[name] for name in SURVIVING)
     if surviving:
         return f"{surviving} mutant(s) survived; each one needs a test or a reasoned skip."
+    unknown = sorted(name for name in counts if name not in HELD)
+    if unknown:
+        return (
+            f"{sum(counts[name] for name in unknown)} mutant(s) ended with an "
+            f"outcome the gate does not know ({', '.join(unknown)}); it cannot "
+            "read them as caught."
+        )
     return None
 
 
