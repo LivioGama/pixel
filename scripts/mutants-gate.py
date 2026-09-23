@@ -28,7 +28,7 @@ Usage:
 `--list` is the stdout of `cargo mutants --list --in-diff <diff>`, which
 costs no build. Exit 0 unless `--fail-on-vacuous` is passed and the diff is
 vacuous, or `--outcomes-root` is passed and a listed mutant survived, timed
-out or never reached a verdict.
+out, never reached a verdict or was unviable only because the disk was full.
 """
 
 import argparse
@@ -65,6 +65,15 @@ OUTCOME_NAMES = {
 HELD = ("caught", "unviable")
 #: Outcomes that fail the gate: the mutant survived or never finished.
 SURVIVING = ("missed", "timeout")
+#: What an `Unviable` becomes when its build died of a full disk. The mutant
+#: never compiled because the runner ran out of space, not because the
+#: mutation broke the code, so nothing was judged. PR #222's run filled the
+#: disk at its 101st mutant: 546 of its 566 `unviable` were this, and the
+#: gate, which holds `unviable`, called the run `tested`.
+DISK_FULL = "disk-full"
+#: The build error that marks it, from the linker or any tool writing a
+#: temporary file (`ENOSPC`).
+DISK_FULL_MARK = "No space left on device"
 
 
 def exclude_globs(config: Path = CONFIG) -> list[str]:
@@ -149,8 +158,11 @@ def tally(root: Path) -> tuple[Counter[str], list[str]]:
 
     A mutant with a summary outside `OUTCOME_NAMES` still counts, under its
     raw summary, so the total always accounts for every scenario the shard
-    reported. Every mutant outside `HELD` is named. The baseline is not a
-    mutant and is not counted.
+    reported. An `Unviable` whose build log (`log_path`, relative to its
+    `outcomes.json`) holds `DISK_FULL_MARK` counts as `DISK_FULL`; one whose
+    log is missing stays `unviable`, since nothing says otherwise. Every
+    mutant outside `HELD` is named. The baseline is not a mutant and is not
+    counted.
     """
     counts: Counter[str] = Counter()
     survivors = []
@@ -163,10 +175,20 @@ def tally(root: Path) -> tuple[Counter[str], list[str]]:
             if not isinstance(scenario, dict) or "Mutant" not in scenario:
                 continue
             name = OUTCOME_NAMES.get(outcome["summary"], outcome["summary"])
+            if name == "unviable" and disk_full(path.parent, outcome.get("log_path")):
+                name = DISK_FULL
             counts[name] += 1
             if name not in HELD:
                 survivors.append(f"{name.upper()} {scenario['Mutant']['name']}")
     return counts, survivors
+
+
+def disk_full(shard: Path, log_path: str | None) -> bool:
+    """Whether the build log of a mutant says the runner's disk was full."""
+    if not log_path:
+        return False
+    log = shard / log_path
+    return log.is_file() and DISK_FULL_MARK in log.read_text(errors="replace")
 
 
 def outcome_failure(listed: int, counts: Counter[str]) -> str | None:
@@ -177,6 +199,13 @@ def outcome_failure(listed: int, counts: Counter[str]) -> str | None:
             f"{listed} mutant(s) listed, {reached} reached a verdict: a shard "
             "crashed, timed out, was cancelled or ran a different list. The "
             "missing mutants were never judged; re-run the failed shard jobs."
+        )
+    if counts[DISK_FULL]:
+        return (
+            f"{counts[DISK_FULL]} mutant(s) reported unviable because the "
+            f"runner's disk filled up ('{DISK_FULL_MARK}' in their build log): "
+            "they never compiled, so they were never judged. Free space on "
+            "the shard runner and re-run the shard jobs."
         )
     surviving = sum(counts[name] for name in SURVIVING)
     if surviving:
@@ -238,12 +267,9 @@ def render_outcomes(
     counts: Counter[str], survivors: list[str], failure: str | None
 ) -> str:
     """The shards' totals, every survivor by name, and the gate's decision."""
-    known = [f"{counts[name]} {name}" for name in OUTCOME_NAMES.values()]
-    other = [
-        f"{n} {name}"
-        for name, n in sorted(counts.items())
-        if name not in OUTCOME_NAMES.values()
-    ]
+    named = [*OUTCOME_NAMES.values(), DISK_FULL]
+    known = [f"{counts[name]} {name}" for name in named]
+    other = [f"{n} {name}" for name, n in sorted(counts.items()) if name not in named]
     lines = [
         "",
         f"- **outcomes across shards:** {sum(counts.values())} judged: "

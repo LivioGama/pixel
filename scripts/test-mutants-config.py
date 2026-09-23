@@ -18,7 +18,9 @@ build reports, not what a test asserts). Anything else is a module, and a
 module belongs to the gate.
 """
 
+import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -246,17 +248,24 @@ class ShardedMutantsGate(unittest.TestCase):
         )
 
     @staticmethod
-    def write_shard(root: Path, name: str, *summaries: str) -> None:
-        """One shard's mutants.out, shaped like cargo-mutants 27.1 writes it."""
+    def write_shard(root: Path, name: str, *summaries: str, logs=None) -> None:
+        """One shard's mutants.out, shaped like cargo-mutants 27.1 writes it.
+
+        `logs` maps a mutant's 1-based index to the text of its build log,
+        written under `log/` and referenced by `log_path` as cargo-mutants does.
+        """
+        logs = logs or {}
+        (root / name / "log").mkdir(parents=True)
         outcomes = [{"scenario": "Baseline", "summary": "Success"}]
-        outcomes += [
-            {
+        for i, summary in enumerate(summaries, start=1):
+            outcome = {
                 "scenario": {"Mutant": {"name": f"crates/pixel/src/main.rs:{i}:5: {name} #{i}"}},
                 "summary": summary,
             }
-            for i, summary in enumerate(summaries, start=1)
-        ]
-        (root / name).mkdir(parents=True)
+            if i in logs:
+                outcome["log_path"] = f"log/mutant_{i}.log"
+                (root / name / outcome["log_path"]).write_text(logs[i])
+            outcomes.append(outcome)
         (root / name / "outcomes.json").write_text(json.dumps({"outcomes": outcomes}))
 
     def run_gate(self, listed: int, *extra: str, shards=()):
@@ -265,8 +274,8 @@ class ShardedMutantsGate(unittest.TestCase):
             root = Path(tmp)
             (root / "pr.diff").write_text(self.DIFF)
             (root / "list.txt").write_text(self.listing(listed))
-            for name, summaries in shards:
-                self.write_shard(root / "shards", name, *summaries)
+            for name, summaries, *logs in shards:
+                self.write_shard(root / "shards", name, *summaries, logs=logs[0] if logs else None)
             output = root / "github-output"
             result = subprocess.run(
                 [
@@ -402,6 +411,58 @@ class ShardedMutantsGate(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("1 judged", result.stdout)
+
+    def test_an_unviable_mutant_whose_build_ran_out_of_disk_was_never_judged(self):
+        """PR #222's run filled the runner's disk at its 101st mutant.
+
+        Every later build failed at the link step, cargo-mutants reported
+        each one `unviable`, and a gate that holds `unviable` called a run
+        whose last 546 mutants never compiled `tested`. A genuine unviable
+        (a rustc type error) in the same shard must still pass.
+        """
+        result, _ = self.run_gate(
+            3,
+            "--outcomes-root",
+            "{root}/shards",
+            shards=[(
+                "mutants-out-0",
+                ("CaughtMutant", "Unviable", "Unviable"),
+                {
+                    2: "error[E0277]: the trait bound `Response: Default` is not satisfied\n",
+                    3: "cc: error: Cannot create temporary file in /tmp/: No space left on device\n",
+                },
+            )],
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(
+            "3 judged: 1 caught, 0 missed, 0 timeout, 1 unviable, 1 disk-full", result.stdout
+        )
+        self.assertIn("1 mutant(s) reported unviable because the runner's disk filled up", result.stdout)
+        self.assertIn("DISK-FULL crates/pixel/src/main.rs:3:5: mutants-out-0 #3", result.stdout)
+        self.assertNotIn("#2", result.stdout)
+
+    def test_an_unviable_mutant_without_a_log_stays_unviable(self):
+        """No log is no evidence of a full disk: the outcome is taken as reported."""
+        result, _ = self.run_gate(
+            1, "--outcomes-root", "{root}/shards", shards=[("mutants-out-0", ("Unviable",))]
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 judged: 0 caught, 0 missed, 0 timeout, 1 unviable, 0 disk-full", result.stdout)
+
+    @unittest.skipUnless(
+        os.environ.get("MUTANTS_REPLAY_PR222"),
+        "set MUTANTS_REPLAY_PR222 to `gh run download 35852843025 -n mutants-out -D <dir>`",
+    )
+    def test_the_pr222_run_replays_as_546_mutants_lost_to_a_full_disk(self):
+        """The run that motivated the check, replayed from its own artifact."""
+        spec = importlib.util.spec_from_file_location("mutants_gate", GATE)
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+        counts, _ = gate.tally(Path(os.environ["MUTANTS_REPLAY_PR222"]))
+        self.assertEqual(counts[gate.DISK_FULL], 546)
+        self.assertEqual(counts["unviable"], 20)
+        self.assertEqual((counts["caught"], counts["missed"], counts["timeout"]), (67, 24, 1))
+        self.assertIn("disk filled up", gate.outcome_failure(658, counts))
 
     def test_no_mutants_and_no_shards_is_not_a_failure(self):
         result, _ = self.run_gate(0, "--outcomes-root", "{root}/shards")
