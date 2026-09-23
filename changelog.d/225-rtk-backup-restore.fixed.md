@@ -1,1 +1,0 @@
-**install:** `pixel install` no longer re-adds an `rtk hook claude` the user removed: the saved RTK hook is restored only when a pixel guard had taken it over, and the backup is deleted once nothing delegates to it. `pixel doctor` flags a leftover `~/.claude/pixel-rtk-hooks.json` in yellow with the command that removes it. ([#225](https://github.com/LivioGama/pixel/pull/225))

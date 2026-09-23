@@ -1,1 +1,0 @@
-**recall:** the `--human-only` help of `recall search` and `recall ask` now says what the filter does: it drops harness-injected user turns and keeps assistant and tool turns, so human text alone takes `--role user` as well. The old text promised human-authored user turns only. ([#234](https://github.com/LivioGama/pixel/pull/234))
