@@ -1743,7 +1743,7 @@ fn roundtrip(stream: &mut UnixStream, req: &Request) -> Option<Response> {
 /// Daemon path: only if the socket answers Ping within ~100ms.
 fn try_daemon(root: &Path, req: &Request) -> Option<Response> {
     match try_daemon_inner(root, req) {
-        DaemonRoute::Served(response) => Some(response),
+        DaemonRoute::Served(response) => Some(*response),
         // A newer daemon belongs to a newer CLI still using it: leave it
         // running and serve this command in process, without starting ours.
         DaemonRoute::Declined => None,
@@ -1776,7 +1776,7 @@ fn auto_start_daemon(root: &Path, req: &Request) -> Option<Response> {
         // Wait up to 5s for the socket to come up.
         for _ in 0..50 {
             if let DaemonRoute::Served(resp) = try_daemon_inner(root, req) {
-                return Some(resp);
+                return Some(*resp);
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -1846,7 +1846,7 @@ fn retire_stale_daemon_within(root: &Path, cap: Duration) {
 /// Outcome of routing one request through the daemon.
 #[derive(Debug)]
 enum DaemonRoute {
-    Served(Response),
+    Served(Box<Response>),
     /// No daemon can serve it now; starting a current one may help.
     Absent,
     /// A newer daemon is running: serve in process, start nothing.
@@ -1877,7 +1877,9 @@ fn try_daemon_inner(root: &Path, req: &Request) -> DaemonRoute {
             .ok()?;
         roundtrip(&mut stream, req)
     });
-    served.map_or(DaemonRoute::Absent, DaemonRoute::Served)
+    served.map_or(DaemonRoute::Absent, |response| {
+        DaemonRoute::Served(Box::new(response))
+    })
 }
 
 /// Check if an env var is explicitly set to "0"/"false"/"off".
