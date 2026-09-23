@@ -1,5 +1,5 @@
 import {AbsoluteFill, useCurrentFrame} from 'remotion';
-import {Badge, halo, LoopArrow, Node, NodeSpec, Panel, Rail, TravelDot} from './parts';
+import {Badge, Defs, dotX, halo, LocalMark, LoopArrow, Node, NodeSpec, Panel, Rail, RailProgress, TravelDot} from './parts';
 
 export type ComparisonSpec = {
 	width: number;
@@ -24,6 +24,21 @@ const sessY = 780;
 const arrivals = (n: number, dur: number) =>
 	Array.from({length: n}, (_, i) => (i * dur) / (n - 1));
 
+/// Rounded elbow connecting the setup rail to the session rail, with
+/// marching dashes like the loop arrows.
+const Connector = ({x1, y1, x2, y2, color, frame}: {x1: number; y1: number; x2: number; y2: number; color: string; frame: number}) => (
+	<path
+		d={`M ${x1} ${y1} L ${x2 - 16} ${y1} Q ${x2} ${y1} ${x2} ${y1 + 16} L ${x2} ${y2 - 16} Q ${x2} ${y2} ${x2 + 16} ${y2}`}
+		fill="none"
+		stroke={color}
+		strokeWidth={2.4}
+		opacity={0.75}
+		strokeDasharray="7 11"
+		strokeDashoffset={-frame * 1.4}
+		strokeLinecap="round"
+	/>
+);
+
 export const ComparisonScene = ({spec}: {spec: ComparisonSpec}) => {
 	const frame = useCurrentFrame();
 	const {panelA, panelB} = spec;
@@ -31,9 +46,9 @@ export const ComparisonScene = ({spec}: {spec: ComparisonSpec}) => {
 	const sessXs = panelB.session.nodes.map((n) => n.x);
 	const setupXs = panelB.setup?.nodes.map((n) => n.x) ?? [];
 
-	const topDur = 360;
-	const setupDur = setupXs.length ? (setupXs.length - 1) * 80 : 0;
-	const sessDur = 360;
+	const topDur = 240;
+	const setupDur = setupXs.length ? (setupXs.length - 1) * 70 : 0;
+	const sessDur = 240;
 
 	const topArrivals = arrivals(topXs.length, topDur);
 	const setupArrivals = setupXs.length ? arrivals(setupXs.length, setupDur) : [];
@@ -44,9 +59,18 @@ export const ComparisonScene = ({spec}: {spec: ComparisonSpec}) => {
 	return (
 		<AbsoluteFill style={{background: '#0d1117'}}>
 			<svg width={spec.width} height={spec.height} viewBox={`0 0 ${spec.width} ${spec.height}`}>
+				<Defs/>
+				<rect width={spec.width} height={spec.height} fill="#0d1117"/>
+				<rect width={spec.width} height={spec.height} fill="url(#bgGlow)"/>
+				<rect width={spec.width} height={spec.height} fill="url(#dotgrid)"/>
+				{/* ambient glows tuned to each panel's accent */}
+				<ellipse cx={spec.width / 2} cy={200} rx={880} ry={300} fill={spec.accentA} opacity={0.045} filter="url(#blur22)"/>
+				<ellipse cx={spec.width / 2} cy={830} rx={880} ry={320} fill={spec.accentB} opacity={0.055} filter="url(#blur22)"/>
+
 				{/* ── WITHOUT ── */}
-				<Panel x={40} y={46} w={spec.width - 80} h={300} title={panelA.title} color="#4a3a36"/>
-				<Rail nodes={panelA.nodes} color="#6b4a42"/>
+				<Panel x={40} y={46} w={spec.width - 80} h={300} title={panelA.title} color={spec.accentA}/>
+				<Rail nodes={panelA.nodes} color="#8a5a52"/>
+				<RailProgress nodes={panelA.nodes} color={spec.accentA} x={dotX(frame, topXs, topDur)}/>
 				<g transform={`translate(0, ${topY})`}>
 					<TravelDot frame={frame} xs={topXs} duration={topDur} color={spec.accentA}/>
 				</g>
@@ -62,30 +86,65 @@ export const ComparisonScene = ({spec}: {spec: ComparisonSpec}) => {
 				/>
 
 				{/* ── WITH PIXEL ── */}
-				<Panel x={40} y={400} w={spec.width - 80} h={spec.height - 40 - 400} title={panelB.title} color={spec.accentB}/>
+				<Panel x={40} y={400} w={spec.width - 80} h={spec.height - 40 - 400} title={panelB.title} color={spec.accentB} mark="pixel"/>
+
+				{/* legend: what the CPU corner-mark means */}
+				<g>
+					<rect
+						x={spec.width - 40 - 24 - 466}
+						y={424}
+						width={466}
+						height={52}
+						rx={16}
+						fill="#0e1319"
+						fillOpacity={0.85}
+						stroke={spec.accentB}
+						strokeOpacity={0.35}
+						strokeWidth={1.4}
+					/>
+					<LocalMark x={spec.width - 40 - 24 - 466 + 14} y={438} size={24} color={spec.accentB}/>
+					<text
+						x={spec.width - 40 - 24 - 466 + 50}
+						y={457}
+						fontFamily="Inter,Arial,sans-serif"
+						fontSize={17}
+						fontWeight={650}
+						letterSpacing={1.8}
+						fill="#9aa7b4"
+					>
+						RUNS LOCALLY · DETERMINISTIC · NO LLM
+					</text>
+				</g>
 
 				{panelB.leftText.length > 0 && (
-					<text x={120} y={540} fontFamily="Inter,Arial,sans-serif" fontSize={34} fontWeight={800} fill="#3d444d" letterSpacing={1}>
-						{panelB.leftText.map((line, i) => (
-							<tspan key={line} x={120} dy={i === 0 ? 0 : 40}>
-								{line}
-							</tspan>
-						))}
-					</text>
+					<g>
+						<rect x={104} y={490} width={5} height={130} rx={2.5} fill={spec.accentB} opacity={0.9}/>
+						<text x={132} y={534} fontFamily="Inter,Arial,sans-serif" fontSize={35} fontWeight={800} fill="#4a545f" letterSpacing={1}>
+							{panelB.leftText.map((line, i) => (
+								<tspan key={line} x={132} dy={i === 0 ? 0 : 44}>
+									{line}
+								</tspan>
+							))}
+						</text>
+					</g>
 				)}
 
 				{panelB.setup && lastSetup && (
 					<>
-						<Rail nodes={panelB.setup.nodes} color="#2f4a75"/>
-						<path
-							d={`M ${lastSetup.x + 42} ${setupY} H ${sessXs[0] + 50} V ${sessY - 42}`}
-							fill="none"
-							stroke="#2f4a75"
-							strokeWidth={2.6}
-							opacity={0.7}
+						<Rail nodes={panelB.setup.nodes} color="#2d4a38"/>
+						{frame <= setupDur && (
+							<RailProgress nodes={panelB.setup.nodes} color={spec.dotColor} x={dotX(frame, setupXs, setupDur)}/>
+						)}
+						<Connector
+							x1={lastSetup.x + 42}
+							y1={setupY}
+							x2={sessXs[0] + 50}
+							y2={sessY - 42}
+							color="#2d4a38"
+							frame={frame}
 						/>
 						{panelB.setup.badge && (
-							<Badge x={sessXs[0] - 20} y={640} text={panelB.setup.badge} color="#8b949e"/>
+							<Badge x={sessXs[0] - 20} y={656} text={panelB.setup.badge} color="#8b949e"/>
 						)}
 						<g transform={`translate(0, ${setupY})`}>
 							{frame <= setupDur && (
@@ -98,7 +157,8 @@ export const ComparisonScene = ({spec}: {spec: ComparisonSpec}) => {
 					</>
 				)}
 
-				<Rail nodes={panelB.session.nodes} color="#2f4a75"/>
+				<Rail nodes={panelB.session.nodes} color="#2d4a38"/>
+				<RailProgress nodes={panelB.session.nodes} color={spec.dotColor} x={dotX(frame, sessXs, sessDur)}/>
 				<g transform={`translate(0, ${sessY})`}>
 					<TravelDot frame={frame} xs={sessXs} duration={sessDur} color={spec.dotColor}/>
 				</g>

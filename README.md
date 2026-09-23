@@ -14,26 +14,46 @@ Make as much repository work deterministic as possible. If something can be answ
   <img src="docs/pixel-line.svg" alt="A direct line from a repository to a highlighted answer" width="760" />
 </p>
 
-## ⭐ The Pixel Flow Power
+## 💡 See the difference
+
+Six jobs every coding agent does. Red rail: without Pixel. Blue rail: with it.
+The `.pixel/` index is built once — every session, every agent reuses it.
+
+### Scope before reading
+`scope-task` returns a closed P0/P1/P2 file list instead of the agent wandering the repo.
+
+<p align="center"><img src="docs/examples/pixel-scope-comparison.webp" width="100%" alt="Scope comparison" /></p>
+
+### Retrieval that measures itself
+Skeleton and context commands replace whole-file reads — and `token-savings` reports the real number, not a claimed one.
+
+<p align="center"><img src="docs/examples/pixel-measured-comparison.webp" width="100%" alt="Measured savings comparison" /></p>
+
+### Impact before edit
+`pixel impact` lists every caller before the agent touches a symbol.
+
+<p align="center"><img src="docs/examples/pixel-impact-comparison.webp" width="100%" alt="Impact comparison" /></p>
+
+### Search stays transparent
+`rg`/`grep` get rewritten to `search-content` by the hook — same command, indexed answer.
+
+<p align="center"><img src="docs/examples/pixel-rewrite-comparison.webp" width="100%" alt="Rewrite comparison" /></p>
+
+### Rescue as a plan
+`plan-rollback` flags the likely-breaking commit and a last-known-good candidate — it never resets anything.
+
+<p align="center"><img src="docs/examples/pixel-rollback-comparison.webp" width="100%" alt="Rollback comparison" /></p>
+
+### Publish without footguns
+`review-changes` → `repo-state` → leased `commit-and-push`: crash-safe, idempotent, never a raw `--force`.
+
+<p align="center"><img src="docs/examples/pixel-publish-comparison.webp" width="100%" alt="Publish comparison" /></p>
+
+## ⭐ The Pixel Flow
 
 ```text
 task → scope-task → find-code → impact → edit → what-changed → review-changes → commit-and-push
 ```
-
-<p align="center">
-  <img src="docs/examples/pixel-workflow-comparison.gif" width="100%" alt="Animated comparison of manual repository rediscovery and Pixel’s bounded evidence workflow" />
-</p>
-
-## 💡 See the difference
-
-Six jobs every coding agent does — shown without Pixel (top rail) and with it
-(bottom rail). The `.pixel/` index is built once, then every session reuses it.
-
-| | |
-| --- | --- |
-| **Scope before reading** — `scope-task` returns a closed P0/P1/P2 file list instead of the agent wandering the repo.<br/><img src="docs/examples/pixel-scope-comparison.gif" width="100%" alt="Scope comparison" /> | **Retrieval that measures itself** — skeleton/context commands replace whole-file reads; `token-savings` reports the real number.<br/><img src="docs/examples/pixel-measured-comparison.gif" width="100%" alt="Measured savings comparison" /> |
-| **Impact before edit** — `pixel impact` lists every caller before the agent touches a symbol.<br/><img src="docs/examples/pixel-impact-comparison.gif" width="100%" alt="Impact comparison" /> | **Search stays transparent** — `rg`/`grep` get rewritten to `search-content` by the hook; same command, indexed answer.<br/><img src="docs/examples/pixel-rewrite-comparison.gif" width="100%" alt="Rewrite comparison" /> |
-| **Rescue as a plan** — `plan-rollback` flags the likely-breaking commit and a last-known-good, never resets.<br/><img src="docs/examples/pixel-rollback-comparison.gif" width="100%" alt="Rollback comparison" /> | **Publish without footguns** — `review-changes` → `repo-state` → leased `commit-and-push`; crash-safe and idempotent.<br/><img src="docs/examples/pixel-publish-comparison.gif" width="100%" alt="Publish comparison" /> |
 
 ## 📉 Token savings — measured, no second model
 

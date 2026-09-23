@@ -18,7 +18,7 @@ export const RemotionRoot = () => (
 				key={id}
 				id={id}
 				component={ComparisonScene}
-				durationInFrames={360}
+				durationInFrames={240}
 				fps={30}
 				width={1600}
 				height={1000}

@@ -1,4 +1,4 @@
-import {interpolate, useCurrentFrame} from 'remotion';
+import {Easing, useCurrentFrame} from 'remotion';
 
 export type NodeSpec = {
 	x: number;
@@ -8,6 +8,7 @@ export type NodeSpec = {
 	icon: IconKind;
 	accent?: string;
 	warn?: boolean;
+	local?: boolean;
 };
 
 export type IconKind =
@@ -33,7 +34,44 @@ export type IconKind =
 	| 'target'
 	| 'rocket';
 
-const TILE = 84;
+export const TILE = 84;
+
+/// Shared defs: tile gradients, dot-grid pattern, blur filters. Render once
+/// inside the scene <svg>.
+export const Defs = () => (
+	<defs>
+		<linearGradient id="tileGrad" x1="0" y1="0" x2="0" y2="1">
+			<stop offset="0%" stopColor="#263040"/>
+			<stop offset="45%" stopColor="#1a212c"/>
+			<stop offset="100%" stopColor="#11161d"/>
+		</linearGradient>
+		<radialGradient id="tileSheen" cx="0.5" cy="0.05" r="1">
+			<stop offset="0%" stopColor="#ffffff" stopOpacity={0.11}/>
+			<stop offset="55%" stopColor="#ffffff" stopOpacity={0.025}/>
+			<stop offset="100%" stopColor="#ffffff" stopOpacity={0}/>
+		</radialGradient>
+		<linearGradient id="warnGrad" x1="0" y1="0" x2="0" y2="1">
+			<stop offset="0%" stopColor="#482019"/>
+			<stop offset="100%" stopColor="#2a1310"/>
+		</linearGradient>
+		<radialGradient id="bgGlow" cx="0.5" cy="0.3" r="0.8">
+			<stop offset="0%" stopColor="#18263e" stopOpacity={0.5}/>
+			<stop offset="100%" stopColor="#0d1117" stopOpacity={0}/>
+		</radialGradient>
+		<pattern id="dotgrid" width="32" height="32" patternUnits="userSpaceOnUse">
+			<circle cx="2" cy="2" r="1" fill="#ffffff" opacity={0.05}/>
+		</pattern>
+		<filter id="blur6" x="-80%" y="-80%" width="260%" height="260%">
+			<feGaussianBlur stdDeviation="6"/>
+		</filter>
+		<filter id="blur14" x="-80%" y="-80%" width="260%" height="260%">
+			<feGaussianBlur stdDeviation="14"/>
+		</filter>
+		<filter id="blur22" x="-60%" y="-60%" width="220%" height="220%">
+			<feGaussianBlur stdDeviation="22"/>
+		</filter>
+	</defs>
+);
 
 export const Icon = ({kind, color}: {kind: IconKind; color: string}) => {
 	const s = {stroke: color, strokeWidth: 3.4, fill: 'none', strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const};
@@ -83,93 +121,234 @@ export const Icon = ({kind, color}: {kind: IconKind; color: string}) => {
 	}
 };
 
+/// The pixel logo: tapering "smile" curve ending in a rounded green square,
+/// same shape as docs/pixel-line.svg.
+export const PixelMark = ({x, y, scale = 1, color = '#22c55e', edge = '#16a34a'}: {x: number; y: number; scale?: number; color?: string; edge?: string}) => (
+	<g transform={`translate(${x}, ${y}) scale(${scale})`}>
+		<path d="M 0 4 Q 14 10 26 11" stroke={color} strokeWidth={3.4} strokeLinecap="round" fill="none"/>
+		<path d="M 26 11 Q 36 12 44 10" stroke={color} strokeWidth={2.6} strokeLinecap="round" fill="none"/>
+		<rect x={46} y={1} width={18} height={18} rx={4.5} fill={color} stroke={edge} strokeWidth={1.4}/>
+	</g>
+);
+
+/// Corner marker: runs locally + deterministically, no LLM call. Drawn as a
+/// mini CPU inside a small rounded chip — reused by Node and the legend.
+export const LocalMark = ({x, y, size = 24, color}: {x: number; y: number; size?: number; color: string}) => {
+	const u = size / 24;
+	return (
+		<g transform={`translate(${x}, ${y}) scale(${u})`}>
+			<rect width={24} height={24} rx={7} fill="#0d1117" stroke={color} strokeOpacity={0.85} strokeWidth={1.6}/>
+			<g stroke={color} strokeWidth={1.5} fill="none" strokeLinecap="round">
+				<rect x={7} y={7} width={10} height={10} rx={2}/>
+				<line x1={10} y1={3.5} x2={10} y2={7}/><line x1={14} y1={3.5} x2={14} y2={7}/>
+				<line x1={10} y1={17} x2={10} y2={20.5}/><line x1={14} y1={17} x2={14} y2={20.5}/>
+				<line x1={3.5} y1={10} x2={7} y2={10}/><line x1={3.5} y1={14} x2={7} y2={14}/>
+				<line x1={17} y1={10} x2={20.5} y2={10}/><line x1={17} y1={14} x2={20.5} y2={14}/>
+			</g>
+			<rect x={10.5} y={10.5} width={3} height={3} rx={0.8} fill={color}/>
+		</g>
+	);
+};
+
+/// One rail node: bloom + expanding halo ring + floating tile + label chip.
+/// `glow` (0..1) is driven by the travelling dot's arrival time.
 export const Node = ({spec, glow}: {spec: NodeSpec; glow: number}) => {
 	const accent = spec.accent ?? '#8b949e';
-	const glowOpacity = interpolate(glow, [0, 1], [0, 0.55]);
+	const hot = spec.warn || !!spec.accent;
+	const stroke = spec.warn ? '#ff7b72' : hot ? accent : '#2d333c';
+	const labelW = spec.label.length * 11.6;
+	const subW = spec.sub.length * 10.8;
+	const chipW = Math.max(labelW, subW) + 44;
 	return (
 		<g transform={`translate(${spec.x - TILE / 2}, ${spec.y - TILE / 2})`}>
-			<circle cx={TILE / 2} cy={TILE / 2} r={TILE * 0.95} fill={accent} opacity={glowOpacity * 0.35}/>
-			<circle cx={TILE / 2} cy={TILE / 2} r={TILE * 0.7} fill={accent} opacity={glowOpacity * 0.45}/>
+			{/* ambient bloom + expanding arrival ring */}
+			<circle cx={TILE / 2} cy={TILE / 2} r={TILE * 1.05} fill={accent} opacity={glow * 0.4} filter="url(#blur14)"/>
+			<circle
+				cx={TILE / 2}
+				cy={TILE / 2}
+				r={TILE * 0.64 + (1 - glow) * 26}
+				fill="none"
+				stroke={accent}
+				strokeWidth={2}
+				opacity={glow * 0.55}
+			/>
+			{/* drop shadow + tile */}
+			<rect x={6} y={10} width={TILE - 12} height={TILE - 4} rx={20} fill="#000000" opacity={0.45} filter="url(#blur6)"/>
 			<rect
 				width={TILE}
 				height={TILE}
-				rx={20}
-				fill={spec.warn ? '#2a1210' : '#151a21'}
-				stroke={spec.warn ? '#d97a6b' : accent}
-				strokeWidth={spec.warn || spec.accent ? 2.6 : 1.6}
+				rx={22}
+				fill={spec.warn ? 'url(#warnGrad)' : 'url(#tileGrad)'}
+				stroke={stroke}
+				strokeWidth={hot ? 2.2 : 1.4}
+				strokeOpacity={hot ? 0.5 + glow * 0.5 : 0.9}
 			/>
+			<rect width={TILE} height={TILE} rx={22} fill="url(#tileSheen)"/>
+			<line x1={22} y1={13} x2={TILE - 22} y2={13} stroke="#ffffff" strokeOpacity={0.1} strokeWidth={2} strokeLinecap="round"/>
 			<g transform="translate(10,10)">
-				<Icon kind={spec.icon} color={spec.warn ? '#d97a6b' : accent}/>
+				<Icon kind={spec.icon} color={spec.warn ? '#e08a78' : accent}/>
 			</g>
-			<text x={TILE / 2} y={TILE + 34} textAnchor="middle" fontFamily="Inter,Arial,sans-serif" fontSize={22} fontWeight={700} fill={spec.warn ? '#e8a99d' : '#e6edf3'}>
+			{spec.local && <LocalMark x={TILE - 14} y={-7} size={26} color={accent}/>}
+			{/* label chip */}
+			<rect
+				x={TILE / 2 - chipW / 2}
+				y={TILE + 10}
+				width={chipW}
+				height={64}
+				rx={16}
+				fill="#0d1117"
+				fillOpacity={0.62}
+				stroke="#ffffff"
+				strokeOpacity={0.05}
+			/>
+			<text x={TILE / 2} y={TILE + 36} textAnchor="middle" fontFamily="Inter,Arial,sans-serif" fontSize={21} fontWeight={700} fill={spec.warn ? '#ffa198' : '#e6edf3'}>
 				{spec.label}
 			</text>
-			<text x={TILE / 2} y={TILE + 58} textAnchor="middle" fontFamily="Inter,Arial,sans-serif" fontSize={15} fontWeight={500} letterSpacing={2} fill={spec.warn ? '#b97f74' : '#7d8590'}>
+			<text x={TILE / 2} y={TILE + 60} textAnchor="middle" fontFamily="Inter,Arial,sans-serif" fontSize={14} fontWeight={500} letterSpacing={2.2} fill={spec.warn ? '#c98a7d' : '#76828e'}>
 				{spec.sub.toUpperCase()}
 			</text>
 		</g>
 	);
 };
 
-export const Rail = ({nodes, color}: {nodes: NodeSpec[]; color: string}) => {
+export const railBounds = (nodes: NodeSpec[]) => {
 	const y = nodes[0].y;
 	const x1 = Math.min(...nodes.map((n) => n.x)) + TILE / 2;
 	const x2 = Math.max(...nodes.map((n) => n.x)) - TILE / 2;
-	return <line x1={x1} y1={y} x2={x2} y2={y} stroke={color} strokeWidth={2.6} opacity={0.7}/>;
+	return {x1, x2, y};
 };
 
-const ease = (t: number) => t;
-
-export const dotX = (frame: number, xs: number[], duration: number) => {
-	const seg = duration / (xs.length - 1);
-	const i = Math.min(Math.floor(frame / seg), xs.length - 2);
-	const t = ease((frame - i * seg) / seg);
-	return xs[i] + (xs[i + 1] - xs[i]) * t;
-};
-
-export const TravelDot = ({frame, xs, duration, color}: {frame: number; xs: number[]; duration: number; color: string}) => {
-	const x = dotX(frame, xs, duration);
+/// Baseline rail: soft under-glow + a gradient line that fades out at both ends.
+export const Rail = ({nodes, color}: {nodes: NodeSpec[]; color: string}) => {
+	const {x1, x2, y} = railBounds(nodes);
+	const gid = `railfade-${color.replace('#', '')}`;
 	return (
 		<g>
-			<circle cx={x} cy={0} r={16} fill={color} opacity={0.25}/>
-			<circle cx={x} cy={0} r={9} fill={color}/>
+			<defs>
+				<linearGradient id={gid} gradientUnits="userSpaceOnUse" x1={x1} y1={y} x2={x2} y2={y}>
+					<stop offset={0} stopColor={color} stopOpacity={0}/>
+					<stop offset={0.06} stopColor={color} stopOpacity={0.55}/>
+					<stop offset={0.94} stopColor={color} stopOpacity={0.55}/>
+					<stop offset={1} stopColor={color} stopOpacity={0}/>
+				</linearGradient>
+			</defs>
+			<line x1={x1} y1={y} x2={x2} y2={y} stroke={color} strokeWidth={10} opacity={0.1} strokeLinecap="round" filter="url(#blur6)"/>
+			<line x1={x1} y1={y} x2={x2} y2={y} stroke={`url(#${gid})`} strokeWidth={2.6} strokeLinecap="round"/>
 		</g>
 	);
 };
 
-export const halo = (frame: number, arrival: number, span = 40) => {
-	const d = Math.abs(frame - arrival);
-	return interpolate(d, [0, span], [1, 0], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
+/// Bright segment that trails the dot — the rail "lights up" behind it.
+export const RailProgress = ({nodes, color, x}: {nodes: NodeSpec[]; color: string; x: number}) => {
+	const {x1, x2, y} = railBounds(nodes);
+	const xc = Math.max(x1, Math.min(x, x2));
+	if (xc <= x1) return null;
+	return (
+		<g>
+			<line x1={x1} y1={y} x2={xc} y2={y} stroke={color} strokeWidth={5} opacity={0.35} strokeLinecap="round" filter="url(#blur6)"/>
+			<line x1={x1} y1={y} x2={xc} y2={y} stroke={color} strokeWidth={2.8} opacity={0.95} strokeLinecap="round"/>
+		</g>
+	);
 };
 
-export const LoopArrow = ({x1, x2, y, color, label}: {x1: number; x2: number; y: number; color: string; label: string}) => (
-	<g>
-		<path d={`M ${x2} ${y - 60} V ${y} H ${x1} V ${y - 60}`} fill="none" stroke={color} strokeWidth={2.2} opacity={0.75}/>
-		<path d={`M ${x1} ${y - 74} l -8 14 h 16 z`} fill={color} opacity={0.9}/>
-		<rect x={(x1 + x2) / 2 - label.length * 5.6} y={y - 16} width={label.length * 11.2} height={32} rx={16} fill="#1b2028" stroke={color} strokeWidth={1.4}/>
-		<text x={(x1 + x2) / 2} y={y + 6} textAnchor="middle" fontFamily="Inter,Arial,sans-serif" fontSize={17} fontWeight={600} letterSpacing={1.5} fill={color}>
-			{label}
-		</text>
-	</g>
-);
+const ease = Easing.inOut(Easing.quad);
 
-export const Panel = ({x, y, w, h, title, color}: {x: number; y: number; w: number; h: number; title: string; color: string}) => (
-	<g>
-		<rect x={x} y={y} width={w} height={h} rx={26} fill="none" stroke={color} strokeWidth={2} opacity={0.55}/>
-		<rect x={x + 30} y={y - 26} width={title.length * 16.5 + 44} height={52} rx={26} fill={color} opacity={0.9}/>
-		<text x={x + 52} y={y + 8} fontFamily="Inter,Arial,sans-serif" fontSize={26} fontWeight={800} letterSpacing={1.5} fill="#0d1117">
-			{title}
-		</text>
-	</g>
-);
+export const dotX = (frame: number, xs: number[], duration: number) => {
+	const seg = duration / (xs.length - 1);
+	const i = Math.min(Math.floor(frame / seg), xs.length - 2);
+	const t = Math.min(1, Math.max(0, ease((frame - i * seg) / seg)));
+	return xs[i] + (xs[i + 1] - xs[i]) * t;
+};
 
-export const Badge = ({x, y, text, color}: {x: number; y: number; text: string; color: string}) => (
-	<g>
-		<rect x={x - text.length * 5.9} y={y - 15} width={text.length * 11.8} height={30} rx={15} fill="#141a21" stroke={color} strokeWidth={1.4}/>
-		<text x={x} y={y + 6} textAnchor="middle" fontFamily="Inter,Arial,sans-serif" fontSize={15} fontWeight={600} letterSpacing={1.2} fill={color}>
-			{text}
-		</text>
-	</g>
-);
+/// Comet: bloom + white core + a decaying 5-dot tail.
+export const TravelDot = ({frame, xs, duration, color}: {frame: number; xs: number[]; duration: number; color: string}) => {
+	const x = dotX(frame, xs, duration);
+	const steps = [3, 7, 11, 16, 22];
+	const radii = [9, 7.5, 6, 4.5, 3];
+	const alphas = [0.3, 0.22, 0.15, 0.09, 0.05];
+	return (
+		<g>
+			{steps.map((dt, i) => (
+				<circle key={dt} cx={dotX(Math.max(0, frame - dt), xs, duration)} cy={0} r={radii[i]} fill={color} opacity={alphas[i]}/>
+			))}
+			<circle cx={x} cy={0} r={30} fill={color} opacity={0.22} filter="url(#blur14)"/>
+			<circle cx={x} cy={0} r={13} fill={color} opacity={0.35} filter="url(#blur6)"/>
+			<circle cx={x} cy={0} r={9.5} fill={color}/>
+			<circle cx={x} cy={0} r={4} fill="#ffffff"/>
+		</g>
+	);
+};
+
+export const halo = (frame: number, arrival: number, span = 28) => {
+	const d = Math.abs(frame - arrival);
+	const t = Math.min(1, Math.max(0, d / span));
+	return 1 - t;
+};
+
+/// Rounded-corner loop U with marching dashes and a status-dot pill label.
+export const LoopArrow = ({x1, x2, y, color, label}: {x1: number; x2: number; y: number; color: string; label: string}) => {
+	const frame = useCurrentFrame();
+	const tw = label.length * 11.2;
+	const w = tw + 62;
+	const cx = (x1 + x2) / 2;
+	return (
+		<g>
+			<path
+				d={`M ${x2} ${y - 58} L ${x2} ${y - 16} Q ${x2} ${y} ${x2 - 16} ${y} L ${x1 + 16} ${y} Q ${x1} ${y} ${x1} ${y - 16} L ${x1} ${y - 58}`}
+				fill="none"
+				stroke={color}
+				strokeWidth={2.4}
+				opacity={0.85}
+				strokeDasharray="7 11"
+				strokeDashoffset={-frame * 1.4}
+				strokeLinecap="round"
+			/>
+			<path d={`M ${x1} ${y - 80} l -9 16 h 18 z`} fill={color} opacity={0.95}/>
+			<rect x={cx - w / 2 + 4} y={y - 14} width={w - 8} height={30} rx={15} fill="#000000" opacity={0.4} filter="url(#blur6)"/>
+			<rect x={cx - w / 2} y={y - 19} width={w} height={38} rx={19} fill="#0e1319" fillOpacity={0.92} stroke={color} strokeOpacity={0.5} strokeWidth={1.4}/>
+			<circle cx={cx - tw / 2 - 14} cy={y} r={4.5} fill={color}/>
+			<text x={cx + 8} y={y + 5.5} textAnchor="middle" fontFamily="Inter,Arial,sans-serif" fontSize={16} fontWeight={600} letterSpacing={1.6} fill={color}>
+				{label}
+			</text>
+		</g>
+	);
+};
+
+/// Glass card with soft shadow, gradient rim and a glowing title tab.
+export const Panel = ({x, y, w, h, title, color, mark}: {x: number; y: number; w: number; h: number; title: string; color: string; mark?: 'dot' | 'pixel'}) => {
+	const textX = mark === 'pixel' ? x + 34 + 58 : x + 34 + 41;
+	const tabW = title.length * 16.2 + (mark === 'pixel' ? 92 : 74);
+	return (
+		<g>
+			<rect x={x + 10} y={y + 16} width={w - 20} height={h - 8} rx={28} fill="#000000" opacity={0.35} filter="url(#blur22)"/>
+			<rect x={x} y={y} width={w} height={h} rx={28} fill="#11161e" fillOpacity={0.72} stroke={color} strokeOpacity={0.28} strokeWidth={1.6}/>
+			<rect x={x + 1} y={y + 1} width={w - 2} height={h - 2} rx={27} fill="none" stroke="#ffffff" strokeOpacity={0.05}/>
+			<rect x={x + 34} y={y - 22} width={tabW} height={46} rx={23} fill={color} opacity={0.32} filter="url(#blur14)"/>
+			<rect x={x + 34} y={y - 22} width={tabW} height={46} rx={23} fill={color}/>
+			{mark === 'pixel' ? (
+				<PixelMark x={x + 34 + 12} y={y - 8} scale={0.62} color="#0d1117" edge="#0d1117"/>
+			) : (
+				<circle cx={x + 34 + 25} cy={y + 1} r={5.5} fill="#0d1117"/>
+			)}
+			<text x={textX} y={y + 9} fontFamily="Inter,Arial,sans-serif" fontSize={24} fontWeight={800} letterSpacing={1.6} fill="#0d1117">
+				{title}
+			</text>
+		</g>
+	);
+};
+
+export const Badge = ({x, y, text, color}: {x: number; y: number; text: string; color: string}) => {
+	const tw = text.length * 10.4;
+	const w = tw + 56;
+	return (
+		<g>
+			<rect x={x - w / 2} y={y - 17} width={w} height={34} rx={17} fill="#0e1319" fillOpacity={0.92} stroke={color} strokeOpacity={0.5} strokeWidth={1.4}/>
+			<circle cx={x - tw / 2 - 12} cy={y} r={4} fill={color}/>
+			<text x={x + 8} y={y + 5} textAnchor="middle" fontFamily="Inter,Arial,sans-serif" fontSize={15} fontWeight={600} letterSpacing={1.5} fill={color}>
+				{text}
+			</text>
+		</g>
+	);
+};
 
 export const useFrame = useCurrentFrame;
