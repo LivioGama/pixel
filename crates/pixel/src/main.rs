@@ -4595,6 +4595,29 @@ fn rename_note(argv: &[String], unprotected: bool) -> Option<String> {
     ))
 }
 
+/// Whether this invocation checks the prompts `pixel install` deployed:
+/// every command but the protected streams, and the three that already deal
+/// with them (`install` rewrites them, `doctor` reports them, `uninstall`
+/// removes them).
+fn checks_deployed_prompts(command_label: &str, protected: bool) -> bool {
+    !protected && !matches!(command_label, "install" | "doctor" | "uninstall")
+}
+
+/// One stderr line naming the deployed prompts that no longer match this
+/// binary. Nothing outside `pixel doctor` said so, and every agent kept the
+/// old command map after an upgrade until someone reran the install.
+fn stale_prompt_note(stale: &[&str]) -> Option<String> {
+    if stale.is_empty() {
+        return None;
+    }
+    let verb = if stale.len() == 1 { "does" } else { "do" };
+    Some(format!(
+        "note: {} from `pixel install` {verb} not match pixel {}; agents still read the old copy — run `pixel install` to update\n",
+        stale.join(" and "),
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
 fn run() -> Result<(), String> {
     let started = std::time::Instant::now();
     let argv: Vec<String> = std::env::args().collect();
@@ -4633,6 +4656,14 @@ fn run() -> Result<(), String> {
         eprint!("{note}");
     }
     operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
+    // After `begin`: the note is rendered output the caller reads.
+    if checks_deployed_prompts(&command_label, protected)
+        && let Some(home) = std::env::var_os("HOME")
+        && let Some(note) =
+            stale_prompt_note(&pixel_install::install::stale_prompts(Path::new(&home)))
+    {
+        operation_metrics::print_error(format_args!("{note}"));
+    }
     // Compatibility fallback must exec the original before any logging changes
     // its search corpus; its successful Pixel branch retains existing logging.
     let mut logger = match &root {
@@ -8149,7 +8180,10 @@ mod prompt_asset_parity {
 
 #[cfg(test)]
 mod renamed_command_tests {
-    use super::{Cli, logged_args, rename_note, renamed_invocation};
+    use super::{
+        Cli, checks_deployed_prompts, logged_args, rename_note, renamed_invocation,
+        stale_prompt_note,
+    };
     use clap::CommandFactory;
     use std::collections::BTreeSet;
 
@@ -8263,6 +8297,37 @@ mod renamed_command_tests {
             "search-content config src",
             "other commands are logged verbatim"
         );
+    }
+
+    #[test]
+    fn stale_prompt_note_names_each_stale_file_in_one_line() {
+        assert_eq!(stale_prompt_note(&[]), None);
+        let one = stale_prompt_note(&["agent-prompt.md"]).unwrap();
+        assert_eq!(
+            one,
+            format!(
+                "note: agent-prompt.md from `pixel install` does not match pixel {}; agents still read the old copy — run `pixel install` to update\n",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        let both = stale_prompt_note(&["agent-prompt.md", "subagent-prompt.md"]).unwrap();
+        assert!(
+            both.starts_with(
+                "note: agent-prompt.md and subagent-prompt.md from `pixel install` do not match"
+            ),
+            "{both}"
+        );
+        assert_eq!(both.lines().count(), 1, "{both}");
+    }
+
+    #[test]
+    fn deployed_prompts_are_checked_except_by_the_commands_that_own_them() {
+        assert!(checks_deployed_prompts("search-content", false));
+        assert!(checks_deployed_prompts("self-update", false));
+        assert!(!checks_deployed_prompts("search-content", true));
+        for owner in ["install", "doctor", "uninstall"] {
+            assert!(!checks_deployed_prompts(owner, false), "{owner}");
+        }
     }
 
     #[test]

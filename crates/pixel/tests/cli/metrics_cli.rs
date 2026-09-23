@@ -60,6 +60,7 @@ impl Fixture {
     fn command(&self) -> Command {
         let mut cmd = Command::new(PIXEL);
         cmd.current_dir(&self.0)
+            .env("HOME", crate::support::neutral_home())
             .env("PIXEL_DAEMON_AUTO_START", "0")
             .env("PIXEL_METRICS", "1")
             .env_remove("PIXEL_METRICS_ROUND_TRIP_MS")

@@ -17,21 +17,40 @@
 //!    resolve: a `pixel classify` or a `check-release --repo <missing dir>`
 //!    spawned from there landed in the checkout's own `.pixel/actions.jsonl`
 //!    and drowned the real errors in `pixel action-log --errors-only`.
+//! 4. The binary never reads the developer's home. `HOME` points at an empty
+//!    directory unless the test sets its own: every command compares the
+//!    prompts `pixel install` deployed there with its own and warns on
+//!    stderr, so a machine that ran another release's install failed every
+//!    test that reads stderr exactly, while CI, with no install, passed.
 
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The built `pixel` binary with daemon auto-start disabled, started from
-/// [`neutral_cwd`] so its action log never reaches this checkout. A test that
-/// needs another working directory sets it after this call (the last
-/// `current_dir` wins).
+/// [`neutral_cwd`] so its action log never reaches this checkout, with
+/// `HOME` at [`neutral_home`]. A test that needs another working directory
+/// or home sets it after this call (the last `current_dir` or `env` wins).
 pub fn pixel_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pixel"));
     command
         .env("PIXEL_DAEMON_AUTO_START", "0")
+        .env("HOME", neutral_home())
         .current_dir(neutral_cwd());
     command
+}
+
+/// An empty home, one per test process and created once, like
+/// [`neutral_cwd`]: nothing `pixel install` deployed on this machine is in it.
+pub fn neutral_home() -> &'static Path {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("pixel-cli-neutral-home-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|e| panic!("create neutral home {}: {e}", dir.display()));
+        dir
+    })
 }
 
 /// A directory outside every repository, one per test process and created
