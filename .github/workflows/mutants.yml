@@ -227,9 +227,10 @@ jobs:
         with:
           name: mutants-plan
 
-      # One directory per shard under shards/. A shard that left no
-      # artifact leaves its mutants without a verdict, and the next step
-      # counts them as such.
+      # One directory per shard under shards/, except for a lone shard,
+      # whose files download-artifact extracts into shards/ itself (the
+      # gate reads both). A shard that left no artifact leaves its mutants
+      # without a verdict, and the next step counts them as such.
       - name: Download every shard's mutants.out
         if: needs.plan.outputs.mutants != '0'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8

@@ -141,7 +141,11 @@ def shard_matrix(mutants: int) -> list[str]:
 
 
 def tally(root: Path) -> tuple[Counter[str], list[str]]:
-    """Outcome counts over every `root/*/outcomes.json`, and the survivors' names.
+    """Outcome counts over every shard's `outcomes.json`, and the survivors' names.
+
+    Each shard's artifact is extracted to `root/<artifact>/`, except when it
+    is the only one: `actions/download-artifact` then puts its files in
+    `root/` itself, so `root/outcomes.json` is read too.
 
     A mutant with a summary outside `OUTCOME_NAMES` still counts, under its
     raw summary, so the total always accounts for every scenario the shard
@@ -150,7 +154,10 @@ def tally(root: Path) -> tuple[Counter[str], list[str]]:
     """
     counts: Counter[str] = Counter()
     survivors = []
-    for path in sorted(root.glob("*/outcomes.json")):
+    paths = sorted(root.glob("*/outcomes.json"))
+    if (root / "outcomes.json").is_file():
+        paths.insert(0, root / "outcomes.json")
+    for path in paths:
         for outcome in json.loads(path.read_text())["outcomes"]:
             scenario = outcome["scenario"]
             if not isinstance(scenario, dict) or "Mutant" not in scenario:
