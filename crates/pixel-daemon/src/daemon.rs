@@ -349,6 +349,7 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
     let _ = std::fs::remove_file(&sock); // stale leftover
 
     let listener = UnixListener::bind(&sock)?;
+    let bound = socket_identity(&sock);
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
     std::fs::write(pid_path(&root), std::process::id().to_string())?;
 
@@ -474,7 +475,7 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
         }
     }
 
-    let _ = stop_acceptor(&sock, &stop, acceptor);
+    let _ = stop_acceptor(&sock, bound, &stop, acceptor);
     let _ = std::fs::remove_file(&sock);
     let _ = std::fs::remove_file(pid_path(&root));
     let _ = std::fs::remove_file(&lock_path);
@@ -506,12 +507,30 @@ fn spawn_acceptor(
     })
 }
 
+/// The `(device, inode)` of the socket file at `path`, `None` when it is gone.
+fn socket_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
 /// Wake the accept thread with a connection of our own, after `stop` is set,
-/// and wait for it to exit; returns whether it did. When the socket no
-/// longer answers (removed from under the daemon), the thread is left to end
-/// with the process.
-fn stop_acceptor(sock: &Path, stop: &AtomicBool, acceptor: std::thread::JoinHandle<()>) -> bool {
+/// and wait for it to exit; returns whether it did. The wake-up goes out only
+/// while `sock` is still the socket this daemon bound (`bound`): once the
+/// file was removed, or replaced by another daemon's socket for the same
+/// root, a connection would never reach this thread, so it is left to end
+/// with the process instead of `join` waiting forever.
+fn stop_acceptor(
+    sock: &Path,
+    bound: Option<(u64, u64)>,
+    stop: &AtomicBool,
+    acceptor: std::thread::JoinHandle<()>,
+) -> bool {
     stop.store(true, Ordering::Release);
+    if bound.is_none() || socket_identity(sock) != bound {
+        return false;
+    }
     if UnixStream::connect(sock).is_err() {
         return false;
     }
@@ -1002,7 +1021,12 @@ mod tests {
             Ok(Msg::Conn(_))
         ));
 
-        assert!(stop_acceptor(&sock, &stop, acceptor));
+        assert!(stop_acceptor(
+            &sock,
+            socket_identity(&sock),
+            &stop,
+            acceptor
+        ));
         assert!(
             rx.recv_timeout(Duration::from_millis(200)).is_err(),
             "the wake-up connection must not reach the loop"
@@ -1047,9 +1071,52 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let acceptor = spawn_acceptor(listener, tx, Arc::clone(&stop));
+        let bound = socket_identity(&sock);
         std::fs::remove_file(&sock).unwrap();
 
-        assert!(!stop_acceptor(&sock, &stop, acceptor));
+        assert!(!stop_acceptor(&sock, bound, &stop, acceptor));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The socket file was removed and another daemon for the same root bound
+    /// the same path: a wake-up connection would reach that daemon, never
+    /// this thread, and `join` would wait forever. Stopping must notice the
+    /// replaced socket and return. The call runs on a thread with a deadline,
+    /// so a regression fails the test instead of hanging it.
+    #[test]
+    fn stop_acceptor_should_not_wait_on_a_socket_another_daemon_bound() {
+        let root = scratch_root("acceptor-replaced");
+        let sock = root.join("a.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let acceptor = spawn_acceptor(listener, tx, Arc::clone(&stop));
+        let bound = socket_identity(&sock);
+        std::fs::remove_file(&sock).unwrap();
+        let _other_daemon = UnixListener::bind(&sock).unwrap();
+        assert_ne!(socket_identity(&sock), bound);
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let sock_for_stop = sock.clone();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(stop_acceptor(&sock_for_stop, bound, &stop, acceptor));
+        });
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(5)), Ok(false));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn socket_identity_should_follow_the_file_not_the_path() {
+        let root = scratch_root("socket-identity");
+        let sock = root.join("a.sock");
+        assert_eq!(socket_identity(&sock), None);
+        let first = UnixListener::bind(&sock).unwrap();
+        let identity = socket_identity(&sock);
+        assert!(identity.is_some());
+        drop(first);
+        std::fs::remove_file(&sock).unwrap();
+        let _second = UnixListener::bind(&sock).unwrap();
+        assert!(socket_identity(&sock).is_some());
         let _ = std::fs::remove_dir_all(&root);
     }
 
