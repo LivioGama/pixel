@@ -43,6 +43,15 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   Refresh the task, the index size and every position together.
 - `data/jobs.toml`, `data/savings.toml`: the six animations and the token
   table, both from the README.
+- `layouts/partials/backdrop.html`: the animated background on every page,
+  one fixed canvas under the content (pixel dust, circuit traces with
+  packets, drifting pixel agents, each layer scrolling at its own rate),
+  kept faint by `.backdrop` in the stylesheet. It also darkens the nav once
+  the page scrolls. Reduced motion gets one still frame.
+- `assets/logos/`: the agents' marks in "Plugs into the agent you already
+  use", one colour each (`fill="currentColor"`), from Simple Icons, Lobe
+  Icons (Devin, Antigravity) and pi.dev's favicon (Pi). Add an agent there
+  and in the `$agents` list of `layouts/index.html` together.
 - `layouts/404.html`: the not-found page GitHub Pages serves for any
   unknown path under the site.
 - `assets/css/main.css`: one stylesheet, tokens first, dark only. Headlines

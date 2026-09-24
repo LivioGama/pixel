@@ -45,23 +45,42 @@
 
     {{/* ---------- numbers ---------- */}}
     <section class="numbers wrap" aria-label="Measured results">
+      {{/* Each meter draws the ratio its number states on a 20-square row: the baseline filled in dim cells, Pixel's in green. */}}
+      {{ $stats := slice
+        (dict "tag" "Tokens" "value" "&minus;95%" "text" "to learn what a large file contains" "base" "full read" "before" 20 "after" 1)
+        (dict "tag" "Callers" "value" "2.8&times;" "text" "faster than GitNexus at finding a symbol's callers" "base" "GitNexus" "before" 14 "after" 5)
+        (dict "tag" "Context" "value" "4.7&times;" "text" "less context than GitNexus on every turn" "base" "GitNexus" "before" 14 "after" 3)
+        (dict "tag" "Agent time" "value" "&minus;30%" "text" "for an agent to scope a multi-file task" "base" "no Pixel" "before" 20 "after" 14)
+      }}
       <ul class="numbers__list" data-reveal="stagger">
-        <li><strong>&minus;95%</strong><span>tokens to learn what a large file contains</span></li>
-        <li><strong>2.8&times;</strong><span>faster than GitNexus at finding a symbol's callers</span></li>
-        <li><strong>4.7&times;</strong><span>less context than GitNexus on every turn</span></li>
-        <li><strong>&minus;30%</strong><span>time for an agent to scope a multi-file task</span></li>
+        {{ range $stats }}
+        <li>
+          <span class="numbers__tag">{{ .tag }}</span>
+          <strong>{{ .value | safeHTML }}</strong>
+          {{ $before := .before }}{{ $after := .after }}
+          <span class="numbers__meter" aria-hidden="true">
+            <em>{{ .base }}</em><i>{{ range seq 20 }}<b{{ if le . $before }} class="on"{{ end }}></b>{{ end }}</i>
+            <em>Pixel</em><i class="is-pixel">{{ range seq 20 }}<b{{ if le . $after }} class="on"{{ end }}></b>{{ end }}</i>
+          </span>
+          <span class="numbers__text">{{ .text }}</span>
+        </li>
+        {{ end }}
       </ul>
-      <p class="numbers__more" data-reveal><a class="link" href="{{ $bench }}">How we measured, and where Pixel loses</a></p>
+      <p class="numbers__more" data-reveal><a class="link" href="{{ $bench }}" target="_blank" rel="noopener">How we measured, and where Pixel loses</a></p>
     </section>
 
     {{/* ---------- scope ---------- */}}
     <section class="section wrap" aria-labelledby="scope-title">
       <header class="section__head" data-reveal>
         <h2 id="scope-title">It knows where to look.</h2>
-        <p>Give it a task. Get the {{ len $s.p0 }} files that matter, out of {{ $s.files }}. Your agent starts coding instead of searching.</p>
+        <p class="scope__lede"><span>You describe the task. Your agent asks Pixel on&nbsp;its&nbsp;own.</span> <span>It gets the {{ len $s.p0 }}&nbsp;files that matter out of&nbsp;{{ $s.files }}, and starts coding instead of&nbsp;searching.</span></p>
       </header>
+      {{/* The agent runs scope-task because pixel install put the protocol in its session: the visitor never types it. */}}
       <figure class="board" data-board data-p1="{{ delimit $s.p1 "," }}" data-files="{{ $s.files }}">
-        <p class="board__cmd"><span class="board__prompt" aria-hidden="true">$</span><code>pixel scope-task "{{ $s.task }}"</code></p>
+        <div class="board__chat">
+          <p class="board__turn"><span class="board__who">You</span><span class="board__say">{{ $s.task | strings.FirstUpper }}.</span></p>
+          <p class="board__turn board__turn--agent"><span class="board__who">Agent</span><code><span class="board__prompt" aria-hidden="true">$</span>pixel scope-task "{{ $s.task }}"</code></p>
+        </div>
         <div class="board__pads" aria-hidden="true"></div>
         <svg class="board__traces" aria-hidden="true"></svg>
         <ol class="board__files" aria-label="Files to start with">
@@ -76,6 +95,7 @@
           <span class="key key--pad">{{ $s.files }} files in the index</span>
         </figcaption>
       </figure>
+      <p class="board__note" data-reveal>You never type that command. <code>pixel install</code> teaches your agent when to run it, the same way it learns every other Pixel command.</p>
     </section>
 
     {{/* ---------- whole agent tasks ---------- */}}
@@ -155,8 +175,18 @@
       <header class="section__head" data-reveal>
         <h2 id="agents-title">Plugs into the agent you already use.</h2>
       </header>
+      {{/* Marks in assets/logos/, one colour each (currentColor): Simple Icons, Lobe Icons, and pi.dev's own favicon for Pi. */}}
+      {{ $agents := slice
+        (dict "name" "Claude Code" "logo" "claude") (dict "name" "Codex" "logo" "codex")
+        (dict "name" "Cursor" "logo" "cursor") (dict "name" "Copilot CLI" "logo" "copilot")
+        (dict "name" "Gemini CLI" "logo" "gemini") (dict "name" "Pi" "logo" "pi")
+        (dict "name" "OpenCode" "logo" "opencode") (dict "name" "Devin" "logo" "devin")
+        (dict "name" "Windsurf" "logo" "windsurf") (dict "name" "Antigravity" "logo" "antigravity")
+      }}
       <ul class="agents" data-reveal="stagger">
-        <li>Claude Code</li><li>Codex</li><li>Cursor</li><li>Copilot CLI</li><li>Gemini CLI</li><li>Pi</li><li>OpenCode</li><li>Devin</li><li>Windsurf</li><li>Antigravity</li>
+        {{ range $agents }}
+        <li class="agents__item agents__item--{{ .logo }}">{{ (resources.Get (printf "logos/%s.svg" .logo)).Content | safeHTML }}<span>{{ .name }}</span></li>
+        {{ end }}
       </ul>
     </section>
 

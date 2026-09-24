@@ -58,6 +58,16 @@ a { color: inherit; }
 
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
+/* ---------- backdrop ----------
+   The fixed canvas partials/backdrop.html draws under everything. Faint on
+   purpose, and fainter still down the middle where the text runs. */
+.backdrop {
+  position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; opacity: 0.34;
+  -webkit-mask-image: linear-gradient(to right, #000, rgba(0, 0, 0, 0.5) 30%, rgba(0, 0, 0, 0.5) 70%, #000);
+  mask-image: linear-gradient(to right, #000, rgba(0, 0, 0, 0.5) 30%, rgba(0, 0, 0, 0.5) 70%, #000);
+}
+main, .footer { position: relative; z-index: 1; }
+
 /* ---------- scroll reveals ----------
    Opt-in through data-reveal (layouts/index.html), and only when the
    script is running and motion is welcome. A block rises 14px and fades
@@ -78,7 +88,13 @@ a { color: inherit; }
 .brand--small .brand__name { font-size: 1.5rem; }
 
 /* ---------- nav ---------- */
-.nav { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--ground) 86%, transparent); backdrop-filter: blur(12px); }
+.nav {
+  position: sticky; top: 0; z-index: 10;
+  background: color-mix(in srgb, var(--ground) 72%, transparent); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  box-shadow: 0 1px 0 transparent; transition: background-color 0.3s ease, box-shadow 0.3s ease;
+}
+/* Once content scrolls under it (the script in partials/backdrop.html), the bar darkens and gets an edge. */
+.nav.is-scrolled { background: color-mix(in srgb, #06140e 90%, transparent); box-shadow: 0 1px 0 var(--line), 0 12px 32px -16px rgba(0, 0, 0, 0.7); }
 .nav__inner { height: var(--nav-h); display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .nav__links { display: flex; align-items: center; gap: clamp(12px, 2.4vw, 28px); font-size: 0.95rem; }
 .nav__links a { text-decoration: none; color: var(--ink-soft); }
@@ -171,14 +187,39 @@ a { color: inherit; }
 .key--likely::before { background: var(--green-dim); }
 .key--pad::before { background: var(--cell); box-shadow: inset 0 0 0 1px var(--cell-edge); }
 
-/* ---------- numbers ---------- */
+/* ---------- numbers ----------
+   One panel, four cells split by hairlines. Each cell: a label, the number,
+   a meter drawing the ratio in squares (baseline dim, Pixel green), the claim. */
 .numbers { padding-block: clamp(40px, 7vh, 72px); }
-.numbers__list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: clamp(20px, 3vw, 40px); }
-.numbers__list li { display: flex; flex-direction: column; gap: 10px; }
-.numbers__list strong { font: 700 clamp(3.4rem, 7vw, 6rem)/0.9 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; color: var(--green-hi); }
-.numbers__list span { color: var(--ink-soft); max-width: 16em; }
-.numbers__more { margin: clamp(28px, 4vw, 40px) 0 0; }
-@media (max-width: 820px) { .numbers__list { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.numbers__list {
+  list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-radius: 8px; box-shadow: inset 0 0 0 1px var(--line);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 55%, transparent), color-mix(in srgb, var(--ground-2) 40%, transparent));
+}
+.numbers__list li { display: flex; flex-direction: column; gap: 14px; padding: clamp(20px, 2.4vw, 30px); min-width: 0; }
+.numbers__list li + li { box-shadow: inset 1px 0 0 var(--line); }
+.numbers__tag { font: 500 0.72rem/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-soft); }
+.numbers__list strong { font: 700 clamp(2.8rem, 4.6vw, 4.2rem)/0.9 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; color: var(--ink); font-variant-numeric: tabular-nums; }
+.numbers__meter { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 6px 10px; }
+.numbers__meter i { display: grid; grid-template-columns: repeat(20, minmax(0, 1fr)); gap: 2px; max-width: 180px; }
+.numbers__meter b { aspect-ratio: 1; border-radius: 1px; box-shadow: inset 0 0 0 1px var(--cell); }
+.numbers__meter b.on { background: var(--cell-edge); box-shadow: none; }
+.numbers__meter .is-pixel b.on { background: var(--green); box-shadow: 0 0 5px rgba(34, 197, 94, 0.55); }
+.numbers__meter em { font: 400 0.68rem/1 var(--mono); font-style: normal; color: var(--ink-soft); white-space: nowrap; }
+.numbers__meter em:nth-of-type(2) { color: var(--green-hi); }
+.numbers__text { color: var(--ink-soft); font-size: 0.98rem; line-height: 1.45; max-width: 18em; }
+.numbers__more { margin: clamp(22px, 3vw, 32px) 0 0; }
+@media (max-width: 820px) {
+  .numbers__list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .numbers__list li + li { box-shadow: none; }
+  .numbers__list li:nth-child(even) { box-shadow: inset 1px 0 0 var(--line); }
+  .numbers__list li:nth-child(n + 3) { box-shadow: inset 0 1px 0 var(--line); }
+  .numbers__list li:nth-child(4) { box-shadow: inset 1px 1px 0 var(--line); }
+}
+@media (max-width: 420px) {
+  .numbers__list li { padding: 18px 14px; }
+  .numbers__meter { gap: 5px 8px; }
+}
 
 /* ---------- sections ---------- */
 .section { padding-block: clamp(80px, 13vh, 150px) 0; }
@@ -189,9 +230,18 @@ a { color: inherit; }
 
 /* ---------- scope board ---------- */
 .board { position: relative; margin: 0; }
-.board__cmd { margin: 0 0 14px; font-size: 0.9rem; color: var(--green-hi); overflow-wrap: anywhere; }
-.board__cmd code { color: var(--ink); font-size: 1em; }
-.board__prompt { margin-right: 0.6em; }
+/* The request as it happens: the visitor's words, then the agent's own call. */
+.scope__lede span { display: block; text-wrap: balance; }
+.scope__lede span + span { margin-top: 4px; color: var(--ink); }
+.board__chat { display: flex; flex-direction: column; gap: 8px; margin: 0 0 18px; font-size: 0.92rem; }
+.board__turn { margin: 0; display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+.board__who { flex: none; width: 4.6em; font: 500 0.7rem/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-soft); }
+.board__say { color: var(--ink); }
+.board__turn--agent code { color: var(--ink); font-size: 1em; overflow-wrap: anywhere; min-width: 0; }
+.board__turn--agent .board__who { color: var(--green-hi); }
+.board__prompt { margin-right: 0.6em; color: var(--green-hi); }
+.board__note { margin: 22px 0 0; font-size: 0.95rem; color: var(--ink-soft); max-width: 44em; }
+.board__note code { background: var(--panel); padding: 1px 6px; border-radius: 3px; }
 .board__pads { --cols: 111; display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); gap: 3px; }
 .board__pads span { aspect-ratio: 1; border-radius: 1px; background: var(--cell); box-shadow: inset 0 0 0 1px var(--cell-edge); }
 .board__pads .is-p1 { background: var(--green-dim); box-shadow: none; }
@@ -267,11 +317,23 @@ a { color: inherit; }
   .jobs__cmd { display: none; }
 }
 
-/* ---------- agents ---------- */
-.agents { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 12px; }
-.agents li {
-  font: 700 clamp(1.7rem, 3vw, 2.4rem)/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5;
-  padding: 14px 22px 16px; border-radius: var(--r); background: var(--panel);
+/* ---------- agents ----------
+   Each vendor's mark in one colour (assets/logos/, currentColor), its name beside it. */
+.agents { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.agents__item {
+  display: flex; align-items: center; gap: 14px; min-width: 0; padding: 18px 20px; border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 70%, transparent); box-shadow: inset 0 0 0 1px transparent;
+  color: var(--ink-soft); transition: color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+}
+.agents__item:hover { color: var(--ink); background: var(--panel); box-shadow: inset 0 0 0 1px var(--cell-edge); }
+.agents__item svg { flex: none; width: 30px; height: 30px; color: var(--ink); }
+.agents__item span { font-weight: 600; font-size: 1rem; line-height: 1.2; }
+@media (max-width: 1000px) { .agents { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 620px) {
+  .agents { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .agents__item { padding: 14px; gap: 10px; }
+  .agents__item svg { width: 24px; height: 24px; }
+  .agents__item span { font-size: 0.92rem; }
 }
 
 /* ---------- Jev ---------- */
