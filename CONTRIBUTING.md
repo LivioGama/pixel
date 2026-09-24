@@ -198,6 +198,10 @@ drop a match guard, ...) and runs the crate's tests. A mutant that survives
 is a behaviour no test can see. Configuration lives in
 `.cargo/mutants.toml`; output goes to the gitignored `mutants.out/`.
 
+An agent runs these only when asked, and then only the `-F` form (see
+"Working on this repo with an AI agent"); the full-crate and full-diff forms
+are for a human who chooses to spend the time.
+
 ```bash
 cargo install --locked cargo-mutants        # or: cargo binstall cargo-mutants
 
@@ -250,7 +254,7 @@ instead, and `--install-path <path>` overwrites a managed binary on purpose.
 ```bash
 pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-cli"
 pixel build-index --history .   # rebuild facts/history index
-pixel install             # redeploy the agent prompt, shell wrapper, Codex config
+pixel install             # redeploy the agent prompt and hooks, Codex config
 pixel doctor . --fix --fail-on yellow   # must exit 0; report any non-green check in the PR
 scripts/pixel-smoke-test.sh   # the installed binary end to end (read-only)
 ```
@@ -259,19 +263,16 @@ scripts/pixel-smoke-test.sh   # the installed binary end to end (read-only)
 incremental rebuild takes seconds and the binary is optimised the same way.
 Drop `--build` for the exact shipped `release` profile.
 
-Both commands write and check the wrappers for the account's login shell,
-read from the user database rather than `$SHELL`: a coding agent's command
-tool frequently runs under another shell than the login one (a `/bin/zsh`
-tool shell on a fish machine), and the wrappers are a `claude` function a
-human runs from the login shell. `--shell fish` overrides the lookup when
-the shell you launch `claude` from is not the account's.
+`pixel install` removes the retired `claude()` shell wrapper from the
+account's login-shell profile, and `pixel doctor` reports one that remains
+(`install.legacy-wrappers`). The login shell is read from the user database
+rather than `$SHELL`: a coding agent's command tool frequently runs under
+another shell than the login one (a `/bin/zsh` tool shell on a fish machine).
+`--shell fish` overrides the lookup when the shell you launch `claude` from
+is not the account's.
 
-`dev-release` (in the workspace `Cargo.toml`) is `release` without thin LTO
-and with 16 codegen units: same optimisation level, but an incremental
-rebuild after touching one crate takes seconds rather than a minute. Use
-plain `--release` only when you need the exact shipped profile. `pixel
-upgrade --build "<cargo command>"` runs the same loop for you and reads the
-binary from the profile named in that command.
+`pixel self-update` reads the built binary from the profile its `--build`
+command names (`target/<profile>/pixel`).
 
 Skip this loop for changes limited to docs, prompts, or bench scripts.
 
@@ -344,8 +345,9 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full map. The short version:
 
 Pixel is dogfooded on itself. When an agent works in this repository:
 
-- Start with `pixel scope-task "<task>"` to get the P0/P1/P2 file list. Stay
-  inside it; refine the task and re-run rather than reading around.
+- Start with `pixel scope-task "<task>"` to get the P0/P1/P2 file list. It is
+  a starting map, not a boundary: when it misses what the change needs,
+  refine the task and re-run, or read further.
 - Run `pixel impact "<symbol>"` before editing any function, struct, or
   method. Say so in the PR if it reported HIGH or CRITICAL risk.
 - Run `pixel what-changed` before editing to avoid duplicating in-progress work.
@@ -354,7 +356,8 @@ Pixel is dogfooded on itself. When an agent works in this repository:
   fails on that mutation or, when the mutation cannot matter, annotate the
   function with `#[cfg_attr(test, mutants::skip)]` and a one-line reason.
   Push until the job reports no missed mutant; do not weaken an assertion to
-  get there, and do not run the full `cargo mutants` locally unasked.
+  get there. Run `cargo mutants` locally only when asked, scoped with `-F`
+  to one or two functions, never the full diff.
 - The CodeRabbit review is a gate like the `Mutants` job, not a suggestion
   box: read the findings when the pass lands, fix or refute each one in its
   thread, resolve it, and say in the pull request which ones you declined and
@@ -522,10 +525,8 @@ for a fresh pass over the whole diff, `@coderabbitai configuration` to
 print the configuration it actually resolved.
 
 A stacked pull request is reviewed against the branch below it as soon as
-it opens (`base_branches: [".*"]`). Before #265 only `main` was reviewed, so
-an upper layer waited for its retarget: #202 was retargeted by hand and
-merged before that, and was never reviewed. A retarget after the branch
-below merges changes the diff CodeRabbit sees, so re-read the review then.
+it opens (`base_branches: [".*"]`). A retarget after the branch below merges
+changes the diff CodeRabbit sees, so re-read the review then.
 
 One shape of pull request still gets no review at all: **a draft**.
 `drafts: false` in `.coderabbit.yaml`: the first pass starts when the pull
@@ -568,9 +569,7 @@ An entry is written to be scanned in a released section, not read as a note:
   warns when neither the text nor the slug references a pull request.
 - **500 bytes is the target, 900 the hard cap.** `prepare.sh --check` warns
   over the first and refuses over the second, so an entry that has turned into
-  an engineering note fails the pull request that wrote it. For scale, the
-  twelve bullets of 0.4.0 ran 264 to 1265 bytes with a median of 715, against
-  171 to 498 for the 19 entries of mise v2026.8.2.
+  an engineering note fails the pull request that wrote it.
 
 ### The release's highlights
 
@@ -585,7 +584,7 @@ It is the one underscore-named file `changelog.d/` takes, and it is not an
 entry: no section in its name, no scope prefix, no 500-byte aim. `###` and
 below are its to use; a `#` or `##` heading would end the section the release
 body is cut from, so `prepare.sh` refuses one, along with a file over 2000
-bytes (mise v2026.8.2's own lead plus highlights is 1275). A release of three
+bytes. A release of three
 fixes needs no chapeau: the file is optional, and the cut deletes it with the
 fragments.
 
