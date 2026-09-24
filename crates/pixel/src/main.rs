@@ -7929,9 +7929,6 @@ fn validate_cli_syntax(args: &[String]) -> Result<(), String> {
 /// argv has no sentinel or it bound to an argument taking several values.
 fn variadic_sentinel_misfit(args: &[String]) -> Option<String> {
     use pixel_install::doctor::VARIADIC_SENTINEL;
-    if !args.iter().any(|a| a == VARIADIC_SENTINEL) {
-        return None;
-    }
     let mut root = Cli::command();
     root.build();
     let matches = root.clone().try_get_matches_from(args).ok()?;
