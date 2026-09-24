@@ -442,6 +442,7 @@ mod tests {
                 tier: Tier::Exact,
                 site_line: 1,
                 receiver: None,
+                callee: None,
             })
             .unwrap();
     }
@@ -455,6 +456,7 @@ mod tests {
                 tier: Tier::Probable,
                 site_line: 1,
                 receiver: Some("on".to_string()),
+                callee: None,
             })
             .unwrap();
     }
@@ -529,6 +531,7 @@ mod tests {
                 tier: Tier::Probable,
                 site_line: 12,
                 receiver: Some("on".to_string()),
+                callee: None,
             })
             .unwrap();
 

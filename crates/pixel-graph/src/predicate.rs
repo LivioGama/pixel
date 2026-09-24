@@ -644,6 +644,7 @@ mod tests {
                     tier,
                     site_line: u32::try_from(10 * from + 3).unwrap(),
                     receiver: None,
+                    callee: None,
                 })
                 .unwrap();
         }
@@ -1241,7 +1242,7 @@ mod tests {
                 fx.files[0],
                 "crate::f1",
                 Some(fx.files[1]),
-                &["f1".to_string()],
+                &[crate::extract::ImportBinding::named("f1")],
             )
             .unwrap();
         let ev = fx.eval_with(
@@ -1303,6 +1304,7 @@ mod tests {
                 tier: Tier::Exact,
                 site_line: 1,
                 receiver: None,
+                callee: None,
             })
             .unwrap();
         let ev = fx.eval(&[0], &[1], Traversal::Callees);
@@ -1330,6 +1332,7 @@ mod tests {
                 tier: Tier::Exact,
                 site_line: 1,
                 receiver: None,
+                callee: None,
             })
             .unwrap();
         let ev = fx.eval(&[0], &[1], Traversal::Callees);

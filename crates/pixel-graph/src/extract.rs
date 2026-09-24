@@ -53,11 +53,41 @@ pub struct RawReference {
 #[derive(Debug, Clone)]
 pub struct RawImport {
     pub spec: String,
-    /// Named bindings imported from this spec (e.g. `["greet", "farewell"]`
-    /// for `import { greet, farewell } from "./a"`). Empty for wildcard
-    /// imports (`import * as x`) or when bindings cannot be extracted. Empty
-    /// bindings never grant Exact import-tier confidence.
-    pub bindings: Vec<String>,
+    /// Named bindings imported from this spec (`greet` and `farewell` for
+    /// `import { greet, farewell } from "./a"`). Empty for wildcard imports
+    /// (`import * as x`) or when bindings cannot be extracted. Empty bindings
+    /// never grant Exact import-tier confidence.
+    pub bindings: Vec<ImportBinding>,
+}
+
+/// One name an import brings into scope: `local` is what the importing file
+/// calls it, `source` what the imported file defines. They differ only under
+/// an alias (`use a::push as leased;`, `import { push as leased }`): the
+/// resolver matches calls on `local` and candidates on `source`, and `rename`
+/// rewrites the `source` occurrence at the import site.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImportBinding {
+    pub local: String,
+    pub source: String,
+}
+
+impl ImportBinding {
+    /// A binding imported under its own name.
+    pub fn named(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            local: name.clone(),
+            source: name,
+        }
+    }
+
+    /// A binding imported as `source` and called `local` in the importer.
+    pub fn aliased(source: impl Into<String>, local: impl Into<String>) -> Self {
+        Self {
+            local: local.into(),
+            source: source.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -401,7 +431,7 @@ impl<'a> Walker<'a> {
         });
     }
 
-    fn push_import(&mut self, spec: String, bindings: Vec<String>) {
+    fn push_import(&mut self, spec: String, bindings: Vec<ImportBinding>) {
         if !spec.is_empty() {
             self.imports.push(RawImport { spec, bindings });
         }
@@ -661,14 +691,17 @@ fn walk_ts(w: &mut Walker, lang: &'static str, node: Node, depth: usize) {
 
 /// Extract named import bindings from a TS/JS `import_statement` or
 /// `export_statement ... from "..."`. Handles:
-/// - `import { greet, farewell } from "./a"` → `["greet", "farewell"]`
-/// - `import greet from "./a"` → `["greet"]` (default import)
-/// - `import * as ns from "./a"` → `[]` (wildcard — no tracked bindings)
-/// - `import greet, { helper } from "./a"` → `["greet", "helper"]`
+/// - `import { greet, farewell } from "./a"` → `greet`, `farewell`
+/// - `import { greet as hi } from "./a"` → `hi` bound to the source `greet`
+/// - `import greet from "./a"` → `greet` (default import)
+/// - `import * as ns from "./a"` → nothing (wildcard — no tracked bindings)
+/// - `import greet, { helper } from "./a"` → `greet`, `helper`
+/// - `export { greet } from "./a"` → `greet` (a re-export keeps the source
+///   name on both sides: `rename` rewrites it there)
 ///
 /// Returns empty for wildcard imports and unparseable forms; T1 then falls
 /// back to file-level matching (the safe, pre-fix behavior).
-fn ts_import_bindings(w: &Walker, node: Node) -> Vec<String> {
+fn ts_import_bindings(w: &Walker, node: Node) -> Vec<ImportBinding> {
     let mut bindings = Vec::new();
     for child in each_child(node) {
         match child.kind() {
@@ -681,7 +714,10 @@ fn ts_import_bindings(w: &Walker, node: Node) -> Vec<String> {
                                 if spec.kind() == "import_specifier"
                                     && let Some(name) = sub_field_text(w, spec, "name")
                                 {
-                                    bindings.push(name);
+                                    bindings.push(match sub_field_text(w, spec, "alias") {
+                                        Some(alias) => ImportBinding::aliased(name, alias),
+                                        None => ImportBinding::named(name),
+                                    });
                                 }
                             }
                         }
@@ -689,7 +725,7 @@ fn ts_import_bindings(w: &Walker, node: Node) -> Vec<String> {
                         "identifier" => {
                             let name = w.text(sub);
                             if !name.is_empty() {
-                                bindings.push(name);
+                                bindings.push(ImportBinding::named(name));
                             }
                         }
                         // Wildcard: `import * as ns` — no tracked bindings.
@@ -706,7 +742,7 @@ fn ts_import_bindings(w: &Walker, node: Node) -> Vec<String> {
                     if spec.kind() == "export_specifier"
                         && let Some(name) = sub_field_text(w, spec, "name")
                     {
-                        bindings.push(name);
+                        bindings.push(ImportBinding::named(name));
                     }
                 }
             }
@@ -965,27 +1001,33 @@ fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
 
 /// The item names a Rust `use` brings into scope, the way
 /// `ts_import_bindings` reads a TS import:
-/// - `use crate::push::push;` → `["push"]`
-/// - `use crate::push::{PushOptions, push};` → `["PushOptions", "push"]`
-/// - `use a::{b::{c, d}, e};` → `["c", "d", "e"]`
-/// - `use a::b as c;` → `["b"]` (the imported item's own name, as for TS)
+/// - `use crate::push::push;` → `push`
+/// - `use crate::push::{PushOptions, push};` → `PushOptions`, `push`
+/// - `use a::{b::{c, d}, e};` → `c`, `d`, `e`
+/// - `use a::b as c;` → `c`, bound to the source item `b`
 /// - `use a::*;`, `use a::{self};` → nothing
 ///
 /// Without them the resolver's import tier (T1) never fired for Rust: a
 /// call to an imported function whose name another file also defines
 /// (`push`, `publish`, `open`) stayed unresolved, and `who-calls` reported
 /// no caller for it.
-fn rust_use_bindings(w: &Walker, node: Node, out: &mut Vec<String>) {
+fn rust_use_bindings(w: &Walker, node: Node, out: &mut Vec<ImportBinding>) {
     match node.kind() {
-        "identifier" | "type_identifier" => out.push(w.text(node)),
+        "identifier" | "type_identifier" => out.push(ImportBinding::named(w.text(node))),
         "scoped_identifier" => {
             if let Some(name) = node.child_by_field_name("name") {
                 rust_use_bindings(w, name, out);
             }
         }
         "use_as_clause" => {
+            let mut source = Vec::new();
             if let Some(path) = node.child_by_field_name("path") {
-                rust_use_bindings(w, path, out);
+                rust_use_bindings(w, path, &mut source);
+            }
+            // Only the alias is in scope: `use a::push as leased;` makes
+            // `leased()` a call to `push` and leaves `push()` unbound.
+            if let ([item], Some(alias)) = (source.as_slice(), node.child_by_field_name("alias")) {
+                out.push(ImportBinding::aliased(item.source.clone(), w.text(alias)));
             }
         }
         "scoped_use_list" => {
@@ -1921,8 +1963,9 @@ fn generic_import(w: &mut Walker, node: Node) {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileExtraction, GENERATED_MAX_BYTES_PER_LINE, GENERATED_MIN_BYTES, RawCall, RawSymbol,
-        assign_enclosing, extract_file, is_generated_blob, jsx_component_call, parse_file,
+        FileExtraction, GENERATED_MAX_BYTES_PER_LINE, GENERATED_MIN_BYTES, ImportBinding, RawCall,
+        RawSymbol, assign_enclosing, extract_file, is_generated_blob, jsx_component_call,
+        parse_file,
     };
     use crate::store::SymbolKind;
 
@@ -3052,27 +3095,80 @@ fn free() {}
         ]
         .join("\n");
         let extraction = extract_file("src/ship.rs", source.as_bytes()).unwrap();
-        let bindings: Vec<(&str, Vec<&str>)> = extraction
+        // (spec, [(local, source)]): the resolver matches calls on the
+        // local name, so an aliased item is in scope as its alias only.
+        let bindings: Vec<(&str, Vec<(&str, &str)>)> = extraction
             .imports
             .iter()
             .map(|i| {
                 (
                     i.spec.as_str(),
-                    i.bindings.iter().map(String::as_str).collect(),
+                    i.bindings
+                        .iter()
+                        .map(|b| (b.local.as_str(), b.source.as_str()))
+                        .collect(),
                 )
             })
             .collect();
         assert_eq!(
             bindings,
             [
-                ("crate::push::push", vec!["push"]),
+                ("crate::push::push", vec![("push", "push")]),
                 (
                     "crate::push::{PushOptions, push as leased}",
-                    vec!["PushOptions", "push"]
+                    vec![("PushOptions", "PushOptions"), ("leased", "push")]
                 ),
-                ("crate::a::{b::{c, d}, e, self}", vec!["c", "d", "e"]),
+                (
+                    "crate::a::{b::{c, d}, e, self}",
+                    vec![("c", "c"), ("d", "d"), ("e", "e")]
+                ),
                 ("std::collections::*", vec![]),
-                ("super::Walker", vec!["Walker"]),
+                ("super::Walker", vec![("Walker", "Walker")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn rust_use_alias_of_a_path_binds_the_alias_to_the_last_segment() {
+        let extraction =
+            extract_file("src/ship.rs", b"use crate::push::push as leased;\n").unwrap();
+        assert_eq!(
+            extraction.imports[0].bindings,
+            [ImportBinding::aliased("push", "leased")]
+        );
+    }
+
+    /// A default import binds its local name beside the named ones.
+    #[test]
+    fn ts_default_import_binds_its_name_beside_the_named_ones() {
+        let extraction =
+            extract_file("src/ship.ts", b"import greet, { helper } from \"./a\";\n").unwrap();
+        assert_eq!(
+            extraction.imports[0].bindings,
+            [
+                ImportBinding::named("greet"),
+                ImportBinding::named("helper")
+            ]
+        );
+    }
+
+    #[test]
+    fn ts_import_alias_binds_the_alias_to_the_exported_name() {
+        let source = b"import { push as leased, publish } from \"./push\";\nexport { open } from \"./store\";\n";
+        let extraction = extract_file("src/ship.ts", source).unwrap();
+        let bindings: Vec<&[ImportBinding]> = extraction
+            .imports
+            .iter()
+            .map(|i| i.bindings.as_slice())
+            .collect();
+        assert_eq!(
+            bindings,
+            [
+                &[
+                    ImportBinding::aliased("push", "leased"),
+                    ImportBinding::named("publish")
+                ][..],
+                &[ImportBinding::named("open")][..],
             ]
         );
     }

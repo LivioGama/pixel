@@ -336,6 +336,7 @@ mod tests {
                 tier: Tier::Exact,
                 site_line: 1,
                 receiver: None,
+                callee: None,
             })
             .unwrap();
     }
