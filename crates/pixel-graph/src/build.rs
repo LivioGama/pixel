@@ -2429,13 +2429,14 @@ mod tests {
         .unwrap();
         std::fs::write(
             root.join("other.ts"),
-            "export function push() {}\nexport function helper() {}\n",
+            "export function push() {}\nexport function helper() {}\nexport function aid() {}\n",
         )
         .unwrap();
         std::fs::write(
             root.join("ship.ts"),
             "import { push as leased, LIMIT, helper as aid } from \"./push\";\n\
              export function cap() { run(LIMIT); run(aid); }\n\
+             export function direct() { aid(); }\n\
              export function run(f: () => void) { f(); }\n\
              export function ship() { leased(); }\n\
              export function stray() { push(); }\n\
@@ -2454,18 +2455,32 @@ mod tests {
         let push = store.symbols_in_file(push_file).unwrap().remove(0);
         let references = store.edges_to(push.id, Some(EdgeKind::References)).unwrap();
         assert_eq!(references.len(), 1, "run(leased) passes push.ts's push");
-        // `LIMIT` is imported but is no callable symbol, and `helper` is
-        // aliased to an item push.ts does not define (other.ts does): passing
-        // either is a plain value, never an unresolved reference.
+        // `LIMIT` is imported but is no callable symbol, and `aid` aliases a
+        // `helper` push.ts does not define: passing either is a plain value,
+        // never an unresolved reference. other.ts defines both `helper` and
+        // an `aid`, which is not what the alias means in ship.ts: no edge,
+        // not even T2's Probable one from the `aid()` call.
         let unresolved: i64 = store
             .conn()
             .query_row(
-                "SELECT count(*) FROM unresolved_calls WHERE name IN ('LIMIT', 'aid')",
+                "SELECT count(*) FROM unresolved_calls
+                  WHERE name IN ('LIMIT', 'aid') AND kind = 'references'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         assert_eq!(unresolved, 0);
+        let other_file = store.file_by_path("other.ts").unwrap().unwrap().id;
+        for symbol in store.symbols_in_file(other_file).unwrap() {
+            if symbol.name == "push" {
+                continue;
+            }
+            assert!(
+                store.edges_to(symbol.id, None).unwrap().is_empty(),
+                "nothing in ship.ts reaches other.ts's {}",
+                symbol.name
+            );
+        }
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
