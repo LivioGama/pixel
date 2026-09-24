@@ -54,7 +54,8 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   and in the `$agents` list of `layouts/index.html` together.
 - Chapters: every landing section with a `data-chapter` gets a numbered
   divider (CSS counter in `main.css`) and a square in the right-edge rail
-  (wide screens), and the home snaps lightly (`proximity`) to section starts.
+  (wide screens), and the home eases onto a section start only when scrolling stopped within
+  80 px of it (a script, not CSS scroll-snap, whose `proximity` bounced).
   The nav's bottom edge fills with the scroll progress.
 - Links: anything that leaves the page opens in a new tab, in the templates
   and in Markdown through `layouts/_default/_markup/render-link.html`; only

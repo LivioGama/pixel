@@ -530,6 +530,39 @@
       mark();
     })();
 
+    /* A gentle snap. CSS scroll-snap cannot set how close is close enough,
+       and its "proximity" pulled the page back when a scroll stopped short.
+       Here nothing moves while the reader scrolls: once scrolling has been
+       still for 180 ms, and only if a chapter's start sits within 80 px of
+       the nav, the page eases onto it. Any new input cancels it. Off under
+       reduced motion. */
+    (function () {
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      var secs = [].slice.call(document.querySelectorAll('main > section[data-chapter]'));
+      if (!secs.length) return;
+      var CATCH = 80, IDLE = 180, t, self = false;
+      var navH = function () { var n = document.querySelector('.nav'); return n ? n.offsetHeight : 0; };
+      var settle = function () {
+        var top = navH(), best = null;
+        secs.forEach(function (sec) {
+          var d = sec.getBoundingClientRect().top - top;
+          if (Math.abs(d) <= CATCH && (best === null || Math.abs(d) < Math.abs(best))) best = d;
+        });
+        if (best === null || Math.abs(best) < 2) return;
+        self = true;
+        scrollBy({ top: best, behavior: 'smooth' });
+        setTimeout(function () { self = false; }, 600);
+      };
+      addEventListener('scroll', function () {
+        if (self) return;
+        clearTimeout(t);
+        t = setTimeout(settle, IDLE);
+      }, { passive: true });
+      ['wheel', 'touchstart', 'keydown', 'mousedown'].forEach(function (ev) {
+        addEventListener(ev, function () { clearTimeout(t); self = false; }, { passive: true });
+      });
+    })();
+
     /* Scroll reveals: a block marked data-reveal fades up once when it
        enters the viewport; data-reveal="stagger" does it child by child.
        The hidden state exists only under .js and no-preference motion, so

@@ -255,10 +255,6 @@ section[data-chapter] { counter-increment: chapter; }
   padding: 7px 14px; border-radius: 999px; background: var(--ground); box-shadow: inset 0 0 0 1px var(--line);
   font: 500 0.7rem/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--green-hi);
 }
-@media (prefers-reduced-motion: no-preference) {
-  html:has(body.home) { scroll-snap-type: y proximity; }
-  .home main > section { scroll-snap-align: start; }
-}
 .section--center .section__head { margin-inline: auto; text-align: center; }
 .section--center .section__head p { margin-inline: auto; }
 .section__head { max-width: 48em; margin-bottom: clamp(32px, 5vw, 56px); }
