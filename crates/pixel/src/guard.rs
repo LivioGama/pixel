@@ -120,10 +120,25 @@ fn index_freshness_line(repo: &Value) -> Option<String> {
     } else {
         "no code graph (callers, impact and symbols unavailable)"
     };
-    let history = match repo.get("facts_fresh").and_then(Value::as_bool) {
-        Some(true) => "history index fresh",
-        Some(false) => "history index still building",
-        None => "no history index",
+    // The phase names what the history commands cannot answer yet: phase A
+    // ingests refs, commit metadata and the paths each commit touched, B
+    // measures the changed blobs (to skip the oversized ones), C the diff
+    // text; a phrase search needs C.
+    let fresh = repo.get("facts_fresh").and_then(Value::as_bool);
+    let phase = repo.get("facts_phase").and_then(Value::as_str);
+    let history = match (fresh, phase) {
+        (None, _) => "no history index",
+        (Some(true), _) => "history index fresh",
+        (Some(false), Some("phase_a")) => {
+            "history index behind the refs (commits and file history incomplete)"
+        }
+        (Some(false), Some("phase_b")) => {
+            "history index measuring changed blobs before the diff text (phrase search incomplete)"
+        }
+        (Some(false), Some("phase_c")) => {
+            "history index still ingesting diff text (phrase search incomplete)"
+        }
+        (Some(false), _) => "history index not fresh",
     };
     Some(format!("Pixel index: commit {commit}, {graph}, {history}."))
 }
@@ -4886,7 +4901,40 @@ mod tests {
         assert_eq!(line(Value::Null), None, "no probe, no claim");
         assert_eq!(
             line(serde_json::json!({"index_commit": "abc", "graph_present": false, "facts_fresh": false})),
-            Some("Pixel index: commit abc, no code graph (callers, impact and symbols unavailable), history index still building.".into())
+            Some("Pixel index: commit abc, no code graph (callers, impact and symbols unavailable), history index not fresh.".into())
+        );
+        // Each phase names what the history commands cannot answer yet.
+        let history = |phase: &str| {
+            line(
+                serde_json::json!({"index_commit": "abc", "graph_present": true,
+                                    "facts_fresh": false, "facts_phase": phase}),
+            )
+            .unwrap()
+        };
+        assert!(
+            history("phase_a")
+                .ends_with("history index behind the refs (commits and file history incomplete)."),
+            "{}",
+            history("phase_a")
+        );
+        assert!(
+            history("phase_b").ends_with(
+                "history index measuring changed blobs before the diff text (phrase search incomplete)."
+            ),
+            "{}",
+            history("phase_b")
+        );
+        assert!(
+            history("phase_c")
+                .ends_with("history index still ingesting diff text (phrase search incomplete)."),
+            "{}",
+            history("phase_c")
+        );
+        // `fresh` wins over a phase that would say otherwise.
+        assert!(
+            line(serde_json::json!({"facts_fresh": true, "facts_phase": "phase_c"}))
+                .unwrap()
+                .ends_with("history index fresh.")
         );
         assert_eq!(
             line(serde_json::json!({})),

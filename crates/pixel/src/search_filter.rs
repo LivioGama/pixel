@@ -7,6 +7,8 @@
 //! The filter runs on the matches the index returns, on this side of the
 //! protocol: the daemon's `Search` request has no glob or type field.
 
+use std::collections::HashSet;
+
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use serde_json::Value;
 
@@ -40,32 +42,39 @@ const TYPES: &[(&str, &[&str])] = &[
 /// Which repo-relative paths a search keeps.
 #[derive(Debug)]
 pub struct PathFilter {
-    include: Option<GlobSet>,
-    exclude: Option<GlobSet>,
+    /// Every `-g` rule's globs in one set, in flag order (empty without `-g`).
+    globs: GlobSet,
+    /// For each glob of `globs`, whether its rule was a `!` exclusion. The
+    /// glob index grows with the flag order, so the highest matching index
+    /// is the last matching rule.
+    negated: Vec<bool>,
+    /// Whether any rule includes: then a path no rule matches is left out.
+    any_include: bool,
     extensions: Vec<&'static str>,
 }
 
 impl PathFilter {
     /// `None` when no flag filters anything. A glob starting with `!`
-    /// excludes; with any include glob, a path must match one of them.
+    /// excludes; with any include glob, a path must match one of them. As in
+    /// ripgrep, the last glob that matches a path decides, so
+    /// `-g '!*.rs' -g '*.rs'` keeps Rust files and `-g '*.rs' -g '!*.rs'`
+    /// drops them.
     pub fn new(globs: &[String], types: &[String]) -> Result<Option<Self>, String> {
         if globs.is_empty() && types.is_empty() {
             return Ok(None);
         }
-        let mut include = GlobSetBuilder::new();
-        let mut exclude = GlobSetBuilder::new();
-        let (mut includes, mut excludes) = (0, 0);
+        let mut set = GlobSetBuilder::new();
+        let mut negated = Vec::new();
+        let mut any_include = false;
         for raw in globs {
-            if let Some(negated) = raw.strip_prefix('!') {
-                for glob in gitignore_globs(negated)? {
-                    exclude.add(glob);
-                }
-                excludes += 1;
-            } else {
-                for glob in gitignore_globs(raw)? {
-                    include.add(glob);
-                }
-                includes += 1;
+            let (pattern, is_negated) = match raw.strip_prefix('!') {
+                Some(pattern) => (pattern, true),
+                None => (raw.as_str(), false),
+            };
+            any_include |= !is_negated;
+            for glob in gitignore_globs(pattern)? {
+                set.add(glob);
+                negated.push(is_negated);
             }
         }
         let mut extensions = Vec::new();
@@ -76,25 +85,21 @@ impl PathFilter {
             })?;
             extensions.extend_from_slice(exts);
         }
-        let build = |b: GlobSetBuilder, n: usize| -> Result<Option<GlobSet>, String> {
-            if n == 0 {
-                return Ok(None);
-            }
-            b.build().map(Some).map_err(|e| format!("bad --glob: {e}"))
-        };
         Ok(Some(Self {
-            include: build(include, includes)?,
-            exclude: build(exclude, excludes)?,
+            globs: set.build().map_err(|e| format!("bad --glob: {e}"))?,
+            negated,
+            any_include,
             extensions,
         }))
     }
 
     pub fn keeps(&self, path: &str) -> bool {
         let path = path.trim_start_matches("./");
-        if self.exclude.as_ref().is_some_and(|set| set.is_match(path)) {
-            return false;
-        }
-        if self.include.as_ref().is_some_and(|set| !set.is_match(path)) {
+        let kept = match self.globs.matches(path).last() {
+            Some(&glob) => !self.negated[glob],
+            None => !self.any_include,
+        };
+        if !kept {
             return false;
         }
         self.extensions.is_empty()
@@ -133,18 +138,17 @@ fn gitignore_globs(raw: &str) -> Result<Vec<Glob>, String> {
         .collect()
 }
 
-/// The distinct `path` of each match, in the order the matches came.
-pub fn files_with_matches(matches: &[Value]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for path in matches
+/// The distinct `path` of each match, in the order the matches came, that
+/// `seen` does not hold yet; each one returned is added to it. One `seen`
+/// shared across the roots of a search prints a path once even when two
+/// roots index it (a nested repository under a gitless parent).
+pub fn files_with_matches(matches: &[Value], seen: &mut HashSet<String>) -> Vec<String> {
+    matches
         .iter()
         .filter_map(|m| m.get("path").and_then(Value::as_str))
-    {
-        if !out.iter().any(|seen| seen == path) {
-            out.push(path.to_string());
-        }
-    }
-    out
+        .filter(|path| seen.insert((*path).to_string()))
+        .map(ToString::to_string)
+        .collect()
 }
 
 #[cfg(test)]
@@ -181,6 +185,32 @@ mod tests {
         assert!(!f.keeps("crates/pixel-ops/tests/all/crash_matrix.rs"));
         assert!(f.keeps("crates/pixel-ops/src/push.rs"));
         assert!(!f.keeps("ARCHITECTURE.md"));
+    }
+
+    #[test]
+    fn the_last_matching_glob_decides_as_in_ripgrep() {
+        // An agent narrowing a search appends a flag; the later one must win,
+        // or `-g '!*.rs' -g '*.rs'` silently returns nothing.
+        let f = filter(&["!*.rs", "*.rs"], &[]);
+        assert!(f.keeps("src/lib.rs"));
+        assert!(!f.keeps("README.md"), "an include rule leaves the rest out");
+        let f = filter(&["*.rs", "!*.rs"], &[]);
+        assert!(!f.keeps("src/lib.rs"));
+        assert!(!f.keeps("README.md"));
+        // A path neither rule matches: kept when every rule excludes.
+        let f = filter(&["!*.rs", "!*.md"], &[]);
+        assert!(f.keeps("scripts/gen.sh"));
+        assert!(!f.keeps("README.md"));
+        assert!(!f.keeps("src/lib.rs"));
+        // The later exclusion overrides an earlier, broader include.
+        let f = filter(&["crates", "!**/tests/**", "crates/pixel/tests/cli"], &[]);
+        assert!(f.keeps("crates/pixel/src/main.rs"));
+        assert!(!f.keeps("crates/pixel-ops/tests/all/a.rs"));
+        assert!(f.keeps("crates/pixel/tests/cli/main.rs"));
+        assert!(
+            !f.keeps("README.md"),
+            "two includes still leave the rest out"
+        );
     }
 
     #[test]
@@ -254,6 +284,13 @@ mod tests {
             serde_json::json!({"path": "b.rs", "line": 9}),
             serde_json::json!({"line": 3}),
         ];
-        assert_eq!(files_with_matches(&matches), ["b.rs", "a.rs"]);
+        let mut seen = HashSet::new();
+        assert_eq!(files_with_matches(&matches, &mut seen), ["b.rs", "a.rs"]);
+        // A second root's page prints only the paths the first did not.
+        let next = vec![
+            serde_json::json!({"path": "a.rs", "line": 4}),
+            serde_json::json!({"path": "c.rs", "line": 5}),
+        ];
+        assert_eq!(files_with_matches(&next, &mut seen), ["c.rs"]);
     }
 }

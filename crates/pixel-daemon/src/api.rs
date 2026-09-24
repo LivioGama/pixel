@@ -34,6 +34,11 @@ pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// daemon of an older build rejects as an unknown variant.
 pub const PROTOCOL_VERSION: u64 = 11;
 
+/// Rows a `search` returns when the request names no `limit`.
+pub const SEARCH_DEFAULT_ROWS: usize = 100;
+/// The most rows one `search` page returns, whatever `limit` asks for.
+pub const SEARCH_MAX_ROWS: usize = 10_000;
+
 /// The potion model the daemon warms. Its download leaves its own marker
 /// ([`pixel_recall::potion_marker`]), which another model's cannot overwrite.
 const POTION_V2_REPO: &str = "minishlab/potion-code-64M-v2";
@@ -1080,13 +1085,13 @@ impl Service {
         // (`.*`, short literals that hit every file) returning unbounded
         // output. A caller-provided limit overrides the row cap; the byte cap
         // always applies as a safety valve.
-        const DEFAULT_LIMIT: usize = 100;
-        const MAX_LIMIT: usize = 10_000;
         const BYTE_CAP: usize = 64 * 1024;
         /// Per-match text cap: a single match line is truncated to this many
         /// bytes so one oversized line cannot bypass the byte cap.
         const PER_MATCH_TEXT_CAP: usize = 4096;
-        let row_limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+        let row_limit = limit
+            .unwrap_or(SEARCH_DEFAULT_ROWS)
+            .clamp(1, SEARCH_MAX_ROWS);
         let offset = offset.unwrap_or(0);
 
         // `scope` selects match ORDER, not a different data source. `None`/
@@ -1136,7 +1141,7 @@ impl Service {
             // state (see `open_graph_for_ranking` for the accompanying
             // determinism fix), `offset` now indexes one coherent sequence:
             // paging through it can neither skip nor repeat a row.
-            const RANK_CANDIDATE_CAP: usize = MAX_LIMIT;
+            const RANK_CANDIDATE_CAP: usize = SEARCH_MAX_ROWS;
             let (pool, pool_stats) = self
                 .index
                 .read()
@@ -1230,7 +1235,7 @@ impl Service {
         }
         if ranked_pool_capped {
             caps.push(format!(
-                "ranked candidate pool capped at {MAX_LIMIT} matches; ranking never saw \
+                "ranked candidate pool capped at {SEARCH_MAX_ROWS} matches; ranking never saw \
                  candidates beyond the cap"
             ));
         }

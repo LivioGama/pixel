@@ -89,7 +89,9 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// 6: the resolver relaxes the receiver-shadow veto for a sole same-file
 ///    inherent method (`w.push_call()`), turning those rows into Probable
 ///    edges for unchanged sources.
-pub const EXTRACTOR_VERSION: &str = "6";
+/// 7: a Rust `use` records the names it binds (`imports.bindings`), so the
+///    import tier turns unresolved calls into Exact edges.
+pub const EXTRACTOR_VERSION: &str = "7";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
