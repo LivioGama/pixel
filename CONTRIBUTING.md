@@ -521,17 +521,16 @@ review` for an incremental pass after a push, `@coderabbitai full review`
 for a fresh pass over the whole diff, `@coderabbitai configuration` to
 print the configuration it actually resolved.
 
-Two shapes of pull request that silently get no review at all:
+A stacked pull request is reviewed against the branch below it as soon as
+it opens (`base_branches: [".*"]`). Before #265 only `main` was reviewed, so
+an upper layer waited for its retarget: #202 was retargeted by hand and
+merged before that, and was never reviewed. A retarget after the branch
+below merges changes the diff CodeRabbit sees, so re-read the review then.
 
-- **A stacked pull request, while its base is another feature branch**
-  ("reviews are disabled for this base branch"). The pass only happens once
-  the branch below merges and GitHub retargets it to `main`, which is one
-  more reason to merge a stack bottom-up and to re-read each PR after its
-  retarget. #202 was retargeted by hand and merged before that, so it was
-  never reviewed.
-- **A draft.** `drafts: false` in `.coderabbit.yaml`: the first pass starts
-  when the pull request is marked ready for review. Leave it the time to
-  land rather than merging on the CI checks alone.
+One shape of pull request still gets no review at all: **a draft**.
+`drafts: false` in `.coderabbit.yaml`: the first pass starts when the pull
+request is marked ready for review. Leave it the time to land rather than
+merging on the CI checks alone.
 
 ## Changelog
 
