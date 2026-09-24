@@ -6653,6 +6653,7 @@ mod tests {
                     tier: Tier::Probable,
                     site_line: 11 + i,
                     receiver: Some("on".to_string()),
+                    callee: None,
                 })
                 .unwrap();
         }
@@ -6688,6 +6689,7 @@ mod tests {
                 tier: Tier::Probable,
                 site_line: 106,
                 receiver: None,
+                callee: None,
             })
             .unwrap();
 

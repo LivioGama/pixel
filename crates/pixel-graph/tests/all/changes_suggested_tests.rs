@@ -63,6 +63,7 @@ fn call(store: &GraphStore, src: i64, dst: i64) {
             tier: Tier::Exact,
             site_line: 2,
             receiver: None,
+            callee: None,
         })
         .unwrap();
 }

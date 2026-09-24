@@ -796,6 +796,7 @@ mod tests {
                 tier: Tier::Exact,
                 site_line: 1,
                 receiver: None,
+                callee: None,
             })
             .unwrap();
     }
@@ -861,6 +862,7 @@ mod tests {
                 tier: Tier::Probable,
                 site_line: 3,
                 receiver: None,
+                callee: None,
             })
             .unwrap();
         // `orphan` has no edges at all — genuinely dead.
