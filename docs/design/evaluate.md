@@ -346,10 +346,11 @@ distinct; `Output::Evaluation` boxes the envelope. `WorkingTreeCheck` has
 only `full_before_and_after` and `before_only` — no witness-only variant
 (forbidden) and no `watcher_signed` until the Budget decision below.
 
-Stack note: CodeRabbit does not review a pull request whose base is
-another feature branch ("reviews are disabled for this base branch"), so a
-stacked PR is only reviewed once the branch below merges and GitHub
-retargets it to `main`. Merge bottom-up and re-read the review then. #202
+Stack note: at the time, CodeRabbit did not review a pull request whose
+base was another feature branch ("reviews are disabled for this base
+branch"), so a stacked PR was only reviewed once the branch below merged
+and GitHub retargeted it to `main`. #265 set `base_branches: [".*"]`, and a
+stacked PR is now reviewed against its base when it opens. #202
 was retargeted by hand and merged before that happened, so it never got a
 CodeRabbit pass; #203 was merged without a rebase, so its 10 mutants never
 ran either. Both are on the p9 list.

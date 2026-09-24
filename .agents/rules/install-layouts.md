@@ -11,11 +11,14 @@ findings on #222 and #225 were layouts nobody had tested.
 
 - **The repository can be the home directory.** `pixel install --repo "$HOME"`
   makes the repo's `.claude/settings.json` the global one and puts the
-  repo-local and global backups in one place. A repo-scoped write that
-  resolves to a global file is refused (compare with `same_file` before
-  writing, not after), and a cleanup that deletes a shared backup first
-  checks that no install on the other side still uses it. Test the
-  `repo == home` case beside the ordinary one.
+  repo-local and global backups in one place. A repo-scoped install write
+  that resolves to a global file is refused (compare with `same_file` before
+  that write, not after). The one write allowed on the shared file first is
+  the migration cleanup (`remove_pre_tool_use_guard`), which touches only
+  `PreToolUse` and takes out only Pixel's guard, putting back the RTK group
+  a delegate adopted. A cleanup that deletes a shared backup first checks
+  that no install on the other side still uses it. Test the `repo == home`
+  case beside the ordinary one.
 - **A foreign config is not a broken install.** Another tool's hooks or
   project settings without a Pixel install are reported as absent, never as
   red: `doctor` judges what Pixel wrote.

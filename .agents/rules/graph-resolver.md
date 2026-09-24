@@ -48,7 +48,8 @@ cases that separate it from a file-wide approximation. For a Rust `use`
 ([reference](https://doc.rust-lang.org/reference/items/use-declarations.html)):
 
 - **Scope:** a binding holds in its module or block; a nested inline module
-  sees its parent's names only through `use super::*;`, and never a block's.
+  does not inherit its parent's names for unqualified lookup (it reaches them
+  through a `super::…` path or a `use` of one), and never sees a block's.
 - **Shadowing:** the innermost applicable `use` wins; two that still tie and
   name different items leave the call unresolved, even in one file — never
   pick by symbol order.
