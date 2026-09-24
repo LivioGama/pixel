@@ -546,6 +546,13 @@ class FragmentContract(unittest.TestCase):
         self.assertIn("git mv changelog.d/thing.fixed.md changelog.d/<number>-thing.fixed.md", result.stderr)
         self.assertIn("https://github.com/LivioGama/pixel/pull/<number>", result.stderr)
 
+    def test_an_issue_number_is_not_a_pull_request_reference(self):
+        """`#42` alone may be an issue: the text counts only with the URL."""
+        root = self.make_repo({"thing.fixed.md": "**thing:** it no longer breaks (fixes issue #42).\n"})
+        result = self.run_check(root)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("no pull request referenced", result.stderr)
+
     def test_a_link_in_the_entry_references_the_pull_request(self):
         """The link alone is enough, whatever the slug."""
         root = self.make_repo({

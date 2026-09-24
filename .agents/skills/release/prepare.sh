@@ -206,7 +206,9 @@ for fragment in changelog.d/*.md; do
     # to remember afterwards. As a warning nothing surfaced it before the
     # release (three entries merged without it in a row, #253-#255); refused,
     # the pull request's own CI run goes red on it, when the number is known.
-    if ! grep -Eq '#[0-9]+' "$fragment" && ! printf '%s' "${fragment##*/}" | grep -Eq '^[0-9]+-'; then
+    # In the text it is the pull request's URL, not any `#<n>`: `Fixes issue
+    # #42` names an issue and would otherwise pass for the reference.
+    if ! grep -Eq '/pull/[0-9]+' "$fragment" && ! printf '%s' "${fragment##*/}" | grep -Eq '^[0-9]+-'; then
         echo "prepare.sh: $fragment: no pull request referenced; once the pull request is open, name the number first in the slug (git mv $fragment changelog.d/<number>-${fragment##*/}) and end the entry with its link: ([#<number>](https://github.com/LivioGama/pixel/pull/<number>))" >&2
         exit 1
     fi
