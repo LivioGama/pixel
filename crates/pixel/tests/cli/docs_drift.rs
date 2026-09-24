@@ -86,6 +86,8 @@ const DOCS: &[&str] = &[
     "AGENTS.md",
     ".agents/rules/test-campaigns.md",
     ".agents/rules/measuring.md",
+    ".agents/rules/change-propagation.md",
+    ".agents/rules/graph-resolver.md",
     "scripts/README.md",
     "js/sniper/README.md",
 ];

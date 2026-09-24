@@ -23,11 +23,14 @@ apply to:
 | File | Applies to | Content |
 | --- | --- | --- |
 | `mutation-gate.md` | `crates/**/*.rs` | writing code and tests that pass `cargo mutants` on the first run |
-| `test-hygiene.md` | `crates/**/*.rs` | git fixtures, env vars, canonical paths, `clippy --fix` cleanup |
+| `test-hygiene.md` | `crates/**/*.rs` | git fixtures, env vars, canonical paths, `clippy --fix` cleanup, assertions as strong as the contract (every form of a "must not happen", values over non-emptiness, the production path, one case per consuming path) |
 | `test-campaigns.md` | always | running long mutants/nextest campaigns without surprises |
 | `measuring.md` | always | what a number must carry before it is evidence: run identity, the command beside the count, one variable per ablation, the baseline |
 | `rust-style.md` | `crates/**/*.rs` | the shapes the four pedantic lints expect (`uninlined_format_args`, `map_unwrap_or`, `redundant_closure_for_method_calls`, `items_after_statements`) and the cleanup after `clippy --fix` |
 | `release.md` | always | releases go through the `release` skill only: a prepare PR into `main`, then a tag on `main` |
+| `change-propagation.md` | always | list every producer and reader of a value before changing it; siblings without the new input, version bumps, named constants, secrets in every sink, timers around the real cost |
+| `graph-resolver.md` | `crates/pixel-graph/**` | the chain a resolution change crosses (extraction, storage, index, six resolution paths, `rename`, diagnostics), the language rule it models, tier honesty |
+| `install-layouts.md` | `crates/pixel-install/**` | repo equal to `$HOME`, foreign configs, quoted paths in pasted commands, global and repo-local state kept apart |
 
 `.claude/rules` is a symlink to that directory (Claude Code loads it by
 itself, honouring `paths:`), and `CLAUDE.md` is a symlink to this file. A

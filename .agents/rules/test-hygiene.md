@@ -41,3 +41,21 @@ Loaded when a Rust source file is in play. Companion of `mutation-gate.md`.
 - **`is_none_or`, `is_some_and`, `is_ok_and`** over `map().unwrap_or()`,
   and `map_or(default, f)` when the default is cheap. Both are what the
   enabled `map_unwrap_or` lint expects.
+- **A "must not happen" test rules out every form it takes.** When the
+  claim is that X never occurs, assert the absence of each observable shape
+  of X: no edge of any kind, no `unresolved_calls` row, no stray file, no
+  line on stderr. #262 checked that an alias left no unresolved row while a
+  false `References` edge would still have passed.
+- **Assert the value, not that there is one.** `!is_empty()`, `is_some()`
+  and `len() > 0` let most mutants through; compare with the expected value
+  or the expected list (#222's preset tests only checked non-emptiness).
+- **Test the path production takes.** A test that builds its object by hand
+  when production reaches it through an opener, an adapter or a constructor
+  (`open_repo`, the real transport) proves the hand-built one: #229's test
+  wrote the download marker itself, so `open_repo` could stop writing it
+  unseen.
+- **A new input gets one case per path that consumes it.** Adding a site
+  line, a scope or a name to a decision means one test through the full
+  build and one through each incremental route that re-derives it
+  (`change-propagation.md`); the full build alone passed on #262 while the
+  incremental update lost the edge.

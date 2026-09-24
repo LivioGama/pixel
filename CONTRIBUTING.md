@@ -451,8 +451,9 @@ concerns should be split into a stack of PRs.
 
 ### CodeRabbit reviews
 
-CodeRabbit reviews pull requests into `main` and `release/x.y`, except
-drafts, Dependabot bumps and titles containing `WIP` or `DO NOT MERGE`. Its
+CodeRabbit reviews pull requests into any base branch — `main`,
+`release/x.y`, and the branch below a stacked one — except drafts,
+Dependabot bumps and titles containing `WIP` or `DO NOT MERGE`. Its
 configuration is [`.coderabbit.yaml`](.coderabbit.yaml) at the root: which
 paths are reviewed, the path-specific instructions that restate the rules
 above for the reviewer, the guideline files it applies (this file,
