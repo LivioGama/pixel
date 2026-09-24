@@ -227,6 +227,11 @@ main, .footer { position: relative; z-index: 1; }
 .numbers__meter b { aspect-ratio: 1; border-radius: 1px; box-shadow: inset 0 0 0 1px var(--cell); }
 .numbers__meter b.on { background: var(--cell-edge); box-shadow: none; }
 .numbers__meter .is-pixel b.on { background: var(--green); box-shadow: 0 0 5px rgba(34, 197, 94, 0.55); }
+/* Unlit until the panel counts up (layouts/index.html sets .is-counted and a delay per square). */
+@media (prefers-reduced-motion: no-preference) {
+  .numbers__meter b { transition: background-color 0.22s ease-out, box-shadow 0.22s ease-out; }
+  .js .numbers__list:not(.is-counted) .numbers__meter b.on { background: transparent; box-shadow: inset 0 0 0 1px var(--cell); }
+}
 .numbers__meter em { font: 400 0.68rem/1 var(--mono); font-style: normal; color: var(--ink-soft); white-space: nowrap; }
 .numbers__meter em:nth-of-type(2) { color: var(--green-hi); }
 .numbers__text { color: var(--ink-soft); font-size: 0.98rem; line-height: 1.45; max-width: 18em; }

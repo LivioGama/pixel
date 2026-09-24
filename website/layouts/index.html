@@ -59,7 +59,7 @@
         (dict "tag" "Context" "value" "4.7&times;" "text" "less context than GitNexus on every turn" "base" "GitNexus" "before" 14 "after" 3)
         (dict "tag" "Agent time" "value" "&minus;30%" "text" "for an agent to scope a multi-file task" "base" "no Pixel" "before" 20 "after" 14)
       }}
-      <ul class="numbers__list" data-reveal="stagger">
+      <ul class="numbers__list" data-reveal="stagger" data-count-up>
         {{ range $stats }}
         <li>
           <span class="numbers__tag">{{ .tag }}</span>
@@ -583,6 +583,54 @@
         clearTimeout(t);
         t = setTimeout(route, 120);
       });
+    })();
+
+    /* Results: once the panel is on screen (and the splash is gone), each
+       number counts up from zero to the value the HTML already holds, and
+       each meter lights its squares one by one, baseline row then Pixel's.
+       Without JavaScript or with reduced motion the final state is what
+       renders. */
+    (function () {
+      var list = document.querySelector('[data-count-up]');
+      if (!list) return;
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches || !('IntersectionObserver' in window)) { list.classList.add('is-counted'); return; }
+      var items = [].slice.call(list.children).map(function (li) {
+        var el = li.querySelector('strong');
+        var m = el.textContent.trim().match(/^(\D*)([\d.]+)(\D*)$/);
+        if (!m) return null;
+        var dec = (m[2].split('.')[1] || '').length;
+        el.textContent = m[1] + (0).toFixed(dec) + m[3];
+        return { li: li, el: el, pre: m[1], to: +m[2], dec: dec, suf: m[3] };
+      }).filter(Boolean);
+      var go = function () {
+        list.classList.add('is-counted');
+        items.forEach(function (it, i) {
+          var delay = 150 + i * 140, dur = 1300, t0 = null;
+          var rows = it.li.querySelectorAll('.numbers__meter i');
+          [].forEach.call(rows, function (row, r) {
+            [].forEach.call(row.querySelectorAll('b.on'), function (cell, j) {
+              cell.style.transitionDelay = (delay + r * 380 + j * 38) + 'ms';
+            });
+          });
+          var tick = function (now) {
+            if (t0 === null) t0 = now;
+            var p = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - p, 3);
+            it.el.textContent = it.pre + (it.to * e).toFixed(it.dec) + it.suf;
+            if (p < 1) requestAnimationFrame(tick);
+          };
+          setTimeout(function () { requestAnimationFrame(tick); }, delay);
+        });
+      };
+      var watch = function () {
+        var io = new IntersectionObserver(function (e) {
+          if (!e[0].isIntersecting) return;
+          io.disconnect();
+          go();
+        }, { threshold: 0.4 });
+        io.observe(list);
+      };
+      if (document.documentElement.classList.contains('splash')) addEventListener('pixel:splashdone', watch, { once: true });
+      else watch();
     })();
 
     /* The chapter rail: one link per section opening on a .chapter label, the
