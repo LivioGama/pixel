@@ -7909,7 +7909,7 @@ fn validate_cli_syntax(args: &[String]) -> Result<(), String> {
     std::thread::Builder::new()
         .stack_size(4 * 1024 * 1024)
         .spawn(move || match Cli::try_parse_from(&args) {
-            Ok(_) => Ok(()),
+            Ok(_) => variadic_sentinel_misfit(&args).map_or(Ok(()), Err),
             Err(e) => Err(e
                 .to_string()
                 .lines()
@@ -7920,6 +7920,42 @@ fn validate_cli_syntax(args: &[String]) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .join()
         .map_err(|_| "parse thread panicked".to_string())?
+}
+
+/// A parsed argv whose `...` placeholder put its second value
+/// (`VARIADIC_SENTINEL`) in another argument than its first: the documented
+/// shape parses only because the extra value fell into another slot, a
+/// defaulted `PATH` or a multi-value positional after a one-value flag.
+/// `None` when the argv has no sentinel or both values bound to one argument.
+fn variadic_sentinel_misfit(args: &[String]) -> Option<String> {
+    use pixel_install::doctor::VARIADIC_SENTINEL;
+    let sentinel = args.iter().position(|a| a == VARIADIC_SENTINEL)?;
+    let mut root = Cli::command();
+    root.build();
+    let matches = root.clone().try_get_matches_from(args).ok()?;
+    let (mut cmd, mut m) = (&root, &matches);
+    // clap counts a subcommand's indices from its own name, so the
+    // sentinel's index there is its argv position less the nesting depth.
+    let mut depth = 0;
+    while let Some((name, sub)) = m.subcommand() {
+        cmd = cmd.find_subcommand(name)?;
+        m = sub;
+        depth += 1;
+    }
+    let sentinel = sentinel.checked_sub(depth)?;
+    let holds = |id: &str, index: usize| {
+        m.indices_of(id)
+            .is_some_and(|mut indices| indices.any(|i| i == index))
+    };
+    let arg = cmd
+        .get_arguments()
+        .find(|a| holds(a.get_id().as_str(), sentinel))?;
+    (!holds(arg.get_id().as_str(), sentinel - 1)).then(|| {
+        format!(
+            "a `...` placeholder's second value lands in `{}`, not in the argument its first value went to",
+            arg.get_id()
+        )
+    })
 }
 
 /// `pixel excavate --show <oid> --file <path>`: full historical file content
@@ -8075,10 +8111,10 @@ mod tests {
             r#"pixel repo-state /path/to/repo [--json]"#,
             r#"pixel review-changes /path/to/repo [--json]"#,
             r#"pixel commit-history /path/to/repo [--ref <ref>] [--limit N] [--json]"#,
-            r#"pixel diff <from> /path/to/repo [--paths <p>...] [--json]"#,
-            r#"pixel commit --files <f>... --message "<msg>" --request-id <id> /path/to/repo"#,
+            r#"pixel diff <from> /path/to/repo [--paths <p1> --paths <p2>] [--json]"#,
+            r#"pixel commit --files <f1> --files <f2> --message "<msg>" --request-id <id> /path/to/repo"#,
             r#"pixel push <remote> <refspec> /path/to/repo --request-id <id>"#,
-            r#"pixel commit-and-push --files <f>... --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
+            r#"pixel commit-and-push --files <f1> --files <f2> --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
             r#"pixel new-branch <name> /path/to/repo --request-id <id>"#,
             r#"pixel fetch <remote> /path/to/repo [--json]"#,
             r#"pixel fast-forward /path/to/repo --expected-head <oid> --target-oid <oid> --request-id <id>"#,
@@ -8103,6 +8139,44 @@ mod tests {
             "canonical rule command lines must parse against the real CLI:\n{}",
             failures.join("\n")
         );
+    }
+
+    /// `--files` and `--paths` take one value per occurrence, so a rule line
+    /// that shows several values after one flag teaches an agent a command
+    /// the CLI rejects: the parity check must go red on it, not validate the
+    /// single-value reading, even where the extra value parses as a PATH.
+    #[test]
+    fn variadic_single_value_flags_are_rejected_as_documented() {
+        for line in [
+            r#"pixel commit --files <f>... --message "<msg>" --request-id <id> /path/to/repo"#,
+            r#"pixel commit-and-push --files <f>... --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
+            // No explicit PATH: the second value would bind to the defaulted
+            // positional and parse, so only the sentinel's trace catches it.
+            r#"pixel commit --files <f>... --message "<msg>" --request-id <id>"#,
+            r#"pixel diff <from> [--paths <p>...] [--json]"#,
+            // The second value lands in a multi-value positional (`paths`),
+            // which takes several values but not this flag's.
+            r#"pixel search-content "<re>" --glob <g>..."#,
+        ] {
+            let argv = pixel_install::doctor::normalize_rule_command(line)
+                .unwrap_or_else(|| panic!("`{line}` did not normalize"));
+            assert!(
+                validate_cli_syntax(&argv).is_err(),
+                "`{line}` → argv {argv:?} should be rejected by the CLI parser"
+            );
+        }
+    }
+
+    /// An argument that does take several values per occurrence keeps its
+    /// `...` placeholder: the parity check must not go red on a true shape.
+    #[test]
+    fn variadic_placeholder_on_a_multi_value_argument_parses() {
+        // The sentinel is the last value, so it is held only if its first
+        // value's argument is found at the index just before it.
+        let line = "pixel task-state race-start <task> <candidate>...";
+        let argv = pixel_install::doctor::normalize_rule_command(line)
+            .unwrap_or_else(|| panic!("`{line}` did not normalize"));
+        assert_eq!(validate_cli_syntax(&argv), Ok(()), "argv {argv:?}");
     }
 
     /// A knowingly-wrong documented command must be REJECTED — this is what

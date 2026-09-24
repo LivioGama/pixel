@@ -104,7 +104,7 @@ pixel find-code "<phrase>"       # before any free-text search for a name
 pixel impact "<symbol>"          # before editing any symbol: its blast radius
 pixel what-changed               # before an edit batch: what already differs
 pixel review-changes             # the working tree, structured
-pixel commit-and-push --files <f>... -m "msg" --request-id "id" origin HEAD
+pixel commit-and-push --files <f1> --files <f2> -m "msg" --request-id "id" origin HEAD
 ```
 
 Two rules hold throughout. `pixel impact` runs before any edit, because editing blind is how callers you never saw break. And the agent never commits or pushes unless asked: every write takes a `--request-id`, which makes it crash-safe and idempotent.
@@ -153,7 +153,7 @@ The most used commands, by job. `pixel --help` lists all of them, and [ARCHITECT
 | `git log --oneline` | `pixel commit-history` |
 | `git branch -a -vv` | `pixel list-branches` |
 | `git pull --rebase` | `pixel sync-branch` |
-| `git add` and `git commit` | `pixel commit --files <f>... -m "msg" --request-id "id"` |
+| `git add` and `git commit` | `pixel commit --files <f1> --files <f2> -m "msg" --request-id "id"` |
 | `git push` | `pixel push`: a leased push, never a raw `--force` |
 
 ### Past sessions
