@@ -1,1 +1,0 @@
-**install:** the SessionStart index line says which history phase is still running (commits, changed paths, or diff text), so an agent knows whether `file-history` or a phrase search is incomplete, instead of "still building".
