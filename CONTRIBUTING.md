@@ -25,7 +25,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] `cargo deny check` exits 0 (skip when `Cargo.lock` did not change); a new exception in `deny.toml` carries its reason.
 - [ ] New behaviour has a test that fails if the behaviour is removed.
 - [ ] The `Mutants` CI job reports no `MISSED` mutant on the pull request (see "Mutation testing"); a local run is optional.
-- [ ] A `changelog.d/<slug>.<section>.md` fragment carries the entry, opening on its scope (`**graph:** …`) and under 500 bytes (skip for pure refactors and CI/deps chores); `prepare.sh --check` refuses a missing scope or an entry over 900.
+- [ ] A `changelog.d/<slug>.<section>.md` fragment carries the entry, opening on its scope (`**graph:** …`), ending with the pull request's link and under 500 bytes (skip for pure refactors and CI/deps chores). The number exists only once the pull request is open: open it, then `git mv` the fragment to `<number>-<slug>.<section>.md`, add the link and push. `prepare.sh --check`, which CI runs on every pull request, refuses a missing scope, a missing pull request reference or an entry over 900.
 - [ ] The commit message follows the Conventional Commits format below.
 - [ ] The branch was created from an up-to-date `main` and the pull request targets `main` (a maintainer's maintenance-release branch instead starts from an up-to-date `origin/release/x.y` and its pull request targets `release/x.y`, so no unreleasable `main` commit rides along; see "Branches").
 - [ ] No file under `.pixel/`, `target/`, `.claude/` (other than the `.claude/rules` and `.claude/skills` symlinks), `.codex/`, `.cursor/` is staged (they are gitignored; do not force-add).
@@ -540,8 +540,12 @@ e.g. `changelog.d/184-rank-gate-tolerance.fixed.md`.
 
 The name is `<slug>.<section>.md`, the section naming the heading the entry is
 filed under — `added`, `changed`, `deprecated`, `removed`, `fixed` or
-`security`. The slug is free; start it with the pull request number when the
-number is known, so the release can match entries to pull requests. The file
+`security`. The slug starts with the pull request number, so the release can
+match entries to pull requests; since the number is only known once the pull
+request is open, write the fragment under any slug, open the pull request, then
+rename it and add the link. `prepare.sh --check` refuses a fragment that names
+no pull request, in the slug or in the text, and CI runs it on every pull
+request. The file
 holds the entry's text and nothing else, without the leading `-`. A second
 file is a second entry.
 

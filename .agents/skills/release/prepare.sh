@@ -10,7 +10,8 @@
 #    `## [x.y.z]` heading yet;
 # 2. `changelog.d/` holds at least one fragment, every fragment is a
 #    `<slug>.<section>.md` with a section from SECTIONS and a first line that
-#    carries the entry, opens on its scope and fits HARD_LIMIT, an optional
+#    carries the entry, opens on its scope, names its pull request and fits
+#    HARD_LIMIT, an optional
 #    `_highlights.md` carries no `## ` heading and fits HIGHLIGHTS_LIMIT, and
 #    `## [Unreleased]` carries no `- ` entry;
 # 3. every workspace member's `[package] version` is set to x.y.z (the
@@ -200,9 +201,16 @@ for fragment in changelog.d/*.md; do
     fi
     # The reader of a short entry needs somewhere to go for the rest. The link
     # is in the text, or derivable by eye from a slug that opens on the number.
-    if ! grep -Eq '#[0-9]+' "$fragment" && ! printf '%s' "${fragment##*/}" | grep -Eq '^[0-9]+-'; then
-        WARNINGS="${WARNINGS}${WARNINGS:+
-}  $fragment: no pull request referenced; link it in the entry, or name the number first in the slug"
+    # A refusal, not a warning: the number only exists once the pull request
+    # is open, so the fragment is written without it and the rename is a step
+    # to remember afterwards. As a warning nothing surfaced it before the
+    # release (three entries merged without it in a row, #253-#255); refused,
+    # the pull request's own CI run goes red on it, when the number is known.
+    # In the text it is the pull request's URL, not any `#<n>`: `Fixes issue
+    # #42` names an issue and would otherwise pass for the reference.
+    if ! grep -Eq '/pull/[0-9]+' "$fragment" && ! printf '%s' "${fragment##*/}" | grep -Eq '^[0-9]+-'; then
+        echo "prepare.sh: $fragment: no pull request referenced; once the pull request is open, name the number first in the slug (git mv $fragment changelog.d/<number>-${fragment##*/}) and end the entry with its link: ([#<number>](https://github.com/LivioGama/pixel/pull/<number>))" >&2
+        exit 1
     fi
 done
 if [ -n "$WARNINGS" ]; then
