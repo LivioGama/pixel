@@ -1,1 +1,0 @@
-**install, doctor:** the agent prompt, the guard's hints and the docs show `pixel commit --files <f1> --files <f2>`, one flag per file, instead of `--files <f>...`, which the CLI rejects once a second file follows. `pixel doctor`'s rule-parity check now reads a `<f>...` placeholder as two values, so a rule line teaching that shape goes red.
