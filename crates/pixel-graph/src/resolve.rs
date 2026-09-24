@@ -251,21 +251,36 @@ impl ResolveIndex {
         self.by_name.contains_key(name)
     }
 
-    /// True iff `name` can name a symbol from `file_id`: a symbol carries
-    /// it, or an import of that file binds it to one the imported file
-    /// defines (an alias names no symbol itself). An imported name no symbol
-    /// of that file defines — a constant, a macro — is a plain value, as it
-    /// was before aliases were tracked.
+    /// True iff `name` can name a symbol from `file_id`. An alias counts only
+    /// when the imported file defines its source: it names no symbol itself,
+    /// and a same-name definition elsewhere is not what it means there. Any
+    /// other name — imported under its own name or not imported — counts
+    /// when some symbol carries it, as before aliases were tracked.
     fn names_a_symbol(&self, file_id: i64, name: &str) -> bool {
-        self.defines(name)
-            || self
-                .import_bindings
-                .get(&(file_id, name.to_string()))
-                .is_some_and(|targets| {
-                    targets
-                        .iter()
-                        .any(|t| self.defines_in_file(t.file_id, &t.source))
-                })
+        match self.import_bindings.get(&(file_id, name.to_string())) {
+            None => self.defines(name),
+            Some(targets) => targets.iter().any(|t| {
+                if t.source == name {
+                    self.defines(name)
+                } else {
+                    self.defines_in_file(t.file_id, &t.source)
+                }
+            }),
+        }
+    }
+
+    /// True iff an import of `file_id` in scope on `site_line` binds `name`
+    /// as an alias of another name. The alias is what `name` means there, so
+    /// a same-name definition elsewhere can never be its target, even as T2's
+    /// sole candidate.
+    fn binds_an_alias(&self, file_id: i64, name: &str, site_line: Option<u32>) -> bool {
+        self.import_bindings
+            .get(&(file_id, name.to_string()))
+            .is_some_and(|targets| {
+                targets
+                    .iter()
+                    .any(|t| t.source != name && in_scope(&t.scope, site_line))
+            })
     }
 
     /// The tier decision for one call from `caller_file_id` to `name`.
@@ -483,6 +498,9 @@ impl ResolveIndex {
         // so they remain eligible only for repo-wide T2 Probable resolution.
         if let Some(decision) = self.import_tier(caller_file_id, name, site_line) {
             return decision;
+        }
+        if self.binds_an_alias(caller_file_id, name, site_line) {
+            return Decision::Unresolved;
         }
         // T2: unique definition file repo-wide.
         let files: HashSet<i64> = cands.iter().map(|c| c.file_id).collect();
