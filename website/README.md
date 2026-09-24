@@ -34,6 +34,8 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   and the cases where Pixel loses. Add a claim to the landing page only once
   it is on this page.
 - `content/docs.md`: the `/docs/` page, rendered by `layouts/_default/single.html`.
+  Every fenced block gets a Copy button from
+  `layouts/_default/_markup/render-codeblock.html`.
   `crates/pixel/tests/cli/docs_drift.rs` reads it and `benchmarks.md`, so
   every `` `pixel <command>` `` quoted in either must exist. Keep it in step with `README.md` when install or
   wiring changes.
@@ -41,9 +43,13 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   Refresh the task, the index size and every position together.
 - `data/jobs.toml`, `data/savings.toml`: the six animations and the token
   table, both from the README.
+- `layouts/404.html`: the not-found page GitHub Pages serves for any
+  unknown path under the site.
 - `assets/css/main.css`: one stylesheet, tokens first, dark only. Headlines
   use Handjet, a variable pixel face (`ELSH` 2 draws square elements; the
-  hero title animates it from 0 once). Coral means tokens wasted, green
+  hero title animates it from 0 once). `partials/head.html` requests only
+  the font axes the stylesheet uses: widen the request before using a new
+  weight or axis. Coral means tokens wasted, green
   means what Pixel returns: keep that split when adding anything.
 - The videos are not copied: `hugo.toml` mounts the MP4s and JPEG posters
   of `../docs/examples/` at `/examples/`. `docs/motion/` renders them

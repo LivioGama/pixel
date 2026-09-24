@@ -1,0 +1,6 @@
+{{- /* Every fenced block gets a Copy button (wired by the footer script). Highlighting stays Chroma's. */ -}}
+{{- $result := transform.HighlightCodeBlock . -}}
+<div class="code">
+{{ $result.Wrapped }}
+<button class="cmd__copy code__copy" type="button" data-copy="{{ .Inner }}">Copy</button>
+</div>

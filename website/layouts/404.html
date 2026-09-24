@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.Language.Locale }}">
+<head>
+  {{ partial "head.html" . }}
+</head>
+<body>
+  <a href="#main" class="skip">Skip to content</a>
+  {{ partial "nav.html" . }}
+  <main class="missing wrap" id="main">
+    <h1 class="missing__title">unresolved</h1>
+    <p>No page at this address. The index knows nothing about it.</p>
+    <div class="closing__cta">
+      <a class="button" href="{{ "" | relURL }}">Home</a>
+      <a class="button button--ghost" href="{{ "docs/" | relURL }}">Read the docs</a>
+    </div>
+  </main>
+  {{ partial "footer.html" . }}
+</body>
+</html>

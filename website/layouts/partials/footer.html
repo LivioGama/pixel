@@ -10,6 +10,7 @@
       <li><a href="{{ "benchmarks/" | relURL }}">Benchmarks</a></li>
       <li><a href="{{ .Site.Params.github_url }}/blob/main/CHANGELOG.md" rel="noopener">Changelog</a></li>
       <li><a href="{{ .Site.Params.github_url }}/blob/main/CONTRIBUTING.md" rel="noopener">Contributing</a></li>
+      <li><a href="{{ .Site.Params.github_url }}/blob/main/SECURITY.md" rel="noopener">Security</a></li>
     </ul>
     <p class="footer__license">MIT licensed. Runs on your machine; nothing leaves it.</p>
   </div>
@@ -38,14 +39,31 @@
       .catch(function () {});
   })();
 
-  /* Copy buttons on every command block. */
+  /* Copy buttons on every command block. The label comes back to what it
+     was ("Copy", "Copy all"), and a refused clipboard (no secure context,
+     no permission) falls back to selecting the command so a plain Cmd-C works. */
   (function () {
+    var write = function (text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+      return Promise.reject(new Error('no clipboard'));
+    };
     document.querySelectorAll('[data-copy]').forEach(function (btn) {
+      var label = btn.textContent;
+      btn.setAttribute('aria-live', 'polite');
       btn.addEventListener('click', function () {
         var text = btn.getAttribute('data-copy');
-        navigator.clipboard.writeText(text).then(function () {
+        write(text).then(function () {
           btn.textContent = 'Copied';
-          setTimeout(function () { btn.textContent = 'Copy'; }, 1600);
+        }, function () {
+          var code = btn.parentNode.querySelector('code');
+          if (code && window.getSelection) {
+            var range = document.createRange();
+            range.selectNodeContents(code);
+            var sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+          }
+          btn.textContent = 'Select and copy';
+        }).then(function () {
+          setTimeout(function () { btn.textContent = label; }, 1600);
         });
       });
     });

@@ -1,16 +1,45 @@
 {{ $desc := .Description | default .Site.Params.description }}
 <meta charset="utf-8">
+{{/* .js gates the scroll reveals: without it every block renders at rest. */}}
+<script>document.documentElement.className += " js";</script>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ if .IsHome }}Pixel: a local code index for coding agents{{ else }}{{ .Title }} | Pixel{{ end }}</title>
 <meta name="description" content="{{ $desc }}">
 <meta property="og:title" content="{{ if .IsHome }}Pixel{{ else }}{{ .Title }} | Pixel{{ end }}">
 <meta property="og:description" content="{{ $desc }}">
-<meta name="color-scheme" content="light dark">
+<meta property="og:type" content="website">
+<meta property="og:url" content="{{ .Permalink }}">
+{{/* The agent demo's poster: 1600x1000, the finished state of the recording. */}}
+<meta property="og:image" content="{{ "examples/pixel-agent-demo.jpg" | absURL }}">
+<meta property="og:image:width" content="1600">
+<meta property="og:image:height" content="1000">
+<meta property="og:image:alt" content="Claude Code on the same task, with and without Pixel: faster, and fewer tokens.">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="canonical" href="{{ .Permalink }}">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0b1f17">
 <link rel="icon" type="image/svg+xml" href="{{ "favicon.svg" | relURL }}">
 <link rel="alternate" type="text/plain" title="llms.txt" href="{{ "llms.txt" | absURL }}">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,100,400&family=Handjet:ELGR,ELSH,wght@1..2,0..16,100..900&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+{{/* Only the axes the stylesheet uses: Archivo 400 to 700 (no width axis), Handjet at 700 with ELSH 0 to 2 (the hero animates it). The full ranges cost 120 KB of CSS alone. */}}
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:ital,wght@0,400..700;1,400&family=Handjet:ELGR,ELSH,wght@1..2,0..2,700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 {{ $css := resources.Get "css/main.css" }}
 {{ if hugo.IsProduction }}{{ $css = $css | minify | fingerprint }}{{ end }}
 <link rel="stylesheet" href="{{ $css.RelPermalink }}"{{ if hugo.IsProduction }} integrity="{{ $css.Data.Integrity }}"{{ end }}>
+{{ if .IsHome }}
+<script type="application/ld+json">
+{{ dict
+  "@context" "https://schema.org"
+  "@type" "SoftwareApplication"
+  "name" "Pixel"
+  "applicationCategory" "DeveloperApplication"
+  "operatingSystem" "macOS, Linux"
+  "description" $desc
+  "url" .Permalink
+  "license" "https://opensource.org/licenses/MIT"
+  "codeRepository" .Site.Params.github_url
+  "offers" (dict "@type" "Offer" "price" "0" "priceCurrency" "USD")
+| jsonify | safeJS }}
+</script>
+{{ end }}
