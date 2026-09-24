@@ -644,6 +644,7 @@ mod tests {
                     tier,
                     site_line: u32::try_from(10 * from + 3).unwrap(),
                     receiver: None,
+                    callee: None,
                 })
                 .unwrap();
         }
@@ -1303,6 +1304,7 @@ mod tests {
                 tier: Tier::Exact,
                 site_line: 1,
                 receiver: None,
+                callee: None,
             })
             .unwrap();
         let ev = fx.eval(&[0], &[1], Traversal::Callees);
@@ -1330,6 +1332,7 @@ mod tests {
                 tier: Tier::Exact,
                 site_line: 1,
                 receiver: None,
+                callee: None,
             })
             .unwrap();
         let ev = fx.eval(&[0], &[1], Traversal::Callees);

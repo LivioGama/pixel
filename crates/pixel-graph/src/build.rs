@@ -1011,9 +1011,12 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
                         if let Some(src_file) = src_file
                             && src_file != old.id
                         {
+                            // Replay the name the site wrote: under an
+                            // alias (`leased()` → `push`) the target's name
+                            // is not in scope at the caller.
                             demoted.push((
                                 src_file,
-                                sym.name.clone(),
+                                edge.callee.clone().unwrap_or_else(|| sym.name.clone()),
                                 edge.src_id,
                                 edge.site_line,
                                 edge.receiver.clone(),
@@ -2390,11 +2393,24 @@ mod tests {
 
         std::fs::write(root.join("src/third.rs"), "pub fn push() {}\n").unwrap();
         update_file(&root, &db, "src/third.rs").unwrap();
+        {
+            let store = GraphStore::open(&db).unwrap();
+            assert_eq!(
+                callers_of_push_in(&store, "src/push.rs"),
+                [("ship".to_string(), Tier::Exact)],
+                "a new same-name definition elsewhere leaves the aliased import's edge"
+            );
+        }
+
+        // Rewriting push.rs demotes its incoming edges; they must come back
+        // under the written `leased`, not the target's `push`.
+        std::fs::write(root.join("src/push.rs"), "// v2\npub fn push() {}\n").unwrap();
+        update_file(&root, &db, "src/push.rs").unwrap();
         let store = GraphStore::open(&db).unwrap();
         assert_eq!(
             callers_of_push_in(&store, "src/push.rs"),
             [("ship".to_string(), Tier::Exact)],
-            "a new same-name definition elsewhere leaves the aliased import's edge"
+            "rewriting the target file leaves the aliased import's edge"
         );
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
@@ -2411,11 +2427,15 @@ mod tests {
             "export function push() {}\nexport const LIMIT = 3;\n",
         )
         .unwrap();
-        std::fs::write(root.join("other.ts"), "export function push() {}\n").unwrap();
+        std::fs::write(
+            root.join("other.ts"),
+            "export function push() {}\nexport function helper() {}\n",
+        )
+        .unwrap();
         std::fs::write(
             root.join("ship.ts"),
-            "import { push as leased, LIMIT } from \"./push\";\n\
-             export function cap() { run(LIMIT); }\n\
+            "import { push as leased, LIMIT, helper as aid } from \"./push\";\n\
+             export function cap() { run(LIMIT); run(aid); }\n\
              export function run(f: () => void) { f(); }\n\
              export function ship() { leased(); }\n\
              export function stray() { push(); }\n\
@@ -2434,12 +2454,13 @@ mod tests {
         let push = store.symbols_in_file(push_file).unwrap().remove(0);
         let references = store.edges_to(push.id, Some(EdgeKind::References)).unwrap();
         assert_eq!(references.len(), 1, "run(leased) passes push.ts's push");
-        // `LIMIT` is imported but is no callable symbol: passing it is a plain
-        // value, never an unresolved reference.
+        // `LIMIT` is imported but is no callable symbol, and `helper` is
+        // aliased to an item push.ts does not define (other.ts does): passing
+        // either is a plain value, never an unresolved reference.
         let unresolved: i64 = store
             .conn()
             .query_row(
-                "SELECT count(*) FROM unresolved_calls WHERE name = 'LIMIT'",
+                "SELECT count(*) FROM unresolved_calls WHERE name IN ('LIMIT', 'aid')",
                 [],
                 |r| r.get(0),
             )

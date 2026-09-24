@@ -13,7 +13,7 @@
 //! No regex replaces, no whole-word text scan: two same-named symbols in one
 //! file only collide if the graph itself confused them.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Serialize;
@@ -129,13 +129,6 @@ pub fn plan(
         spec: None,
     }];
 
-    // A site that calls the symbol through an import alias writes the alias,
-    // which the rename leaves valid: it is neither an edit nor a skip.
-    let aliased: HashSet<(i64, u32)> = store
-        .aliased_edge_sites(sym.id, &sym.name)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .collect();
     for kind in [EdgeKind::Calls, EdgeKind::References] {
         let site_kind = if kind == EdgeKind::Calls {
             SiteKind::Call
@@ -146,7 +139,10 @@ pub fn plan(
             .edges_to(sym.id, Some(kind))
             .map_err(|e| e.to_string())?
         {
-            if aliased.contains(&(edge.src_id, edge.site_line)) {
+            // A site that calls the symbol through an import alias writes the
+            // alias, which the rename leaves valid: neither an edit nor a skip.
+            // Per edge, so a direct call on the same line is still renamed.
+            if edge.callee.as_deref().is_some_and(|c| c != sym.name) {
                 continue;
             }
             // The edge names the enclosing symbol; its file holds the site.
@@ -826,6 +822,36 @@ mod tests {
         let after = std::fs::read_to_string(dir.path().join("src/caller.ts")).unwrap();
         assert!(after.contains("import { authenticate as auth }"), "{after}");
         assert!(after.contains("return auth("), "{after}");
+    }
+
+    /// `import { loginUser, loginUser as auth }`, then `auth()` and
+    /// `loginUser()` on one line: two edges from one caller and one line. The
+    /// alias's call stays, the direct call is renamed — skipping by
+    /// `(caller, line)` left it stale while its import was rewritten.
+    #[test]
+    fn plan_renames_a_direct_call_that_shares_its_line_with_an_aliased_one() {
+        let (dir, _store) = fixture();
+        std::fs::write(
+            dir.path().join("src/caller.ts"),
+            "import { loginUser, loginUser as auth } from \"./login\";\n\nexport function go(): boolean {\n    return auth(\"a\") && loginUser(\"b\");\n}\n",
+        )
+        .unwrap();
+        let db = dir.path().join("graph.db");
+        crate::build::build_graph(dir.path(), &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let sym = login_sym(&store);
+        let plan = plan(&store, dir.path(), &sym, "authenticate").unwrap();
+        assert!(plan.skipped.is_empty(), "{:?}", plan.skipped);
+        apply(dir.path(), &plan, "loginUser", "authenticate").unwrap();
+        let after = std::fs::read_to_string(dir.path().join("src/caller.ts")).unwrap();
+        assert!(
+            after.contains("import { authenticate, authenticate as auth }"),
+            "{after}"
+        );
+        assert!(
+            after.contains("return auth(\"a\") && authenticate(\"b\");"),
+            "{after}"
+        );
     }
 
     #[test]

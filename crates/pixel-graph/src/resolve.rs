@@ -225,15 +225,20 @@ impl ResolveIndex {
     }
 
     /// True iff `name` can name a symbol from `file_id`: a symbol carries
-    /// it, or an import of that file binds it to one (an alias names no
-    /// symbol itself). An imported name no symbol defines — a constant, a
-    /// macro — is a plain value, as it was before aliases were tracked.
+    /// it, or an import of that file binds it to one the imported file
+    /// defines (an alias names no symbol itself). An imported name no symbol
+    /// of that file defines — a constant, a macro — is a plain value, as it
+    /// was before aliases were tracked.
     fn names_a_symbol(&self, file_id: i64, name: &str) -> bool {
         self.defines(name)
             || self
                 .import_bindings
                 .get(&(file_id, name.to_string()))
-                .is_some_and(|targets| targets.iter().any(|(_, source)| self.defines(source)))
+                .is_some_and(|targets| {
+                    targets
+                        .iter()
+                        .any(|(file_id, source)| self.defines_in_file(*file_id, source))
+                })
     }
 
     /// The tier decision for one call from `caller_file_id` to `name`.
@@ -544,31 +549,27 @@ pub fn resolve_calls(
                 call.receiver.as_deref(),
             ) {
                 Decision::Exact(dst) => {
-                    store.insert_resolved_edge(
-                        &EdgeRow {
-                            src_id,
-                            dst_id: dst,
-                            kind: EdgeKind::Calls,
-                            tier: Tier::Exact,
-                            site_line: call.site_line,
-                            receiver: call.receiver.clone(),
-                        },
-                        &call.callee_name,
-                    )?;
+                    store.insert_edge(&EdgeRow {
+                        src_id,
+                        dst_id: dst,
+                        kind: EdgeKind::Calls,
+                        tier: Tier::Exact,
+                        site_line: call.site_line,
+                        receiver: call.receiver.clone(),
+                        callee: Some(call.callee_name.clone()),
+                    })?;
                     stats.exact += 1;
                 }
                 Decision::Probable(dst) => {
-                    store.insert_resolved_edge(
-                        &EdgeRow {
-                            src_id,
-                            dst_id: dst,
-                            kind: EdgeKind::Calls,
-                            tier: Tier::Probable,
-                            site_line: call.site_line,
-                            receiver: call.receiver.clone(),
-                        },
-                        &call.callee_name,
-                    )?;
+                    store.insert_edge(&EdgeRow {
+                        src_id,
+                        dst_id: dst,
+                        kind: EdgeKind::Calls,
+                        tier: Tier::Probable,
+                        site_line: call.site_line,
+                        receiver: call.receiver.clone(),
+                        callee: Some(call.callee_name.clone()),
+                    })?;
                     stats.probable += 1;
                 }
                 Decision::Unresolved => {
@@ -626,17 +627,15 @@ pub fn resolve_references(
             // method call), so pass `None`.
             match idx.decide(fr.file_id, &r#ref.name, None) {
                 Decision::Exact(dst) | Decision::Probable(dst) => {
-                    store.insert_resolved_edge(
-                        &EdgeRow {
-                            src_id,
-                            dst_id: dst,
-                            kind: EdgeKind::References,
-                            tier: Tier::Probable,
-                            site_line: r#ref.site_line,
-                            receiver: r#ref.arg_of.clone(),
-                        },
-                        &r#ref.name,
-                    )?;
+                    store.insert_edge(&EdgeRow {
+                        src_id,
+                        dst_id: dst,
+                        kind: EdgeKind::References,
+                        tier: Tier::Probable,
+                        site_line: r#ref.site_line,
+                        receiver: r#ref.arg_of.clone(),
+                        callee: Some(r#ref.name.clone()),
+                    })?;
                     stats.probable += 1;
                 }
                 Decision::Unresolved => {
@@ -723,17 +722,15 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
         } else {
             tier
         };
-        store.insert_resolved_edge(
-            &EdgeRow {
-                src_id: row.enclosing,
-                dst_id: dst,
-                kind: edge_kind,
-                tier,
-                site_line: row.site_line,
-                receiver: row.receiver.clone(),
-            },
-            &row.name,
-        )?;
+        store.insert_edge(&EdgeRow {
+            src_id: row.enclosing,
+            dst_id: dst,
+            kind: edge_kind,
+            tier,
+            site_line: row.site_line,
+            receiver: row.receiver.clone(),
+            callee: Some(row.name.clone()),
+        })?;
         store.conn().execute(
             "DELETE FROM unresolved_calls WHERE id = ?1",
             params![row.id],

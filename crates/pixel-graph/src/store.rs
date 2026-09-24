@@ -243,6 +243,12 @@ pub struct EdgeRow {
     /// Preserved across incremental demote/re-resolve so receiver calls are
     /// never falsely promoted from Probable to Exact.
     pub receiver: Option<String>,
+    /// The name the site wrote (`edges.callee`), when the resolver recorded
+    /// it. It differs from the target's own name under an import alias
+    /// (`leased()` → `push`), and re-resolving the site after an incremental
+    /// update must replay it: the target's name is not in scope there.
+    /// `None` reads as the target's name.
+    pub callee: Option<String>,
 }
 
 /// One human annotation row. Annotations are HUMAN-OWNED: they are keyed by
@@ -726,19 +732,6 @@ impl GraphStore {
     }
 
     pub fn insert_edge(&self, e: &EdgeRow) -> Result<()> {
-        self.insert_edge_row(e, None)
-    }
-
-    /// Insert a resolved call or reference edge, recording the name the site
-    /// wrote (`edges.callee`). It differs from the target's own name under an
-    /// import alias (`leased()` → `push`), and re-resolution after an
-    /// incremental update must replay the written name: the target's name is
-    /// not in scope at that site.
-    pub fn insert_resolved_edge(&self, e: &EdgeRow, callee: &str) -> Result<()> {
-        self.insert_edge_row(e, Some(callee))
-    }
-
-    fn insert_edge_row(&self, e: &EdgeRow, callee: Option<&str>) -> Result<()> {
         self.conn.execute(
             "INSERT INTO edges (src_id, dst_id, kind, tier, site_line, receiver, callee)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -749,7 +742,7 @@ impl GraphStore {
                 e.tier.as_str(),
                 e.site_line,
                 e.receiver,
-                callee
+                e.callee
             ],
         )?;
         Ok(())
@@ -1071,19 +1064,6 @@ impl GraphStore {
             .optional()?)
     }
 
-    /// `(src_id, site_line)` of the edges into `dst_id` whose site wrote
-    /// another name than `name`: calls through an import alias
-    /// (`leased()` → `push`). `rename` leaves them alone, since the alias
-    /// stays valid when the source item is renamed.
-    pub fn aliased_edge_sites(&self, dst_id: i64, name: &str) -> Result<Vec<(i64, u32)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT src_id, site_line FROM edges
-              WHERE dst_id = ?1 AND callee IS NOT NULL AND callee != ?2",
-        )?;
-        let rows = stmt.query_map(params![dst_id, name], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
-    }
-
     /// Import rows whose spec resolved to `resolved_file_id` — the files that
     /// pull bindings out of that file. `rename` reads these to rewrite the
     /// imported name at the `use`/`import` site.
@@ -1286,12 +1266,12 @@ impl GraphStore {
         let col = if outgoing { "src_id" } else { "dst_id" };
         let sql = match kind {
             Some(_) => format!(
-                "SELECT src_id, dst_id, kind, tier, site_line, receiver FROM edges
+                "SELECT src_id, dst_id, kind, tier, site_line, receiver, callee FROM edges
                  WHERE {col} = ?1 AND kind = ?2"
             ),
             None => {
                 format!(
-                    "SELECT src_id, dst_id, kind, tier, site_line, receiver FROM edges WHERE {col} = ?1"
+                    "SELECT src_id, dst_id, kind, tier, site_line, receiver, callee FROM edges WHERE {col} = ?1"
                 )
             }
         };
@@ -1303,6 +1283,7 @@ impl GraphStore {
                 tier: Tier::parse(&r.get::<_, String>(3)?),
                 site_line: r.get(4)?,
                 receiver: r.get(5)?,
+                callee: r.get(6)?,
             })
         };
         let mut out = Vec::new();
