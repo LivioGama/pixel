@@ -1,1 +1,0 @@
-**docs:** The website gets an animated pixel-and-agents backdrop with parallax, a nav that darkens on scroll, the headline numbers as one panel with square meters, the scope demo shown as the agent's own call, and the supported agents with their logos.
