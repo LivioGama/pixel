@@ -1,1 +1,0 @@
-**install:** a build installed under another name than `pixel` (`pixel-dev`) now recognises the hooks it wrote: `pixel install` replaces them instead of adding four more each run, one install collapses copies already stacked, `pixel uninstall` removes them, and `pixel doctor` reports a hook registered more than once as red.
