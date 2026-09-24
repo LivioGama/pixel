@@ -936,6 +936,26 @@ fn a_filtered_limit_counts_kept_matches_and_resumes_past_dropped_rows() {
     );
 }
 
+/// A filter narrows the answer, it does not lengthen the page: without
+/// `--limit`, `-g` gets the daemon's default row limit, as an unfiltered
+/// search does, not the 10 000-row page it reads the index with.
+#[test]
+fn a_filtered_search_without_a_limit_keeps_the_default_page_length() {
+    let dir = fixture_with_many_matches("search-filter-default");
+    let run = |args: &[&str]| {
+        let mut full = vec!["search-content", "the", ".", "--json"];
+        full.extend_from_slice(args);
+        let out = pixel(&dir, &full);
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        parse_stdout_lines(&out, "default page")
+    };
+    let plain = run(&[]);
+    let filtered = run(&["-g", "src/*"]);
+    assert_eq!(plain.len() - 1, 100, "the daemon default");
+    assert_eq!(filtered.len() - 1, plain.len() - 1);
+    assert_eq!(filtered.last().unwrap()["truncated"], true);
+}
+
 /// `-l` holds the stdout byte cap like every other search output, cutting
 /// between paths, never inside one, and says so on stderr.
 #[test]

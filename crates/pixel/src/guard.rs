@@ -121,16 +121,19 @@ fn index_freshness_line(repo: &Value) -> Option<String> {
         "no code graph (callers, impact and symbols unavailable)"
     };
     // The phase names what the history commands cannot answer yet: phase A
-    // ingests refs and commit metadata, B the paths each commit touched, C
-    // the diff text.
+    // ingests refs, commit metadata and the paths each commit touched, B
+    // measures the changed blobs (to skip the oversized ones), C the diff
+    // text; a phrase search needs C.
     let fresh = repo.get("facts_fresh").and_then(Value::as_bool);
     let phase = repo.get("facts_phase").and_then(Value::as_str);
     let history = match (fresh, phase) {
         (None, _) => "no history index",
         (Some(true), _) => "history index fresh",
-        (Some(false), Some("phase_a")) => "history index behind the refs (commits missing)",
+        (Some(false), Some("phase_a")) => {
+            "history index behind the refs (commits and file history incomplete)"
+        }
         (Some(false), Some("phase_b")) => {
-            "history index still recording changed paths (file history incomplete)"
+            "history index measuring changed blobs before the diff text (phrase search incomplete)"
         }
         (Some(false), Some("phase_c")) => {
             "history index still ingesting diff text (phrase search incomplete)"
@@ -4909,13 +4912,14 @@ mod tests {
             .unwrap()
         };
         assert!(
-            history("phase_a").ends_with("history index behind the refs (commits missing)."),
+            history("phase_a")
+                .ends_with("history index behind the refs (commits and file history incomplete)."),
             "{}",
             history("phase_a")
         );
         assert!(
             history("phase_b").ends_with(
-                "history index still recording changed paths (file history incomplete)."
+                "history index measuring changed blobs before the diff text (phrase search incomplete)."
             ),
             "{}",
             history("phase_b")

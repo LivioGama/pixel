@@ -55,7 +55,10 @@ mod task_scheduler;
 mod web_search;
 mod workspace_cmd;
 use pixel_actionlog::{InProcessReason, ServeRoute, ServeStep};
-use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service, failure_response};
+use pixel_daemon::api::{
+    PROTOCOL_VERSION, Request, Response, SEARCH_DEFAULT_ROWS, SEARCH_MAX_ROWS, Service,
+    failure_response,
+};
 use pixel_daemon::daemon;
 use pixel_index::index::{build, shard_path};
 use pixel_index::shard::Shard;
@@ -3512,7 +3515,7 @@ fn run_search(
 /// Rows asked of the index per page when `-g`/`-t` filter the matches on
 /// this side: the protocol's hard cap, so the filter does not run on the
 /// first page of an unfiltered search only.
-const FILTERED_SEARCH_ROWS: usize = 10_000;
+const FILTERED_SEARCH_ROWS: usize = SEARCH_MAX_ROWS;
 
 /// Pages of [`FILTERED_SEARCH_ROWS`] a filtered search reads before it stops
 /// and reports the rest as resumable: 100 000 index rows, so a filter that
@@ -3648,7 +3651,11 @@ fn run_search_one(
         Some(filter) => {
             let found = collect_filtered_matches(
                 offset as u64,
-                limit.unwrap_or(FILTERED_SEARCH_ROWS),
+                // The row limit the daemon gives an unfiltered search, so a
+                // filter never changes how long the default page is.
+                limit
+                    .unwrap_or(SEARCH_DEFAULT_ROWS)
+                    .clamp(1, SEARCH_MAX_ROWS),
                 FILTERED_SEARCH_PAGES,
                 |m| {
                     m.get("path")

@@ -1,8 +1,8 @@
 //! `ingest.rs` — the low-priority, checkpointed ingest engine.
 //!
 //! Three phases, resumable via the `ingest_jobs` cursor:
-//!   Phase A — refs + commit metadata first, always completes.
-//!   Phase B — path changes + blob sizes (before any diff is requested).
+//!   Phase A — refs, commit metadata and changed paths first, always completes.
+//!   Phase B — blob sizes of the changed paths (before any diff is requested).
 //!   Phase C — diff text, with skips decided BEFORE spawning git.
 //!
 //! The engine yields control back to the caller (the daemon's ingest thread)
@@ -671,7 +671,7 @@ fn emit_path_grams(ins: &mut rusqlite::Statement, path: &str, change_id: i64) ->
 }
 
 // ---------------------------------------------------------------------------
-// Phase B — path changes + blob sizes (before any diff)
+// Phase B — blob sizes of the paths phase A recorded (before any diff)
 // ---------------------------------------------------------------------------
 
 /// Returns (phaseB_done, poisoned_this).
