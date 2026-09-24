@@ -1,1 +1,0 @@
-**graph:** an aliased import now binds the alias, not the source name (`use a::push as leased;`, `import { push as leased }`): `leased()` resolves `exact` to `push`, an unbound `push()` no longer takes that import's `exact` edge, and `rename` rewrites the import without flagging the `leased()` call.
