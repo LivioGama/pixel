@@ -28,9 +28,10 @@
       </div>
 
       <figure class="wall" data-wall data-full="{{ $big.full }}" data-pixel="{{ $big.pixel }}" data-per="25">
-        <div class="wall__meter" aria-live="polite">
-          <p class="wall__label" data-wall-label>Your agent reading one {{ lang.FormatNumberCustom 0 $big.lines }}-line file</p>
-          <p class="wall__count"><span data-wall-count>{{ lang.FormatNumberCustom 0 $big.full }}</span> tokens</p>
+        <div class="wall__meter">
+          <p class="wall__label" data-wall-label aria-hidden="true">Your agent reading one {{ lang.FormatNumberCustom 0 $big.lines }}-line file</p>
+          <p class="wall__count" aria-hidden="true"><span data-wall-count>{{ lang.FormatNumberCustom 0 $big.full }}</span> tokens</p>
+          <p class="sr-only" aria-live="polite" data-wall-announce>Your agent reading one {{ lang.FormatNumberCustom 0 $big.lines }}-line file: {{ lang.FormatNumberCustom 0 $big.full }} tokens. The same question through Pixel: {{ lang.FormatNumberCustom 0 $big.pixel }} tokens.</p>
         </div>
         <div class="wall__grid" aria-hidden="true"></div>
         <figcaption class="wall__caption">
@@ -44,18 +45,18 @@
 
     {{/* ---------- numbers ---------- */}}
     <section class="numbers wrap" aria-label="Measured results">
-      <ul class="numbers__list">
+      <ul class="numbers__list" data-reveal="stagger">
         <li><strong>&minus;95%</strong><span>tokens to learn what a large file contains</span></li>
         <li><strong>2.8&times;</strong><span>faster than GitNexus at finding a symbol's callers</span></li>
         <li><strong>4.7&times;</strong><span>less context than GitNexus on every turn</span></li>
         <li><strong>&minus;30%</strong><span>time for an agent to scope a multi-file task</span></li>
       </ul>
-      <p class="numbers__more"><a class="link" href="{{ $bench }}">How we measured, and where Pixel loses</a></p>
+      <p class="numbers__more" data-reveal><a class="link" href="{{ $bench }}">How we measured, and where Pixel loses</a></p>
     </section>
 
     {{/* ---------- scope ---------- */}}
     <section class="section wrap" aria-labelledby="scope-title">
-      <header class="section__head">
+      <header class="section__head" data-reveal>
         <h2 id="scope-title">It knows where to look.</h2>
         <p>Give it a task. Get the {{ len $s.p0 }} files that matter, out of {{ $s.files }}. Your agent starts coding instead of searching.</p>
       </header>
@@ -79,30 +80,30 @@
 
     {{/* ---------- whole agent tasks ---------- */}}
     <section class="section wrap" id="tasks" aria-labelledby="tasks-title">
-      <header class="section__head">
+      <header class="section__head" data-reveal>
         <h2 id="tasks-title">Measured on whole agent tasks.</h2>
         <p>Fast answers do not make a fast agent on their own. So we timed Claude Code on real tasks in this repository, with Pixel and against a vanilla agent with no rules or hooks.</p>
       </header>
-      <figure class="demo">
+      <figure class="demo" data-reveal>
         <video class="demo__video" data-demo width="1600" height="1000" muted playsinline preload="none" controls
           poster="{{ "examples/pixel-agent-demo.jpg" | relURL }}" src="{{ "examples/pixel-agent-demo.mp4" | relURL }}"
           aria-describedby="demo-caption"></video>
         <figcaption id="demo-caption" class="demo__caption">Claude Code on the same task, eleven times with Pixel 0.5.0 and eleven times without. The replay shows each side's median-time run on one clock at 6&times; speed; every command, time and token count comes from the recording. <a class="link" href="{{ site.Params.github_url }}/tree/main/docs/motion/src/demo" rel="noopener">The traces</a></figcaption>
       </figure>
-      <ul class="ledger">
+      <ul class="ledger" data-reveal="stagger">
         <li class="ledger__win"><strong>&minus;30%</strong><span>Scoping a multi-file task: the median of 11 runs per side above, with 38% fewer tokens read. Two earlier designs agree: &minus;31% and &minus;29%.</span></li>
         <li class="ledger__loss"><strong>+1.5 s</strong><span>A single lookup, in the August runs. Reading Pixel's guidance costs more than it saves on a one-shot answer.</span></li>
         <li class="ledger__loss"><strong>Slower</strong><span>Recovering deleted code from history, in the August runs. Open work.</span></li>
       </ul>
-      <p class="ledger__fine">The two losses come from three runs per cell: read them as directions, not decimals. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
+      <p class="ledger__fine" data-reveal>The two losses come from three runs per cell: read them as directions, not decimals. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
     </section>
 
     {{/* ---------- six jobs ---------- */}}
     <section class="section wrap" id="jobs" aria-labelledby="jobs-title">
-      <header class="section__head">
+      <header class="section__head" data-reveal>
         <h2 id="jobs-title">Six things your agent does all day.<br>Now in milliseconds.</h2>
       </header>
-      <div class="jobs" data-jobs>
+      <div class="jobs" data-jobs data-reveal>
         <div class="jobs__tabs" role="tablist" aria-label="Jobs">
           {{ range $i, $j := hugo.Data.jobs.job }}
           <button class="jobs__tab" type="button" role="tab" id="tab-{{ $j.id }}" aria-controls="panel-{{ $j.id }}" aria-selected="{{ if eq $i 0 }}true{{ else }}false{{ end }}"{{ if ne $i 0 }} tabindex="-1"{{ end }}>
@@ -125,11 +126,11 @@
 
     {{/* ---------- how it works ---------- */}}
     <section class="section wrap" id="how" aria-labelledby="how-title">
-      <header class="section__head">
+      <header class="section__head" data-reveal>
         <h2 id="how-title">How it works.</h2>
         <p>One binary, one folder in your repository, no server.</p>
       </header>
-      <ol class="how">
+      <ol class="how" data-reveal="stagger">
         <li>
           <h3>Index</h3>
           <p><code>.pixel/</code>, at your repository root, holds a text index of every file Git does not ignore and a code graph of symbols, imports and calls parsed with tree-sitter, built on first use.</p>
@@ -151,17 +152,17 @@
 
     {{/* ---------- agents ---------- */}}
     <section class="section wrap" aria-labelledby="agents-title">
-      <header class="section__head">
+      <header class="section__head" data-reveal>
         <h2 id="agents-title">Plugs into the agent you already use.</h2>
       </header>
-      <ul class="agents">
+      <ul class="agents" data-reveal="stagger">
         <li>Claude Code</li><li>Codex</li><li>Cursor</li><li>Copilot CLI</li><li>Gemini CLI</li><li>Pi</li><li>OpenCode</li><li>Devin</li><li>Windsurf</li><li>Antigravity</li>
       </ul>
     </section>
 
     {{/* ---------- decisions ---------- */}}
     <section class="section wrap" aria-labelledby="jev-title">
-      <div class="jev">
+      <div class="jev" data-reveal="stagger">
         <p class="jev__score" aria-hidden="true">14/14</p>
         <div class="jev__copy">
           <h2 id="jev-title">Beats Jev's published score on coding decisions.</h2>
@@ -173,30 +174,30 @@
 
     {{/* ---------- install ---------- */}}
     <section class="section wrap" id="install" aria-labelledby="install-title">
-      <header class="section__head">
+      <header class="section__head" data-reveal>
         <h2 id="install-title">Two commands. That's the whole setup.</h2>
       </header>
-      <div class="term">
+      <div class="term" data-reveal>
         <div class="term__bar" aria-hidden="true"><span></span><span></span><span></span></div>
         <pre class="term__body"><code><span class="term__p">$</span> brew install LivioGama/tap/pixel
 <span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi, OpenCode, Antigravity</span>
 <span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></code></pre>
         <button class="cmd__copy term__copy" type="button" data-copy="brew install LivioGama/tap/pixel && pixel install && pixel doctor .">Copy all</button>
       </div>
-      <ul class="badges">
+      <ul class="badges" data-reveal="stagger">
         <li>Runs 100% on your machine</li>
         <li><a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" rel="noopener">Zero telemetry</a></li>
         <li>No account, no server</li>
         <li>MIT licensed</li>
         <li>Hooks gone in one <code>pixel uninstall</code></li>
       </ul>
-      <p class="install__alt">No Homebrew? One line does it on macOS and Linux:</p>
-      <div class="cmd install__script">
+      <p class="install__alt" data-reveal>No Homebrew? One line does it on macOS and Linux:</p>
+      <div class="cmd install__script" data-reveal>
         <code><span class="cmd__prompt" aria-hidden="true">$</span> curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh</code>
         <button class="cmd__copy" type="button" data-copy="curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh">Copy</button>
       </div>
-      <p class="install__more">Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}">Plugins and rules files</a>.</p>
-      <div class="yours">
+      <p class="install__more" data-reveal>Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}">Plugins and rules files</a>.</p>
+      <div class="yours" data-reveal>
         <h3>Don't take our numbers.</h3>
         <p>After a few sessions, ask Pixel what it spared your own agent. On the maintainer's machine: 41 to 83% of what it would have read, across 798 operations.</p>
         <div class="cmd">
@@ -208,10 +209,10 @@
 
     {{/* ---------- questions ---------- */}}
     <section class="section wrap" id="faq" aria-labelledby="faq-title">
-      <header class="section__head">
+      <header class="section__head" data-reveal>
         <h2 id="faq-title">Fair questions.</h2>
       </header>
-      <div class="faq">
+      <div class="faq" data-reveal="stagger">
         <details>
           <summary>Will my agent actually use it?</summary>
           <p>Not every time. Agents are trained on <code>grep</code> and fall back to it. Pixel does not wait for the agent to discover a tool: <code>pixel install</code> puts its protocol into every session, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files. The guard advises and never blocks.</p>
@@ -246,8 +247,8 @@
 
     {{/* ---------- closing ---------- */}}
     <section class="closing wrap" aria-labelledby="closing-title">
-      <h2 id="closing-title" class="closing__title">Give your agent a map.</h2>
-      <div class="closing__cta">
+      <h2 id="closing-title" class="closing__title" data-reveal>Give your agent a map.</h2>
+      <div class="closing__cta" data-reveal>
         <a class="button" href="#install">Install Pixel</a>
         <a class="button button--ghost" href="{{ "docs/" | relURL }}">Read the docs</a>
       </div>
@@ -268,6 +269,8 @@
       var count = fig.querySelector('[data-wall-count]');
       var label = fig.querySelector('[data-wall-label]');
       var replay = fig.querySelector('[data-wall-replay]');
+      var announce = fig.querySelector('[data-wall-announce]');
+      var said = announce.textContent;
       var full = +fig.dataset.full, kept = +fig.dataset.pixel, per = +fig.dataset.per;
       var n = Math.round(full / per), k = Math.round(kept / per);
       var startLabel = label.textContent;
@@ -314,6 +317,7 @@
         cells.forEach(function (c) { c.className = ''; c.style.transform = ''; });
         count.textContent = fmt(full);
         label.textContent = startLabel;
+        announce.textContent = '';
         var t0 = null, dur = 1800;
         var burnt = 0;
         keep.forEach(function (i) { cells[i].className = 'is-kept is-waiting'; });
@@ -328,6 +332,7 @@
           keep.forEach(function (i) { cells[i].className = 'is-kept'; });
           label.textContent = 'The same question, asked through Pixel';
           fig.classList.add('is-done');
+          announce.textContent = said;
           setTimeout(gather, 250);
           setTimeout(function () { replay.hidden = false; }, 1400);
         };
@@ -459,6 +464,34 @@
         clearTimeout(t);
         t = setTimeout(route, 120);
       });
+    })();
+
+    /* Scroll reveals: a block marked data-reveal fades up once when it
+       enters the viewport; data-reveal="stagger" does it child by child.
+       The hidden state exists only under .js and no-preference motion, so
+       a visitor without JavaScript or with reduced motion sees the page
+       at rest. Anything already in view on load shows without waiting. */
+    (function () {
+      var blocks = [].slice.call(document.querySelectorAll('[data-reveal]'));
+      if (!blocks.length) return;
+      var still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (still || !('IntersectionObserver' in window)) {
+        blocks.forEach(function (b) { b.classList.add('is-shown'); });
+        return;
+      }
+      blocks.forEach(function (b) {
+        if (b.dataset.reveal === 'stagger') {
+          [].forEach.call(b.children, function (c, i) { c.style.transitionDelay = Math.min(i, 8) * 70 + 'ms'; });
+        }
+      });
+      var io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) {
+          if (!e.isIntersecting) return;
+          e.target.classList.add('is-shown');
+          io.unobserve(e.target);
+        });
+      }, { rootMargin: '0px 0px -12% 0px', threshold: 0.05 });
+      blocks.forEach(function (b) { io.observe(b); });
     })();
 
     /* Videos play only while on screen, and never on their own under
