@@ -17,17 +17,18 @@
   </div>
 </footer>
 <script>
-  /* GitHub star count in the nav: shown only once the API answers. */
+  /* GitHub star count in the nav, behind a star icon: shown only once the API answers. */
   (function () {
     var el = document.querySelector('[data-gh-stars]');
     if (!el) return;
+    var badge = el.parentNode;
     var repo = el.getAttribute('data-gh-stars');
     var key = 'gh-stars:' + repo;
     var show = function (n) {
       if (typeof n !== 'number') return;
       el.textContent = n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
-      el.setAttribute('aria-label', n + ' stars');
-      el.hidden = false;
+      badge.setAttribute('aria-label', n + ' stars on GitHub');
+      badge.hidden = false;
     };
     try { show(JSON.parse(sessionStorage.getItem(key))); } catch (_) {}
     fetch('https://api.github.com/repos/' + repo)

@@ -6,14 +6,14 @@
 id = "scope"
 name = "Scope before reading"
 command = "pixel scope-task"
-text = "A closed P0/P1/P2 file list instead of an agent wandering the repository."
+text = "A closed P0/P1/P2 file list, not an agent wandering the repository."
 media = "pixel-scope-comparison"
 
 [[job]]
 id = "measured"
 name = "Read skeletons, not files"
 command = "pixel list-signatures"
-text = "Signatures and budget-fitted context replace whole-file reads, and pixel token-savings reports what that saved."
+text = "Signatures fitted to a token budget, instead of whole-file reads."
 media = "pixel-measured-comparison"
 
 [[job]]
@@ -27,19 +27,19 @@ media = "pixel-impact-comparison"
 id = "rewrite"
 name = "Search stays familiar"
 command = "pixel search-content"
-text = "The hook rewrites rg and grep to the indexed search: same command, indexed answer."
+text = "The hook turns rg and grep into indexed search. Same command."
 media = "pixel-rewrite-comparison"
 
 [[job]]
 id = "rollback"
 name = "Rescue as a plan"
 command = "pixel plan-rollback"
-text = "Flags the likely breaking commit and a last-known-good candidate. It never resets anything."
+text = "Flags the likely breaking commit and the last good one. Resets nothing."
 media = "pixel-rollback-comparison"
 
 [[job]]
 id = "publish"
 name = "Publish without footguns"
 command = "pixel commit-and-push"
-text = "Review, then a leased push that is crash-safe and idempotent. Never a raw --force."
+text = "Review, then a crash-safe leased push. Never a raw --force."
 media = "pixel-publish-comparison"

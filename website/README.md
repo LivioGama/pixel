@@ -42,7 +42,10 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
 - `data/scope.toml`: the real `pixel scope-task` run the hero grid replays.
   Refresh the task, the index size and every position together.
 - `data/jobs.toml`, `data/savings.toml`: the six animations and the token
-  table, both from the README.
+  table, both from the README. A job's `text` holds one line on a wide
+  screen (about 70 characters): the tab panel reserves one line there and
+  clips past it, so a longer text would lose its end rather than move the
+  video.
 - `layouts/partials/backdrop.html`: the animated background on every page,
   one fixed canvas under the content (pixel dust, circuit traces with
   packets, drifting pixel agents, each layer scrolling at its own rate),
@@ -65,6 +68,12 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   same-page anchors (`#install`) stay in place. Keep it for new links.
 - `static/cursor.svg`, `static/cursor-link.svg`: the pixel-arrow cursor, the
   green one over anything clickable, for fine pointers only.
+- `layouts/partials/icon.html`: the pixel icons, 8x8 bitmaps drawn in
+  `currentColor`. Add one as a new row list; call it with
+  `(dict "name" "star" "size" 16)`.
+- The agent demo never starts on its own: its poster is
+  `pixel-agent-demo-start.jpg`, the recording's first frame, which
+  `docs/motion/scripts/render.sh` writes beside the last-frame poster.
 - `layouts/404.html`: the not-found page GitHub Pages serves for any
   unknown path under the site.
 - `assets/css/main.css`: one stylesheet, tokens first, dark only. Headlines

@@ -19,7 +19,7 @@
     {{/* ---------- hero: the token wall ---------- */}}
     <section class="hero wrap">
       <div class="hero__copy">
-      <h1 class="hero__title"><span>Read less.</span> <span>Ship more.</span></h1>
+      <h1 class="hero__title"><span>Read less.</span> <span class="glow">Ship more.</span></h1>
       <p class="hero__lede"><strong>A local code index for AI coding agents.</strong> Your agent queries Pixel instead of reading your repo file by file. Same agent, same prompts. A fraction of the tokens.</p>
       <div class="hero__cta">
         <div class="cmd">
@@ -113,9 +113,13 @@
         <p>Fast answers do not make a fast agent on their own. So we timed Claude Code on real tasks in this repository, with Pixel and against a vanilla agent with no rules or hooks.</p>
       </header>
       <figure class="demo" data-reveal>
-        <video class="demo__video" data-demo width="1600" height="1000" muted playsinline preload="none" controls
-          poster="{{ "examples/pixel-agent-demo.jpg" | relURL }}" src="{{ "examples/pixel-agent-demo.mp4" | relURL }}"
-          aria-describedby="demo-caption"></video>
+        {{/* Never starts on its own: the poster is the recording's first frame (both clocks at 0:00) and the button starts it. */}}
+        <div class="demo__frame">
+          <video class="demo__video" data-demo width="1600" height="1000" muted playsinline preload="none"
+            poster="{{ "examples/pixel-agent-demo-start.jpg" | relURL }}" src="{{ "examples/pixel-agent-demo.mp4" | relURL }}"
+            aria-describedby="demo-caption"></video>
+          <button class="demo__play" type="button" data-demo-play>{{ partial "icon.html" (dict "name" "play" "size" 18) }}<span>Play video</span></button>
+        </div>
         <figcaption id="demo-caption" class="demo__caption">Claude Code on the same task, eleven times with Pixel 0.5.0 and eleven times without. The replay shows each side's median-time run on one clock at 6&times; speed; every command, time and token count comes from the recording. <a class="link" href="{{ site.Params.github_url }}/tree/main/docs/motion/src/demo" target="_blank" rel="noopener">The traces</a></figcaption>
       </figure>
       <ul class="ledger" data-reveal="stagger">
@@ -130,7 +134,7 @@
     <section class="section wrap" id="jobs" aria-labelledby="jobs-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Everyday speed</span></p>
       <header class="section__head" data-reveal>
-        <h2 id="jobs-title">Six things your agent does all day.<br>Now in milliseconds.</h2>
+        <h2 id="jobs-title">Six daily jobs, <span class="glow">in milliseconds.</span></h2>
       </header>
       <div class="jobs" data-jobs data-reveal>
         <div class="jobs__tabs" role="tablist" aria-label="Jobs">
@@ -162,18 +166,22 @@
       </header>
       <ol class="how" data-reveal="stagger">
         <li>
+          <span class="how__icon">{{ partial "icon.html" (dict "name" "grid" "size" 28) }}</span>
           <h3>Index</h3>
           <p><code>.pixel/</code>, at your repository root, holds a text index of every file Git does not ignore and a code graph of symbols, imports and calls parsed with tree-sitter, built on first use.</p>
         </li>
         <li>
+          <span class="how__icon">{{ partial "icon.html" (dict "name" "bolt" "size" 28) }}</span>
           <h3>Stay warm</h3>
           <p>A local daemon keeps both open and watches the tree, so answers take milliseconds and follow your edits. No daemon? The command runs in-process.</p>
         </li>
         <li>
+          <span class="how__icon">{{ partial "icon.html" (dict "name" "gauge" "size" 28) }}</span>
           <h3>Answer to a budget</h3>
           <p>The agent gets the symbols, signatures or lines its question needs, fitted to a token budget, with a marker saying whether the answer is complete.</p>
         </li>
         <li>
+          <span class="how__icon">{{ partial "icon.html" (dict "name" "robot" "size" 28) }}</span>
           <h3>Reach the agent</h3>
           <p>A CLI plus hooks, not an MCP server. <code>pixel install</code> puts the protocol where each agent reads its instructions, and the agent calls Pixel from the shell it already has.</p>
         </li>
@@ -227,36 +235,45 @@
     <section class="section wrap section--center" id="install" aria-labelledby="install-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Install</span></p>
       <header class="section__head" data-reveal>
-        <h2 id="install-title">Two commands. That's the whole setup.</h2>
+        <h2 id="install-title"><span class="glow">Two commands.</span> That's the whole setup.</h2>
       </header>
-      <div class="term" data-reveal>
-        <div class="term__bar" aria-hidden="true"><span></span><span></span><span></span></div>
-        <pre class="term__body"><code><span class="term__p">$</span> brew install LivioGama/tap/pixel
-<span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi, OpenCode, Antigravity</span>
+      {{ $brew := "brew install LivioGama/tap/pixel" }}
+      {{ $curl := "curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh" }}
+      <div class="setup">
+        <div class="setup__main" data-reveal>
+          {{/* One terminal, two ways to get the binary: the switch swaps the first line and what Copy all copies. */}}
+          <div class="term" data-term>
+            <div class="term__bar">
+              <span class="term__dots" aria-hidden="true"><span></span><span></span><span></span></span>
+              <div class="term__switch" role="group" aria-label="Install with">
+                <button type="button" aria-pressed="true" data-variant="brew" data-copy-all="{{ $brew }} && pixel install && pixel doctor .">Homebrew</button>
+                <button type="button" aria-pressed="false" data-variant="curl" data-copy-all="{{ $curl }} && pixel install && pixel doctor .">Script</button>
+              </div>
+              <button class="cmd__copy term__copy" type="button" data-copy="{{ $brew }} && pixel install && pixel doctor .">Copy all</button>
+            </div>
+            <pre class="term__body"><code><span data-line="brew"><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl" hidden><span class="term__p">$</span> {{ $curl }}</span>
+<span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span>
 <span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></code></pre>
-        <button class="cmd__copy term__copy" type="button" data-copy="brew install LivioGama/tap/pixel && pixel install && pixel doctor .">Copy all</button>
+          </div>
+          <p class="install__more">The script works on macOS and Linux. Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}" target="_blank" rel="noopener">Plugins and rules files</a>.</p>
+        </div>
+        <aside class="yours" data-reveal>
+          <span class="yours__icon">{{ partial "icon.html" (dict "name" "chart" "size" 26) }}</span>
+          <h3>Don't take our numbers.</h3>
+          <p>After a few sessions, ask Pixel what it spared your own agent. On the maintainer's machine: 41 to 83% of what it would have read, across 798 operations.</p>
+          <div class="cmd">
+            <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel token-savings</code>
+            <button class="cmd__copy" type="button" data-copy="pixel token-savings">Copy</button>
+          </div>
+        </aside>
       </div>
       <ul class="badges" data-reveal="stagger">
-        <li>Runs 100% on your machine</li>
-        <li><a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Zero telemetry</a></li>
-        <li>No account, no server</li>
-        <li>MIT licensed</li>
-        <li>Hooks gone in one <code>pixel uninstall</code></li>
+        <li>{{ partial "icon.html" (dict "name" "laptop" "size" 18) }}Runs 100% on your machine</li>
+        <li>{{ partial "icon.html" (dict "name" "shield" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Zero telemetry</a></li>
+        <li>{{ partial "icon.html" (dict "name" "user" "size" 18) }}No account, no server</li>
+        <li>{{ partial "icon.html" (dict "name" "doc" "size" 18) }}MIT licensed</li>
+        <li>{{ partial "icon.html" (dict "name" "trash" "size" 18) }}Hooks gone in one <code>pixel uninstall</code></li>
       </ul>
-      <p class="install__alt" data-reveal>No Homebrew? One line does it on macOS and Linux:</p>
-      <div class="cmd install__script" data-reveal>
-        <code><span class="cmd__prompt" aria-hidden="true">$</span> curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh</code>
-        <button class="cmd__copy" type="button" data-copy="curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh">Copy</button>
-      </div>
-      <p class="install__more" data-reveal>Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}" target="_blank" rel="noopener">Plugins and rules files</a>.</p>
-      <div class="yours" data-reveal>
-        <h3>Don't take our numbers.</h3>
-        <p>After a few sessions, ask Pixel what it spared your own agent. On the maintainer's machine: 41 to 83% of what it would have read, across 798 operations.</p>
-        <div class="cmd">
-          <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel token-savings</code>
-          <button class="cmd__copy" type="button" data-copy="pixel token-savings">Copy</button>
-        </div>
-      </div>
     </section>
 
     {{/* ---------- questions ---------- */}}
@@ -300,7 +317,7 @@
 
     {{/* ---------- closing ---------- */}}
     <section class="closing wrap" aria-labelledby="closing-title">
-      <h2 id="closing-title" class="closing__title" data-reveal>Give your agent a map.</h2>
+      <h2 id="closing-title" class="closing__title" data-reveal>Give your agent <span class="glow">a map.</span></h2>
       <div class="closing__cta" data-reveal>
         <a class="button" href="#install">Install Pixel</a>
         <a class="button button--ghost" href="{{ "docs/" | relURL }}" target="_blank" rel="noopener">Read the docs</a>
@@ -623,13 +640,36 @@
       }, { threshold: [0, 0.5, 1] }).observe(video);
     };
 
-    /* Demo: plays once when it scrolls into view; the controls replay it. */
+    /* Demo: waits for its Play button. Once started it gets the native
+       controls; at the end the button comes back as Replay. */
     (function () {
       var demo = document.querySelector('[data-demo]');
-      if (!demo) return;
-      demo.addEventListener('ended', function () { demo.dataset.ended = '1'; });
-      demo.addEventListener('play', function () { demo.dataset.ended = ''; });
-      watch(demo);
+      var btn = document.querySelector('[data-demo-play]');
+      if (!demo || !btn) return;
+      var label = btn.querySelector('span');
+      btn.addEventListener('click', function () {
+        demo.controls = true;
+        demo.currentTime = 0;
+        demo.play().catch(function () {});
+      });
+      demo.addEventListener('play', function () { btn.hidden = true; });
+      demo.addEventListener('ended', function () { label.textContent = 'Replay video'; btn.hidden = false; });
+    })();
+
+    /* Install: the Homebrew / Script switch swaps the terminal's first line
+       and what Copy all copies. */
+    (function () {
+      var term = document.querySelector('[data-term]');
+      if (!term) return;
+      var buttons = [].slice.call(term.querySelectorAll('[data-variant]'));
+      var copy = term.querySelector('.term__copy');
+      buttons.forEach(function (b) {
+        b.addEventListener('click', function () {
+          buttons.forEach(function (o) { o.setAttribute('aria-pressed', o === b); });
+          [].forEach.call(term.querySelectorAll('[data-line]'), function (l) { l.hidden = l.dataset.line !== b.dataset.variant; });
+          copy.setAttribute('data-copy', b.dataset.copyAll);
+        });
+      });
     })();
 
     /* Jobs: a tab list; a recording loads only when its tab is opened. */
