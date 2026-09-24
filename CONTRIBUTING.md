@@ -198,6 +198,10 @@ drop a match guard, ...) and runs the crate's tests. A mutant that survives
 is a behaviour no test can see. Configuration lives in
 `.cargo/mutants.toml`; output goes to the gitignored `mutants.out/`.
 
+An agent runs these only when asked, and then only the `-F` form (see
+"Working on this repo with an AI agent"); the full-crate and full-diff forms
+are for a human who chooses to spend the time.
+
 ```bash
 cargo install --locked cargo-mutants        # or: cargo binstall cargo-mutants
 
@@ -250,7 +254,7 @@ instead, and `--install-path <path>` overwrites a managed binary on purpose.
 ```bash
 pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-cli"
 pixel build-index --history .   # rebuild facts/history index
-pixel install             # redeploy the agent prompt, shell wrapper, Codex config
+pixel install             # redeploy the agent prompt and hooks, Codex config
 pixel doctor . --fix --fail-on yellow   # must exit 0; report any non-green check in the PR
 scripts/pixel-smoke-test.sh   # the installed binary end to end (read-only)
 ```
@@ -259,15 +263,16 @@ scripts/pixel-smoke-test.sh   # the installed binary end to end (read-only)
 incremental rebuild takes seconds and the binary is optimised the same way.
 Drop `--build` for the exact shipped `release` profile.
 
-`pixel install` and `pixel doctor` write and check the wrappers for the
-account's login shell, read from the user database rather than `$SHELL`: a
-coding agent's command tool frequently runs under another shell than the
-login one (a `/bin/zsh` tool shell on a fish machine), and the wrappers are a
-`claude` function a human runs from the login shell. `--shell fish` overrides the lookup when
-the shell you launch `claude` from is not the account's.
+`pixel install` removes the retired `claude()` shell wrapper from the
+account's login-shell profile, and `pixel doctor` reports one that remains
+(`install.legacy-wrappers`). The login shell is read from the user database
+rather than `$SHELL`: a coding agent's command tool frequently runs under
+another shell than the login one (a `/bin/zsh` tool shell on a fish machine).
+`--shell fish` overrides the lookup when the shell you launch `claude` from
+is not the account's.
 
-`pixel upgrade --build "<cargo command>"` runs the same loop for you and
-reads the binary from the profile named in that command.
+`pixel self-update` reads the built binary from the profile its `--build`
+command names (`target/<profile>/pixel`).
 
 Skip this loop for changes limited to docs, prompts, or bench scripts.
 
