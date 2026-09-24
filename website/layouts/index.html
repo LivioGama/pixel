@@ -215,19 +215,27 @@
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Decisions</span></p>
       {{/* Facts from content/benchmarks.md#coding-decisions; the example question is the public item hard-sol-a-trap-10. */}}
       <div class="jev">
-        <div class="jev__score" data-reveal>
+        {{/* Left: the proof. The score, the comparison, and the other models close behind, so no one reads it as a DeepSeek requirement. */}}
+        <div class="jev__proof" data-reveal>
           <p class="jev__big" aria-hidden="true">14<span>/</span>14</p>
-          <p class="jev__under">tricky coding calls, all right</p>
-        </div>
-        <div class="jev__copy" data-reveal="stagger">
-          <h2 id="jev-title">A flash model, every coding call right.</h2>
-          <p class="jev__hook">A patch billed as a "documentation cleanup" also changes a timeout: does it still need two reviewers? JevBench asks judgement calls like this one, where the obvious answer is the wrong one.</p>
-          <p><code>pixel classify</code> hands each question to a model you pick and returns one probability per answer. With deepseek-v4.1-flash it got all 14 public coding items right, 1.4 s each at the median.</p>
+          <p class="jev__under">public JevBench coding items</p>
           <ul class="jev__bars" aria-label="Accuracy on coding decisions">
             <li class="is-pixel" style="--v: 1"><span class="jev__who">Pixel + deepseek-v4.1-flash</span><span class="jev__bar" aria-hidden="true"></span><strong>100%</strong></li>
             <li style="--v: 0.839"><span class="jev__who">Jev, a dedicated decision model</span><span class="jev__bar" aria-hidden="true"></span><strong>83.9%</strong></li>
           </ul>
-          <p class="jev__fine">Jev's 83.9% is its own published score on 56 coding items, not re-measured here, and 14 items is a small sample. <code>pixel classify</code> is opt-in: the only command that sends anything to a model, and only to the one you configure. <a class="link" href="{{ $bench }}#coding-decisions" target="_blank" rel="noopener">Every model, the method and its limits</a></p>
+          <p class="jev__others">Also 13 of 14 with gpt-oss:120b, gpt-oss:20b or deepseek-v4-flash.</p>
+        </div>
+        {{/* Right: the pitch, opt-in first. */}}
+        <div class="jev__copy" data-reveal="stagger">
+          <p class="jev__kicker">{{ partial "icon.html" (dict "name" "bolt" "size" 12) }}Optional add-on &middot; bring your own model</p>
+          <h2 id="jev-title">Hard coding calls, <span class="glow">answered right.</span></h2>
+          <p class="jev__hook">A patch billed as a "documentation cleanup" also changes a timeout: does it still need two reviewers? JevBench asks judgement calls like this one, where the obvious answer is the wrong one.</p>
+          <p><code>pixel classify</code> hands such a question to the model you choose and returns one probability per answer.</p>
+          <div class="jev__optin">
+            {{ partial "icon.html" (dict "name" "shield" "size" 20) }}
+            <p><strong>Pixel works fully without it.</strong> No API key, no account. <code>pixel classify</code> is the only command that calls a model, and only the one you configure: OpenRouter, Ollama Cloud or a local server.</p>
+          </div>
+          <p class="jev__fine">Jev's 83.9% is its own published score on 56 coding items, not re-measured here, and 14 items is a small sample. <a class="link" href="{{ $bench }}#coding-decisions" target="_blank" rel="noopener">Every model, the method and its limits</a></p>
         </div>
       </div>
     </section>
