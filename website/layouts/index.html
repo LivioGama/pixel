@@ -252,8 +252,7 @@
               </div>
               <button class="cmd__copy term__copy" type="button" data-copy="{{ $brew }} && pixel install && pixel doctor .">Copy all</button>
             </div>
-            <pre class="term__body"><code><span data-line="brew"><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl" hidden><span class="term__p">$</span> {{ $curl }}</span>
-<span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span>
+            <pre class="term__body"><code><span data-line="brew"><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl" hidden><span class="term__p">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</span><span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span>
 <span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></code></pre>
           </div>
           <p class="install__more">The script works on macOS and Linux. Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}" target="_blank" rel="noopener">Plugins and rules files</a>.</p>
