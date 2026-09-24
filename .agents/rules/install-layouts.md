@@ -6,8 +6,8 @@ paths:
 # Install Layouts
 
 Loaded when `pixel-install` is in play. `install`, `uninstall` and `doctor`
-run on machines whose layout the author did not choose; six CodeRabbit
-findings on #222 and #225 were layouts nobody had tested.
+run on machines whose layout the author did not choose; test the layouts
+below beside the ordinary one.
 
 - **The repository can be the home directory.** `pixel install --repo "$HOME"`
   makes the repo's `.claude/settings.json` the global one and puts the

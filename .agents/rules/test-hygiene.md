@@ -33,14 +33,6 @@ Loaded when a Rust source file is in play. Companion of `mutation-gate.md`.
   porcelain, NDJSON, `git log -z` records) from an explicit list of lines
   joined with `"\n"`, not from a continued string literal: an indentation
   or escape mistake there parses as valid input and tests the wrong thing.
-- **Clean up after `clippy --fix`.** It writes `std::string::ToString::to_string`
-  and `std::vec::Vec::len`; shorten to `ToString::to_string`, `Vec::len`,
-  `AsRef::as_ref`, `str::to_lowercase`. It does not move items: hoist a
-  `const`/`struct`/`use` declared after statements to the top of its function
-  or to module level with its comment attached.
-- **`is_none_or`, `is_some_and`, `is_ok_and`** over `map().unwrap_or()`,
-  and `map_or(default, f)` when the default is cheap. Both are what the
-  enabled `map_unwrap_or` lint expects.
 - **A "must not happen" test rules out every form it takes.** When the
   claim is that X never occurs, assert the absence of each observable shape
   of X: no edge of any kind, no `unresolved_calls` row, no stray file, no

@@ -3,9 +3,6 @@
 Always loaded: a change is finished when every path that produces or reads
 the value it changed agrees with it, not when the path you started from does.
 
-Each rule below is the largest class of CodeRabbit findings on #222 to #264
-(about 18 of 105), fixed after review instead of before it.
-
 - **List every producer and reader before the first test.** When a change
   adds an input to a value — a scope, an alias, a cap, a phase, a filter, a
   route — run `pixel who-calls <entry point>` on the function that computes

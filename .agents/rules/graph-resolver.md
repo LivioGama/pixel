@@ -7,8 +7,7 @@ paths:
 
 Loaded when `pixel-graph` is in play. A change to what an import, a call or
 a symbol means has to hold on every path below, and on the language rule it
-models; #255, #262 and #264 took eleven CodeRabbit findings between them
-because each fix covered the path it started from.
+models, not only on the path the fix started from.
 
 ## The chain a resolution change crosses
 

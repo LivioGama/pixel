@@ -23,7 +23,7 @@ apply to:
 | File | Applies to | Content |
 | --- | --- | --- |
 | `mutation-gate.md` | `crates/**/*.rs` | writing code and tests that pass `cargo mutants` on the first run |
-| `test-hygiene.md` | `crates/**/*.rs` | git fixtures, env vars, canonical paths, `clippy --fix` cleanup, assertions as strong as the contract (every form of a "must not happen", values over non-emptiness, the production path, one case per consuming path) |
+| `test-hygiene.md` | `crates/**/*.rs` | git fixtures, env vars, canonical paths, assertions as strong as the contract (every form of a "must not happen", values over non-emptiness, the production path, one case per consuming path) |
 | `test-campaigns.md` | always | running long mutants/nextest campaigns without surprises |
 | `measuring.md` | always | what a number must carry before it is evidence: run identity, the command beside the count, one variable per ablation, the baseline |
 | `rust-style.md` | `crates/**/*.rs` | the shapes the four pedantic lints expect (`uninlined_format_args`, `map_unwrap_or`, `redundant_closure_for_method_calls`, `items_after_statements`) and the cleanup after `clippy --fix` |
