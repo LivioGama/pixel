@@ -2686,6 +2686,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// An alias blocks T2 only where it is in scope. `zap` aliases a
+    /// `helper` that left.rs does not define, inside `mod a`; other.rs holds
+    /// the only `zap`. In `mod a` the call means the alias, so it links
+    /// nothing; in `mod b` no import binds `zap` and T2 links other.rs's.
+    #[test]
+    fn an_alias_blocks_the_repo_wide_tier_only_where_it_is_in_scope() {
+        let root = tmpdir("rust-alias-scope");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub mod left;\npub mod other;\npub mod ship;\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/left.rs"), "pub fn push() {}\n").unwrap();
+        std::fs::write(root.join("src/other.rs"), "pub fn zap() {}\n").unwrap();
+        std::fs::write(
+            root.join("src/ship.rs"),
+            [
+                "mod a {",
+                "    use crate::left::helper as zap;",
+                "    pub fn fa() { zap(); }",
+                "}",
+                "mod b {",
+                "    pub fn fb() { zap(); }",
+                "}",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let callers: Vec<(String, String)> = store
+            .conn()
+            .prepare(
+                "SELECT src.name, e.tier FROM edges e
+                   JOIN symbols src ON src.id = e.src_id
+                   JOIN symbols dst ON dst.id = e.dst_id
+                  WHERE dst.name = 'zap' ORDER BY src.name",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(callers, [("fb".to_string(), "probable".to_string())]);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn wildcard_import_does_not_make_unqualified_call_exact() {
         let root = tmpdir("wildcard-import");
