@@ -12,6 +12,9 @@
   {{/* The code graph's grammars: crates/pixel-graph/src/extract.rs. The last five use the generic extractor. */}}
   {{ $langs := slice "TypeScript" "JavaScript" "Rust" "Go" "Java" "Python" "C#" "Ruby" "PHP" "C" "Swift" "Elixir" "Lua" }}
 
+  {{/* Where the reader is: one square per chapter (the sections' data-chapter), filled as it passes. Built by the script below. */}}
+  <nav class="rail" aria-label="Sections" data-rail hidden></nav>
+
   <main id="main">
     {{/* ---------- hero: the token wall ---------- */}}
     <section class="hero wrap">
@@ -23,7 +26,7 @@
           <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
           <button class="cmd__copy" type="button" data-copy="brew install LivioGama/tap/pixel">Copy</button>
         </div>
-        <a class="button button--ghost" href="{{ site.Params.github_url }}" rel="noopener">Star on GitHub</a>
+        <a class="button button--ghost" href="{{ site.Params.github_url }}" target="_blank" rel="noopener">Star on GitHub</a>
       </div>
       </div>
 
@@ -41,10 +44,13 @@
           <button class="wall__replay" type="button" data-wall-replay hidden>Replay</button>
         </figcaption>
       </figure>
+      <a class="hero__down" href="#results" aria-label="Scroll to the results">
+        <svg viewBox="0 0 14 8" width="28" height="16" aria-hidden="true" fill="currentColor"><path d="M0 0h2v2H0zM2 2h2v2H2zM4 4h2v2H4zM6 6h2v2H6zM8 4h2v2H8zM10 2h2v2h-2zM12 0h2v2h-2z"/></svg>
+      </a>
     </section>
 
     {{/* ---------- numbers ---------- */}}
-    <section class="numbers wrap" aria-label="Measured results">
+    <section class="numbers wrap" id="results" data-chapter="Results" aria-label="Measured results">
       {{/* Each meter draws the ratio its number states on a 20-square row: the baseline filled in dim cells, Pixel's in green. */}}
       {{ $stats := slice
         (dict "tag" "Tokens" "value" "&minus;95%" "text" "to learn what a large file contains" "base" "full read" "before" 20 "after" 1)
@@ -70,7 +76,7 @@
     </section>
 
     {{/* ---------- scope ---------- */}}
-    <section class="section wrap" aria-labelledby="scope-title">
+    <section class="section wrap" id="scope" data-chapter="Scope" aria-labelledby="scope-title">
       <header class="section__head" data-reveal>
         <h2 id="scope-title">It knows where to look.</h2>
         <p class="scope__lede"><span>You describe the task. Your agent asks Pixel on&nbsp;its&nbsp;own.</span> <span>It gets the {{ len $s.p0 }}&nbsp;files that matter out of&nbsp;{{ $s.files }}, and starts coding instead of&nbsp;searching.</span></p>
@@ -99,7 +105,7 @@
     </section>
 
     {{/* ---------- whole agent tasks ---------- */}}
-    <section class="section wrap" id="tasks" aria-labelledby="tasks-title">
+    <section class="section wrap" id="tasks" data-chapter="Agent tasks" aria-labelledby="tasks-title">
       <header class="section__head" data-reveal>
         <h2 id="tasks-title">Measured on whole agent tasks.</h2>
         <p>Fast answers do not make a fast agent on their own. So we timed Claude Code on real tasks in this repository, with Pixel and against a vanilla agent with no rules or hooks.</p>
@@ -108,18 +114,18 @@
         <video class="demo__video" data-demo width="1600" height="1000" muted playsinline preload="none" controls
           poster="{{ "examples/pixel-agent-demo.jpg" | relURL }}" src="{{ "examples/pixel-agent-demo.mp4" | relURL }}"
           aria-describedby="demo-caption"></video>
-        <figcaption id="demo-caption" class="demo__caption">Claude Code on the same task, eleven times with Pixel 0.5.0 and eleven times without. The replay shows each side's median-time run on one clock at 6&times; speed; every command, time and token count comes from the recording. <a class="link" href="{{ site.Params.github_url }}/tree/main/docs/motion/src/demo" rel="noopener">The traces</a></figcaption>
+        <figcaption id="demo-caption" class="demo__caption">Claude Code on the same task, eleven times with Pixel 0.5.0 and eleven times without. The replay shows each side's median-time run on one clock at 6&times; speed; every command, time and token count comes from the recording. <a class="link" href="{{ site.Params.github_url }}/tree/main/docs/motion/src/demo" target="_blank" rel="noopener">The traces</a></figcaption>
       </figure>
       <ul class="ledger" data-reveal="stagger">
         <li class="ledger__win"><strong>&minus;30%</strong><span>Scoping a multi-file task: the median of 11 runs per side above, with 38% fewer tokens read. Two earlier designs agree: &minus;31% and &minus;29%.</span></li>
         <li class="ledger__loss"><strong>+1.5 s</strong><span>A single lookup, in the August runs. Reading Pixel's guidance costs more than it saves on a one-shot answer.</span></li>
         <li class="ledger__loss"><strong>Slower</strong><span>Recovering deleted code from history, in the August runs. Open work.</span></li>
       </ul>
-      <p class="ledger__fine" data-reveal>The two losses come from three runs per cell: read them as directions, not decimals. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
+      <p class="ledger__fine" data-reveal>The two losses come from three runs per cell: read them as directions, not decimals. <a class="link" href="{{ $bench }}#on-whole-agent-tasks" target="_blank" rel="noopener">The runs and their caveats</a></p>
     </section>
 
     {{/* ---------- six jobs ---------- */}}
-    <section class="section wrap" id="jobs" aria-labelledby="jobs-title">
+    <section class="section wrap" id="jobs" data-chapter="Six jobs" aria-labelledby="jobs-title">
       <header class="section__head" data-reveal>
         <h2 id="jobs-title">Six things your agent does all day.<br>Now in milliseconds.</h2>
       </header>
@@ -145,7 +151,7 @@
     </section>
 
     {{/* ---------- how it works ---------- */}}
-    <section class="section wrap" id="how" aria-labelledby="how-title">
+    <section class="section wrap" id="how" data-chapter="How it works" aria-labelledby="how-title">
       <header class="section__head" data-reveal>
         <h2 id="how-title">How it works.</h2>
         <p>One binary, one folder in your repository, no server.</p>
@@ -171,7 +177,7 @@
     </section>
 
     {{/* ---------- agents ---------- */}}
-    <section class="section wrap" aria-labelledby="agents-title">
+    <section class="section wrap section--center" id="agents" data-chapter="Agents" aria-labelledby="agents-title">
       <header class="section__head" data-reveal>
         <h2 id="agents-title">Plugs into the agent you already use.</h2>
       </header>
@@ -191,19 +197,19 @@
     </section>
 
     {{/* ---------- decisions ---------- */}}
-    <section class="section wrap" aria-labelledby="jev-title">
+    <section class="section wrap" id="decisions" data-chapter="Decisions" aria-labelledby="jev-title">
       <div class="jev" data-reveal="stagger">
         <p class="jev__score" aria-hidden="true">14/14</p>
         <div class="jev__copy">
           <h2 id="jev-title">Beats Jev's published score on coding decisions.</h2>
           <p><code>pixel classify</code> routes a coding decision to the model you pick. With deepseek-v4.1-flash it got all 14 public JevBench coding items right. Jev publishes 0.839.</p>
-          <p class="jev__fine">Jev's score covers 56 items and was not re-measured here. <code>pixel classify</code> is opt-in: the only command that sends anything to a model, and only to the one you configure. <a class="link" href="{{ $bench }}#coding-decisions">Every model, the method and its limits</a></p>
+          <p class="jev__fine">Jev's score covers 56 items and was not re-measured here. <code>pixel classify</code> is opt-in: the only command that sends anything to a model, and only to the one you configure. <a class="link" href="{{ $bench }}#coding-decisions" target="_blank" rel="noopener">Every model, the method and its limits</a></p>
         </div>
       </div>
     </section>
 
     {{/* ---------- install ---------- */}}
-    <section class="section wrap" id="install" aria-labelledby="install-title">
+    <section class="section wrap section--center" id="install" data-chapter="Install" aria-labelledby="install-title">
       <header class="section__head" data-reveal>
         <h2 id="install-title">Two commands. That's the whole setup.</h2>
       </header>
@@ -216,7 +222,7 @@
       </div>
       <ul class="badges" data-reveal="stagger">
         <li>Runs 100% on your machine</li>
-        <li><a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" rel="noopener">Zero telemetry</a></li>
+        <li><a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Zero telemetry</a></li>
         <li>No account, no server</li>
         <li>MIT licensed</li>
         <li>Hooks gone in one <code>pixel uninstall</code></li>
@@ -226,7 +232,7 @@
         <code><span class="cmd__prompt" aria-hidden="true">$</span> curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh</code>
         <button class="cmd__copy" type="button" data-copy="curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh">Copy</button>
       </div>
-      <p class="install__more" data-reveal>Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}">Plugins and rules files</a>.</p>
+      <p class="install__more" data-reveal>Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}" target="_blank" rel="noopener">Plugins and rules files</a>.</p>
       <div class="yours" data-reveal>
         <h3>Don't take our numbers.</h3>
         <p>After a few sessions, ask Pixel what it spared your own agent. On the maintainer's machine: 41 to 83% of what it would have read, across 798 operations.</p>
@@ -238,7 +244,7 @@
     </section>
 
     {{/* ---------- questions ---------- */}}
-    <section class="section wrap" id="faq" aria-labelledby="faq-title">
+    <section class="section wrap section--center" id="faq" data-chapter="Questions" aria-labelledby="faq-title">
       <header class="section__head" data-reveal>
         <h2 id="faq-title">Fair questions.</h2>
       </header>
@@ -246,7 +252,7 @@
         <details>
           <summary>Will my agent actually use it?</summary>
           <p>Not every time. Agents are trained on <code>grep</code> and fall back to it. Pixel does not wait for the agent to discover a tool: <code>pixel install</code> puts its protocol into every session, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files. The guard advises and never blocks.</p>
-          <p>With Pixel 0.5.0 it did: in each of the 11 recorded runs behind the demo, the agent called Pixel 6 to 17 times. An earlier release fared worse: given its protocol alone, the agent barely ran a Pixel command, yet still scoped tasks 29% faster, so part of the gain is the protocol's guidance itself. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs</a></p>
+          <p>With Pixel 0.5.0 it did: in each of the 11 recorded runs behind the demo, the agent called Pixel 6 to 17 times. An earlier release fared worse: given its protocol alone, the agent barely ran a Pixel command, yet still scoped tasks 29% faster, so part of the gain is the protocol's guidance itself. <a class="link" href="{{ $bench }}#on-whole-agent-tasks" target="_blank" rel="noopener">The runs</a></p>
         </details>
         <details>
           <summary>Why not just grep?</summary>
@@ -262,11 +268,11 @@
         </details>
         <details>
           <summary>Pixel or semble?</summary>
-          <p>Both, if you search in plain English a lot. semble puts the right file in its top 10 for 100% of 45 natural-language queries, Pixel for 69%. Pixel adds the call graph, blast radius, Git history and guarded Git writes. Together they cost about 5,100 tokens of context per turn. <a class="link" href="{{ $bench }}#where-a-specialist-wins">Where a specialist wins</a></p>
+          <p>Both, if you search in plain English a lot. semble puts the right file in its top 10 for 100% of 45 natural-language queries, Pixel for 69%. Pixel adds the call graph, blast radius, Git history and guarded Git writes. Together they cost about 5,100 tokens of context per turn. <a class="link" href="{{ $bench }}#where-a-specialist-wins" target="_blank" rel="noopener">Where a specialist wins</a></p>
         </details>
         <details>
           <summary>Does anything leave my machine?</summary>
-          <p>Nothing you did not ask for. The index lives in <code>.pixel/</code> and there is no telemetry. Pixel touches the network for four things only: the embedding model it downloads from Hugging Face on first use, the Git remote operations you run (<code>pixel fetch</code>, <code>pixel push</code>), <code>pixel classify</code>, which sends its question to the model you configure, and <code>pixel web-search</code>, which sends its query to the SearXNG endpoint you configure or else to DuckDuckGo and Wikipedia. <a class="link" href="{{ site.Params.github_url }}/blob/main/SECURITY.md" rel="noopener">Security model</a></p>
+          <p>Nothing you did not ask for. The index lives in <code>.pixel/</code> and there is no telemetry. Pixel touches the network for four things only: the embedding model it downloads from Hugging Face on first use, the Git remote operations you run (<code>pixel fetch</code>, <code>pixel push</code>), <code>pixel classify</code>, which sends its question to the model you configure, and <code>pixel web-search</code>, which sends its query to the SearXNG endpoint you configure or else to DuckDuckGo and Wikipedia. <a class="link" href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Security model</a></p>
         </details>
         <details>
           <summary>Which languages?</summary>
@@ -280,7 +286,7 @@
       <h2 id="closing-title" class="closing__title" data-reveal>Give your agent a map.</h2>
       <div class="closing__cta" data-reveal>
         <a class="button" href="#install">Install Pixel</a>
-        <a class="button button--ghost" href="{{ "docs/" | relURL }}">Read the docs</a>
+        <a class="button button--ghost" href="{{ "docs/" | relURL }}" target="_blank" rel="noopener">Read the docs</a>
       </div>
     </section>
   </main>
@@ -494,6 +500,34 @@
         clearTimeout(t);
         t = setTimeout(route, 120);
       });
+    })();
+
+    /* The chapter rail: one link per section carrying data-chapter, the
+       current one lit, the passed ones filled. Wide screens only (CSS). */
+    (function () {
+      var rail = document.querySelector('[data-rail]');
+      var secs = [].slice.call(document.querySelectorAll('section[data-chapter]'));
+      if (!rail || !secs.length) return;
+      var links = secs.map(function (sec, i) {
+        var a = document.createElement('a');
+        a.href = '#' + sec.id;
+        a.innerHTML = '<span class="rail__n">' + String(i + 1).padStart(2, '0') + '</span><span class="rail__label"></span>';
+        a.querySelector('.rail__label').textContent = sec.dataset.chapter;
+        rail.appendChild(a);
+        return a;
+      });
+      rail.hidden = false;
+      var mark = function () {
+        var line = innerHeight * 0.4, cur = -1;
+        secs.forEach(function (sec, i) { if (sec.getBoundingClientRect().top <= line) cur = i; });
+        links.forEach(function (a, i) {
+          a.classList.toggle('is-past', i < cur);
+          if (i === cur) a.setAttribute('aria-current', 'location'); else a.removeAttribute('aria-current');
+        });
+      };
+      addEventListener('scroll', mark, { passive: true });
+      addEventListener('resize', mark);
+      mark();
     })();
 
     /* Scroll reveals: a block marked data-reveal fades up once when it

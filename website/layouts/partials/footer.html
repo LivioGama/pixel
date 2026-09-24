@@ -1,17 +1,17 @@
 {{ partial "backdrop.html" . }}
 <footer class="footer">
   <div class="wrap footer__inner">
-    <a class="brand brand--small" href="{{ "" | relURL }}">
+    <a class="brand brand--small" href="{{ if .IsHome }}#main{{ else }}{{ "" | relURL }}{{ end }}"{{ if not .IsHome }} target="_blank" rel="noopener"{{ end }}>
       <span class="brand__pixel" aria-hidden="true"></span>
       <span class="brand__name">pixel</span>
     </a>
     <ul class="footer__links">
-      <li><a href="{{ "docs/" | relURL }}">Docs</a></li>
-      <li><a href="{{ .Site.Params.github_url }}" rel="noopener">Source on GitHub</a></li>
-      <li><a href="{{ "benchmarks/" | relURL }}">Benchmarks</a></li>
-      <li><a href="{{ .Site.Params.github_url }}/blob/main/CHANGELOG.md" rel="noopener">Changelog</a></li>
-      <li><a href="{{ .Site.Params.github_url }}/blob/main/CONTRIBUTING.md" rel="noopener">Contributing</a></li>
-      <li><a href="{{ .Site.Params.github_url }}/blob/main/SECURITY.md" rel="noopener">Security</a></li>
+      <li><a href="{{ "docs/" | relURL }}" target="_blank" rel="noopener">Docs</a></li>
+      <li><a href="{{ .Site.Params.github_url }}" target="_blank" rel="noopener">Source on GitHub</a></li>
+      <li><a href="{{ "benchmarks/" | relURL }}" target="_blank" rel="noopener">Benchmarks</a></li>
+      <li><a href="{{ .Site.Params.github_url }}/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a></li>
+      <li><a href="{{ .Site.Params.github_url }}/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a></li>
+      <li><a href="{{ .Site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a></li>
     </ul>
     <p class="footer__license">MIT licensed. Runs on your machine; nothing leaves it.</p>
   </div>

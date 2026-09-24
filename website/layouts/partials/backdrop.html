@@ -139,16 +139,21 @@
     raf = requestAnimationFrame(loop);
   })();
 
-  /* The nav darkens once the page scrolls under it. */
+  /* The nav darkens once the page scrolls under it, and its bottom edge
+     fills with how far down the page the reader is. */
   (function () {
     var nav = document.querySelector('.nav');
     if (!nav) return;
-    var on = false;
+    var on = false, queued = false;
     var check = function () {
+      queued = false;
       var next = scrollY > 8;
       if (next !== on) { on = next; nav.classList.toggle('is-scrolled', on); }
+      var room = document.documentElement.scrollHeight - innerHeight;
+      nav.style.setProperty('--progress', room > 0 ? Math.min(1, scrollY / room).toFixed(4) : 0);
     };
-    addEventListener('scroll', check, { passive: true });
+    addEventListener('scroll', function () { if (!queued) { queued = true; requestAnimationFrame(check); } }, { passive: true });
+    addEventListener('resize', check);
     check();
   })();
 </script>

@@ -52,6 +52,15 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   use", one colour each (`fill="currentColor"`), from Simple Icons, Lobe
   Icons (Devin, Antigravity) and pi.dev's favicon (Pi). Add an agent there
   and in the `$agents` list of `layouts/index.html` together.
+- Chapters: every landing section with a `data-chapter` gets a numbered
+  divider (CSS counter in `main.css`) and a square in the right-edge rail
+  (wide screens), and the home snaps lightly (`proximity`) to section starts.
+  The nav's bottom edge fills with the scroll progress.
+- Links: anything that leaves the page opens in a new tab, in the templates
+  and in Markdown through `layouts/_default/_markup/render-link.html`; only
+  same-page anchors (`#install`) stay in place. Keep it for new links.
+- `static/cursor.svg`, `static/cursor-link.svg`: the pixel-arrow cursor, the
+  green one over anything clickable, for fine pointers only.
 - `layouts/404.html`: the not-found page GitHub Pages serves for any
   unknown path under the site.
 - `assets/css/main.css`: one stylesheet, tokens first, dark only. Headlines
