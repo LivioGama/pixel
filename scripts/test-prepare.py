@@ -529,16 +529,31 @@ class FragmentContract(unittest.TestCase):
         self.assertIn("not a refusal", result.stderr)
         self.assertIn("well formed", result.stdout)
 
-    def test_an_entry_referencing_no_pull_request_warns(self):
+    def test_an_entry_referencing_no_pull_request_is_refused(self):
         """A short entry needs somewhere to send the reader for the rest.
 
         Cutting the reasoning out of the entry is only an improvement while the
-        reasoning is still reachable.
+        reasoning is still reachable. It used to be a warning, and three
+        entries in a row (#253-#255) merged without their link because nothing
+        read it before the release; this refusal is what turns the
+        pull request's own run red while its number is known, and the message
+        is the fix.
         """
         root = self.make_repo({"thing.fixed.md": "**thing:** it no longer breaks.\n"})
         result = self.run_check(root)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("thing.fixed.md: no pull request referenced", result.stderr)
+        self.assertIn("git mv changelog.d/thing.fixed.md changelog.d/<number>-thing.fixed.md", result.stderr)
+        self.assertIn("https://github.com/LivioGama/pixel/pull/<number>", result.stderr)
+
+    def test_a_link_in_the_entry_references_the_pull_request(self):
+        """The link alone is enough, whatever the slug."""
+        root = self.make_repo({
+            "thing.fixed.md": "**thing:** it no longer breaks. ([#12](https://github.com/LivioGama/pixel/pull/12))\n",
+        })
+        result = self.run_check(root)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("no pull request referenced", result.stderr)
+        self.assertNotIn("no pull request referenced", result.stderr)
 
     def test_a_number_first_in_the_slug_references_the_pull_request(self):
         """The convention the directory already had counts as the reference."""
