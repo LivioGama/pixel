@@ -1475,7 +1475,7 @@ fn pixel_invocation_in_tokens(tokens: &[&str], env: Option<String>) -> Option<Pi
     }
     let bin = tokens.get(i)?;
     let base = bin.rsplit('/').next().unwrap_or(bin);
-    if base == "pixel" || base == "pixel-dev" {
+    if pixel_install::config::PIXEL_EXECUTABLES.contains(&base) {
         return Some(PixelInvocation {
             args: tokens[i + 1..].join(" "),
             metrics_env,

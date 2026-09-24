@@ -80,29 +80,43 @@ pub(crate) fn quoted_executable(exe: &Path) -> String {
     format!("'{}'", exe.to_string_lossy().replace('\'', "'\\''"))
 }
 
-/// Recognize our executable commands and legacy script names, not arbitrary
-/// commands merely containing a lifecycle verb.
-pub(crate) fn is_pixel_hook(command: &str) -> bool {
-    fn executable_name(executable: &str) -> Option<String> {
-        let unquoted = if let Some(inner) = executable
-            .strip_prefix('\'')
-            .and_then(|s| s.strip_suffix('\''))
-        {
-            inner.replace("'\\''", "'")
-        } else {
-            if executable.chars().any(char::is_whitespace) {
-                return None;
-            }
-            executable.to_string()
-        };
-        Path::new(&unquoted)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-    }
+/// The file name of an unquoted executable path, or of one single-quoted the
+/// way [`quoted_executable`] writes it. An unquoted token holding whitespace
+/// is a command line, not an executable, and has none.
+fn executable_name(executable: &str) -> Option<String> {
+    let unquoted = if let Some(inner) = executable
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+    {
+        inner.replace("'\\''", "'")
+    } else {
+        if executable.chars().any(char::is_whitespace) {
+            return None;
+        }
+        executable.to_string()
+    };
+    Path::new(&unquoted)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+}
+
+/// What makes `command` one of pixel's hooks, or `None` for a foreign one:
+/// the `run-hook` verb (`session-start`, `guard --provider claude`, ...) or,
+/// for an install older than `run-hook`, the script's file name.
+///
+/// A `run-hook` command is pixel's when its executable carries one of the
+/// names pixel installs itself under ([`config::PIXEL_EXECUTABLES`]: `pixel`
+/// for a release, `pixel-dev` for `self-update --dev`) or the file name of
+/// `exe`, the binary installing or uninstalling now. Without them a build under
+/// another name never recognises the entries it wrote, nor a release the dev
+/// build's: each install appends a new set beside the old one and uninstall
+/// leaves them all. Only those exact names count, never any name merely
+/// containing `pixel`.
+pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a str> {
     // Installs before `pixel run-hook` registered standalone scripts under
     // `~/.claude/hooks/`. An install that does not recognise them keeps the
     // script entry next to the new `run-hook` one: two SessionStart hooks.
-    if executable_name(command).is_some_and(|name| {
+    if let Some(script) = executable_name(command).and_then(|name| {
         [
             config::GUARD_HOOK,
             config::OLD_GUARD_HOOK,
@@ -110,43 +124,56 @@ pub(crate) fn is_pixel_hook(command: &str) -> bool {
             config::PROMPT_SUBMIT_HOOK,
             config::POST_COMPACTION_HOOK,
         ]
-        .contains(&name.as_str())
+        .into_iter()
+        .find(|script| *script == name)
     }) {
-        return true;
+        return Some(script);
     }
+    let own = exe.file_name().map(|n| n.to_string_lossy());
     // Entries written before the command rename say `pixel hook <verb>`;
     // both spellings are pixel's and both must be recognised so an upgrade
     // replaces the old entry instead of stacking a second one next to it.
     command
         .rsplit_once(" run-hook ")
         .or_else(|| command.rsplit_once(" hook "))
-        .is_some_and(|(executable, verb)| {
-            executable_name(executable).as_deref() == Some("pixel")
-                && [
-                    "guard",
-                    "guard --provider claude",
-                    "guard --provider codex",
-                    "guard --provider devin",
-                    "guard --provider claude --delegate-rtk",
-                    "composed-guard --provider codex",
-                    "session-start",
-                    "prompt-submit",
-                    "prompt-submit --provider claude",
-                    "post-compaction",
-                    "post-compaction --provider claude",
-                    "post-tool-use",
-                    "post-tool-use --provider claude",
-                ]
-                .contains(&verb)
-                || (verb.starts_with("composed-guard --provider codex --backup ")
-                    && verb
-                        .strip_prefix("composed-guard --provider codex --backup ")
-                        .is_some_and(|backup| !backup.is_empty()))
+        .filter(|(executable, verb)| {
+            executable_name(executable).is_some_and(|name| {
+                config::PIXEL_EXECUTABLES.contains(&name.as_str())
+                    || own.as_deref() == Some(name.as_str())
+            }) && ([
+                "guard",
+                "guard --provider claude",
+                "guard --provider codex",
+                "guard --provider devin",
+                "guard --provider claude --delegate-rtk",
+                "composed-guard --provider codex",
+                "session-start",
+                "prompt-submit",
+                "prompt-submit --provider claude",
+                "post-compaction",
+                "post-compaction --provider claude",
+                "post-tool-use",
+                "post-tool-use --provider claude",
+            ]
+            .contains(verb)
+                || verb
+                    .strip_prefix("composed-guard --provider codex --backup ")
+                    .is_some_and(|backup| !backup.is_empty()))
         })
+        .map(|(_, verb)| verb)
+}
+
+/// Recognize our executable commands and legacy script names, not arbitrary
+/// commands merely containing a lifecycle verb. See [`pixel_hook_verb`] for
+/// which executables count as pixel's.
+pub(crate) fn is_pixel_hook(command: &str, exe: &Path) -> bool {
+    pixel_hook_verb(command, exe).is_some()
 }
 
 /// Preserve outer matchers and co-located foreign/security hooks.
-pub(crate) fn remove_pixel_hooks(hooks: &mut Map<String, Value>) {
+/// Every entry [`is_pixel_hook`] recognises goes, so one pass also collapses
+/// entries an earlier install stacked.
+pub(crate) fn remove_pixel_hooks(hooks: &mut Map<String, Value>, exe: &Path) {
     hooks.retain(|_, groups| {
         let Some(groups) = groups.as_array_mut() else {
             return true;
@@ -159,7 +186,7 @@ pub(crate) fn remove_pixel_hooks(hooks: &mut Map<String, Value>) {
                 !hook
                     .get("command")
                     .and_then(Value::as_str)
-                    .is_some_and(is_pixel_hook)
+                    .is_some_and(|command| is_pixel_hook(command, exe))
             });
             !inner.is_empty()
         });
@@ -354,7 +381,7 @@ fn hook_group(command: String, matcher: Option<&str>) -> Value {
     group
 }
 
-pub(crate) fn has_delegate(hooks: &Map<String, Value>) -> bool {
+pub(crate) fn has_delegate(hooks: &Map<String, Value>, exe: &Path) -> bool {
     hooks
         .get("PreToolUse")
         .and_then(Value::as_array)
@@ -368,7 +395,8 @@ pub(crate) fn has_delegate(hooks: &Map<String, Value>) -> bool {
                             hook.get("command")
                                 .and_then(Value::as_str)
                                 .is_some_and(|command| {
-                                    is_pixel_hook(command) && command.contains(" --delegate-rtk")
+                                    is_pixel_hook(command, exe)
+                                        && command.contains(" --delegate-rtk")
                                 })
                         })
                     })
@@ -406,11 +434,11 @@ pub(crate) fn load_rtk_backup(home: &Path) -> crate::Result<Vec<Value>> {
 /// `~/.claude/settings.json` delegates to it: a leftover that `pixel install`
 /// never applies, such as one an `install --repo` build wrote under `$HOME`
 /// before the repository backup moved into the repository.
-pub(crate) fn orphan_rtk_backup(home: &Path) -> Option<PathBuf> {
+pub(crate) fn orphan_rtk_backup(home: &Path, exe: &Path) -> Option<PathBuf> {
     let backup = home.join(RTK_BACKUP);
     let in_use = BACKUP_READERS
         .iter()
-        .any(|rel| delegates_rtk(&home.join(rel)));
+        .any(|rel| delegates_rtk(&home.join(rel), exe));
     (backup.is_file() && !in_use).then_some(backup)
 }
 
@@ -422,12 +450,12 @@ const BACKUP_READERS: [&str; 2] = [CLAUDE_SHARED_SETTINGS, CLAUDE_LOCAL_SETTINGS
 
 /// Whether the settings at `path` hold a delegate guard. A file that cannot
 /// be read may hold one, so it counts as delegating: the backup is kept.
-fn delegates_rtk(path: &Path) -> bool {
+fn delegates_rtk(path: &Path, exe: &Path) -> bool {
     install::read_settings(path).map_or(true, |value| {
         value
             .get("hooks")
             .and_then(Value::as_object)
-            .is_some_and(has_delegate)
+            .is_some_and(|hooks| has_delegate(hooks, exe))
     })
 }
 
@@ -490,11 +518,11 @@ fn configure_scoped(
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .ok_or("hooks is not an object")?;
-    let delegated = has_delegate(hooks);
+    let delegated = has_delegate(hooks, exe);
     if delegated && saved.is_empty() {
         return Err("RTK delegate backup missing; refusing to lose its registration".into());
     }
-    remove_pixel_hooks(hooks);
+    remove_pixel_hooks(hooks, exe);
     if delegated {
         // The delegate guard that ran RTK is gone: put RTK back where it was,
         // whatever the scope. Without a delegate the backup is only a record
@@ -787,7 +815,7 @@ pub(crate) fn install_project_codex_at(
         .get_mut("hooks")
         .and_then(Value::as_object_mut)
     {
-        remove_pixel_hooks(hooks);
+        remove_pixel_hooks(hooks, exe);
     }
     let snapshot = snapshot_source
         .get("hooks")
@@ -892,7 +920,7 @@ pub(crate) fn install_at_scoped(
     let read_elsewhere = BACKUP_READERS
         .iter()
         .map(|rel| backup_root.join(rel))
-        .any(|other| other != path && delegates_rtk(&other));
+        .any(|other| other != path && delegates_rtk(&other, exe));
     if adopted.is_empty() && !saved.is_empty() && !dry_run && !read_elsewhere {
         fs::remove_file(backup_root.join(RTK_BACKUP))?;
     }
@@ -946,6 +974,7 @@ pub(crate) fn install_at_scoped(
 /// ([`rtk_group`]), so no backup file is needed to restore it.
 pub(crate) fn remove_pre_tool_use_guard(
     path: &Path,
+    exe: &Path,
     dry_run: bool,
 ) -> crate::Result<(Vec<Value>, bool)> {
     if !path.is_file() {
@@ -960,8 +989,8 @@ pub(crate) fn remove_pre_tool_use_guard(
     };
     let mut event = Map::new();
     event.insert("PreToolUse".into(), before.clone());
-    let delegated = has_delegate(&event);
-    remove_pixel_hooks(&mut event);
+    let delegated = has_delegate(&event, exe);
+    remove_pixel_hooks(&mut event, exe);
     if delegated {
         restore_rtk(&mut event, &[rtk_group()]);
     }
@@ -999,7 +1028,7 @@ pub(crate) fn install_project_claude_at(
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
     let shared = repo.join(CLAUDE_SHARED_SETTINGS);
-    let (mut inherited, migrated) = remove_pre_tool_use_guard(&shared, dry_run)?;
+    let (mut inherited, migrated) = remove_pre_tool_use_guard(&shared, exe, dry_run)?;
     let global_path = Provider::Claude.path(home);
     // A repository at `$HOME` has the global file as its shared one, which
     // was read above.
@@ -1012,7 +1041,7 @@ pub(crate) fn install_project_claude_at(
     let global_blockers = hook_commands(&blocking);
     // A guard a full install of an older release left in the global file:
     // the current global install takes it out.
-    let stale_global_guard = commands(&blocking).any(is_pixel_hook);
+    let stale_global_guard = commands(&blocking).any(|command| is_pixel_hook(command, exe));
     inherited.extend(global);
     let mut step = install_at_scoped(
         repo,
@@ -1115,7 +1144,7 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
 
 /// Whether any hook command in a settings value (`{"hooks": {<event>: [...]}}`)
 /// is one of Pixel's: the evidence that Pixel was installed into that file.
-pub(crate) fn has_pixel_hook(value: &Value) -> bool {
+pub(crate) fn has_pixel_hook(value: &Value, exe: &Path) -> bool {
     value
         .get("hooks")
         .and_then(Value::as_object)
@@ -1127,14 +1156,49 @@ pub(crate) fn has_pixel_hook(value: &Value) -> bool {
                 .filter_map(|group| group.get("hooks").and_then(Value::as_array))
                 .flatten()
                 .filter_map(|hook| hook.get("command").and_then(Value::as_str))
-                .any(is_pixel_hook)
+                .any(|command| is_pixel_hook(command, exe))
         })
+}
+
+/// Pixel hooks a settings value registers more than once for the same event
+/// and verb, as `Event→verb ×n` lines: the trace of installs that
+/// appended their entries beside earlier ones instead of replacing them, so
+/// the harness runs that hook `n` times.
+pub(crate) fn stacked_pixel_hooks(value: &Value, exe: &Path) -> Vec<String> {
+    let Some(events) = value.get("hooks").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut stacked = Vec::new();
+    for (event, groups) in events {
+        let mut counts: Vec<(&str, usize)> = Vec::new();
+        for verb in groups
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+            .filter_map(|command| pixel_hook_verb(command, exe))
+        {
+            match counts.iter_mut().find(|(seen, _)| *seen == verb) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((verb, 1)),
+            }
+        }
+        stacked.extend(
+            counts
+                .into_iter()
+                .filter(|&(_, count)| count > 1)
+                .map(|(verb, count)| format!("{event}→{verb} ×{count}")),
+        );
+    }
+    stacked
 }
 
 /// Whether a Pixel `PreToolUse` command in a settings value contains `verb`
 /// (`run-hook guard --provider claude`): the guard is registered, not merely
 /// some other Pixel hook.
-pub(crate) fn has_pixel_guard(value: &Value, verb: &str) -> bool {
+pub(crate) fn has_pixel_guard(value: &Value, verb: &str, exe: &Path) -> bool {
     value
         .get("hooks")
         .and_then(|hooks| hooks.get("PreToolUse"))
@@ -1144,7 +1208,7 @@ pub(crate) fn has_pixel_guard(value: &Value, verb: &str) -> bool {
         .filter_map(|group| group.get("hooks").and_then(Value::as_array))
         .flatten()
         .filter_map(|hook| hook.get("command").and_then(Value::as_str))
-        .any(|command| is_pixel_hook(command) && command.contains(verb))
+        .any(|command| is_pixel_hook(command, exe) && command.contains(verb))
 }
 
 /// Merge a pixel `run-hook guard --provider devin` PreToolUse group into the
@@ -1159,7 +1223,7 @@ pub(crate) fn install_project_devin_at(
     exe: &Path,
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
-    remove_pre_tool_use_guard(&repo.join(DEVIN_LEGACY_HOOKS), dry_run)?;
+    remove_pre_tool_use_guard(&repo.join(DEVIN_LEGACY_HOOKS), exe, dry_run)?;
     let path = &repo.join(DEVIN_LOCAL_CONFIG);
     let mut value = install::read_settings(path)?;
     let root = value
@@ -1218,19 +1282,28 @@ pub(crate) fn install_project_devin_at(
 mod tests {
     use super::*;
 
+    /// A release build's executable: every release installs it as `pixel`.
+    fn release() -> &'static Path {
+        Path::new("/usr/local/bin/pixel")
+    }
+
     #[test]
     fn routing_ownership_rejects_other_executables_and_command_mentions() {
         assert!(is_pixel_hook(
-            "'/tmp/Pixel tools/pixel' run-hook guard --provider claude"
+            "'/tmp/Pixel tools/pixel' run-hook guard --provider claude",
+            release()
         ));
         assert!(is_pixel_hook(
-            "'/tmp/Pixel'\\''s/pixel' run-hook prompt-submit"
+            "'/tmp/Pixel'\\''s/pixel' run-hook prompt-submit",
+            release()
         ));
         assert!(is_pixel_hook(
-            "'/tmp/Pixel'\\''s/pixel' run-hook prompt-submit --provider claude"
+            "'/tmp/Pixel'\\''s/pixel' run-hook prompt-submit --provider claude",
+            release()
         ));
         assert!(is_pixel_hook(
-            "'/tmp/Pixel'\\''s/pixel' run-hook post-compaction --provider claude"
+            "'/tmp/Pixel'\\''s/pixel' run-hook post-compaction --provider claude",
+            release()
         ));
         for foreign in [
             "other-pixel hook guard",
@@ -1241,7 +1314,7 @@ mod tests {
             "'/tmp/pixel' run-hook guard --provider claude; security-check",
             "'/tmp/pixel' run-hook prompt-submit > user-log",
         ] {
-            assert!(!is_pixel_hook(foreign), "{foreign}");
+            assert!(!is_pixel_hook(foreign, release()), "{foreign}");
         }
     }
 
@@ -1258,14 +1331,14 @@ mod tests {
             "~/.claude/hooks/gitpixel-targets-guard",
             "'/Users/a dev/.claude/hooks/pixel-session-start'",
         ] {
-            assert!(is_pixel_hook(legacy), "{legacy}");
+            assert!(is_pixel_hook(legacy, release()), "{legacy}");
         }
         for foreign in [
             "~/.claude/hooks/pixel-session-start-audit",
             "my-tool ~/.claude/hooks/pixel-session-start",
             "/usr/local/bin/session-start",
         ] {
-            assert!(!is_pixel_hook(foreign), "{foreign}");
+            assert!(!is_pixel_hook(foreign, release()), "{foreign}");
         }
     }
 
@@ -1275,27 +1348,33 @@ mod tests {
         let verb = "run-hook guard --provider claude";
         assert!(has_pixel_guard(
             &settings("'/p/pixel' run-hook guard --provider claude"),
-            verb
+            verb,
+            release()
         ));
         assert!(
-            !has_pixel_guard(&settings("echo run-hook guard --provider claude"), verb),
+            !has_pixel_guard(
+                &settings("echo run-hook guard --provider claude"),
+                verb,
+                release()
+            ),
             "a foreign command merely naming the verb is not the guard"
         );
         assert!(
             !has_pixel_guard(
                 &settings("'/p/pixel' run-hook guard --provider devin"),
-                verb
+                verb,
+                release()
             ),
             "another provider's guard is not this one"
         );
         let lifecycle_only = json!({"hooks":{"SessionStart":[{"hooks":[{"command":"'/p/pixel' run-hook guard --provider claude"}]}]}});
         assert!(
-            !has_pixel_guard(&lifecycle_only, verb),
+            !has_pixel_guard(&lifecycle_only, verb, release()),
             "only PreToolUse registers a guard"
         );
-        assert!(has_pixel_hook(&lifecycle_only));
-        assert!(!has_pixel_hook(&settings("keep-security-check")));
-        assert!(!has_pixel_hook(&Value::Null));
+        assert!(has_pixel_hook(&lifecycle_only, release()));
+        assert!(!has_pixel_hook(&settings("keep-security-check"), release()));
+        assert!(!has_pixel_hook(&Value::Null, release()));
     }
 
     #[test]
@@ -1303,7 +1382,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         assert_eq!(
-            remove_pre_tool_use_guard(&path, false).unwrap(),
+            remove_pre_tool_use_guard(&path, release(), false).unwrap(),
             (Vec::new(), false),
             "an absent file is left absent"
         );
@@ -1316,7 +1395,7 @@ mod tests {
             json!({"hooks":{"PreToolUse":[write.clone(), guard],"SessionStart":[start.clone()]}});
         install::write_settings(&path, &original, false).unwrap();
 
-        let (left, changed) = remove_pre_tool_use_guard(&path, true).unwrap();
+        let (left, changed) = remove_pre_tool_use_guard(&path, release(), true).unwrap();
         assert!(changed);
         assert_eq!(left, vec![write.clone()]);
         assert_eq!(
@@ -1325,7 +1404,7 @@ mod tests {
             "a dry run reports without writing"
         );
 
-        let (left, changed) = remove_pre_tool_use_guard(&path, false).unwrap();
+        let (left, changed) = remove_pre_tool_use_guard(&path, release(), false).unwrap();
         assert!(changed);
         assert_eq!(left, vec![write.clone()]);
         let after = install::read_settings(&path).unwrap();
@@ -1336,7 +1415,7 @@ mod tests {
             "a lifecycle entry is never touched, even Pixel's own"
         );
         assert_eq!(
-            remove_pre_tool_use_guard(&path, false).unwrap(),
+            remove_pre_tool_use_guard(&path, release(), false).unwrap(),
             (vec![write], false),
             "nothing left to remove"
         );
@@ -1353,7 +1432,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            remove_pre_tool_use_guard(&only_guard, false).unwrap(),
+            remove_pre_tool_use_guard(&only_guard, release(), false).unwrap(),
             (Vec::new(), true)
         );
         assert_eq!(
@@ -1368,7 +1447,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let (left, changed) = remove_pre_tool_use_guard(&delegated, false).unwrap();
+        let (left, changed) = remove_pre_tool_use_guard(&delegated, release(), false).unwrap();
         assert!(changed);
         assert_eq!(
             left,
@@ -1384,13 +1463,13 @@ mod tests {
         let lifecycle = json!({"hooks":{"SessionStart":[{"hooks":[{"command":"x"}]}]}});
         install::write_settings(&no_pre, &lifecycle, false).unwrap();
         assert_eq!(
-            remove_pre_tool_use_guard(&no_pre, false).unwrap(),
+            remove_pre_tool_use_guard(&no_pre, release(), false).unwrap(),
             (Vec::new(), false)
         );
         let no_hooks = dir.path().join("no-hooks.json");
         install::write_settings(&no_hooks, &json!({"theme":"dark"}), false).unwrap();
         assert_eq!(
-            remove_pre_tool_use_guard(&no_hooks, false).unwrap(),
+            remove_pre_tool_use_guard(&no_hooks, release(), false).unwrap(),
             (Vec::new(), false)
         );
     }
@@ -1426,7 +1505,7 @@ mod tests {
             assert_eq!(enabled, expect_enabled, "{inherited:?}");
             assert!(adopted.is_empty(), "an inherited group is never adopted");
             assert_eq!(
-                has_pixel_guard(&value, "run-hook guard --provider claude"),
+                has_pixel_guard(&value, "run-hook guard --provider claude", release()),
                 expect_enabled,
                 "{value}"
             );
@@ -1496,7 +1575,7 @@ mod tests {
             configure(&mut value, Provider::Claude, Path::new("/tmp/pixel"), &[]).unwrap();
         assert!(enabled);
         assert_eq!(adopted, vec![rtk.clone()]);
-        assert!(has_delegate(value["hooks"].as_object().unwrap()));
+        assert!(has_delegate(value["hooks"].as_object().unwrap(), release()));
         let once = value.clone();
         configure(
             &mut value,
@@ -1507,9 +1586,129 @@ mod tests {
         .unwrap();
         assert_eq!(value, once);
         let hooks = value["hooks"].as_object_mut().unwrap();
-        remove_pixel_hooks(hooks);
+        remove_pixel_hooks(hooks, release());
         restore_rtk(hooks, &adopted);
         assert_eq!(hooks["PreToolUse"], json!([rtk]));
+    }
+
+    /// A build installed under another name than `pixel` (`self-update
+    /// --dev` writes `pixel-dev`, a user may rename one) must recognise the
+    /// entries it wrote itself, and a release those of `pixel-dev`, or every
+    /// install appends a second set and uninstall leaves them all.
+    /// Recognising them must not widen ownership to other names that merely
+    /// contain `pixel`, nor to commands that chain or redirect.
+    #[test]
+    fn is_pixel_hook_should_own_the_installing_executable_under_any_name_but_no_other() {
+        let dev = Path::new("/Users/dev/.local/bin/pixel-dev");
+        for own in [
+            "'/Users/dev/.local/bin/pixel-dev' run-hook session-start",
+            "'/Users/dev/.local/bin/pixel-dev' run-hook post-tool-use --provider claude",
+            // The same build copied elsewhere writes the same file name.
+            "'/opt/other place/pixel-dev' run-hook prompt-submit --provider claude",
+            // A release build's entries stay pixel's for a dev install.
+            "'/usr/local/bin/pixel' run-hook guard --provider claude",
+            "'/p/pixel-dev' run-hook composed-guard --provider codex --backup '/p/b.json'",
+        ] {
+            assert!(is_pixel_hook(own, dev), "{own}");
+        }
+        for foreign in [
+            "'/opt/pixel-dev-helper' run-hook session-start",
+            "'/opt/other-pixel' run-hook session-start",
+            "other-pixel hook guard",
+            "herdr hook session-start --agent claude",
+            "'/Users/dev/.local/bin/pixel-dev' run-hook session-start && security-check",
+            "'/Users/dev/.local/bin/pixel-dev' run-hook prompt-submit > user-log",
+            "'/Users/dev/.local/bin/pixel-dev' run-hook unknown-verb",
+            "'/p/pixel-dev' run-hook composed-guard --provider codex --backup ",
+            "'/p/security' run-hook composed-guard --provider codex --backup '/p/b.json'",
+            "my-tool ~/.claude/hooks/pixel-session-start",
+            "/usr/local/bin/session-start",
+        ] {
+            assert!(!is_pixel_hook(foreign, dev), "{foreign}");
+        }
+        assert!(
+            is_pixel_hook(
+                "'/Users/dev/.local/bin/pixel-dev' run-hook session-start",
+                release()
+            ),
+            "a release install replaces what `self-update --dev` installed"
+        );
+        let renamed = Path::new("/opt/bin/pixel-livio");
+        let livio = "'/opt/bin/pixel-livio' run-hook session-start";
+        assert!(
+            is_pixel_hook(livio, renamed),
+            "a build renamed by hand owns what it wrote"
+        );
+        assert!(
+            !is_pixel_hook(livio, release()),
+            "a name pixel never installs under is only its own build's"
+        );
+        assert!(!is_pixel_hook(
+            "'/opt/pixel-dev-helper' run-hook session-start",
+            release()
+        ));
+    }
+
+    /// The RTK delegation of a renamed build's guard is read back by that
+    /// build's next install: unrecognised, the old delegate guard stayed as an
+    /// unknown shell rewriter, which blocked the new guard, and the adopted
+    /// RTK group was never put back.
+    #[test]
+    fn reinstall_by_a_renamed_build_should_keep_its_rtk_delegation() {
+        let renamed = Path::new("/opt/bin/pixel-livio");
+        let rtk =
+            json!({"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]});
+        let mut value = json!({"hooks":{"PreToolUse":[rtk.clone()]}});
+        let (_, adopted) = configure(&mut value, Provider::Claude, renamed, &[]).unwrap();
+        assert_eq!(adopted, vec![rtk.clone()]);
+        assert!(has_delegate(value["hooks"].as_object().unwrap(), renamed));
+        assert!(!has_delegate(
+            value["hooks"].as_object().unwrap(),
+            release()
+        ));
+        let once = value.clone();
+        let (enabled, again) = configure(&mut value, Provider::Claude, renamed, &adopted).unwrap();
+        assert!(
+            enabled,
+            "the renamed build's own guard does not block itself"
+        );
+        assert_eq!(again, vec![rtk]);
+        assert_eq!(value, once);
+    }
+
+    /// Doctor names each stacked pixel hook with its count, whichever of
+    /// pixel's names wrote the copies, and never counts a foreign hook or a
+    /// pixel hook registered once.
+    #[test]
+    fn stacked_pixel_hooks_should_name_each_verb_registered_more_than_once() {
+        let dev = Path::new("/Users/dev/.local/bin/pixel-dev");
+        let entry = |command: &str| json!({"hooks":[{"type":"command","command":command}]});
+        let start = entry("'/Users/dev/.local/bin/pixel-dev' run-hook session-start");
+        let herdr = entry("herdr hook session-start --agent claude");
+        let value = json!({"hooks":{
+            "SessionStart":[
+                start.clone(), start.clone(), start,
+                {"matcher":"compact","hooks":[{"type":"command","command":"'/Users/dev/.local/bin/pixel-dev' run-hook post-compaction --provider claude"}]},
+            ],
+            "Stop":[herdr.clone(), herdr],
+            "UserPromptSubmit":[
+                entry("'/usr/local/bin/pixel' run-hook prompt-submit --provider claude"),
+                entry("'/Users/dev/.local/bin/pixel-dev' run-hook prompt-submit --provider claude"),
+            ],
+        }});
+        assert_eq!(
+            stacked_pixel_hooks(&value, dev),
+            vec![
+                "SessionStart→session-start ×3".to_owned(),
+                "UserPromptSubmit→prompt-submit --provider claude ×2".to_owned(),
+            ]
+        );
+        assert_eq!(
+            stacked_pixel_hooks(&value, release()),
+            stacked_pixel_hooks(&value, dev),
+            "a release doctor sees the copies a dev build stacked"
+        );
+        assert_eq!(stacked_pixel_hooks(&Value::Null, dev), Vec::<String>::new());
     }
 
     #[test]
@@ -1788,7 +1987,10 @@ mod tests {
         )
         .unwrap();
         let value = install::read_settings(&local).unwrap();
-        assert!(has_delegate(value["hooks"].as_object().unwrap()), "{value}");
+        assert!(
+            has_delegate(value["hooks"].as_object().unwrap(), release()),
+            "{value}"
+        );
         assert_eq!(
             load_rtk_backup(repo.path()).unwrap(),
             vec![rtk_group()],
@@ -1809,16 +2011,16 @@ mod tests {
     #[test]
     fn orphan_rtk_backup_should_name_a_backup_no_guard_delegates_to() {
         let home = tempfile::tempdir().unwrap();
-        assert_eq!(orphan_rtk_backup(home.path()), None);
+        assert_eq!(orphan_rtk_backup(home.path(), release()), None);
 
         let home = home_with_backup(&[]);
         assert_eq!(
-            orphan_rtk_backup(home.path()),
+            orphan_rtk_backup(home.path(), release()),
             Some(home.path().join(RTK_BACKUP))
         );
 
         let home = home_with_backup(&[delegate_guard()]);
-        assert_eq!(orphan_rtk_backup(home.path()), None);
+        assert_eq!(orphan_rtk_backup(home.path(), release()), None);
     }
 
     /// A repository at `$HOME` shares the global backup: a delegate guard in
@@ -1828,13 +2030,13 @@ mod tests {
     fn a_backup_the_home_repository_guard_delegates_to_should_be_kept() {
         let home = home_with_backup(&[]);
         write_local(home.path(), &[delegate_guard()]);
-        assert_eq!(orphan_rtk_backup(home.path()), None);
+        assert_eq!(orphan_rtk_backup(home.path(), release()), None);
         global_install(home.path(), false);
         assert!(home.path().join(RTK_BACKUP).is_file());
 
         let home = home_with_backup(&[]);
         fs::write(home.path().join(CLAUDE_LOCAL_SETTINGS), "{ not json").unwrap();
-        assert_eq!(orphan_rtk_backup(home.path()), None);
+        assert_eq!(orphan_rtk_backup(home.path(), release()), None);
         global_install(home.path(), false);
         assert!(home.path().join(RTK_BACKUP).is_file());
     }

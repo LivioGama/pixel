@@ -4314,7 +4314,8 @@ fn upgrade_target_refusal(target: &UpgradeTarget, roots: &[ManagedRoot]) -> Opti
 /// `pixel upgrade --dev` destination: a distinct name, so a local build
 /// can be exercised as `pixel-dev` while `pixel` stays the managed one.
 fn dev_install_path(home: &Path) -> PathBuf {
-    home.join(".local/bin/pixel-dev")
+    home.join(".local/bin")
+        .join(pixel_install::config::PIXEL_DEV_EXECUTABLE)
 }
 
 /// True when `path` has a `target` directory component: a cargo build
