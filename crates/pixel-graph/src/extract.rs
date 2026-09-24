@@ -3236,6 +3236,20 @@ fn free() {}
         );
     }
 
+    /// A default import binds its local name beside the named ones.
+    #[test]
+    fn ts_default_import_binds_its_name_beside_the_named_ones() {
+        let extraction =
+            extract_file("src/ship.ts", b"import greet, { helper } from \"./a\";\n").unwrap();
+        assert_eq!(
+            extraction.imports[0].bindings,
+            [
+                ImportBinding::named("greet"),
+                ImportBinding::named("helper")
+            ]
+        );
+    }
+
     #[test]
     fn ts_import_alias_binds_the_alias_to_the_exported_name() {
         let source = b"import { push as leased, publish } from \"./push\";\nexport { open } from \"./store\";\n";
