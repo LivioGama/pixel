@@ -94,7 +94,9 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// 8: an aliased import binds the alias to its source name
 ///    (`use a::push as leased;`, `import { push as leased }`), so T1 links
 ///    `leased()` to `push` and no longer links an unbound `push()`.
-pub const EXTRACTOR_VERSION: &str = "8";
+/// 9: a Rust `use` naming several paths yields one import per path
+///    (`imports.path`), each resolved to its own file.
+pub const EXTRACTOR_VERSION: &str = "9";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -446,9 +448,9 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
     for (i, e) in extracted.iter().enumerate() {
         let file_id = path_to_id[&e.rel];
         for imp in &e.fx.imports {
-            let resolved = resolve_import(&imp.spec, &e.rel, &all_paths)
+            let resolved = resolve_import(&imp.path, &e.rel, &all_paths)
                 .and_then(|p| path_to_id.get(&p).copied());
-            store.insert_import(file_id, &imp.spec, resolved, &imp.bindings)?;
+            store.insert_import_at(file_id, &imp.spec, &imp.path, resolved, &imp.bindings)?;
         }
         let calls =
             e.fx.calls
@@ -1123,9 +1125,9 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     let mut pending_refs: Vec<FileReferences> = Vec::with_capacity(staged.len());
     for st in &staged {
         for imp in &st.fx.imports {
-            let resolved = resolve_import(&imp.spec, &st.rel, &all_paths)
+            let resolved = resolve_import(&imp.path, &st.rel, &all_paths)
                 .and_then(|p| path_to_id.get(&p).copied());
-            store.insert_import(st.file_id, &imp.spec, resolved, &imp.bindings)?;
+            store.insert_import_at(st.file_id, &imp.spec, &imp.path, resolved, &imp.bindings)?;
         }
         let calls = st
             .fx
@@ -1167,15 +1169,15 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     if added_any {
         let dangling: Vec<(i64, String, String)> = {
             let mut stmt = store.conn().prepare(
-                "SELECT i.id, i.spec, f.path FROM imports i
+                "SELECT i.id, i.path, f.path FROM imports i
                    JOIN files f ON f.id = i.file_id
                   WHERE i.resolved_file_id IS NULL",
             )?;
             let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             rows.collect::<std::result::Result<_, _>>()?
         };
-        for (import_id, spec, importer) in dangling {
-            if let Some(target) = resolve_import(&spec, &importer, &all_paths)
+        for (import_id, import_path, importer) in dangling {
+            if let Some(target) = resolve_import(&import_path, &importer, &all_paths)
                 .and_then(|p| path_to_id.get(&p).copied())
             {
                 store.conn().execute(
@@ -2429,6 +2431,109 @@ mod tests {
         let push = store.symbols_in_file(push_file).unwrap().remove(0);
         let references = store.edges_to(push.id, Some(EdgeKind::References)).unwrap();
         assert_eq!(references.len(), 1, "run(leased) passes push.ts's push");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The file holding the symbol an `Exact` call edge from `caller` to
+    /// `callee` lands on, or `None` when there is no such edge.
+    fn exact_callee_file(store: &GraphStore, caller: &str, callee: &str) -> Option<String> {
+        store
+            .conn()
+            .query_row(
+                "SELECT f.path FROM edges e
+                   JOIN symbols src ON src.id = e.src_id
+                   JOIN symbols dst ON dst.id = e.dst_id
+                   JOIN files f ON f.id = dst.file_id
+                  WHERE src.name = ?1 AND dst.name = ?2 AND e.kind = 'calls' AND e.tier = 'exact'",
+                rusqlite::params![caller, callee],
+                |r| r.get(0),
+            )
+            .ok()
+    }
+
+    /// A grouped `use` names one file per path. `other.rs` defines every
+    /// name too, so only the import tier links the calls: resolving the
+    /// statement as one spec cut it at `{` (`crate`, no file) and gave no
+    /// binding the import tier, and `crate::push::{a::x, y}` sent `x` to
+    /// `push.rs` although it lives in `push/a.rs`.
+    #[test]
+    fn a_grouped_rust_use_resolves_each_path_to_its_own_file() {
+        let root = tmpdir("rust-grouped-use");
+        std::fs::create_dir_all(root.join("src/push")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub mod left;\npub mod right;\npub mod push;\npub mod other;\npub mod ship;\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/left.rs"), "pub fn push() {}\n").unwrap();
+        std::fs::write(root.join("src/right.rs"), "pub fn publish() {}\n").unwrap();
+        std::fs::write(root.join("src/push.rs"), "pub mod a;\npub fn y() {}\n").unwrap();
+        std::fs::write(root.join("src/push/a.rs"), "pub fn x() {}\n").unwrap();
+        std::fs::write(
+            root.join("src/other.rs"),
+            "pub fn push() {}\npub fn publish() {}\npub fn x() {}\npub fn y() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/ship.rs"),
+            "use crate::{left::push, right::publish};\nuse crate::push::{a::x, y};\n\
+             pub fn ship() { push(); publish(); x(); y(); }\n",
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let landed: Vec<Option<String>> = ["push", "publish", "x", "y"]
+            .iter()
+            .map(|callee| exact_callee_file(&store, "ship", callee))
+            .collect();
+        assert_eq!(
+            landed,
+            [
+                Some("src/left.rs".to_string()),
+                Some("src/right.rs".to_string()),
+                Some("src/push/a.rs".to_string()),
+                Some("src/push.rs".to_string()),
+            ]
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A path of a grouped `use` whose file is written after the importer
+    /// dangles; adding the file re-resolves that path (not the statement's
+    /// spec, which resolves nothing) and turns the call Exact.
+    #[test]
+    fn a_dangling_path_of_a_grouped_use_resolves_when_its_file_appears() {
+        let root = tmpdir("rust-grouped-dangling");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub mod left;\npub mod right;\npub mod other;\npub mod ship;\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/right.rs"), "pub fn publish() {}\n").unwrap();
+        std::fs::write(root.join("src/other.rs"), "pub fn push() {}\n").unwrap();
+        std::fs::write(
+            root.join("src/ship.rs"),
+            "use crate::{left::push, right::publish};\npub fn ship() { push(); publish(); }\n",
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        {
+            let store = GraphStore::open(&db).unwrap();
+            assert_eq!(exact_callee_file(&store, "ship", "push"), None);
+        }
+        std::fs::write(root.join("src/left.rs"), "pub fn push() {}\n").unwrap();
+        let delta = tree_delta(&root, &db).unwrap().unwrap();
+        apply_tree_delta(&root, &db, &delta).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        assert_eq!(
+            exact_callee_file(&store, "ship", "push").as_deref(),
+            Some("src/left.rs")
+        );
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
