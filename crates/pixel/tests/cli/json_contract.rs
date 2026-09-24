@@ -935,6 +935,82 @@ fn plan_renders_daemon_findings_as_json_and_compact() {
     );
 }
 
+/// `pixel plan` turns the daemon's `prereqs` evidence into blocking gates:
+/// an env read names the variable, an auth-gated file names the saved
+/// `auth`-tagged replay flow, gates render above the numbered list, and
+/// `--no-prereqs` omits them.
+#[test]
+fn plan_lists_verification_gates_and_honors_no_prereqs() {
+    let dir = fixture("plan-prereqs");
+    std::fs::write(
+        dir.join("src/secrets.rs"),
+        "pub fn unused() {\n    auth();\n    let k = std::env::var(\"STRIPE_SECRET_KEY\").unwrap();\n    let _ = k;\n}\nfn auth() {}\n",
+    )
+    .unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "secrets"]);
+
+    // A saved `auth`-tagged flow the auth gate can name.
+    let flows = dir.join("flows");
+    std::fs::create_dir_all(&flows).unwrap();
+    std::fs::write(
+        flows.join("client-login.json"),
+        "{\"name\":\"client-login\",\"title\":\"t\",\"description\":\"d\",\"tags\":[\"auth\"],\"steps\":[],\"created_unix\":1,\"revised_unix\":1}",
+    )
+    .unwrap();
+
+    let out = pixel_command()
+        .args(["plan", "--query", "dead-code", "--json", "."])
+        .current_dir(&*dir)
+        .env("PIXEL_FLOW_DIR", &flows)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let gates = doc["gates"].as_array().unwrap();
+    let labels: Vec<&str> = gates.iter().filter_map(|g| g["label"].as_str()).collect();
+    assert!(
+        labels.iter().any(|l| l.contains("STRIPE_SECRET_KEY")),
+        "{doc}"
+    );
+    assert!(
+        labels.iter().any(|l| l.contains("client-login")),
+        "auth gate must name the saved flow: {doc}"
+    );
+    assert_eq!(gates[0]["kind"], "prereq", "{doc}");
+    assert_eq!(gates[0]["blocking"], true, "{doc}");
+
+    // Markdown: gates as a bullet block before the numbered findings, and
+    // the verify item says the gates come first.
+    let md = pixel_command()
+        .args(["plan", "--query", "dead-code", "."])
+        .current_dir(&*dir)
+        .env("PIXEL_FLOW_DIR", &flows)
+        .output()
+        .unwrap();
+    assert!(md.status.success(), "{md:?}");
+    let text = String::from_utf8(md.stdout).unwrap();
+    let gates_at = text.find("Prerequisites — verification gates:");
+    let list_at = text.find("1. [ ]");
+    assert!(gates_at.is_some(), "{text}");
+    assert!(gates_at < list_at, "gates render before findings: {text}");
+    assert!(text.contains("(gates above first)"), "{text}");
+
+    // Gates are tracked items: --status numbers them, --done marks them.
+    let status = pixel(&dir, &["plan", "--status"]);
+    let shown = String::from_utf8(status.stdout).unwrap();
+    assert!(shown.contains("Gate: auth-gated code"), "{shown}");
+    let done = pixel(&dir, &["plan", "--done", "1"]);
+    assert!(done.status.success(), "{done:?}");
+
+    // --no-prereqs drops the block entirely.
+    let none = pixel(&dir, &["plan", "--query", "dead-code", "--no-prereqs", "."]);
+    assert!(none.status.success(), "{none:?}");
+    let text = String::from_utf8(none.stdout).unwrap();
+    assert!(!text.contains("Prerequisites"), "{text}");
+    assert!(!text.contains("Gate:"), "{text}");
+}
+
 /// `search-content` takes the ripgrep flags agents pass by habit instead of
 /// rejecting them: in the recorded demo runs each `--glob` usage error cost
 /// the agent a turn. `-l` lists files, `-g` filters with `.gitignore` rules
