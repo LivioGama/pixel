@@ -873,3 +873,128 @@ fn search_content_takes_ripgreps_glob_type_files_and_literal_flags() {
         "{unknown:?}"
     );
 }
+
+/// `--limit` counts the matching lines a `-g`/`-t` search prints, not the
+/// index rows read before the filter: `--limit 1 -g 'tests/*'` used to ask
+/// the index for one row, drop it (it was `NOTES.md`), and print nothing
+/// while `tests/login_test.rs` matched. `next_offset` counts index rows, so
+/// the page it names starts on the next kept match instead of replaying one.
+#[test]
+fn a_filtered_limit_counts_kept_matches_and_resumes_past_dropped_rows() {
+    let dir = fixture("search-filter-limit");
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    std::fs::write(
+        dir.join("tests/login_test.rs"),
+        "fn t() { login_user(\"x\"); }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("NOTES.md"), "login_user is the entry point\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "more"]);
+    let page = |args: &[&str]| -> Vec<serde_json::Value> {
+        let mut full = vec!["search-content", "login_user", ".", "--json"];
+        full.extend_from_slice(args);
+        let out = pixel(&dir, &full);
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        parse_stdout_lines(&out, "filtered search")
+    };
+
+    let docs = page(&["--limit", "1", "-g", "tests/*"]);
+    let (meta, matches) = docs.split_last().unwrap();
+    assert_eq!(matches.len(), 1, "{docs:?}");
+    assert_eq!(matches[0]["path"], "tests/login_test.rs");
+    assert_eq!(meta["truncated"], false, "the only kept match: {meta}");
+    assert!(meta["next_offset"].is_null(), "{meta}");
+
+    // Paging one kept line at a time walks exactly the filtered answer:
+    // every `next_offset` skips the rows the filter dropped, none replays.
+    let filter = ["-t", "rust", "-g", "src/*"];
+    let key = |m: &serde_json::Value| (m["path"].to_string(), m["line"].to_string());
+    let docs = page(&filter);
+    let whole: Vec<_> = docs[..docs.len() - 1].iter().map(key).collect();
+    assert!(whole.len() > 1, "{docs:?}");
+    let mut walked = Vec::new();
+    let mut offset = "0".to_string();
+    for _ in 0..whole.len() + 1 {
+        let mut args = filter.to_vec();
+        args.extend_from_slice(&["--limit", "1", "--offset", &offset]);
+        let docs = page(&args);
+        let (meta, matches) = docs.split_last().unwrap();
+        assert_eq!(matches.len(), 1, "{docs:?}");
+        walked.push(key(&matches[0]));
+        match meta["next_offset"].as_u64() {
+            Some(next) => {
+                assert_eq!(meta["truncated"], true, "{meta}");
+                offset = next.to_string();
+            }
+            None => break,
+        }
+    }
+    assert_eq!(
+        walked, whole,
+        "one page per kept line, in order, none twice"
+    );
+}
+
+/// `-l` holds the stdout byte cap like every other search output, cutting
+/// between paths, never inside one, and says so on stderr.
+#[test]
+fn files_with_matches_stop_at_the_stdout_cap_between_paths() {
+    let dir = fixture("search-files-cap");
+    std::fs::write(dir.join("NOTES.md"), "login_user is the entry point\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "notes"]);
+    let run = |cap: &str| {
+        pixel_command()
+            .args(["search-content", "login_user", ".", "-l"])
+            .current_dir(&dir)
+            .env("PIXEL_OUTPUT_CAP_BYTES", cap)
+            .output()
+            .unwrap()
+    };
+    let whole = run("0");
+    let all = String::from_utf8(whole.stdout).unwrap();
+    let paths: Vec<&str> = all.lines().collect();
+    assert_eq!(paths.len(), 3, "{all}");
+    // Room for the first path and its newline, one byte short of the second.
+    let cap = paths[0].len() + 1 + paths[1].len();
+    let cut = run(&cap.to_string());
+    assert_eq!(
+        String::from_utf8_lossy(&cut.stdout),
+        format!("{}\n", paths[0]),
+        "{cut:?}"
+    );
+    let stderr = String::from_utf8_lossy(&cut.stderr);
+    assert!(stderr.contains("stdout cap"), "{stderr}");
+    assert!(stderr.contains("wrote 1 paths"), "{stderr}");
+    // The offset it names starts on the first path the cap held back.
+    let offset = stderr
+        .split("--offset ")
+        .nth(1)
+        .and_then(|rest| rest.split('.').next())
+        .unwrap_or_else(|| panic!("a resume offset: {stderr}"));
+    let resumed = pixel_command()
+        .args([
+            "search-content",
+            "login_user",
+            ".",
+            "-l",
+            "--offset",
+            offset,
+        ])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&resumed.stdout).lines().next(),
+        Some(paths[1]),
+        "{resumed:?}"
+    );
+    // Exactly the bytes of two paths fits both.
+    let fits = run(&(cap + 1).to_string());
+    assert_eq!(
+        String::from_utf8_lossy(&fits.stdout).lines().count(),
+        2,
+        "{fits:?}"
+    );
+}

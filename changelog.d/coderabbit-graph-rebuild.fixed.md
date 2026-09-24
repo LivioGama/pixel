@@ -1,0 +1,1 @@
+**graph:** a graph built before Rust `use` bindings were recorded is now rebuilt on the next query, instead of keeping the unresolved edges those bindings fix until a full rebuild.

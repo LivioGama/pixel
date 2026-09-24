@@ -1,7 +1,7 @@
 //! pixel CLI — index/search plus the graph command surface, speaking to a
 //! per-root daemon over its Unix socket when one is up, else in-process.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -193,7 +193,7 @@ enum Command {
         ignore_case: bool,
         /// Only keep paths matching this glob, ripgrep-style: `.gitignore`
         /// rules (`*.rs` at any depth, a `/` anchors at the root), `!`
-        /// excludes. Repeatable.
+        /// excludes. Repeatable; the last glob matching a path decides.
         #[arg(short = 'g', long = "glob")]
         globs: Vec<String>,
         /// Only keep files of this type, ripgrep-style (`rust`, `py`, `ts`,
@@ -3205,12 +3205,14 @@ fn fits_before_cap(assembled: usize, line: usize, reserve: usize, cap: usize) ->
 
 /// What one `search` page wrote: `printed` match lines out of the daemon's
 /// page, whether the page is partial (`truncated`, whether the daemon's own
-/// caps or the stdout cap cut it), and whether the stdout cap — not the
-/// daemon — is what cut it, so the caller names the right cap on stderr.
+/// caps or the stdout cap cut it), whether the stdout cap — not the daemon —
+/// is what cut it, so the caller names the right cap on stderr, and the index
+/// row the next page starts at when the stdout cap cut this one.
 struct SearchPage {
     printed: usize,
     truncated: bool,
     cap_fired: bool,
+    next_offset: u64,
 }
 
 /// Print a `search` page and report what reached stdout.
@@ -3220,13 +3222,28 @@ struct SearchPage {
 /// The global stdout cap is enforced here, during assembly: `--context` text
 /// is added by the CLI, after the daemon's own byte cap, so this is the last
 /// place that can hold one.
-fn print_search_matches(data: &Value, matches: &[Value], json: bool) -> Result<SearchPage, String> {
+///
+/// `positions` holds the index row of each match: `offset + i` for a plain
+/// page, sparser for a `-g`/`-t` filtered one, whose `next_offset` must count
+/// the rows the filter dropped or `--offset` would replay them.
+fn print_search_matches(
+    data: &Value,
+    matches: &[Value],
+    positions: &[u64],
+    json: bool,
+) -> Result<SearchPage, String> {
     let cap = stdout_byte_cap();
     let offset = data.get("offset").and_then(Value::as_u64).unwrap_or(0);
     let daemon_truncated = data
         .get("truncated")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // Where the page ends in index rows: the daemon's resume point when it
+    // cut the page, else just past the last match.
+    let page_end = data
+        .get("next_offset")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| offset.saturating_add(matches.len() as u64));
     // Reserve the metadata line before the matches: it is what tells the
     // caller the page is partial, so it must not be the part that falls off
     // the cap. Reserve the longer of the two reachable trailers (partial and
@@ -3235,11 +3252,7 @@ fn print_search_matches(data: &Value, matches: &[Value], json: bool) -> Result<S
     // trailer itself is the one case it exceeds — bounded, and preferable to
     // hiding the page state.
     let reserve = if json {
-        let resumable = search_meta(
-            data,
-            true,
-            Some(offset.saturating_add(matches.len() as u64)),
-        );
+        let resumable = search_meta(data, true, Some(page_end));
         let complete = search_meta(data, false, None);
         serialized_len(&resumable).max(serialized_len(&complete))
     } else {
@@ -3258,15 +3271,20 @@ fn print_search_matches(data: &Value, matches: &[Value], json: bool) -> Result<S
         printed += 1;
     }
     let truncated = cap_fired || daemon_truncated;
+    // The first match left out resumes the page; past the last one, the page end.
+    let next_offset = positions.get(printed).copied().unwrap_or(page_end);
     if json {
-        let next_offset = truncated.then_some(offset.saturating_add(printed as u64));
-        output.push_str(&format!("{}\n", search_meta(data, truncated, next_offset)));
+        output.push_str(&format!(
+            "{}\n",
+            search_meta(data, truncated, truncated.then_some(next_offset))
+        ));
     }
     write_stdout(&output)?;
     Ok(SearchPage {
         printed,
         truncated,
         cap_fired,
+        next_offset,
     })
 }
 
@@ -3466,6 +3484,7 @@ fn run_search(
     };
     let groups = group_by_root(&paths)?;
     let multi_root = groups.len() > 1;
+    let mut seen_files = HashSet::new();
     for (root, rels) in groups {
         let whole_repo = rels.iter().any(String::is_empty);
         let req_paths = if whole_repo { None } else { Some(rels) };
@@ -3483,16 +3502,115 @@ fn run_search(
             context,
             filter,
             files_only,
+            &mut seen_files,
             logger,
         )?;
     }
     Ok(())
 }
 
-/// Rows asked of the index when `-g`/`-t` filter the matches on this side:
-/// the protocol's hard cap, so the filter does not run on the first page
-/// of an unfiltered search only.
+/// Rows asked of the index per page when `-g`/`-t` filter the matches on
+/// this side: the protocol's hard cap, so the filter does not run on the
+/// first page of an unfiltered search only.
 const FILTERED_SEARCH_ROWS: usize = 10_000;
+
+/// Pages of [`FILTERED_SEARCH_ROWS`] a filtered search reads before it stops
+/// and reports the rest as resumable: 100 000 index rows, so a filter that
+/// keeps almost nothing cannot page through a whole monorepo in one call.
+const FILTERED_SEARCH_PAGES: usize = 10;
+
+/// A filtered search's answer, assembled from one or more index pages.
+struct FilteredSearch {
+    /// The last page's response, its page state rewritten for the filtered
+    /// answer: `offset`, `truncated`, `next_offset` and `match_count` count
+    /// index rows the way an unfiltered page does, so `--offset` resumes.
+    data: Value,
+    matches: Vec<Value>,
+    /// The index row each kept match came from, parallel to `matches`.
+    positions: Vec<u64>,
+}
+
+/// Read index pages from `offset` until a match past the first `target` that
+/// pass `keeps` shows the answer is partial, the index runs out, or
+/// `max_pages` pages were read. `--limit` counts matching lines, not index
+/// rows: asking the index for `target` rows and filtering them afterwards
+/// returned fewer (often zero) matches while later rows matched. The resume
+/// point is the row of that next kept match, or the end of the last page
+/// read.
+fn collect_filtered_matches(
+    offset: u64,
+    target: usize,
+    max_pages: usize,
+    keeps: impl Fn(&Value) -> bool,
+    mut fetch: impl FnMut(u64) -> Result<Value, String>,
+) -> Result<FilteredSearch, String> {
+    let mut matches = Vec::new();
+    let mut positions = Vec::new();
+    let mut raw = offset;
+    let mut last = Value::Null;
+    let mut more = false;
+    for _ in 0..max_pages {
+        let page = fetch(raw)?;
+        let rows = page
+            .get("matches")
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice);
+        let page_more = page.get("truncated").and_then(Value::as_bool) == Some(true);
+        let row_count = rows.len();
+        let mut stopped_at = None;
+        for (i, m) in rows.iter().enumerate() {
+            if !keeps(m) {
+                continue;
+            }
+            if matches.len() >= target {
+                // One kept match past the limit: the answer is partial, and
+                // this row is where the next page starts.
+                stopped_at = Some(i);
+                break;
+            }
+            matches.push(m.clone());
+            positions.push(raw + i as u64);
+        }
+        let consumed = stopped_at.unwrap_or(row_count);
+        more = page_more || consumed < row_count;
+        raw += consumed as u64;
+        last = page;
+        if stopped_at.is_some() || !page_more || row_count == 0 {
+            break;
+        }
+    }
+    let mut data = last;
+    if let Some(obj) = data.as_object_mut() {
+        obj.remove("matches");
+        obj.insert("offset".into(), json!(offset));
+        obj.insert("truncated".into(), json!(more));
+        obj.insert("next_offset".into(), json!(more.then_some(raw)));
+        obj.insert("match_count".into(), json!(matches.len()));
+        obj.insert("limit".into(), json!(target));
+    }
+    Ok(FilteredSearch {
+        data,
+        matches,
+        positions,
+    })
+}
+
+/// Print `paths` one per line within the stdout byte cap, stopping before a
+/// path that would cross it so no path is ever cut. Returns the text and how
+/// many paths it holds.
+fn files_only_output(paths: &[String], cap: usize) -> (String, usize) {
+    let mut out = String::new();
+    let mut printed = 0;
+    for path in paths {
+        if !fits_before_cap(out.len(), path.len() + 1, 0, cap) {
+            break;
+        }
+        out.push_str(path);
+        out.push('\n');
+        printed += 1;
+    }
+    (out, printed)
+}
 
 #[allow(clippy::too_many_arguments)]
 fn run_search_one(
@@ -3509,45 +3627,48 @@ fn run_search_one(
     context: usize,
     filter: Option<&search_filter::PathFilter>,
     files_only: bool,
+    seen_files: &mut HashSet<String>,
     _logger: &pixel_actionlog::ActionLog,
 ) -> Result<(), String> {
-    let limit = if filter.is_some() {
-        limit.or(Some(FILTERED_SEARCH_ROWS))
-    } else {
-        limit
+    let search = |limit: Option<usize>, offset: u64| {
+        execute(
+            root,
+            Request::Search {
+                pattern: pattern.to_string(),
+                json,
+                limit,
+                offset: Some(offset as usize),
+                paths: req_paths.clone(),
+                scope: scope.clone(),
+            },
+            no_daemon,
+        )
     };
-    let data = execute(
-        root,
-        Request::Search {
-            pattern: pattern.to_string(),
-            json,
-            limit,
-            offset: Some(offset),
-            paths: req_paths,
-            scope,
-        },
-        no_daemon,
-    )?;
-    let empty = Vec::new();
-    let all = data
-        .get("matches")
-        .and_then(Value::as_array)
-        .unwrap_or(&empty);
-    let kept: Vec<Value>;
-    let matches: &[Value] = match filter {
+    let (data, matches, positions) = match filter {
         Some(filter) => {
-            kept = all
-                .iter()
-                .filter(|m| {
+            let found = collect_filtered_matches(
+                offset as u64,
+                limit.unwrap_or(FILTERED_SEARCH_ROWS),
+                FILTERED_SEARCH_PAGES,
+                |m| {
                     m.get("path")
                         .and_then(Value::as_str)
                         .is_some_and(|p| filter.keeps(p))
-                })
-                .cloned()
-                .collect();
-            &kept
+                },
+                |raw| search(Some(FILTERED_SEARCH_ROWS), raw),
+            )?;
+            (found.data, found.matches, found.positions)
         }
-        None => all,
+        None => {
+            let data = search(limit, offset as u64)?;
+            let matches = data
+                .get("matches")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let positions = (offset as u64..).take(matches.len()).collect();
+            (data, matches, positions)
+        }
     };
     // Enrich matches with surrounding context lines if requested.
     let mut cache: HashMap<PathBuf, Option<String>> = HashMap::new();
@@ -3572,19 +3693,25 @@ fn run_search_one(
         matches.to_vec()
     };
     let page = if files_only {
-        let paths = search_filter::files_with_matches(&enriched);
-        let mut out = paths.join("\n");
-        if !out.is_empty() {
-            out.push('\n');
-        }
+        let paths = search_filter::files_with_matches(&enriched, seen_files);
+        let (out, printed) = files_only_output(&paths, stdout_byte_cap());
         write_stdout(&out)?;
+        let cap_fired = printed < paths.len();
+        // Resume at the first match of the first path the cap held back.
+        let resume = paths.get(printed).and_then(|cut| {
+            enriched
+                .iter()
+                .position(|m| m.get("path").and_then(Value::as_str) == Some(cut.as_str()))
+                .map(|i| positions[i])
+        });
         SearchPage {
-            printed: paths.len(),
-            truncated: data.get("truncated").and_then(Value::as_bool) == Some(true),
-            cap_fired: false,
+            printed,
+            truncated: cap_fired || data.get("truncated").and_then(Value::as_bool) == Some(true),
+            cap_fired,
+            next_offset: resume.unwrap_or(0),
         }
     } else {
-        print_search_matches(&data, &enriched, json)?
+        print_search_matches(&data, &enriched, &positions, json)?
     };
     // Warn the user when results were truncated so the default row cap
     // is never a surprise.
@@ -3594,12 +3721,16 @@ fn run_search_one(
         // The `--context` text is added on this side of the daemon's byte
         // cap, so the stdout cap can be what cut this page: name that cap and
         // the offset that resumes the page instead of the daemon's row cap.
+        let wrote = if files_only {
+            format!("{} paths from {match_count} matches", page.printed)
+        } else {
+            format!("{} of {match_count} matches", page.printed)
+        };
         eprintln!(
-            "⚠ results truncated at the {}-byte stdout cap (PIXEL_OUTPUT_CAP_BYTES): wrote {} of {match_count} matches. \
+            "⚠ results truncated at the {}-byte stdout cap (PIXEL_OUTPUT_CAP_BYTES): wrote {wrote}. \
              Narrow --context/--limit, or continue with --offset {}.",
             stdout_byte_cap(),
-            page.printed,
-            offset.saturating_add(page.printed),
+            page.next_offset,
         );
     } else if page.truncated {
         eprintln!(
@@ -8348,6 +8479,137 @@ mod tests {
     /// The `--json` page trailer: the page state a match row cannot carry,
     /// plus the envelope honesty fields, with every key always present so a
     /// strict NDJSON reader can tell a partial page from a complete one.
+    /// A fake index of `rows` paths served `page` rows at a time, recording
+    /// in `asked` the offsets it was asked for.
+    fn fake_index<'a>(
+        rows: &'a [&str],
+        page: usize,
+        asked: &'a std::cell::RefCell<Vec<u64>>,
+    ) -> impl FnMut(u64) -> Result<Value, String> + 'a {
+        move |offset: u64| {
+            asked.borrow_mut().push(offset);
+            let start = (offset as usize).min(rows.len());
+            let end = (start + page).min(rows.len());
+            let matches: Vec<Value> = rows[start..end]
+                .iter()
+                .map(|p| json!({"path": p, "line": 1}))
+                .collect();
+            Ok(json!({
+                "matches": matches,
+                "truncated": end < rows.len(),
+                "epistemics": {"basis": "text index"},
+            }))
+        }
+    }
+
+    fn keeps_rs(m: &Value) -> bool {
+        m["path"].as_str().is_some_and(|p| p.ends_with(".rs"))
+    }
+
+    #[test]
+    fn a_filtered_search_pages_until_the_limit_of_kept_matches() {
+        let rows = ["a.md", "b.md", "c.rs", "d.md", "e.rs", "f.rs"];
+        let asked = std::cell::RefCell::new(Vec::new());
+        let found =
+            collect_filtered_matches(0, 2, 10, keeps_rs, fake_index(&rows, 2, &asked)).unwrap();
+        let paths: Vec<&str> = found
+            .matches
+            .iter()
+            .map(|m| m["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, ["c.rs", "e.rs"]);
+        assert_eq!(found.positions, [2, 4], "index rows, not kept counts");
+        // `f.rs` is kept past the limit: partial, and the next page starts on it.
+        assert_eq!(found.data["truncated"], true);
+        assert_eq!(found.data["next_offset"], 5);
+        assert_eq!(found.data["offset"], 0);
+        assert_eq!(found.data["match_count"], 2);
+        assert_eq!(found.data["limit"], 2);
+        assert!(found.data.get("matches").is_none());
+        assert_eq!(found.data["epistemics"]["basis"], "text index");
+        assert_eq!(
+            *asked.borrow(),
+            [0, 2, 4],
+            "each page resumes where the last ended"
+        );
+    }
+
+    #[test]
+    fn a_filtered_search_that_exhausts_the_index_is_complete() {
+        let rows = ["a.md", "c.rs", "d.md", "e.rs"];
+        let asked = std::cell::RefCell::new(Vec::new());
+        let found =
+            collect_filtered_matches(1, 2, 10, keeps_rs, fake_index(&rows, 3, &asked)).unwrap();
+        assert_eq!(found.positions, [1, 3]);
+        assert_eq!(found.data["truncated"], false, "no kept match is left");
+        assert!(found.data["next_offset"].is_null());
+        assert_eq!(found.data["offset"], 1);
+        assert_eq!(*asked.borrow(), [1]);
+        // At the limit exactly with rows left but none kept: still complete.
+        let rows = ["c.rs", "e.rs", "a.md", "b.md"];
+        let found =
+            collect_filtered_matches(0, 2, 10, keeps_rs, fake_index(&rows, 10, &asked)).unwrap();
+        assert_eq!(found.positions, [0, 1]);
+        assert_eq!(found.data["truncated"], false);
+    }
+
+    #[test]
+    fn a_filtered_search_stops_after_its_page_budget_and_resumes_there() {
+        let rows = ["a.md", "b.md", "c.md", "d.md", "e.rs"];
+        let asked = std::cell::RefCell::new(Vec::new());
+        let found =
+            collect_filtered_matches(0, 5, 2, keeps_rs, fake_index(&rows, 2, &asked)).unwrap();
+        assert!(found.matches.is_empty());
+        assert_eq!(found.data["truncated"], true, "rows are left unread");
+        assert_eq!(found.data["next_offset"], 4);
+        assert_eq!(*asked.borrow(), [0, 2]);
+    }
+
+    #[test]
+    fn a_filtered_search_stops_on_an_empty_page() {
+        // An index that claims more rows but serves none must not spin.
+        let mut asked = 0;
+        let found = collect_filtered_matches(7, 3, 10, keeps_rs, |_| {
+            asked += 1;
+            Ok(json!({"matches": [], "truncated": true}))
+        })
+        .unwrap();
+        assert_eq!(asked, 1);
+        assert_eq!(found.data["next_offset"], 7);
+        assert_eq!(found.data["truncated"], true);
+    }
+
+    #[test]
+    fn a_filtered_search_with_a_zero_limit_keeps_nothing() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let rows = ["a.rs", "b.rs"];
+        let found =
+            collect_filtered_matches(0, 0, 10, keeps_rs, fake_index(&rows, 5, &asked)).unwrap();
+        assert!(found.matches.is_empty());
+        assert_eq!(found.data["next_offset"], 0);
+        assert_eq!(found.data["truncated"], true);
+    }
+
+    #[test]
+    fn a_filtered_search_passes_the_fetch_error_on() {
+        let err = collect_filtered_matches(0, 1, 10, keeps_rs, |_| Err("daemon down".into()));
+        assert_eq!(err.err().as_deref(), Some("daemon down"));
+    }
+
+    #[test]
+    fn files_only_output_cuts_between_paths_at_the_cap() {
+        let paths = ["ab".to_string(), "cde".to_string()];
+        assert_eq!(
+            files_only_output(&paths, 7),
+            ("ab\ncde\n".into(), 2),
+            "7 bytes fit both"
+        );
+        assert_eq!(files_only_output(&paths, 6), ("ab\n".into(), 1));
+        assert_eq!(files_only_output(&paths, 3), ("ab\n".into(), 1));
+        assert_eq!(files_only_output(&paths, 2), (String::new(), 0));
+        assert_eq!(files_only_output(&[], 0), (String::new(), 0));
+    }
+
     #[test]
     fn search_meta_carries_the_page_state_and_the_envelope_honesty() {
         let data = serde_json::json!({
