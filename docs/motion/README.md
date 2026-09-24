@@ -29,8 +29,9 @@ command, time and token count comes from a recording.
 
 1. `scripts/record-demo.sh <dir> [reps] [model]` (Opus at medium effort by
    default, what most people run) checks out a pinned ref (`REF`, default
-   `v0.5.0`) in a throwaway worktree without `docs/motion`, so no agent can
-   read the demo's own traces, indexes it, then runs both arms `reps` times,
+   `v0.5.0`) in a throwaway repository that holds only that ref's history,
+   without `docs/motion`, so no agent can read the demo's own traces or a
+   later commit, indexes it, then runs both arms `reps` times,
    each pair started together, and stores every stream-json event with its
    arrival time. The script's header lists what the two arms share. Both are
    told to answer in English: the account's organization instructions would
