@@ -77,24 +77,55 @@ fn deployed_agent_prompt() -> Option<String> {
 /// never saw the retired shell wrapper — because the hook injects the
 /// deployed agent prompt itself as `hookSpecificOutput.additionalContext`.
 /// The structured `pixel` capability block stays top-level for consumers
-/// that parse it, and its JSON is appended to the context text.
+/// that parse it. The context text carries it only when no prompt is
+/// deployed: next to the prompt, its ~2 KB list of every command (internal
+/// ones included) cost ~860 tokens per session and no recorded agent run
+/// used a command only it named, so the prompt gets one line of index
+/// freshness instead.
 pub fn session_start_output(pixel_block: &Value) -> Value {
     session_start_envelope(pixel_block, deployed_agent_prompt().as_deref())
 }
 
 fn session_start_envelope(pixel_block: &Value, agent_prompt: Option<&str>) -> Value {
-    let mut context = String::new();
-    if let Some(prompt) = agent_prompt {
-        context.push_str(prompt.trim_end());
-        context.push_str("\n\n");
-    }
-    context.push_str(&serde_json::to_string_pretty(pixel_block).unwrap_or_default());
+    let context = match agent_prompt {
+        Some(prompt) => {
+            let mut context = prompt.trim_end().to_string();
+            if let Some(line) = index_freshness_line(&pixel_block["pixel"]["repo"]) {
+                context.push_str("\n\n");
+                context.push_str(&line);
+            }
+            context
+        }
+        None => serde_json::to_string_pretty(pixel_block).unwrap_or_default(),
+    };
     let mut output = pixel_block.clone();
     output["hookSpecificOutput"] = serde_json::json!({
         "hookEventName": "SessionStart",
         "additionalContext": context,
     });
     output
+}
+
+/// One line saying what the index behind the commands covers, from the
+/// capability block's `repo` probe; `None` when the probe gave nothing (it
+/// timed out, or the directory is not indexed).
+fn index_freshness_line(repo: &Value) -> Option<String> {
+    let repo = repo.as_object()?;
+    let commit = repo
+        .get("index_commit")
+        .and_then(Value::as_str)
+        .map_or("unknown", |oid| oid.get(..12).unwrap_or(oid));
+    let graph = if repo.get("graph_present").and_then(Value::as_bool) == Some(true) {
+        "code graph present"
+    } else {
+        "no code graph (callers, impact and symbols unavailable)"
+    };
+    let history = match repo.get("facts_fresh").and_then(Value::as_bool) {
+        Some(true) => "history index fresh",
+        Some(false) => "history index still building",
+        None => "no history index",
+    };
+    Some(format!("Pixel index: commit {commit}, {graph}, {history}."))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -4818,20 +4849,53 @@ mod tests {
 
     #[test]
     fn session_start_envelope_wraps_the_prompt_in_claude_contract() {
-        let block =
-            serde_json::json!({"pixel": {"capabilities": ["search-content"], "usage": "u"}});
-        let out = session_start_envelope(&block, Some("# Pixel doctrine\nuse pixel"));
+        let block = serde_json::json!({"pixel": {
+            "capabilities": ["search-content"],
+            "usage": "u",
+            "repo": {"index_commit": "5855ef57b69f793bcdb4a2ce1e3499f9a0613253",
+                     "graph_present": true, "facts_fresh": true},
+        }});
+        let out = session_start_envelope(&block, Some("# Pixel doctrine\nuse pixel\n\n"));
         assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SessionStart");
         let context = out["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap();
-        assert!(
-            context.starts_with("# Pixel doctrine\nuse pixel"),
-            "{context}"
+        // The prompt, then the freshness line; the command list stays out of
+        // the model's context, it costs tokens every session for nothing.
+        assert_eq!(
+            context,
+            "# Pixel doctrine\nuse pixel\n\nPixel index: commit 5855ef57b69f, code graph present, history index fresh."
         );
-        assert!(context.contains("\"capabilities\""), "{context}");
         // The structured block survives for consumers that parse it.
         assert_eq!(out["pixel"]["capabilities"][0], "search-content");
+    }
+
+    #[test]
+    fn session_start_envelope_without_a_repo_probe_is_the_prompt_alone() {
+        let block = serde_json::json!({"pixel": {"capabilities": ["search-content"]}});
+        let out = session_start_envelope(&block, Some("# Pixel doctrine\n"));
+        assert_eq!(
+            out["hookSpecificOutput"]["additionalContext"],
+            "# Pixel doctrine"
+        );
+    }
+
+    #[test]
+    fn index_freshness_line_names_what_the_commands_can_answer() {
+        let line = |repo: Value| index_freshness_line(&repo);
+        assert_eq!(line(Value::Null), None, "no probe, no claim");
+        assert_eq!(
+            line(serde_json::json!({"index_commit": "abc", "graph_present": false, "facts_fresh": false})),
+            Some("Pixel index: commit abc, no code graph (callers, impact and symbols unavailable), history index still building.".into())
+        );
+        assert_eq!(
+            line(serde_json::json!({})),
+            Some("Pixel index: commit unknown, no code graph (callers, impact and symbols unavailable), no history index.".into())
+        );
+        assert_eq!(
+            line(serde_json::json!({"index_commit": "0123456789abcdef", "graph_present": true})),
+            Some("Pixel index: commit 0123456789ab, code graph present, no history index.".into())
+        );
     }
 
     #[test]
@@ -4841,7 +4905,7 @@ mod tests {
         let context = out["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap();
-        assert!(context.contains("\"pixel\""), "{context}");
-        assert!(!context.starts_with('\n'), "{context}");
+        // Without a deployed prompt the block is the only guidance left.
+        assert_eq!(context, serde_json::to_string_pretty(&block).unwrap());
     }
 }
