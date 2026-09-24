@@ -1,0 +1,4 @@
+{{- /* Every link in docs and benchmarks opens in a new tab, except an anchor on the same page. */ -}}
+{{- $inpage := strings.HasPrefix .Destination "#" -}}
+<a href="{{ .Destination | safeURL }}"{{ with .Title }} title="{{ . }}"{{ end }}{{ if not $inpage }} target="_blank" rel="noopener"{{ end }}>{{ .Text }}</a>
+{{- /* chomp */ -}}

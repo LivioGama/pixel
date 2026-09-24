@@ -40,6 +40,11 @@ for id in "${ids[@]}"; do
   # The poster is the last frame: the finished state, for reduced motion and
   # for the moment before the video starts.
   ffmpeg -loglevel error -y -sseof -0.1 -i "$tmp/$name.mp4" -frames:v 1 -q:v 3 "$examples/$name.jpg"
+  # The agent demo waits on a Play button, so the site shows its first frame
+  # (both clocks at 0:00) until the visitor starts it.
+  if [ "$id" = AgentDemo ]; then
+    ffmpeg -loglevel error -y -i "$tmp/$name.mp4" -frames:v 1 -q:v 3 "$examples/$name-start.jpg"
+  fi
   mkdir -p "$tmp/$name"
   ffmpeg -loglevel error -y -i "$tmp/$name.mp4" -vf "fps=15,scale=800:500:flags=lanczos" "$tmp/$name/%04d.png"
   img2webp -loop 0 -lossy -q 70 -m 6 -d 67 "$tmp/$name"/*.png -o "$examples/$name.webp" >/dev/null

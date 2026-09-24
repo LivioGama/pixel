@@ -1,0 +1,1 @@
+**docs:** The website gets a splash on the home, an animated pixel backdrop, chapter dividers with a progress rail, brand-coloured agent logos, pixel icons, a clearer JevBench block, a lighter install section, an agent demo that waits for Play, and outbound links in new tabs. ([#271](https://github.com/LivioGama/pixel/pull/271))

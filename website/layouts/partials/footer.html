@@ -1,32 +1,34 @@
+{{ partial "backdrop.html" . }}
 <footer class="footer">
   <div class="wrap footer__inner">
-    <a class="brand brand--small" href="{{ "" | relURL }}">
+    <a class="brand brand--small" href="{{ if .IsHome }}#main{{ else }}{{ "" | relURL }}{{ end }}"{{ if not .IsHome }} target="_blank" rel="noopener"{{ end }}>
       <span class="brand__pixel" aria-hidden="true"></span>
       <span class="brand__name">pixel</span>
     </a>
     <ul class="footer__links">
-      <li><a href="{{ "docs/" | relURL }}">Docs</a></li>
-      <li><a href="{{ .Site.Params.github_url }}" rel="noopener">Source on GitHub</a></li>
-      <li><a href="{{ "benchmarks/" | relURL }}">Benchmarks</a></li>
-      <li><a href="{{ .Site.Params.github_url }}/blob/main/CHANGELOG.md" rel="noopener">Changelog</a></li>
-      <li><a href="{{ .Site.Params.github_url }}/blob/main/CONTRIBUTING.md" rel="noopener">Contributing</a></li>
-      <li><a href="{{ .Site.Params.github_url }}/blob/main/SECURITY.md" rel="noopener">Security</a></li>
+      <li><a href="{{ "docs/" | relURL }}" target="_blank" rel="noopener">Docs</a></li>
+      <li><a href="{{ .Site.Params.github_url }}" target="_blank" rel="noopener">Source on GitHub</a></li>
+      <li><a href="{{ "benchmarks/" | relURL }}" target="_blank" rel="noopener">Benchmarks</a></li>
+      <li><a href="{{ .Site.Params.github_url }}/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a></li>
+      <li><a href="{{ .Site.Params.github_url }}/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a></li>
+      <li><a href="{{ .Site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a></li>
     </ul>
     <p class="footer__license">MIT licensed. Runs on your machine; nothing leaves it.</p>
   </div>
 </footer>
 <script>
-  /* GitHub star count in the nav: shown only once the API answers. */
+  /* GitHub star count in the nav, behind a star icon: shown only once the API answers. */
   (function () {
     var el = document.querySelector('[data-gh-stars]');
     if (!el) return;
+    var badge = el.parentNode;
     var repo = el.getAttribute('data-gh-stars');
     var key = 'gh-stars:' + repo;
     var show = function (n) {
       if (typeof n !== 'number') return;
       el.textContent = n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
-      el.setAttribute('aria-label', n + ' stars');
-      el.hidden = false;
+      badge.setAttribute('aria-label', n + ' stars on GitHub');
+      badge.hidden = false;
     };
     try { show(JSON.parse(sessionStorage.getItem(key))); } catch (_) {}
     fetch('https://api.github.com/repos/' + repo)
