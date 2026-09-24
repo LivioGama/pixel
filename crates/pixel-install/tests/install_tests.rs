@@ -2239,6 +2239,7 @@ fn install_writes_the_agent_prompt_into_opencode_agents_md_when_opencode_is_pres
         repo: None,
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join(".local/bin/pixel")),
+        executable_path: None,
         shell: Some(TEST_SHELL.into()),
         dry_run: false,
         wrappers_only: false,
@@ -4108,6 +4109,201 @@ fn install_should_replace_legacy_script_hooks_instead_of_stacking_new_ones() {
             .unwrap()
             .contains(&foreign),
         "a foreign command naming a pixel verb is kept: {settings}"
+    );
+}
+
+/// A stand-in pixel build installed under another name, the way
+/// `pixel self-update --dev` installs `pixel-dev`, canonicalized as install
+/// writes it into the hook commands.
+#[cfg(unix)]
+fn fake_dev_exe(home: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = home.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let path = bin.join("pixel-dev");
+    fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path.canonicalize().unwrap()
+}
+
+/// How many times each pixel lifecycle verb is registered in the global
+/// Claude settings: one entry each is the only correct count, anything more
+/// runs that hook several times on every prompt, edit or session.
+fn lifecycle_counts(settings: &serde_json::Value) -> Vec<(&'static str, usize)> {
+    [
+        ("SessionStart", "run-hook session-start"),
+        ("SessionStart", "run-hook post-compaction --provider claude"),
+        (
+            "UserPromptSubmit",
+            "run-hook prompt-submit --provider claude",
+        ),
+        ("PostToolUse", "run-hook post-tool-use --provider claude"),
+    ]
+    .into_iter()
+    .map(|(event, verb)| {
+        (
+            verb,
+            pixel_commands(settings, event)
+                .iter()
+                .filter(|c| c.ends_with(verb))
+                .count(),
+        )
+    })
+    .collect()
+}
+
+const ONE_EACH: [(&str, usize); 4] = [
+    ("run-hook session-start", 1),
+    ("run-hook post-compaction --provider claude", 1),
+    ("run-hook prompt-submit --provider claude", 1),
+    ("run-hook post-tool-use --provider claude", 1),
+];
+
+/// A build not named `pixel` must replace the entries it wrote on the last
+/// install. It used to append a new set each time (0 → 4 → 8 → 12 entries),
+/// so every prompt and every edit ran each hook once per install.
+#[test]
+#[cfg(unix)]
+fn install_by_a_binary_not_named_pixel_should_replace_its_own_hooks_not_stack_them() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = fake_dev_exe(home);
+    for _ in 0..3 {
+        install(&InstallOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: Some(exe.clone()),
+            shell: Some(TEST_SHELL.into()),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let settings = read_json(&home.join(".claude/settings.json"));
+    assert_eq!(lifecycle_counts(&settings), ONE_EACH, "{settings}");
+    assert!(
+        settings.to_string().contains("pixel-dev' run-hook"),
+        "the entries name the dev build: {settings}"
+    );
+}
+
+/// Machines that ran the stacking install still hold several copies per
+/// event. Doctor reports them red, and one install collapses them to one
+/// entry each while a foreign hook in the same event (herdr's SessionStart
+/// hook, with its own matcher) or in the same group as a pixel copy comes
+/// out unchanged.
+#[test]
+#[cfg(unix)]
+fn one_install_should_collapse_stacked_dev_hooks_and_keep_foreign_ones_unchanged() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = fake_dev_exe(home);
+    let quoted = format!("'{}'", exe.display());
+    let pixel = |verb: &str| serde_json::json!({"type":"command","command":format!("{quoted} run-hook {verb}"),"timeout":5});
+    let herdr = serde_json::json!({"matcher":"startup","hooks":[{"type":"command","command":"herdr hook session-start --agent claude","timeout":10}]});
+    let notify = serde_json::json!({"type":"command","command":"notify-send claude-started"});
+    let mut session = vec![herdr.clone()];
+    let mut prompt = Vec::new();
+    let mut edit = Vec::new();
+    for copy in 0..3 {
+        let mut start = vec![pixel("session-start")];
+        if copy == 0 {
+            start.push(notify.clone());
+        }
+        session.push(serde_json::json!({"hooks": start}));
+        session.push(serde_json::json!({"matcher":"compact","hooks":[pixel("post-compaction --provider claude")]}));
+        prompt.push(serde_json::json!({"hooks":[pixel("prompt-submit --provider claude")]}));
+        edit.push(serde_json::json!({"matcher":"Edit","hooks":[pixel("post-tool-use --provider claude")]}));
+    }
+    let path = home.join(".claude/settings.json");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&serde_json::json!({"hooks":{
+            "SessionStart": session,
+            "UserPromptSubmit": prompt,
+            "PostToolUse": edit,
+        }}))
+        .unwrap(),
+    )
+    .unwrap();
+    let doctor_hooks = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: Some(exe.clone()),
+            shell: Some(TEST_SHELL.into()),
+            only: vec!["install.claude-hooks".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "install.claude-hooks").clone()
+    };
+    let before = doctor_hooks();
+    assert_eq!(before.status, CheckStatus::Red, "{before:?}");
+    let reason = before.reason.clone().unwrap_or_default();
+    for stacked in [
+        "SessionStart→session-start ×3",
+        "SessionStart→post-compaction --provider claude ×3",
+        "UserPromptSubmit→prompt-submit --provider claude ×3",
+        "PostToolUse→post-tool-use --provider claude ×3",
+    ] {
+        assert!(reason.contains(stacked), "{stacked} not in {reason}");
+    }
+
+    install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(exe.clone()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let settings = read_json(&path);
+    assert_eq!(lifecycle_counts(&settings), ONE_EACH, "{settings}");
+    let groups = settings["hooks"]["SessionStart"].as_array().unwrap();
+    assert!(groups.contains(&herdr), "herdr's group changed: {settings}");
+    assert!(
+        groups.contains(&serde_json::json!({"hooks":[notify]})),
+        "the foreign hook sharing a group with a pixel copy is kept alone in it: {settings}"
+    );
+    let after = doctor_hooks();
+    assert_eq!(after.status, CheckStatus::Green, "{after:?}");
+}
+
+/// `pixel-dev uninstall` removes the entries `pixel-dev install` wrote; it
+/// used to report success and leave all of them running.
+#[test]
+#[cfg(unix)]
+fn uninstall_by_a_binary_not_named_pixel_should_remove_its_own_hooks() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = fake_dev_exe(home);
+    let keep = serde_json::json!({"matcher":"startup","hooks":[{"type":"command","command":"herdr hook session-start --agent claude"}]});
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::write(
+        home.join(".claude/settings.json"),
+        serde_json::to_string(&serde_json::json!({"hooks":{"SessionStart":[keep.clone()]}}))
+            .unwrap(),
+    )
+    .unwrap();
+    install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(exe.clone()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+    uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        binary_path: Some(exe.clone()),
+        executable_path: Some(exe),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let settings = read_json(&home.join(".claude/settings.json"));
+    assert_eq!(
+        settings,
+        serde_json::json!({"hooks":{"SessionStart":[keep]}}),
+        "only the foreign hook is left"
     );
 }
 

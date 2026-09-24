@@ -33,6 +33,11 @@ pub struct UninstallOptions {
     pub home: Option<PathBuf>,
     /// Path to the pixel binary to remove. Defaults to `~/.local/bin/pixel`.
     pub binary_path: Option<PathBuf>,
+    /// The pixel binary whose hook entries count as pixel's, beside those of
+    /// a binary named `pixel` (see [`routing::pixel_hook_verb`]). Defaults to
+    /// the current exe, so a build installed as `pixel-dev` removes the
+    /// entries it wrote.
+    pub executable_path: Option<PathBuf>,
     /// Shell whose wrapper block should be removed, as a `$SHELL`-style value.
     /// Defaults to `$SHELL`.
     pub shell: Option<String>,
@@ -74,10 +79,16 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         .binary_path
         .clone()
         .unwrap_or_else(|| home.join(".local").join("bin").join("pixel"));
+    let executable_path = options
+        .executable_path
+        .clone()
+        .or_else(|| std::env::current_exe().ok())
+        .unwrap_or_else(|| binary_path.clone());
+    let exe = executable_path.canonicalize().unwrap_or(executable_path);
 
     let dry_run = options.dry_run;
     if let Some(repo) = &options.repo {
-        return uninstall_project(repo, &binary_path, dry_run);
+        return uninstall_project(repo, &binary_path, &exe, dry_run);
     }
     if options.wrappers_only {
         let step = install::remove_shell_wrappers(&home, options.shell.as_deref(), dry_run)?;
@@ -105,16 +116,16 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         strip_agent_configs(&home, dry_run)?,
         // 3. Remove pixel run-hook entries from Claude settings.json + delete hook
         //    scripts from ~/.claude/hooks/.
-        remove_claude_hooks(&home, dry_run)?,
+        remove_claude_hooks(&home, &exe, dry_run)?,
         // 4. Remove pixel run-hook entries from every other tool's settings file.
-        remove_devin_hooks(&home, dry_run)?,
-        remove_codex_hooks(&home, dry_run)?,
-        remove_gemini_hooks(&home, dry_run)?,
+        remove_devin_hooks(&home, &exe, dry_run)?,
+        remove_codex_hooks(&home, &exe, dry_run)?,
+        remove_gemini_hooks(&home, &exe, dry_run)?,
         remove_zcode_hooks(&home, dry_run)?,
         remove_cursor_hooks(&home, dry_run)?,
         remove_pi_extension(&home, dry_run)?,
         // 5. Remove pixel hooks from project-level .codex/hooks.json files.
-        remove_project_codex_hooks(&home, dry_run)?,
+        remove_project_codex_hooks(&home, &exe, dry_run)?,
         // 6. Remove the pixel rule source file.
         remove_rule_source(&home, dry_run)?,
         // 7. Remove the pixel agent system prompt.
@@ -175,7 +186,12 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
 ///     — the pixel guard group only;
 ///   - `<repo>/.pi/extensions/pixel-guard.ts`, and pixel's files in the
 ///     `<repo>/.pi/agent/` an older release used ([`crate::pi_project`]).
-fn uninstall_project(repo: &Path, binary_path: &Path, dry_run: bool) -> Result<InstallReport> {
+fn uninstall_project(
+    repo: &Path,
+    binary_path: &Path,
+    exe: &Path,
+    dry_run: bool,
+) -> Result<InstallReport> {
     let codex_hooks = repo.join(".codex").join(crate::codex_config::HOOKS_FILE);
     let mut patched = Vec::new();
     let mut conflicts = Vec::new();
@@ -186,7 +202,7 @@ fn uninstall_project(repo: &Path, binary_path: &Path, dry_run: bool) -> Result<I
                 // The composed install also registers lifecycle entries
                 // (PostToolUse, SessionStart, UserPromptSubmit, compaction);
                 // strip them now that PreToolUse holds the restored groups.
-                let (removed, _) = remove_pixel_hooks_from_settings(&codex_hooks, dry_run)?;
+                let (removed, _) = remove_pixel_hooks_from_settings(&codex_hooks, exe, dry_run)?;
                 if removed > 0 {
                     patched.push(codex_hooks.display().to_string());
                 }
@@ -195,7 +211,7 @@ fn uninstall_project(repo: &Path, binary_path: &Path, dry_run: bool) -> Result<I
             // edited; preserve both files rather than lose recovery data.
             ComposedGuardRestore::Conflict => conflicts.push(codex_hooks.display().to_string()),
             ComposedGuardRestore::NotManaged => {
-                let (removed, _) = remove_pixel_hooks_from_settings(&codex_hooks, dry_run)?;
+                let (removed, _) = remove_pixel_hooks_from_settings(&codex_hooks, exe, dry_run)?;
                 if removed > 0 {
                     patched.push(codex_hooks.display().to_string());
                 }
@@ -222,13 +238,17 @@ fn uninstall_project(repo: &Path, binary_path: &Path, dry_run: bool) -> Result<I
             summary: install::dry_run_summary(dry_run, &codex_summary),
             detail: Some(format!("config={}", codex_hooks.display())),
         },
-        remove_project_claude_guard(repo, dry_run)?,
+        remove_project_claude_guard(repo, exe, dry_run)?,
         crate::codex_config::remove_developer_instructions(&repo.join(".codex"), dry_run)?,
         {
             let devin_hooks = repo.join(routing::DEVIN_LOCAL_CONFIG);
-            let (legacy_removed, _) =
-                remove_pixel_hooks_from_settings(&repo.join(routing::DEVIN_LEGACY_HOOKS), dry_run)?;
-            let (removed, backup_path) = remove_pixel_hooks_from_settings(&devin_hooks, dry_run)?;
+            let (legacy_removed, _) = remove_pixel_hooks_from_settings(
+                &repo.join(routing::DEVIN_LEGACY_HOOKS),
+                exe,
+                dry_run,
+            )?;
+            let (removed, backup_path) =
+                remove_pixel_hooks_from_settings(&devin_hooks, exe, dry_run)?;
             let removed = removed + legacy_removed;
             InstallStep {
                 id: "hooks.devin".into(),
@@ -274,7 +294,7 @@ fn uninstall_project(repo: &Path, binary_path: &Path, dry_run: bool) -> Result<I
 /// and put back the RTK group it adopted, read from the repository's own
 /// backup, which is deleted afterwards. A guard an earlier install wrote into
 /// the shared `settings.json` is removed as well.
-fn remove_project_claude_guard(repo: &Path, dry_run: bool) -> Result<InstallStep> {
+fn remove_project_claude_guard(repo: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let local = repo.join(routing::CLAUDE_LOCAL_SETTINGS);
     let backup_file = repo.join(routing::RTK_BACKUP);
     let mut removed = 0usize;
@@ -285,7 +305,7 @@ fn remove_project_claude_guard(repo: &Path, dry_run: bool) -> Result<InstallStep
             .get_mut("hooks")
             .and_then(serde_json::Value::as_object_mut)
         {
-            let saved = if routing::has_delegate(hooks) {
+            let saved = if routing::has_delegate(hooks, exe) {
                 let saved = routing::load_rtk_backup(repo)?;
                 if saved.is_empty() {
                     return Err(InstallError::InvalidSettings {
@@ -299,7 +319,7 @@ fn remove_project_claude_guard(repo: &Path, dry_run: bool) -> Result<InstallStep
                 Vec::new()
             };
             let before = hooks.clone();
-            routing::remove_pixel_hooks(hooks);
+            routing::remove_pixel_hooks(hooks, exe);
             if !saved.is_empty() {
                 routing::restore_rtk(hooks, &saved);
             }
@@ -313,7 +333,7 @@ fn remove_project_claude_guard(repo: &Path, dry_run: bool) -> Result<InstallStep
         fs::remove_file(&backup_file)?;
     }
     let shared = repo.join(routing::CLAUDE_SHARED_SETTINGS);
-    let (_, shared_changed) = routing::remove_pre_tool_use_guard(&shared, dry_run)?;
+    let (_, shared_changed) = routing::remove_pre_tool_use_guard(&shared, exe, dry_run)?;
     removed += usize::from(shared_changed);
     Ok(InstallStep {
         id: "hooks.claude".into(),
@@ -391,7 +411,7 @@ fn strip_agent_configs(home: &Path, dry_run: bool) -> Result<InstallStep> {
 // Step 2: remove Claude hooks (settings.json entries + hook scripts)
 // -------------------------------------------------------------------------
 
-fn remove_claude_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
+fn remove_claude_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let settings = home.join(".claude").join("settings.json");
     let mut removed_entries = 0usize;
     let mut backup_path = None;
@@ -402,7 +422,7 @@ fn remove_claude_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
             .get_mut("hooks")
             .and_then(serde_json::Value::as_object_mut)
         {
-            let saved = if routing::has_delegate(hooks) {
+            let saved = if routing::has_delegate(hooks, exe) {
                 let saved = routing::load_rtk_backup(home)?;
                 if saved.is_empty() {
                     return Err(InstallError::InvalidSettings {
@@ -416,7 +436,7 @@ fn remove_claude_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
                 Vec::new()
             };
             let before = hooks.clone();
-            routing::remove_pixel_hooks(hooks);
+            routing::remove_pixel_hooks(hooks, exe);
             if !saved.is_empty() {
                 routing::restore_rtk(hooks, &saved);
             }
@@ -509,11 +529,11 @@ fn remove_claude_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
 // Step 3a: remove Devin hooks
 // -------------------------------------------------------------------------
 
-fn remove_devin_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
+fn remove_devin_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let config_path = home
         .join(config::DEVIN_CONFIG_DIR)
         .join(config::DEVIN_CONFIG_FILE);
-    let (removed, backup_path) = remove_pixel_hooks_from_settings(&config_path, dry_run)?;
+    let (removed, backup_path) = remove_pixel_hooks_from_settings(&config_path, exe, dry_run)?;
     let summary = format!("removed {removed} Devin hook entry/entries");
     Ok(InstallStep {
         id: "hooks.devin".into(),
@@ -530,9 +550,9 @@ fn remove_devin_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
 // Step 3b: remove Codex hooks
 // -------------------------------------------------------------------------
 
-fn remove_codex_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
+fn remove_codex_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let config_path = home.join(config::CODEX_HOOKS_FILE);
-    let (removed, backup_path) = remove_pixel_hooks_from_settings(&config_path, dry_run)?;
+    let (removed, backup_path) = remove_pixel_hooks_from_settings(&config_path, exe, dry_run)?;
     let summary = format!("removed {removed} Codex hook entry/entries");
     Ok(InstallStep {
         id: "hooks.codex".into(),
@@ -549,9 +569,9 @@ fn remove_codex_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
 // Step 3c: remove Gemini hooks
 // -------------------------------------------------------------------------
 
-fn remove_gemini_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
+fn remove_gemini_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let config_path = home.join(config::GEMINI_SETTINGS_FILE);
-    let (removed, backup_path) = remove_pixel_hooks_from_settings(&config_path, dry_run)?;
+    let (removed, backup_path) = remove_pixel_hooks_from_settings(&config_path, exe, dry_run)?;
     let summary = format!("removed {removed} Gemini hook entry/entries");
     Ok(InstallStep {
         id: "hooks.gemini".into(),
@@ -787,7 +807,7 @@ fn remove_pi_extension_dir(config_dir: &Path, dry_run: bool) -> Result<InstallSt
 // Step 4: remove pixel hooks from project-level .codex/hooks.json files
 // -------------------------------------------------------------------------
 
-fn remove_project_codex_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
+fn remove_project_codex_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let mut patched = Vec::new();
     let mut conflicts = Vec::new();
     for root in project_hook_search_roots(home) {
@@ -810,7 +830,7 @@ fn remove_project_codex_hooks(home: &Path, dry_run: bool) -> Result<InstallStep>
             }
             ComposedGuardRestore::NotManaged => {}
         }
-        let (removed, _) = remove_pixel_hooks_from_settings(&config_path, dry_run)?;
+        let (removed, _) = remove_pixel_hooks_from_settings(&config_path, exe, dry_run)?;
         if removed > 0 {
             patched.push(config_path.display().to_string());
         }
@@ -1126,6 +1146,7 @@ fn remove_binary(binary_path: &Path, dry_run: bool) -> Result<InstallStep> {
 
 fn remove_pixel_hooks_from_settings(
     config_path: &Path,
+    exe: &Path,
     dry_run: bool,
 ) -> Result<(usize, Option<PathBuf>)> {
     if !config_path.is_file() {
@@ -1138,7 +1159,7 @@ fn remove_pixel_hooks_from_settings(
         .and_then(serde_json::Value::as_object_mut)
     {
         let before = hooks.clone();
-        routing::remove_pixel_hooks(hooks);
+        routing::remove_pixel_hooks(hooks, exe);
         removed += usize::from(*hooks != before);
         let event_keys: Vec<String> = hooks.keys().cloned().collect();
         for event in event_keys {
@@ -1204,15 +1225,15 @@ mod routing_tests {
         let mut installed = install::read_settings(&path).unwrap();
         installed["later_user_change"] = json!(true);
         install::write_settings(&path, &installed, false).unwrap();
-        remove_claude_hooks(home, true).unwrap();
+        remove_claude_hooks(home, Path::new("/tmp/pixel"), true).unwrap();
         assert_eq!(install::read_settings(&path).unwrap(), installed);
-        remove_claude_hooks(home, false).unwrap();
+        remove_claude_hooks(home, Path::new("/tmp/pixel"), false).unwrap();
         let restored = install::read_settings(&path).unwrap();
         assert_eq!(restored["hooks"]["PreToolUse"], json!([rtk]));
         assert_eq!(restored["hooks"]["SessionStart"], json!([foreign]));
         assert_eq!(restored["later_user_change"], true);
         assert!(!home.join(routing::RTK_BACKUP).exists());
-        remove_claude_hooks(home, false).unwrap();
+        remove_claude_hooks(home, Path::new("/tmp/pixel"), false).unwrap();
         assert_eq!(install::read_settings(&path).unwrap(), restored);
     }
 
@@ -1223,7 +1244,12 @@ mod routing_tests {
             routing::install_provider(home.path(), Path::new("/tmp/pixel"), provider, false)
                 .unwrap();
             let path = provider.path(home.path());
-            assert!(remove_pixel_hooks_from_settings(&path, false).unwrap().0 > 0);
+            assert!(
+                remove_pixel_hooks_from_settings(&path, Path::new("/tmp/pixel"), false)
+                    .unwrap()
+                    .0
+                    > 0
+            );
             assert_eq!(install::read_settings(&path).unwrap(), json!({}));
         }
     }
@@ -1249,7 +1275,8 @@ mod routing_tests {
             false,
         )
         .unwrap();
-        let (removed, backup) = remove_pixel_hooks_from_settings(&path, false).unwrap();
+        let (removed, backup) =
+            remove_pixel_hooks_from_settings(&path, Path::new("/tmp/pixel"), false).unwrap();
         assert_eq!(removed, 2, "PreToolUse rewritten, SessionStart dropped");
         assert!(backup.is_some());
         let after = install::read_settings(&path).unwrap();
@@ -1257,10 +1284,16 @@ mod routing_tests {
         assert!(after["hooks"].get("SessionStart").is_none(), "{after}");
         assert_eq!(after["hooks"]["Stop"], json!([stop]));
         assert_eq!(after["theme"], "dark");
-        let (again, _) = remove_pixel_hooks_from_settings(&path, false).unwrap();
+        let (again, _) =
+            remove_pixel_hooks_from_settings(&path, Path::new("/tmp/pixel"), false).unwrap();
         assert_eq!(again, 0, "nothing left to remove");
         assert_eq!(
-            remove_pixel_hooks_from_settings(&home.path().join("absent.json"), false).unwrap(),
+            remove_pixel_hooks_from_settings(
+                &home.path().join("absent.json"),
+                Path::new("/tmp/pixel"),
+                false
+            )
+            .unwrap(),
             (0, None)
         );
     }
@@ -1317,7 +1350,7 @@ mod routing_tests {
         .unwrap();
         make_private(&codex.join(routing::CODEX_COMPOSED_BACKUP));
 
-        let step = remove_project_codex_hooks(home.path(), false).unwrap();
+        let step = remove_project_codex_hooks(home.path(), Path::new("/tmp/pixel"), false).unwrap();
         assert_eq!(step.status, CheckStatus::Green);
         assert_eq!(
             install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
@@ -1355,7 +1388,7 @@ mod routing_tests {
         .unwrap();
         make_private(&codex.join(routing::CODEX_COMPOSED_BACKUP));
 
-        let step = remove_project_codex_hooks(home.path(), false).unwrap();
+        let step = remove_project_codex_hooks(home.path(), Path::new("/tmp/pixel"), false).unwrap();
         assert_eq!(step.status, CheckStatus::Yellow);
         assert_eq!(
             install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],

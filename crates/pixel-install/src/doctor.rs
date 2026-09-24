@@ -523,6 +523,14 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     missing.join(", ")
                 ));
             }
+            let stacked = crate::routing::stacked_pixel_hooks(&value, &exe);
+            if !stacked.is_empty() {
+                return Err(format!(
+                    "pixel hooks registered more than once in {}: {} — run `pixel install`",
+                    path.display(),
+                    stacked.join(", ")
+                ));
+            }
             Ok(DoctorCheckDetail {
                 summary: format!("claude lifecycle hooks configured in {}", path.display()),
                 detail: Some(serde_json::json!({ "path": path.display().to_string() })),
@@ -533,7 +541,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     // A global RTK backup that no guard delegates to is never applied again;
     // say so rather than leave a file that looks like a live registration.
     runner.record("install.rtk-backup", || {
-        Ok(rtk_backup_check(crate::routing::orphan_rtk_backup(&home)))
+        Ok(rtk_backup_check(crate::routing::orphan_rtk_backup(
+            &home, &exe,
+        )))
     });
 
     // Legacy `claude()` shell wrappers are harmful now: a surviving block
@@ -725,7 +735,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 )),
                 (true, false) => {
                     let value = install::read_settings(&hooks_path).map_err(|e| e.to_string())?;
-                    if !crate::routing::has_pixel_hook(&value) {
+                    if !crate::routing::has_pixel_hook(&value, &exe) {
                         return Ok((
                             CheckStatus::Green,
                             DoctorCheckDetail {
@@ -799,7 +809,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             } else {
                 serde_json::Value::Null
             };
-            if !crate::routing::has_pixel_hook(&value) {
+            if !crate::routing::has_pixel_hook(&value, &exe) {
                 return Ok((
                     CheckStatus::Green,
                     DoctorCheckDetail {
@@ -811,7 +821,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     },
                 ));
             }
-            if !crate::routing::has_pixel_guard(&value, "run-hook guard --provider devin") {
+            if !crate::routing::has_pixel_guard(&value, "run-hook guard --provider devin", &exe) {
                 return Err(format!(
                     "pixel hooks in {} but no pixel guard PreToolUse entry — run `pixel install --repo`",
                     path.display()
@@ -832,7 +842,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             let shared = root.join(crate::routing::CLAUDE_SHARED_SETTINGS);
             if shared.is_file() {
                 let value = install::read_settings(&shared).map_err(|e| e.to_string())?;
-                if crate::routing::has_pixel_guard(&value, "run-hook guard") {
+                if crate::routing::has_pixel_guard(&value, "run-hook guard", &exe) {
                     return Err(format!(
                         "pixel guard in the shared {} names this machine's binary — run `pixel install --repo` to move it to {}",
                         shared.display(),
@@ -847,7 +857,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 serde_json::Value::Null
             };
             let rtk_backup = root.join(crate::routing::RTK_BACKUP);
-            if !crate::routing::has_pixel_hook(&value) && !rtk_backup.is_file() {
+            if !crate::routing::has_pixel_hook(&value, &exe) && !rtk_backup.is_file() {
                 return Ok((
                     CheckStatus::Green,
                     DoctorCheckDetail {
@@ -859,7 +869,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     },
                 ));
             }
-            if !crate::routing::has_pixel_guard(&value, "run-hook guard --provider claude") {
+            if !crate::routing::has_pixel_guard(&value, "run-hook guard --provider claude", &exe) {
                 return Err(format!(
                     "pixel install evidence (hook or {}) but no pixel guard PreToolUse entry in {} — run `pixel install --repo`",
                     rtk_backup.display(),
