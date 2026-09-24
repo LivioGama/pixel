@@ -19,7 +19,9 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
 - `layouts/index.html`: the whole landing page, with its scripts inline at
   the bottom. The token wall draws one square per 25 tokens of a full file
   read (`data/savings.toml`, first row) and burns down to what the same
-  question costs through Pixel once it scrolls into view. The scope board
+  question costs through Pixel once it scrolls into view; the survivors
+  gather into a P of exactly that many squares, built from the count by
+  the script, so one square always means 25 tokens. The scope board
   draws one pad per indexed file and routes a trace from each P0 pad to its
   file name. The job tabs load each video only when opened, and the agent
   demo in "Measured on whole agent tasks" plays once when it scrolls into
