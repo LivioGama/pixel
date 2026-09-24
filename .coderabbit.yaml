@@ -108,6 +108,27 @@ reviews:
         Test shape is not a finding: do not suggest restyling, splitting or
         consolidating a passing test; flag only an assertion weaker than the
         contract it claims to check.
+    - path: "crates/pixel-graph/**"
+      instructions: |
+        `.agents/rules/graph-resolver.md` lists the chain a resolution change
+        crosses: extraction, storage (column, migration, `EXTRACTOR_VERSION`),
+        `ResolveIndex::build`, the six resolution paths (`resolve_calls`,
+        `resolve_references` with its `names_a_symbol` prefilter,
+        `resolve_all`, `reconsider_resolved_calls`, and the demotion and
+        dangling-import re-resolution in `write_rows`), `rename`, and
+        `tests/all/unresolved_diagnostic.rs`. When the diff changes what a
+        binding, call or edge means, check every link in one pass and name
+        each one the diff leaves on the old behaviour, instead of the path
+        the diff starts from. Check the language rule too (Rust `use`: scope,
+        shadowing, alias, groups, globs): an Exact edge is only granted when
+        exactly one definition is proven.
+    - path: "crates/pixel-install/**"
+      instructions: |
+        `.agents/rules/install-layouts.md`: the repository may be `$HOME`
+        (repo-local and global files coincide), a foreign config is not a
+        broken install, every path in a command the user is told to paste
+        goes through `routing::quoted_executable`, and repo-local state never
+        lands in a global `~/.claude/` file.
     - path: "crates/pixel-proto/**"
       instructions: |
         Every `Op::op_name` must match its serde tag; the invariant test in
@@ -213,10 +234,14 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
-    # Maintenance-release pull requests target `release/x.y` branches
-    # (CONTRIBUTING.md "Branches"); review them like the ones into `main`.
+    # Every base branch, not only `main`: maintenance-release pull requests
+    # target `release/x.y` (CONTRIBUTING.md "Branches"), and a stack's upper
+    # pull requests target the branch below them. Reviewing a stacked layer
+    # only once the layers under it merged cost #263 and #264 their first
+    # review until a manual `@coderabbitai review`, and #264's findings came
+    # two hours after it opened.
     base_branches:
-      - "^release/.*"
+      - ".*"
     # Dependabot bumps are gated by `cargo deny`, the MSRV job and the full
     # test run; a review comment on them has nothing to add.
     ignore_usernames:
@@ -335,6 +360,10 @@ knowledge_base:
         applyTo: "crates/**/*.rs"
       - files: ".agents/skills/rust-guidelines/SKILL.md"
         applyTo: "crates/**/*.rs"
-      # Both rules are always-on in AGENTS.md's table.
-      - files: ".agents/rules/test-campaigns.md,.agents/rules/release.md"
+      - files: ".agents/rules/graph-resolver.md"
+        applyTo: "crates/pixel-graph/**"
+      - files: ".agents/rules/install-layouts.md"
+        applyTo: "crates/pixel-install/**"
+      # These rules are always-on in AGENTS.md's table.
+      - files: ".agents/rules/test-campaigns.md,.agents/rules/release.md,.agents/rules/measuring.md,.agents/rules/change-propagation.md"
         applyTo: "**"
