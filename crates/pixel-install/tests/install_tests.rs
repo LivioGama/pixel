@@ -4117,10 +4117,17 @@ fn install_should_replace_legacy_script_hooks_instead_of_stacking_new_ones() {
 /// writes it into the hook commands.
 #[cfg(unix)]
 fn fake_dev_exe(home: &std::path::Path) -> std::path::PathBuf {
+    fake_exe_named(home, "pixel-dev")
+}
+
+/// A stand-in pixel build installed as `name` under `~/.local/bin`,
+/// canonicalized as install writes it into the hook commands.
+#[cfg(unix)]
+fn fake_exe_named(home: &std::path::Path, name: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = home.join(".local/bin");
     fs::create_dir_all(&bin).unwrap();
-    let path = bin.join("pixel-dev");
+    let path = bin.join(name);
     fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     path.canonicalize().unwrap()
@@ -4161,17 +4168,45 @@ const ONE_EACH: [(&str, usize); 4] = [
 
 /// A build not named `pixel` must replace the entries it wrote on the last
 /// install. It used to append a new set each time (0 → 4 → 8 → 12 entries),
-/// so every prompt and every edit ran each hook once per install.
+/// so every prompt and every edit ran each hook once per install. Both the
+/// name `self-update --dev` writes and a name chosen by hand.
 #[test]
 #[cfg(unix)]
 fn install_by_a_binary_not_named_pixel_should_replace_its_own_hooks_not_stack_them() {
+    for name in ["pixel-dev", "pixel-livio"] {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let exe = fake_exe_named(home, name);
+        for _ in 0..3 {
+            install(&InstallOptions {
+                home: Some(home.to_path_buf()),
+                executable_path: Some(exe.clone()),
+                shell: Some(TEST_SHELL.into()),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        let settings = read_json(&home.join(".claude/settings.json"));
+        assert_eq!(lifecycle_counts(&settings), ONE_EACH, "{name}: {settings}");
+        assert!(
+            settings.to_string().contains(&format!("{name}' run-hook")),
+            "the entries name the {name} build: {settings}"
+        );
+    }
+}
+
+/// Going back from a dev build to the release: `pixel install` after
+/// `pixel-dev install` must replace the dev entries, not add its own beside
+/// them and run every hook twice.
+#[test]
+#[cfg(unix)]
+fn release_install_after_a_dev_install_should_replace_the_dev_hooks() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
-    let exe = fake_dev_exe(home);
-    for _ in 0..3 {
+    for exe in [fake_dev_exe(home), fake_pixel_exe(home)] {
         install(&InstallOptions {
             home: Some(home.to_path_buf()),
-            executable_path: Some(exe.clone()),
+            executable_path: Some(exe),
             shell: Some(TEST_SHELL.into()),
             ..Default::default()
         })
@@ -4180,8 +4215,8 @@ fn install_by_a_binary_not_named_pixel_should_replace_its_own_hooks_not_stack_th
     let settings = read_json(&home.join(".claude/settings.json"));
     assert_eq!(lifecycle_counts(&settings), ONE_EACH, "{settings}");
     assert!(
-        settings.to_string().contains("pixel-dev' run-hook"),
-        "the entries name the dev build: {settings}"
+        !settings.to_string().contains("pixel-dev"),
+        "no dev entry left: {settings}"
     );
 }
 

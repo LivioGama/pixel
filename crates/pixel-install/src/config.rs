@@ -24,6 +24,17 @@ pub const MANAGED_END: &str = "<!-- pixel:managed:end -->";
 const STALE_BLOCK_MARKERS: &[&str] =
     &["gitnexus", "GitNexus", "codebase-memory", "codebase memory"];
 
+/// The file name every release installs pixel under.
+pub const PIXEL_EXECUTABLE: &str = "pixel";
+/// The file name `pixel self-update --dev` installs a side build under, so it
+/// runs beside the managed `pixel` without shadowing it.
+pub const PIXEL_DEV_EXECUTABLE: &str = "pixel-dev";
+/// Every file name pixel installs itself under. A command run through either
+/// is pixel's, whichever of the two binaries reads it: a release install
+/// replaces the hooks a dev build wrote, and the guard recognises a
+/// `pixel-dev` invocation as it does a `pixel` one.
+pub const PIXEL_EXECUTABLES: [&str; 2] = [PIXEL_EXECUTABLE, PIXEL_DEV_EXECUTABLE];
+
 /// The Claude hooks directory (relative to home).
 pub const CLAUDE_HOOKS_DIR: &str = ".claude/hooks";
 /// The guard script name used before the `gitpixel` → `pixel` rename; still

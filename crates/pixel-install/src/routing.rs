@@ -104,12 +104,14 @@ fn executable_name(executable: &str) -> Option<String> {
 /// the `run-hook` verb (`session-start`, `guard --provider claude`, ...) or,
 /// for an install older than `run-hook`, the script's file name.
 ///
-/// A `run-hook` command is pixel's when its executable is named `pixel`, as
-/// every release installs it, or carries the file name of `exe`, the binary
-/// installing or uninstalling now. Without the second case a build installed
-/// under another name (`pixel-dev`) never recognises the entries it wrote: each
-/// install appends a new set beside them and uninstall leaves them all. Only
-/// those two names count, never any name merely containing `pixel`.
+/// A `run-hook` command is pixel's when its executable carries one of the
+/// names pixel installs itself under ([`config::PIXEL_EXECUTABLES`]: `pixel`
+/// for a release, `pixel-dev` for `self-update --dev`) or the file name of
+/// `exe`, the binary installing or uninstalling now. Without them a build under
+/// another name never recognises the entries it wrote, nor a release the dev
+/// build's: each install appends a new set beside the old one and uninstall
+/// leaves them all. Only those exact names count, never any name merely
+/// containing `pixel`.
 pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a str> {
     // Installs before `pixel run-hook` registered standalone scripts under
     // `~/.claude/hooks/`. An install that does not recognise them keeps the
@@ -135,27 +137,28 @@ pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a st
         .rsplit_once(" run-hook ")
         .or_else(|| command.rsplit_once(" hook "))
         .filter(|(executable, verb)| {
-            executable_name(executable)
-                .is_some_and(|name| name == "pixel" || own.as_deref() == Some(name.as_str()))
-                && ([
-                    "guard",
-                    "guard --provider claude",
-                    "guard --provider codex",
-                    "guard --provider devin",
-                    "guard --provider claude --delegate-rtk",
-                    "composed-guard --provider codex",
-                    "session-start",
-                    "prompt-submit",
-                    "prompt-submit --provider claude",
-                    "post-compaction",
-                    "post-compaction --provider claude",
-                    "post-tool-use",
-                    "post-tool-use --provider claude",
-                ]
-                .contains(verb)
-                    || verb
-                        .strip_prefix("composed-guard --provider codex --backup ")
-                        .is_some_and(|backup| !backup.is_empty()))
+            executable_name(executable).is_some_and(|name| {
+                config::PIXEL_EXECUTABLES.contains(&name.as_str())
+                    || own.as_deref() == Some(name.as_str())
+            }) && ([
+                "guard",
+                "guard --provider claude",
+                "guard --provider codex",
+                "guard --provider devin",
+                "guard --provider claude --delegate-rtk",
+                "composed-guard --provider codex",
+                "session-start",
+                "prompt-submit",
+                "prompt-submit --provider claude",
+                "post-compaction",
+                "post-compaction --provider claude",
+                "post-tool-use",
+                "post-tool-use --provider claude",
+            ]
+            .contains(verb)
+                || verb
+                    .strip_prefix("composed-guard --provider codex --backup ")
+                    .is_some_and(|backup| !backup.is_empty()))
         })
         .map(|(_, verb)| verb)
 }
@@ -1589,9 +1592,10 @@ mod tests {
     }
 
     /// A build installed under another name than `pixel` (`self-update
-    /// --dev` writes `pixel-dev`) must recognise the entries it wrote itself,
-    /// or every install appends a second set and uninstall leaves them all.
-    /// Recognising it must not widen ownership to other names that merely
+    /// --dev` writes `pixel-dev`, a user may rename one) must recognise the
+    /// entries it wrote itself, and a release those of `pixel-dev`, or every
+    /// install appends a second set and uninstall leaves them all.
+    /// Recognising them must not widen ownership to other names that merely
     /// contain `pixel`, nor to commands that chain or redirect.
     #[test]
     fn is_pixel_hook_should_own_the_installing_executable_under_any_name_but_no_other() {
@@ -1623,34 +1627,51 @@ mod tests {
             assert!(!is_pixel_hook(foreign, dev), "{foreign}");
         }
         assert!(
-            !is_pixel_hook(
+            is_pixel_hook(
                 "'/Users/dev/.local/bin/pixel-dev' run-hook session-start",
                 release()
             ),
-            "a release build does not claim another build's name"
+            "a release install replaces what `self-update --dev` installed"
         );
+        let renamed = Path::new("/opt/bin/pixel-livio");
+        let livio = "'/opt/bin/pixel-livio' run-hook session-start";
+        assert!(
+            is_pixel_hook(livio, renamed),
+            "a build renamed by hand owns what it wrote"
+        );
+        assert!(
+            !is_pixel_hook(livio, release()),
+            "a name pixel never installs under is only its own build's"
+        );
+        assert!(!is_pixel_hook(
+            "'/opt/pixel-dev-helper' run-hook session-start",
+            release()
+        ));
     }
 
-    /// The RTK delegation of a `pixel-dev` guard is read back by the next
-    /// `pixel-dev` install: unrecognised, the old delegate guard stayed as an
+    /// The RTK delegation of a renamed build's guard is read back by that
+    /// build's next install: unrecognised, the old delegate guard stayed as an
     /// unknown shell rewriter, which blocked the new guard, and the adopted
     /// RTK group was never put back.
     #[test]
-    fn reinstall_by_a_dev_build_should_keep_its_rtk_delegation() {
-        let dev = Path::new("/Users/dev/.local/bin/pixel-dev");
+    fn reinstall_by_a_renamed_build_should_keep_its_rtk_delegation() {
+        let renamed = Path::new("/opt/bin/pixel-livio");
         let rtk =
             json!({"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]});
         let mut value = json!({"hooks":{"PreToolUse":[rtk.clone()]}});
-        let (_, adopted) = configure(&mut value, Provider::Claude, dev, &[]).unwrap();
+        let (_, adopted) = configure(&mut value, Provider::Claude, renamed, &[]).unwrap();
         assert_eq!(adopted, vec![rtk.clone()]);
-        assert!(has_delegate(value["hooks"].as_object().unwrap(), dev));
+        assert!(has_delegate(value["hooks"].as_object().unwrap(), renamed));
         assert!(!has_delegate(
             value["hooks"].as_object().unwrap(),
             release()
         ));
         let once = value.clone();
-        let (enabled, again) = configure(&mut value, Provider::Claude, dev, &adopted).unwrap();
-        assert!(enabled, "the dev build's own guard does not block itself");
+        let (enabled, again) = configure(&mut value, Provider::Claude, renamed, &adopted).unwrap();
+        assert!(
+            enabled,
+            "the renamed build's own guard does not block itself"
+        );
         assert_eq!(again, vec![rtk]);
         assert_eq!(value, once);
     }
@@ -1681,6 +1702,11 @@ mod tests {
                 "SessionStart→session-start ×3".to_owned(),
                 "UserPromptSubmit→prompt-submit --provider claude ×2".to_owned(),
             ]
+        );
+        assert_eq!(
+            stacked_pixel_hooks(&value, release()),
+            stacked_pixel_hooks(&value, dev),
+            "a release doctor sees the copies a dev build stacked"
         );
         assert_eq!(stacked_pixel_hooks(&Value::Null, dev), Vec::<String>::new());
     }
