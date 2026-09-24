@@ -1410,7 +1410,7 @@ pub(crate) mod tests {
 
     #[test]
     fn parse_phase_a_keeps_a_record_with_no_changes_and_drops_a_short_one() {
-        let bare = b"abc  Ann 2026-01-01T00:00:00Z subject
+        let bare = b"\x1eabc\x00\x00Ann\x002026-01-01T00:00:00Z\x00subject
 
 body
 ";
@@ -1425,7 +1425,7 @@ body
 body"
         );
         assert!(parsed[0].changes.is_empty());
-        assert!(parse_phase_a(b"abc  Ann ").is_empty());
+        assert!(parse_phase_a(b"\x1eabc\x00\x00Ann\x00").is_empty());
         assert!(parse_phase_a(b"").is_empty());
     }
 
