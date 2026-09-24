@@ -9,6 +9,8 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+use crate::extract::ImportBinding;
+
 #[derive(Debug)]
 pub enum StoreError {
     Sql(rusqlite::Error),
@@ -188,8 +190,38 @@ pub struct ImportRow {
     pub id: i64,
     pub file_id: i64,
     pub spec: String,
-    /// Named bindings pulled from `spec` (already split on the stored CSV).
-    pub bindings: Vec<String>,
+    /// Named bindings pulled from `spec` (decoded from the stored column).
+    pub bindings: Vec<ImportBinding>,
+}
+
+/// The `imports.bindings` column: comma-separated bindings, each `name` when
+/// imported under its own name and `local=source` under an alias. Neither
+/// separator can occur in an identifier, and a plain `name` is what graphs
+/// built before aliases were tracked stored, so they decode unchanged.
+pub fn encode_bindings(bindings: &[ImportBinding]) -> String {
+    bindings
+        .iter()
+        .map(|b| {
+            if b.local == b.source {
+                b.local.clone()
+            } else {
+                format!("{}={}", b.local, b.source)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The inverse of [`encode_bindings`]; empty entries are dropped.
+pub fn decode_bindings(csv: &str) -> Vec<ImportBinding> {
+    csv.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| match entry.split_once('=') {
+            Some((local, source)) => ImportBinding::aliased(source, local),
+            None => ImportBinding::named(entry),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -683,9 +715,9 @@ impl GraphStore {
         file_id: i64,
         spec: &str,
         resolved_file_id: Option<i64>,
-        bindings: &[String],
+        bindings: &[ImportBinding],
     ) -> Result<()> {
-        let bindings_csv = bindings.join(",");
+        let bindings_csv = encode_bindings(bindings);
         self.conn.execute(
             "INSERT INTO imports (file_id, spec, resolved_file_id, bindings) VALUES (?1, ?2, ?3, ?4)",
             params![file_id, spec, resolved_file_id, bindings_csv],
@@ -694,16 +726,30 @@ impl GraphStore {
     }
 
     pub fn insert_edge(&self, e: &EdgeRow) -> Result<()> {
+        self.insert_edge_row(e, None)
+    }
+
+    /// Insert a resolved call or reference edge, recording the name the site
+    /// wrote (`edges.callee`). It differs from the target's own name under an
+    /// import alias (`leased()` → `push`), and re-resolution after an
+    /// incremental update must replay the written name: the target's name is
+    /// not in scope at that site.
+    pub fn insert_resolved_edge(&self, e: &EdgeRow, callee: &str) -> Result<()> {
+        self.insert_edge_row(e, Some(callee))
+    }
+
+    fn insert_edge_row(&self, e: &EdgeRow, callee: Option<&str>) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO edges (src_id, dst_id, kind, tier, site_line, receiver)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO edges (src_id, dst_id, kind, tier, site_line, receiver, callee)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 e.src_id,
                 e.dst_id,
                 e.kind.as_str(),
                 e.tier.as_str(),
                 e.site_line,
-                e.receiver
+                e.receiver,
+                callee
             ],
         )?;
         Ok(())
@@ -1025,6 +1071,19 @@ impl GraphStore {
             .optional()?)
     }
 
+    /// `(src_id, site_line)` of the edges into `dst_id` whose site wrote
+    /// another name than `name`: calls through an import alias
+    /// (`leased()` → `push`). `rename` leaves them alone, since the alias
+    /// stays valid when the source item is renamed.
+    pub fn aliased_edge_sites(&self, dst_id: i64, name: &str) -> Result<Vec<(i64, u32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT src_id, site_line FROM edges
+              WHERE dst_id = ?1 AND callee IS NOT NULL AND callee != ?2",
+        )?;
+        let rows = stmt.query_map(params![dst_id, name], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// Import rows whose spec resolved to `resolved_file_id` — the files that
     /// pull bindings out of that file. `rename` reads these to rewrite the
     /// imported name at the `use`/`import` site.
@@ -1037,12 +1096,7 @@ impl GraphStore {
                 id: r.get(0)?,
                 file_id: r.get(1)?,
                 spec: r.get(2)?,
-                bindings: r
-                    .get::<_, String>(3)?
-                    .split(',')
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-                    .collect(),
+                bindings: decode_bindings(&r.get::<_, String>(3)?),
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -1516,7 +1570,8 @@ CREATE TABLE IF NOT EXISTS edges (
   kind TEXT NOT NULL,
   tier TEXT NOT NULL,
   site_line INTEGER NOT NULL DEFAULT 0,
-  receiver TEXT
+  receiver TEXT,
+  callee TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src_id);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst_id);
@@ -1658,6 +1713,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if !has_column("edges", "receiver")? {
         conn.execute("ALTER TABLE edges ADD COLUMN receiver TEXT", [])?;
+    }
+    if !has_column("edges", "callee")? {
+        conn.execute("ALTER TABLE edges ADD COLUMN callee TEXT", [])?;
     }
     if !has_column("imports", "bindings")? {
         conn.execute(
@@ -2109,5 +2167,25 @@ mod tests {
             store.symbols_by_lang().unwrap().into_iter().collect();
         assert_eq!(by_lang["rust"], 2);
         assert_eq!(by_lang["ts"], 1);
+    }
+
+    /// The column keeps `local=source` only under an alias, so a graph
+    /// written before aliases were tracked (plain names) decodes as-is.
+    #[test]
+    fn bindings_column_encodes_an_alias_as_local_equals_source() {
+        let bindings = [
+            ImportBinding::named("push"),
+            ImportBinding::aliased("push", "leased"),
+        ];
+        assert_eq!(encode_bindings(&bindings), "push,leased=push");
+        assert_eq!(decode_bindings(" push, leased=push,,"), bindings);
+        assert_eq!(
+            decode_bindings("greet,farewell"),
+            [
+                ImportBinding::named("greet"),
+                ImportBinding::named("farewell")
+            ]
+        );
+        assert!(decode_bindings("").is_empty());
     }
 }

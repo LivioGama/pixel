@@ -31,17 +31,18 @@
 //! envelope honest (`lower_bound`, `unresolved_same_name`) instead of an edge
 //! to the wrong definition.
 //!
-//! Known limitation: T1 still matches at file granularity (an import resolves
-//! to a file, not to specific exported bindings). Refining this to per-name
-//! import tracking requires recording imported binding names, which is left
-//! for a follow-up; the receiver downgrade above already removes the cited
-//! false-positive (`x.parse()` → `SymbolKind::parse`).
+//! T1 matches on the names an import binds (`imports.bindings`), not on the
+//! file it resolves to: a wildcard or file-level import proves no binding.
+//! Under an alias the call site writes the importer's local name while the
+//! candidate carries the source name (`use a::push as leased;` →
+//! `leased()` calls `push`), so T1 looks the local name up and matches
+//! candidates on the source; the source name alone is not in scope there.
 
 use std::collections::{HashMap, HashSet};
 
 use rusqlite::params;
 
-use crate::store::{EdgeKind, EdgeRow, GraphStore, StoreError, SymbolKind, Tier};
+use crate::store::{EdgeKind, EdgeRow, GraphStore, StoreError, SymbolKind, Tier, decode_bindings};
 
 #[derive(Debug, Default, Clone)]
 pub struct ResolveStats {
@@ -118,13 +119,11 @@ pub struct ResolveIndex {
     /// (`pixel_git::GitRunner` + `new` ↔ `GitRunner::new`). Kept beside the
     /// `Copy` candidate rows so the tier code stays copy-based.
     qualified_of: HashMap<i64, String>,
-    /// file_id → set of imported file_ids (for file-level fallback).
-    imports_of: HashMap<i64, HashSet<i64>>,
-    /// (file_id, binding_name) → set of imported file_ids. When non-empty,
-    /// T1 requires the callee name to be an imported binding from that file,
-    /// not just any definition in an imported file. Empty binding sets fall
-    /// back to file-level matching (the pre-fix behavior).
-    import_bindings: HashMap<(i64, String), HashSet<i64>>,
+    /// (file_id, local name) → the (imported file_id, source name) pairs an
+    /// import binds under that name. T1 requires the callee to be one of
+    /// them: a definition named `source` in that file, not just any
+    /// definition in an imported file.
+    import_bindings: HashMap<(i64, String), Vec<(i64, String)>>,
 }
 
 fn callable(kind: SymbolKind) -> bool {
@@ -186,8 +185,7 @@ impl ResolveIndex {
                 }
             }
         }
-        let mut imports_of: HashMap<i64, HashSet<i64>> = HashMap::new();
-        let mut import_bindings: HashMap<(i64, String), HashSet<i64>> = HashMap::new();
+        let mut import_bindings: HashMap<(i64, String), Vec<(i64, String)>> = HashMap::new();
         {
             let mut stmt = conn.prepare(
                 "SELECT file_id, resolved_file_id, bindings FROM imports WHERE resolved_file_id IS NOT NULL",
@@ -202,17 +200,13 @@ impl ResolveIndex {
             for row in rows {
                 let (fid, dst_opt, bindings_csv) = row?;
                 if let Some(dst) = dst_opt {
-                    imports_of.entry(fid).or_default().insert(dst);
-                    // Parse comma-separated binding names. Empty string means
-                    // wildcard or unknown and grants no T1 Exact confidence.
-                    for b in bindings_csv.split(',') {
-                        let b = b.trim();
-                        if !b.is_empty() {
-                            import_bindings
-                                .entry((fid, b.to_string()))
-                                .or_default()
-                                .insert(dst);
-                        }
+                    // An empty column means wildcard or unknown and grants
+                    // no T1 Exact confidence.
+                    for b in decode_bindings(&bindings_csv) {
+                        import_bindings
+                            .entry((fid, b.local))
+                            .or_default()
+                            .push((dst, b.source));
                     }
                 }
             }
@@ -221,7 +215,6 @@ impl ResolveIndex {
             by_name,
             ruby_files,
             qualified_of,
-            imports_of,
             import_bindings,
         })
     }
@@ -229,6 +222,15 @@ impl ResolveIndex {
     /// True iff some symbol in the graph is named `name`.
     pub fn defines(&self, name: &str) -> bool {
         self.by_name.contains_key(name)
+    }
+
+    /// True iff `name` can name a symbol from `file_id`: a symbol carries
+    /// it, or an import of that file binds it (an alias names no symbol).
+    fn names_a_symbol(&self, file_id: i64, name: &str) -> bool {
+        self.defines(name)
+            || self
+                .import_bindings
+                .contains_key(&(file_id, name.to_string()))
     }
 
     /// The tier decision for one call from `caller_file_id` to `name`.
@@ -415,9 +417,7 @@ impl ResolveIndex {
 
     /// Tier decision ignoring receiver type (the original name-only logic).
     fn decide_raw(&self, caller_file_id: i64, name: &str) -> Decision {
-        let Some(cands) = self.by_name.get(name) else {
-            return Decision::Unresolved;
-        };
+        let cands = self.by_name.get(name).map_or(&[][..], Vec::as_slice);
         // T0: same file.
         let same_file: Vec<Candidate> = cands
             .iter()
@@ -430,29 +430,8 @@ impl ResolveIndex {
         // T1: defined in exactly one file that explicitly imported this name.
         // File-level or wildcard imports cannot prove an unqualified binding,
         // so they remain eligible only for repo-wide T2 Probable resolution.
-        if let Some(imported) = self.imports_of.get(&caller_file_id) {
-            let binding_files = self
-                .import_bindings
-                .get(&(caller_file_id, name.to_string()));
-            let mut effective_imported: HashSet<i64> = binding_files
-                .into_iter()
-                .flat_map(|files| files.iter().copied())
-                .collect();
-            effective_imported.retain(|file_id| imported.contains(file_id));
-            let hits: Vec<Candidate> = cands
-                .iter()
-                .copied()
-                .filter(|c| effective_imported.contains(&c.file_id))
-                .collect();
-            let files: HashSet<i64> = hits.iter().map(|c| c.file_id).collect();
-            if files.len() == 1
-                && let Some(id) = best(&hits)
-            {
-                return Decision::Exact(id);
-            }
-            if files.len() > 1 {
-                return Decision::Unresolved; // ambiguous — never fan out
-            }
+        if let Some(decision) = self.import_tier(caller_file_id, name) {
+            return decision;
         }
         // T2: unique definition file repo-wide.
         let files: HashSet<i64> = cands.iter().map(|c| c.file_id).collect();
@@ -462,6 +441,29 @@ impl ResolveIndex {
             return Decision::Probable(id);
         }
         Decision::Unresolved
+    }
+
+    /// T1: the definitions the imports binding `name` in `caller_file_id`
+    /// point at — each a symbol named after the binding's source in the file
+    /// the import resolved to. `None` when no import binds `name` or none of
+    /// them lands on a definition (T2 decides); `Unresolved` when they land
+    /// in several files, since a name never fans out.
+    fn import_tier(&self, caller_file_id: i64, name: &str) -> Option<Decision> {
+        let targets = self
+            .import_bindings
+            .get(&(caller_file_id, name.to_string()))?;
+        let mut hits: Vec<Candidate> = Vec::new();
+        for (file_id, source) in targets {
+            if let Some(cands) = self.by_name.get(source) {
+                hits.extend(cands.iter().copied().filter(|c| c.file_id == *file_id));
+            }
+        }
+        let files: HashSet<i64> = hits.iter().map(|c| c.file_id).collect();
+        match files.len() {
+            0 => None,
+            1 => best(&hits).map(Decision::Exact),
+            _ => Some(Decision::Unresolved),
+        }
     }
 }
 
@@ -539,25 +541,31 @@ pub fn resolve_calls(
                 call.receiver.as_deref(),
             ) {
                 Decision::Exact(dst) => {
-                    store.insert_edge(&EdgeRow {
-                        src_id,
-                        dst_id: dst,
-                        kind: EdgeKind::Calls,
-                        tier: Tier::Exact,
-                        site_line: call.site_line,
-                        receiver: call.receiver.clone(),
-                    })?;
+                    store.insert_resolved_edge(
+                        &EdgeRow {
+                            src_id,
+                            dst_id: dst,
+                            kind: EdgeKind::Calls,
+                            tier: Tier::Exact,
+                            site_line: call.site_line,
+                            receiver: call.receiver.clone(),
+                        },
+                        &call.callee_name,
+                    )?;
                     stats.exact += 1;
                 }
                 Decision::Probable(dst) => {
-                    store.insert_edge(&EdgeRow {
-                        src_id,
-                        dst_id: dst,
-                        kind: EdgeKind::Calls,
-                        tier: Tier::Probable,
-                        site_line: call.site_line,
-                        receiver: call.receiver.clone(),
-                    })?;
+                    store.insert_resolved_edge(
+                        &EdgeRow {
+                            src_id,
+                            dst_id: dst,
+                            kind: EdgeKind::Calls,
+                            tier: Tier::Probable,
+                            site_line: call.site_line,
+                            receiver: call.receiver.clone(),
+                        },
+                        &call.callee_name,
+                    )?;
                     stats.probable += 1;
                 }
                 Decision::Unresolved => {
@@ -594,7 +602,7 @@ pub fn resolve_references(
     let mut stats = ResolveStats::default();
     for fr in pending {
         for r#ref in &fr.references {
-            if !idx.defines(&r#ref.name) {
+            if !idx.names_a_symbol(fr.file_id, &r#ref.name) {
                 continue;
             }
             let Some(src_id) = r#ref.enclosing_symbol_id else {
@@ -615,14 +623,17 @@ pub fn resolve_references(
             // method call), so pass `None`.
             match idx.decide(fr.file_id, &r#ref.name, None) {
                 Decision::Exact(dst) | Decision::Probable(dst) => {
-                    store.insert_edge(&EdgeRow {
-                        src_id,
-                        dst_id: dst,
-                        kind: EdgeKind::References,
-                        tier: Tier::Probable,
-                        site_line: r#ref.site_line,
-                        receiver: r#ref.arg_of.clone(),
-                    })?;
+                    store.insert_resolved_edge(
+                        &EdgeRow {
+                            src_id,
+                            dst_id: dst,
+                            kind: EdgeKind::References,
+                            tier: Tier::Probable,
+                            site_line: r#ref.site_line,
+                            receiver: r#ref.arg_of.clone(),
+                        },
+                        &r#ref.name,
+                    )?;
                     stats.probable += 1;
                 }
                 Decision::Unresolved => {
@@ -709,14 +720,17 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
         } else {
             tier
         };
-        store.insert_edge(&EdgeRow {
-            src_id: row.enclosing,
-            dst_id: dst,
-            kind: edge_kind,
-            tier,
-            site_line: row.site_line,
-            receiver: row.receiver.clone(),
-        })?;
+        store.insert_resolved_edge(
+            &EdgeRow {
+                src_id: row.enclosing,
+                dst_id: dst,
+                kind: edge_kind,
+                tier,
+                site_line: row.site_line,
+                receiver: row.receiver.clone(),
+            },
+            &row.name,
+        )?;
         store.conn().execute(
             "DELETE FROM unresolved_calls WHERE id = ?1",
             params![row.id],
@@ -751,7 +765,7 @@ pub fn reconsider_resolved_calls(
     for name in changed_names {
         let found: Vec<ResolvedCall> = {
             let mut stmt = store.conn().prepare(
-                "SELECT src.file_id, dst.name, e.src_id, e.site_line, e.receiver, e.kind
+                "SELECT src.file_id, COALESCE(e.callee, dst.name), e.src_id, e.site_line, e.receiver, e.kind
                    FROM edges e
                    JOIN symbols src ON src.id = e.src_id
                    JOIN symbols dst ON dst.id = e.dst_id
@@ -793,6 +807,7 @@ pub fn reconsider_resolved_calls(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extract::ImportBinding;
     use crate::store::GraphStore;
 
     /// Two Rust files that both define `f`: the caller's own `src/local.rs`
@@ -1287,7 +1302,12 @@ mod tests {
         // `open()` to `A::open` as Exact. A receiver naming `B` must not
         // swap that for a Probable guess at `B::open`.
         store
-            .insert_import(local, "crate::a::open", Some(a), &["open".to_string()])
+            .insert_import(
+                local,
+                "crate::a::open",
+                Some(a),
+                &[crate::extract::ImportBinding::named("open")],
+            )
             .unwrap();
         let idx = ResolveIndex::build(&store).unwrap();
         assert_eq!(
@@ -1295,5 +1315,64 @@ mod tests {
             Decision::Probable(a_open),
             "Exact(A::open) downgraded to Probable, never swapped for B::open"
         );
+    }
+
+    /// T1 under an alias: the call writes the local name, the candidate
+    /// carries the source name. Two imports binding one name to definitions
+    /// in two files never fan out; an import whose file holds no definition
+    /// of the source leaves the decision to T2.
+    #[test]
+    fn import_tier_matches_the_local_name_against_the_source_definition() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let local = store.replace_file("src/local.rs", "oid", "rust").unwrap();
+        let a = store.replace_file("src/a.rs", "oid", "rust").unwrap();
+        let b = store.replace_file("src/b.rs", "oid", "rust").unwrap();
+        let c = store.replace_file("src/c.rs", "oid", "rust").unwrap();
+        let a_push = insert(&store, a, "src/a.rs", "push");
+        insert(&store, b, "src/b.rs", "push");
+        let c_open = insert(&store, c, "src/c.rs", "open");
+        store
+            .insert_import(
+                local,
+                "crate::a::push as leased",
+                Some(a),
+                &[ImportBinding::aliased("push", "leased")],
+            )
+            .unwrap();
+        store
+            .insert_import(
+                local,
+                "crate::a::push as both",
+                Some(a),
+                &[ImportBinding::aliased("push", "both")],
+            )
+            .unwrap();
+        store
+            .insert_import(
+                local,
+                "crate::b::push as both",
+                Some(b),
+                &[ImportBinding::aliased("push", "both")],
+            )
+            .unwrap();
+        // `open` is bound to a.rs, which does not define it: the import
+        // proves nothing, and c.rs's sole `open` is T2's Probable.
+        store
+            .insert_import(
+                local,
+                "crate::a::open",
+                Some(a),
+                &[ImportBinding::named("open")],
+            )
+            .unwrap();
+        let idx = ResolveIndex::build(&store).unwrap();
+        assert_eq!(idx.decide(local, "leased", None), Decision::Exact(a_push));
+        assert_eq!(
+            idx.decide(local, "push", None),
+            Decision::Unresolved,
+            "only aliases are bound; two files define push"
+        );
+        assert_eq!(idx.decide(local, "both", None), Decision::Unresolved);
+        assert_eq!(idx.decide(local, "open", None), Decision::Probable(c_open));
     }
 }

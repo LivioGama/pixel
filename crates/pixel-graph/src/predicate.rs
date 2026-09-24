@@ -1241,7 +1241,7 @@ mod tests {
                 fx.files[0],
                 "crate::f1",
                 Some(fx.files[1]),
-                &["f1".to_string()],
+                &[crate::extract::ImportBinding::named("f1")],
             )
             .unwrap();
         let ev = fx.eval_with(

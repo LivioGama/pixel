@@ -13,7 +13,7 @@
 //! No regex replaces, no whole-word text scan: two same-named symbols in one
 //! file only collide if the graph itself confused them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use serde::Serialize;
@@ -129,6 +129,13 @@ pub fn plan(
         spec: None,
     }];
 
+    // A site that calls the symbol through an import alias writes the alias,
+    // which the rename leaves valid: it is neither an edit nor a skip.
+    let aliased: HashSet<(i64, u32)> = store
+        .aliased_edge_sites(sym.id, &sym.name)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect();
     for kind in [EdgeKind::Calls, EdgeKind::References] {
         let site_kind = if kind == EdgeKind::Calls {
             SiteKind::Call
@@ -139,6 +146,9 @@ pub fn plan(
             .edges_to(sym.id, Some(kind))
             .map_err(|e| e.to_string())?
         {
+            if aliased.contains(&(edge.src_id, edge.site_line)) {
+                continue;
+            }
             // The edge names the enclosing symbol; its file holds the site.
             let Some(src) = symbol_by_id(store, edge.src_id) else {
                 continue;
@@ -159,7 +169,7 @@ pub fn plan(
         .imports_to_file(sym.file_id)
         .map_err(|e| e.to_string())?
     {
-        if !import.bindings.iter().any(|b| b == &sym.name) {
+        if !import.bindings.iter().any(|b| b.source == sym.name) {
             continue;
         }
         let Some(path) = files.get(&import.file_id) else {
@@ -787,6 +797,35 @@ mod tests {
         assert!(after.contains("authenticate("), "{after}");
         assert!(after.contains("import { authenticate }"), "{after}");
         assert!(after.contains("// loginUser"), "{after}");
+    }
+
+    /// `import { loginUser as auth }` then `auth()`: the import's source
+    /// name is rewritten, and the call — an Exact edge since the resolver
+    /// follows the alias — writes `auth`, which stays valid. It is neither an
+    /// edit nor a skip: a skip would report a site the rename cannot verify
+    /// when there is nothing to rename there.
+    #[test]
+    fn plan_rewrites_an_aliased_import_and_leaves_the_aliased_call() {
+        let (dir, _store) = fixture();
+        std::fs::write(
+            dir.path().join("src/caller.ts"),
+            "import { loginUser as auth } from \"./login\";\n\nexport function go(): boolean {\n    return auth(\"someone\");\n}\n",
+        )
+        .unwrap();
+        let db = dir.path().join("graph.db");
+        crate::build::build_graph(dir.path(), &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let sym = login_sym(&store);
+        let plan = plan(&store, dir.path(), &sym, "authenticate").unwrap();
+        let caller = plan.files.get("src/caller.ts").expect("caller edits");
+        let kinds: Vec<SiteKind> = caller.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, [SiteKind::Import], "{caller:?}");
+        assert!(plan.skipped.is_empty(), "{:?}", plan.skipped);
+
+        apply(dir.path(), &plan, "loginUser", "authenticate").unwrap();
+        let after = std::fs::read_to_string(dir.path().join("src/caller.ts")).unwrap();
+        assert!(after.contains("import { authenticate as auth }"), "{after}");
+        assert!(after.contains("return auth("), "{after}");
     }
 
     #[test]

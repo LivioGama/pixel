@@ -91,7 +91,10 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    edges for unchanged sources.
 /// 7: a Rust `use` records the names it binds (`imports.bindings`), so the
 ///    import tier turns unresolved calls into Exact edges.
-pub const EXTRACTOR_VERSION: &str = "7";
+/// 8: an aliased import binds the alias to its source name
+///    (`use a::push as leased;`, `import { push as leased }`), so T1 links
+///    `leased()` to `push` and no longer links an unbound `push()`.
+pub const EXTRACTOR_VERSION: &str = "8";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -2317,6 +2320,115 @@ mod tests {
             !matches!(idx.decide(ship, "publish", None), Decision::Exact(_)),
             "a name the use does not bind never gets the import tier"
         );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The callers of `push` in `path`, as `(caller name, tier)`.
+    fn callers_of_push_in(store: &GraphStore, path: &str) -> Vec<(String, Tier)> {
+        let file = store.file_by_path(path).unwrap().unwrap().id;
+        let push = store
+            .symbols_in_file(file)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "push")
+            .unwrap();
+        let mut callers: Vec<(String, Tier)> = store
+            .edges_to(push.id, Some(EdgeKind::Calls))
+            .unwrap()
+            .into_iter()
+            .map(|e| {
+                let src: String = store
+                    .conn()
+                    .query_row(
+                        "SELECT name FROM symbols WHERE id = ?1",
+                        rusqlite::params![e.src_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                (src, e.tier)
+            })
+            .collect();
+        callers.sort_by(|a, b| a.0.cmp(&b.0));
+        callers
+    }
+
+    /// `use crate::push::push as leased;` puts `leased` in scope, not `push`.
+    /// Two files define `push`, so only the import tier can link a call to
+    /// one of them: `leased()` must reach `push.rs`, and the bare `push()` in
+    /// `stray`, which no import binds, must reach neither — it used to take
+    /// the Exact edge to `push.rs` because the use recorded the source name.
+    /// An incremental update that adds a third `push` reconsiders the edge;
+    /// it must replay the written `leased`, or the edge would be lost.
+    #[test]
+    fn a_rust_use_alias_binds_the_alias_and_survives_an_incremental_update() {
+        let root = tmpdir("rust-use-alias");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub mod push;\npub mod other;\npub mod ship;\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/push.rs"), "pub fn push() {}\n").unwrap();
+        std::fs::write(root.join("src/other.rs"), "pub fn push() {}\n").unwrap();
+        std::fs::write(
+            root.join("src/ship.rs"),
+            "use crate::push::push as leased;\npub fn ship() { leased(); }\npub fn stray() { push(); }\n",
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        {
+            let store = GraphStore::open(&db).unwrap();
+            assert_eq!(
+                callers_of_push_in(&store, "src/push.rs"),
+                [("ship".to_string(), Tier::Exact)],
+                "leased() calls push.rs's push; the unbound push() calls nothing proven"
+            );
+            assert!(callers_of_push_in(&store, "src/other.rs").is_empty());
+        }
+
+        std::fs::write(root.join("src/third.rs"), "pub fn push() {}\n").unwrap();
+        update_file(&root, &db, "src/third.rs").unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        assert_eq!(
+            callers_of_push_in(&store, "src/push.rs"),
+            [("ship".to_string(), Tier::Exact)],
+            "a new same-name definition elsewhere leaves the aliased import's edge"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The TS form of the alias: `import { push as leased }`. The alias is
+    /// also what a passed-as-value reference writes (`run(leased)`), and it
+    /// names no symbol, so the reference must not be dropped as a plain value.
+    #[test]
+    fn a_ts_import_alias_binds_the_alias_for_calls_and_references() {
+        let root = tmpdir("ts-import-alias");
+        std::fs::write(root.join("push.ts"), "export function push() {}\n").unwrap();
+        std::fs::write(root.join("other.ts"), "export function push() {}\n").unwrap();
+        std::fs::write(
+            root.join("ship.ts"),
+            "import { push as leased } from \"./push\";\n\
+             export function run(f: () => void) { f(); }\n\
+             export function ship() { leased(); }\n\
+             export function stray() { push(); }\n\
+             export function hand() { run(leased); }\n",
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        assert_eq!(
+            callers_of_push_in(&store, "push.ts"),
+            [("ship".to_string(), Tier::Exact)]
+        );
+        assert!(callers_of_push_in(&store, "other.ts").is_empty());
+        let push_file = store.file_by_path("push.ts").unwrap().unwrap().id;
+        let push = store.symbols_in_file(push_file).unwrap().remove(0);
+        let references = store.edges_to(push.id, Some(EdgeKind::References)).unwrap();
+        assert_eq!(references.len(), 1, "run(leased) passes push.ts's push");
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
