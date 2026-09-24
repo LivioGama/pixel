@@ -1713,6 +1713,13 @@ pub fn extract_rule_commands(rule_text: &str) -> Vec<String> {
 /// Returns `None` when the line contains syntax this normalizer cannot
 /// handle — the caller reports such lines as "unparsed" instead of silently
 /// passing them.
+/// The second value a `...` placeholder expands to in
+/// [`normalize_rule_command`]. It is distinct from every other dummy so the
+/// validator can see which argument it bound to: a flag that takes one value
+/// per occurrence pushes it into the next positional (often a defaulted
+/// `PATH`), where a plain `x` would parse without a trace.
+pub const VARIADIC_SENTINEL: &str = "__pixel_variadic_second_value__";
+
 pub fn normalize_rule_command(line: &str) -> Option<Vec<String>> {
     // Unwrap bracketed optional groups: brackets may span several
     // whitespace-separated tokens, so strip the characters up front.
@@ -1743,9 +1750,9 @@ pub fn normalize_rule_command(line: &str) -> Option<Vec<String>> {
     let mut argv = Vec::with_capacity(tokens.len());
     for token in tokens {
         // A trailing variadic marker (`<f>...`) promises several values
-        // after one flag, so it becomes two dummy values: a flag that takes
-        // one value per occurrence then fails the parse, as `--files a b`
-        // does for the agent that copies the line.
+        // after one flag, so it becomes a dummy and `VARIADIC_SENTINEL`: the
+        // validator then checks the sentinel bound to an argument that takes
+        // several values, as `--files a b` must for the agent that copies it.
         let variadic = token.ends_with("...");
         let token = token.strip_suffix("...").unwrap_or(&token).to_string();
         // Placeholder → dummy value. A quoted multi-word placeholder is one
@@ -1773,10 +1780,10 @@ pub fn normalize_rule_command(line: &str) -> Option<Vec<String>> {
         if token.contains('<') || token.contains('>') || token.contains('…') {
             return None;
         }
-        if variadic {
-            argv.push(token.clone());
-        }
         argv.push(token);
+        if variadic {
+            argv.push(VARIADIC_SENTINEL.to_string());
+        }
     }
     if argv.first().map(String::as_str) != Some("pixel") {
         return None;
@@ -1861,10 +1868,11 @@ mod tests {
     use super::facts_dead_reason;
     use super::{
         CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary, Remedy, Repair,
-        RepairOutcome, RepairStatus, age_secs, capped, catalogue_steps, extract_rule_commands,
-        fix_for, judge_repair, normalize_rule_command, one_line, probe_daemon_epistemics,
-        render_catalogue, render_repairs, repair_for, repair_plan, rtk_backup_check, run_repair,
-        scenario_mismatches, selected, shell_word, spec, validate_selection,
+        RepairOutcome, RepairStatus, VARIADIC_SENTINEL, age_secs, capped, catalogue_steps,
+        extract_rule_commands, fix_for, judge_repair, normalize_rule_command, one_line,
+        probe_daemon_epistemics, render_catalogue, render_repairs, repair_for, repair_plan,
+        rtk_backup_check, run_repair, scenario_mismatches, selected, shell_word, spec,
+        validate_selection,
     };
     use crate::InstallError;
 
@@ -2657,8 +2665,8 @@ git clone https://example.com/repo.git
                 "auto".into(),
             ])
         );
-        // A variadic placeholder stands for two values, the shape an agent
-        // types when it copies the line.
+        // A variadic placeholder stands for two values, the second one the
+        // sentinel the validator traces.
         assert_eq!(
             normalize_rule_command(
                 "pixel commit --files <f>... --message \"<msg>\" --request-id <id> /path/to/repo"
@@ -2668,7 +2676,7 @@ git clone https://example.com/repo.git
                 "commit".into(),
                 "--files".into(),
                 "x".into(),
-                "x".into(),
+                VARIADIC_SENTINEL.into(),
                 "--message".into(),
                 "x".into(),
                 "--request-id".into(),

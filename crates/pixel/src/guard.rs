@@ -2349,8 +2349,8 @@ fn destructive_git_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<S
         "push" if has("--force") || cluster('f') => Some(vec![
             "BLOCKED by pixel-targets-guard: `git push --force` can destroy remote history.".into(),
             "Use pixel's gated mutation ops instead:".into(),
-            format!("  pixel push --request-id <id> {}", shell_quote(&root.display().to_string())),
-            format!("  pixel commit-and-push --files <f1> --files <f2> --message \"<msg>\" --request-id <id> {}", shell_quote(&root.display().to_string())),
+            format!("  pixel push <remote> <refspec> --request-id <id> {}", shell_quote(&root.display().to_string())),
+            format!("  pixel commit-and-push --files <f1> --files <f2> --message \"<msg>\" <remote> <refspec> --request-id <id> {}", shell_quote(&root.display().to_string())),
             "(pixel push uses --force-with-lease semantics only where safe.)".into(),
         ]),
         // `git merge` used to integrate a branch is denied outright: the
@@ -4019,6 +4019,40 @@ mod tests {
             .unwrap()
             .join("\n");
         assert!(msg.contains("destroy remote history"), "{msg}");
+    }
+
+    /// The force-push deny names the commands to run instead; an agent
+    /// copies them, so each must parse against the real CLI with more than
+    /// one file staged (`--files` takes one value per occurrence).
+    #[test]
+    fn force_push_alternatives_parse_with_several_files() {
+        let lines =
+            bash_deny_lines("git push --force origin main", Some(Path::new("/repo"))).unwrap();
+        let commands: Vec<&str> = lines
+            .iter()
+            .map(|l| l.trim())
+            .filter(|l| l.starts_with("pixel "))
+            .collect();
+        assert!(
+            commands
+                .iter()
+                .any(|c| c.starts_with("pixel commit-and-push")),
+            "{lines:?}"
+        );
+        for command in commands {
+            let argv = pixel_install::doctor::normalize_rule_command(command)
+                .unwrap_or_else(|| panic!("`{command}` did not normalize"));
+            assert_ne!(
+                argv.iter().filter(|a| *a == "--files").count(),
+                1,
+                "`{command}` shows a single --files"
+            );
+            assert_eq!(
+                crate::validate_cli_syntax(&argv),
+                Ok(()),
+                "`{command}` → {argv:?}"
+            );
+        }
     }
 
     // --- transcript escalation ------------------------------------------
