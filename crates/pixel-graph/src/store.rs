@@ -215,6 +215,27 @@ pub fn encode_bindings(bindings: &[ImportBinding]) -> String {
         .join(",")
 }
 
+/// The `imports.scope` column: comma-separated inclusive line ranges
+/// `start-end`; empty when the bindings are in scope in the whole file.
+pub fn encode_scope(scope: &[(u32, u32)]) -> String {
+    scope
+        .iter()
+        .map(|(start, end)| format!("{start}-{end}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The inverse of [`encode_scope`]; a malformed range is dropped.
+pub fn decode_scope(column: &str) -> Vec<(u32, u32)> {
+    column
+        .split(',')
+        .filter_map(|range| {
+            let (start, end) = range.trim().split_once('-')?;
+            Some((start.parse().ok()?, end.parse().ok()?))
+        })
+        .collect()
+}
+
 /// The inverse of [`encode_bindings`]; empty entries are dropped.
 pub fn decode_bindings(csv: &str) -> Vec<ImportBinding> {
     csv.split(',')
@@ -726,11 +747,12 @@ impl GraphStore {
         resolved_file_id: Option<i64>,
         bindings: &[ImportBinding],
     ) -> Result<()> {
-        self.insert_import_at(file_id, spec, spec, resolved_file_id, bindings)
+        self.insert_import_at(file_id, spec, spec, resolved_file_id, bindings, &[])
     }
 
-    /// An import row whose resolved `path` is not the statement's `spec`:
-    /// one path of a Rust `use` naming several (`RawImport::path`).
+    /// An import row whose resolved `path` is not the statement's `spec`
+    /// (one path of a Rust `use` naming several, `RawImport::path`), or whose
+    /// bindings are in scope on some lines only (`RawImport::scope`).
     pub fn insert_import_at(
         &self,
         file_id: i64,
@@ -738,12 +760,20 @@ impl GraphStore {
         path: &str,
         resolved_file_id: Option<i64>,
         bindings: &[ImportBinding],
+        scope: &[(u32, u32)],
     ) -> Result<()> {
         let bindings_csv = encode_bindings(bindings);
         self.conn.execute(
-            "INSERT INTO imports (file_id, spec, path, resolved_file_id, bindings)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![file_id, spec, path, resolved_file_id, bindings_csv],
+            "INSERT INTO imports (file_id, spec, path, resolved_file_id, bindings, scope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                file_id,
+                spec,
+                path,
+                resolved_file_id,
+                bindings_csv,
+                encode_scope(scope)
+            ],
         )?;
         Ok(())
     }
@@ -1559,7 +1589,8 @@ CREATE TABLE IF NOT EXISTS imports (
   spec TEXT NOT NULL,
   path TEXT NOT NULL DEFAULT '',
   resolved_file_id INTEGER,
-  bindings TEXT NOT NULL DEFAULT ''
+  bindings TEXT NOT NULL DEFAULT '',
+  scope TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_id);
 CREATE INDEX IF NOT EXISTS idx_imports_resolved ON imports(resolved_file_id);
@@ -1731,6 +1762,12 @@ fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
         conn.execute("UPDATE imports SET path = spec", [])?;
+    }
+    if !has_column("imports", "scope")? {
+        conn.execute(
+            "ALTER TABLE imports ADD COLUMN scope TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
     }
     // Engine 1: stamp the concept extractor version so a change to the
     // extractor forces a one-time concept rebuild (the graph itself is a

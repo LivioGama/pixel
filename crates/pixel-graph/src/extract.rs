@@ -60,6 +60,11 @@ pub struct RawImport {
     /// which yields one import per path (`crate::left::push`, …), each
     /// resolved to its own file.
     pub path: String,
+    /// The inclusive line ranges where the bindings are in scope; empty means
+    /// the whole file. A Rust `use` binds names for its enclosing module or
+    /// block only, and not inside a nested module unless that module
+    /// glob-imports its parent (`use super::*;`).
+    pub scope: Vec<(u32, u32)>,
     /// Named bindings imported from this spec (`greet` and `farewell` for
     /// `import { greet, farewell } from "./a"`). Empty for wildcard imports
     /// (`import * as x`) or when bindings cannot be extracted. Empty bindings
@@ -283,6 +288,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         jsx_elements: Vec::new(),
         stack: Vec::new(),
         in_trait_impl: false,
+        use_scopes: std::collections::HashMap::new(),
     };
     let root = tree.root_node();
     match lang {
@@ -346,6 +352,9 @@ struct Walker<'a> {
     stack: Vec<String>,
     /// Inside the body of a trait implementation (`impl Trait for Type`).
     in_trait_impl: bool,
+    /// Rust `use` scopes already computed, by scope node id: every `use` of a
+    /// file's top level shares one walk of the file.
+    use_scopes: std::collections::HashMap<usize, Vec<(u32, u32)>>,
 }
 
 impl<'a> Walker<'a> {
@@ -439,14 +448,21 @@ impl<'a> Walker<'a> {
     }
 
     fn push_import(&mut self, spec: String, bindings: Vec<ImportBinding>) {
-        self.push_import_at(spec.clone(), spec, bindings);
+        self.push_import_at(spec.clone(), spec, bindings, Vec::new());
     }
 
-    fn push_import_at(&mut self, spec: String, path: String, bindings: Vec<ImportBinding>) {
+    fn push_import_at(
+        &mut self,
+        spec: String,
+        path: String,
+        bindings: Vec<ImportBinding>,
+        scope: Vec<(u32, u32)>,
+    ) {
         if !spec.is_empty() {
             self.imports.push(RawImport {
                 spec,
                 path,
+                scope,
                 bindings,
             });
         }
@@ -999,11 +1015,17 @@ fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
             if let Some(arg) = node.child_by_field_name("argument") {
                 let spec = w.text(arg);
                 let leaves = rust_use_leaves(w.src, arg);
+                let scope = rust_use_scope(w, node);
                 if leaves.is_empty() {
-                    w.push_import(spec.clone(), Vec::new());
+                    w.push_import_at(spec.clone(), spec.clone(), Vec::new(), scope.clone());
                 }
                 for leaf in leaves {
-                    w.push_import_at(spec.clone(), leaf.path, leaf.binding.into_iter().collect());
+                    w.push_import_at(
+                        spec.clone(),
+                        leaf.path,
+                        leaf.binding.into_iter().collect(),
+                        scope.clone(),
+                    );
                 }
             }
         }
@@ -1016,6 +1038,94 @@ fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
         w.stack.pop();
     }
     w.in_trait_impl = outer_trait_impl;
+}
+
+/// The lines where the names a Rust `use` binds are in scope (see
+/// `RawImport::scope`). The scope is the innermost enclosing block, inline
+/// module or file, minus the inline modules nested in it: a module does not
+/// see its parent's names, unless it glob-imports them with `use super::*;`
+/// — and then only a module's names, since `super` names a module, never a
+/// block. A file-level `use` with no such module to exclude is in scope
+/// everywhere: empty.
+fn rust_use_scope(w: &mut Walker, use_node: Node) -> Vec<(u32, u32)> {
+    // Climb to the enclosing block or inline module; the walk ends on the
+    // file's root otherwise. A `use` never sits under a `mod foo;`, which
+    // has no body, so any `mod_item` ancestor is an inline module.
+    let mut scope = use_node;
+    let mut is_module = true;
+    while let Some(parent) = scope.parent() {
+        scope = parent;
+        match parent.kind() {
+            "block" => {
+                is_module = false;
+                break;
+            }
+            "mod_item" => break,
+            _ => {}
+        }
+    }
+    if let Some(cached) = w.use_scopes.get(&scope.id()) {
+        return cached.clone();
+    }
+    let excluded = hidden_modules(w, scope, is_module);
+    let whole_file = scope.kind() == "source_file";
+    let ranges = if whole_file && excluded.is_empty() {
+        Vec::new()
+    } else {
+        subtract_line_ranges((line_start(scope), line_end(scope)), &excluded)
+    };
+    w.use_scopes.insert(scope.id(), ranges.clone());
+    ranges
+}
+
+/// The line ranges of the inline modules under `scope` that do not see its
+/// names, sorted. With `through_glob`, a module that glob-imports its parent
+/// sees them, and only the modules nested in it are examined. An explicit
+/// stack rather than recursion: a deeply nested file cannot overflow it.
+fn hidden_modules(w: &Walker, scope: Node, through_glob: bool) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    let mut pending = each_child(scope);
+    while let Some(node) = pending.pop() {
+        if node.kind() == "mod_item"
+            && let Some(body) = node.child_by_field_name("body")
+        {
+            if through_glob && glob_imports_parent(w, body) {
+                pending.extend(each_child(body));
+            } else {
+                out.push((line_start(node), line_end(node)));
+            }
+        } else {
+            pending.extend(each_child(node));
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// True iff the module body holds `use super::*;` at its own level.
+fn glob_imports_parent(w: &Walker, body: Node) -> bool {
+    each_child(body).into_iter().any(|item| {
+        item.kind() == "use_declaration"
+            && item
+                .child_by_field_name("argument")
+                .is_some_and(|arg| use_path_text(w.src, arg) == "super::*")
+    })
+}
+
+/// `span` minus the sorted, disjoint `holes`, as inclusive line ranges.
+fn subtract_line_ranges(span: (u32, u32), holes: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    let mut start = span.0;
+    for &(hole_start, hole_end) in holes {
+        if hole_start > start {
+            out.push((start, hole_start - 1));
+        }
+        start = start.max(hole_end.saturating_add(1));
+    }
+    if start <= span.1 {
+        out.push((start, span.1));
+    }
+    out
 }
 
 /// One path a Rust `use` names, with the item name it brings into scope.
@@ -2044,7 +2154,7 @@ mod tests {
     use super::{
         FileExtraction, GENERATED_MAX_BYTES_PER_LINE, GENERATED_MIN_BYTES, ImportBinding, RawCall,
         RawSymbol, assign_enclosing, extract_file, is_generated_blob, jsx_component_call,
-        parse_file,
+        parse_file, subtract_line_ranges,
     };
     use crate::store::SymbolKind;
 
@@ -3216,6 +3326,66 @@ fn free() {}
                 ("super::Walker", "super::Walker", vec![("Walker", "Walker")]),
             ]
         );
+    }
+
+    /// Where a Rust `use` binds names: its enclosing module or block, minus
+    /// the inline modules nested in it — except a module that glob-imports
+    /// its parent (`use super::*;`), and then only for a module's names,
+    /// since `super` never names a block.
+    #[test]
+    fn rust_use_scope_is_its_module_or_block_minus_the_modules_that_do_not_see_it() {
+        let source = [
+            "use crate::left::push;", // 1: file level
+            "mod a {",                // 2
+            "    use crate::right::publish;",
+            "    pub fn f() { publish(); }",
+            "}",                          // 5
+            "mod tests {",                // 6
+            "    use super::*;",          // 7: sees the file's names
+            "    mod deep { fn g() {} }", // 8: its parent is tests, no glob
+            "}",                          // 9
+            "fn h() {",                   // 10
+            "    use crate::inner::x;",   // 11: block level
+            "    x();",
+            "    mod m { use super::*; }", // 13: super is the file, not h's block
+            "}",                           // 14
+        ]
+        .join("\n");
+        let extraction = extract_file("src/ship.rs", source.as_bytes()).unwrap();
+        let scopes: Vec<(&str, &[(u32, u32)])> = extraction
+            .imports
+            .iter()
+            .map(|i| (i.path.as_str(), i.scope.as_slice()))
+            .collect();
+        assert_eq!(
+            scopes,
+            [
+                ("crate::left::push", &[(1, 1), (6, 7), (9, 14)][..]),
+                ("crate::right::publish", &[(2, 5)][..]),
+                ("super::*", &[(6, 7), (9, 9)][..]),
+                ("crate::inner::x", &[(10, 12), (14, 14)][..]),
+                ("super::*", &[(13, 13)][..]),
+            ]
+        );
+    }
+
+    /// A file-level `use` with no module to exclude is in scope everywhere,
+    /// which the column stores as nothing. An external `mod foo;` holds no
+    /// code here and excludes nothing.
+    #[test]
+    fn rust_file_level_use_without_hidden_modules_is_in_scope_everywhere() {
+        let source = b"use crate::left::push;\nmod other;\npub fn f() { push(); }\n";
+        let extraction = extract_file("src/ship.rs", source).unwrap();
+        assert!(extraction.imports[0].scope.is_empty());
+    }
+
+    #[test]
+    fn subtract_line_ranges_keeps_the_lines_between_the_holes() {
+        assert_eq!(subtract_line_ranges((1, 10), &[]), [(1, 10)]);
+        assert_eq!(subtract_line_ranges((1, 5), &[(2, 2)]), [(1, 1), (3, 5)]);
+        assert_eq!(subtract_line_ranges((1, 10), &[(1, 3), (8, 10)]), [(4, 7)]);
+        assert_eq!(subtract_line_ranges((1, 5), &[(1, 4)]), [(5, 5)]);
+        assert!(subtract_line_ranges((1, 5), &[(1, 5)]).is_empty());
     }
 
     /// A path broken across lines names the same module as on one line.

@@ -149,6 +149,7 @@ struct Site {
     name: String,
     file_id: i64,
     path: String,
+    site_line: u32,
     receiver: Option<String>,
     kind: String,
     enclosing: Option<i64>,
@@ -228,6 +229,7 @@ fn unresolved_breakdown() {
                     name: r.get(0)?,
                     file_id: r.get(1)?,
                     path: r.get(2)?,
+                    site_line: r.get(3)?,
                     receiver: r.get(4)?,
                     kind: r.get(5)?,
                     enclosing: r.get(6)?,
@@ -309,7 +311,7 @@ fn unresolved_breakdown() {
             stats.shadowed += 1;
             "shadow"
         } else if matches!(
-            idx.decide(site.file_id, &site.name, None),
+            idx.decide_at(site.file_id, &site.name, None, site.site_line),
             Decision::Unresolved
         ) {
             stats.no_candidate += 1;

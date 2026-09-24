@@ -96,7 +96,9 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    `leased()` to `push` and no longer links an unbound `push()`.
 /// 9: a Rust `use` naming several paths yields one import per path
 ///    (`imports.path`), each resolved to its own file.
-pub const EXTRACTOR_VERSION: &str = "9";
+/// 10: a Rust `use` records the lines where its names are in scope
+///    (`imports.scope`), and T1 ignores it outside them.
+pub const EXTRACTOR_VERSION: &str = "10";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -450,7 +452,14 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
         for imp in &e.fx.imports {
             let resolved = resolve_import(&imp.path, &e.rel, &all_paths)
                 .and_then(|p| path_to_id.get(&p).copied());
-            store.insert_import_at(file_id, &imp.spec, &imp.path, resolved, &imp.bindings)?;
+            store.insert_import_at(
+                file_id,
+                &imp.spec,
+                &imp.path,
+                resolved,
+                &imp.bindings,
+                &imp.scope,
+            )?;
         }
         let calls =
             e.fx.calls
@@ -1130,7 +1139,14 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         for imp in &st.fx.imports {
             let resolved = resolve_import(&imp.path, &st.rel, &all_paths)
                 .and_then(|p| path_to_id.get(&p).copied());
-            store.insert_import_at(st.file_id, &imp.spec, &imp.path, resolved, &imp.bindings)?;
+            store.insert_import_at(
+                st.file_id,
+                &imp.spec,
+                &imp.path,
+                resolved,
+                &imp.bindings,
+                &imp.scope,
+            )?;
         }
         let calls = st
             .fx
@@ -2586,6 +2602,229 @@ mod tests {
             exact_callee_file(&store, "ship", "push").as_deref(),
             Some("src/left.rs")
         );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A Rust `use` binds names for its module or block only. Three files
+    /// define `push`, so T2 never decides and only an import in scope may
+    /// link a call:
+    /// - `mod a`'s use reaches `fa`, not `fb` in `mod b`, which gets its
+    ///   `push` from a wildcard (it took the Exact edge to `left.rs` when
+    ///   bindings were file-wide);
+    /// - the file-level use reaches `top` and, through `use super::*;`, the
+    ///   `tests` module, but not `bare`, which does not import its parent.
+    ///
+    /// An incremental update that adds a fourth `push` re-resolves every
+    /// edge from its stored site line, and must land on the same targets.
+    #[test]
+    fn a_rust_use_binds_names_only_where_it_is_in_scope() {
+        let root = tmpdir("rust-use-scope");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub mod left;\npub mod right;\npub mod other;\npub mod ship;\npub mod top;\n",
+        )
+        .unwrap();
+        for file in ["left", "right", "other"] {
+            std::fs::write(root.join(format!("src/{file}.rs")), "pub fn push() {}\n").unwrap();
+        }
+        std::fs::write(
+            root.join("src/ship.rs"),
+            [
+                "mod a {",
+                "    use crate::left::push;",
+                "    pub fn fa() { push(); }",
+                "}",
+                "mod b {",
+                "    use crate::right::*;",
+                "    pub fn fb() { push(); }",
+                "}",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/top.rs"),
+            [
+                "use crate::left::push;",
+                "pub fn top() { push(); }",
+                "mod tests {",
+                "    use super::*;",
+                "    fn t() { push(); }",
+                "}",
+                "mod bare {",
+                "    use crate::right::*;",
+                "    fn u() { push(); }",
+                "}",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let callers = ["fa", "fb", "top", "t", "u"];
+        let left = Some("src/left.rs".to_string());
+        let expected = [left.clone(), None, left.clone(), left, None];
+        {
+            let store = GraphStore::open(&db).unwrap();
+            let landed: Vec<Option<String>> = callers
+                .iter()
+                .map(|caller| exact_callee_file(&store, caller, "push"))
+                .collect();
+            assert_eq!(landed, expected);
+        }
+        std::fs::write(root.join("src/fourth.rs"), "pub fn push() {}\n").unwrap();
+        update_file(&root, &db, "src/fourth.rs").unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let landed: Vec<Option<String>> = callers
+            .iter()
+            .map(|caller| exact_callee_file(&store, caller, "push"))
+            .collect();
+        assert_eq!(landed, expected, "after the incremental update");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An alias blocks T2 only where it is in scope. `zap` aliases a
+    /// `helper` that left.rs does not define, inside `mod a`; other.rs holds
+    /// the only `zap`. In `mod a` the call means the alias, so it links
+    /// nothing; in `mod b` no import binds `zap` and T2 links other.rs's.
+    #[test]
+    fn an_alias_blocks_the_repo_wide_tier_only_where_it_is_in_scope() {
+        let root = tmpdir("rust-alias-scope");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub mod left;\npub mod other;\npub mod ship;\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/left.rs"), "pub fn push() {}\n").unwrap();
+        std::fs::write(root.join("src/other.rs"), "pub fn zap() {}\n").unwrap();
+        std::fs::write(
+            root.join("src/ship.rs"),
+            [
+                "mod a {",
+                "    use crate::left::helper as zap;",
+                "    pub fn fa() { zap(); }",
+                "}",
+                "mod b {",
+                "    pub fn fb() { zap(); }",
+                "}",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let callers: Vec<(String, String)> = store
+            .conn()
+            .prepare(
+                "SELECT src.name, e.tier FROM edges e
+                   JOIN symbols src ON src.id = e.src_id
+                   JOIN symbols dst ON dst.id = e.dst_id
+                  WHERE dst.name = 'zap' ORDER BY src.name",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(callers, [("fb".to_string(), "probable".to_string())]);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A block's `use` shadows the file-level one for the calls inside it:
+    /// `inner` means `later`, `outer` means `early`, although both aliases
+    /// are named `run` and point into one file (T1 used to take whichever
+    /// symbol of utils.rs came first).
+    #[test]
+    fn a_block_use_shadows_the_file_level_alias_of_the_same_name() {
+        let root = tmpdir("rust-use-shadow");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod utils;\npub mod ship;\n").unwrap();
+        std::fs::write(
+            root.join("src/utils.rs"),
+            "pub fn early() {}\npub fn later() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/ship.rs"),
+            [
+                "use crate::utils::early as run;",
+                "pub fn outer() { run(); }",
+                "pub fn inner() {",
+                "    use crate::utils::later as run;",
+                "    run();",
+                "}",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let edges: Vec<(String, String, String)> = store
+            .conn()
+            .prepare(
+                "SELECT src.name, dst.name, e.tier FROM edges e
+                   JOIN symbols src ON src.id = e.src_id
+                   JOIN symbols dst ON dst.id = e.dst_id
+                  WHERE e.kind = 'calls' ORDER BY src.name",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let expected = [("inner", "later"), ("outer", "early")]
+            .map(|(src, dst)| (src.to_string(), dst.to_string(), "exact".to_string()));
+        assert_eq!(edges, expected);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An alias applies only in its own scope: `mod a` aliases a constant as
+    /// `zap`, and `mod b` passes its own `fn zap` as a value. The out-of-scope
+    /// alias must not turn that reference into a plain value and drop it.
+    #[test]
+    fn an_out_of_scope_alias_does_not_hide_a_reference_to_a_local_function() {
+        let root = tmpdir("rust-alias-reference-scope");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod consts;\npub mod ship;\n").unwrap();
+        std::fs::write(root.join("src/consts.rs"), "pub const VALUE: u32 = 1;\n").unwrap();
+        std::fs::write(
+            root.join("src/ship.rs"),
+            [
+                "mod a {",
+                "    use crate::consts::VALUE as zap;",
+                "}",
+                "mod b {",
+                "    fn zap() {}",
+                "    fn consume(_: fn()) {}",
+                "    fn f() { consume(zap); }",
+                "}",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let references: i64 = store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM edges e
+                   JOIN symbols src ON src.id = e.src_id
+                   JOIN symbols dst ON dst.id = e.dst_id
+                  WHERE e.kind = 'references' AND src.name = 'f' AND dst.name = 'zap'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(references, 1, "consume(zap) passes mod b's zap");
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
