@@ -7923,30 +7923,36 @@ fn validate_cli_syntax(args: &[String]) -> Result<(), String> {
 }
 
 /// A parsed argv whose `...` placeholder put its second value
-/// (`VARIADIC_SENTINEL`) into an argument that takes one value per
-/// occurrence: the documented shape parses only because the extra value
-/// fell into another slot, typically a defaulted `PATH`. `None` when the
-/// argv has no sentinel or it bound to an argument taking several values.
+/// (`VARIADIC_SENTINEL`) in another argument than its first: the documented
+/// shape parses only because the extra value fell into another slot, a
+/// defaulted `PATH` or a multi-value positional after a one-value flag.
+/// `None` when the argv has no sentinel or both values bound to one argument.
 fn variadic_sentinel_misfit(args: &[String]) -> Option<String> {
     use pixel_install::doctor::VARIADIC_SENTINEL;
+    let sentinel = args.iter().position(|a| a == VARIADIC_SENTINEL)?;
     let mut root = Cli::command();
     root.build();
     let matches = root.clone().try_get_matches_from(args).ok()?;
     let (mut cmd, mut m) = (&root, &matches);
+    // clap counts a subcommand's indices from its own name, so the
+    // sentinel's index there is its argv position less the nesting depth.
+    let mut depth = 0;
     while let Some((name, sub)) = m.subcommand() {
         cmd = cmd.find_subcommand(name)?;
         m = sub;
+        depth += 1;
     }
-    let arg = cmd.get_arguments().find(|a| {
-        m.try_get_raw(a.get_id().as_str())
-            .ok()
-            .flatten()
-            .is_some_and(|mut values| values.any(|v| v == VARIADIC_SENTINEL))
-    })?;
-    let takes_several = arg.get_num_args().is_some_and(|r| r.max_values() > 1);
-    (!takes_several).then(|| {
+    let sentinel = sentinel.checked_sub(depth)?;
+    let holds = |id: &str, index: usize| {
+        m.indices_of(id)
+            .is_some_and(|mut indices| indices.any(|i| i == index))
+    };
+    let arg = cmd
+        .get_arguments()
+        .find(|a| holds(a.get_id().as_str(), sentinel))?;
+    (!holds(arg.get_id().as_str(), sentinel - 1)).then(|| {
         format!(
-            "a `...` placeholder's second value lands in `{}`, which takes one value per occurrence",
+            "a `...` placeholder's second value lands in `{}`, not in the argument its first value went to",
             arg.get_id()
         )
     })
@@ -8148,6 +8154,9 @@ mod tests {
             // positional and parse, so only the sentinel's trace catches it.
             r#"pixel commit --files <f>... --message "<msg>" --request-id <id>"#,
             r#"pixel diff <from> [--paths <p>...] [--json]"#,
+            // The second value lands in a multi-value positional (`paths`),
+            // which takes several values but not this flag's.
+            r#"pixel search-content "<re>" --glob <g>..."#,
         ] {
             let argv = pixel_install::doctor::normalize_rule_command(line)
                 .unwrap_or_else(|| panic!("`{line}` did not normalize"));
@@ -8162,7 +8171,9 @@ mod tests {
     /// `...` placeholder: the parity check must not go red on a true shape.
     #[test]
     fn variadic_placeholder_on_a_multi_value_argument_parses() {
-        let line = "pixel task-state race-start <task> <candidate>... /path/to/repo";
+        // The sentinel is the last value, so it is held only if its first
+        // value's argument is found at the index just before it.
+        let line = "pixel task-state race-start <task> <candidate>...";
         let argv = pixel_install::doctor::normalize_rule_command(line)
             .unwrap_or_else(|| panic!("`{line}` did not normalize"));
         assert_eq!(validate_cli_syntax(&argv), Ok(()), "argv {argv:?}");
