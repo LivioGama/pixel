@@ -1048,6 +1048,9 @@ fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
 /// block. A file-level `use` with no such module to exclude is in scope
 /// everywhere: empty.
 fn rust_use_scope(w: &mut Walker, use_node: Node) -> Vec<(u32, u32)> {
+    // Climb to the enclosing block or inline module; the walk ends on the
+    // file's root otherwise. A `use` never sits under a `mod foo;`, which
+    // has no body, so any `mod_item` ancestor is an inline module.
     let mut scope = use_node;
     let mut is_module = true;
     while let Some(parent) = scope.parent() {
@@ -1057,18 +1060,14 @@ fn rust_use_scope(w: &mut Walker, use_node: Node) -> Vec<(u32, u32)> {
                 is_module = false;
                 break;
             }
-            "source_file" => break,
-            "mod_item" if parent.child_by_field_name("body").is_some() => break,
+            "mod_item" => break,
             _ => {}
         }
     }
     if let Some(cached) = w.use_scopes.get(&scope.id()) {
         return cached.clone();
     }
-    let mut excluded = Vec::new();
-    for child in each_child(scope) {
-        collect_hidden_modules(w, child, is_module, 0, &mut excluded);
-    }
+    let excluded = hidden_modules(w, scope, is_module);
     let whole_file = scope.kind() == "source_file";
     let ranges = if whole_file && excluded.is_empty() {
         Vec::new()
@@ -1079,34 +1078,28 @@ fn rust_use_scope(w: &mut Walker, use_node: Node) -> Vec<(u32, u32)> {
     ranges
 }
 
-/// The line ranges of the inline modules under `node` that do not see the
-/// scope's names. With `through_glob`, a module that glob-imports its parent
-/// sees them, and only the modules nested in it are examined.
-fn collect_hidden_modules(
-    w: &Walker,
-    node: Node,
-    through_glob: bool,
-    depth: usize,
-    out: &mut Vec<(u32, u32)>,
-) {
-    if depth > MAX_DEPTH {
-        return;
-    }
-    if node.kind() == "mod_item"
-        && let Some(body) = node.child_by_field_name("body")
-    {
-        if through_glob && glob_imports_parent(w, body) {
-            for child in each_child(body) {
-                collect_hidden_modules(w, child, through_glob, depth + 1, out);
+/// The line ranges of the inline modules under `scope` that do not see its
+/// names, sorted. With `through_glob`, a module that glob-imports its parent
+/// sees them, and only the modules nested in it are examined. An explicit
+/// stack rather than recursion: a deeply nested file cannot overflow it.
+fn hidden_modules(w: &Walker, scope: Node, through_glob: bool) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    let mut pending = each_child(scope);
+    while let Some(node) = pending.pop() {
+        if node.kind() == "mod_item"
+            && let Some(body) = node.child_by_field_name("body")
+        {
+            if through_glob && glob_imports_parent(w, body) {
+                pending.extend(each_child(body));
+            } else {
+                out.push((line_start(node), line_end(node)));
             }
         } else {
-            out.push((line_start(node), line_end(node)));
+            pending.extend(each_child(node));
         }
-        return;
     }
-    for child in each_child(node) {
-        collect_hidden_modules(w, child, through_glob, depth + 1, out);
-    }
+    out.sort_unstable();
+    out
 }
 
 /// True iff the module body holds `use super::*;` at its own level.
