@@ -2350,7 +2350,7 @@ fn destructive_git_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<S
             "BLOCKED by pixel-targets-guard: `git push --force` can destroy remote history.".into(),
             "Use pixel's gated mutation ops instead:".into(),
             format!("  pixel push --request-id <id> {}", shell_quote(&root.display().to_string())),
-            format!("  pixel commit-and-push --files <f>... --message \"<msg>\" --request-id <id> {}", shell_quote(&root.display().to_string())),
+            format!("  pixel commit-and-push --files <f1> --files <f2> --message \"<msg>\" --request-id <id> {}", shell_quote(&root.display().to_string())),
             "(pixel push uses --force-with-lease semantics only where safe.)".into(),
         ]),
         // `git merge` used to integrate a branch is denied outright: the

@@ -8075,10 +8075,10 @@ mod tests {
             r#"pixel repo-state /path/to/repo [--json]"#,
             r#"pixel review-changes /path/to/repo [--json]"#,
             r#"pixel commit-history /path/to/repo [--ref <ref>] [--limit N] [--json]"#,
-            r#"pixel diff <from> /path/to/repo [--paths <p>...] [--json]"#,
-            r#"pixel commit --files <f>... --message "<msg>" --request-id <id> /path/to/repo"#,
+            r#"pixel diff <from> /path/to/repo [--paths <p1> --paths <p2>] [--json]"#,
+            r#"pixel commit --files <f1> --files <f2> --message "<msg>" --request-id <id> /path/to/repo"#,
             r#"pixel push <remote> <refspec> /path/to/repo --request-id <id>"#,
-            r#"pixel commit-and-push --files <f>... --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
+            r#"pixel commit-and-push --files <f1> --files <f2> --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
             r#"pixel new-branch <name> /path/to/repo --request-id <id>"#,
             r#"pixel fetch <remote> /path/to/repo [--json]"#,
             r#"pixel fast-forward /path/to/repo --expected-head <oid> --target-oid <oid> --request-id <id>"#,
@@ -8103,6 +8103,27 @@ mod tests {
             "canonical rule command lines must parse against the real CLI:\n{}",
             failures.join("\n")
         );
+    }
+
+    /// `--files` and `--paths` take one value per occurrence, so a rule line
+    /// that shows several values after one flag teaches an agent a command
+    /// the CLI rejects: the parity check must go red on it, not validate the
+    /// single-value reading. (`diff --paths a b` still parses, `b` landing in
+    /// the positional PATH, so no parse can flag that line; its text is fixed
+    /// by hand.)
+    #[test]
+    fn variadic_single_value_flags_are_rejected_as_documented() {
+        for line in [
+            r#"pixel commit --files <f>... --message "<msg>" --request-id <id> /path/to/repo"#,
+            r#"pixel commit-and-push --files <f>... --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
+        ] {
+            let argv = pixel_install::doctor::normalize_rule_command(line)
+                .unwrap_or_else(|| panic!("`{line}` did not normalize"));
+            assert!(
+                validate_cli_syntax(&argv).is_err(),
+                "`{line}` → argv {argv:?} should be rejected by the CLI parser"
+            );
+        }
     }
 
     /// A knowingly-wrong documented command must be REJECTED — this is what

@@ -38,7 +38,7 @@ pixel plan-rollback "<problem>"  # the moment "it worked before"
 pixel sync-branch                # any branch sync, never git pull --rebase
 pixel what-changed               # before an edit batch — what already differs
 pixel review-changes             # the working tree, structured
-pixel commit --files <f>... -m "msg" --request-id "id"   # only when asked
+pixel commit --files <f1> --files <f2> -m "msg" --request-id "id"   # only when asked; one --files per file
 ```
 
 ## REPLACEMENT MAP
@@ -69,7 +69,7 @@ History and git ops — use instead of raw `git`:
 | "it worked before" | `pixel plan-rollback "<problem>"` — flags the breaking commit; writes nothing without `--apply` |
 | `git status` / `git diff` / `git log` | `pixel repo-state` / `pixel review-changes` / `pixel commit-history` |
 | `git branch -a -vv` | `pixel list-branches` |
-| `git add+commit[+push]` | `pixel commit --files <f>... -m "msg" --request-id "id"` / `pixel commit-and-push …` (push only when authorized) |
+| `git add+commit[+push]` | `pixel commit --files <f1> --files <f2> -m "msg" --request-id "id"` / `pixel commit-and-push …` (push only when authorized) |
 | `git checkout -b` / `git fetch` / `git merge --ff-only` | `pixel new-branch name` / `pixel fetch` / `pixel fast-forward …` |
 
 ## Hard rules

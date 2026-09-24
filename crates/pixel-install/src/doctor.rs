@@ -1742,7 +1742,11 @@ pub fn normalize_rule_command(line: &str) -> Option<Vec<String>> {
 
     let mut argv = Vec::with_capacity(tokens.len());
     for token in tokens {
-        // Drop a trailing variadic marker (`<f>...` → `<f>`).
+        // A trailing variadic marker (`<f>...`) promises several values
+        // after one flag, so it becomes two dummy values: a flag that takes
+        // one value per occurrence then fails the parse, as `--files a b`
+        // does for the agent that copies the line.
+        let variadic = token.ends_with("...");
         let token = token.strip_suffix("...").unwrap_or(&token).to_string();
         // Placeholder → dummy value. A quoted multi-word placeholder is one
         // token by now (`<what broke, in the user's words>`).
@@ -1768,6 +1772,9 @@ pub fn normalize_rule_command(line: &str) -> Option<Vec<String>> {
         // normalizer.
         if token.contains('<') || token.contains('>') || token.contains('…') {
             return None;
+        }
+        if variadic {
+            argv.push(token.clone());
         }
         argv.push(token);
     }
@@ -2650,6 +2657,8 @@ git clone https://example.com/repo.git
                 "auto".into(),
             ])
         );
+        // A variadic placeholder stands for two values, the shape an agent
+        // types when it copies the line.
         assert_eq!(
             normalize_rule_command(
                 "pixel commit --files <f>... --message \"<msg>\" --request-id <id> /path/to/repo"
@@ -2658,6 +2667,7 @@ git clone https://example.com/repo.git
                 "pixel".into(),
                 "commit".into(),
                 "--files".into(),
+                "x".into(),
                 "x".into(),
                 "--message".into(),
                 "x".into(),
