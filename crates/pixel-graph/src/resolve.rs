@@ -225,12 +225,15 @@ impl ResolveIndex {
     }
 
     /// True iff `name` can name a symbol from `file_id`: a symbol carries
-    /// it, or an import of that file binds it (an alias names no symbol).
+    /// it, or an import of that file binds it to one (an alias names no
+    /// symbol itself). An imported name no symbol defines — a constant, a
+    /// macro — is a plain value, as it was before aliases were tracked.
     fn names_a_symbol(&self, file_id: i64, name: &str) -> bool {
         self.defines(name)
             || self
                 .import_bindings
-                .contains_key(&(file_id, name.to_string()))
+                .get(&(file_id, name.to_string()))
+                .is_some_and(|targets| targets.iter().any(|(_, source)| self.defines(source)))
     }
 
     /// The tier decision for one call from `caller_file_id` to `name`.

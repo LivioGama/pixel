@@ -2406,11 +2406,16 @@ mod tests {
     #[test]
     fn a_ts_import_alias_binds_the_alias_for_calls_and_references() {
         let root = tmpdir("ts-import-alias");
-        std::fs::write(root.join("push.ts"), "export function push() {}\n").unwrap();
+        std::fs::write(
+            root.join("push.ts"),
+            "export function push() {}\nexport const LIMIT = 3;\n",
+        )
+        .unwrap();
         std::fs::write(root.join("other.ts"), "export function push() {}\n").unwrap();
         std::fs::write(
             root.join("ship.ts"),
-            "import { push as leased } from \"./push\";\n\
+            "import { push as leased, LIMIT } from \"./push\";\n\
+             export function cap() { run(LIMIT); }\n\
              export function run(f: () => void) { f(); }\n\
              export function ship() { leased(); }\n\
              export function stray() { push(); }\n\
@@ -2429,6 +2434,17 @@ mod tests {
         let push = store.symbols_in_file(push_file).unwrap().remove(0);
         let references = store.edges_to(push.id, Some(EdgeKind::References)).unwrap();
         assert_eq!(references.len(), 1, "run(leased) passes push.ts's push");
+        // `LIMIT` is imported but is no callable symbol: passing it is a plain
+        // value, never an unresolved reference.
+        let unresolved: i64 = store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM unresolved_calls WHERE name = 'LIMIT'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unresolved, 0);
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
