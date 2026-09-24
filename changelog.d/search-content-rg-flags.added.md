@@ -1,0 +1,1 @@
+**search:** `pixel search-content` takes the ripgrep flags agents pass by habit: `-g/--glob` (`.gitignore` rules, `!` excludes, repeatable), `-t/--type` (`rust`, `py`, `ts`, `md`…), `-l/--files-with-matches`, `-F/--fixed-strings`, and `-n` as a no-op. They used to be a usage error that cost an agent a turn; the filters apply to the index's matches.

@@ -45,6 +45,7 @@ mod prompt_submit;
 mod recall_cmd;
 mod rescue_cmd;
 mod search_compat;
+mod search_filter;
 mod serve_trace;
 mod sniper_cmd;
 mod task_plan;
@@ -190,6 +191,25 @@ enum Command {
         /// Case-insensitive search (ripgrep-compatible shorthand).
         #[arg(short = 'i', long = "ignore-case")]
         ignore_case: bool,
+        /// Only keep paths matching this glob, ripgrep-style: `.gitignore`
+        /// rules (`*.rs` at any depth, a `/` anchors at the root), `!`
+        /// excludes. Repeatable.
+        #[arg(short = 'g', long = "glob")]
+        globs: Vec<String>,
+        /// Only keep files of this type, ripgrep-style (`rust`, `py`, `ts`,
+        /// `md`, …). Repeatable.
+        #[arg(short = 't', long = "type")]
+        types: Vec<String>,
+        /// Print only the path of each file with a match (ripgrep `-l`).
+        #[arg(short = 'l', long = "files-with-matches", conflicts_with = "json")]
+        files_with_matches: bool,
+        /// Match the pattern as a literal string, not a regex (ripgrep `-F`).
+        #[arg(short = 'F', long = "fixed-strings")]
+        fixed_strings: bool,
+        /// Accepted for ripgrep compatibility; matches always carry their
+        /// line number.
+        #[arg(short = 'n', long = "line-number")]
+        line_number: bool,
     },
     /// Native-output literal file search for automatic routing; unsupported
     /// inputs execute the original rg/grep command without modification.
@@ -3435,6 +3455,8 @@ fn run_search(
     scope: Option<String>,
     context: usize,
     ignore_case: bool,
+    filter: Option<&search_filter::PathFilter>,
+    files_only: bool,
     logger: &pixel_actionlog::ActionLog,
 ) -> Result<(), String> {
     let effective_pattern = if ignore_case && !pattern.starts_with("(?i)") {
@@ -3459,11 +3481,18 @@ fn run_search(
             no_daemon,
             scope.clone(),
             context,
+            filter,
+            files_only,
             logger,
         )?;
     }
     Ok(())
 }
+
+/// Rows asked of the index when `-g`/`-t` filter the matches on this side:
+/// the protocol's hard cap, so the filter does not run on the first page
+/// of an unfiltered search only.
+const FILTERED_SEARCH_ROWS: usize = 10_000;
 
 #[allow(clippy::too_many_arguments)]
 fn run_search_one(
@@ -3478,8 +3507,15 @@ fn run_search_one(
     no_daemon: bool,
     scope: Option<String>,
     context: usize,
+    filter: Option<&search_filter::PathFilter>,
+    files_only: bool,
     _logger: &pixel_actionlog::ActionLog,
 ) -> Result<(), String> {
+    let limit = if filter.is_some() {
+        limit.or(Some(FILTERED_SEARCH_ROWS))
+    } else {
+        limit
+    };
     let data = execute(
         root,
         Request::Search {
@@ -3493,10 +3529,26 @@ fn run_search_one(
         no_daemon,
     )?;
     let empty = Vec::new();
-    let matches = data
+    let all = data
         .get("matches")
         .and_then(Value::as_array)
         .unwrap_or(&empty);
+    let kept: Vec<Value>;
+    let matches: &[Value] = match filter {
+        Some(filter) => {
+            kept = all
+                .iter()
+                .filter(|m| {
+                    m.get("path")
+                        .and_then(Value::as_str)
+                        .is_some_and(|p| filter.keeps(p))
+                })
+                .cloned()
+                .collect();
+            &kept
+        }
+        None => all,
+    };
     // Enrich matches with surrounding context lines if requested.
     let mut cache: HashMap<PathBuf, Option<String>> = HashMap::new();
     let enriched: Vec<Value> = if context > 0 {
@@ -3519,7 +3571,21 @@ fn run_search_one(
     } else {
         matches.to_vec()
     };
-    let page = print_search_matches(&data, &enriched, json)?;
+    let page = if files_only {
+        let paths = search_filter::files_with_matches(&enriched);
+        let mut out = paths.join("\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        write_stdout(&out)?;
+        SearchPage {
+            printed: paths.len(),
+            truncated: data.get("truncated").and_then(Value::as_bool) == Some(true),
+            cap_fired: false,
+        }
+    } else {
+        print_search_matches(&data, &enriched, json)?
+    };
     // Warn the user when results were truncated so the default row cap
     // is never a surprise.
     let match_count = data.get("match_count").and_then(Value::as_u64).unwrap_or(0);
@@ -5024,10 +5090,21 @@ fn run_command(
             scope,
             context,
             ignore_case,
+            globs,
+            types,
+            files_with_matches,
+            fixed_strings,
+            line_number: _,
         } => {
             if call_guard_check("search-content", &format!("{pattern} {paths:?}")) {
                 return Err("circuit breaker: repeated search calls".to_string());
             }
+            let filter = search_filter::PathFilter::new(&globs, &types)?;
+            let pattern = if fixed_strings {
+                regex::escape(&pattern)
+            } else {
+                pattern
+            };
             run_search(
                 pattern,
                 paths,
@@ -5039,6 +5116,8 @@ fn run_command(
                 scope,
                 context,
                 ignore_case,
+                filter.as_ref(),
+                files_with_matches,
                 logger,
             )
         }

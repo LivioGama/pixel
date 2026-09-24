@@ -787,3 +787,89 @@ fn plan_renders_daemon_findings_as_json_and_compact() {
         "{unknown:?}"
     );
 }
+
+/// `search-content` takes the ripgrep flags agents pass by habit instead of
+/// rejecting them: in the recorded demo runs each `--glob` usage error cost
+/// the agent a turn. `-l` lists files, `-g` filters with `.gitignore` rules
+/// and `!` excludes, `-t` selects by type, `-F` matches literally, `-n` is
+/// accepted.
+#[test]
+fn search_content_takes_ripgreps_glob_type_files_and_literal_flags() {
+    let dir = fixture("search-rg-flags");
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    std::fs::write(
+        dir.join("tests/login_test.rs"),
+        "fn t() { login_user(\"x\"); }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("NOTES.md"), "login_user is the entry point\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "more"]);
+    let files = |args: &[&str]| -> Vec<String> {
+        let mut full = vec!["search-content"];
+        full.extend_from_slice(args);
+        let out = pixel(&dir, &full);
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let mut lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(ToString::to_string)
+            .collect();
+        lines.sort();
+        lines
+    };
+    assert_eq!(
+        files(&["login_user", ".", "-l"]),
+        [
+            "NOTES.md",
+            "src/caller.rs",
+            "src/login.rs",
+            "tests/login_test.rs"
+        ],
+        "-l prints each file once"
+    );
+    assert_eq!(
+        files(&["login_user", ".", "-l", "--glob", "!**/tests/**"]),
+        ["NOTES.md", "src/caller.rs", "src/login.rs"]
+    );
+    assert_eq!(
+        files(&["login_user", ".", "-l", "-t", "rust", "-g", "!tests"]),
+        ["src/caller.rs", "src/login.rs"]
+    );
+    assert_eq!(
+        files(&["login_user(", ".", "-F", "-n", "-l", "-g", "src/*.rs"]),
+        ["src/caller.rs", "src/login.rs"],
+        "-F: `(` is literal"
+    );
+    // -l output is newline-terminated lines, and nothing at all without a match.
+    let listed = pixel(
+        &dir,
+        &["search-content", "login_user", "src/login.rs", "-l"],
+    );
+    assert_eq!(String::from_utf8_lossy(&listed.stdout), "src/login.rs\n");
+    let none = pixel(&dir, &["search-content", "no_such_needle_xyz", ".", "-l"]);
+    assert!(none.status.success(), "{none:?}");
+    assert!(none.stdout.is_empty(), "{none:?}");
+    // -l still says when the page it listed was cut, and only then.
+    let cut = pixel(
+        &dir,
+        &["search-content", "login_user", ".", "-l", "--limit", "1"],
+    );
+    assert!(
+        String::from_utf8_lossy(&cut.stderr).contains("results truncated"),
+        "{cut:?}"
+    );
+    let whole = pixel(&dir, &["search-content", "login_user", ".", "-l"]);
+    assert!(
+        !String::from_utf8_lossy(&whole.stderr).contains("results truncated"),
+        "{whole:?}"
+    );
+    // Without -F the same pattern is an unclosed group, so -F is doing the work.
+    let regex = pixel(&dir, &["search-content", "login_user(", "."]);
+    assert!(!regex.status.success(), "{regex:?}");
+    let unknown = pixel(&dir, &["search-content", "login_user", ".", "-t", "cobol"]);
+    assert!(!unknown.status.success(), "{unknown:?}");
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("unknown --type 'cobol'"),
+        "{unknown:?}"
+    );
+}
