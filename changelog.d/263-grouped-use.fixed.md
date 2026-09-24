@@ -1,0 +1,1 @@
+**graph:** a grouped Rust `use` now resolves each path to its own file: `use crate::{left::push, right::publish};` links `push()` and `publish()` `exact` instead of resolving nothing, `use crate::push::{a::x, y};` sends `x` to `push/a.rs`, and `rename` rewrites only the leaf that names the renamed item. ([#263](https://github.com/LivioGama/pixel/pull/263))
