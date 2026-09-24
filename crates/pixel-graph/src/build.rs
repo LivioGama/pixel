@@ -96,7 +96,9 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    `leased()` to `push` and no longer links an unbound `push()`.
 /// 9: a Rust `use` naming several paths yields one import per path
 ///    (`imports.path`), each resolved to its own file.
-pub const EXTRACTOR_VERSION: &str = "9";
+/// 10: a Rust `use` records the lines where its names are in scope
+///    (`imports.scope`), and T1 ignores it outside them.
+pub const EXTRACTOR_VERSION: &str = "10";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -450,7 +452,14 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
         for imp in &e.fx.imports {
             let resolved = resolve_import(&imp.path, &e.rel, &all_paths)
                 .and_then(|p| path_to_id.get(&p).copied());
-            store.insert_import_at(file_id, &imp.spec, &imp.path, resolved, &imp.bindings)?;
+            store.insert_import_at(
+                file_id,
+                &imp.spec,
+                &imp.path,
+                resolved,
+                &imp.bindings,
+                &imp.scope,
+            )?;
         }
         let calls =
             e.fx.calls
@@ -1127,7 +1136,14 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         for imp in &st.fx.imports {
             let resolved = resolve_import(&imp.path, &st.rel, &all_paths)
                 .and_then(|p| path_to_id.get(&p).copied());
-            store.insert_import_at(st.file_id, &imp.spec, &imp.path, resolved, &imp.bindings)?;
+            store.insert_import_at(
+                st.file_id,
+                &imp.spec,
+                &imp.path,
+                resolved,
+                &imp.bindings,
+                &imp.scope,
+            )?;
         }
         let calls = st
             .fx
@@ -2534,6 +2550,86 @@ mod tests {
             exact_callee_file(&store, "ship", "push").as_deref(),
             Some("src/left.rs")
         );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A Rust `use` binds names for its module or block only. Three files
+    /// define `push`, so T2 never decides and only an import in scope may
+    /// link a call:
+    /// - `mod a`'s use reaches `fa`, not `fb` in `mod b`, which gets its
+    ///   `push` from a wildcard (it took the Exact edge to `left.rs` when
+    ///   bindings were file-wide);
+    /// - the file-level use reaches `top` and, through `use super::*;`, the
+    ///   `tests` module, but not `bare`, which does not import its parent.
+    ///
+    /// An incremental update that adds a fourth `push` re-resolves every
+    /// edge from its stored site line, and must land on the same targets.
+    #[test]
+    fn a_rust_use_binds_names_only_where_it_is_in_scope() {
+        let root = tmpdir("rust-use-scope");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub mod left;\npub mod right;\npub mod other;\npub mod ship;\npub mod top;\n",
+        )
+        .unwrap();
+        for file in ["left", "right", "other"] {
+            std::fs::write(root.join(format!("src/{file}.rs")), "pub fn push() {}\n").unwrap();
+        }
+        std::fs::write(
+            root.join("src/ship.rs"),
+            [
+                "mod a {",
+                "    use crate::left::push;",
+                "    pub fn fa() { push(); }",
+                "}",
+                "mod b {",
+                "    use crate::right::*;",
+                "    pub fn fb() { push(); }",
+                "}",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/top.rs"),
+            [
+                "use crate::left::push;",
+                "pub fn top() { push(); }",
+                "mod tests {",
+                "    use super::*;",
+                "    fn t() { push(); }",
+                "}",
+                "mod bare {",
+                "    use crate::right::*;",
+                "    fn u() { push(); }",
+                "}",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let callers = ["fa", "fb", "top", "t", "u"];
+        let left = Some("src/left.rs".to_string());
+        let expected = [left.clone(), None, left.clone(), left, None];
+        {
+            let store = GraphStore::open(&db).unwrap();
+            let landed: Vec<Option<String>> = callers
+                .iter()
+                .map(|caller| exact_callee_file(&store, caller, "push"))
+                .collect();
+            assert_eq!(landed, expected);
+        }
+        std::fs::write(root.join("src/fourth.rs"), "pub fn push() {}\n").unwrap();
+        update_file(&root, &db, "src/fourth.rs").unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let landed: Vec<Option<String>> = callers
+            .iter()
+            .map(|caller| exact_callee_file(&store, caller, "push"))
+            .collect();
+        assert_eq!(landed, expected, "after the incremental update");
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -1,0 +1,1 @@
+**graph:** a Rust `use` now binds its names only where they are in scope — its module or block, minus nested modules that do not `use super::*;` — so a `use` in `mod a` no longer gives a call in `mod b` of the same file an `exact` edge to its import.

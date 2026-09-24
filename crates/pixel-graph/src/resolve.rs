@@ -42,7 +42,9 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::params;
 
-use crate::store::{EdgeKind, EdgeRow, GraphStore, StoreError, SymbolKind, Tier, decode_bindings};
+use crate::store::{
+    EdgeKind, EdgeRow, GraphStore, StoreError, SymbolKind, Tier, decode_bindings, decode_scope,
+};
 
 #[derive(Debug, Default, Clone)]
 pub struct ResolveStats {
@@ -111,6 +113,25 @@ struct Candidate {
     trait_impl: bool,
 }
 
+/// One import binding a name: T1 accepts a definition named `source` in
+/// `file_id` for a call on a line of `scope` (empty: anywhere in the file).
+struct ImportTarget {
+    file_id: i64,
+    source: String,
+    scope: Vec<(u32, u32)>,
+}
+
+/// True iff a call on `site_line` sees names bound for `scope`. A call whose
+/// line is unknown sees only the file-wide ones.
+fn in_scope(scope: &[(u32, u32)], site_line: Option<u32>) -> bool {
+    scope.is_empty()
+        || site_line.is_some_and(|line| {
+            scope
+                .iter()
+                .any(|&(start, end)| start <= line && line <= end)
+        })
+}
+
 /// Symbol-name index + import graph snapshot used for tier decisions.
 pub struct ResolveIndex {
     by_name: HashMap<String, Vec<Candidate>>,
@@ -119,11 +140,10 @@ pub struct ResolveIndex {
     /// (`pixel_git::GitRunner` + `new` ↔ `GitRunner::new`). Kept beside the
     /// `Copy` candidate rows so the tier code stays copy-based.
     qualified_of: HashMap<i64, String>,
-    /// (file_id, local name) → the (imported file_id, source name) pairs an
-    /// import binds under that name. T1 requires the callee to be one of
-    /// them: a definition named `source` in that file, not just any
-    /// definition in an imported file.
-    import_bindings: HashMap<(i64, String), Vec<(i64, String)>>,
+    /// (file_id, local name) → the imports binding that name. T1 requires
+    /// the callee to be one of them, and the call site to sit where the
+    /// import's names are in scope.
+    import_bindings: HashMap<(i64, String), Vec<ImportTarget>>,
 }
 
 fn callable(kind: SymbolKind) -> bool {
@@ -185,28 +205,35 @@ impl ResolveIndex {
                 }
             }
         }
-        let mut import_bindings: HashMap<(i64, String), Vec<(i64, String)>> = HashMap::new();
+        let mut import_bindings: HashMap<(i64, String), Vec<ImportTarget>> = HashMap::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT file_id, resolved_file_id, bindings FROM imports WHERE resolved_file_id IS NOT NULL",
+                "SELECT file_id, resolved_file_id, bindings, scope FROM imports
+                  WHERE resolved_file_id IS NOT NULL",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, Option<i64>>(1)?,
                     r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             })?;
             for row in rows {
-                let (fid, dst_opt, bindings_csv) = row?;
+                let (fid, dst_opt, bindings_csv, scope) = row?;
                 if let Some(dst) = dst_opt {
+                    let scope = decode_scope(&scope);
                     // An empty column means wildcard or unknown and grants
                     // no T1 Exact confidence.
                     for b in decode_bindings(&bindings_csv) {
                         import_bindings
                             .entry((fid, b.local))
                             .or_default()
-                            .push((dst, b.source));
+                            .push(ImportTarget {
+                                file_id: dst,
+                                source: b.source,
+                                scope: scope.clone(),
+                            });
                     }
                 }
             }
@@ -265,8 +292,23 @@ impl ResolveIndex {
     /// (`words.iter().count()`), two same-name methods in one file
     /// (`A::walk` beside `B::walk`), and any name with a definition in
     /// another file keep the shadow veto.
+    ///
+    /// Without a site line, only the imports in scope in the whole file count
+    /// for T1; [`Self::decide_at`] places the call.
     pub fn decide(&self, caller_file_id: i64, name: &str, receiver: Option<&str>) -> Decision {
-        self.decide_from(caller_file_id, None, name, receiver)
+        self.decide_from(caller_file_id, None, name, receiver, None)
+    }
+
+    /// [`Self::decide`] for a call on `site_line`, which T1 checks against
+    /// the lines where each import's names are in scope.
+    pub fn decide_at(
+        &self,
+        caller_file_id: i64,
+        name: &str,
+        receiver: Option<&str>,
+        site_line: u32,
+    ) -> Decision {
+        self.decide_from(caller_file_id, None, name, receiver, Some(site_line))
     }
 
     fn decide_from(
@@ -275,6 +317,7 @@ impl ResolveIndex {
         caller_symbol_id: Option<i64>,
         name: &str,
         receiver: Option<&str>,
+        site_line: Option<u32>,
     ) -> Decision {
         if self.ruby_files.contains(&caller_file_id)
             && self.ambiguous_local_name(caller_file_id, name)
@@ -303,7 +346,7 @@ impl ResolveIndex {
             }
             return Decision::Unresolved;
         }
-        let raw = self.decide_raw(caller_file_id, name);
+        let raw = self.decide_raw(caller_file_id, name, site_line);
         if has_real_receiver(receiver) {
             if let Decision::Exact(id) = raw {
                 // Downgrade: a non-self receiver means we cannot confirm the
@@ -416,7 +459,7 @@ impl ResolveIndex {
     }
 
     /// Tier decision ignoring receiver type (the original name-only logic).
-    fn decide_raw(&self, caller_file_id: i64, name: &str) -> Decision {
+    fn decide_raw(&self, caller_file_id: i64, name: &str, site_line: Option<u32>) -> Decision {
         let cands = self.by_name.get(name).map_or(&[][..], Vec::as_slice);
         // T0: same file.
         let same_file: Vec<Candidate> = cands
@@ -430,7 +473,7 @@ impl ResolveIndex {
         // T1: defined in exactly one file that explicitly imported this name.
         // File-level or wildcard imports cannot prove an unqualified binding,
         // so they remain eligible only for repo-wide T2 Probable resolution.
-        if let Some(decision) = self.import_tier(caller_file_id, name) {
+        if let Some(decision) = self.import_tier(caller_file_id, name, site_line) {
             return decision;
         }
         // T2: unique definition file repo-wide.
@@ -445,17 +488,33 @@ impl ResolveIndex {
 
     /// T1: the definitions the imports binding `name` in `caller_file_id`
     /// point at — each a symbol named after the binding's source in the file
-    /// the import resolved to. `None` when no import binds `name` or none of
-    /// them lands on a definition (T2 decides); `Unresolved` when they land
-    /// in several files, since a name never fans out.
-    fn import_tier(&self, caller_file_id: i64, name: &str) -> Option<Decision> {
+    /// the import resolved to — counting only the imports whose names are in
+    /// scope on `site_line`. `None` when no such import binds `name` or none
+    /// of them lands on a definition (T2 decides); `Unresolved` when they
+    /// land in several files, since a name never fans out. A block's `use`
+    /// that shadows a file-level one therefore leaves the call unresolved
+    /// rather than guessing which of the two wins.
+    fn import_tier(
+        &self,
+        caller_file_id: i64,
+        name: &str,
+        site_line: Option<u32>,
+    ) -> Option<Decision> {
         let targets = self
             .import_bindings
             .get(&(caller_file_id, name.to_string()))?;
         let mut hits: Vec<Candidate> = Vec::new();
-        for (file_id, source) in targets {
-            if let Some(cands) = self.by_name.get(source) {
-                hits.extend(cands.iter().copied().filter(|c| c.file_id == *file_id));
+        for target in targets {
+            if !in_scope(&target.scope, site_line) {
+                continue;
+            }
+            if let Some(cands) = self.by_name.get(&target.source) {
+                hits.extend(
+                    cands
+                        .iter()
+                        .copied()
+                        .filter(|c| c.file_id == target.file_id),
+                );
             }
         }
         let files: HashSet<i64> = hits.iter().map(|c| c.file_id).collect();
@@ -539,6 +598,7 @@ pub fn resolve_calls(
                 Some(src_id),
                 &call.callee_name,
                 call.receiver.as_deref(),
+                Some(call.site_line),
             ) {
                 Decision::Exact(dst) => {
                     store.insert_resolved_edge(
@@ -621,7 +681,7 @@ pub fn resolve_references(
             // References resolve against the same T0/T1/T2 index. A real
             // receiver is irrelevant here (the arg is an identifier, not a
             // method call), so pass `None`.
-            match idx.decide(fr.file_id, &r#ref.name, None) {
+            match idx.decide_at(fr.file_id, &r#ref.name, None, r#ref.site_line) {
                 Decision::Exact(dst) | Decision::Probable(dst) => {
                     store.insert_resolved_edge(
                         &EdgeRow {
@@ -699,6 +759,7 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
             Some(row.enclosing),
             &row.name,
             row.receiver.as_deref(),
+            Some(row.site_line),
         );
         let (dst, tier) = match decision {
             Decision::Exact(d) => (d, Tier::Exact),
@@ -944,11 +1005,17 @@ mod tests {
             .unwrap();
         let idx = ResolveIndex::build(&store).unwrap();
         assert_eq!(
-            idx.decide_from(local, Some(caller), "application", Some("self")),
+            idx.decide_from(local, Some(caller), "application", Some("self"), None),
             Decision::Exact(local_target)
         );
         assert_eq!(
-            idx.decide_from(local, Some(unrelated_caller), "application", Some("self")),
+            idx.decide_from(
+                local,
+                Some(unrelated_caller),
+                "application",
+                Some("self"),
+                None
+            ),
             Decision::Unresolved
         );
     }
@@ -996,7 +1063,7 @@ mod tests {
 
         let idx = ResolveIndex::build(&store).unwrap();
         assert_eq!(
-            idx.decide_from(file, Some(caller), "application", Some("self")),
+            idx.decide_from(file, Some(caller), "application", Some("self"), None),
             Decision::Exact(app_target)
         );
         assert_eq!(idx.decide(file, "application", None), Decision::Unresolved);
@@ -1374,5 +1441,32 @@ mod tests {
         );
         assert_eq!(idx.decide(local, "both", None), Decision::Unresolved);
         assert_eq!(idx.decide(local, "open", None), Decision::Probable(c_open));
+    }
+
+    /// A scoped import counts for a call on one of its lines, both ends
+    /// included; a file-wide one counts everywhere, even where the call's
+    /// line is unknown, and a scoped one never does then.
+    #[test]
+    fn in_scope_accepts_the_lines_of_the_scope_only() {
+        let scope = [(3, 5), (9, 9)];
+        let cases: Vec<(Option<u32>, bool)> = [2, 3, 4, 5, 6, 9, 10]
+            .iter()
+            .map(|&line| (Some(line), in_scope(&scope, Some(line))))
+            .collect();
+        assert_eq!(
+            cases,
+            [
+                (Some(2), false),
+                (Some(3), true),
+                (Some(4), true),
+                (Some(5), true),
+                (Some(6), false),
+                (Some(9), true),
+                (Some(10), false),
+            ]
+        );
+        assert!(!in_scope(&scope, None));
+        assert!(in_scope(&[], None));
+        assert!(in_scope(&[], Some(7)));
     }
 }
