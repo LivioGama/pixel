@@ -341,7 +341,7 @@
   <script>
     /* Token wall: one square per 25 tokens of a full file read. On load the
        wall burns down to what the same question costs through Pixel, the
-       counter follows, and the survivors gather into one block. Reduced
+       counter follows, and the survivors gather into a P. Reduced
        motion gets the final state; Replay runs it again. */
     (function () {
       var fig = document.querySelector('[data-wall]');
@@ -371,16 +371,50 @@
       var burn = order.slice(k);
       var fmt = function (v) { return Math.round(v).toLocaleString('en-US'); };
 
+      // The survivors gather into a P, for Pixel, made of exactly k squares,
+      // so "one square is 25 tokens" stays true. The bowl is a stroke-t
+      // outline, the stem takes the rest in whole rows: the search keeps the
+      // shapes whose remainder divides by t, then the one closest to a 1.6
+      // height-to-width ratio, a 3-square stroke and notched corners.
+      // Failing that, the smallest P is cut down from the stem's foot, and
+      // failing that, a plain block.
+      var outline = function (t, w, b, notch, x, y) {
+        return (x < t || y < t || y >= b - t || x >= w - t) && !(notch && x === w - 1 && (y === 0 || y === b - 1));
+      };
+      var letter = function (rows, cols) {
+        var best = null, near = null;
+        for (var t = 2; t <= 4; t++) for (var w = 3 * t; w <= 6 * t; w++) for (var b = 2 * t + 1; b <= 2 * t + 9; b++) {
+          [true, false].forEach(function (notch) {
+            var pts = [];
+            for (var y = 0; y < b; y++) for (var x = 0; x < w; x++) if (outline(t, w, b, notch, x, y)) pts.push([x, y]);
+            var rest = k - pts.length;
+            if (rest <= 0) return;
+            var len = Math.ceil(rest / t), h = b + len;
+            if (h > rows || w > cols || len < 0.6 * b || len > 1.2 * b) return;
+            for (var yy = b; yy < h; yy++) for (var xx = 0; xx < t; xx++) pts.push([xx, yy]);
+            var score = Math.abs(h / w - 1.6) + (t === 3 ? 0 : 0.2) + (notch ? 0 : 0.05);
+            var cand = { pts: pts.slice(0, k), w: w, h: h, score: score };
+            if (rest % t === 0) { if (!best || score < best.score) best = cand; }
+            else if (!near || score < near.score) near = cand;
+          });
+        }
+        return best || near;
+      };
       var gather = function () {
         var cols = getComputedStyle(grid).gridTemplateColumns.split(' ').length;
         var rows = Math.ceil(n / cols);
         var a = cells[0].getBoundingClientRect(), b = cells[1].getBoundingClientRect();
         var step = b.left - a.left;
-        var bw = Math.ceil(Math.sqrt(k * 1.6)), bh = Math.ceil(k / bw);
-        var c0 = Math.floor((cols - bw) / 2), r0 = Math.floor((rows - bh) / 2);
+        var shape = letter(rows, cols);
+        if (!shape) {
+          var bw = Math.ceil(Math.sqrt(k * 1.6)), bh = Math.ceil(k / bw), pts = [];
+          for (var s = 0; s < k; s++) pts.push([s % bw, Math.floor(s / bw)]);
+          shape = { pts: pts, w: bw, h: bh };
+        }
+        var c0 = Math.floor((cols - shape.w) / 2), r0 = Math.floor((rows - shape.h) / 2);
         keep.forEach(function (idx, s) {
           var x = (idx % cols), y = Math.floor(idx / cols);
-          var tx = c0 + (s % bw), ty = r0 + Math.floor(s / bw);
+          var tx = c0 + shape.pts[s][0], ty = r0 + shape.pts[s][1];
           cells[idx].style.transform = 'translate(' + (tx - x) * step + 'px,' + (ty - y) * step + 'px)';
         });
       };
