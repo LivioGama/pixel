@@ -244,13 +244,13 @@ main, .footer { position: relative; z-index: 1; }
 }
 
 /* ---------- sections ---------- */
-.section { position: relative; padding-block: clamp(170px, 25vh, 280px) 0; }
+.section { --pad: clamp(210px, 34vh, 380px); position: relative; padding-block: var(--pad) 0; }
 /* Each chapter opens on a label (.chapter in layouts/index.html): its number
    and a category name, deliberately not the headline's words, across a row of
    squares. The numbers match the rail. */
 main { counter-reset: chapter; }
 .chapter {
-  counter-increment: chapter; position: absolute; left: var(--gutter); right: var(--gutter); top: clamp(60px, 9vh, 104px);
+  counter-increment: chapter; position: absolute; left: var(--gutter); right: var(--gutter); top: calc(var(--pad) * 0.55);
   transform: translateY(-50%); margin: 0; display: flex; align-items: center; justify-content: center; gap: 18px;
   font: 700 clamp(1.5rem, 2.4vw, 2rem)/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink);
 }
