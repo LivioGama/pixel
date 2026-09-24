@@ -12,7 +12,7 @@
   {{/* The code graph's grammars: crates/pixel-graph/src/extract.rs. The last five use the generic extractor. */}}
   {{ $langs := slice "TypeScript" "JavaScript" "Rust" "Go" "Java" "Python" "C#" "Ruby" "PHP" "C" "Swift" "Elixir" "Lua" }}
 
-  {{/* Where the reader is: one square per chapter (the sections' data-chapter), filled as it passes. Built by the script below. */}}
+  {{/* Where the reader is: one square per chapter (each section's .chapter label), filled as it passes. Built by the script below. */}}
   <nav class="rail" aria-label="Sections" data-rail hidden></nav>
 
   <main id="main">
@@ -50,7 +50,7 @@
     </section>
 
     {{/* ---------- numbers ---------- */}}
-    <section class="numbers wrap" id="results" data-chapter="Results" aria-label="Measured results">
+    <section class="numbers wrap" id="results" aria-label="Measured results">
       {{/* Each meter draws the ratio its number states on a 20-square row: the baseline filled in dim cells, Pixel's in green. */}}
       {{ $stats := slice
         (dict "tag" "Tokens" "value" "&minus;95%" "text" "to learn what a large file contains" "base" "full read" "before" 20 "after" 1)
@@ -76,7 +76,8 @@
     </section>
 
     {{/* ---------- scope ---------- */}}
-    <section class="section wrap" id="scope" data-chapter="Scope" aria-labelledby="scope-title">
+    <section class="section wrap" id="scope" aria-labelledby="scope-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Scoping</span></p>
       <header class="section__head" data-reveal>
         <h2 id="scope-title">It knows where to look.</h2>
         <p class="scope__lede"><span>You describe the task. Your agent asks Pixel on&nbsp;its&nbsp;own.</span> <span>It gets the {{ len $s.p0 }}&nbsp;files that matter out of&nbsp;{{ $s.files }}, and starts coding instead of&nbsp;searching.</span></p>
@@ -105,7 +106,8 @@
     </section>
 
     {{/* ---------- whole agent tasks ---------- */}}
-    <section class="section wrap" id="tasks" data-chapter="Agent tasks" aria-labelledby="tasks-title">
+    <section class="section wrap" id="tasks" aria-labelledby="tasks-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Proof</span></p>
       <header class="section__head" data-reveal>
         <h2 id="tasks-title">Measured on whole agent tasks.</h2>
         <p>Fast answers do not make a fast agent on their own. So we timed Claude Code on real tasks in this repository, with Pixel and against a vanilla agent with no rules or hooks.</p>
@@ -125,7 +127,8 @@
     </section>
 
     {{/* ---------- six jobs ---------- */}}
-    <section class="section wrap" id="jobs" data-chapter="Six jobs" aria-labelledby="jobs-title">
+    <section class="section wrap" id="jobs" aria-labelledby="jobs-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Everyday speed</span></p>
       <header class="section__head" data-reveal>
         <h2 id="jobs-title">Six things your agent does all day.<br>Now in milliseconds.</h2>
       </header>
@@ -151,7 +154,8 @@
     </section>
 
     {{/* ---------- how it works ---------- */}}
-    <section class="section wrap" id="how" data-chapter="How it works" aria-labelledby="how-title">
+    <section class="section wrap" id="how" aria-labelledby="how-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Architecture</span></p>
       <header class="section__head" data-reveal>
         <h2 id="how-title">How it works.</h2>
         <p>One binary, one folder in your repository, no server.</p>
@@ -177,15 +181,16 @@
     </section>
 
     {{/* ---------- agents ---------- */}}
-    <section class="section wrap section--center" id="agents" data-chapter="Agents" aria-labelledby="agents-title">
+    <section class="section wrap section--center" id="agents" aria-labelledby="agents-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Compatibility</span></p>
       <header class="section__head" data-reveal>
         <h2 id="agents-title">Plugs into the agent you already use.</h2>
       </header>
-      {{/* Marks in assets/logos/, one colour each (currentColor): Simple Icons, Lobe Icons, and pi.dev's own favicon for Pi. */}}
+      {{/* Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
       {{ $agents := slice
         (dict "name" "Claude Code" "logo" "claude") (dict "name" "Codex" "logo" "codex")
-        (dict "name" "Cursor" "logo" "cursor") (dict "name" "Copilot CLI" "logo" "copilot")
-        (dict "name" "Gemini CLI" "logo" "gemini") (dict "name" "Pi" "logo" "pi")
+        (dict "name" "Pi" "logo" "pi") (dict "name" "Cursor" "logo" "cursor")
+        (dict "name" "Copilot CLI" "logo" "copilot") (dict "name" "Gemini CLI" "logo" "gemini")
         (dict "name" "OpenCode" "logo" "opencode") (dict "name" "Devin" "logo" "devin")
         (dict "name" "Windsurf" "logo" "windsurf") (dict "name" "Antigravity" "logo" "antigravity")
       }}
@@ -197,19 +202,30 @@
     </section>
 
     {{/* ---------- decisions ---------- */}}
-    <section class="section wrap" id="decisions" data-chapter="Decisions" aria-labelledby="jev-title">
-      <div class="jev" data-reveal="stagger">
-        <p class="jev__score" aria-hidden="true">14/14</p>
-        <div class="jev__copy">
-          <h2 id="jev-title">Beats Jev's published score on coding decisions.</h2>
-          <p><code>pixel classify</code> routes a coding decision to the model you pick. With deepseek-v4.1-flash it got all 14 public JevBench coding items right. Jev publishes 0.839.</p>
-          <p class="jev__fine">Jev's score covers 56 items and was not re-measured here. <code>pixel classify</code> is opt-in: the only command that sends anything to a model, and only to the one you configure. <a class="link" href="{{ $bench }}#coding-decisions" target="_blank" rel="noopener">Every model, the method and its limits</a></p>
+    <section class="section wrap" id="decisions" aria-labelledby="jev-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Decisions</span></p>
+      {{/* Facts from content/benchmarks.md#coding-decisions; the example question is the public item hard-sol-a-trap-10. */}}
+      <div class="jev">
+        <div class="jev__score" data-reveal>
+          <p class="jev__big" aria-hidden="true">14<span>/</span>14</p>
+          <p class="jev__under">tricky coding calls, all right</p>
+        </div>
+        <div class="jev__copy" data-reveal="stagger">
+          <h2 id="jev-title">A flash model, every coding call right.</h2>
+          <p class="jev__hook">A patch billed as a "documentation cleanup" also changes a timeout: does it still need two reviewers? JevBench asks judgement calls like this one, where the obvious answer is the wrong one.</p>
+          <p><code>pixel classify</code> hands each question to a model you pick and returns one probability per answer. With deepseek-v4.1-flash it got all 14 public coding items right, 1.4 s each at the median.</p>
+          <ul class="jev__bars" aria-label="Accuracy on coding decisions">
+            <li class="is-pixel" style="--v: 1"><span class="jev__who">Pixel + deepseek-v4.1-flash</span><span class="jev__bar" aria-hidden="true"></span><strong>100%</strong></li>
+            <li style="--v: 0.839"><span class="jev__who">Jev, a dedicated decision model</span><span class="jev__bar" aria-hidden="true"></span><strong>83.9%</strong></li>
+          </ul>
+          <p class="jev__fine">Jev's 83.9% is its own published score on 56 coding items, not re-measured here, and 14 items is a small sample. <code>pixel classify</code> is opt-in: the only command that sends anything to a model, and only to the one you configure. <a class="link" href="{{ $bench }}#coding-decisions" target="_blank" rel="noopener">Every model, the method and its limits</a></p>
         </div>
       </div>
     </section>
 
     {{/* ---------- install ---------- */}}
-    <section class="section wrap section--center" id="install" data-chapter="Install" aria-labelledby="install-title">
+    <section class="section wrap section--center" id="install" aria-labelledby="install-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Install</span></p>
       <header class="section__head" data-reveal>
         <h2 id="install-title">Two commands. That's the whole setup.</h2>
       </header>
@@ -244,7 +260,8 @@
     </section>
 
     {{/* ---------- questions ---------- */}}
-    <section class="section wrap section--center" id="faq" data-chapter="Questions" aria-labelledby="faq-title">
+    <section class="section wrap section--center" id="faq" aria-labelledby="faq-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Objections</span></p>
       <header class="section__head" data-reveal>
         <h2 id="faq-title">Fair questions.</h2>
       </header>
@@ -502,17 +519,17 @@
       });
     })();
 
-    /* The chapter rail: one link per section carrying data-chapter, the
+    /* The chapter rail: one link per section opening on a .chapter label, the
        current one lit, the passed ones filled. Wide screens only (CSS). */
     (function () {
       var rail = document.querySelector('[data-rail]');
-      var secs = [].slice.call(document.querySelectorAll('section[data-chapter]'));
+      var secs = [].slice.call(document.querySelectorAll('main > section')).filter(function (sec) { return sec.querySelector(':scope > .chapter'); });
       if (!rail || !secs.length) return;
       var links = secs.map(function (sec, i) {
         var a = document.createElement('a');
         a.href = '#' + sec.id;
         a.innerHTML = '<span class="rail__n">' + String(i + 1).padStart(2, '0') + '</span><span class="rail__label"></span>';
-        a.querySelector('.rail__label').textContent = sec.dataset.chapter;
+        a.querySelector('.rail__label').textContent = sec.querySelector('.chapter__name').textContent;
         rail.appendChild(a);
         return a;
       });
@@ -538,7 +555,7 @@
        reduced motion. */
     (function () {
       if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-      var secs = [].slice.call(document.querySelectorAll('main > section[data-chapter]'));
+      var secs = [].slice.call(document.querySelectorAll('main > section')).filter(function (sec) { return sec.querySelector(':scope > .chapter'); });
       if (!secs.length) return;
       var CATCH = 80, IDLE = 180, t, self = false;
       var navH = function () { var n = document.querySelector('.nav'); return n ? n.offsetHeight : 0; };

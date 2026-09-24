@@ -49,12 +49,15 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   kept faint by `.backdrop` in the stylesheet. It also darkens the nav once
   the page scrolls. Reduced motion gets one still frame.
 - `assets/logos/`: the agents' marks in "Plugs into the agent you already
-  use", one colour each (`fill="currentColor"`), from Simple Icons, Lobe
-  Icons (Devin, Antigravity) and pi.dev's favicon (Pi). Add an agent there
+  use", in each brand's own colours (Lobe Icons' colour variants: Claude,
+  Codex, Cursor, Gemini, Devin, Antigravity); the monochrome marks (Pi,
+  Copilot, OpenCode, Windsurf) use `currentColor`, from Simple Icons and
+  pi.dev's favicon. Add an agent there
   and in the `$agents` list of `layouts/index.html` together.
-- Chapters: every landing section with a `data-chapter` gets a numbered
-  divider (CSS counter in `main.css`) and a square in the right-edge rail
-  (wide screens), and the home eases onto a section start only when scrolling stopped within
+- Chapters: a landing section that opens on a `<p class="chapter">` gets a
+  numbered divider (CSS counter in `main.css`) and a square in the
+  right-edge rail (wide screens). A chapter name is a category, never the
+  headline's own words ("Architecture" over "How it works."), and the home eases onto a section start only when scrolling stopped within
   80 px of it (a script, not CSS scroll-snap, whose `proximity` bounced).
   The nav's bottom edge fills with the scroll progress.
 - Links: anything that leaves the page opens in a new tab, in the templates
