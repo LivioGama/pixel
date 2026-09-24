@@ -819,7 +819,12 @@ fn search_content_takes_ripgreps_glob_type_files_and_literal_flags() {
     };
     assert_eq!(
         files(&["login_user", ".", "-l"]),
-        ["NOTES.md", "src/caller.rs", "src/login.rs", "tests/login_test.rs"],
+        [
+            "NOTES.md",
+            "src/caller.rs",
+            "src/login.rs",
+            "tests/login_test.rs"
+        ],
         "-l prints each file once"
     );
     assert_eq!(
@@ -834,6 +839,29 @@ fn search_content_takes_ripgreps_glob_type_files_and_literal_flags() {
         files(&["login_user(", ".", "-F", "-n", "-l", "-g", "src/*.rs"]),
         ["src/caller.rs", "src/login.rs"],
         "-F: `(` is literal"
+    );
+    // -l output is newline-terminated lines, and nothing at all without a match.
+    let listed = pixel(
+        &dir,
+        &["search-content", "login_user", "src/login.rs", "-l"],
+    );
+    assert_eq!(String::from_utf8_lossy(&listed.stdout), "src/login.rs\n");
+    let none = pixel(&dir, &["search-content", "no_such_needle_xyz", ".", "-l"]);
+    assert!(none.status.success(), "{none:?}");
+    assert!(none.stdout.is_empty(), "{none:?}");
+    // -l still says when the page it listed was cut, and only then.
+    let cut = pixel(
+        &dir,
+        &["search-content", "login_user", ".", "-l", "--limit", "1"],
+    );
+    assert!(
+        String::from_utf8_lossy(&cut.stderr).contains("results truncated"),
+        "{cut:?}"
+    );
+    let whole = pixel(&dir, &["search-content", "login_user", ".", "-l"]);
+    assert!(
+        !String::from_utf8_lossy(&whole.stderr).contains("results truncated"),
+        "{whole:?}"
     );
     // Without -F the same pattern is an unclosed group, so -F is doing the work.
     let regex = pixel(&dir, &["search-content", "login_user(", "."]);
