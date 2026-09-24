@@ -232,50 +232,6 @@
       </div>
     </section>
 
-    {{/* ---------- install ---------- */}}
-    <section class="section wrap section--center" id="install" aria-labelledby="install-title">
-      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Install</span></p>
-      <header class="section__head" data-reveal>
-        <h2 id="install-title"><span class="glow">Two commands.</span> That's the whole setup.</h2>
-      </header>
-      {{ $brew := "brew install LivioGama/tap/pixel" }}
-      {{ $curl := "curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh" }}
-      <div class="setup">
-        <div class="setup__main" data-reveal>
-          {{/* One terminal, two ways to get the binary: the switch swaps the first line and what Copy all copies. */}}
-          <div class="term" data-term>
-            <div class="term__bar">
-              <span class="term__dots" aria-hidden="true"><span></span><span></span><span></span></span>
-              <div class="term__switch" role="group" aria-label="Install with">
-                <button type="button" aria-pressed="true" data-variant="brew" data-copy-all="{{ $brew }} && pixel install && pixel doctor .">Homebrew</button>
-                <button type="button" aria-pressed="false" data-variant="curl" data-copy-all="{{ $curl }} && pixel install && pixel doctor .">Script</button>
-              </div>
-              <button class="cmd__copy term__copy" type="button" data-copy="{{ $brew }} && pixel install && pixel doctor .">Copy all</button>
-            </div>
-            <pre class="term__body"><code><span data-line="brew"><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl" hidden><span class="term__p">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</span><span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span>
-<span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></code></pre>
-          </div>
-          <p class="install__more">The script works on macOS and Linux. Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}" target="_blank" rel="noopener">Plugins and rules files</a>.</p>
-        </div>
-        <aside class="yours" data-reveal>
-          <span class="yours__icon">{{ partial "icon.html" (dict "name" "chart" "size" 26) }}</span>
-          <h3>Don't take our numbers.</h3>
-          <p>After a few sessions, ask Pixel what it spared your own agent. On the maintainer's machine: 41 to 83% of what it would have read, across 798 operations.</p>
-          <div class="cmd">
-            <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel token-savings</code>
-            <button class="cmd__copy" type="button" data-copy="pixel token-savings">Copy</button>
-          </div>
-        </aside>
-      </div>
-      <ul class="badges" data-reveal="stagger">
-        <li>{{ partial "icon.html" (dict "name" "laptop" "size" 18) }}Runs 100% on your machine</li>
-        <li>{{ partial "icon.html" (dict "name" "shield" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Zero telemetry</a></li>
-        <li>{{ partial "icon.html" (dict "name" "user" "size" 18) }}No account, no server</li>
-        <li>{{ partial "icon.html" (dict "name" "doc" "size" 18) }}MIT licensed</li>
-        <li>{{ partial "icon.html" (dict "name" "trash" "size" 18) }}Hooks gone in one <code>pixel uninstall</code></li>
-      </ul>
-    </section>
-
     {{/* ---------- questions ---------- */}}
     <section class="section wrap section--center" id="faq" aria-labelledby="faq-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Objections</span></p>
@@ -313,6 +269,53 @@
           <p>Text search covers every file Git does not ignore, up to 4 MiB. The code graph covers {{ delimit $langs ", " ", and " }}. The last five go through a generic extractor rather than a dedicated one.</p>
         </details>
       </div>
+      {{/* The last objection answered by the visitor's own numbers, before the install that follows. */}}
+      <aside class="yours" data-reveal>
+        <span class="yours__icon">{{ partial "icon.html" (dict "name" "chart" "size" 26) }}</span>
+        <div class="yours__text">
+          <h3>Don't take our numbers.</h3>
+          <p>After a few sessions, ask Pixel what it spared your own agent. On the maintainer's machine: 41 to 83% of what it would have read, across 798 operations.</p>
+        </div>
+        <div class="cmd">
+          <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel token-savings</code>
+          <button class="cmd__copy" type="button" data-copy="pixel token-savings">Copy</button>
+        </div>
+      </aside>
+    </section>
+
+    {{/* ---------- install ---------- */}}
+    <section class="section wrap section--center" id="install" aria-labelledby="install-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Install</span></p>
+      <header class="section__head" data-reveal>
+        <h2 id="install-title"><span class="glow">Two commands.</span> That's the whole setup.</h2>
+      </header>
+      {{ $brew := "brew install LivioGama/tap/pixel" }}
+      {{ $curl := "curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh" }}
+      <div class="setup">
+        <div class="setup__main" data-reveal>
+          {{/* One terminal, two ways to get the binary: the switch swaps the first line and what Copy all copies. */}}
+          <div class="term" data-term>
+            <div class="term__bar">
+              <span class="term__dots" aria-hidden="true"><span></span><span></span><span></span></span>
+              <div class="term__switch" role="group" aria-label="Install with">
+                <button type="button" aria-pressed="true" data-variant="brew" data-copy-all="{{ $brew }} && pixel install && pixel doctor .">Homebrew</button>
+                <button type="button" aria-pressed="false" data-variant="curl" data-copy-all="{{ $curl }} && pixel install && pixel doctor .">Script</button>
+              </div>
+              <button class="cmd__copy term__copy" type="button" data-copy="{{ $brew }} && pixel install && pixel doctor .">Copy all</button>
+            </div>
+            <pre class="term__body"><code><span data-line="brew"><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl" hidden><span class="term__p">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</span><span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span>
+<span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></code></pre>
+          </div>
+          <p class="install__more">The script works on macOS and Linux. Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}" target="_blank" rel="noopener">Plugins and rules files</a>.</p>
+        </div>
+      </div>
+      <ul class="badges" data-reveal="stagger">
+        <li>{{ partial "icon.html" (dict "name" "laptop" "size" 18) }}Runs 100% on your machine</li>
+        <li>{{ partial "icon.html" (dict "name" "shield" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Zero telemetry</a></li>
+        <li>{{ partial "icon.html" (dict "name" "user" "size" 18) }}No account, no server</li>
+        <li>{{ partial "icon.html" (dict "name" "doc" "size" 18) }}MIT licensed</li>
+        <li>{{ partial "icon.html" (dict "name" "trash" "size" 18) }}Hooks gone in one <code>pixel uninstall</code></li>
+      </ul>
     </section>
 
     {{/* ---------- closing ---------- */}}
