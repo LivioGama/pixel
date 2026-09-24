@@ -2736,6 +2736,99 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A block's `use` shadows the file-level one for the calls inside it:
+    /// `inner` means `later`, `outer` means `early`, although both aliases
+    /// are named `run` and point into one file (T1 used to take whichever
+    /// symbol of utils.rs came first).
+    #[test]
+    fn a_block_use_shadows_the_file_level_alias_of_the_same_name() {
+        let root = tmpdir("rust-use-shadow");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod utils;\npub mod ship;\n").unwrap();
+        std::fs::write(
+            root.join("src/utils.rs"),
+            "pub fn early() {}\npub fn later() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/ship.rs"),
+            [
+                "use crate::utils::early as run;",
+                "pub fn outer() { run(); }",
+                "pub fn inner() {",
+                "    use crate::utils::later as run;",
+                "    run();",
+                "}",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let edges: Vec<(String, String, String)> = store
+            .conn()
+            .prepare(
+                "SELECT src.name, dst.name, e.tier FROM edges e
+                   JOIN symbols src ON src.id = e.src_id
+                   JOIN symbols dst ON dst.id = e.dst_id
+                  WHERE e.kind = 'calls' ORDER BY src.name",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let expected = [("inner", "later"), ("outer", "early")]
+            .map(|(src, dst)| (src.to_string(), dst.to_string(), "exact".to_string()));
+        assert_eq!(edges, expected);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An alias applies only in its own scope: `mod a` aliases a constant as
+    /// `zap`, and `mod b` passes its own `fn zap` as a value. The out-of-scope
+    /// alias must not turn that reference into a plain value and drop it.
+    #[test]
+    fn an_out_of_scope_alias_does_not_hide_a_reference_to_a_local_function() {
+        let root = tmpdir("rust-alias-reference-scope");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod consts;\npub mod ship;\n").unwrap();
+        std::fs::write(root.join("src/consts.rs"), "pub const VALUE: u32 = 1;\n").unwrap();
+        std::fs::write(
+            root.join("src/ship.rs"),
+            [
+                "mod a {",
+                "    use crate::consts::VALUE as zap;",
+                "}",
+                "mod b {",
+                "    fn zap() {}",
+                "    fn consume(_: fn()) {}",
+                "    fn f() { consume(zap); }",
+                "}",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let references: i64 = store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM edges e
+                   JOIN symbols src ON src.id = e.src_id
+                   JOIN symbols dst ON dst.id = e.dst_id
+                  WHERE e.kind = 'references' AND src.name = 'f' AND dst.name = 'zap'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(references, 1, "consume(zap) passes mod b's zap");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn wildcard_import_does_not_make_unqualified_call_exact() {
         let root = tmpdir("wildcard-import");

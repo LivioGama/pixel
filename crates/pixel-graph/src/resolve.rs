@@ -132,6 +132,20 @@ fn in_scope(scope: &[(u32, u32)], site_line: Option<u32>) -> bool {
         })
 }
 
+/// How many lines the range of `scope` holding `site_line` spans: the
+/// innermost scope has the narrowest one, since a nested block or module
+/// lies inside every range of the scopes around it. A file-wide scope spans
+/// everything.
+fn scope_width(scope: &[(u32, u32)], site_line: Option<u32>) -> u32 {
+    site_line
+        .and_then(|line| {
+            scope
+                .iter()
+                .find(|&&(start, end)| start <= line && line <= end)
+        })
+        .map_or(u32::MAX, |&(start, end)| end - start)
+}
+
 /// Symbol-name index + import graph snapshot used for tier decisions.
 pub struct ResolveIndex {
     by_name: HashMap<String, Vec<Candidate>>,
@@ -256,17 +270,49 @@ impl ResolveIndex {
     /// and a same-name definition elsewhere is not what it means there. Any
     /// other name — imported under its own name or not imported — counts
     /// when some symbol carries it, as before aliases were tracked.
-    fn names_a_symbol(&self, file_id: i64, name: &str) -> bool {
-        match self.import_bindings.get(&(file_id, name.to_string())) {
-            None => self.defines(name),
-            Some(targets) => targets.iter().any(|t| {
-                if t.source == name {
-                    self.defines(name)
-                } else {
-                    self.defines_in_file(t.file_id, &t.source)
-                }
-            }),
+    /// Only the imports that apply on `site_line` count: an alias in another
+    /// module does not hide a same-name function of this one.
+    fn names_a_symbol(&self, file_id: i64, name: &str, site_line: Option<u32>) -> bool {
+        let targets = self.applicable_targets(file_id, name, site_line);
+        if targets.is_empty() {
+            return self.defines(name);
         }
+        targets.iter().any(|t| {
+            if t.source == name {
+                self.defines(name)
+            } else {
+                self.defines_in_file(t.file_id, &t.source)
+            }
+        })
+    }
+
+    /// The imports binding `name` in `file_id` that apply on `site_line`:
+    /// those in scope there, and of those only the innermost, since a nested
+    /// block's or module's `use` shadows the ones around it.
+    fn applicable_targets(
+        &self,
+        file_id: i64,
+        name: &str,
+        site_line: Option<u32>,
+    ) -> Vec<&ImportTarget> {
+        let Some(targets) = self.import_bindings.get(&(file_id, name.to_string())) else {
+            return Vec::new();
+        };
+        let visible: Vec<&ImportTarget> = targets
+            .iter()
+            .filter(|t| in_scope(&t.scope, site_line))
+            .collect();
+        let Some(narrowest) = visible
+            .iter()
+            .map(|t| scope_width(&t.scope, site_line))
+            .min()
+        else {
+            return Vec::new();
+        };
+        visible
+            .into_iter()
+            .filter(|t| scope_width(&t.scope, site_line) == narrowest)
+            .collect()
     }
 
     /// True iff an import of `file_id` in scope on `site_line` binds `name`
@@ -274,13 +320,9 @@ impl ResolveIndex {
     /// a same-name definition elsewhere can never be its target, even as T2's
     /// sole candidate.
     fn binds_an_alias(&self, file_id: i64, name: &str, site_line: Option<u32>) -> bool {
-        self.import_bindings
-            .get(&(file_id, name.to_string()))
-            .is_some_and(|targets| {
-                targets
-                    .iter()
-                    .any(|t| t.source != name && in_scope(&t.scope, site_line))
-            })
+        self.applicable_targets(file_id, name, site_line)
+            .iter()
+            .any(|t| t.source != name)
     }
 
     /// The tier decision for one call from `caller_file_id` to `name`.
@@ -513,42 +555,35 @@ impl ResolveIndex {
     }
 
     /// T1: the definitions the imports binding `name` in `caller_file_id`
-    /// point at — each a symbol named after the binding's source in the file
-    /// the import resolved to — counting only the imports whose names are in
-    /// scope on `site_line`. `None` when no such import binds `name` or none
-    /// of them lands on a definition (T2 decides); `Unresolved` when they
-    /// land in several files, since a name never fans out. A block's `use`
-    /// that shadows a file-level one therefore leaves the call unresolved
-    /// rather than guessing which of the two wins.
+    /// point at — a symbol named after the binding's source in the file the
+    /// import resolved to — counting only the imports that apply on
+    /// `site_line` (`applicable_targets`: in scope, innermost first). `None`
+    /// when none binds `name` or none lands on a definition (T2 decides);
+    /// `Unresolved` when the applicable imports name several items, even in
+    /// one file, since a name never fans out and the resolver will not pick
+    /// between them by symbol order.
     fn import_tier(
         &self,
         caller_file_id: i64,
         name: &str,
         site_line: Option<u32>,
     ) -> Option<Decision> {
-        let targets = self
-            .import_bindings
-            .get(&(caller_file_id, name.to_string()))?;
-        let mut hits: Vec<Candidate> = Vec::new();
-        for target in targets {
-            if !in_scope(&target.scope, site_line) {
-                continue;
-            }
-            if let Some(cands) = self.by_name.get(&target.source) {
-                hits.extend(
-                    cands
-                        .iter()
-                        .copied()
-                        .filter(|c| c.file_id == target.file_id),
-                );
-            }
-        }
-        let files: HashSet<i64> = hits.iter().map(|c| c.file_id).collect();
-        match files.len() {
-            0 => None,
-            1 => best(&hits).map(Decision::Exact),
-            _ => Some(Decision::Unresolved),
-        }
+        let targets = self.applicable_targets(caller_file_id, name, site_line);
+        let items: HashSet<(i64, &str)> = targets
+            .iter()
+            .map(|t| (t.file_id, t.source.as_str()))
+            .collect();
+        let [(file_id, source)] = items.into_iter().collect::<Vec<_>>()[..] else {
+            return (!targets.is_empty()).then_some(Decision::Unresolved);
+        };
+        let hits: Vec<Candidate> = self
+            .by_name
+            .get(source)?
+            .iter()
+            .copied()
+            .filter(|c| c.file_id == file_id)
+            .collect();
+        best(&hits).map(Decision::Exact)
     }
 }
 
@@ -684,7 +719,7 @@ pub fn resolve_references(
     let mut stats = ResolveStats::default();
     for fr in pending {
         for r#ref in &fr.references {
-            if !idx.names_a_symbol(fr.file_id, &r#ref.name) {
+            if !idx.names_a_symbol(fr.file_id, &r#ref.name, Some(r#ref.site_line)) {
                 continue;
             }
             let Some(src_id) = r#ref.enclosing_symbol_id else {
@@ -1486,5 +1521,38 @@ mod tests {
         assert!(!in_scope(&scope, None));
         assert!(in_scope(&[], None));
         assert!(in_scope(&[], Some(7)));
+    }
+
+    /// Two imports bind `run` for the same lines to two items of one file:
+    /// nothing says which one the call means, so T1 must not pick one by
+    /// symbol order.
+    #[test]
+    fn import_tier_leaves_two_items_bound_for_the_same_lines_unresolved() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let local = store.replace_file("src/local.rs", "oid", "rust").unwrap();
+        let utils = store.replace_file("src/utils.rs", "oid", "rust").unwrap();
+        insert(&store, utils, "src/utils.rs", "early");
+        insert(&store, utils, "src/utils.rs", "later");
+        for source in ["early", "later"] {
+            store
+                .insert_import(
+                    local,
+                    &format!("crate::utils::{source} as run"),
+                    Some(utils),
+                    &[ImportBinding::aliased(source, "run")],
+                )
+                .unwrap();
+        }
+        let idx = ResolveIndex::build(&store).unwrap();
+        assert_eq!(idx.decide_at(local, "run", None, 3), Decision::Unresolved);
+    }
+
+    #[test]
+    fn scope_width_is_the_span_of_the_range_holding_the_line() {
+        let scope = [(1, 1), (4, 9)];
+        assert_eq!(scope_width(&scope, Some(5)), 5);
+        assert_eq!(scope_width(&scope, Some(1)), 0);
+        assert_eq!(scope_width(&[], Some(5)), u32::MAX);
+        assert_eq!(scope_width(&scope, None), u32::MAX);
     }
 }
