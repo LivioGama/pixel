@@ -4,6 +4,7 @@
   {{ partial "head.html" . }}
 </head>
 <body class="home">
+  {{ partial "splash.html" . }}
   <a href="#main" class="skip">Skip to content</a>
   {{ partial "nav.html" . }}
   {{ $s := hugo.Data.scope }}
@@ -415,14 +416,18 @@
         t = setTimeout(function () { if (fig.classList.contains('is-done')) gather(); }, 120);
       });
       if (matchMedia('(prefers-reduced-motion: reduce)').matches) return final();
-      // Burn only once the wall is on screen, so nobody misses it.
-      if (!('IntersectionObserver' in window)) return run();
-      var seen = new IntersectionObserver(function (e) {
-        if (!e[0].isIntersecting) return;
-        seen.disconnect();
-        run();
-      }, { threshold: 0.5 });
-      seen.observe(grid);
+      // Burn only once the wall is on screen, and after the splash, so nobody misses it.
+      var start = function () {
+        if (!('IntersectionObserver' in window)) return run();
+        var seen = new IntersectionObserver(function (e) {
+          if (!e[0].isIntersecting) return;
+          seen.disconnect();
+          run();
+        }, { threshold: 0.5 });
+        seen.observe(grid);
+      };
+      if (document.documentElement.classList.contains('splash')) addEventListener('pixel:splashdone', start, { once: true });
+      else start();
     })();
 
     /* Scope board: one pad per indexed file. Each P0 file gets a

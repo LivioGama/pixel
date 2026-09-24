@@ -1,0 +1,57 @@
+{{- /* The home's splash: a swarm of pixels lands into the brand square, the
+   square locks with a flash, the wordmark materialises (Handjet's ELSH, as
+   the hero title does) and a row of squares fills; then the screen fades
+   into the page. About two seconds, skippable with any click or key.
+   Shown only when head.html set the .splash class (home, once per tab
+   session, motion welcome). Without JavaScript nothing renders, and the
+   CSS fades it out by itself at 4.5 s if the script never finishes. */ -}}
+<div class="splash-screen" data-splash aria-hidden="true">
+  <div class="splash__stage">
+    <div class="splash__mark" data-splash-mark></div>
+    <p class="splash__word">pixel</p>
+    <div class="splash__bar"><span></span></div>
+  </div>
+</div>
+<script>
+  (function () {
+    var root = document.documentElement;
+    var el = document.querySelector('[data-splash]');
+    if (!el || !root.classList.contains('splash')) { if (el) el.remove(); return; }
+    try { sessionStorage.setItem('pixel:splash', '1'); } catch (_) {}
+    var mark = el.querySelector('[data-splash-mark]');
+    var N = 7, seed = 5;
+    var rand = function () { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+    // Each square starts somewhere off in the screen and flies to its cell,
+    // the centre first, so the square builds outwards.
+    for (var i = 0; i < N * N; i++) {
+      var s = document.createElement('span');
+      var x = i % N - (N - 1) / 2, y = Math.floor(i / N) - (N - 1) / 2;
+      var a = rand() * Math.PI * 2, d = 180 + rand() * 320;
+      s.style.setProperty('--x', Math.round(Math.cos(a) * d) + 'px');
+      s.style.setProperty('--y', Math.round(Math.sin(a) * d) + 'px');
+      s.style.setProperty('--r', Math.round(rand() * 180 - 90) + 'deg');
+      s.style.animationDelay = Math.round(Math.max(Math.abs(x), Math.abs(y)) * 70 + rand() * 90) + 'ms';
+      mark.appendChild(s);
+    }
+    var prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    var timers = [], gone = false;
+    var finish = function () {
+      if (gone) return;
+      gone = true;
+      timers.forEach(clearTimeout);
+      el.classList.add('is-leaving');
+      document.body.style.overflow = prev;
+      setTimeout(function () {
+        el.remove();
+        root.classList.remove('splash');
+        dispatchEvent(new Event('pixel:splashdone'));
+      }, 520);
+    };
+    timers.push(setTimeout(function () { el.classList.add('is-locked'); }, 820));
+    timers.push(setTimeout(finish, 2100));
+    ['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach(function (ev) {
+      addEventListener(ev, finish, { once: true, passive: true });
+    });
+  })();
+</script>

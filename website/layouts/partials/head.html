@@ -2,6 +2,10 @@
 <meta charset="utf-8">
 {{/* .js gates the scroll reveals: without it every block renders at rest. */}}
 <script>document.documentElement.className += " js";</script>
+{{- if .IsHome }}
+{{/* The splash (partials/splash.html) is decided before the first paint: home only, once per tab session, never under reduced motion. */}}
+<script>(function () { try { if (!matchMedia("(prefers-reduced-motion: reduce)").matches && !sessionStorage.getItem("pixel:splash")) document.documentElement.className += " splash"; } catch (_) {} })();</script>
+{{- end }}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ if .IsHome }}Pixel: a local code index for coding agents{{ else }}{{ .Title }} | Pixel{{ end }}</title>
 <meta name="description" content="{{ $desc }}">

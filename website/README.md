@@ -74,6 +74,12 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
 - The agent demo never starts on its own: its poster is
   `pixel-agent-demo-start.jpg`, the recording's first frame, which
   `docs/motion/scripts/render.sh` writes beside the last-frame poster.
+- `layouts/partials/splash.html`: the home's splash (pixels landing into
+  the brand square, then the wordmark), about two seconds, skippable.
+  `partials/head.html` decides it before the first paint: home only, once
+  per tab session (`sessionStorage`), never under reduced motion. The token
+  wall waits for its `pixel:splashdone` event. A CSS fallback fades it out
+  at 4.5 s if the script never finishes.
 - `layouts/404.html`: the not-found page GitHub Pages serves for any
   unknown path under the site.
 - `assets/css/main.css`: one stylesheet, tokens first, dark only. Headlines
