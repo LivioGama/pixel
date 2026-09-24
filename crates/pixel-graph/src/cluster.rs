@@ -59,12 +59,15 @@ fn build_graph(store: &GraphStore) -> Result<Graph, StoreError> {
     }
 
     // file-level imports projected to symbols via one representative symbol
-    // per file (min symbol id) — keeps the projection O(imports).
+    // per file (min symbol id) — keeps the projection O(imports). One link per
+    // statement and target file: the paths of a Rust `use` that land in one
+    // file (`use a::{b, c};`) are one import, as they were before being split.
     {
         let mut stmt = store.conn().prepare(
             "SELECT (SELECT MIN(s.id) FROM symbols s WHERE s.file_id = i.file_id),
                     (SELECT MIN(s.id) FROM symbols s WHERE s.file_id = i.resolved_file_id)
-             FROM imports i WHERE i.resolved_file_id IS NOT NULL",
+             FROM (SELECT DISTINCT file_id, spec, resolved_file_id FROM imports
+                    WHERE resolved_file_id IS NOT NULL) i",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?))

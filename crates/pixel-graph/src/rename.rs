@@ -84,8 +84,9 @@ struct Site {
     line: u32,
     kind: SiteKind,
     /// For `Import`: the import's spec text, used to find the right
-    /// statement when a file has several.
-    spec: Option<String>,
+    /// statement when a file has several, and the path it resolved, which
+    /// picks the leaf of a Rust `use` naming several.
+    spec: Option<(String, String)>,
 }
 
 /// Compute the verified edit set for renaming `sym` to `new_name`.
@@ -175,7 +176,7 @@ pub fn plan(
             path: path.clone(),
             line: 0, // located by spec text, not a stored line
             kind: SiteKind::Import,
-            spec: Some(import.spec),
+            spec: Some((import.spec, import.path)),
         });
     }
 
@@ -298,8 +299,10 @@ fn verify_site(
     };
     match site.kind {
         SiteKind::Import => {
-            let Some(spec) = &site.spec else { return };
-            let found = import_name_nodes(tree, content, spec, &sym.name);
+            let Some((spec, import_path)) = &site.spec else {
+                return;
+            };
+            let found = import_name_nodes(tree, content, spec, import_path, &sym.name);
             if found.is_empty() {
                 skip(
                     plan,
@@ -532,10 +535,19 @@ fn is_declaration_name(node: Node) -> bool {
 
 /// Inside the file's import statements that carry `spec`, the identifier
 /// nodes naming `name` in binding position — never the `as` alias, which is
-/// the importer's local name and stays valid as-is.
-fn import_name_nodes<'t>(tree: &'t Tree, content: &[u8], spec: &str, name: &str) -> Vec<Node<'t>> {
+/// the importer's local name and stays valid as-is. In a Rust `use`, only the
+/// leaf whose full path is `path` (the import row's): `use crate::{left::push,
+/// right::push as p};` holds two `push` items from two files, and renaming
+/// one must leave the other.
+fn import_name_nodes<'t>(
+    tree: &'t Tree,
+    content: &[u8],
+    spec: &str,
+    path: &str,
+    name: &str,
+) -> Vec<Node<'t>> {
     let mut out = Vec::new();
-    collect_import_nodes(tree.root_node(), content, spec, name, &mut out);
+    collect_import_nodes(tree.root_node(), content, spec, path, name, &mut out);
     out
 }
 
@@ -543,6 +555,7 @@ fn collect_import_nodes<'t>(
     node: Node<'t>,
     content: &[u8],
     spec: &str,
+    path: &str,
     name: &str,
     out: &mut Vec<Node<'t>>,
 ) {
@@ -550,6 +563,10 @@ fn collect_import_nodes<'t>(
         || (node.kind() == "export_statement"
             && node.utf8_text(content).is_ok_and(|t| t.contains("from")));
     if is_import && node.utf8_text(content).is_ok_and(|t| t.contains(spec)) {
+        if node.kind() == "use_declaration" {
+            use_leaf_name_nodes(node, content, path, name, out);
+            return;
+        }
         // Within this statement, rewrite name-position identifiers matching
         // the old name; alias-position nodes (the `as X` target) keep the
         // importer's local name.
@@ -558,7 +575,30 @@ fn collect_import_nodes<'t>(
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            collect_import_nodes(child, content, spec, name, out);
+            collect_import_nodes(child, content, spec, path, name, out);
+        }
+    }
+}
+
+/// The source-name node of the leaf of Rust `use` `node` whose path is `path`
+/// and whose item is `name`.
+fn use_leaf_name_nodes<'t>(
+    node: Node<'t>,
+    content: &[u8],
+    path: &str,
+    name: &str,
+    out: &mut Vec<Node<'t>>,
+) {
+    let Some(arg) = node.child_by_field_name("argument") else {
+        return;
+    };
+    for leaf in extract::rust_use_leaves(content, arg) {
+        if leaf.path == path
+            && leaf.binding.is_some_and(|b| b.source == name)
+            && let Some(bytes) = leaf.source_bytes
+            && let Some(found) = node.descendant_for_byte_range(bytes.start, bytes.end)
+        {
+            out.push(found);
         }
     }
 }
@@ -854,6 +894,44 @@ mod tests {
         );
     }
 
+    /// `use crate::{left::push, right::push as p};` imports two `push`
+    /// items from two files. Renaming `left.rs`'s rewrites its leaf only:
+    /// matching the statement by spec alone rewrote every `push` in it.
+    #[test]
+    fn plan_rewrites_only_the_leaf_of_a_grouped_use_that_names_the_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub mod left;\npub mod right;\npub mod ship;\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/left.rs"), "pub fn push() {}\n").unwrap();
+        std::fs::write(dir.path().join("src/right.rs"), "pub fn push() {}\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/ship.rs"),
+            "use crate::{left::push, right::push as p};\npub fn ship() { push(); p(); }\n",
+        )
+        .unwrap();
+        let db = dir.path().join("graph.db");
+        crate::build::build_graph(dir.path(), &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let left = store.file_by_path("src/left.rs").unwrap().unwrap().id;
+        let sym = store
+            .symbols_in_file(left)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "push")
+            .unwrap();
+        let plan = plan(&store, dir.path(), &sym, "shove").unwrap();
+        apply(dir.path(), &plan, "push", "shove").unwrap();
+        let after = std::fs::read_to_string(dir.path().join("src/ship.rs")).unwrap();
+        assert_eq!(
+            after,
+            "use crate::{left::shove, right::push as p};\npub fn ship() { shove(); p(); }\n"
+        );
+    }
+
     #[test]
     fn plan_rejects_renaming_to_the_same_name() {
         let (dir, store) = fixture();
@@ -979,7 +1057,7 @@ mod tests {
     fn import_binding_is_not_a_declaration_name() {
         let src = b"import { loginUser } from \"./login\";\n";
         let tree = extract::parse_file("a.ts", src).unwrap();
-        let nodes = import_name_nodes(&tree, src, "./login", "loginUser");
+        let nodes = import_name_nodes(&tree, src, "./login", "./login", "loginUser");
         assert_eq!(nodes.len(), 1);
         assert!(!is_declaration_name(nodes[0]));
         // And it IS a reference-position identifier.
@@ -992,7 +1070,7 @@ mod tests {
     fn alias_with_same_name_is_not_rewritten() {
         let src = b"import { other as loginUser } from \"./login\";\n";
         let tree = extract::parse_file("a.ts", src).unwrap();
-        assert!(import_name_nodes(&tree, src, "./login", "loginUser").is_empty());
+        assert!(import_name_nodes(&tree, src, "./login", "./login", "loginUser").is_empty());
         // The alias node itself reports as alias position.
         let tree2 = extract::parse_file("a.ts", src).unwrap();
         let all = identifier_nodes_on_line(&tree2, src, 1, "loginUser");
@@ -1028,7 +1106,7 @@ mod tests {
     fn reexport_from_is_an_import_site_bare_export_is_not() {
         let src = b"export { loginUser } from \"./login\";\nexport { loginUser };\n";
         let tree = extract::parse_file("a.ts", src).unwrap();
-        let nodes = import_name_nodes(&tree, src, "./login", "loginUser");
+        let nodes = import_name_nodes(&tree, src, "./login", "./login", "loginUser");
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].start_position().row, 0);
     }
@@ -1090,7 +1168,7 @@ mod tests {
     fn import_alias_target_is_never_rewritten() {
         let src = b"import { loginUser as auth } from \"./login\";\nimport { loginUser } from \"./login\";\n";
         let tree = extract::parse_file("a.ts", src).unwrap();
-        let nodes = import_name_nodes(&tree, src, "./login", "loginUser");
+        let nodes = import_name_nodes(&tree, src, "./login", "./login", "loginUser");
         assert_eq!(nodes.len(), 2);
         // First statement: only the `name` side (`loginUser`), never `auth`.
         assert_eq!(nodes[0].start_position().row, 0);
@@ -1106,7 +1184,7 @@ mod tests {
     fn import_nodes_only_match_the_resolved_spec() {
         let src = b"import { loginUser } from \"./other\";\n";
         let tree = extract::parse_file("a.ts", src).unwrap();
-        assert!(import_name_nodes(&tree, src, "./login", "loginUser").is_empty());
+        assert!(import_name_nodes(&tree, src, "./login", "./login", "loginUser").is_empty());
     }
 
     /// The definition picker picks the `name` field of the declaration —

@@ -348,7 +348,7 @@ fn import_premises(
     let from_path = file_path_by_id(store, from_file)?;
     let to_path = file_path_by_id(store, to_file)?;
     let mut stmt = store.conn().prepare(
-        "SELECT spec FROM imports WHERE file_id = ?1 AND resolved_file_id = ?2 ORDER BY spec",
+        "SELECT DISTINCT spec FROM imports WHERE file_id = ?1 AND resolved_file_id = ?2 ORDER BY spec",
     )?;
     let specs = stmt.query_map(params![from_file, to_file], |r| r.get::<_, String>(0))?;
     let mut out = Vec::new();

@@ -52,7 +52,14 @@ pub struct RawReference {
 
 #[derive(Debug, Clone)]
 pub struct RawImport {
+    /// The statement's import text as written; `rename` finds the statement
+    /// by it, so it stays whole even when the statement names several paths.
     pub spec: String,
+    /// What `resolve_import` resolves. Equal to `spec`, except for a Rust
+    /// `use` naming several paths (`use crate::{left::push, right::publish};`),
+    /// which yields one import per path (`crate::left::push`, …), each
+    /// resolved to its own file.
+    pub path: String,
     /// Named bindings imported from this spec (`greet` and `farewell` for
     /// `import { greet, farewell } from "./a"`). Empty for wildcard imports
     /// (`import * as x`) or when bindings cannot be extracted. Empty bindings
@@ -432,8 +439,16 @@ impl<'a> Walker<'a> {
     }
 
     fn push_import(&mut self, spec: String, bindings: Vec<ImportBinding>) {
+        self.push_import_at(spec.clone(), spec, bindings);
+    }
+
+    fn push_import_at(&mut self, spec: String, path: String, bindings: Vec<ImportBinding>) {
         if !spec.is_empty() {
-            self.imports.push(RawImport { spec, bindings });
+            self.imports.push(RawImport {
+                spec,
+                path,
+                bindings,
+            });
         }
     }
 
@@ -983,9 +998,13 @@ fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
         "use_declaration" => {
             if let Some(arg) = node.child_by_field_name("argument") {
                 let spec = w.text(arg);
-                let mut bindings = Vec::new();
-                rust_use_bindings(w, arg, &mut bindings);
-                w.push_import(spec, bindings);
+                let leaves = rust_use_leaves(w.src, arg);
+                if leaves.is_empty() {
+                    w.push_import(spec.clone(), Vec::new());
+                }
+                for leaf in leaves {
+                    w.push_import_at(spec.clone(), leaf.path, leaf.binding.into_iter().collect());
+                }
             }
         }
         _ => {}
@@ -999,45 +1018,105 @@ fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
     w.in_trait_impl = outer_trait_impl;
 }
 
-/// The item names a Rust `use` brings into scope, the way
-/// `ts_import_bindings` reads a TS import:
-/// - `use crate::push::push;` → `push`
-/// - `use crate::push::{PushOptions, push};` → `PushOptions`, `push`
-/// - `use a::{b::{c, d}, e};` → `c`, `d`, `e`
-/// - `use a::b as c;` → `c`, bound to the source item `b`
-/// - `use a::*;`, `use a::{self};` → nothing
+/// One path a Rust `use` names, with the item name it brings into scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UseLeaf {
+    /// The full path, prefixes of enclosing groups included
+    /// (`crate::left::push` in `use crate::{left::push, right::publish};`).
+    pub path: String,
+    /// `None` for `self`, a wildcard, or anything else that names no item.
+    pub binding: Option<ImportBinding>,
+    /// Byte range of the source item's name, the text `rename` rewrites.
+    pub source_bytes: Option<std::ops::Range<usize>>,
+}
+
+/// The paths a Rust `use` argument names, the way `ts_import_bindings`
+/// reads a TS import:
+/// - `use crate::push::push;` → `crate::push::push` binding `push`
+/// - `use crate::push::{PushOptions, push};` → `crate::push::PushOptions`,
+///   `crate::push::push`
+/// - `use a::{b::{c, d}, e};` → `a::b::c`, `a::b::d`, `a::e`
+/// - `use a::b as c;` → `a::b`, binding `c` to the source item `b`
+/// - `use a::*;`, `use a::{self};` → `a::*`, `a::self`, binding nothing
 ///
-/// Without them the resolver's import tier (T1) never fired for Rust: a
-/// call to an imported function whose name another file also defines
-/// (`push`, `publish`, `open`) stayed unresolved, and `who-calls` reported
-/// no caller for it.
-fn rust_use_bindings(w: &Walker, node: Node, out: &mut Vec<ImportBinding>) {
+/// One path per leaf, not one per statement: `use crate::{left::push,
+/// right::publish};` names two files, and resolving the statement as a whole
+/// found neither (the text before `{` is `crate`), while `use
+/// crate::push::{a::x, y};` sent `x` to `push.rs` instead of `push/a.rs`.
+pub(crate) fn rust_use_leaves(src: &[u8], node: Node) -> Vec<UseLeaf> {
+    let mut out = Vec::new();
+    collect_use_leaves(src, node, "", &mut out);
+    out
+}
+
+/// `node`'s text with whitespace removed: a path split across lines
+/// (`crate::\n    push`) still names `crate::push`.
+fn use_path_text(src: &[u8], node: Node) -> String {
+    String::from_utf8_lossy(&src[node.byte_range()])
+        .split_whitespace()
+        .collect()
+}
+
+fn join_use_path(prefix: &str, rest: &str) -> String {
+    if prefix.is_empty() {
+        rest.to_string()
+    } else {
+        format!("{prefix}::{rest}")
+    }
+}
+
+fn collect_use_leaves(src: &[u8], node: Node, prefix: &str, out: &mut Vec<UseLeaf>) {
+    let text = || use_path_text(src, node);
     match node.kind() {
-        "identifier" | "type_identifier" => out.push(ImportBinding::named(w.text(node))),
+        "identifier" | "type_identifier" => out.push(UseLeaf {
+            path: join_use_path(prefix, &text()),
+            binding: Some(ImportBinding::named(text())),
+            source_bytes: Some(node.byte_range()),
+        }),
+        "self" | "crate" | "super" | "use_wildcard" => out.push(UseLeaf {
+            path: join_use_path(prefix, &text()),
+            binding: None,
+            source_bytes: None,
+        }),
         "scoped_identifier" => {
-            if let Some(name) = node.child_by_field_name("name") {
-                rust_use_bindings(w, name, out);
-            }
+            let name = node
+                .child_by_field_name("name")
+                .filter(|n| matches!(n.kind(), "identifier" | "type_identifier"));
+            out.push(UseLeaf {
+                path: join_use_path(prefix, &text()),
+                binding: name.map(|n| ImportBinding::named(use_path_text(src, n))),
+                source_bytes: name.map(|n| n.byte_range()),
+            });
         }
         "use_as_clause" => {
-            let mut source = Vec::new();
+            let mut inner = Vec::new();
             if let Some(path) = node.child_by_field_name("path") {
-                rust_use_bindings(w, path, &mut source);
+                collect_use_leaves(src, path, prefix, &mut inner);
             }
             // Only the alias is in scope: `use a::push as leased;` makes
             // `leased()` a call to `push` and leaves `push()` unbound.
-            if let ([item], Some(alias)) = (source.as_slice(), node.child_by_field_name("alias")) {
-                out.push(ImportBinding::aliased(item.source.clone(), w.text(alias)));
+            if let ([leaf], Some(alias)) = (inner.as_slice(), node.child_by_field_name("alias")) {
+                out.push(UseLeaf {
+                    path: leaf.path.clone(),
+                    binding: leaf.binding.as_ref().map(|b| {
+                        ImportBinding::aliased(b.source.clone(), use_path_text(src, alias))
+                    }),
+                    source_bytes: leaf.source_bytes.clone(),
+                });
             }
         }
         "scoped_use_list" => {
+            let prefix = node.child_by_field_name("path").map_or_else(
+                || prefix.to_string(),
+                |p| join_use_path(prefix, &use_path_text(src, p)),
+            );
             if let Some(list) = node.child_by_field_name("list") {
-                rust_use_bindings(w, list, out);
+                collect_use_leaves(src, list, &prefix, out);
             }
         }
         "use_list" => {
             for child in each_child(node) {
-                rust_use_bindings(w, child, out);
+                collect_use_leaves(src, child, prefix, out);
             }
         }
         _ => {}
@@ -3086,6 +3165,7 @@ fn free() {}
 
     #[test]
     fn rust_use_binds_the_item_names_it_brings_into_scope() {
+        type Row<'a> = (&'a str, &'a str, Vec<(&'a str, &'a str)>);
         let source = [
             "use crate::push::push;",
             "use crate::push::{PushOptions, push as leased};",
@@ -3095,14 +3175,16 @@ fn free() {}
         ]
         .join("\n");
         let extraction = extract_file("src/ship.rs", source.as_bytes()).unwrap();
-        // (spec, [(local, source)]): the resolver matches calls on the
+        // One import per path, keeping the statement's spec for `rename`:
+        // (spec, path, [(local, source)]). The resolver matches calls on the
         // local name, so an aliased item is in scope as its alias only.
-        let bindings: Vec<(&str, Vec<(&str, &str)>)> = extraction
+        let imports: Vec<Row> = extraction
             .imports
             .iter()
             .map(|i| {
                 (
                     i.spec.as_str(),
+                    i.path.as_str(),
                     i.bindings
                         .iter()
                         .map(|b| (b.local.as_str(), b.source.as_str()))
@@ -3110,22 +3192,38 @@ fn free() {}
                 )
             })
             .collect();
+        let grouped = "crate::push::{PushOptions, push as leased}";
+        let nested = "crate::a::{b::{c, d}, e, self}";
         assert_eq!(
-            bindings,
+            imports,
             [
-                ("crate::push::push", vec![("push", "push")]),
                 (
-                    "crate::push::{PushOptions, push as leased}",
-                    vec![("PushOptions", "PushOptions"), ("leased", "push")]
+                    "crate::push::push",
+                    "crate::push::push",
+                    vec![("push", "push")]
                 ),
                 (
-                    "crate::a::{b::{c, d}, e, self}",
-                    vec![("c", "c"), ("d", "d"), ("e", "e")]
+                    grouped,
+                    "crate::push::PushOptions",
+                    vec![("PushOptions", "PushOptions")]
                 ),
-                ("std::collections::*", vec![]),
-                ("super::Walker", vec![("Walker", "Walker")]),
+                (grouped, "crate::push::push", vec![("leased", "push")]),
+                (nested, "crate::a::b::c", vec![("c", "c")]),
+                (nested, "crate::a::b::d", vec![("d", "d")]),
+                (nested, "crate::a::e", vec![("e", "e")]),
+                (nested, "crate::a::self", vec![]),
+                ("std::collections::*", "std::collections::*", vec![]),
+                ("super::Walker", "super::Walker", vec![("Walker", "Walker")]),
             ]
         );
+    }
+
+    /// A path broken across lines names the same module as on one line.
+    #[test]
+    fn rust_use_path_ignores_the_whitespace_inside_it() {
+        let extraction =
+            extract_file("src/ship.rs", b"use crate::{\n    left ::push,\n};\n").unwrap();
+        assert_eq!(extraction.imports[0].path, "crate::left::push");
     }
 
     #[test]

@@ -190,6 +190,9 @@ pub struct ImportRow {
     pub id: i64,
     pub file_id: i64,
     pub spec: String,
+    /// The path this row resolved (`RawImport::path`): `spec`, or one path of
+    /// a Rust `use` naming several.
+    pub path: String,
     /// Named bindings pulled from `spec` (decoded from the stored column).
     pub bindings: Vec<ImportBinding>,
 }
@@ -723,10 +726,24 @@ impl GraphStore {
         resolved_file_id: Option<i64>,
         bindings: &[ImportBinding],
     ) -> Result<()> {
+        self.insert_import_at(file_id, spec, spec, resolved_file_id, bindings)
+    }
+
+    /// An import row whose resolved `path` is not the statement's `spec`:
+    /// one path of a Rust `use` naming several (`RawImport::path`).
+    pub fn insert_import_at(
+        &self,
+        file_id: i64,
+        spec: &str,
+        path: &str,
+        resolved_file_id: Option<i64>,
+        bindings: &[ImportBinding],
+    ) -> Result<()> {
         let bindings_csv = encode_bindings(bindings);
         self.conn.execute(
-            "INSERT INTO imports (file_id, spec, resolved_file_id, bindings) VALUES (?1, ?2, ?3, ?4)",
-            params![file_id, spec, resolved_file_id, bindings_csv],
+            "INSERT INTO imports (file_id, spec, path, resolved_file_id, bindings)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![file_id, spec, path, resolved_file_id, bindings_csv],
         )?;
         Ok(())
     }
@@ -1069,14 +1086,15 @@ impl GraphStore {
     /// imported name at the `use`/`import` site.
     pub fn imports_to_file(&self, resolved_file_id: i64) -> Result<Vec<ImportRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, file_id, spec, bindings FROM imports WHERE resolved_file_id = ?1",
+            "SELECT id, file_id, spec, path, bindings FROM imports WHERE resolved_file_id = ?1",
         )?;
         let rows = stmt.query_map(params![resolved_file_id], |r| {
             Ok(ImportRow {
                 id: r.get(0)?,
                 file_id: r.get(1)?,
                 spec: r.get(2)?,
-                bindings: decode_bindings(&r.get::<_, String>(3)?),
+                path: r.get(3)?,
+                bindings: decode_bindings(&r.get::<_, String>(4)?),
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -1539,6 +1557,7 @@ CREATE TABLE IF NOT EXISTS imports (
   id INTEGER PRIMARY KEY,
   file_id INTEGER NOT NULL,
   spec TEXT NOT NULL,
+  path TEXT NOT NULL DEFAULT '',
   resolved_file_id INTEGER,
   bindings TEXT NOT NULL DEFAULT ''
 );
@@ -1703,6 +1722,15 @@ fn migrate(conn: &Connection) -> Result<()> {
             "ALTER TABLE imports ADD COLUMN bindings TEXT NOT NULL DEFAULT ''",
             [],
         )?;
+    }
+    if !has_column("imports", "path")? {
+        // Rows written before a statement could name several paths resolved
+        // their spec; the extractor version bump rewrites them.
+        conn.execute(
+            "ALTER TABLE imports ADD COLUMN path TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+        conn.execute("UPDATE imports SET path = spec", [])?;
     }
     // Engine 1: stamp the concept extractor version so a change to the
     // extractor forces a one-time concept rebuild (the graph itself is a
