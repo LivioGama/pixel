@@ -3,7 +3,7 @@
 //! No LLM is used for the code analysis: queries run against the graph.db
 //! schema (symbols, edges, imports, jsx_elements, concepts) and git history.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::store::GraphStore;
@@ -170,6 +170,19 @@ impl Severity {
     }
 }
 
+/// Whether a [`PlanFinding`] is a code site to work on or a verification
+/// gate that must hold before the plan's verify step can run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FindingKind {
+    /// A code site the plan points at.
+    #[default]
+    Site,
+    /// A verification gate converted from a [`Prereq`] — rendered as a
+    /// blocking bullet above the numbered list.
+    Prereq,
+}
+
 /// One item that becomes a todo entry.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlanFinding {
@@ -178,6 +191,13 @@ pub struct PlanFinding {
     pub label: String,
     pub fan_in: u32,
     pub severity: Severity,
+    /// `Site` for code findings, `Prereq` for verification gates. Defaulted
+    /// so pre-prereq daemons and `.pixel/plan.json` files still deserialize.
+    #[serde(default)]
+    pub kind: FindingKind,
+    /// True when skipping the item invalidates the verify step.
+    #[serde(default)]
+    pub blocking: bool,
 }
 
 /// Run a list of plan queries and merge the results.
@@ -271,6 +291,8 @@ fn dead_interactive(
             label,
             fan_in: fi,
             severity: Severity::from_fan_in(fi),
+            kind: FindingKind::Site,
+            blocking: false,
         });
     }
     Ok(out)
@@ -336,6 +358,8 @@ fn dead_code(
             label,
             fan_in: fi,
             severity: Severity::from_fan_in(fi),
+            kind: FindingKind::Site,
+            blocking: false,
         });
     }
     Ok(out)
@@ -390,6 +414,8 @@ fn hotspots(
             label: format!("Refactor hotspot file {path} ({fi} dependents)"),
             fan_in: fi,
             severity: Severity::from_fan_in(fi),
+            kind: FindingKind::Site,
+            blocking: false,
         });
     }
     Ok(out)
@@ -623,6 +649,8 @@ fn by_concept(
             label,
             fan_in: fi,
             severity: Severity::from_fan_in(fi),
+            kind: FindingKind::Site,
+            blocking: false,
         });
     }
     Ok(out)
@@ -672,9 +700,441 @@ fn recent_changes(
                 line: 1,
                 fan_in: fi,
                 severity: Severity::from_fan_in(fi),
+                kind: FindingKind::Site,
+                blocking: false,
             }
         })
         .collect())
+}
+
+/// What kind of verification precondition a [`Prereq`] records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrereqKind {
+    /// The code path sits behind a login or session check.
+    Auth,
+    /// The code reads environment variables — likely deployment secrets.
+    Env,
+    /// A third-party provider SDK is imported.
+    Provider,
+    /// The code talks to a database — real state is needed to reproduce.
+    Db,
+}
+
+/// A verification precondition detected in a plan's file set: evidence that
+/// an agent cannot honestly verify the change without it — a login session,
+/// env keys, or real data. Detection is a lower bound: substring and import
+/// scans miss indirection, so an empty list means "none detected", never
+/// "none needed".
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Prereq {
+    pub kind: PrereqKind,
+    /// Repo-relative file where the signal was seen.
+    pub file: String,
+    /// 1-based line of a content signal, or 1 for an import-level one.
+    pub line: u32,
+    /// The signal itself: an env var name, an import spec, a marker call.
+    pub detail: String,
+}
+
+/// Files a prereq scan reads at most: the plan's file set plus one import
+/// hop in both directions, capped so a plan that names a hub file does not
+/// scan the whole repo.
+const PREREQ_FILE_CAP: usize = 50;
+
+/// Bytes of each file scanned for prereq signals — enough for the import
+/// block and env reads of any hand-written source file.
+const PREREQ_CONTENT_CAP: usize = 262_144;
+
+/// The env-read spellings a file's language bucket recognizes, as
+/// `(marker, quoted)`: a bare marker captures the identifier that follows it
+/// (`process.env.NAME`); a quoted marker captures inside the quote or
+/// bracket that follows (`os.Getenv("NAME")`, `ENV["NAME"]`).
+const ENV_NEEDLES: &[(&str, &str, bool)] = &[
+    ("js", "process.env.", false),
+    ("js", "process.env[", true),
+    ("js", "import.meta.env.", false),
+    ("js", "Deno.env.get(", true),
+    ("js", "Bun.env.", false),
+    ("rs", "env::var(", true),
+    ("rs", "env::var_os(", true),
+    ("rs", "env!(", true),
+    ("rs", "option_env!(", true),
+    ("go", "os.Getenv(", true),
+    ("go", "os.LookupEnv(", true),
+    ("py", "os.getenv(", true),
+    ("py", "os.environ.get(", true),
+    ("py", "os.environ[", true),
+    ("rb", "ENV[", true),
+    ("rb", "ENV.fetch(", true),
+    ("jvm", "System.getenv(", true),
+];
+
+/// Identifier spellings that mean "this code requires a session": an
+/// identifier boundary on the left (no `myauth`) and no lowercase
+/// continuation on the right (no `getSessions`).
+const AUTH_MARKERS: &[&str] = &[
+    "getServerSession",
+    "useSession",
+    "requireAuth",
+    "withAuth",
+    "authMiddleware",
+    "clerkMiddleware",
+    "kindeAuth",
+    "getSession",
+    "currentUser",
+    "verifyAuth",
+    "isAuthenticated",
+    "requireUser",
+    "require_user",
+    "require_auth",
+    "auth_required",
+    "login_required",
+    "AuthGuard",
+];
+
+/// `(spec base, display name, env prefix)` for third-party provider SDKs.
+/// A spec matches a base via [`spec_matches`]: equal, or continuing with
+/// `/`, `-`, or `::` (`stripe/react`, `sqlx::Pool`, `diesel-async`).
+const PROVIDER_SPECS: &[(&str, &str, &str)] = &[
+    ("stripe", "Stripe", "STRIPE_"),
+    ("@supabase", "Supabase", "SUPABASE_"),
+    ("@clerk", "Clerk", "CLERK_"),
+    ("openai", "OpenAI", "OPENAI_"),
+    ("@openai", "OpenAI", "OPENAI_"),
+    ("@anthropic-ai", "Anthropic", "ANTHROPIC_"),
+    ("twilio", "Twilio", "TWILIO_"),
+    ("@sendgrid", "SendGrid", "SENDGRID_"),
+    ("resend", "Resend", "RESEND_"),
+    ("aws-sdk", "AWS", "AWS_"),
+    ("@aws-sdk", "AWS", "AWS_"),
+    ("aws_sdk", "AWS", "AWS_"),
+    ("firebase", "Firebase", "FIREBASE_"),
+    ("@firebase", "Firebase", "FIREBASE_"),
+    ("firebase-admin", "Firebase", "FIREBASE_"),
+    ("@sentry", "Sentry", "SENTRY_"),
+    ("posthog", "PostHog", "POSTHOG_"),
+    ("@google-cloud", "Google Cloud", "GOOGLE_CLOUD_"),
+    ("@kinde", "Kinde", "KINDE_"),
+    ("@workos-inc", "WorkOS", "WORKOS_"),
+];
+
+/// Auth-package import specifiers — these gate a code path behind a session.
+const AUTH_SPECS: &[&str] = &[
+    "next-auth",
+    "@auth",
+    "@clerk",
+    "@supabase/auth",
+    "lucia",
+    "@kinde",
+    "@workos-inc",
+    "@propelauth",
+    "supertokens",
+    "passport",
+];
+
+/// Database driver and ORM import specifiers — when these are in the file
+/// set, verification needs real state rather than a mock.
+const DB_SPECS: &[&str] = &[
+    "@prisma",
+    "prisma",
+    "drizzle-orm",
+    "mongoose",
+    "sequelize",
+    "knex",
+    "pg",
+    "mysql",
+    "mysql2",
+    "typeorm",
+    "postgres",
+    "better-sqlite3",
+    "sqlite3",
+    "@libsql",
+    "@neondatabase",
+    "@vercel/postgres",
+    "sqlx",
+    "rusqlite",
+    "diesel",
+    "sea-orm",
+    "sea_orm",
+    "tokio-postgres",
+    "mongodb",
+    "redis",
+    "ioredis",
+    "sqlalchemy",
+    "psycopg2",
+    "asyncpg",
+    "pymysql",
+    "activerecord",
+    "database/sql",
+];
+
+/// Scan the plan's file set — plus one import hop in both directions — for
+/// verification preconditions: env reads, auth gates, provider SDKs,
+/// database access. Deterministic: raw file contents and the `imports`
+/// table; nothing is executed.
+///
+/// The result feeds the CLI's gate items, which is why detection returns
+/// raw evidence rather than wording: the caller resolves names the daemon
+/// cannot (e.g. which saved replay-flow to replay).
+pub fn detect_prereqs(
+    store: &GraphStore,
+    root: &Path,
+    files: &[String],
+) -> Result<Vec<Prereq>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut scan: Vec<(i64, String)> = Vec::new();
+    let mut seen: HashSet<i64> = HashSet::new();
+    for f in files {
+        if let Some(row) = store.file_by_path(f)?
+            && seen.insert(row.id)
+        {
+            scan.push((row.id, row.path));
+        }
+    }
+    // One import hop in both directions: a route delegating auth to a
+    // middleware file, or a page importing the gated component, still flags.
+    for seed in scan.iter().map(|(id, _)| *id).collect::<Vec<_>>() {
+        for import in store.imports_from(seed)? {
+            if let Some(id) = import.resolved_file_id
+                && !seen.contains(&id)
+                && let Some(row) = store.file_by_id(id)?
+            {
+                seen.insert(id);
+                scan.push((id, row.path));
+            }
+        }
+        for import in store.imports_to_file(seed)? {
+            if !seen.contains(&import.file_id)
+                && let Some(row) = store.file_by_id(import.file_id)?
+            {
+                seen.insert(import.file_id);
+                scan.push((import.file_id, row.path));
+            }
+        }
+        if scan.len() >= PREREQ_FILE_CAP {
+            break;
+        }
+    }
+    scan.truncate(PREREQ_FILE_CAP);
+
+    let mut out: Vec<Prereq> = Vec::new();
+    let mut emitted: HashSet<(PrereqKind, String, String)> = HashSet::new();
+    let mut emit = |out: &mut Vec<Prereq>, p: Prereq| {
+        if emitted.insert((p.kind, p.file.clone(), p.detail.clone())) {
+            out.push(p);
+        }
+    };
+    for (file_id, path) in &scan {
+        for import in store.imports_from(*file_id)? {
+            if let Some((_, provider, _)) = PROVIDER_SPECS
+                .iter()
+                .find(|(base, _, _)| spec_matches(&import.spec, base))
+            {
+                emit(
+                    &mut out,
+                    Prereq {
+                        kind: PrereqKind::Provider,
+                        file: path.clone(),
+                        line: 1,
+                        detail: (*provider).to_string(),
+                    },
+                );
+            }
+            if AUTH_SPECS
+                .iter()
+                .any(|base| spec_matches(&import.spec, base))
+            {
+                emit(
+                    &mut out,
+                    Prereq {
+                        kind: PrereqKind::Auth,
+                        file: path.clone(),
+                        line: 1,
+                        detail: import.spec.clone(),
+                    },
+                );
+            }
+            if DB_SPECS.iter().any(|base| spec_matches(&import.spec, base)) {
+                emit(
+                    &mut out,
+                    Prereq {
+                        kind: PrereqKind::Db,
+                        file: path.clone(),
+                        line: 1,
+                        detail: import.spec.clone(),
+                    },
+                );
+            }
+        }
+        let lang = prereq_lang(path);
+        let Ok(bytes) = std::fs::read(root.join(path)) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(PREREQ_CONTENT_CAP)]);
+        for &(needle_lang, marker, quoted) in ENV_NEEDLES {
+            if needle_lang != lang {
+                continue;
+            }
+            for (name, line) in env_reads(&text, marker, quoted) {
+                emit(
+                    &mut out,
+                    Prereq {
+                        kind: PrereqKind::Env,
+                        file: path.clone(),
+                        line,
+                        detail: name,
+                    },
+                );
+            }
+        }
+        for (marker, line) in auth_marker_hits(&text) {
+            emit(
+                &mut out,
+                Prereq {
+                    kind: PrereqKind::Auth,
+                    file: path.clone(),
+                    line,
+                    detail: (*marker).to_string(),
+                },
+            );
+        }
+        for line in auth_call_hits(&text) {
+            emit(
+                &mut out,
+                Prereq {
+                    kind: PrereqKind::Auth,
+                    file: path.clone(),
+                    line,
+                    detail: "auth()".to_string(),
+                },
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// The env prefix a [`PrereqKind::Provider`] detail implies — the CLI names
+/// the expected keys with it.
+pub fn provider_env_prefix(provider: &str) -> Option<&'static str> {
+    PROVIDER_SPECS
+        .iter()
+        .find(|(_, name, _)| *name == provider)
+        .map(|(_, _, prefix)| *prefix)
+}
+
+/// A spec matches a catalog base when it equals it or continues with `/`,
+/// `-`, or `::` — `stripe/react`, `sqlx::Pool`, `diesel-async` all count;
+/// `pgx` and `striped` do not.
+fn spec_matches(spec: &str, base: &str) -> bool {
+    if spec == base {
+        return true;
+    }
+    spec.strip_prefix(base).is_some_and(|rest| {
+        rest.starts_with('/') || rest.starts_with('-') || rest.starts_with("::")
+    })
+}
+
+/// Extension → the language bucket whose env/auth spellings apply.
+fn prereq_lang(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or_default() {
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts" => "js",
+        "rs" => "rs",
+        "go" => "go",
+        "py" => "py",
+        "rb" => "rb",
+        "java" | "kt" | "kts" => "jvm",
+        _ => "",
+    }
+}
+
+/// Bytes that can continue an identifier — the boundary check that keeps
+/// `myenv::var` and `reauth` out of the `env::var`/`auth` detections.
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// 1-based line of byte offset `at` in `text`.
+fn line_at(text: &str, at: usize) -> u32 {
+    text[..at].bytes().filter(|b| *b == b'\n').count() as u32 + 1
+}
+
+/// Every `marker` occurrence not preceded by an identifier byte, capturing
+/// the variable name that follows: bare markers read the identifier
+/// (`process.env.NAME`), quoted markers read inside the quote or bracket
+/// (`os.Getenv("NAME")`, `ENV["NAME"]`). A name counts only when it looks
+/// like a constant — at least two bytes with one uppercase letter.
+fn env_reads(text: &str, marker: &str, quoted: bool) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(off) = text[from..].find(marker) {
+        let at = from + off;
+        if at > 0 && is_ident_byte(bytes[at - 1]) {
+            from = at + marker.len();
+            continue;
+        }
+        let mut pos = at + marker.len();
+        if quoted {
+            while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            if pos >= bytes.len() || !matches!(bytes[pos], b'"' | b'\'') {
+                from = pos.max(at + marker.len());
+                continue;
+            }
+            pos += 1;
+        }
+        let start = pos;
+        while pos < bytes.len() && is_ident_byte(bytes[pos]) {
+            pos += 1;
+        }
+        if pos - start >= 2 && text[start..pos].bytes().any(|b| b.is_ascii_uppercase()) {
+            out.push((text[start..pos].to_string(), line_at(text, at)));
+        }
+        from = pos.max(at + marker.len());
+    }
+    out
+}
+
+/// `(marker, line)` for each auth spelling present — one hit per marker per
+/// file is enough evidence. Left boundary rejects `reauth`; a lowercase byte
+/// on the right rejects `getSessions`.
+fn auth_marker_hits(text: &str) -> Vec<(&'static str, u32)> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    for &marker in AUTH_MARKERS {
+        let mut from = 0;
+        while let Some(off) = text[from..].find(marker) {
+            let at = from + off;
+            let end = at + marker.len();
+            let left_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
+            let right_ok = end >= bytes.len() || !bytes[end].is_ascii_lowercase();
+            if left_ok && right_ok {
+                out.push((marker, line_at(text, at)));
+                break;
+            }
+            from = end;
+        }
+    }
+    out
+}
+
+/// Lines with an `auth(` call site — the next-auth style gate. The left
+/// identifier boundary keeps `oauth(` and `reauth(` out, and the paren must
+/// be immediate so prose like `auth (the token)` is not a call.
+fn auth_call_hits(text: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(off) = text[from..].find("auth") {
+        let at = from + off;
+        let pos = at + 4;
+        if (at == 0 || !is_ident_byte(bytes[at - 1])) && pos < bytes.len() && bytes[pos] == b'(' {
+            out.push(line_at(text, at));
+        }
+        from = pos;
+    }
+    out
 }
 
 /// Paths of a `git log --name-only --pretty=format:` output with the number
@@ -767,6 +1227,7 @@ fn fan_in_where(
 mod tests {
     use super::*;
     use crate::store::{EdgeKind, EdgeRow, GraphStore, SymbolKind, Tier};
+    use serde_json::json;
 
     fn file(store: &mut GraphStore, path: &str) -> i64 {
         store.replace_file(path, "oid", "ts").unwrap()
@@ -1661,5 +2122,185 @@ mod tests {
             .find(|f| f.file == "dup.ts")
             .unwrap_or_else(|| panic!("{findings:?}"));
         assert_eq!(f.line, 1, "{findings:?}");
+    }
+
+    /// `env reads` keep identifier boundaries: `myprocess.env.X` and
+    /// non-literal `env::var(name)` must not register, `option_env!` must
+    /// not double-fire the `env!` needle.
+    #[test]
+    fn env_reads_respects_identifier_boundaries() {
+        let text = "a = process.env.STRIPE_KEY\n\
+                    b = myprocess.env.NOT_THIS\n\
+                    c = process.env.lowercase\n\
+                    d = env::var(\"DATABASE_URL\")\n\
+                    e = env::var(name)\n\
+                    f = option_env!(\"OPT\")\n";
+        let js = env_reads(text, "process.env.", false);
+        assert_eq!(js, [("STRIPE_KEY".to_string(), 1)]);
+        assert_eq!(
+            env_reads(text, "env::var(", true),
+            [("DATABASE_URL".to_string(), 4)]
+        );
+        // `env!` inside `option_env!` is rejected by the left boundary —
+        // only the dedicated needle captures OPT.
+        assert!(env_reads(text, "env!(", true).is_empty());
+        assert_eq!(
+            env_reads(text, "option_env!(", true),
+            [("OPT".to_string(), 6)]
+        );
+    }
+
+    /// Exact match or a `rest` continuation that starts with a path/separator
+    /// char — `striped` and `pgx` must not match `stripe`/`pg`.
+    #[test]
+    fn spec_matches_exact_or_continues_with_a_separator() {
+        assert!(spec_matches("stripe", "stripe"));
+        assert!(spec_matches("stripe/react", "stripe"));
+        assert!(spec_matches("sqlx::Pool", "sqlx"));
+        assert!(spec_matches("diesel-async", "diesel"));
+        assert!(spec_matches("@supabase/auth-helpers", "@supabase"));
+        assert!(!spec_matches("pgx", "pg"));
+        assert!(!spec_matches("striped", "stripe"));
+        assert!(!spec_matches("my-stripe", "stripe"));
+    }
+
+    #[test]
+    fn auth_markers_and_bare_auth_calls_need_boundaries() {
+        let hits = auth_marker_hits(
+            "a = getServerSession()\n\
+             b = mygetSession()\n\
+             c = getSessions()\n",
+        );
+        assert_eq!(hits, [("getServerSession", 1)]);
+        // `oauth()`/`reauth()` carry `auth` inside an identifier — only the
+        // boundary-respecting hits count.
+        let calls = auth_call_hits("x = auth()\ny = oauth()\nz = reauth()\nw = obj.auth()\n");
+        assert_eq!(calls, vec![1, 4]);
+        // A space before the paren is prose, not a call.
+        assert!(auth_call_hits("// auth (the token) is checked\n").is_empty());
+    }
+
+    /// Plan targets pull one import hop in both directions: a resolved
+    /// import adds the target file, an importer adds the importing file.
+    /// Every signal kind is found across the set.
+    #[test]
+    fn detect_prereqs_follows_one_import_hop_both_ways() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let w = |rel: &str, content: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, content).unwrap();
+        };
+        w(
+            "src/pay.ts",
+            "import Stripe from 'stripe';\nconst k = process.env.STRIPE_SECRET_KEY;\nconst b = process.env['API_BASE'];\n",
+        );
+        w("src/middleware.ts", "export const mw = auth();\n");
+        w(
+            "src/page.tsx",
+            "import { pay } from './pay';\nconst s = getServerSession();\n",
+        );
+        w("src/db.ts", "import { sql } from 'drizzle-orm';\n");
+
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let pay = file(&mut store, "src/pay.ts");
+        let mid = file(&mut store, "src/middleware.ts");
+        let page = file(&mut store, "src/page.tsx");
+        let db = file(&mut store, "src/db.ts");
+        store
+            .insert_import(pay, "stripe", None, &["Stripe".into()])
+            .unwrap();
+        store
+            .insert_import(pay, "./middleware", Some(mid), &[])
+            .unwrap();
+        store
+            .insert_import(page, "./pay", Some(pay), &["pay".into()])
+            .unwrap();
+        store
+            .insert_import(db, "drizzle-orm", None, &["sql".into()])
+            .unwrap();
+
+        // Seeds: pay.ts + db.ts. middleware arrives via the import-out hop;
+        // page arrives via the import-in hop.
+        let out = detect_prereqs(&store, root, &["src/pay.ts".into(), "src/db.ts".into()]).unwrap();
+        let has =
+            |kind: PrereqKind, file: &str| out.iter().any(|p| p.kind == kind && p.file == file);
+        assert!(has(PrereqKind::Provider, "src/pay.ts"), "{out:?}");
+        assert!(has(PrereqKind::Env, "src/pay.ts"));
+        assert!(has(PrereqKind::Db, "src/db.ts"));
+        assert!(
+            has(PrereqKind::Auth, "src/middleware.ts"),
+            "import-out hop missed"
+        );
+        assert!(
+            has(PrereqKind::Auth, "src/page.tsx"),
+            "import-in hop missed"
+        );
+
+        // Evidence quality: env names captured, provider named by display.
+        let envs: Vec<&str> = out
+            .iter()
+            .filter(|p| p.kind == PrereqKind::Env)
+            .map(|p| p.detail.as_str())
+            .collect();
+        assert_eq!(envs, ["STRIPE_SECRET_KEY", "API_BASE"]);
+        let prov = out.iter().find(|p| p.kind == PrereqKind::Provider).unwrap();
+        assert_eq!(prov.detail, "Stripe");
+        let auth = out.iter().find(|p| p.file == "src/middleware.ts").unwrap();
+        assert_eq!(auth.line, 1, "{auth:?}");
+        // A file in the graph but absent from disk is skipped, not fatal.
+        file(&mut store, "src/ghost.ts");
+        assert!(
+            detect_prereqs(&store, root, &["src/ghost.ts".into()])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// The scan set is bounded: sixty resolved importers cannot push the
+    /// read set past the file cap.
+    #[test]
+    fn detect_prereqs_caps_the_scan_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let w = |rel: &str, content: &str| std::fs::write(root.join(rel), content).unwrap();
+        w("seed.ts", "// seed\n");
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let seed = file(&mut store, "seed.ts");
+        for i in 0..60 {
+            let rel = format!("m{i}.ts");
+            w(&rel, &format!("const k{i} = process.env.VAR_{i};\n"));
+            let id = file(&mut store, &rel);
+            store.insert_import(id, "./seed", Some(seed), &[]).unwrap();
+        }
+        let out = detect_prereqs(&store, root, &["seed.ts".into()]).unwrap();
+        let envs = out.iter().filter(|p| p.kind == PrereqKind::Env).count();
+        assert!(envs <= PREREQ_FILE_CAP, "scanned {envs} files' env reads");
+    }
+
+    /// The wire contract: kinds serialize to the stable snake_case names the
+    /// CLI parses, and unknown rows surface as decode errors not silence.
+    #[test]
+    fn prereq_serde_uses_stable_kind_names() {
+        let p = Prereq {
+            kind: PrereqKind::Auth,
+            file: "a.ts".into(),
+            line: 7,
+            detail: "auth()".into(),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["kind"], "auth");
+        let back: Prereq = serde_json::from_value(json!({
+            "kind": "db", "file": "b.rs", "line": 1, "detail": "sqlx"
+        }))
+        .unwrap();
+        assert_eq!(back.kind, PrereqKind::Db);
+        assert!(
+            serde_json::from_value::<Prereq>(json!({
+                "kind": "wat", "file": "b.rs", "line": 1, "detail": "x"
+            }))
+            .is_err()
+        );
     }
 }

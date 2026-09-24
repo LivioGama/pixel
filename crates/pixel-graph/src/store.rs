@@ -195,6 +195,9 @@ pub struct ImportRow {
     pub path: String,
     /// Named bindings pulled from `spec` (decoded from the stored column).
     pub bindings: Vec<ImportBinding>,
+    /// The repo file `spec` resolved to, when it did. `plan`'s prereq scan
+    /// reads this to walk one import hop out from each plan target.
+    pub resolved_file_id: Option<i64>,
 }
 
 /// The `imports.bindings` column: comma-separated bindings, each `name` when
@@ -475,6 +478,19 @@ impl ExecCached for Connection {
     fn exec_cached<P: rusqlite::Params>(&self, sql: &str, params: P) -> Result<usize> {
         Ok(self.prepare_cached(sql)?.execute(params)?)
     }
+}
+
+/// One `imports` table row — shared by [`GraphStore::imports_to_file`] and
+/// [`GraphStore::imports_from`] so both query directions read the same shape.
+fn import_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ImportRow> {
+    Ok(ImportRow {
+        id: r.get(0)?,
+        file_id: r.get(1)?,
+        spec: r.get(2)?,
+        path: r.get(3)?,
+        bindings: decode_bindings(&r.get::<_, String>(4)?),
+        resolved_file_id: r.get(5)?,
+    })
 }
 
 impl GraphStore {
@@ -1136,17 +1152,22 @@ impl GraphStore {
     /// imported name at the `use`/`import` site.
     pub fn imports_to_file(&self, resolved_file_id: i64) -> Result<Vec<ImportRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, file_id, spec, path, bindings FROM imports WHERE resolved_file_id = ?1",
+            "SELECT id, file_id, spec, path, bindings, resolved_file_id FROM imports \
+             WHERE resolved_file_id = ?1",
         )?;
-        let rows = stmt.query_map(params![resolved_file_id], |r| {
-            Ok(ImportRow {
-                id: r.get(0)?,
-                file_id: r.get(1)?,
-                spec: r.get(2)?,
-                path: r.get(3)?,
-                bindings: decode_bindings(&r.get::<_, String>(4)?),
-            })
-        })?;
+        let rows = stmt.query_map(params![resolved_file_id], import_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Import rows `file_id` declares — the read side of
+    /// [`Self::imports_to_file`]. `plan`'s prereq scan reads these for the
+    /// specifier catalog match (provider SDKs, auth packages, db drivers).
+    pub fn imports_from(&self, file_id: i64) -> Result<Vec<ImportRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, file_id, spec, path, bindings, resolved_file_id FROM imports \
+             WHERE file_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![file_id], import_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 

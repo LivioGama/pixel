@@ -1265,20 +1265,23 @@ enum Command {
         /// Omit the trailing verification todo.
         #[arg(long)]
         no_verify: bool,
+        /// Omit the verification-gate block (auth session, env keys, real data).
+        #[arg(long)]
+        no_prereqs: bool,
         /// Cap the number of findings returned.
         #[arg(long)]
         max_todos: Option<usize>,
         /// Print the tracked checklist (.pixel/plan.json) without planning.
-        #[arg(long, conflicts_with_all = ["prompt", "query", "tag", "limit", "format", "no_verify", "max_todos"])]
+        #[arg(long, conflicts_with_all = ["prompt", "query", "tag", "limit", "format", "no_verify", "no_prereqs", "max_todos"])]
         status: bool,
         /// Mark tracked item N done (numbering from --status). Repeatable.
-        #[arg(long, value_name = "N", conflicts_with_all = ["prompt", "query", "tag", "limit", "format", "no_verify", "max_todos"])]
+        #[arg(long, value_name = "N", conflicts_with_all = ["prompt", "query", "tag", "limit", "format", "no_verify", "no_prereqs", "max_todos"])]
         done: Vec<usize>,
         /// Mark tracked item N not done. Repeatable.
-        #[arg(long, value_name = "N", conflicts_with_all = ["prompt", "query", "tag", "limit", "format", "no_verify", "max_todos"])]
+        #[arg(long, value_name = "N", conflicts_with_all = ["prompt", "query", "tag", "limit", "format", "no_verify", "no_prereqs", "max_todos"])]
         undone: Vec<usize>,
         /// Drop findings the latest plan no longer reports.
-        #[arg(long, conflicts_with_all = ["prompt", "query", "tag", "limit", "format", "no_verify", "max_todos"])]
+        #[arg(long, conflicts_with_all = ["prompt", "query", "tag", "limit", "format", "no_verify", "no_prereqs", "max_todos"])]
         prune: bool,
         #[arg(long)]
         json: bool,
@@ -7489,6 +7492,7 @@ fn run_command(
             limit,
             format,
             no_verify,
+            no_prereqs,
             max_todos,
             status,
             done,
@@ -7505,6 +7509,7 @@ fn run_command(
                 limit,
                 format,
                 no_verify,
+                no_prereqs,
                 max_todos,
                 status,
                 done,

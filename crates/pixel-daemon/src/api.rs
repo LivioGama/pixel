@@ -1977,11 +1977,19 @@ impl Service {
         let store = self.graph.as_ref().unwrap();
         let findings = pixel_graph::plan::run_plan_queries(store, &self.root, &runner, &queries)
             .map_err(|e| format!("plan: {e}"))?;
+        // Verification preconditions ride along: the client turns them into
+        // blocking gate items (auth session, env keys, real data) ahead of the
+        // findings. Always computed — the CLI decides whether to render them.
+        let mut files: Vec<String> = findings.iter().map(|f| f.file.clone()).collect();
+        files.sort();
+        files.dedup();
+        let prereqs = pixel_graph::plan::detect_prereqs(store, &self.root, &files)
+            .map_err(|e| format!("plan: {e}"))?;
         let names: Vec<&str> = queries
             .iter()
             .map(pixel_graph::plan::PlanQuery::name)
             .collect();
-        let mut out = json!({ "queries": names, "findings": findings });
+        let mut out = json!({ "queries": names, "findings": findings, "prereqs": prereqs });
         merge_build_info(&mut out, built);
         Ok(out)
     }

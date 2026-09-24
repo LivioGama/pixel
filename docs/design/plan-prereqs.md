@@ -1,6 +1,7 @@
 # `pixel plan` — verification prerequisites (`prereqs`)
 
-Status: spec. Not implemented.
+Status: implemented on branch `plan-prereqs-spec` (open questions resolved
+below).
 
 ## Problem
 
@@ -85,42 +86,43 @@ BLOCKED: <file> is auth-gated — no login flow saved; ask the human for a test
 That second line is the feature: the plan *asks for the account* because the
 agent provably cannot verify without it.
 
-### 4. Rendering
+### 4. Transport and rendering
 
-`PlanFinding` gains two fields:
+The daemon detects raw `Prereq { kind, file, line, detail }` values and puts
+them in a `"prereqs"` field next to `"findings"` — no `Request::Plan` change,
+so old CLI/new daemon and new CLI/old daemon both keep working. `plan_cmd`
+converts detections into `PlanFinding` gate items, resolving the auth flow
+name there (the CLI crate already depends on `pixel-flow`; the graph does
+not).
+
+`PlanFinding` gains two `#[serde(default)]` fields so existing
+`.pixel/plan.json` files deserialize:
 
 ```rust
-pub enum FindingKind { Site, Prereq }
-pub kind: FindingKind,        // default Site — old state files still load
-pub blocking: bool,           // true for every Prereq
+pub enum FindingKind { Site, Prereq }   // Site is #[default]
+pub kind: FindingKind,
+pub blocking: bool,                     // true for every gate
 ```
 
-`#[serde(default)]` on both so existing `.pixel/plan.json` files deserialize.
-
-Prereq items render **before** site findings, unnumbered gate block:
+Gates ride the ordinary `findings` array into `plan_state::merge`, so
+`--done`, `--undone`, `--prune` and staleness tracking apply unchanged.
+Markdown renders them as a bullet block above the numbered list (`--status`
+still numbers them for `--done`):
 
 ```
-Prerequisites (verification gates):
-- [ ] BLOCKED: app/billing/page.tsx is auth-gated — replay `client-login`
-- [ ] env keys required by crates/pay/src/stripe.rs: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
-- [ ] DB-backed state: reproduce with the client's real data before fixing
+Prerequisites — verification gates:
+- [ ] Gate: auth-gated code (app/billing/page.tsx) — replay `pixel replay-flow replay client-login`
+- [ ] Gate: env keys required: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET (crates/pay/src/stripe.rs)
+- [ ] Gate: DB-backed state (crates/pay/src/db.rs) — reproduce with real data before fixing
 
 1. [ ] Map 4 findings across 3 files (ranked by fan-in)
 2. [ ] …
 n. [ ] Verify all plan targets in the running build (gates above first)
 ```
 
-The verify line appends `(gates above first)` when prereqs exist.
-`--format compact` prints `prereq: <text>` lines first; `--format json` adds
-`"prereqs": [...]` beside `findings`, and `verify` keeps its meaning.
-
-### 5. State
-
-Prereqs merge into `plan_state` like findings (`merge` keyed on label).
-`--done N` on a prereq = the human/agent confirms provisioning. `--prune`
-drops prereqs the latest plan no longer detects — correct by construction.
-Numbering: prereqs take their own `- [ ]` block, not the numbered list, so
-site numbering stays stable across runs.
+`--format compact` prints `gate: <label>` lines first; `--format json` adds
+`"gates": [...]` (full finding objects) beside `findings`, and `verify` keeps
+its meaning.
 
 ### 6. Epistemics honesty
 
@@ -134,13 +136,15 @@ not "none needed"; the spec text and item wording both say so.
 
 | File | Change |
 | --- | --- |
-| `crates/pixel-graph/src/plan.rs` | `prereqs(store, root, files)` post-pass + signal catalog + tests |
-| `crates/pixel/src/plan_cmd.rs` | `--no-prereqs`, render block, JSON field |
-| `crates/pixel/src/cli.rs` (or wherever `PlanOptions` is built) | flag plumbing |
-| `crates/pixel-install/assets/pixel-agent-prompt.md` | document the gate block + "prereq undone = cannot claim verified" |
-| `ARCHITECTURE.md` | command surface: flag row only if the table lists flags |
+| `crates/pixel-graph/src/plan.rs` | `Prereq`/`PrereqKind`, `detect_prereqs(store, root, files)` post-pass, signal catalog, `FindingKind`/`blocking` on `PlanFinding`, tests |
+| `crates/pixel-graph/src/store.rs` | `resolved_file_id` on `ImportRow`, `imports_from(file_id)` |
+| `crates/pixel-daemon/src/api.rs` | `op_plan` runs the post-pass, adds `"prereqs"` to the answer |
+| `crates/pixel/src/plan_cmd.rs` | `prereqs_of`, `auth_flow_names`, `gates_of`, render block, `gates` JSON field |
+| `crates/pixel/src/main.rs` | `--no-prereqs` plumbing + conflicts |
+| `crates/pixel-install/assets/pixel-agent-prompt.md` | gate semantics in Hard rules |
+| `ARCHITECTURE.md` | `pixel plan` row mentions the gates |
 | `changelog.d/plan-prereqs.added.md` | `**cli:** …` fragment |
-| `crates/pixel/tests/cli/plan_cli.rs` (or nearest) | CLI coverage |
+| `crates/pixel/tests/cli/json_contract.rs` | end-to-end CLI coverage |
 
 ## Tests
 
@@ -153,13 +157,15 @@ not "none needed"; the spec text and item wording both say so.
 - mutation-gate shapes per `.agents/rules/mutation-gate.md` — every branch in
   the classifier/catalog match asserts observable output.
 
-## Open questions
+## Decisions (formerly open questions)
 
-1. Should `pixel scope-task` get the same post-pass (its P0 file list is the
-   same shape)? Spec says yes eventually, out of scope for v1.
-2. Does a prereq item deserve `--blocking` severity separate from `HIGH`, or
-   is the `blocking` flag enough? Current answer: flag is enough, severity
-   stays `HIGH` so it sorts first.
-3. Flow tag vocabulary: `auth`/`login` only, or a `tags:` convention the
-   `replay-flow save` docs should standardise? Lean: match both, document
-   `auth` as the canonical tag.
+1. **scope-task**: v1 stays plan-only. `detect_prereqs` is exported, so a
+   follow-up can run the same post-pass over scope-task's P0 file list
+   without touching detection.
+2. **Blocking model**: `blocking: bool` on the finding, severity stays
+   `HIGH` — no new severity variant, no flag vocabulary.
+3. **Flow tags**: gate matching accepts `auth` and `login`; `auth` is the
+   canonical tag the agent prompt documents.
+4. **Wire contract**: detection always runs daemon-side (≤50 files ×
+   ≤256 KiB reads only when a plan produced findings); `--no-prereqs` is a
+   client-side render opt-out like `--no-verify`.

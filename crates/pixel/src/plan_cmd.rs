@@ -4,11 +4,11 @@
 //! refreshes the graph incrementally before it runs the queries, and this
 //! module only renders them.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
 use pixel_daemon::api::Request;
-use pixel_graph::plan::PlanFinding;
+use pixel_graph::plan::{FindingKind, PlanFinding, Prereq, PrereqKind, Severity};
 use serde_json::json;
 
 use crate::plan_state;
@@ -22,6 +22,8 @@ pub struct PlanOptions {
     pub limit: Option<usize>,
     pub format: String,
     pub no_verify: bool,
+    /// Omit the verification-gate block derived from the daemon's `prereqs`.
+    pub no_prereqs: bool,
     pub max_todos: Option<usize>,
     pub status: bool,
     pub done: Vec<usize>,
@@ -46,10 +48,16 @@ pub fn run(opts: PlanOptions) -> Result<(), String> {
         false,
     )?;
     let findings = findings_of(&data)?;
+    let gates = if opts.no_prereqs {
+        Vec::new()
+    } else {
+        gates_of(&prereqs_of(&data)?, &findings)
+    };
     // Persist the checklist before rendering: a failed state write must not
     // swallow the plan itself, so a write error is a warning, not a failure.
     // A corrupt file is named too — silently resetting tracked progress is
-    // a data loss the user should see.
+    // a data loss the user should see. Gates merge first so a fresh
+    // `--status` lists them above the site findings.
     let mut state = match plan_state::load(&opts.path) {
         Ok(state) => state,
         Err(e) => {
@@ -57,11 +65,13 @@ pub fn run(opts: PlanOptions) -> Result<(), String> {
             plan_state::PlanState::default()
         }
     };
-    plan_state::merge(&mut state, &findings);
+    let mut tracked = gates.clone();
+    tracked.extend(findings.iter().cloned());
+    plan_state::merge(&mut state, &tracked);
     if let Err(e) = plan_state::save(&opts.path, &state) {
         eprintln!("warning: plan state not saved: {e}");
     }
-    render(opts, findings)
+    render(opts, findings, gates)
 }
 
 /// `--status`/`--done`/`--undone`/`--prune`: operate on `.pixel/plan.json`
@@ -146,29 +156,199 @@ fn findings_of(data: &serde_json::Value) -> Result<Vec<PlanFinding>, String> {
     serde_json::from_value(findings).map_err(|e| format!("plan: unreadable findings: {e}"))
 }
 
-fn render(opts: PlanOptions, findings: Vec<PlanFinding>) -> Result<(), String> {
+/// The `prereqs` field of a `plan` op answer — absent on daemons that
+/// predate it, which is not an error.
+fn prereqs_of(data: &serde_json::Value) -> Result<Vec<Prereq>, String> {
+    match data.get("prereqs") {
+        Some(v) => {
+            serde_json::from_value(v.clone()).map_err(|e| format!("plan: unreadable prereqs: {e}"))
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Names of saved flows tagged `auth` or `login` — the replay a gate can
+/// name. A missing or unreadable flow dir is "no flows", never a failure.
+fn auth_flow_names() -> Vec<String> {
+    let Ok(value) = pixel_flow::list() else {
+        return Vec::new();
+    };
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|f| {
+            f["tags"].as_array().into_iter().flatten().any(|t| {
+                t.as_str().is_some_and(|t| {
+                    t.eq_ignore_ascii_case("auth") || t.eq_ignore_ascii_case("login")
+                })
+            })
+        })
+        .filter_map(|f| f["name"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Fold raw [`Prereq`] detections into blocking gate items: every env var
+/// detected merges into one item, auth-gated files share one that names the
+/// saved login flow when there is one, each provider gets its own item, and
+/// database drivers share one. Gate labels start with `Gate:` so they are
+/// recognizable in `--status` output.
+fn gates_of(prereqs: &[Prereq], findings: &[PlanFinding]) -> Vec<PlanFinding> {
+    let fan_in_of = |file: &str| {
+        findings
+            .iter()
+            .find(|f| f.file == file)
+            .map_or(0, |f| f.fan_in)
+    };
+    let gate = |file: &str, line: u32, label: String| PlanFinding {
+        file: file.to_string(),
+        line,
+        label,
+        fan_in: fan_in_of(file),
+        severity: Severity::High,
+        kind: FindingKind::Prereq,
+        blocking: true,
+    };
+    let mut gates = Vec::new();
+
+    let auth: Vec<&Prereq> = prereqs
+        .iter()
+        .filter(|p| p.kind == PrereqKind::Auth)
+        .collect();
+    if let Some(first) = auth.first() {
+        let mut files: Vec<&str> = Vec::new();
+        for p in &auth {
+            if !files.contains(&p.file.as_str()) {
+                files.push(&p.file);
+            }
+        }
+        let names = files.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+        let extra = if files.len() > 3 {
+            format!(" +{} more", files.len() - 3)
+        } else {
+            String::new()
+        };
+        let how = match auth_flow_names().first() {
+            Some(name) => format!("replay `pixel replay-flow replay {name}`"),
+            None => "no `auth`-tagged replay-flow saved — ask the human for a test account, or record one with `pixel replay-flow save`".to_string(),
+        };
+        gates.push(gate(
+            &first.file,
+            first.line,
+            format!(
+                "Gate: auth-gated code ({names}{extra}) — verify needs a logged-in session: {how}"
+            ),
+        ));
+    }
+
+    let envs: BTreeSet<&str> = prereqs
+        .iter()
+        .filter(|p| p.kind == PrereqKind::Env)
+        .map(|p| p.detail.as_str())
+        .collect();
+    if let Some(first) = prereqs.iter().find(|p| p.kind == PrereqKind::Env) {
+        let shown: Vec<&str> = envs.iter().take(12).copied().collect();
+        let extra = if envs.len() > 12 {
+            format!(" +{} more", envs.len() - 12)
+        } else {
+            String::new()
+        };
+        gates.push(gate(
+            &first.file,
+            first.line,
+            format!("Gate: env keys required: {}{}", shown.join(", "), extra),
+        ));
+    }
+
+    // One gate per provider; detections carry the display name as detail.
+    let mut providers: BTreeMap<&str, &Prereq> = BTreeMap::new();
+    for p in prereqs.iter().filter(|p| p.kind == PrereqKind::Provider) {
+        providers.entry(&p.detail).or_insert(p);
+    }
+    for (name, p) in providers {
+        let keys = pixel_graph::plan::provider_env_prefix(name).map_or_else(
+            || "the provider's env keys".to_string(),
+            |prefix| format!("{prefix}* keys"),
+        );
+        gates.push(gate(
+            &p.file,
+            p.line,
+            format!("Gate: {name} integration — verify needs {keys}"),
+        ));
+    }
+
+    let mut dbs: BTreeMap<&str, &Prereq> = BTreeMap::new();
+    for p in prereqs.iter().filter(|p| p.kind == PrereqKind::Db) {
+        dbs.entry(&p.detail).or_insert(p);
+    }
+    if let Some((_, first)) = dbs.first_key_value() {
+        let specs: Vec<&str> = dbs.keys().take(3).copied().collect();
+        let extra = if dbs.len() > 3 {
+            format!(" +{} more", dbs.len() - 3)
+        } else {
+            String::new()
+        };
+        gates.push(gate(
+            &first.file,
+            first.line,
+            format!(
+                "Gate: database-backed state ({}{extra}) — reproduce with real data before fixing",
+                specs.join(", ")
+            ),
+        ));
+    }
+    gates
+}
+
+fn render(
+    opts: PlanOptions,
+    findings: Vec<PlanFinding>,
+    gates: Vec<PlanFinding>,
+) -> Result<(), String> {
     let mut findings = findings;
     if let Some(cap) = opts.max_todos {
         findings.truncate(cap);
     }
     match opts.format.as_str() {
-        "json" => render_json(&opts, &findings),
-        "compact" => render_compact(&opts, &findings),
-        _ => render_markdown(&opts, &findings),
+        "json" => render_json(&opts, &findings, &gates),
+        "compact" => render_compact(&opts, &findings, &gates),
+        _ => render_markdown(&opts, &findings, &gates),
     }
 }
 
 #[cfg_attr(test, mutants::skip)] // one print over `markdown`, which is tested
-fn render_markdown(opts: &PlanOptions, findings: &[PlanFinding]) -> Result<(), String> {
-    print!("{}", markdown(opts.no_verify, findings));
+fn render_markdown(
+    opts: &PlanOptions,
+    findings: &[PlanFinding],
+    gates: &[PlanFinding],
+) -> Result<(), String> {
+    print!("{}", markdown(opts.no_verify, findings, gates));
     Ok(())
 }
 
-/// The markdown checklist: a numbered `[ ]` line per finding, a leading
-/// "map" item once there are enough findings to summarise, and a trailing
-/// verify item unless `--no-verify`.
-fn markdown(no_verify: bool, findings: &[PlanFinding]) -> String {
+/// The ` (gates above first)` suffix the verify item carries when the plan
+/// has verification gates — signing off without them is not verification.
+fn gates_suffix(gates: &[PlanFinding]) -> &'static str {
+    if gates.is_empty() {
+        ""
+    } else {
+        " (gates above first)"
+    }
+}
+
+/// The markdown checklist: a `Prerequisites` bullet block per gate, a
+/// numbered `[ ]` line per finding, a leading "map" item once there are
+/// enough findings to summarise, and a trailing verify item unless
+/// `--no-verify`.
+fn markdown(no_verify: bool, findings: &[PlanFinding], gates: &[PlanFinding]) -> String {
     let mut output = String::new();
+    if !gates.is_empty() {
+        output.push_str("Prerequisites — verification gates:\n");
+        for g in gates {
+            output.push_str(&format!("- [ ] {}\n", g.label));
+        }
+        output.push('\n');
+    }
     if findings.is_empty() {
         output.push_str("No plan findings.\n");
     } else if is_summary_eligible(findings) {
@@ -192,7 +372,8 @@ fn markdown(no_verify: bool, findings: &[PlanFinding]) -> String {
         if !no_verify {
             let n = findings.len() + 2;
             output.push_str(&format!(
-                "{n}. [ ] Verify all plan targets in the running build\n"
+                "{n}. [ ] Verify all plan targets in the running build{}\n",
+                gates_suffix(gates)
             ));
         }
     } else {
@@ -210,14 +391,22 @@ fn markdown(no_verify: bool, findings: &[PlanFinding]) -> String {
         if !no_verify {
             let n = findings.len() + 1;
             output.push_str(&format!(
-                "{n}. [ ] Verify all plan targets in the running build\n"
+                "{n}. [ ] Verify all plan targets in the running build{}\n",
+                gates_suffix(gates)
             ));
         }
     }
     output
 }
 
-fn render_compact(opts: &PlanOptions, findings: &[PlanFinding]) -> Result<(), String> {
+fn render_compact(
+    opts: &PlanOptions,
+    findings: &[PlanFinding],
+    gates: &[PlanFinding],
+) -> Result<(), String> {
+    for g in gates {
+        println!("gate: {}", g.label);
+    }
     for f in findings {
         println!(
             "{}:{} {} [{}]",
@@ -233,10 +422,15 @@ fn render_compact(opts: &PlanOptions, findings: &[PlanFinding]) -> Result<(), St
     Ok(())
 }
 
-fn render_json(opts: &PlanOptions, findings: &[PlanFinding]) -> Result<(), String> {
+fn render_json(
+    opts: &PlanOptions,
+    findings: &[PlanFinding],
+    gates: &[PlanFinding],
+) -> Result<(), String> {
     let verify = !opts.no_verify;
     let payload = json!({
         "findings": findings,
+        "gates": gates,
         "verify": verify,
     });
     println!(
@@ -270,6 +464,29 @@ mod tests {
             label: format!("Review {file}"),
             fan_in,
             severity: Severity::from_fan_in(fan_in),
+            kind: FindingKind::Site,
+            blocking: false,
+        }
+    }
+
+    fn gate(file: &str, label: &str) -> PlanFinding {
+        PlanFinding {
+            file: file.to_string(),
+            line: 1,
+            label: label.to_string(),
+            fan_in: 0,
+            severity: Severity::High,
+            kind: FindingKind::Prereq,
+            blocking: true,
+        }
+    }
+
+    fn prereq(kind: PrereqKind, file: &str, detail: &str) -> Prereq {
+        Prereq {
+            kind,
+            file: file.to_string(),
+            line: 3,
+            detail: detail.to_string(),
         }
     }
 
@@ -282,6 +499,7 @@ mod tests {
             limit: None,
             format: "markdown".to_string(),
             no_verify: false,
+            no_prereqs: false,
             max_todos: None,
             status: false,
             done: Vec::new(),
@@ -323,18 +541,18 @@ mod tests {
 
     #[test]
     fn markdown_lists_findings_with_map_and_verify_items() {
-        assert_eq!(markdown(false, &[]), "No plan findings.\n");
-        assert_eq!(markdown(true, &[]), "No plan findings.\n");
+        assert_eq!(markdown(false, &[], &[]), "No plan findings.\n");
+        assert_eq!(markdown(true, &[], &[]), "No plan findings.\n");
 
         // Under the summary threshold: plain numbering, verify last.
         let one = [finding("src/a.rs", 3, 0)];
         assert_eq!(
-            markdown(false, &one),
+            markdown(false, &one, &[]),
             "1. [ ] Review src/a.rs in src/a.rs (line 3, fan-in: 0) [LOW]\n\
              2. [ ] Verify all plan targets in the running build\n"
         );
         assert_eq!(
-            markdown(true, &one),
+            markdown(true, &one, &[]),
             "1. [ ] Review src/a.rs in src/a.rs (line 3, fan-in: 0) [LOW]\n"
         );
 
@@ -345,7 +563,7 @@ mod tests {
             finding("src/a.rs", 7, 3),
             finding("src/b.rs", 2, 0),
         ];
-        let text = markdown(false, &three);
+        let text = markdown(false, &three, &[]);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
             lines,
@@ -357,7 +575,110 @@ mod tests {
                 "5. [ ] Verify all plan targets in the running build",
             ]
         );
-        assert!(!markdown(true, &three).contains("Verify"));
+        assert!(!markdown(true, &three, &[]).contains("Verify"));
+    }
+
+    #[test]
+    fn markdown_puts_gates_in_a_bullet_block_and_marks_verify() {
+        let one = [finding("src/a.rs", 3, 0)];
+        let gates = [gate(
+            "src/a.rs",
+            "Gate: env keys required: STRIPE_SECRET_KEY",
+        )];
+        let text = markdown(false, &one, &gates);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "Prerequisites — verification gates:",
+                "- [ ] Gate: env keys required: STRIPE_SECRET_KEY",
+                "",
+                "1. [ ] Review src/a.rs in src/a.rs (line 3, fan-in: 0) [LOW]",
+                "2. [ ] Verify all plan targets in the running build (gates above first)",
+            ]
+        );
+        // --no-verify drops the verify item but keeps the gates.
+        assert_eq!(
+            markdown(true, &one, &gates),
+            "Prerequisites — verification gates:\n\
+             - [ ] Gate: env keys required: STRIPE_SECRET_KEY\n\
+             \n\
+             1. [ ] Review src/a.rs in src/a.rs (line 3, fan-in: 0) [LOW]\n"
+        );
+        // Gates with no findings still render — a plan of pure gates is real.
+        assert!(markdown(false, &[], &gates).contains("No plan findings."));
+    }
+
+    #[test]
+    fn prereqs_of_absent_or_present_field() {
+        assert!(prereqs_of(&json!({"findings": []})).unwrap().is_empty());
+        let data =
+            json!({"prereqs": [{"kind": "env", "file": "a.rs", "line": 2, "detail": "API_KEY"}]});
+        let prereqs = prereqs_of(&data).unwrap();
+        assert_eq!(prereqs.len(), 1);
+        assert_eq!(prereqs[0].kind, PrereqKind::Env);
+        assert_eq!(prereqs[0].detail, "API_KEY");
+        assert!(prereqs_of(&json!({"prereqs": "nope"})).is_err());
+    }
+
+    /// The env vars detected across files merge into one gate that names
+    /// them; provider and db detections become their own gates.
+    #[test]
+    fn gates_of_merges_env_names_and_lists_providers() {
+        let prereqs = [
+            prereq(PrereqKind::Env, "a.rs", "STRIPE_SECRET_KEY"),
+            prereq(PrereqKind::Env, "b.rs", "DATABASE_URL"),
+            prereq(PrereqKind::Env, "a.rs", "STRIPE_SECRET_KEY"), // dup
+            prereq(PrereqKind::Provider, "b.rs", "Stripe"),
+            prereq(PrereqKind::Db, "b.rs", "sqlx"),
+        ];
+        let findings = [finding("a.rs", 3, 4), finding("b.rs", 9, 0)];
+        let gates = gates_of(&prereqs, &findings);
+        assert_eq!(gates.len(), 3, "{gates:?}");
+        let env = &gates[0];
+        assert_eq!(
+            env.label,
+            "Gate: env keys required: DATABASE_URL, STRIPE_SECRET_KEY"
+        );
+        assert_eq!(env.file, "a.rs", "first evidence site");
+        assert_eq!(env.fan_in, 4, "gate inherits the evidence file's fan-in");
+        assert_eq!(env.kind, FindingKind::Prereq);
+        assert!(env.blocking);
+        assert_eq!(env.severity, Severity::High);
+        assert_eq!(
+            gates[1].label,
+            "Gate: Stripe integration — verify needs STRIPE_* keys"
+        );
+        assert_eq!(
+            gates[2].label,
+            "Gate: database-backed state (sqlx) — reproduce with real data before fixing"
+        );
+    }
+
+    /// Auth detections fold into one gate; with no `auth`-tagged flow the
+    /// label asks for a test account instead of naming a replay.
+    #[test]
+    fn gates_of_auth_asks_for_an_account_when_no_flow_is_saved() {
+        let prereqs = [
+            prereq(PrereqKind::Auth, "src/middleware.ts", "auth()"),
+            prereq(PrereqKind::Auth, "src/page.tsx", "getServerSession"),
+            prereq(PrereqKind::Auth, "src/page.tsx", "auth()"), // same file again
+        ];
+        let gates = gates_of(&prereqs, &[]);
+        assert_eq!(gates.len(), 1, "{gates:?}");
+        assert_eq!(gates[0].file, "src/middleware.ts");
+        assert_eq!(gates[0].line, 3);
+        assert!(
+            gates[0]
+                .label
+                .starts_with("Gate: auth-gated code (src/middleware.ts, src/page.tsx)"),
+            "{}",
+            gates[0].label
+        );
+        // PIXEL_FLOW_DIR is unset in tests unless a test sets it, but a real
+        // flow dir may exist on a dev machine — accept either arm, pinning
+        // only the parts that cannot vary.
+        assert!(gates[0].label.contains("verify needs a logged-in session"));
     }
 
     /// Each state flag alone must route to `run_state_ops` — any `||`→`&&`
