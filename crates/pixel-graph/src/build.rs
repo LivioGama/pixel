@@ -2262,6 +2262,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A Rust `use` binds names like a TS import does: `ship.rs` imports
+    /// `push` from `push.rs` while `other.rs` defines a `push` too, so only
+    /// the import tier can tell the two apart. Before Rust bindings were
+    /// extracted the call stayed unresolved and `who-calls push` reported no
+    /// caller (the demo's `ship.rs` → `push` edge).
+    #[test]
+    fn a_rust_use_makes_the_imported_same_name_function_exact() {
+        let root = tmpdir("rust-use-bindings");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub mod push;\npub mod other;\npub mod ship;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/push.rs"),
+            "pub struct PushOptions;\npub fn push() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/other.rs"),
+            "pub fn push() {}\npub fn publish() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/ship.rs"),
+            "use crate::push::{PushOptions, push};\npub fn ship() { push(); publish(); }\n",
+        )
+        .unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+
+        let store = GraphStore::open(&db).unwrap();
+        let idx = ResolveIndex::build(&store).unwrap();
+        let ship = store.file_by_path("src/ship.rs").unwrap().unwrap().id;
+        let push_file = store.file_by_path("src/push.rs").unwrap().unwrap().id;
+        match idx.decide(ship, "push", None) {
+            Decision::Exact(id) => assert!(
+                store
+                    .symbols_in_file(push_file)
+                    .unwrap()
+                    .iter()
+                    .any(|s| s.id == id),
+                "the imported push, not other.rs's"
+            ),
+            other => panic!("imported `push` should be Exact, got {other:?}"),
+        }
+        // Not imported: the use binds `push`, not every item of push.rs,
+        // and `publish` is defined elsewhere only.
+        assert!(
+            !matches!(idx.decide(ship, "publish", None), Decision::Exact(_)),
+            "a name the use does not bind never gets the import tier"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn wildcard_import_does_not_make_unqualified_call_exact() {
         let root = tmpdir("wildcard-import");

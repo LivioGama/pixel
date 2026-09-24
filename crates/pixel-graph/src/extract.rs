@@ -947,7 +947,9 @@ fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
         "use_declaration" => {
             if let Some(arg) = node.child_by_field_name("argument") {
                 let spec = w.text(arg);
-                w.push_import(spec, Vec::new());
+                let mut bindings = Vec::new();
+                rust_use_bindings(w, arg, &mut bindings);
+                w.push_import(spec, bindings);
             }
         }
         _ => {}
@@ -959,6 +961,45 @@ fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
         w.stack.pop();
     }
     w.in_trait_impl = outer_trait_impl;
+}
+
+/// The item names a Rust `use` brings into scope, the way
+/// `ts_import_bindings` reads a TS import:
+/// - `use crate::push::push;` → `["push"]`
+/// - `use crate::push::{PushOptions, push};` → `["PushOptions", "push"]`
+/// - `use a::{b::{c, d}, e};` → `["c", "d", "e"]`
+/// - `use a::b as c;` → `["b"]` (the imported item's own name, as for TS)
+/// - `use a::*;`, `use a::{self};` → nothing
+///
+/// Without them the resolver's import tier (T1) never fired for Rust: a
+/// call to an imported function whose name another file also defines
+/// (`push`, `publish`, `open`) stayed unresolved, and `who-calls` reported
+/// no caller for it.
+fn rust_use_bindings(w: &Walker, node: Node, out: &mut Vec<String>) {
+    match node.kind() {
+        "identifier" | "type_identifier" => out.push(w.text(node)),
+        "scoped_identifier" => {
+            if let Some(name) = node.child_by_field_name("name") {
+                rust_use_bindings(w, name, out);
+            }
+        }
+        "use_as_clause" => {
+            if let Some(path) = node.child_by_field_name("path") {
+                rust_use_bindings(w, path, out);
+            }
+        }
+        "scoped_use_list" => {
+            if let Some(list) = node.child_by_field_name("list") {
+                rust_use_bindings(w, list, out);
+            }
+        }
+        "use_list" => {
+            for child in each_child(node) {
+                rust_use_bindings(w, child, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn rust_is_test_container(w: &Walker, node: Node) -> bool {
@@ -2997,6 +3038,42 @@ fn free() {}
             extraction.references.is_empty(),
             "literal args must not be references: {:?}",
             extraction.references
+        );
+    }
+
+    #[test]
+    fn rust_use_binds_the_item_names_it_brings_into_scope() {
+        let source = [
+            "use crate::push::push;",
+            "use crate::push::{PushOptions, push as leased};",
+            "use crate::a::{b::{c, d}, e, self};",
+            "use std::collections::*;",
+            "use super::Walker;",
+        ]
+        .join("\n");
+        let extraction = extract_file("src/ship.rs", source.as_bytes()).unwrap();
+        let bindings: Vec<(&str, Vec<&str>)> = extraction
+            .imports
+            .iter()
+            .map(|i| {
+                (
+                    i.spec.as_str(),
+                    i.bindings.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            bindings,
+            [
+                ("crate::push::push", vec!["push"]),
+                (
+                    "crate::push::{PushOptions, push as leased}",
+                    vec!["PushOptions", "push"]
+                ),
+                ("crate::a::{b::{c, d}, e, self}", vec!["c", "d", "e"]),
+                ("std::collections::*", vec![]),
+                ("super::Walker", vec!["Walker"]),
+            ]
         );
     }
 }
