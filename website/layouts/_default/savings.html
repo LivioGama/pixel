@@ -134,7 +134,8 @@
         inputs.forEach(function (d) {
           var raw = el[d.key].value.trim();
           var x = raw === '' ? NaN : Number(raw);
-          var bad = !isFinite(x) || x < d.min || x > d.max;
+          /* The form never submits, so its step and range validation must be checked here: 1.5 developers is not an estimate. */
+          var bad = !isFinite(x) || x < d.min || x > d.max || el[d.key].validity.stepMismatch;
           el[d.key].setAttribute('aria-invalid', bad ? 'true' : 'false');
           if (bad) ok = false; else v[d.key] = x;
         });
@@ -150,8 +151,19 @@
         var dash = '—';
         if (!v) {
           ['usd-lo', 'usd-mid', 'usd-hi', 'tok-lo', 'tok-mid', 'tok-hi', 'tok-full', 'tok-px', 'reads', 'full', 'n-lo', 'n-mid', 'n-hi', 'c-lo', 'c-mid', 'c-hi'].forEach(function (k) { put(k, dash); });
+          /* No stale estimate to share while a field is invalid, and a way back to the defaults. */
+          ['link', 'badge'].forEach(function (k) {
+            put(k, dash); copyText(k, '');
+            var b = document.querySelector('[data-out-copy="' + k + '"]');
+            if (b) b.disabled = true;
+          });
+          reset.hidden = false;
           return;
         }
+        ['link', 'badge'].forEach(function (k) {
+          var b = document.querySelector('[data-out-copy="' + k + '"]');
+          if (b) b.disabled = false;
+        });
         var reads = v.d * v.s * v.r * v.w;
         var full = reads * v.t;
         var saved = { lo: full * (data.rates.lo / 100), mid: full * (data.rates.mid / 100), hi: full * (data.rates.hi / 100) };
@@ -183,14 +195,18 @@
         }
       };
 
-      /* A shared link: #d=10&s=4&r=5&t=10000&p=3&w=21. Unknown keys and out-of-range values are ignored. */
+      /* A shared link: #d=10&s=4&r=5&t=10000&p=3&w=21. A key the fragment omits takes its default (so a
+         later hashchange never keeps the previous link's value); unknown keys, malformed escapes and
+         out-of-range values are ignored, one at a time. */
       var load = function () {
+        inputs.forEach(function (d) { el[d.key].value = String(d.default); });
         var h = location.hash.replace(/^#/, '');
         if (!h) return;
         h.split('&').forEach(function (pair) {
           var kv = pair.split('=');
           var d = inputs.filter(function (i) { return i.key === kv[0]; })[0];
-          var x = Number(decodeURIComponent(kv[1] || ''));
+          var x;
+          try { x = Number(decodeURIComponent(kv[1] || '')); } catch (_) { return; }
           if (d && kv[1] !== '' && isFinite(x) && x >= d.min && x <= d.max) el[d.key].value = String(x);
         });
       };

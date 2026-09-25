@@ -788,6 +788,7 @@ a.agents__item { text-decoration: none; }
 .est__share h2 { font: 700 2.4rem/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; margin: 0 0 14px; }
 .est__share p { color: var(--ink-soft); margin: 18px 0 10px; }
 .est__share .cmd code { font-size: 0.84rem; }
+.est__share .cmd__copy:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ---------- measure box (/benchmarks/) ---------- */
 .prose .measure { margin: 0 0 48px; padding: 22px 24px 8px; border-radius: 8px; background: color-mix(in srgb, var(--panel) 55%, transparent); box-shadow: inset 0 0 0 1px var(--cell-edge); }
