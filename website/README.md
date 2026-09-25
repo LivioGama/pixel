@@ -310,10 +310,15 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   history for it; a shallow clone would date every page by HEAD.
 - `og/`: the share card. `og/render.sh` fills `og/card.html` with the
   wall's row of `data/read_savings.toml`, renders it at 1200x630 with
-  `agent-browser` and writes `static/og.png`; re-run it when that row
-  changes, never edit the PNG. It shows the wall's final state (one square
-  per 25 tokens, the P built as the home builds it) and the same saving,
-  floored, as the wall. Hugo ignores the folder.
+  `agent-browser` and writes `assets/og.png`; re-run it when that row
+  changes, never edit the PNG. It shows the brand, the headline and the
+  wall's two figures with the same saving, floored, as the wall. Everything
+  that carries meaning sits in the centred 630x630 square, because Slack's
+  compact unfurl (like iMessage and WhatsApp) crops the card to it and
+  draws it at about 80 px; no text is under 40 px, because the large
+  unfurls draw it about 360 px wide. `head.html` fingerprints it
+  (`og.<hash>.png`): unfurlers cache an image by URL, so a re-rendered card
+  reaches them under a new one. Hugo ignores the folder.
 - `assets/css/main.css`: one stylesheet, tokens first, dark only. Headlines
   use Handjet, a variable pixel face (`ELSH` 2 draws square elements; the
   hero title animates it from 0 once). `partials/head.html` requests only
