@@ -1,8 +1,9 @@
 //! `pixel web-search`: the parse and dispatch contract — query argument,
 //! `--limit`, `--json`, and the `marker`/`epistemics`/`snapshot` envelope —
-//! exercised end to end against a loopback SearXNG stub. One hit satisfies
-//! `--limit 1`, so the provider chain stops there and the test never touches
-//! the real DuckDuckGo/Wikipedia endpoints.
+//! exercised end to end against a loopback SearXNG stub. A configured SearXNG
+//! is the only provider, so these tests never touch the real DuckDuckGo or
+//! Wikipedia endpoints (the unit tests in `web_search.rs` pin that rule on a
+//! fetch seam; the test below checks that `run` passes the variable through).
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -57,6 +58,33 @@ fn web_search_json_reports_hits_with_epistemics_and_snapshot() {
     assert_eq!(doc["epistemics"]["basis"], "web search");
     assert_eq!(doc["snapshot"]["limit"], 1);
     assert_eq!(doc["snapshot"]["providers"], serde_json::json!(["searxng"]));
+}
+
+#[test]
+fn web_search_with_searxng_set_answers_from_it_alone_under_the_limit() {
+    // One hit for a limit of 8 used to be topped up from DuckDuckGo and
+    // Wikipedia; with the user's own instance configured it no longer is.
+    let base = http_stub(
+        r#"{"results":[{"title":"JEV","url":"https://example.test/jev","content":"Joint Embedded Validator"}]}"#,
+        1,
+    );
+    let out = pixel_command()
+        .args(["web-search", "JEV", "--limit", "8", "--json"])
+        .env("PIXEL_WEB_SEARCH_URL", &base)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("one JSON document");
+    assert_eq!(doc["snapshot"]["providers"], serde_json::json!(["searxng"]));
+    assert_eq!(
+        doc["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["url"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["https://example.test/jev"]
+    );
 }
 
 #[test]

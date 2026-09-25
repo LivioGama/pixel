@@ -386,7 +386,7 @@
         </details>
         <details>
           <summary>Does anything leave my machine?</summary>
-          <p>Nothing you did not ask for. The index lives in <code>.pixel/</code> and there is no telemetry. Pixel touches the network for four things only: the embedding model it downloads from Hugging Face on first use, the Git remote operations you run (<code>pixel fetch</code>, <code>pixel push</code>), <code>pixel classify</code>, which sends its question to the model you configure, and <code>pixel web-search</code>, which sends its query to the SearXNG endpoint you configure, then to DuckDuckGo and Wikipedia whenever it still has fewer hits than it asked for, SearXNG configured or not. <a class="link" href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Security model</a></p>
+          <p>Nothing you did not ask for. The index lives in <code>.pixel/</code> and there is no telemetry. Pixel touches the network for four things only: the embedding model it downloads from Hugging Face on first use, the Git remote operations you run (<code>pixel fetch</code>, <code>pixel push</code>), <code>pixel classify</code>, which sends its question to the model you configure, and <code>pixel web-search</code>, which sends its query to the SearXNG endpoint you configure and nowhere else, or, without one, to DuckDuckGo and then Wikipedia. <a class="link" href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Security model</a></p>
         </details>
         <details>
           <summary>Which languages?</summary>
