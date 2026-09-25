@@ -176,6 +176,7 @@ pub fn ingest_until_fresh_within(
     let mut n = 0u64;
     let start = Instant::now();
     let dbg = std::env::var("PIXEL_FACTS_DEBUG_TICKS").is_ok();
+    let mut last_mark: Option<String> = None;
     loop {
         let report = ingest_tick(store, options)?;
         n += 1;
@@ -185,6 +186,16 @@ pub fn ingest_until_fresh_within(
         if report.fresh {
             return Ok(report);
         }
+        // Every tick lands at least one batch of whichever phase is running,
+        // so a tick that leaves the state as it found it never will: fail
+        // now rather than spin until the wall-clock cap.
+        let mark = progress_mark(store)?;
+        if last_mark.as_ref() == Some(&mark) {
+            return Err(crate::store::FactsError::Msg(format!(
+                "ingest made no progress on tick {n} (state {mark}) — last report: {report:?}"
+            )));
+        }
+        last_mark = Some(mark);
         if start.elapsed() >= wall_clock {
             return Err(crate::store::FactsError::Msg(format!(
                 "ingest_until_fresh did not converge after {n} ticks / {:?} — last report: {:?}",
@@ -193,6 +204,21 @@ pub fn ingest_until_fresh_within(
             )));
         }
     }
+}
+
+/// What a tick that makes progress changes: the commit count (phase A), the
+/// pending diffs (phase C) and each phase's cursor and status (phase A's
+/// remaining oids, phase B's measured commit).
+fn progress_mark(store: &FactsStore) -> Result<String> {
+    Ok(store.conn().query_row(
+        "SELECT (SELECT count(*) FROM commits) || '/' ||
+                (SELECT count(*) FROM commits WHERE diff_state = ?1) || '/' ||
+                COALESCE((SELECT group_concat(job, ' ') FROM (
+                    SELECT phase || ':' || COALESCE(cursor, '') || ':' || status AS job
+                    FROM ingest_jobs ORDER BY phase)), '')",
+        [DIFF_STATE_PENDING],
+        |r| r.get(0),
+    )?)
 }
 
 /// Default wall-clock budget for the lazy query-path ingest loop (~3s).
@@ -1183,7 +1209,10 @@ fn insert_phase_c_commit(store: &mut FactsStore, commit: &PhaseCCommit) -> Resul
         let mut over_cap = false;
         for (i, file) in commit.files.iter().enumerate() {
             let path = &file.path;
-            if skip[i] {
+            // A hunk without text (a binary file, a pure rename or mode
+            // change) has nothing to search: no row, so a hunk row without
+            // text only ever means lost text (what `doctor` reports).
+            if skip[i] || (file.added.is_empty() && file.removed.is_empty()) {
                 continue;
             }
             if commit_bytes >= COMMIT_TEXT_CAP_BYTES {
@@ -1197,11 +1226,8 @@ fn insert_phase_c_commit(store: &mut FactsStore, commit: &PhaseCCommit) -> Resul
                 file.removed,
                 if file.truncated { 1 } else { 0 }
             ])?;
-            // Index the added+removed text under the hunk's rowid; a binary
-            // file's hunk has no text and nothing to index.
-            if !file.added.is_empty() || !file.removed.is_empty() {
-                ins_text.execute(params![id, format!("{}\n{}", file.added, file.removed)])?;
-            }
+            // Index the added+removed text under the hunk's rowid.
+            ins_text.execute(params![id, format!("{}\n{}", file.added, file.removed)])?;
             commit_bytes += file.added.len() + file.removed.len();
         }
         mark.execute(params![
@@ -1258,12 +1284,24 @@ fn window_cutoff(now_unix: i64, days: u64) -> i64 {
 
 /// Drop the diff text of every commit authored before the window, and mark
 /// the pending ones so their diff is never fetched. A commit exactly at the
-/// cutoff stays. Returns the number of commits taken out of the diff index.
+/// cutoff stays. A window widened or lifted since takes back the commits it
+/// now covers: they are pending again (a diff evicted for size is not, so a
+/// restored diff that does not fit is evicted once more and stays out).
+/// Returns the number of commits taken out of the diff index.
 pub fn apply_window(store: &mut FactsStore, limits: &HistoryLimits, now_unix: i64) -> Result<u64> {
-    let Some(days) = limits.window_days else {
-        return Ok(0);
-    };
-    let cutoff = window_cutoff(now_unix, days);
+    let cutoff = limits
+        .window_days
+        .map_or(i64::MIN, |days| window_cutoff(now_unix, days));
+    store.conn().execute(
+        "UPDATE commits SET diff_state = ?1, skip_note = NULL
+         WHERE diff_state = ?2 AND skip_note = ?3 AND unixepoch(committed_at) >= ?4",
+        params![
+            DIFF_STATE_PENDING,
+            DIFF_STATE_EVICTED,
+            SKIP_NOTE_OUTSIDE_WINDOW,
+            cutoff
+        ],
+    )?;
     let indexed = commits_with_hunks_before(store, cutoff)?;
     let mut evicted = evict_commits(store, &indexed, SKIP_NOTE_OUTSIDE_WINDOW)?;
     evicted += store.conn().execute(
@@ -1806,6 +1844,53 @@ b
             .len()
     }
 
+    /// A file without diff text (binary here) leaves no hunk row: every
+    /// stored hunk has text, which is what `doctor`'s poison check reads.
+    #[test]
+    fn ingest_writes_no_hunk_row_for_a_file_without_text() {
+        let dir = init_repo();
+        let root = dir.path();
+        let oid = commit(
+            root,
+            &[
+                ("logo.bin", b"\x00\x01\x02binary\x00"),
+                ("a.txt", b"words\n"),
+            ],
+            "binary and text",
+        );
+        let mut store = FactsStore::open(root).unwrap();
+        ingest_within(&mut store);
+        assert_eq!(state_of(&store, &oid), (DIFF_STATE_INDEXED, None));
+        let paths: Vec<(String, i64)> = {
+            let mut stmt = store
+                .conn()
+                .prepare("SELECT path, length(added) + length(removed) FROM hunks")
+                .unwrap();
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(paths, vec![("a.txt".to_string(), 6)]);
+    }
+
+    /// The mark moves with each tick's progress and holds still otherwise;
+    /// `ingest_until_fresh_within` reads a mark that held still as a stall.
+    #[test]
+    fn progress_mark_moves_with_a_tick_and_holds_still_without_one() {
+        let (dir, _, _) = two_commit_repo();
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        let empty = progress_mark(&store).unwrap();
+        assert_eq!(empty, "0/0/");
+        assert_eq!(progress_mark(&store).unwrap(), empty, "nothing ran");
+        let options = IngestOptions {
+            tick_budget_ms: 0,
+            ..IngestOptions::default()
+        };
+        ingest_tick(&mut store, &options).unwrap();
+        let after = progress_mark(&store).unwrap();
+        assert_ne!(after, empty);
+        assert!(after.starts_with("2/"), "{after}");
+    }
+
     #[test]
     fn now_unix_reads_the_clock_in_seconds() {
         let before = std::time::SystemTime::now()
@@ -1943,6 +2028,56 @@ b
             0
         );
         assert_eq!(state_of(&store, &edge), (DIFF_STATE_INDEXED, None));
+    }
+
+    /// Widening the window takes back the commits it now covers, lifting it
+    /// takes back all of them, and a commit evicted for size stays out.
+    #[test]
+    fn apply_window_restores_commits_a_wider_or_lifted_window_covers() {
+        let dir = init_repo();
+        let root = dir.path();
+        let t = 1_700_000_000;
+        let old = commit_at(root, &[("a.txt", b"a\n")], "old", t - 10 * 86_400);
+        let mid = commit_at(root, &[("b.txt", b"b\n")], "mid", t - 3 * 86_400);
+        let sized = commit_at(root, &[("c.txt", b"c\n")], "sized", t - 3 * 86_400);
+        let mut store = metadata_only(root);
+        store
+            .conn()
+            .execute(
+                "UPDATE commits SET diff_state = ?1, skip_note = ?2 WHERE oid = ?3",
+                params![DIFF_STATE_EVICTED, SKIP_NOTE_OVER_BUDGET, sized],
+            )
+            .unwrap();
+        let window = |days| HistoryLimits {
+            window_days: Some(days),
+            ..no_limits()
+        };
+        assert_eq!(apply_window(&mut store, &window(1), t).unwrap(), 2);
+        let outside = (
+            DIFF_STATE_EVICTED,
+            Some(SKIP_NOTE_OUTSIDE_WINDOW.to_string()),
+        );
+        assert_eq!(state_of(&store, &mid), outside);
+
+        assert_eq!(apply_window(&mut store, &window(5), t).unwrap(), 0);
+        assert_eq!(
+            state_of(&store, &mid),
+            (DIFF_STATE_PENDING, None),
+            "back inside"
+        );
+        assert_eq!(state_of(&store, &old), outside, "still outside");
+
+        assert_eq!(apply_window(&mut store, &no_limits(), t).unwrap(), 0);
+        assert_eq!(
+            state_of(&store, &old),
+            (DIFF_STATE_PENDING, None),
+            "window lifted"
+        );
+        assert_eq!(
+            state_of(&store, &sized),
+            (DIFF_STATE_EVICTED, Some(SKIP_NOTE_OVER_BUDGET.to_string())),
+            "a size eviction is not the window's to undo"
+        );
     }
 
     /// Pending commits before the cutoff are marked, the one at it is not.

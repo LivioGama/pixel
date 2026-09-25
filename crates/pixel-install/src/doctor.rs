@@ -1042,12 +1042,11 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             let hunks_with_text = count(
                 "SELECT count(*) FROM hunks WHERE length(added) > 0 OR length(removed) > 0",
             );
-            let diffs_indexed = count(&format!(
-                "SELECT count(*) FROM commits WHERE diff_state = {}",
-                pixel_facts::store::DIFF_STATE_INDEXED
-            ));
-            let verdict =
-                facts_verdict(state.commits_indexed, diffs_indexed, hunks_with_text, state.fresh);
+            // Ingest writes no row for a hunk without text (a binary file,
+            // a rename), so an empty row only ever means lost text.
+            let empty_hunks =
+                count("SELECT count(*) FROM hunks WHERE added = '' AND removed = ''");
+            let verdict = facts_verdict(state.commits_indexed, empty_hunks, state.fresh);
             let repo_commits = pixel_git::GitRunner::new(root)
                 .rev_list_count_all()
                 .unwrap_or(0);
@@ -1640,7 +1639,7 @@ fn capped(text: &str, max_chars: usize) -> String {
 pub enum FactsVerdict {
     /// No commit indexed: history was never asked for. Green.
     NotBuilt,
-    /// Diffs marked indexed while no hunk holds text. Red, with the reason.
+    /// Hunk rows stored without text. Red, with the reason.
     Poisoned(String),
     /// Ingest has not caught up with the refs. Yellow.
     Stale,
@@ -1650,16 +1649,11 @@ pub enum FactsVerdict {
 
 /// The `facts.freshness` verdict, factored out of the check so each branch
 /// is testable without a real repo.
-pub fn facts_verdict(
-    commits_indexed: u64,
-    diffs_indexed: i64,
-    hunks_with_text: i64,
-    fresh: bool,
-) -> FactsVerdict {
+pub fn facts_verdict(commits_indexed: u64, empty_hunks: i64, fresh: bool) -> FactsVerdict {
     if commits_indexed == 0 {
         return FactsVerdict::NotBuilt;
     }
-    if let Some(reason) = facts_poisoned_reason(diffs_indexed, hunks_with_text) {
+    if let Some(reason) = facts_poisoned_reason(empty_hunks) {
         return FactsVerdict::Poisoned(reason);
     }
     if fresh {
@@ -1675,20 +1669,22 @@ fn size_mib(bytes: u64) -> String {
 }
 
 /// The poisoned-DB predicate for `facts.freshness`, factored out so it is
-/// unit-testable without a real repo: commits whose diff is marked indexed
-/// while no hunk holds any text is the signature of the historical bug that
-/// stored every hunk with empty added/removed text, so excavate and diff
-/// search returned nothing forever while `diff_state` claimed INDEXED.
+/// unit-testable without a real repo: a hunk row without text is the
+/// signature of the historical bug that stored every hunk with empty
+/// added/removed text, so excavate and diff search returned nothing forever
+/// while `diff_state` claimed INDEXED. Ingest writes no row for a hunk that
+/// has no text (a binary file, a pure rename), so a repository of binary
+/// commits is not flagged.
 ///
 /// An empty db is not dead: history is built on the first history command,
 /// so a repository that never ran one has nothing to report.
 ///
 /// Returns `Some(reason)` when the check must go RED.
-pub fn facts_poisoned_reason(diffs_indexed: i64, hunks_with_text: i64) -> Option<String> {
-    if diffs_indexed > 0 && hunks_with_text == 0 {
+pub fn facts_poisoned_reason(empty_hunks: i64) -> Option<String> {
+    if empty_hunks > 0 {
         return Some(format!(
-            "facts db poisoned: {diffs_indexed} commits have their diff marked indexed but no \
-             hunk holds text — delete .pixel/history.db or re-run `pixel build-index --history`"
+            "facts db poisoned: {empty_hunks} diff hunks were stored without their text \
+             — delete .pixel/history.db or re-run `pixel build-index --history`"
         ));
     }
     None
@@ -2840,29 +2836,36 @@ git clone https://example.com/repo.git
     #[test]
     fn poisoned_db_signature_is_red() {
         // The real-world poisoned DB: 11 commits marked indexed, 323 hunks all
-        // with empty text.
-        let reason = facts_poisoned_reason(11, 0);
+        // stored with empty text.
+        let reason = facts_poisoned_reason(323);
         assert!(
             reason.as_deref().unwrap_or("").contains("poisoned"),
-            "indexed diffs with no hunk text must be flagged poisoned, got {reason:?}"
+            "hunk rows without text must be flagged poisoned, got {reason:?}"
         );
+        assert!(
+            facts_poisoned_reason(1).is_some(),
+            "one lost hunk is enough"
+        );
+    }
+
+    /// History that was never asked for, or whose commits carry no text at
+    /// all (binary files write no hunk row), is not an error: `doctor --fix`
+    /// must not turn a health check into a full history build.
+    #[test]
+    fn healthy_and_never_built_cases_are_not_red() {
+        assert_eq!(facts_poisoned_reason(0), None);
     }
 
     #[test]
     fn facts_verdict_reads_not_built_then_poisoned_then_freshness() {
-        assert_eq!(facts_verdict(0, 0, 0, false), FactsVerdict::NotBuilt);
-        assert_eq!(facts_verdict(0, 5, 0, true), FactsVerdict::NotBuilt);
+        assert_eq!(facts_verdict(0, 0, false), FactsVerdict::NotBuilt);
+        assert_eq!(facts_verdict(0, 5, true), FactsVerdict::NotBuilt);
         assert!(matches!(
-            facts_verdict(11, 11, 0, true),
-            FactsVerdict::Poisoned(r) if r.contains("11 commits")
+            facts_verdict(11, 323, true),
+            FactsVerdict::Poisoned(r) if r.contains("323 diff hunks")
         ));
-        assert_eq!(facts_verdict(21, 20, 400, true), FactsVerdict::Fresh);
-        assert_eq!(facts_verdict(21, 20, 400, false), FactsVerdict::Stale);
-        assert_eq!(
-            facts_verdict(1, 0, 0, true),
-            FactsVerdict::Fresh,
-            "every diff evicted"
-        );
+        assert_eq!(facts_verdict(21, 0, true), FactsVerdict::Fresh);
+        assert_eq!(facts_verdict(21, 0, false), FactsVerdict::Stale);
     }
 
     #[test]
@@ -2870,14 +2873,5 @@ git clone https://example.com/repo.git
         assert_eq!(size_mib(268_435_456), "256 MiB");
         assert_eq!(size_mib(3_145_727), "2 MiB");
         assert_eq!(size_mib(0), "0 MiB");
-    }
-
-    /// History that was never asked for is not an error: `doctor --fix`
-    /// must not turn a health check into a full history build.
-    #[test]
-    fn healthy_and_never_built_cases_are_not_red() {
-        assert_eq!(facts_poisoned_reason(21, 400), None, "healthy db");
-        assert_eq!(facts_poisoned_reason(0, 0), None, "no diff indexed yet");
-        assert_eq!(facts_poisoned_reason(1, 1), None, "one diff, one hunk");
     }
 }

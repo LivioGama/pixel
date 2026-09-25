@@ -135,9 +135,11 @@ contract groups, a web UI, generated wikis — all GitNexus, no pixel equivalent
 **Disk, with history.** pixel's comparable index is 8.6 MB against GitNexus'
 184 MB on the same repo, but the history database added ~849 MB in that run
 (225 MB db + 624 MB WAL). That was before the history index moved to FTS5
-trigram indexes (383 MB with its WAL down to 25 MB on pixel's own repository) and gained
-a default ceiling of 256 MiB and 365 days of diffs; the GitNexus repo has not
-been re-measured since. History is built only when a history command runs.
+trigram indexes and gained a default ceiling of 256 MiB and 365 days of diffs.
+On pixel's own repository (918 commits, `du` on `.pixel/history.db*`) the
+change took the history database from 383 MB, WAL included, to 25 MB
+([#301](https://github.com/LivioGama/pixel/pull/301)); the GitNexus repo has
+not been re-measured since. History is built only when a history command runs.
 
 ## Running them together
 
