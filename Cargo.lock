@@ -2078,7 +2078,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pixel-actionlog"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2087,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-bench"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "criterion",
  "pixel-daemon",
@@ -2100,7 +2100,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "clap",
  "globset",
@@ -2135,14 +2135,14 @@ dependencies = [
 
 [[package]]
 name = "pixel-context"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "pixel-daemon"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "fs2",
  "mutants",
@@ -2165,7 +2165,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-facts"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "mutants",
  "pixel-git",
@@ -2180,7 +2180,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-flow"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "mutants",
  "serde",
@@ -2191,14 +2191,14 @@ dependencies = [
 
 [[package]]
 name = "pixel-git"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "regex",
 ]
 
 [[package]]
 name = "pixel-graph"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "mutants",
  "pixel-git",
@@ -2228,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-index"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "crc32fast",
  "fs2",
@@ -2249,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-install"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "mutants",
  "pixel-daemon",
@@ -2266,7 +2266,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-ops"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "hex",
  "libc",
@@ -2284,7 +2284,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-proto"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2292,7 +2292,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-rank"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "pixel-git",
  "pixel-graph",
@@ -2307,7 +2307,7 @@ dependencies = [
 
 [[package]]
 name = "pixel-recall"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "fastembed",
  "memmap2",
@@ -2327,14 +2327,14 @@ dependencies = [
 
 [[package]]
 name = "pixel-release"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "pixel-session"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "pixel-git",
  "rmcp",
