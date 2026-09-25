@@ -722,6 +722,133 @@
       blocks.forEach(function (b) { io.observe(b); });
     })();
 
+    /* Titles assemble: each h2 of the page builds itself out of pixels the
+       first time it scrolls into view. The script draws the title into an
+       offscreen canvas with the same font, word by word at the positions
+       the browser laid out, samples it on a grid of about one Handjet
+       element (0.06 em), and lights those cells from left to right with a
+       flicker, hot first and then in their own colour; the real text fades
+       back in under them and the canvas goes. About 0.7 s. The h2 stays in
+       the DOM the whole time, so reading, selection and screen readers
+       never see the effect. Skipped under reduced motion, without
+       IntersectionObserver, or when Handjet did not load (the fallback
+       font has no pixels to assemble). */
+    (function () {
+      var titles = [].slice.call(document.querySelectorAll('main h2'));
+      if (!titles.length || !('IntersectionObserver' in window) || !document.fonts) return;
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      var SWEEP = 300, JITTER = 160, HOT = 90, OUT = 220, FRAME = 1000 / 30;
+      var hash = function (a, b) { var h = (a * 374761393 + b * 668265263) | 0; h = (h ^ (h >>> 13)) * 1274126177; return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
+
+      var assemble = function (h2) {
+        var cs = getComputedStyle(h2);
+        var size = parseFloat(cs.fontSize);
+        var cell = Math.max(3, Math.round(size * 0.06));
+        var box = h2.getBoundingClientRect();
+        var pad = cell * 2, W = Math.ceil(box.width + pad * 2), H = Math.ceil(box.height + pad * 2);
+        var dpr = Math.min(window.devicePixelRatio || 1, 2);
+        var off = document.createElement('canvas');
+        off.width = W; off.height = H;
+        var o = off.getContext('2d', { willReadFrequently: true });
+        o.font = cs.fontWeight + ' ' + size + 'px ' + cs.fontFamily;
+        o.textBaseline = 'alphabetic';
+        var ascent = o.measureText('M').fontBoundingBoxAscent;
+        // Every word where the browser put it, in its own colour, stretched
+        // to the width it has in the page (canvas cannot set the ELGR axis,
+        // which changes the advance a little).
+        var walk = document.createTreeWalker(h2, NodeFilter.SHOW_TEXT), node;
+        while ((node = walk.nextNode())) {
+          o.fillStyle = getComputedStyle(node.parentElement).color;
+          var re = /\S+/g, m;
+          while ((m = re.exec(node.data))) {
+            var r = document.createRange();
+            r.setStart(node, m.index); r.setEnd(node, m.index + m[0].length);
+            var rect = r.getClientRects()[0];
+            if (!rect) continue;
+            var w = o.measureText(m[0]).width || 1;
+            o.setTransform(rect.width / w, 0, 0, 1, rect.left - box.left + pad, 0);
+            o.fillText(m[0], 0, rect.top - box.top + pad + ascent);
+          }
+        }
+        o.setTransform(1, 0, 0, 1, 0, 0);
+        var px = o.getImageData(0, 0, W, H).data;
+        var on = function (x, y) { return px[(y * W + x) * 4 + 3] >= 110; };
+        // The grid's phase: the offset whose cells sit whole inside the
+        // strokes most often, so the last frame matches the text beneath.
+        var best = 0, ox = 0, oy = 0;
+        for (var py = 0; py < cell; py++) {
+          for (var qx = 0; qx < cell; qx++) {
+            var score = 0;
+            for (var y = py; y + cell <= H; y += cell) {
+              for (var x = qx; x + cell <= W; x += cell) {
+                if (on(x + 1, y + 1) && on(x + cell - 2, y + cell - 2)) score++;
+              }
+            }
+            if (score > best) { best = score; ox = qx; oy = py; }
+          }
+        }
+        var cells = [];
+        for (var y = oy; y + cell <= H; y += cell) {
+          for (var x = ox; x + cell <= W; x += cell) {
+            if (!on(x + (cell >> 1), y + (cell >> 1))) continue;
+            var at = ((y + (cell >> 1)) * W + x + (cell >> 1)) * 4;
+            cells.push({ x: x, y: y, c: 'rgb(' + px[at] + ',' + px[at + 1] + ',' + px[at + 2] + ')', t: (x / W) * SWEEP + hash(x, y) * JITTER });
+          }
+        }
+        if (!cells.length) { h2.classList.remove('is-assembling'); return; }
+        var done = SWEEP + JITTER + HOT;
+
+        var cv = document.createElement('canvas');
+        cv.className = 'assemble';
+        cv.setAttribute('aria-hidden', 'true');
+        cv.width = W * dpr; cv.height = H * dpr;
+        cv.style.cssText = 'left:' + -pad + 'px;top:' + -pad + 'px;width:' + W + 'px;height:' + H + 'px';
+        var g = cv.getContext('2d');
+        g.scale(dpr, dpr);
+        h2.appendChild(cv);
+        var gap = cell > 4 ? 1 : 0.5, start = performance.now(), last = -1;
+        var draw = function (now) {
+          var t = now - start, f = Math.floor(t / FRAME);
+          if (f !== last) {
+            last = f;
+            g.clearRect(0, 0, W, H);
+            for (var i = 0; i < cells.length; i++) {
+              var k = cells[i];
+              if (t < k.t) {
+                // Not yet placed: it flickers faintly, a few frames at a time.
+                if (hash(i, f) > 0.1) continue;
+                g.globalAlpha = 0.35; g.fillStyle = k.c;
+              } else {
+                g.globalAlpha = 1; g.fillStyle = t - k.t < HOT ? '#effff3' : k.c;
+              }
+              g.fillRect(k.x + gap / 2, k.y + gap / 2, cell - gap, cell - gap);
+            }
+          }
+          if (t < done) return requestAnimationFrame(draw);
+          h2.classList.remove('is-assembling');
+          h2.classList.add('is-assembled');
+          cv.style.opacity = '0';
+          setTimeout(function () { cv.remove(); }, OUT);
+        };
+        requestAnimationFrame(draw);
+      };
+
+      document.fonts.ready.then(function () {
+        if (!document.fonts.check('700 16px Handjet')) return;
+        // Hidden from here until its turn (only the fill: the computed
+        // colour the sampling reads is untouched).
+        titles.forEach(function (h) { h.classList.add('is-assembling'); });
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (e) {
+            if (!e.isIntersecting) return;
+            io.unobserve(e.target);
+            assemble(e.target);
+          });
+        }, { rootMargin: '0px 0px -12% 0px', threshold: 0.3 });
+        titles.forEach(function (h) { io.observe(h); });
+      });
+    })();
+
     /* Videos play only while on screen, and never on their own under
        reduced motion: those visitors get the poster (the finished state)
        and the controls. */

@@ -27,6 +27,14 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   demo in "Measured on whole agent tasks" plays once when it scrolls into
   view. Videos never autoplay under reduced motion: the poster shows the
   finished state and the controls are there.
+- Every `h2` of the landing page assembles out of pixels the first time it
+  scrolls into view (the "Titles assemble" script in `layouts/index.html`,
+  `.is-assembling` / `.is-assembled` in `main.css`): the title is sampled
+  from a canvas drawn with Handjet at the browser's word positions, on a
+  0.06 em grid phased onto the glyphs, and its green words light up last.
+  The text never leaves the DOM; no JavaScript, reduced motion or a
+  missing Handjet leaves the titles static. The hero title keeps its own
+  `materialize` animation, which follows the splash.
 - The "Fair questions" block in `layouts/index.html` restates facts from
   `SECURITY.md`, `docs/bench/measured-performance.md` and the graph's
   grammars (`$langs`, from `crates/pixel-graph/src/extract.rs`): change it
