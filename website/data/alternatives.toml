@@ -30,7 +30,7 @@
 #   note_label,    the card's note, when it is not "Where <name> wins: <wins>"
 #   note
 #   more           the card's link label; `more_href` replaces the link to
-#                  /benchmarks/#<bench> on the card (Jev points at #decisions)
+#                  /benchmarks/#<bench> on the card
 #   checked        the day the rows were last checked against /benchmarks/;
 #                  the page's "Updated" date is the later of it and its Git date
 #   matrix         a column of the home's matrix, in this order (the code
@@ -368,7 +368,6 @@ checked = 2026-09-25
 [[tool]]
 slug = "shunt"
 name = "shunt"
-home = true
 pitch = "Spotify's plugin: large reads go to a second model."
 about = "Spotify's plugin that hands an agent's large file reads to a worker model, a second model on the bill."
 measure = "published-figure"
@@ -413,7 +412,6 @@ checked = 2026-09-25
 [[tool]]
 slug = "jev"
 name = "Jev"
-home = true
 pitch = "A dedicated model for coding judgement calls."
 about = "A dedicated model for coding judgement calls, scored on its own benchmark, JevBench."
 measure = "published-figure"
@@ -422,8 +420,7 @@ answer = '''For a bounded coding decision, <code>pixel classify</code> asks a mo
 wins = "its score covers all 56 of its coding items, where Pixel's run covers only the 14 public ones."
 note_label = "Read with care"
 note = "Jev's 83.9% is its published score on 56 items; Pixel's run covers the 14 public ones, and the rest of Pixel needs no decision model."
-more = "The optional add-on"
-more_href = "#decisions"
+more = "Every model, the method and its limits"
 checked = 2026-09-25
 
   [[tool.row]]

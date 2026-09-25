@@ -42,7 +42,10 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   the bottom. The hero opens on who Pixel is for (four agent marks and the
   count of the rest, from `data/agents.toml`, which the Compatibility grid
   also draws, each mark linking to its `/for/<slug>/` page), then states the problem in the reader's words before naming the
-  category. The token wall draws one square per 25 tokens of a full file
+  category. Under the one call to action (the brew command; no star
+  button, the nav links GitHub) a quiet line states what a visitor checks
+  before pasting it: the platforms `release.yml` builds, the licence, no
+  telemetry. The token wall draws one square per 25 tokens of a full file
   read of a well-known file (`data/read_savings.toml`, the row marked
   `wall`) and burns down to what the same
   question costs through Pixel once it scrolls into view. A Without / With
@@ -52,8 +55,16 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   gather into a P of exactly that many squares, built from the count by
   the script, so one square always means 25 tokens. The order after the
   hero shows before it proves: the scope example comes first, then the
-  numbers band (its comparisons with GitNexus mean little before a visitor
-  has seen what Pixel does), then the chapters of proof. The scope board
+  numbers band, then the chapters of proof (Proof, How it works with the
+  six daily jobs under it, Alternatives, Teams, Compatibility, Objections,
+  Install). Every figure in the band is measured against the same agent
+  without Pixel, the only baseline a first-time visitor can read; the
+  head-to-head with GitNexus stays in Alternatives. Proof pairs the time
+  saved with the answer both sides reached (the same file in all 22 runs),
+  and keeps the losses to one line that links their runs. The optional
+  `pixel classify` and its JevBench score live on `/benchmarks/` and
+  `/vs/jev/`, not on the home: an add-on that needs a model blurs the
+  pitch of a tool that needs none. The scope board
   draws one pad per indexed file and routes a trace from each P0 pad to its
   file name. The job tabs load each video only when opened, and the agent
   demo in "Measured on whole agent tasks" plays once when it scrolls into
@@ -75,9 +86,8 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   missing Handjet leaves the titles static. The hero title keeps its own
   `materialize` animation, which follows the splash.
 - The "Alternatives" and "Teams" chapters restate `content/benchmarks.md`
-  (GitNexus, the well-known files, JevBench, the demo runs) and shunt's own
-  README for its claim and requirements. Alternatives keeps, on every card,
-  the rows where the other tool wins; Teams gives each role (developer, lead,
+  (GitNexus, the well-known files, the demo runs). Alternatives keeps, in
+  the matrix, the row where each other tool wins; Teams gives each role (developer, lead,
   harness engineer, CTO) three proofs, each a number or a command that
   exists. Change a figure on the benchmarks page first, then in
   `data/alternatives.toml` (the Alternatives cards and the `/vs/` pages)
@@ -96,8 +106,10 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   reach, history, licence), or the build fails, and a row with
   `matrix = "callers"` or `"context"` puts its figure in the matrix, where a
   tool without one shows how it was compared instead. A phone scrolls the
-  matrix sideways under its pinned criterion column. The tools marked `home`
-  are the "Other ways to spend fewer tokens" cards under it (shunt, Jev); every tool is a `/vs/<slug>/` page
+  matrix sideways under its pinned criterion column. A tool marked `home`
+  gets an "Other ways to spend fewer tokens" card under it; none is marked
+  today (shunt and Jev are linked from the line under the matrix instead),
+  and the block disappears with no marked tool. Every tool is a `/vs/<slug>/` page
   (`content/vs/<slug>.md`, front matter `tool = "<slug>"`, rendered by
   `layouts/vs/single.html`; `/vs/` itself is `layouts/vs/list.html`). A
   page's Markdown is prose only: the short answer, the table and "Where …
@@ -141,6 +153,17 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   `crates/pixel/tests/cli/docs_drift.rs` reads the pages and this file for
   `pixel …` commands, and fails when `static/llms.txt` ("Answers") misses a
   page or states another question than its `title`. Linked from the footer.
+- `data/voices.toml`: quotes from people who run Pixel, shown under the
+  Proof chapter's ledger. Nothing renders while the file holds no entry.
+  Below them, with or without quotes, an invite links a "Show and tell"
+  discussion prefilled with what a quote needs (repository, agent, the
+  `pixel token-savings` report, consent to be quoted); a reply moves to
+  this file only with its author's written yes.
+  Each entry is a real, named person who agreed in writing to be quoted;
+  the file's header lists the fields and the rules. A figure in a quote is
+  theirs, measured on their code, and says so in `measured`.
+- The nav's GitHub star count shows only from `gh_stars_min` in
+  `hugo.toml` up: a small count beside the brand argues against the page.
 - `data/objections.toml`: the "Fair questions" chapter, and the home's
   `FAQPage` JSON-LD, from one list (`layouts/partials/objections.html`
   renders it for both, so the markup never says what the page does not).

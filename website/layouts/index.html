@@ -37,8 +37,9 @@
           <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
           <button class="cmd__copy" type="button" data-copy="brew install LivioGama/tap/pixel">Copy</button>
         </div>
-        <a class="button button--ghost hero__star" href="{{ site.Params.github_url }}" target="_blank" rel="noopener" aria-label="Star Pixel on GitHub"><svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="currentColor"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>Star</a>
       </div>
+      {{/* Beside the one call to action, what a visitor checks before pasting it: the platforms the release builds (release.yml), the licence and the telemetry. No star button here: the nav links GitHub. */}}
+      <p class="hero__trust">macOS on Apple Silicon and Linux &middot; MIT &middot; no account, no telemetry</p>
       </div>
 
       <figure class="wall" data-wall data-full="{{ $big.full }}" data-pixel="{{ $big.pixel }}" data-per="25">
@@ -94,12 +95,12 @@
 
     {{/* ---------- numbers ---------- */}}
     <section class="numbers wrap" id="results" aria-label="Measured results">
-      {{/* Each meter draws the ratio its number states on a 20-square row: the baseline filled in dim cells, Pixel's in green. */}}
+      {{/* Each meter draws the ratio its number states on a 20-square row: the baseline filled in dim cells, Pixel's in green. Every baseline is the same agent without Pixel, the one comparison a first-time visitor can read; the head-to-head with GitNexus lives in the Alternatives chapter. The last three are the "On whole agent tasks" table of content/benchmarks.md (60.7 s against 86.5 s, 10,655 against 17,268 tokens, $0.274 against $0.394): change them there first. */}}
       {{ $stats := slice
         (dict "tag" "Tokens" "value" "&minus;95%" "text" "to learn what a large file contains" "base" "full read" "before" 20 "after" 1)
-        (dict "tag" "Callers" "value" "2.8&times;" "text" "faster than GitNexus at finding a symbol's callers" "base" "GitNexus" "before" 14 "after" 5)
-        (dict "tag" "Context" "value" "4.7&times;" "text" "less context than GitNexus on every turn" "base" "GitNexus" "before" 14 "after" 3)
         (dict "tag" "Agent time" "value" "&minus;30%" "text" "for an agent to scope a multi-file task" "base" "no Pixel" "before" 20 "after" 14)
+        (dict "tag" "Context" "value" "&minus;38%" "text" "tokens read into context on that whole task" "base" "no Pixel" "before" 20 "after" 12)
+        (dict "tag" "API cost" "value" "&minus;30%" "text" "billed for the same task, same model" "base" "no Pixel" "before" 20 "after" 14)
       }}
       <ul class="numbers__list" data-reveal="stagger" data-count-up>
         {{ range $stats }}
@@ -135,13 +136,89 @@
         </div>
         <figcaption id="demo-caption" class="demo__caption">Claude Code on the same task, eleven times with Pixel 0.5.0 and eleven times without. The replay shows each side's median-time run on one clock at 6&times; speed; every command, time and token count comes from the recording. <a class="link" href="{{ site.Params.github_url }}/tree/main/docs/motion/src/demo" target="_blank" rel="noopener">The traces</a></figcaption>
       </figure>
+      {{/* Faster is worth nothing if the answer gets worse, so the second entry is the result both sides reached. The losses stay one line here, in full on /benchmarks/. All from content/benchmarks.md, "On whole agent tasks". */}}
       <ul class="ledger" data-reveal="stagger">
         <li class="ledger__win"><strong>&minus;30%</strong><span>Scoping a multi-file task: the median of 11 runs per side above, with 38% fewer tokens read. Two earlier designs agree: &minus;31% and &minus;29%.</span></li>
-        <li class="ledger__loss"><strong>+1.5 s</strong><span>A single lookup, in the August runs. Reading Pixel's guidance costs more than it saves on a one-shot answer.</span></li>
-        <li class="ledger__loss"><strong>Slower</strong><span>Recovering deleted code from history, in the August runs. Open work.</span></li>
+        <li class="ledger__win"><strong>Same answer</strong><span>Both sides named <code>push.rs</code>, the file the change starts in, among their first two in every one of the 22 runs. Pixel gets there sooner, not differently.</span></li>
       </ul>
-      <p class="ledger__fine" data-reveal>The two losses come from three runs per cell: read them as directions, not decimals. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
+      <p class="ledger__fine" data-reveal>Where Pixel loses: a one-shot lookup runs about 1.5&nbsp;s slower, and recovering deleted code from history is still slower. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
+      {{/* Real users' words, from data/voices.toml: nothing renders until it holds an entry, and the file says what an entry needs. */}}
+      {{ with hugo.Data.voices.voice }}
+      <ul class="voices" data-reveal="stagger" aria-label="What people who run Pixel say">
+        {{ range . }}
+        <li class="voices__card">
+          <blockquote class="voices__quote"><p>{{ .quote }}</p></blockquote>
+          <p class="voices__who">{{ with .url }}<a class="link" href="{{ . }}" target="_blank" rel="noopener">{{ end }}{{ .name }}{{ with .url }}</a>{{ end }}<span>{{ .role }}</span></p>
+          {{ with .measured }}<p class="voices__measured">Measured on {{ . }}</p>{{ end }}
+        </li>
+        {{ end }}
+      </ul>
+      {{ end }}
+      {{/* The call for more voices, shown with or without quotes above it: a Show and tell discussion prefilled with what a quote needs (the numbers, the repository, the agent). A quote only moves to data/voices.toml with its author's written consent. */}}
+      {{ $title := "My pixel token-savings numbers" }}
+      {{ $body := "Repository (language, rough size):\nAgent:\nHow long I have run Pixel:\n\n```\n<paste the output of pixel token-savings>\n```\n\nOK to quote this on pixel-cli.dev under my name and role? (yes / no)" }}
+      {{ $share := printf "%s/discussions/new?category=show-and-tell&title=%s&body=%s" site.Params.github_url (replace (urlquery $title) "+" "%20") (replace (urlquery $body) "+" "%20") }}
+      <aside class="invite" data-reveal>
+        <div class="invite__text">
+          <h3>Running Pixel on your own code?</h3>
+          <p>Post what <code>pixel token-savings</code> reports, with your repository's language and size and the agent you run. With your permission, it can be quoted here under your name.</p>
+        </div>
+        <a class="button button--ghost invite__cta" href="{{ $share }}" target="_blank" rel="noopener">Share your numbers</a>
+      </aside>
     </section>
+
+    {{/* ---------- how it works ---------- */}}
+    <section class="section wrap" id="how" aria-labelledby="how-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Architecture</span></p>
+      <header class="section__head" data-reveal>
+        <h2 id="how-title">How it <span class="glow">works.</span></h2>
+        <p>One binary, one folder in your repository, no server. Then six jobs your agent runs on it every day.</p>
+      </header>
+      <ol class="how" data-reveal="stagger">
+        <li>
+          <span class="how__icon">{{ partial "icon.html" (dict "name" "grid" "size" 28) }}</span>
+          <h3>Index</h3>
+          <p><code>.pixel/</code>, at your repository root, holds a text index of every file Git does not ignore and a code graph of symbols, imports and calls parsed with tree-sitter, built on first use.</p>
+        </li>
+        <li>
+          <span class="how__icon">{{ partial "icon.html" (dict "name" "bolt" "size" 28) }}</span>
+          <h3>Stay warm</h3>
+          <p>A local daemon keeps both open and watches the tree, so answers take milliseconds and follow your edits. No daemon? The command runs in-process.</p>
+        </li>
+        <li>
+          <span class="how__icon">{{ partial "icon.html" (dict "name" "gauge" "size" 28) }}</span>
+          <h3>Answer to a budget</h3>
+          <p>The agent gets the symbols, signatures or lines its question needs, fitted to a token budget, with a marker saying whether the answer is complete.</p>
+        </li>
+        <li>
+          <span class="how__icon">{{ partial "icon.html" (dict "name" "robot" "size" 28) }}</span>
+          <h3>Reach the agent</h3>
+          <p>A CLI plus hooks, not an MCP server. <code>pixel install</code> puts the protocol where each agent reads its instructions, and the agent calls Pixel from the shell it already has.</p>
+        </li>
+      </ol>
+      {{/* The six jobs an agent runs every day on that index, each a recording of the same task without Pixel and with it: data/jobs.toml. No latency in the heading: commit-and-push waits on the remote, so a millisecond claim would not hold for all six. They live under How it works so the page has one chapter for what Pixel does, not two. */}}
+      <h3 class="vs__kicker" id="jobs" data-reveal>Six jobs your agent runs every day</h3>
+      <div class="jobs" data-jobs data-reveal>
+        <div class="jobs__tabs" role="tablist" aria-label="Jobs">
+          {{ range $i, $j := hugo.Data.jobs.job }}
+          <button class="jobs__tab" type="button" role="tab" id="tab-{{ $j.id }}" aria-controls="panel-{{ $j.id }}" aria-selected="{{ if eq $i 0 }}true{{ else }}false{{ end }}"{{ if ne $i 0 }} tabindex="-1"{{ end }}>
+            <span class="jobs__name">{{ $j.name }}</span>
+            <code class="jobs__cmd">{{ $j.command }}</code>
+          </button>
+          {{ end }}
+        </div>
+        {{ range $i, $j := hugo.Data.jobs.job }}
+        <div class="jobs__panel" role="tabpanel" id="panel-{{ $j.id }}" aria-labelledby="tab-{{ $j.id }}"{{ if ne $i 0 }} hidden{{ end }}>
+          <p class="jobs__text">{{ $j.text }}</p>
+          {{ $src := printf "examples/%s.mp4" $j.media | relURL }}
+          <video class="jobs__video" width="1600" height="1000" muted loop playsinline preload="none"
+            poster="{{ printf "examples/%s.jpg" $j.media | relURL }}" aria-label="{{ $j.name }}: the same task without Pixel and with it"
+            {{ if eq $i 0 }}src="{{ $src }}"{{ else }}data-src="{{ $src }}"{{ end }}></video>
+        </div>
+        {{ end }}
+      </div>
+    </section>
+
 
     {{/* ---------- alternatives ---------- */}}
     <section class="section wrap" id="alternatives" aria-labelledby="alternatives-title">
@@ -207,9 +284,11 @@
         </div>
       </div>
 
+      {{/* Cards for the tools marked `home` that are not code indexes; none is marked today, so the matrix stands alone and the line below links them. */}}
+      {{ with where $alts "home" true }}
       <h3 class="vs__kicker" data-reveal>Other ways to spend fewer tokens</h3>
       <div class="vs" data-reveal="stagger">
-        {{ range where $alts "home" true }}{{ $tool := . }}
+        {{ range . }}{{ $tool := . }}
         <article class="vs__card">
           <header class="vs__head"><h3>vs {{ .name }}</h3><p>{{ .pitch | safeHTML }}</p></header>
           <table class="vs__table">
@@ -224,7 +303,8 @@
         </article>
         {{ end }}
       </div>
-      <p class="ledger__fine" data-reveal>Where a specialist beats Pixel at its one job (semble on plain-English search, stacklit on a compact repository map), the numbers are on the <a class="link" href="{{ $bench }}#where-a-specialist-wins">benchmarks page</a> too, and each comparison has <a class="link" href="{{ "vs/" | relURL }}">a page of its own</a>.</p>
+      {{ end }}
+      <p class="ledger__fine" data-reveal>Other ways to spend fewer tokens have a page each: <a class="link" href="{{ "vs/shunt/" | relURL }}">shunt</a>, which hands large reads to a second model, and <a class="link" href="{{ "vs/jev/" | relURL }}">Jev</a>, a model for coding judgement calls. Where a specialist beats Pixel at its one job (semble on plain-English search, stacklit on a compact repository map), the numbers are on the <a class="link" href="{{ $bench }}#where-a-specialist-wins">benchmarks page</a>, and <a class="link" href="{{ "vs/" | relURL }}">every comparison</a> is listed.</p>
     </section>
 
     {{/* ---------- roles ---------- */}}
@@ -277,64 +357,6 @@
       </ul>
     </section>
 
-    {{/* ---------- six jobs ---------- */}}
-    <section class="section wrap" id="jobs" aria-labelledby="jobs-title">
-      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Everyday speed</span></p>
-      <header class="section__head" data-reveal>
-        <h2 id="jobs-title">Six daily jobs, <span class="glow">in milliseconds.</span></h2>
-      </header>
-      <div class="jobs" data-jobs data-reveal>
-        <div class="jobs__tabs" role="tablist" aria-label="Jobs">
-          {{ range $i, $j := hugo.Data.jobs.job }}
-          <button class="jobs__tab" type="button" role="tab" id="tab-{{ $j.id }}" aria-controls="panel-{{ $j.id }}" aria-selected="{{ if eq $i 0 }}true{{ else }}false{{ end }}"{{ if ne $i 0 }} tabindex="-1"{{ end }}>
-            <span class="jobs__name">{{ $j.name }}</span>
-            <code class="jobs__cmd">{{ $j.command }}</code>
-          </button>
-          {{ end }}
-        </div>
-        {{ range $i, $j := hugo.Data.jobs.job }}
-        <div class="jobs__panel" role="tabpanel" id="panel-{{ $j.id }}" aria-labelledby="tab-{{ $j.id }}"{{ if ne $i 0 }} hidden{{ end }}>
-          <p class="jobs__text">{{ $j.text }}</p>
-          {{ $src := printf "examples/%s.mp4" $j.media | relURL }}
-          <video class="jobs__video" width="1600" height="1000" muted loop playsinline preload="none"
-            poster="{{ printf "examples/%s.jpg" $j.media | relURL }}" aria-label="{{ $j.name }}: the same task without Pixel and with it"
-            {{ if eq $i 0 }}src="{{ $src }}"{{ else }}data-src="{{ $src }}"{{ end }}></video>
-        </div>
-        {{ end }}
-      </div>
-    </section>
-
-    {{/* ---------- how it works ---------- */}}
-    <section class="section wrap" id="how" aria-labelledby="how-title">
-      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Architecture</span></p>
-      <header class="section__head" data-reveal>
-        <h2 id="how-title">How it <span class="glow">works.</span></h2>
-        <p>One binary, one folder in your repository, no server.</p>
-      </header>
-      <ol class="how" data-reveal="stagger">
-        <li>
-          <span class="how__icon">{{ partial "icon.html" (dict "name" "grid" "size" 28) }}</span>
-          <h3>Index</h3>
-          <p><code>.pixel/</code>, at your repository root, holds a text index of every file Git does not ignore and a code graph of symbols, imports and calls parsed with tree-sitter, built on first use.</p>
-        </li>
-        <li>
-          <span class="how__icon">{{ partial "icon.html" (dict "name" "bolt" "size" 28) }}</span>
-          <h3>Stay warm</h3>
-          <p>A local daemon keeps both open and watches the tree, so answers take milliseconds and follow your edits. No daemon? The command runs in-process.</p>
-        </li>
-        <li>
-          <span class="how__icon">{{ partial "icon.html" (dict "name" "gauge" "size" 28) }}</span>
-          <h3>Answer to a budget</h3>
-          <p>The agent gets the symbols, signatures or lines its question needs, fitted to a token budget, with a marker saying whether the answer is complete.</p>
-        </li>
-        <li>
-          <span class="how__icon">{{ partial "icon.html" (dict "name" "robot" "size" 28) }}</span>
-          <h3>Reach the agent</h3>
-          <p>A CLI plus hooks, not an MCP server. <code>pixel install</code> puts the protocol where each agent reads its instructions, and the agent calls Pixel from the shell it already has.</p>
-        </li>
-      </ol>
-    </section>
-
     {{/* ---------- agents ---------- */}}
     <section class="section wrap section--center" id="agents" aria-labelledby="agents-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Compatibility</span></p>
@@ -348,36 +370,6 @@
         {{ end }}
       </ul>
       <p class="agents__more"><a class="link" href="{{ "for/" | relURL }}">What Pixel writes for each agent, and how to check it</a></p>
-    </section>
-
-    {{/* ---------- decisions ---------- */}}
-    <section class="section wrap" id="decisions" aria-labelledby="jev-title">
-      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Decisions</span></p>
-      {{/* Facts from content/benchmarks.md#coding-decisions; the example question is the public item hard-sol-a-trap-10. */}}
-      <div class="jev">
-        {{/* Left: the proof. The score, the comparison, and the other models close behind, so no one reads it as a DeepSeek requirement. */}}
-        <div class="jev__proof" data-reveal>
-          <p class="jev__big" aria-hidden="true">14<span>/</span>14</p>
-          <p class="jev__under">public JevBench coding items</p>
-          <ul class="jev__bars" aria-label="Accuracy on coding decisions">
-            <li class="is-pixel" style="--v: 1"><span class="jev__who">Pixel + deepseek-v4.1-flash</span><span class="jev__bar" aria-hidden="true"></span><strong>100%</strong></li>
-            <li style="--v: 0.839"><span class="jev__who">Jev, a dedicated decision model</span><span class="jev__bar" aria-hidden="true"></span><strong>83.9%</strong></li>
-          </ul>
-          <p class="jev__others">Also 13 of 14 with gpt-oss:120b, gpt-oss:20b or deepseek-v4-flash.</p>
-        </div>
-        {{/* Right: the pitch, opt-in first. */}}
-        <div class="jev__copy" data-reveal="stagger">
-          <p class="jev__kicker">{{ partial "icon.html" (dict "name" "bolt" "size" 12) }}Optional add-on &middot; bring your own model</p>
-          <h2 id="jev-title">Hard coding calls, <span class="glow">answered right.</span></h2>
-          <p class="jev__hook">A patch billed as a "documentation cleanup" also changes a timeout: does it still need two reviewers? JevBench asks judgement calls like this one, where the obvious answer is the wrong one.</p>
-          <p><code>pixel classify</code> hands such a question to the model you choose and returns one probability per answer.</p>
-          <div class="jev__optin">
-            {{ partial "icon.html" (dict "name" "shield" "size" 20) }}
-            <p><strong>Pixel works fully without it.</strong> No API key, no account. <code>pixel classify</code> is the only command that calls a model, and only the one you configure: OpenRouter, Ollama Cloud or a local server.</p>
-          </div>
-          <p class="jev__fine">Jev's 83.9% is its own published score on 56 coding items, not re-measured here, and 14 items is a small sample. <a class="link" href="{{ $bench }}#coding-decisions">Every model, the method and its limits</a></p>
-        </div>
-      </div>
     </section>
 
     {{/* ---------- questions ---------- */}}
@@ -430,12 +422,14 @@
               <button class="cmd__copy term__copy" type="button" data-copy="{{ $brew }} && pixel install && pixel doctor .">Copy all</button>
             </div>
             <pre class="term__body"><code><span data-line="brew"><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl" hidden><span class="term__p">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</span><span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span>
-  <span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span>
-  <span class="term__p">$</span> pixel list-signatures path/to/a/large/file.py  <span class="term__c"># first result, in your repo</span></code></pre>
+<span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span>
+<span class="term__p">$</span> pixel list-signatures path/to/a/large/file.py  <span class="term__c"># first result, in your repo</span></code></pre>
           </div>
           {{/* Measured on a fresh clone of psf/requests with the pixel of this commit; re-run it when the report line changes (crates/pixel-actionlog/src/metrics.rs, measured_read_section). */}}
           <p class="install__more">The last line needs no session: under the file's outline, Pixel's report compares it with reading the whole file. On Requests' <code>models.py</code>: <code>full read 10365 tok, pixel answer 641 tok (-94%)</code>.</p>
-          <p class="install__more">The script works on macOS and Linux. Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}">Plugins and rules files</a>.</p>
+          {{/* The prebuilt targets are release.yml's matrix (aarch64-apple-darwin, x86_64 and aarch64 musl Linux), and scripts/install.sh refuses an archive whose .sha256 it cannot fetch or match: change this line when either changes. */}}
+          <p class="install__more">Prebuilt for Apple Silicon Macs and Linux (x86_64, arm64); the script checks the archive's SHA&#8209;256 before it installs anything. No Windows build yet. Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}">Plugins and rules files</a>.</p>
+          <p class="install__more"><code>pixel install</code> edits your agents' settings, so every file it writes is listed per agent, with the check and the removal: <a class="link" href="{{ "for/" | relURL }}">what Pixel writes for each agent</a>.</p>
           <p class="install__more install__ask">Questions, or stuck on setup? <a class="link" href="{{ site.Params.github_url }}/discussions" target="_blank" rel="noopener">Ask in GitHub Discussions</a>.</p>
         </div>
       </div>
