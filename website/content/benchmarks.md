@@ -7,7 +7,7 @@ description: "Every number on the home page, with its method, its sample size an
 
 Every number below links to its method and raw data in the repository, with the scripts to re-run it on your own code. Losses sit next to wins.
 
-<!-- Each command in this box was run on a fresh clone of a third-party repository (psf/requests) before it was written here: `pixel audit` at requests 611c616 with a build of #290 (b4187fc), the others with pixel 0.5.0. Re-run them when an output or a prerequisite changes. -->
+<!-- Each command in this box was run on a fresh clone of a third-party repository (psf/requests) before it was written here: `pixel audit` and `pixel list-signatures` at requests 611c616 with pixel 0.5.1, the others with pixel 0.5.0. Re-run them when an output or a prerequisite changes. -->
 <aside class="measure" aria-labelledby="measure-it-on-your-own-code">
 
 ## Measure it on your own code
