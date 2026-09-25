@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Renders the share card, website/static/og.png (1200x630, the ratio X,
+# Renders the share card, website/assets/og.png (1200x630, the ratio X,
 # LinkedIn and Slack draw), from og/card.html and the token wall's row of
 # data/read_savings.toml. Re-run it whenever that row changes: the card's
 # figures are the home page's and /benchmarks/', never typed by hand.
@@ -11,7 +11,7 @@ set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 site=$(dirname "$here")
-out="$site/static/og.png"
+out="$site/assets/og.png"
 tmp=$(mktemp -d)
 session="pixel-og-$$"
 trap 'agent-browser --session "$session" close >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT

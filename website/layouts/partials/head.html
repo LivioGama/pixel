@@ -15,19 +15,20 @@
 <meta property="og:description" content="{{ $desc }}">
 <meta property="og:type" content="website">
 <meta property="og:url" content="{{ .Permalink }}">
-{{/* The share card, 1200x630 (the 1.91:1 X, LinkedIn and Slack draw): og/render.sh renders it from data/read_savings.toml. Its alt restates the same row. */}}
+{{/* The share card, 1200x630 (the 1.91:1 X, LinkedIn and Slack draw): og/render.sh renders it from data/read_savings.toml. Its alt states the card's figures. Fingerprinted, because every unfurler caches the image by its URL: a new card gets a new one. */}}
+{{ $og := resources.Get "og.png" | fingerprint }}
 {{ $big := partial "wall-row.html" . }}
-{{ $alt := printf "The token wall: %s tokens to read %s %s, %s through Pixel, %v%% fewer." (lang.FormatNumberCustom 0 $big.full) $big.owner (path.Base $big.path) (lang.FormatNumberCustom 0 $big.pixel) (math.Floor $big.saved) }}
-<meta property="og:image" content="{{ "og.png" | absURL }}">
+{{ $alt := printf "Pixel. Read less, ship more: %s tokens to read %s %s whole, %s through Pixel, %v%% fewer." (lang.FormatNumberCustom 0 $big.full) $big.owner (path.Base $big.path) (lang.FormatNumberCustom 0 $big.pixel) (math.Floor $big.saved) }}
+<meta property="og:image" content="{{ $og.Permalink }}">
 <meta property="og:image:type" content="image/png">
-<meta property="og:image:width" content="1200">
-<meta property="og:image:height" content="630">
+<meta property="og:image:width" content="{{ $og.Width }}">
+<meta property="og:image:height" content="{{ $og.Height }}">
 <meta property="og:image:alt" content="{{ $alt }}">
 <meta property="og:site_name" content="Pixel">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{{ $title }}">
 <meta name="twitter:description" content="{{ $desc }}">
-<meta name="twitter:image" content="{{ "og.png" | absURL }}">
+<meta name="twitter:image" content="{{ $og.Permalink }}">
 <meta name="twitter:image:alt" content="{{ $alt }}">
 <link rel="canonical" href="{{ .Permalink }}">
 <meta name="color-scheme" content="dark">
