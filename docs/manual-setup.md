@@ -10,10 +10,12 @@ wire (Cursor, Gemini CLI, Copilot, ...)? You don't need `pixel install`.
    (a short version for Claude Code sub-agents, which see neither the session
    prompt nor its history).
 3. **Add lifecycle hooks to `~/.claude/settings.json`**: a `SessionStart`
-   hook injects the agent prompt into every Claude Code session as context,
-   however `claude` is launched (a terminal, an IDE, an agent, cron). No
-   shell wrapper: an older install's `claude()` function in the shell profile
-   is removed.
+   hook injects the agent prompt as context into every Claude Code session
+   that loads your user settings, however `claude` is launched on this
+   machine (a terminal, an IDE, an agent, cron). A run that does not read
+   `~/.claude/settings.json`, such as `claude-code-action` in CI, needs the
+   flags instead ([In CI](#in-ci-claude-code-action)). No shell wrapper: an
+   older install's `claude()` function in the shell profile is removed.
 4. **Put the prompt into Codex's `config.toml`** as `developer_instructions`,
    so every Codex front end (CLI, desktop app, extension, sub-agents) gets it.
 5. **Put the prompt into Pi's `~/.pi/agent/APPEND_SYSTEM.md`**, and, when
@@ -78,8 +80,9 @@ claude -p --append-system-prompt-file ~/.local/share/pixel/agent-prompt.md \
 To make it automatic, do what `pixel install` does: register Pixel's
 lifecycle hooks in `~/.claude/settings.json`. The `SessionStart` one prints
 the deployed `agent-prompt.md` as `hookSpecificOutput.additionalContext`, so
-every session gets the prompt without a flag or a shell function, whatever
-starts `claude`:
+every session that loads these user settings gets the prompt without a flag
+or a shell function, whatever starts `claude` on this machine (CI is the
+exception, below):
 
 ```json
 {

@@ -75,7 +75,7 @@ pixel doctor . --fix   # runs each repair a flagged check names, then re-checks
 
 ## Plugins
 
-Each agent CLI below can load Pixel's protocol through its own plugin mechanism, with no `pixel install` step. The `pixel` binary still has to be installed: the plugin never installs it. When the binary is missing or too old for the commands the protocol names, the plugin injects a one-paragraph notice instead of the protocol.
+Each agent CLI below can load Pixel's protocol through its own plugin mechanism, or for the last row a rules file you copy, with no `pixel install` step. The `pixel` binary still has to be installed: the plugin never installs it. When the binary is missing or too old for the commands the protocol names, the plugin injects a one-paragraph notice instead of the protocol.
 
 | Tool | Install |
 | --- | --- |
@@ -85,8 +85,9 @@ Each agent CLI below can load Pixel's protocol through its own plugin mechanism,
 | Devin | add `github.com/LivioGama/pixel` as a Devin plugin |
 | Gemini CLI | `gemini extensions install https://github.com/LivioGama/pixel` |
 | Pi | `pi install git:github.com/LivioGama/pixel` |
-| OpenCode | no plugin package is published yet: `pixel install` puts the protocol in its global `AGENTS.md` ([OpenCode](../for/opencode/)) |
 | Cursor, Windsurf, Kiro, Cline, Qoder | rules ship under `.cursor/rules/`, `.windsurf/rules/`, `.kiro/steering/`, `.clinerules/` and `.qoder/rules/`: copy them into your project |
+
+OpenCode has no Pixel plugin package published yet, so it is not in the table: `pixel install` puts the protocol in its global `AGENTS.md` instead ([Pixel for OpenCode](../for/opencode/)).
 
 Any other agent: paste [`PIXEL.md`](https://github.com/LivioGama/pixel/blob/main/PIXEL.md), the plain-Markdown protocol, into whatever instruction surface it offers. [Manual setup](https://github.com/LivioGama/pixel/blob/main/docs/manual-setup.md) covers wiring the full prompt by hand.
 
