@@ -12,6 +12,10 @@ disableKinds = ["taxonomy", "term", "RSS"]
 description = "A local code index for AI coding agents. Your agent queries Pixel instead of reading files: 95% fewer tokens to learn what a large file contains."
 github_url = "https://github.com/LivioGama/pixel"
 repo = "LivioGama/pixel"
+# The nav shows the repository's GitHub star count only from this many up:
+# below it the badge stays hidden (layouts/partials/footer.html). 0 always
+# shows it.
+gh_stars_min = 100
 # Cloudflare Web Analytics site token (Cloudflare dashboard, Web Analytics,
 # pixel-cli.dev). Public by design: it ships in every page. Empty means no
 # beacon and no analytics line in the footer.

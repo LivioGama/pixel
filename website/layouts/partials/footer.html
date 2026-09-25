@@ -55,15 +55,18 @@
 <script type="module" src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "{{ . }}"}'></script>
 {{- end }}{{ end }}
 <script>
-  /* GitHub star count in the nav, behind a star icon: shown only once the API answers. */
+  /* GitHub star count in the nav, behind a star icon: shown only once the API
+     answers, and only from gh_stars_min (hugo.toml) up, since a small count
+     next to the brand argues against the page rather than for it. */
   (function () {
     var el = document.querySelector('[data-gh-stars]');
     if (!el) return;
     var badge = el.parentNode;
     var repo = el.getAttribute('data-gh-stars');
+    var min = Number(el.getAttribute('data-gh-stars-min')) || 0;
     var key = 'gh-stars:' + repo;
     var show = function (n) {
-      if (typeof n !== 'number') return;
+      if (typeof n !== 'number' || n < min) return;
       el.textContent = n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
       badge.setAttribute('aria-label', n + ' stars on GitHub');
       badge.hidden = false;

@@ -1,0 +1,23 @@
+# What people who run Pixel say about it, shown on the home under "Proof"
+# (layouts/index.html, "voices"). The block renders only once this file holds
+# at least one entry, so an empty file shows nothing.
+#
+# Every entry is a real person who wrote or said these words about Pixel and
+# agreed, in writing, to be quoted here with their name and role. Never
+# paraphrase into a quote, never invent one, never keep a quote whose author
+# asked to be removed. A figure in a quote is theirs, measured on their code:
+# say so in `measured`, and keep ours on /benchmarks/.
+#
+#   quote     their words, plain text, one or two sentences
+#   name      as they want it shown
+#   role      role and team or company, as they want it shown
+#   url       optional: their public profile, or the post the quote comes from
+#   measured  optional: what their own figure was measured on ("pixel
+#             token-savings over two weeks on a Rails monolith")
+#
+# [[voice]]
+# quote = "…"
+# name = "…"
+# role = "…"
+# url = "https://…"
+# measured = "…"
