@@ -28,7 +28,7 @@
   </div>
 </footer>
 {{- with site.Params.cf_analytics_token }}{{ if hugo.IsProduction }}
-<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "{{ . }}"}'></script>
+<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "{{ . }}"}'></script>
 {{- end }}{{ end }}
 <script>
   /* GitHub star count in the nav, behind a star icon: shown only once the API answers. */
