@@ -62,9 +62,36 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   README for its claim and requirements. Alternatives keeps, on every card,
   the rows where the other tool wins; Teams gives each role (developer, lead,
   harness engineer, CTO) three proofs, each a number or a command that
-  exists. Change a figure on the benchmarks page first, then here, then in
-  the repository README's "Why" list and `static/llms.txt`, whose "Evaluating Pixel against alternatives" section
-  gives the same results to an assistant comparing tools for its user.
+  exists. Change a figure on the benchmarks page first, then in
+  `data/alternatives.toml` (the Alternatives cards and the `/vs/` pages)
+  or the Teams chapter, then in the repository README's "Why" list and
+  `static/llms.txt`, whose "Evaluating Pixel against alternatives" section
+  gives the same results to an assistant comparing tools for its user and
+  links each `/vs/` page.
+- `data/alternatives.toml`: one entry per tool Pixel is compared with, read
+  through `layouts/partials/alternatives.html` (placeholders such as
+  `{kept.range}` or `{big.full}` filled from `data/read_savings.toml`, an
+  unknown one fails the build). The tools marked `home` are the
+  Alternatives cards; every tool is a `/vs/<slug>/` page
+  (`content/vs/<slug>.md`, front matter `tool = "<slug>"`, rendered by
+  `layouts/vs/single.html`; `/vs/` itself is `layouts/vs/list.html`). A
+  page's Markdown is prose only: the short answer, the table and "Where …
+  wins" (required, the build fails without it) come from the data. Each
+  entry's `measure` is shown above its table: `head-to-head`,
+  `published-figure` (different samples), `baseline` (grep) or `design`
+  (not benchmarked, no figure). A tool or category `/benchmarks/` does not
+  measure (a language server, an editor's index) gets a page only as
+  `design`: no figure at all, "Not benchmarked" above its table, and the
+  build fails on a digit in its answer, wins or rows, or on a `bench`.
+  No figure `/benchmarks/` does not show: a card figure from the other
+  tool's own docs (shunt's claim) gets a `page_other` the page shows
+  instead. A page's "Updated" date is the later of its Git date and the
+  entry's `checked`: bump `checked` when you change its rows. Each page
+  carries its own JSON-LD (`WebPage`, `BreadcrumbList`) that points at the
+  home's `#website` and `#software` by `@id` rather than declaring them
+  again. `docs_drift.rs` reads `content/vs/*.md` and this file.
+  `static/llms.txt` is not a template: its `/vs/` links spell the domain,
+  so they change with `baseURL`.
 - `data/objections.toml`: the "Fair questions" chapter, and the home's
   `FAQPage` JSON-LD, from one list (`layouts/partials/objections.html`
   renders it for both, so the markup never says what the page does not).
@@ -151,7 +178,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   workflow redeploys on it. Every absolute URL goes through `baseURL`
   (`absURL`, `.Permalink`), so a new domain is one line in `hugo.toml`.
 - `layouts/robots.txt` names the sitemap Hugo writes (`/`, `/docs/`,
-  `/benchmarks/`; the 404 stays out). `enableGitInfo` dates each page by the
+  `/benchmarks/`, `/vs/` and each comparison; the 404 stays out). `enableGitInfo` dates each page by the
   last commit that touched its source: the sitemap's `lastmod` and the
   "Updated" line under the `/docs/` and `/benchmarks/` titles
   (`layouts/_default/single.html`). The Pages workflow checks out the full

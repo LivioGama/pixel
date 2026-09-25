@@ -1,0 +1,64 @@
+{{/* The tools of data/alternatives.toml, their placeholders filled in: the
+     home's Alternatives cards and every /vs/ page read them from here, so a
+     card and its page cannot disagree. Returns the list in file order, each
+     tool a dict with the file's fields, `rows` in place of `row`, and `url`
+     (its /vs/ page, relative). Call with (dict "abs" true) for absolute
+     links (the JSON-LD). */}}
+{{ $big := partial "wall-row.html" . }}
+{{ $reads := hugo.Data.read_savings.row }}
+{{ $kept := sort (apply (where $reads "status" "kept") "index" "." "saved") }}
+{{ $mid := div (len $kept) 2 }}
+{{ $median := cond (modBool (len $kept) 2) (div (add (index $kept (sub $mid 1)) (index $kept $mid)) 2.0) (index $kept $mid) }}
+{{ $vars := dict
+  "{bench}" (cond .abs ("benchmarks/" | absURL) ("benchmarks/" | relURL))
+  "{kept.range}" (printf "%s to %s%%" (lang.FormatNumber 1 (index $kept 0)) (lang.FormatNumber 1 (index $kept (sub (len $kept) 1))))
+  "{kept.count}" (string (len $kept))
+  "{kept.median}" (printf "%s%%" (lang.FormatNumber 1 $median))
+  "{big.owner}" $big.owner
+  "{big.file}" (path.Base $big.path)
+  "{big.lines}" (lang.FormatNumberCustom 0 $big.lines)
+  "{big.full}" (lang.FormatNumberCustom 0 $big.full)
+  "{big.pixel}" (lang.FormatNumberCustom 0 $big.pixel)
+}}
+{{ $measures := slice "head-to-head" "published-figure" "baseline" "design" }}
+{{ $out := slice }}
+{{ range hugo.Data.alternatives.tool }}
+  {{ $tool := . }}
+  {{ if not (in $measures .measure) }}{{ errorf "data/alternatives.toml: %s: unknown measure %q" .slug .measure }}{{ end }}
+  {{ if and (ne .measure "design") (not .bench) }}{{ errorf "data/alternatives.toml: %s: a measured tool names its /benchmarks/ section (bench)" .slug }}{{ end }}
+  {{ if eq .measure "design" }}
+    {{ if .bench }}{{ errorf "data/alternatives.toml: %s: a design entry is not benchmarked, it names no /benchmarks/ section" .slug }}{{ end }}
+    {{ $text := slice .answer .wins }}
+    {{ range .row }}{{ $text = $text | append .label .pixel .other }}{{ end }}
+    {{ with findRE `[0-9]` (delimit $text " ") }}{{ errorf "data/alternatives.toml: %s: a design entry carries no figure" $tool.slug }}{{ end }}
+  {{ end }}
+  {{ if not .wins }}{{ errorf "data/alternatives.toml: %s: every tool says where it wins (wins)" .slug }}{{ end }}
+  {{ $t := dict }}
+  {{ range $k, $v := $tool }}
+    {{ if eq $k "row" }}{{ continue }}{{ end }}
+    {{ if reflect.IsMap $v }}{{ continue }}{{ end }}
+    {{ $s := $v }}
+    {{ if eq (printf "%T" $v) "string" }}
+      {{ range $pk, $pv := $vars }}{{ $s = replace $s $pk $pv }}{{ end }}
+      {{ with findRE `\{[a-z.]+\}` $s }}{{ errorf "data/alternatives.toml: %s: unknown placeholder %v" $tool.slug . }}{{ end }}
+    {{ end }}
+    {{ $t = merge $t (dict $k $s) }}
+  {{ end }}
+  {{ $rows := slice }}
+  {{ range .row }}
+    {{ $r := dict }}
+    {{ range $k, $v := . }}
+      {{ $s := $v }}
+      {{ if eq (printf "%T" $v) "string" }}
+        {{ range $pk, $pv := $vars }}{{ $s = replace $s $pk $pv }}{{ end }}
+        {{ with findRE `\{[a-z.]+\}` $s }}{{ errorf "data/alternatives.toml: %s: unknown placeholder %v" $tool.slug . }}{{ end }}
+      {{ end }}
+      {{ $r = merge $r (dict $k $s) }}
+    {{ end }}
+    {{ $rows = $rows | append $r }}
+  {{ end }}
+  {{ $url := printf "vs/%s/" .slug }}
+  {{ $t = merge $t (dict "rows" $rows "url" (cond $.abs ($url | absURL) ($url | relURL))) }}
+  {{ $out = $out | append $t }}
+{{ end }}
+{{ return $out }}

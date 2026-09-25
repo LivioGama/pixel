@@ -157,52 +157,26 @@
         <h2 id="alternatives-title">Measured against <span class="glow">the alternatives.</span></h2>
         <p>The tools a team weighs Pixel against, with the rows where they win kept in. GitNexus was run against Pixel on the same cases and the same machine; shunt and Jev are their own published figures, set beside ours.</p>
       </header>
-      {{/* Facts from content/benchmarks.md (#against-gitnexus, #well-known-files, #coding-decisions) and shunt's own README (plugins/shunt in spotify/portal-ai-plugins). Change them there first. */}}
+      {{/* The cards are the tools marked `home` in data/alternatives.toml (partials/alternatives.html fills their figures), the same entries the /vs/ pages render: change a figure on content/benchmarks.md first, then there. */}}
+      {{/* The kept files' range, for the Teams chapter below. */}}
       {{ $range := printf "%s to %s%%" (lang.FormatNumber 1 (index $kept 0)) (lang.FormatNumber 1 (index $kept (sub (len $kept) 1))) }}
       <div class="vs" data-reveal="stagger">
+        {{ range where (partial "alternatives.html" (dict "abs" false)) "home" true }}{{ $tool := . }}
         <article class="vs__card">
-          <header class="vs__head"><h3>vs GitNexus</h3><p>A code graph for agents, served as 17 MCP tools.</p></header>
+          <header class="vs__head"><h3>vs {{ .name }}</h3><p>{{ .pitch | safeHTML }}</p></header>
           <table class="vs__table">
-            <thead><tr><th scope="col"><span class="sr-only">Measure</span></th><th scope="col">Pixel</th><th scope="col">GitNexus</th></tr></thead>
+            <thead><tr><th scope="col"><span class="sr-only">Measure</span></th><th scope="col">Pixel</th><th scope="col">{{ .name }}</th></tr></thead>
             <tbody>
-              <tr><th scope="row">Callers found (29&nbsp;cases)</th><td>0.86</td><td>0.84</td></tr>
-              <tr><th scope="row">Median answer</th><td class="is-win">153&nbsp;ms</td><td>432&nbsp;ms</td></tr>
-              <tr><th scope="row">Context on every turn</th><td class="is-win">~4,160&nbsp;tok</td><td>~19,700&nbsp;tok</td></tr>
-              <tr><th scope="row">Git history, Git writes</th><td class="is-win">Yes</td><td>No</td></tr>
-              <tr><th scope="row">Licence</th><td class="is-win">MIT</td><td>PolyForm Noncommercial</td></tr>
+              {{ range where .rows "page" "!=" true }}<tr><th scope="row">{{ .label | safeHTML }}</th><td{{ if eq .win "pixel" }} class="is-win"{{ end }}>{{ .pixel | safeHTML }}</td><td{{ if eq .win "other" }} class="is-win"{{ end }}>{{ .other | safeHTML }}</td></tr>
+              {{ end }}
             </tbody>
           </table>
-          <p class="vs__theirs"><strong>Where GitNexus wins:</strong> Cypher queries, taint analysis, API route maps, and callers in Ruby.</p>
-          <a class="link vs__more" href="{{ $bench }}#against-gitnexus" target="_blank" rel="noopener">The 29 cases</a>
+          <p class="vs__theirs"><strong>{{ .note_label | default (printf "Where %s wins" .name) }}:</strong> {{ .note | default .wins | safeHTML }}</p>
+          {{ with .more_href }}<a class="link vs__more" href="{{ . }}">{{ $tool.more }}</a>{{ else }}<a class="link vs__more" href="{{ $bench }}#{{ .bench }}" target="_blank" rel="noopener">{{ .more }}</a>{{ end }}
         </article>
-        <article class="vs__card">
-          <header class="vs__head"><h3>vs shunt</h3><p>Spotify's plugin: large reads go to a second model.</p></header>
-          <table class="vs__table">
-            <thead><tr><th scope="col"><span class="sr-only">Measure</span></th><th scope="col">Pixel</th><th scope="col">shunt</th></tr></thead>
-            <tbody>
-              <tr><th scope="row">Less read on large files</th><td>{{ $range }} measured</td><td>82 to 94% claimed</td></tr>
-              <tr><th scope="row">Who reads the file</th><td class="is-win">The index</td><td>A worker model</td></tr>
-              <tr><th scope="row">Second model on the bill</th><td class="is-win">None</td><td>Yes</td></tr>
-              <tr><th scope="row">Needs</th><td class="is-win">One binary</td><td>Spotify Portal with AiKA</td></tr>
-            </tbody>
-          </table>
-          <p class="vs__theirs"><strong>Where shunt wins:</strong> its worker also writes boilerplate code, which Pixel does not.</p>
-          <a class="link vs__more" href="{{ $bench }}#well-known-files" target="_blank" rel="noopener">The {{ len $kept }} files measured</a>
-        </article>
-        <article class="vs__card">
-          <header class="vs__head"><h3>vs Jev</h3><p>A dedicated model for coding judgement calls.</p></header>
-          <table class="vs__table">
-            <thead><tr><th scope="col"><span class="sr-only">Measure</span></th><th scope="col">Pixel</th><th scope="col">Jev</th></tr></thead>
-            <tbody>
-              <tr><th scope="row">JevBench coding items</th><td class="is-win">14 of 14 with deepseek-v4.1-flash</td><td>83.9%</td></tr>
-              <tr><th scope="row">Model</th><td class="is-win">The one you choose (13 of 14 with gpt-oss)</td><td>Jev's own</td></tr>
-            </tbody>
-          </table>
-          <p class="vs__theirs"><strong>Read with care:</strong> Jev's 83.9% is its published score on 56 items; Pixel's run covers the 14 public ones, and the rest of Pixel needs no decision model.</p>
-          <a class="link vs__more" href="#decisions">The optional add-on</a>
-        </article>
+        {{ end }}
       </div>
-      <p class="ledger__fine" data-reveal>Where a specialist beats Pixel at its one job (semble on plain-English search, stacklit on a compact repository map), the numbers are on the <a class="link" href="{{ $bench }}#where-a-specialist-wins" target="_blank" rel="noopener">benchmarks page</a> too.</p>
+      <p class="ledger__fine" data-reveal>Where a specialist beats Pixel at its one job (semble on plain-English search, stacklit on a compact repository map), the numbers are on the <a class="link" href="{{ $bench }}#where-a-specialist-wins" target="_blank" rel="noopener">benchmarks page</a> too, and each comparison has <a class="link" href="{{ "vs/" | relURL }}" target="_blank" rel="noopener">a page of its own</a>.</p>
     </section>
 
     {{/* ---------- roles ---------- */}}

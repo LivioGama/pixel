@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.Language.Locale }}">
+<head>
+  {{ partial "head.html" . }}
+</head>
+<body>
+  <a href="#main" class="skip">Skip to content</a>
+  {{ partial "nav.html" . }}
+  {{/* One comparison: its tool in data/alternatives.toml (front matter `tool`), filled by partials/alternatives.html, the same entry as the home's card. The page's own Markdown is prose only: every figure comes from the data. */}}
+  {{ $slug := .Params.tool }}
+  {{ $all := partial "alternatives.html" (dict "abs" false) }}
+  {{ $tool := index (where $all "slug" $slug) 0 }}
+  {{ if not $tool }}{{ errorf "%s: tool %q is not in data/alternatives.toml" .File.Path $slug }}{{ end }}
+  {{ $m := partial "vs-measure.html" $tool }}
+  {{ $column := $tool.column | default $tool.name }}
+  {{ $bench := "benchmarks/" | relURL }}
+  {{/* The later of the page's last commit and the day its rows were last checked against /benchmarks/. */}}
+  {{ $updated := .Lastmod }}
+  {{ with $tool.checked }}{{ if (time .).After $updated }}{{ $updated = time . }}{{ end }}{{ end }}
+
+  <main class="docs wrap vsp" id="main">
+    <nav class="vsp__crumbs" aria-label="Breadcrumb"><a href="{{ "" | relURL }}" target="_blank" rel="noopener">Pixel</a> / <a href="{{ "vs/" | relURL }}" target="_blank" rel="noopener">Comparisons</a> / <span aria-current="page">{{ .Title }}</span></nav>
+    <header class="docs__head">
+      <h1>{{ .Title }}</h1>
+      <p class="docs__lede">{{ $tool.about | safeHTML }}</p>
+      <p class="docs__updated">Updated <time datetime="{{ $updated.Format "2006-01-02" }}">{{ $updated.Format "2 January 2006" }}</time></p>
+    </header>
+
+    <article class="vsp__body">
+      <section class="vsp__answer" aria-labelledby="short-answer">
+        <h2 id="short-answer">Short answer</h2>
+        <p>{{ $tool.answer | safeHTML }}</p>
+      </section>
+
+      <section aria-labelledby="side-by-side">
+        <h2 id="side-by-side">Side by side</h2>
+        <p class="vsp__measure vsp__measure--{{ $tool.measure }}"><strong>{{ $m.label }}.</strong> {{ $m.text }}</p>
+        <table class="vs__table vsp__table">
+          <thead><tr><th scope="col"><span class="sr-only">Measure</span></th><th scope="col">Pixel</th><th scope="col">{{ $column }}</th></tr></thead>
+          <tbody>
+            {{ range $tool.rows }}<tr><th scope="row">{{ .label | safeHTML }}</th><td{{ if eq .win "pixel" }} class="is-win"{{ end }}>{{ .pixel | safeHTML }}</td><td{{ if eq .win "other" }} class="is-win"{{ end }}>{{ .page_other | default .other | safeHTML }}</td></tr>
+            {{ end }}
+          </tbody>
+        </table>
+        {{ with $tool.bench }}<p class="vsp__source">Every figure above is on the <a class="link" href="{{ $bench }}#{{ . }}" target="_blank" rel="noopener">benchmarks page</a>, with its sample size, its method and the cases where Pixel loses.</p>{{ end }}
+      </section>
+
+      <section class="vsp__theirs" aria-labelledby="where-they-win">
+        <h2 id="where-they-win">Where {{ $tool.name }} wins</h2>
+        <p>{{ strings.FirstUpper $tool.wins | safeHTML }}</p>
+      </section>
+
+      {{ with .Content }}<div class="prose vsp__prose">{{ . }}</div>{{ end }}
+
+      <nav class="vsp__more" aria-labelledby="more-comparisons">
+        <h2 id="more-comparisons">More comparisons</h2>
+        <ul>
+          {{ range $all }}{{ if ne .slug $slug }}<li><a class="link" href="{{ .url }}" target="_blank" rel="noopener">Pixel vs {{ .name }}</a></li>{{ end }}{{ end }}
+        </ul>
+      </nav>
+    </article>
+  </main>
+
+  {{ partial "footer.html" . }}
+
+  {{/* The page, its place in the site and what it is about, by reference to the entities the home's @graph declares (#website, #software): nothing is declared twice. */}}
+  {{ $home := "" | absURL }}
+  {{ $graph := slice
+    (dict
+      "@type" "WebPage"
+      "@id" (printf "%s#webpage" .Permalink)
+      "url" .Permalink
+      "name" .Title
+      "description" (.Description | default $tool.about)
+      "inLanguage" site.Language.Locale
+      "dateModified" ($updated.Format "2006-01-02")
+      "isPartOf" (dict "@id" (printf "%s#website" $home))
+      "about" (dict "@id" (printf "%s#software" $home))
+      "breadcrumb" (dict "@id" (printf "%s#breadcrumb" .Permalink)))
+    (dict
+      "@type" "BreadcrumbList"
+      "@id" (printf "%s#breadcrumb" .Permalink)
+      "itemListElement" (slice
+        (dict "@type" "ListItem" "position" 1 "name" "Pixel" "item" $home)
+        (dict "@type" "ListItem" "position" 2 "name" "Comparisons" "item" ("vs/" | absURL))
+        (dict "@type" "ListItem" "position" 3 "name" .Title "item" .Permalink)))
+  }}
+  <script type="application/ld+json">
+  {{ dict "@context" "https://schema.org" "@graph" $graph | jsonify | safeJS }}
+  </script>
+</body>
+</html>

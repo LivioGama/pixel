@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.Language.Locale }}">
+<head>
+  {{ partial "head.html" . }}
+</head>
+<body>
+  <a href="#main" class="skip">Skip to content</a>
+  {{ partial "nav.html" . }}
+  {{/* /vs/: every tool of data/alternatives.toml that has a page (content/vs/<slug>.md), in the file's order, with how its figures were obtained. */}}
+  {{ $all := partial "alternatives.html" (dict "abs" false) }}
+  {{ $pages := .Pages }}
+
+  <main class="docs wrap vsp" id="main">
+    <nav class="vsp__crumbs" aria-label="Breadcrumb"><a href="{{ "" | relURL }}" target="_blank" rel="noopener">Pixel</a> / <span aria-current="page">Comparisons</span></nav>
+    <header class="docs__head">
+      <h1>{{ .Title }}</h1>
+      <p class="docs__lede">{{ .Description }}</p>
+      <p class="docs__updated">Updated <time datetime="{{ .Lastmod.Format "2006-01-02" }}">{{ .Lastmod.Format "2 January 2006" }}</time></p>
+    </header>
+
+    <article class="vsp__body">
+      {{ with .Content }}<div class="prose vsp__prose">{{ . }}</div>{{ end }}
+      <ul class="vsp__index">
+        {{ range $all }}
+          {{ $tool := . }}
+          {{ with where $pages "Params.tool" .slug }}
+            {{ $p := index . 0 }}
+            {{ $m := partial "vs-measure.html" $tool }}
+            <li class="vsp__entry">
+              <h2><a class="link" href="{{ $p.RelPermalink }}" target="_blank" rel="noopener">{{ $p.Title }}</a></h2>
+              <p class="vsp__tag vsp__measure--{{ $tool.measure }}">{{ $m.label }}</p>
+              <p>{{ $tool.about | safeHTML }}</p>
+              <p class="vsp__entry-wins"><strong>Where {{ $tool.name }} wins:</strong> {{ $tool.wins | safeHTML }}</p>
+            </li>
+          {{ end }}
+        {{ end }}
+      </ul>
+    </article>
+  </main>
+
+  {{ partial "footer.html" . }}
+
+  {{/* The index and the pages it lists; the site and the application are the home's @graph entities, referenced by @id. */}}
+  {{ $home := "" | absURL }}
+  {{ $items := slice }}
+  {{ range $all }}{{ with where $pages "Params.tool" .slug }}{{ $p := index . 0 }}{{ $items = $items | append (dict "@type" "ListItem" "position" (add (len $items) 1) "url" $p.Permalink "name" $p.Title) }}{{ end }}{{ end }}
+  {{ $graph := slice
+    (dict
+      "@type" "CollectionPage"
+      "@id" (printf "%s#webpage" .Permalink)
+      "url" .Permalink
+      "name" .Title
+      "description" .Description
+      "inLanguage" site.Language.Locale
+      "dateModified" (.Lastmod.Format "2006-01-02")
+      "isPartOf" (dict "@id" (printf "%s#website" $home))
+      "about" (dict "@id" (printf "%s#software" $home))
+      "mainEntity" (dict "@type" "ItemList" "itemListElement" $items))
+  }}
+  <script type="application/ld+json">
+  {{ dict "@context" "https://schema.org" "@graph" $graph | jsonify | safeJS }}
+  </script>
+</body>
+</html>
