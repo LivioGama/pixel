@@ -1,0 +1,1 @@
+**docs:** The website's hero now says who Pixel is for (Claude Code, Codex, Cursor and the rest) and the problem it solves before its category, and the token wall labels its two sides, shows the saving and turns a token into lines of code.
