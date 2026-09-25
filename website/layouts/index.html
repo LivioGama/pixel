@@ -245,10 +245,10 @@
         </li>
         <li class="roles__card">
           <p class="roles__who">{{ partial "icon.html" (dict "name" "shield" "size" 16) }}CTOs</p>
-          <h3>Cheaper agent runs, no new vendor, nothing leaving.</h3>
+          <h3>Cheaper agent runs, no new vendor, no telemetry.</h3>
           <ul>
             <li><strong>&minus;30% API cost</strong> on the measured scoping task, the median of 11 runs per side.</li>
-            <li>No second model on the bill, no account, no telemetry: the index stays in <code>.pixel/</code>.</li>
+            <li>No second model on the bill, no account, no telemetry: the index stays in <code>.pixel/</code>. The network sees only what you run: Git remotes, the optional <code>pixel classify</code> and <code>pixel web-search</code>, and a one-time embedding model download.</li>
             <li>MIT licensed, and the same index serves {{ len $agents }} agents, so switching agents does not mean switching tools.</li>
           </ul>
         </li>
