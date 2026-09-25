@@ -116,7 +116,11 @@ pub struct GraphStats {
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
-fn read_source_file(path: &Path) -> Option<Vec<u8>> {
+/// The bytes the graph indexes for `path`: a regular file (not a symlink)
+/// within `MAX_FILE_BYTES`, the same file from stat to read. `None` for
+/// anything else, which the graph never indexes; `pixel audit` reads through
+/// it so a file grown past the cap is never loaded whole.
+pub fn read_source_file(path: &Path) -> Option<Vec<u8>> {
     let before = std::fs::symlink_metadata(path).ok()?;
     if !before.file_type().is_file() || before.len() > MAX_FILE_BYTES {
         return None;

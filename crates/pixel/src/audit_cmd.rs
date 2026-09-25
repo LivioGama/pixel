@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use pixel_actionlog::{read_tokens, saved_percent};
 use pixel_daemon::api::GRAPH_DB_FILE;
-use pixel_graph::build::content_oid;
+use pixel_graph::build::{FRESHNESS_KEY, content_oid, read_source_file};
 use pixel_graph::extract::lang_of;
 use pixel_graph::store::{FileRow, GraphStore};
 use pixel_index::index::SHARD_DIR;
@@ -80,6 +80,21 @@ struct Report {
     measured: Vec<Measured>,
     stale: Vec<String>,
     no_signatures: Vec<String>,
+    /// Indexed source files, the pool the largest are taken from.
+    candidates: usize,
+    /// Candidates walked before `top` were measured: fewer than
+    /// `candidates` means the report is capped.
+    examined: usize,
+    top: usize,
+    /// The graph's freshness signature: which snapshot the rows came from.
+    graph_signature: Option<String>,
+}
+
+impl Report {
+    /// Files remain that `--top` kept out of the report.
+    fn capped(&self) -> bool {
+        self.examined < self.candidates
+    }
 }
 
 /// The exact stdout of `pixel list-signatures` for one file: a header, then
@@ -110,18 +125,28 @@ fn line_count(content: &[u8]) -> u64 {
     newlines + u64::from(content.last().is_some_and(|b| *b != b'\n'))
 }
 
-/// Measure one indexed file against its current bytes.
-fn measure(store: &GraphStore, root: &Path, row: &FileRow) -> Result<Measured, LeftOut> {
-    let content = std::fs::read(root.join(&row.path)).map_err(|_| LeftOut::Stale)?;
+/// Measure one indexed file against its current bytes. The outer error is
+/// a store failure, never a verdict on the file; the inner one says why the
+/// file was left out. The bytes are read under the graph's own rules
+/// ([`read_source_file`]: a regular file within its size cap), so a file
+/// grown past what the graph would index is stale, not loaded.
+fn measure(
+    store: &GraphStore,
+    root: &Path,
+    row: &FileRow,
+) -> Result<Result<Measured, LeftOut>, String> {
+    let Some(content) = read_source_file(&root.join(&row.path)) else {
+        return Ok(Err(LeftOut::Stale));
+    };
     if content_oid(&content) != row.blob_oid {
-        return Err(LeftOut::Stale);
+        return Ok(Err(LeftOut::Stale));
     }
     let symbols = store
         .symbols_in_file(row.id)
-        .map_err(|_| LeftOut::NoSignatures)?;
+        .map_err(|e| format!("audit: {}: {e}", row.path))?;
     let signatures = symbols.iter().filter(|s| !s.sig.is_empty()).count() as u64;
     if signatures == 0 {
-        return Err(LeftOut::NoSignatures);
+        return Ok(Err(LeftOut::NoSignatures));
     }
     let outline = render_outline(
         &row.path,
@@ -130,14 +155,14 @@ fn measure(store: &GraphStore, root: &Path, row: &FileRow) -> Result<Measured, L
             .iter()
             .map(|s| (u64::from(s.start_line), s.kind.as_str(), s.sig.as_str())),
     );
-    Ok(Measured {
+    Ok(Ok(Measured {
         path: row.path.clone(),
         lang: row.lang.clone(),
         lines: line_count(&content),
         signatures,
         file_bytes: content.len() as u64,
         outline_bytes: outline.len() as u64,
-    })
+    }))
 }
 
 /// The largest indexed source files first, by their size on disk; a file
@@ -158,13 +183,21 @@ fn largest_first(root: &Path, rows: Vec<FileRow>) -> Vec<FileRow> {
 /// Walk the largest files until `top` are measured, recording every
 /// candidate left out on the way, so the report says what it skipped.
 fn collect(store: &GraphStore, root: &Path, top: usize) -> Result<Report, String> {
-    let rows = store.files().map_err(|e| format!("audit: {e}"))?;
-    let mut report = Report::default();
-    for row in largest_first(root, rows) {
+    let rows = largest_first(root, store.files().map_err(|e| format!("audit: {e}"))?);
+    let mut report = Report {
+        candidates: rows.len(),
+        top,
+        graph_signature: store
+            .meta_get(FRESHNESS_KEY)
+            .map_err(|e| format!("audit: {e}"))?,
+        ..Report::default()
+    };
+    for row in rows {
         if report.measured.len() == top {
             break;
         }
-        match measure(store, root, &row) {
+        report.examined += 1;
+        match measure(store, root, &row)? {
             Ok(m) => report.measured.push(m),
             Err(LeftOut::Stale) => report.stale.push(row.path),
             Err(LeftOut::NoSignatures) => report.no_signatures.push(row.path),
@@ -227,8 +260,9 @@ fn render_human(
         }
         let (full, outline) = totals(&report.measured);
         out.push_str(&format!(
-            "\ntotal, {} files: full read {full} tok, pixel answer {outline} tok ({})\n",
+            "\ntotal, {} of {} indexed source files: full read {full} tok, pixel answer {outline} tok ({})\n",
             report.measured.len(),
+            report.candidates,
             saving_text(saved_percent(full, outline))
         ));
         let savings: Vec<i64> = report.measured.iter().map(Measured::saved).collect();
@@ -276,6 +310,9 @@ fn render_human(
     out
 }
 
+/// What every count stands on, as the JSON envelope states it.
+const AUDIT_BASIS: &str = "graph snapshot rows against each file's current bytes; utf-8 bytes / 4, rounded down, per file";
+
 fn render_json(
     report: &Report,
     coverage: &BTreeMap<String, coverage_cmd::Row>,
@@ -283,9 +320,26 @@ fn render_json(
 ) -> Value {
     let (full, outline) = totals(&report.measured);
     let savings: Vec<i64> = report.measured.iter().map(Measured::saved).collect();
+    let marker = if report.capped() {
+        "capped"
+    } else {
+        "complete"
+    };
     json!({
         "root": root.display().to_string(),
-        "basis": "utf-8 bytes / 4, rounded down, per file",
+        "marker": marker,
+        "epistemics": {
+            "closed_world": false,
+            "lower_bound": report.capped(),
+            "basis": AUDIT_BASIS,
+            "confidence": marker,
+        },
+        "snapshot": {
+            "graph_signature": report.graph_signature,
+            "indexed_source_files": report.candidates,
+            "examined": report.examined,
+            "top": report.top,
+        },
         "files": report.measured.iter().map(|m| json!({
             "path": m.path,
             "lang": m.lang,
@@ -598,6 +652,81 @@ mod tests {
         assert_eq!(paths, ["src/big.rs", "src/small.rs"]);
     }
 
+    /// A report that walked every candidate is complete; one that stopped
+    /// at `--top` with files left is capped, and says how many it saw.
+    #[test]
+    fn collect_records_the_pool_it_drew_from() {
+        let fx = Fixture::new("pool");
+        let store = fx.store();
+        let whole = collect(&store, &fx.0, 20).unwrap();
+        assert_eq!((whole.candidates, whole.examined, whole.top), (2, 2, 20));
+        assert!(!whole.capped());
+        let signature = store.meta_get(FRESHNESS_KEY).unwrap();
+        assert!(
+            signature.is_some(),
+            "build_graph stores a freshness signature"
+        );
+        assert_eq!(whole.graph_signature, signature);
+
+        let cut = collect(&store, &fx.0, 1).unwrap();
+        assert_eq!((cut.candidates, cut.examined), (2, 1));
+        assert!(cut.capped());
+    }
+
+    /// The exact edge: `--top` equal to the pool measures everything and is
+    /// not capped, although the loop stops on `top`.
+    #[test]
+    fn a_top_equal_to_the_pool_is_complete() {
+        let fx = Fixture::new("edge");
+        let report = collect(&fx.store(), &fx.0, 2).unwrap();
+        assert_eq!((report.candidates, report.examined), (2, 2));
+        assert!(!report.capped());
+    }
+
+    /// A store that cannot answer is an error, not a file "with no
+    /// signature": the audit fails instead of printing a wrong left-out line.
+    #[test]
+    fn a_symbol_query_failure_fails_the_audit() {
+        let fx = Fixture::new("dberr");
+        let store = fx.store();
+        store.conn().execute_batch("DROP TABLE symbols").unwrap();
+        let err = collect(&store, &fx.0, 20).unwrap_err();
+        assert!(err.starts_with("audit: src/big.rs: "), "{err}");
+    }
+
+    /// A file grown past the graph's size cap is never loaded to be hashed:
+    /// even with a row that matches its bytes, it is stale, as the graph
+    /// would no longer index it.
+    #[test]
+    fn a_file_past_the_graph_size_cap_is_stale_unread() {
+        let fx = Fixture::new("huge");
+        let body = "pub fn huge() {}\n";
+        let huge = body.repeat(4 * 1024 * 1024 / body.len() + 1);
+        std::fs::write(fx.0.join("src/huge.rs"), &huge).unwrap();
+        {
+            let mut store = fx.store();
+            let id = store
+                .replace_file("src/huge.rs", &content_oid(huge.as_bytes()), "rust")
+                .unwrap();
+            store
+                .insert_symbol(
+                    id,
+                    "src/huge.rs#huge#function",
+                    "huge",
+                    "huge",
+                    pixel_graph::store::SymbolKind::Function,
+                    1,
+                    1,
+                    "pub fn huge()",
+                )
+                .unwrap();
+        }
+        let report = collect(&fx.store(), &fx.0, 20).unwrap();
+        assert_eq!(report.stale, ["src/huge.rs"]);
+        let paths: Vec<&str> = report.measured.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, ["src/big.rs", "src/small.rs"]);
+    }
+
     #[test]
     fn render_human_states_totals_median_and_what_it_left_out() {
         let report = Report {
@@ -608,6 +737,10 @@ mod tests {
             ],
             stale: vec!["src/old.rs".to_string()],
             no_signatures: vec!["src/gen.rs".to_string(), "src/raw.rs".to_string()],
+            candidates: 7,
+            examined: 6,
+            top: 3,
+            graph_signature: None,
         };
         let mut coverage = BTreeMap::new();
         coverage.insert(
@@ -623,7 +756,7 @@ mod tests {
             "root: /repo",
             "   1000 tok      100 tok       -90%      3      10  src/a.rs",
             "    100 tok      100 tok  no saving      3      10  src/c.rs",
-            "total, 3 files: full read 1600 tok, pixel answer 300 tok (-81%)",
+            "total, 3 of 7 indexed source files: full read 1600 tok, pixel answer 300 tok (-81%)",
             "per file: median 80% saved, from 0% to 90%",
             "left out: 1 changed since indexing (`pixel prepare-repo .` refreshes them)",
             "left out: 2 with no signature to outline (no definitions, or a grammar that missed them): src/gen.rs, src/raw.rs",
@@ -659,8 +792,31 @@ mod tests {
             ],
             stale: vec!["src/old.rs".to_string()],
             no_signatures: vec![],
+            candidates: 5,
+            examined: 3,
+            top: 2,
+            graph_signature: Some("abc123".to_string()),
         };
         let value = render_json(&report, &BTreeMap::new(), Path::new("/repo"));
+        assert_eq!(value["marker"], "capped", "two files were never examined");
+        assert_eq!(
+            value["epistemics"],
+            json!({
+                "closed_world": false,
+                "lower_bound": true,
+                "basis": AUDIT_BASIS,
+                "confidence": "capped",
+            })
+        );
+        assert_eq!(
+            value["snapshot"],
+            json!({
+                "graph_signature": "abc123",
+                "indexed_source_files": 5,
+                "examined": 3,
+                "top": 2,
+            })
+        );
         assert_eq!(value["files"][0]["full_tokens"], 1000);
         assert_eq!(value["files"][0]["outline_tokens"], 100);
         assert_eq!(value["files"][0]["saved_pct"], 90);
@@ -696,7 +852,7 @@ mod tests {
         let fx = Fixture::new("report");
         let text = report_for(&fx.0, 20, false).unwrap();
         assert!(
-            text.contains("  src/big.rs\n") && text.contains("total, 2 files:"),
+            text.contains("  src/big.rs\n") && text.contains("total, 2 of 2 indexed source files:"),
             "{text}"
         );
         let json: Value = serde_json::from_str(&report_for(&fx.0, 1, true).unwrap()).unwrap();

@@ -56,6 +56,33 @@ fn audit_rows_match_list_signatures_and_the_file_size() {
     assert_eq!(big["outline_tokens"], skeleton.stdout.len() as u64 / 4);
     assert_eq!(big["signatures"], 30);
     assert_eq!(big["lines"], 120);
+
+    // Both files measured: the report covers the whole pool and says so.
+    assert_eq!(report["marker"], "complete");
+    assert_eq!(report["epistemics"]["lower_bound"], false);
+    assert_eq!(report["epistemics"]["closed_world"], false);
+    assert_eq!(report["snapshot"]["indexed_source_files"], 2);
+    assert_eq!(report["snapshot"]["examined"], 2);
+    assert!(
+        report["snapshot"]["graph_signature"].is_string(),
+        "{report}"
+    );
+
+    let capped = pixel_command()
+        .current_dir(&*repo)
+        .args(["audit", "--json", "--top", "1", "--metrics=off"])
+        .output()
+        .unwrap();
+    let capped: Value = serde_json::from_slice(&capped.stdout).unwrap();
+    assert_eq!(
+        capped["marker"], "capped",
+        "--top 1 leaves src/small.rs out"
+    );
+    assert_eq!(capped["epistemics"]["lower_bound"], true);
+    assert_eq!(
+        capped["snapshot"]["graph_signature"],
+        report["snapshot"]["graph_signature"]
+    );
 }
 
 /// A fresh clone answers on the first call, and only that call builds: a
@@ -106,7 +133,10 @@ fn audit_prints_the_table_and_refuses_a_zero_top() {
         .unwrap();
     assert!(text.status.success(), "{text:?}");
     let stdout = String::from_utf8(text.stdout).unwrap();
-    assert!(stdout.contains("total, 1 files:"), "{stdout}");
+    assert!(
+        stdout.contains("total, 1 of 2 indexed source files:"),
+        "{stdout}"
+    );
     assert!(
         stdout.lines().any(|l| l.ends_with("  src/big.rs")),
         "{stdout}"
