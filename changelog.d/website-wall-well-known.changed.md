@@ -1,1 +1,0 @@
-**docs:** The website's token wall now reads Hugging Face's `trainer.py` instead of one of Pixel's own files, and `/benchmarks/` gains a table of eight well-known files (79.7 to 97.2% saved, median 94.5%) measured by `scripts/bench-read-savings.sh`.
