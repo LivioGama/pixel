@@ -1,0 +1,8 @@
+{{- /* The kept rows of data/read_savings.toml as numbers: the saving's range and median (the median of an even count is the mean of the two middle rows), and the range of their full-read sizes. The home's token wall and Teams chapter, partials/alternatives.html (/vs/ and the home's Alternatives), /savings/ and the {{% read-savings "summary" %}} shortcode all read it, so no page computes its own. */ -}}
+{{- $kept := where hugo.Data.read_savings.row "status" "kept" -}}
+{{- $saved := sort (apply $kept "index" "." "saved") -}}
+{{- $full := sort (apply $kept "index" "." "full") -}}
+{{- $n := len $saved -}}
+{{- $mid := div $n 2 -}}
+{{- $median := cond (modBool $n 2) (div (add (index $saved (sub $mid 1)) (index $saved $mid)) 2.0) (index $saved $mid) -}}
+{{- return dict "count" $n "min" (index $saved 0) "median" $median "max" (index $saved (sub $n 1)) "fullMin" (index $full 0) "fullMax" (index $full (sub $n 1)) -}}

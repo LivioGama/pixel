@@ -109,6 +109,29 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   page shows lives here with its sample size, its source in `docs/bench/`,
   and the cases where Pixel loses. Add a claim to the landing page only once
   it is on this page.
+- `content/savings.md` and `layouts/_default/savings.html`: the `/savings/`
+  estimate. The front matter lists the six inputs (developers, sessions per
+  day, large-file reads per session, tokens per full read, input price,
+  working days) with their defaults and help texts; the layout multiplies
+  them by the kept rows' saving (min, median, max from
+  `layouts/partials/kept-rates.html`, which the home, `/vs/` and the `/benchmarks/` summary read
+  too), so the rates move when `data/read_savings.toml` does and are never
+  copied. The defaults' result is rendered by Hugo for a visit without
+  JavaScript; the inline script recomputes the same figures, formatted as
+  `layouts/partials/savings-format.html` formats them (change both
+  together). Nothing is sent or stored: the share link carries the values in
+  its fragment (`#d=10&s=4&r=5&t=10000&p=3&w=21`, the inputs' `key`s, so
+  never rename one), and the README badge is a static shields.io URL built
+  from the median. The whole-task figures beside the result (−30% API cost,
+  −38% tokens) restate the "On whole agent tasks" table of `benchmarks.md`:
+  change them there first, then here. The page is labelled an estimate
+  everywhere, including `static/llms.txt`; it is linked from the home's
+  CTO card, `/benchmarks/`'s "Measure it on your own code" box and the
+  footer, not from the nav.
+- `content/benchmarks.md` opens on "Measure it on your own code": three
+  commands, each run on a fresh clone of a third-party repository before it
+  was written there. Re-run them when their output or a prerequisite
+  changes.
 - `content/docs.md`: the `/docs/` page, rendered by `layouts/_default/single.html`.
   Every fenced block gets a Copy button from
   `layouts/_default/_markup/render-codeblock.html`.
@@ -142,8 +165,8 @@ touched (Hugo 0.166; a plain `hugo` build is right).
 - `data/read_savings.toml`: the well-known files `scripts/bench-read-savings.sh`
   measures (method in `docs/bench/read-savings.md`). The token wall, its
   caption's range and median and the `/benchmarks/` table
-  (`layouts/shortcodes/read-savings.html`) all read it: re-run the script
-  and replace the rows, never one number by hand, then re-render the share
+  (`layouts/shortcodes/read-savings.html`) and the `/savings/` estimate all read it: re-run the script
+  and replace the rows, never one number by hand (the kept rows' count, range and median are computed once, in `layouts/partials/kept-rates.html`), then re-render the share
   card (`og/render.sh`), whose figures come from the wall's row.
 - `data/jobs.toml`, `data/savings.toml`: the six animations and the token
   table, both from the README. A job's `text` holds one line on a wide
@@ -200,11 +223,11 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   workflow redeploys on it. Every absolute URL goes through `baseURL`
   (`absURL`, `.Permalink`), so a new domain is one line in `hugo.toml`.
 - `layouts/robots.txt` names the sitemap Hugo writes (`/`, `/docs/`,
-  `/benchmarks/`, `/vs/` and each comparison, `/for/` and each agent page;
-  the 404 stays out). `enableGitInfo` dates each page by the
+  `/benchmarks/`, `/savings/`, `/vs/` and each comparison, `/for/` and each
+  agent page; the 404 stays out). `enableGitInfo` dates each page by the
   last commit that touched its source: the sitemap's `lastmod` and the
-  "Updated" line under the `/docs/`, `/benchmarks/` and `/for/` titles
-  (`layouts/_default/single.html`, `layouts/for/`). The Pages workflow checks out the full
+  "Updated" line under the `/docs/`, `/benchmarks/`, `/savings/` and `/for/`
+  titles (`layouts/_default/single.html`, `savings.html`, `layouts/for/`). The Pages workflow checks out the full
   history for it; a shallow clone would date every page by HEAD.
 - `og/`: the share card. `og/render.sh` fills `og/card.html` with the
   wall's row of `data/read_savings.toml`, renders it at 1200x630 with

@@ -7,6 +7,40 @@ description: "Every number on the home page, with its method, its sample size an
 
 Every number below links to its method and raw data in the repository, with the scripts to re-run it on your own code. Losses sit next to wins.
 
+<!-- Each command in this box was run on a fresh clone of a third-party repository (psf/requests) with pixel 0.5.0 before it was written here; re-run them when an output or a prerequisite changes. -->
+<aside class="measure" aria-labelledby="measure-it-on-your-own-code">
+
+## Measure it on your own code
+
+Three checks, quickest first. Each needs `pixel` on your PATH ([install](../docs/#install)); the first two run inside a Git repository of yours, where the first Pixel command builds its index in `.pixel/` and adds that folder to `.gitignore`.
+
+**One large file, now.** The whole file against `pixel list-signatures` on it, counted as below (bytes divided by four), in bash or zsh:
+
+```bash
+f=path/to/a/large/file.py
+echo "full read: $(( $(wc -c < "$f") / 4 )) tokens"
+echo "pixel: $(( $(pixel list-signatures "$f" | wc -c) / 4 )) tokens"
+```
+
+On Requests' `src/requests/models.py` (1,184 lines) it printed `full read: 10365 tokens` and `pixel: 641 tokens`, 94% less. The report Pixel writes to stderr under each command is left out of the count.
+
+**Your agent's sessions, after a few days.** `pixel token-savings` reads the local action log (`.pixel/actions.jsonl`) and reports what Pixel's answers spared, each part labelled `measured` or `estimated`:
+
+```bash
+pixel token-savings
+```
+
+**Our table, on your machine.** `scripts/bench-read-savings.sh` re-measures the well-known files below. It needs a clone of Pixel's repository for the script, plus `curl` and the network: it downloads each file at its pinned commit into a throwaway folder, never into your code, and takes a few seconds.
+
+```bash
+git clone --depth 1 https://github.com/LivioGama/pixel.git && cd pixel
+scripts/bench-read-savings.sh
+```
+
+To turn the rate into a monthly figure for your team, the [savings estimate](../savings/) multiplies it by your own numbers.
+
+</aside>
+
 ## Reading code
 
 What reaches the agent's context when it needs to know what a file contains, measured on Pixel's own repository (138K lines of Rust), counting UTF-8 bytes divided by four. No second model reads the files instead.

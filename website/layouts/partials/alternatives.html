@@ -5,15 +5,12 @@
      (its /vs/ page, relative). Call with (dict "abs" true) for absolute
      links (the JSON-LD). */}}
 {{ $big := partial "wall-row.html" . }}
-{{ $reads := hugo.Data.read_savings.row }}
-{{ $kept := sort (apply (where $reads "status" "kept") "index" "." "saved") }}
-{{ $mid := div (len $kept) 2 }}
-{{ $median := cond (modBool (len $kept) 2) (div (add (index $kept (sub $mid 1)) (index $kept $mid)) 2.0) (index $kept $mid) }}
+{{ $rates := partial "kept-rates.html" . }}
 {{ $vars := dict
   "{bench}" (cond .abs ("benchmarks/" | absURL) ("benchmarks/" | relURL))
-  "{kept.range}" (printf "%s to %s%%" (lang.FormatNumber 1 (index $kept 0)) (lang.FormatNumber 1 (index $kept (sub (len $kept) 1))))
-  "{kept.count}" (string (len $kept))
-  "{kept.median}" (printf "%s%%" (lang.FormatNumber 1 $median))
+  "{kept.range}" (printf "%s to %s%%" (lang.FormatNumber 1 ($rates.min)) (lang.FormatNumber 1 ($rates.max)))
+  "{kept.count}" (string ($rates.count))
+  "{kept.median}" (printf "%s%%" (lang.FormatNumber 1 $rates.median))
   "{big.owner}" $big.owner
   "{big.file}" (path.Base $big.path)
   "{big.lines}" (lang.FormatNumberCustom 0 $big.lines)

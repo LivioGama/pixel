@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.Language.Locale }}">
+<head>
+  {{ partial "head.html" . }}
+</head>
+<body>
+  <a href="#main" class="skip">Skip to content</a>
+  {{ partial "nav.html" . }}
+  {{/* The rates: the kept rows of data/read_savings.toml, never a copy (partials/kept-rates.html). The inputs and their defaults: this page's front matter. Everything below is rendered once here with the defaults, so the page reads right without JavaScript; the script at the bottom recomputes the same figures, formatted the same way (partials/savings-format.html). */}}
+  {{ $r := partial "kept-rates.html" . }}
+  {{ $in := dict }}
+  {{ range .Params.inputs }}{{ $in = merge $in (dict .key .default) }}{{ end }}
+  {{ $reads := mul $in.d $in.s $in.r $in.w }}
+  {{ $full := mul $reads $in.t }}
+  {{ $lo := mul $full (div $r.min 100.0) }}
+  {{ $mid := mul $full (div $r.median 100.0) }}
+  {{ $hi := mul $full (div $r.max 100.0) }}
+  {{ $usd := dict "lo" (mul (div $lo 1e6) $in.p) "mid" (mul (div $mid 1e6) $in.p) "hi" (mul (div $hi 1e6) $in.p) }}
+  {{ $hash := "" }}
+  {{ range .Params.inputs }}{{ $hash = printf "%s%s%s=%v" $hash (cond (eq $hash "") "#" "&") .key .default }}{{ end }}
+  {{ $link := printf "%s%s" .Permalink $hash }}
+  {{ $tokMid := partial "savings-format.html" (dict "kind" "tok" "v" $mid) }}
+  {{ $badgeMsg := printf "%s tokens a month not read" $tokMid }}
+  {{ $badge := printf "[![Pixel estimate: %s](https://img.shields.io/badge/Pixel%%20estimate-%s-22c55e)](%s)" $badgeMsg (replace (replace $badgeMsg " " "%20") "," "%2C") $link }}
+  {{ $fmtFull := dict "fullMin" (lang.FormatNumberCustom 0 $r.fullMin) "fullMax" (lang.FormatNumberCustom 0 $r.fullMax) }}
+  {{ $bench := "benchmarks/" | relURL }}
+
+  <main class="docs wrap" id="main">
+    <header class="docs__head">
+      <h1>{{ .Title }}</h1>
+      <p class="docs__lede">{{ .Description }}</p>
+      <p class="docs__updated">Updated <time datetime="{{ .Lastmod.Format "2006-01-02" }}">{{ .Lastmod.Format "2 January 2006" }}</time></p>
+    </header>
+
+    <div class="est" data-est>
+      <form class="est__form" aria-label="Your team" data-est-form>
+        {{ range .Params.inputs }}
+        <div class="est__field">
+          <label for="est-{{ .key }}">{{ .label }}{{ with .unit }} <span class="est__unit">({{ . }})</span>{{ end }}</label>
+          <input id="est-{{ .key }}" name="{{ .key }}" type="number" inputmode="decimal" value="{{ .default }}" min="{{ .min }}" max="{{ .max }}" step="{{ .step }}" data-default="{{ .default }}" aria-describedby="est-{{ .key }}-help">
+          <p class="est__help" id="est-{{ .key }}-help">{{ replace (replace .help "{fullMin}" $fmtFull.fullMin) "{fullMax}" $fmtFull.fullMax }}</p>
+        </div>
+        {{ end }}
+        <button class="est__reset" type="button" data-est-reset hidden>Reset to defaults</button>
+        <noscript><p class="est__help">Without JavaScript the page shows the result of the defaults above.</p></noscript>
+      </form>
+
+      <section class="est__result" aria-labelledby="est-result-title">
+        <p class="est__tag" id="est-result-title">{{ partial "icon.html" (dict "name" "chart" "size" 12) }}Estimate, per month</p>
+        <div class="est__figures" aria-live="polite" aria-atomic="true">
+          <p class="est__big"><strong data-out="usd-mid">{{ partial "savings-format.html" (dict "kind" "usd" "v" $usd.mid) }}</strong> <span>of input tokens not billed</span></p>
+          <p class="est__range">range <span data-out="usd-lo">{{ partial "savings-format.html" (dict "kind" "usd" "v" $usd.lo) }}</span> to <span data-out="usd-hi">{{ partial "savings-format.html" (dict "kind" "usd" "v" $usd.hi) }}</span></p>
+          <p class="est__big est__big--tok"><strong data-out="tok-mid">{{ $tokMid }}</strong> <span>tokens your agents do not read</span></p>
+          <p class="est__range">range <span data-out="tok-lo">{{ partial "savings-format.html" (dict "kind" "tok" "v" $lo) }}</span> to <span data-out="tok-hi">{{ partial "savings-format.html" (dict "kind" "tok" "v" $hi) }}</span></p>
+        </div>
+        {{/* Coral: what whole-file reads cost; green: what Pixel returns instead, at the median rate. The ratio is the rate, so only the labels follow the inputs. */}}
+        <div class="est__bars" aria-hidden="true">
+          <div class="est__bar est__bar--full"><i></i><span>Whole files: <b data-out="tok-full">{{ partial "savings-format.html" (dict "kind" "tok" "v" $full) }}</b></span></div>
+          <div class="est__bar est__bar--px" style="--w: {{ sub 100 $r.median }}%"><i></i><span>Through Pixel: <b data-out="tok-px">{{ partial "savings-format.html" (dict "kind" "tok" "v" (sub $full $mid)) }}</b></span></div>
+        </div>
+        <p class="est__rate">At the {{ $r.count }} well-known files' rate: <strong>{{ lang.FormatNumber 1 $r.median }}%</strong> median, {{ $r.min }} to {{ $r.max }}% (<a class="link" href="{{ $bench }}#well-known-files" target="_blank" rel="noopener">the files</a>).</p>
+        {{/* The trap: the rate is per large-file read, never per session. The whole-task figures are the "On whole agent tasks" table of content/benchmarks.md: change them there first. */}}
+        <p class="est__scope">This rate is for reading one large file, not for a whole session, which also spends tokens on prompts, edits, tests and answers. On a whole agent task we measured <strong>&minus;30% API cost</strong> and &minus;38% tokens read, the median of 11 runs per side (<a class="link" href="{{ $bench }}#on-whole-agent-tasks" target="_blank" rel="noopener">the runs</a>).</p>
+
+        <details class="est__math">
+          <summary>Show the math</summary>
+          <ol>
+            <li>Reads a month = <span data-out="in-d">{{ $in.d }}</span> developers &times; <span data-out="in-s">{{ $in.s }}</span> sessions &times; <span data-out="in-r">{{ $in.r }}</span> reads &times; <span data-out="in-w">{{ $in.w }}</span> days = <b data-out="reads">{{ partial "savings-format.html" (dict "kind" "int" "v" $reads) }}</b></li>
+            <li>Tokens read whole = <span data-out="reads">{{ partial "savings-format.html" (dict "kind" "int" "v" $reads) }}</span> &times; <span data-out="in-t">{{ partial "savings-format.html" (dict "kind" "int" "v" $in.t) }}</span> tokens = <b data-out="full">{{ partial "savings-format.html" (dict "kind" "int" "v" $full) }}</b></li>
+            <li>Tokens not read = <span data-out="full">{{ partial "savings-format.html" (dict "kind" "int" "v" $full) }}</span> &times; {{ $r.median }}% (median) = <b data-out="n-mid">{{ partial "savings-format.html" (dict "kind" "int" "v" $mid) }}</b>; at {{ $r.min }}%: <span data-out="n-lo">{{ partial "savings-format.html" (dict "kind" "int" "v" $lo) }}</span>, at {{ $r.max }}%: <span data-out="n-hi">{{ partial "savings-format.html" (dict "kind" "int" "v" $hi) }}</span></li>
+            <li>Dollars = tokens not read &divide; 1,000,000 &times; $<span data-out="in-p">{{ $in.p }}</span> = <b data-out="c-mid">{{ partial "savings-format.html" (dict "kind" "cents" "v" $usd.mid) }}</b>; from <span data-out="c-lo">{{ partial "savings-format.html" (dict "kind" "cents" "v" $usd.lo) }}</span> to <span data-out="c-hi">{{ partial "savings-format.html" (dict "kind" "cents" "v" $usd.hi) }}</span></li>
+          </ol>
+          <p>The three rates are the saving on each kept file of <a class="link" href="{{ $bench }}#well-known-files" target="_blank" rel="noopener">the well-known files table</a>: the whole file against <code>pixel list-signatures</code> on it, UTF-8 bytes divided by four on both sides, Pixel's answer already subtracted. The median of an even count is the mean of the two middle files.</p>
+          <p>What it leaves out: a file read stays in the context and is sent again on every later turn (usually from the cache, billed lower), so a real session pays for it more than once; output tokens do not change; and the files measured run {{ $fmtFull.fullMin }} to {{ $fmtFull.fullMax }} tokens, so much smaller files may save less.</p>
+        </details>
+      </section>
+    </div>
+
+    <section class="est__share" aria-labelledby="est-share-title">
+      <h2 id="est-share-title">Share this estimate</h2>
+      <p>The link carries your six values in its fragment (<code>#d=…&amp;s=…</code>), which the browser keeps to itself: opening it recomputes the same estimate, and nothing is sent to us or stored.</p>
+      <div class="cmd">
+        <code data-out="link">{{ $link }}</code>
+        <button class="cmd__copy" type="button" data-copy="{{ $link }}" data-out-copy="link">Copy link</button>
+      </div>
+      <p>A README badge with the median, linking back to these values. The image is a static <a class="link" href="https://shields.io/badges/static-badge" target="_blank" rel="noopener">shields.io</a> badge, drawn from the text of its URL.</p>
+      <div class="cmd">
+        <code data-out="badge">{{ $badge }}</code>
+        <button class="cmd__copy" type="button" data-copy="{{ $badge }}" data-out-copy="badge">Copy badge</button>
+      </div>
+      <p>To measure instead of estimate, run <code>pixel token-savings</code> in your repository after a few sessions: it reads Pixel's local action log. <a class="link" href="{{ $bench }}#measure-it-on-your-own-code" target="_blank" rel="noopener">Measure it on your own code</a>.</p>
+    </section>
+  </main>
+
+  {{ partial "footer.html" . }}
+
+  <script type="application/json" id="est-data">{{ dict "rates" (dict "lo" $r.min "mid" $r.median "hi" $r.max) "page" .Permalink "inputs" .Params.inputs | jsonify | safeJS }}</script>
+  <script>
+    /* The estimator. Reads the rates and inputs Hugo injected above, recomputes on every input,
+       and keeps the share link and the badge in step. No request, no storage: the values live in
+       the inputs and in the URL fragment, which the browser never sends. */
+    (function () {
+      var root = document.querySelector('[data-est]');
+      var data = JSON.parse(document.getElementById('est-data').textContent);
+      if (!root || !data) return;
+      var form = root.querySelector('[data-est-form]');
+      var reset = root.querySelector('[data-est-reset]');
+      var inputs = data.inputs;
+      var el = {};
+      inputs.forEach(function (d) { el[d.key] = form.querySelector('#est-' + d.key); });
+
+      var num = function (v, digits) { return v.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits }); };
+      /* Same thresholds and roundings as partials/savings-format.html. */
+      var fmtTok = function (v) {
+        if (v >= 1e9) return num(v / 1e9, 1) + 'B';
+        if (v >= 1e6) return num(v / 1e6, 1) + 'M';
+        if (v >= 1e4) return num(v / 1e3, 0) + 'k';
+        return num(v, 0);
+      };
+      var fmtUsd = function (v) { return '$' + (v >= 10 ? num(v, 0) : num(v, 2)); };
+      var fmtInt = function (v) { return num(v, 0); };
+      var fmtIn = function (v) { return v.toLocaleString('en-US', { maximumFractionDigits: 2 }); };
+
+      var put = function (name, text) {
+        root.parentNode.querySelectorAll('[data-out="' + name + '"]').forEach(function (n) { n.textContent = text; });
+      };
+      var copyText = function (name, text) {
+        var b = document.querySelector('[data-out-copy="' + name + '"]');
+        if (b) b.setAttribute('data-copy', text);
+      };
+
+      var read = function () {
+        var v = {}, ok = true;
+        inputs.forEach(function (d) {
+          var raw = el[d.key].value.trim();
+          var x = raw === '' ? NaN : Number(raw);
+          /* The form never submits, so its step and range validation must be checked here: 1.5 developers is not an estimate. */
+          var bad = !isFinite(x) || x < d.min || x > d.max || el[d.key].validity.stepMismatch;
+          el[d.key].setAttribute('aria-invalid', bad ? 'true' : 'false');
+          if (bad) ok = false; else v[d.key] = x;
+        });
+        return ok ? v : null;
+      };
+
+      var fragment = function (v) {
+        return '#' + inputs.map(function (d) { return d.key + '=' + v[d.key]; }).join('&');
+      };
+
+      var render = function () {
+        var v = read();
+        var dash = '—';
+        if (!v) {
+          ['usd-lo', 'usd-mid', 'usd-hi', 'tok-lo', 'tok-mid', 'tok-hi', 'tok-full', 'tok-px', 'reads', 'full', 'n-lo', 'n-mid', 'n-hi', 'c-lo', 'c-mid', 'c-hi'].forEach(function (k) { put(k, dash); });
+          /* No stale estimate to share while a field is invalid, and a way back to the defaults. */
+          ['link', 'badge'].forEach(function (k) {
+            put(k, dash); copyText(k, '');
+            var b = document.querySelector('[data-out-copy="' + k + '"]');
+            if (b) b.disabled = true;
+          });
+          reset.hidden = false;
+          return;
+        }
+        ['link', 'badge'].forEach(function (k) {
+          var b = document.querySelector('[data-out-copy="' + k + '"]');
+          if (b) b.disabled = false;
+        });
+        var reads = v.d * v.s * v.r * v.w;
+        var full = reads * v.t;
+        var saved = { lo: full * (data.rates.lo / 100), mid: full * (data.rates.mid / 100), hi: full * (data.rates.hi / 100) };
+        var usd = { lo: saved.lo / 1e6 * v.p, mid: saved.mid / 1e6 * v.p, hi: saved.hi / 1e6 * v.p };
+        ['lo', 'mid', 'hi'].forEach(function (k) {
+          put('usd-' + k, fmtUsd(usd[k]));
+          put('tok-' + k, fmtTok(saved[k]));
+          put('n-' + k, fmtInt(saved[k]));
+          put('c-' + k, '$' + num(usd[k], 2));
+        });
+        put('tok-full', fmtTok(full));
+        put('tok-px', fmtTok(full - saved.mid));
+        put('reads', fmtInt(reads));
+        put('full', fmtInt(full));
+        ['d', 's', 'r', 'w', 'p'].forEach(function (k) { put('in-' + k, fmtIn(v[k])); });
+        put('in-t', fmtInt(v.t));
+
+        var hash = fragment(v);
+        var link = data.page + hash;
+        var msg = fmtTok(saved.mid) + ' tokens a month not read';
+        var shield = function (s) { return encodeURIComponent(s.replace(/-/g, '--').replace(/_/g, '__')); };
+        var badge = '[![Pixel estimate: ' + msg + '](https://img.shields.io/badge/' + shield('Pixel estimate') + '-' + shield(msg) + '-22c55e)](' + link + ')';
+        put('link', link); copyText('link', link);
+        put('badge', badge); copyText('badge', badge);
+        var isDefault = inputs.every(function (d) { return v[d.key] === d.default; });
+        reset.hidden = isDefault;
+        if (history.replaceState) {
+          try { history.replaceState(null, '', isDefault ? location.pathname : hash); } catch (_) {}
+        }
+      };
+
+      /* A shared link: #d=10&s=4&r=5&t=10000&p=3&w=21. A key the fragment omits takes its default (so a
+         later hashchange never keeps the previous link's value); unknown keys, malformed escapes and
+         out-of-range values are ignored, one at a time. */
+      var load = function () {
+        inputs.forEach(function (d) { el[d.key].value = String(d.default); });
+        var h = location.hash.replace(/^#/, '');
+        if (!h) return;
+        h.split('&').forEach(function (pair) {
+          var kv = pair.split('=');
+          var d = inputs.filter(function (i) { return i.key === kv[0]; })[0];
+          var x;
+          try { x = Number(decodeURIComponent(kv[1] || '')); } catch (_) { return; }
+          if (d && kv[1] !== '' && isFinite(x) && x >= d.min && x <= d.max) el[d.key].value = String(x);
+        });
+      };
+
+      form.addEventListener('input', render);
+      form.addEventListener('submit', function (e) { e.preventDefault(); });
+      reset.addEventListener('click', function () {
+        inputs.forEach(function (d) { el[d.key].value = String(d.default); });
+        render();
+      });
+      window.addEventListener('hashchange', function () { load(); render(); });
+      load();
+      render();
+    })();
+  </script>
+</body>
+</html>

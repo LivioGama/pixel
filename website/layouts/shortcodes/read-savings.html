@@ -1,10 +1,8 @@
-{{- /* The well-known files of /benchmarks/, from data/read_savings.toml (the same rows the home's token wall reads), so the page and the wall cannot disagree. {{% read-savings %}} prints the table (Markdown, rendered by render-table.html); {{% read-savings "summary" %}} prints the kept rows' range and median. */ -}}
+{{- /* The well-known files of /benchmarks/, from data/read_savings.toml (the same rows the home's token wall reads), so the page and the wall cannot disagree. {{% read-savings %}} prints the table (Markdown, rendered by render-table.html); {{% read-savings "summary" %}} prints the kept rows' range and median, from partials/kept-rates.html (the rates /savings/ multiplies). */ -}}
 {{- $rows := hugo.Data.read_savings.row -}}
 {{- if eq (.Get 0) "summary" -}}
-{{- $kept := sort (apply (where $rows "status" "kept") "index" "." "saved") -}}
-{{- $mid := div (len $kept) 2 -}}
-{{- $median := cond (modBool (len $kept) 2) (div (add (index $kept (sub $mid 1)) (index $kept $mid)) 2.0) (index $kept $mid) -}}
-{{ index $kept 0 }} to {{ index $kept (sub (len $kept) 1) }}% less across the {{ len $kept }} kept files, median {{ lang.FormatNumber 1 $median }}%
+{{- $r := partial "kept-rates.html" . -}}
+{{ $r.min }} to {{ $r.max }}% less across the {{ $r.count }} kept files, median {{ lang.FormatNumber 1 $r.median }}%
 {{- else -}}
 | Project | File | Lines | Full read, tokens | With Pixel, tokens | Saved | Signatures |
 | --- | --- | --- | --- | --- | --- | --- |
