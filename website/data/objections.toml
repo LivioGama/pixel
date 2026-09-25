@@ -24,7 +24,7 @@
 question = "Will my agent actually use it?"
 answer = [
   '''Not every time. Agents are trained on <code>grep</code> and fall back to it. Pixel does not wait for the agent to discover a tool: <code>pixel install</code> puts its protocol into every session, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files. The guard advises and never blocks.''',
-  '''With Pixel 0.5.0 it did: in each of the 11 recorded runs behind the demo, the agent called Pixel 6 to 17 times. An earlier release fared worse: given its protocol alone, the agent barely ran a Pixel command, yet still scoped tasks 29% faster, so part of the gain is the protocol's guidance itself. <a class="link" href="{bench}#on-whole-agent-tasks" target="_blank" rel="noopener">The runs</a>''',
+  '''With Pixel 0.5.0 it did: in each of the 11 recorded runs behind the demo, the agent called Pixel 6 to 17 times. An earlier release fared worse: given its protocol alone, the agent barely ran a Pixel command, yet still scoped tasks 29% faster, so part of the gain is the protocol's guidance itself. <a class="link" href="{bench}#on-whole-agent-tasks">The runs</a>''',
 ]
 
 [[objection]]
@@ -48,7 +48,7 @@ answer = [
 [[objection]]
 question = "Pixel or semble?"
 answer = [
-  '''Both, if you search in plain English a lot. semble puts the right file in its top 10 for 100% of 45 natural-language queries, Pixel for 69%. Pixel adds the call graph, blast radius, Git history and guarded Git writes. Together they cost about 5,100 tokens of context per turn. <a class="link" href="{bench}#where-a-specialist-wins" target="_blank" rel="noopener">Where a specialist wins</a>''',
+  '''Both, if you search in plain English a lot. semble puts the right file in its top 10 for 100% of 45 natural-language queries, Pixel for 69%. Pixel adds the call graph, blast radius, Git history and guarded Git writes. Together they cost about 5,100 tokens of context per turn. <a class="link" href="{bench}#where-a-specialist-wins">Where a specialist wins</a>''',
 ]
 
 [[objection]]

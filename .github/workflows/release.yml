@@ -172,7 +172,7 @@ jobs:
           cat > pixel.rb <<EOF
           class Pixel < Formula
             desc "Local control layer for coding agents — deterministic retrieval + git engine"
-            homepage "https://github.com/LivioGama/pixel"
+            homepage "https://pixel-cli.dev/"
             # Homebrew validates a URL for every simulated OS/arch at tap
             # time; the per-target URLs in the on_* blocks are the ones
             # actually used. This top-level URL satisfies the check.

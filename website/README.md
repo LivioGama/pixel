@@ -5,7 +5,9 @@ The Hugo site published at <https://pixel-cli.dev/> by
 `website/**`, `docs/examples/**` or `crates/pixel/Cargo.toml` (the version
 the JSON-LD states).
 
-The domain lives in three places that change together: `baseURL` in
+The domain lives in three places that change together (and is spelled as
+the homepage in `package.json`, `.claude-plugin/plugin.json` and the
+Homebrew formula `release.yml` writes): `baseURL` in
 `hugo.toml`, the custom domain in the repository's Pages settings (the
 workflow deploys an artifact, so a `static/CNAME` file would be ignored),
 and the DNS records at Cloudflare: four `A` and four `AAAA` records to
@@ -231,9 +233,16 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   headline's own words ("Architecture" over "How it works."), and the home eases onto a section start only when scrolling stopped within
   80 px of it (a script, not CSS scroll-snap, whose `proximity` bounced).
   The nav's bottom edge fills with the scroll progress.
-- Links: anything that leaves the page opens in a new tab, in the templates
-  and in Markdown through `layouts/_default/_markup/render-link.html`; only
-  same-page anchors (`#install`) stay in place. Keep it for new links.
+- Links: a link that leaves the site (GitHub, another tool's docs) opens in
+  a new tab with `target="_blank" rel="noopener"`, in the templates and in
+  Markdown through `layouts/_default/_markup/render-link.html`; a page of
+  this site or an anchor opens in place, so Back works. Keep it for new
+  links. The footer marks its outbound links with an arrow (`::after` on
+  `a[target="_blank"]`).
+- Footer (`layouts/partials/footer.html`): the brand, a one-line tagline,
+  the domain spelled out (`baseURL`'s host, for screenshots and prints) and
+  the CLI version linking to its release, then three columns (Product,
+  Guides, Community) and the legal lines.
 - `static/cursor.svg`, `static/cursor-link.svg`: the pixel-arrow cursor, the
   green one over anything clickable, for fine pointers only.
 - `layouts/partials/icon.html`: the pixel icons, 8x8 bitmaps drawn in
