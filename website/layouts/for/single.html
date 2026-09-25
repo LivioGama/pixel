@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.Language.Locale }}">
+<head>
+  {{ partial "head.html" . }}
+</head>
+<body>
+  <a href="#main" class="skip">Skip to content</a>
+  {{ partial "nav.html" . }}
+  {{/* One agent's page: its entry in data/agents.toml (front matter `agent`), the setup sections from the agent-setup shortcode in the content file, and every other agent at the bottom. */}}
+  {{ $agents := hugo.Data.agents.agent }}
+  {{ $a := index (where $agents "slug" .Params.agent) 0 }}
+  {{ if not $a }}{{ errorf "%s: no agent %q in data/agents.toml" .File.Path .Params.agent }}{{ end }}
+  {{ $section := .Parent }}
+
+  <main class="docs wrap" id="main">
+    <header class="docs__head">
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <a href="{{ "" | relURL }}">Pixel</a><span aria-hidden="true">/</span><a href="{{ $section.RelPermalink }}">{{ $section.Title }}</a><span aria-hidden="true">/</span><span aria-current="page">{{ $a.name }}</span>
+      </nav>
+      <h1 class="agent__title"><span class="agent__mark agent__mark--{{ $a.logo }}" aria-hidden="true">{{ (resources.Get (printf "logos/%s.svg" $a.logo)).Content | safeHTML }}</span>{{ .Title }}</h1>
+      <p class="docs__lede">{{ $a.lede | markdownify }}</p>
+      <p class="docs__updated">Updated <time datetime="{{ .Lastmod.Format "2006-01-02" }}">{{ .Lastmod.Format "2 January 2006" }}</time></p>
+    </header>
+    <div class="docs__layout">
+      <nav class="docs__toc" aria-label="On this page">
+        {{ .TableOfContents }}
+      </nav>
+      <article class="prose">
+        {{ .Content }}
+      </article>
+    </div>
+
+    <section class="agents-more" aria-labelledby="agents-more-title">
+      <h2 id="agents-more-title">Pixel for other agents</h2>
+      <ul class="agents">
+        {{ range $agents }}{{ if ne .slug $a.slug }}
+        <li><a class="agents__item agents__item--{{ .logo }}" href="{{ printf "for/%s/" .slug | relURL }}">{{ (resources.Get (printf "logos/%s.svg" .logo)).Content | safeHTML }}<span>{{ .name }}</span></a></li>
+        {{ end }}{{ end }}
+      </ul>
+    </section>
+  </main>
+
+  {{ partial "footer.html" . }}
+
+  {{/* Breadcrumb for search engines: the same three steps as the visible trail. */}}
+  {{ $crumbs := dict
+    "@context" "https://schema.org"
+    "@type" "BreadcrumbList"
+    "itemListElement" (slice
+      (dict "@type" "ListItem" "position" 1 "name" "Pixel" "item" site.Home.Permalink)
+      (dict "@type" "ListItem" "position" 2 "name" $section.Title "item" $section.Permalink)
+      (dict "@type" "ListItem" "position" 3 "name" $a.name "item" .Permalink))
+  }}
+  <script type="application/ld+json">{{ $crumbs | jsonify | safeJS }}</script>
+  {{ partial "toc-current.html" . }}
+</body>
+</html>

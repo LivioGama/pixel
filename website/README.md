@@ -23,8 +23,8 @@ touched (Hugo 0.166; a plain `hugo` build is right).
 
 - `layouts/index.html`: the whole landing page, with its scripts inline at
   the bottom. The hero opens on who Pixel is for (four agent marks and the
-  count of the rest, from the `$agents` list the Compatibility grid also
-  draws), then states the problem in the reader's words before naming the
+  count of the rest, from `data/agents.toml`, which the Compatibility grid
+  also draws, each mark linking to its `/for/<slug>/` page), then states the problem in the reader's words before naming the
   category. The token wall draws one square per 25 tokens of a full file
   read of a well-known file (`data/read_savings.toml`, the row marked
   `wall`) and burns down to what the same
@@ -114,7 +114,29 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   `layouts/_default/_markup/render-codeblock.html`.
   `crates/pixel/tests/cli/docs_drift.rs` reads it and `benchmarks.md`, so
   every `` `pixel <command>` `` quoted in either must exist. Keep it in step with `README.md` when install or
-  wiring changes.
+  wiring changes. Its "What pixel install wires" table is the
+  `agents-install` shortcode, from `data/agents.toml`.
+- `data/agents.toml`: the agents the site names, in the home's order, and
+  what Pixel does for each: `wiring` (`install`, `plugin` or `rules`), the
+  files `pixel install` and `pixel install --repo` write, the plugin command
+  or rules file, the `pixel doctor` checks. The hero, the Compatibility
+  grid, the `/docs/` wiring table and the `/for/` section all read it.
+  `crates/pixel/tests/cli/docs_drift.rs` runs a real `pixel install` and
+  `pixel install --repo` into empty directories and fails when the files
+  they write differ from the lists, when a check id is not one of
+  `pixel doctor`'s or an agent check of the doctor belongs to no agent, and
+  when `static/llms.txt` misses an agent page: a pull request that changes
+  what `pixel install` writes updates this file in the same commit.
+- `content/for/`: one page per agent (`/for/<slug>/`), each a front matter
+  naming its `agent` and the `{{% agent-setup %}}` shortcode
+  (`layouts/shortcodes/agent-setup.html`), which writes the setup sections
+  from the data: install, what `pixel install` writes, the plugin or rules
+  file, the per-repository guard, the check, the removal.
+  `layouts/for/single.html` adds the breadcrumb (visible and as
+  `BreadcrumbList` JSON-LD) and the other agents; `layouts/for/list.html`
+  groups `/for/` by wiring, and the build fails on an agent with no page or
+  an unknown wiring. No figure on a page unless it is on `/benchmarks/` for
+  that agent: today only Claude Code's.
 - `data/scope.toml`: the real `pixel scope-task` run the hero grid replays.
   Refresh the task, the index size and every position together.
 - `data/read_savings.toml`: the well-known files `scripts/bench-read-savings.sh`
@@ -138,7 +160,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   Codex, Cursor, Gemini, Devin, Antigravity); the monochrome marks (Pi,
   Copilot, OpenCode, Windsurf) use `currentColor`, from Simple Icons and
   pi.dev's favicon. Add an agent there
-  and in the `$agents` list of `layouts/index.html` together.
+  and in `data/agents.toml` together, with its page `content/for/<slug>.md`.
 - Community and updates: the line under the Install block and the footer
   link to GitHub Discussions; the footer's "Follow releases" is the
   releases' Atom feed (no newsletter, nothing to sign up for), also
@@ -178,10 +200,11 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   workflow redeploys on it. Every absolute URL goes through `baseURL`
   (`absURL`, `.Permalink`), so a new domain is one line in `hugo.toml`.
 - `layouts/robots.txt` names the sitemap Hugo writes (`/`, `/docs/`,
-  `/benchmarks/`, `/vs/` and each comparison; the 404 stays out). `enableGitInfo` dates each page by the
+  `/benchmarks/`, `/vs/` and each comparison, `/for/` and each agent page;
+  the 404 stays out). `enableGitInfo` dates each page by the
   last commit that touched its source: the sitemap's `lastmod` and the
-  "Updated" line under the `/docs/` and `/benchmarks/` titles
-  (`layouts/_default/single.html`). The Pages workflow checks out the full
+  "Updated" line under the `/docs/`, `/benchmarks/` and `/for/` titles
+  (`layouts/_default/single.html`, `layouts/for/`). The Pages workflow checks out the full
   history for it; a shallow clone would date every page by HEAD.
 - `og/`: the share card. `og/render.sh` fills `og/card.html` with the
   wall's row of `data/read_savings.toml`, renders it at 1200x630 with

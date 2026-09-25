@@ -1,0 +1,111 @@
+{{- /* The setup sections of a /for/<slug>/ page, as Markdown, from the page's `agent` entry in data/agents.toml: install, what Pixel writes and where, the per-repository guard, the plugin or rules file, the check, the removal. Called as {{% agent-setup %}} so the sections reach the table of contents. crates/pixel/tests/cli/docs_drift.rs holds the data's paths and checks to a real `pixel install`. */ -}}
+{{- $slug := .Page.Params.agent -}}
+{{- $a := index (where hugo.Data.agents.agent "slug" $slug) 0 -}}
+{{- if not $a }}{{ errorf "%s: no agent %q in data/agents.toml" .Page.File.Path $slug }}{{ end -}}
+{{- $docs := "docs/" | relURL -}}
+{{- $raw := printf "https://raw.githubusercontent.com/%s/main" site.Params.repo -}}
+{{- $shared := hugo.Data.agents.shared -}}
+## Install Pixel
+
+Pixel is a command-line tool: {{ $a.name }} runs the `pixel` binary, so install it first (macOS and Linux).
+
+```bash
+brew install LivioGama/tap/pixel
+```
+
+The [install script]({{ $docs }}#install) is the other channel. Neither one changes any agent's configuration.
+{{ if eq $a.wiring "install" }}
+## What pixel install writes
+
+```bash
+pixel install
+```
+
+Run it once, from anywhere{{ with $a.when }}; it writes {{ $a.name }}'s files {{ . }}{{ end }}. For {{ $a.name }}:
+{{ range $a.global }}
+- `{{ . }}`
+{{- end }}
+
+{{ strings.TrimSuffix "." $a.wires | strings.FirstUpper }}.
+
+Every `pixel install` also deploys the prompt itself to {{ range $i, $f := $shared }}{{ if $i }} and {{ end }}`{{ $f }}`{{ end }}, and wires the other agents it finds.
+{{ else }}
+## What pixel install writes
+
+Nothing for {{ $a.name }}{{ with $a.repo }}, outside the per-repository guard below{{ end }}. `pixel doctor` judges only what `pixel install` writes{{ if not $a.checks }}, so it does not see {{ $a.name }}'s {{ if eq $a.wiring "rules" }}rule{{ else }}plugin{{ end }}{{ end }}.
+{{ end }}
+{{- with $a.note }}
+{{ . }}
+{{ end }}
+{{- with $a.plugin }}
+## {{ if eq $a.wiring "plugin" }}Install the plugin{{ else }}Or as a plugin{{ end }}
+
+{{ . | strings.FirstUpper }}.
+
+The plugin never installs the `pixel` binary. The protocol it loads starts by checking for it (`command -v pixel`) and tells the agent to work without Pixel's commands when it is missing.
+{{ end }}
+{{- with $a.rules }}
+## Add the rule
+
+Copy the rule the repository ships into your project:
+
+```bash
+mkdir -p {{ path.Dir . }}
+curl -fsSL {{ $raw }}/{{ . }} -o {{ . }}
+```
+
+The rule is the protocol: which `pixel` command replaces `grep`, a whole-file read or `git log`, and when a native tool is still right. It starts by checking for the binary (`command -v pixel`).
+{{ end }}
+{{- with $a.repo }}
+## Per repository
+
+```bash
+pixel install --repo .
+```
+
+Adds an advisory guard to this repository only, and skips every global step. For {{ $a.name }}:
+{{ range . }}
+- `{{ . }}`
+{{- end }}
+
+The guard steers the agent toward Pixel commands, for example with a notice before an untargeted read of a large source file, and never blocks a tool call. Every file that names this machine's `pixel` binary goes into the clone's `.git/info/exclude`, so a `git add -A` cannot publish it. [Every per-repository file]({{ $docs }}#per-repository-guards)
+{{ with $a.repo_note }}
+{{ . }}
+{{ end }}
+{{- end }}
+## Check it
+
+```bash
+pixel doctor .
+```
+
+{{ with $a.checks -}}
+`pixel doctor .` reports the wiring of every agent as green, stale or missing, and names the command that repairs each finding. For {{ $a.name }} alone:
+
+```bash
+pixel doctor .{{ range . }} --only {{ . }}{{ end }}
+```
+{{- else -}}
+It checks the binary, the daemon and this repository's index, the parts {{ $a.name }} relies on once the {{ if eq $a.wiring "rules" }}rule{{ else }}plugin{{ end }} is in place.
+{{- end }}
+
+## Remove it
+{{ if eq $a.wiring "install" }}
+```bash
+pixel uninstall
+```
+
+It removes everything `pixel install` wrote, for every agent at once, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: `brew uninstall LivioGama/tap/pixel`.
+{{- end }}
+{{- with $a.repo }}
+
+`pixel uninstall --repo .` removes only this repository's files.
+{{- end }}
+{{- if and $a.plugin (ne $a.wiring "install") }}
+
+Remove the plugin with {{ $a.name }}'s own plugin or extension command.
+{{- end }}
+{{- with $a.rules }}
+
+Delete `{{ . }}`.
+{{- end }}

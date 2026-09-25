@@ -33,13 +33,9 @@ The index, the code graph and the optional history data live in `.pixel/` at the
 
 `pixel install` is global: run it once, from anywhere. It deploys the agent prompt to `~/.local/share/pixel/` (`agent-prompt.md`, plus the short `subagent-prompt.md` for sub-agents) and wires it into the agents it knows:
 
-| Agent | How the prompt reaches it |
-| --- | --- |
-| Claude Code | `SessionStart` and `SubagentStart` hooks in `~/.claude/settings.json` inject the prompt as context. No shell wrapper, never blocks. |
-| Codex | the `developer_instructions` key of `~/.codex/config.toml`, which every Codex front end reads, plus a metrics `PostToolUse` hook |
-| Pi | `~/.pi/agent/APPEND_SYSTEM.md`, read automatically |
-| OpenCode | the prompt appended to `AGENTS.md` |
-| Antigravity | its plugin, hooks and configuration activated |
+{{% agents-install %}}
+
+Each agent's page under [For your agent](../for/) names the files, the check and the removal, including the agents `pixel install` leaves alone.
 
 `pixel uninstall` removes everything `pixel install` wrote, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: `brew uninstall LivioGama/tap/pixel`, or `mise uninstall pixel`.
 
@@ -89,7 +85,7 @@ Each agent CLI below can load Pixel's protocol through its own plugin mechanism,
 | Devin | add `github.com/LivioGama/pixel` as a Devin plugin |
 | Gemini CLI | `gemini extensions install https://github.com/LivioGama/pixel` |
 | Pi | `pi install git:github.com/LivioGama/pixel` |
-| OpenCode | `"plugin": ["@liviogama/pixel"]` in `opencode.json` |
+| OpenCode | no plugin package is published yet: `pixel install` puts the protocol in its global `AGENTS.md` ([OpenCode](../for/opencode/)) |
 | Cursor, Windsurf, Kiro, Cline, Qoder | rules ship under `.cursor/rules/`, `.windsurf/rules/`, `.kiro/steering/`, `.clinerules/` and `.qoder/rules/`: copy them into your project |
 
 Any other agent: paste [`PIXEL.md`](https://github.com/LivioGama/pixel/blob/main/PIXEL.md), the plain-Markdown protocol, into whatever instruction surface it offers. [Manual setup](https://github.com/LivioGama/pixel/blob/main/docs/manual-setup.md) covers wiring the full prompt by hand.
