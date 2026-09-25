@@ -692,6 +692,9 @@ a.agents__item { text-decoration: none; }
 .footer__links a[target="_blank"]::after { content: " \2197"; font-size: 0.8em; opacity: 0.6; }
 .footer__legal { grid-column: 1 / -1; display: grid; gap: 6px; padding-top: 24px; border-top: 1px solid var(--line); font-size: 0.85rem; color: var(--ink-soft); }
 .footer__legal p { margin: 0; }
+.footer__policies { display: flex; flex-wrap: wrap; gap: 6px 20px; list-style: none; margin: 6px 0 0; padding: 0; }
+.footer__policies a { color: var(--ink-soft); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--line); }
+.footer__policies a:hover { color: var(--ink); text-decoration-color: currentColor; }
 @media (max-width: 760px) {
   .footer__inner { grid-template-columns: minmax(0, 1fr); }
 }

@@ -1,0 +1,27 @@
+# The people who make Pixel, in this order on /about/ ({{% team %}},
+# layouts/shortcodes/team.html) and as the `Person` nodes of the home's
+# JSON-LD (layouts/partials/head.html): the site's publisher, the project's
+# creator, and every author of the source code.
+#
+# A name here is personal data: add someone, change their text or keep them
+# only with their agreement, and remove them when they ask. No photo.
+#
+#   name       as they want it shown
+#   github     their GitHub login (the profile link and the JSON-LD `sameAs`)
+#   role       what they do on Pixel, lower case, no trailing full stop (the
+#              list reads "Name: role.")
+#   publisher  true for the one person who publishes the site (the legal pages
+#              name them); the JSON-LD's WebSite `publisher`
+#   creator    true for who created the project; the JSON-LD's `creator`
+
+[[person]]
+name = "Navid Emad"
+github = "navidemad"
+role = "main contributor, and publisher of this site"
+publisher = true
+
+[[person]]
+name = "Livio Gama"
+github = "LivioGama"
+role = "created Pixel, from the idea to its structure, and remains a major contributor"
+creator = true

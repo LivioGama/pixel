@@ -21,7 +21,7 @@ fastembed = { version = "7", optional = true, default-features = false, features
 pixel-index = { path = "../pixel-index" }
 pixel-rank = { path = "../pixel-rank" }
 memmap2 = "0.9.11"
-model2vec-rs = { version = "0.2", optional = true }
+model2vec-rs = { version = "0.3", optional = true }
 regex = "1.13"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
