@@ -29,8 +29,8 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   `wall`) and burns down to what the same
   question costs through Pixel once it scrolls into view. A Without / With
   Pixel chip names the side shown, the saving (`saved`, floored as the
-  stats round it) appears once the wall has burnt, and the caption turns
-  a square into lines of that same file; the survivors
+  stats round it) appears once the wall has burnt, and the caption quotes
+  the kept files' range and median; the survivors
   gather into a P of exactly that many squares, built from the count by
   the script, so one square always means 25 tokens. The order after the
   hero shows before it proves: the scope example comes first, then the
