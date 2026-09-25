@@ -1304,13 +1304,18 @@ pub fn apply_window(store: &mut FactsStore, limits: &HistoryLimits, now_unix: i6
     )?;
     let indexed = commits_with_hunks_before(store, cutoff)?;
     let mut evicted = evict_commits(store, &indexed, SKIP_NOTE_OUTSIDE_WINDOW)?;
+    // What is left before the cutoff: pending commits, whose diff is never
+    // fetched, and indexed commits without a hunk (a binary-only change
+    // writes none), which would otherwise stay indexed outside the window
+    // and hold `diff_coverage_since` back.
     evicted += store.conn().execute(
         "UPDATE commits SET diff_state = ?1, skip_note = ?2
-         WHERE diff_state = ?3 AND unixepoch(committed_at) < ?4",
+         WHERE diff_state IN (?3, ?4) AND unixepoch(committed_at) < ?5",
         params![
             DIFF_STATE_EVICTED,
             SKIP_NOTE_OUTSIDE_WINDOW,
             DIFF_STATE_PENDING,
+            DIFF_STATE_INDEXED,
             cutoff
         ],
     )? as u64;
@@ -2078,6 +2083,44 @@ b
             (DIFF_STATE_EVICTED, Some(SKIP_NOTE_OVER_BUDGET.to_string())),
             "a size eviction is not the window's to undo"
         );
+    }
+
+    /// A binary-only commit is indexed without a hunk; once it ages out it
+    /// is marked outside the window like the others, so the coverage date
+    /// moves with the window.
+    #[test]
+    fn apply_window_ages_out_an_indexed_commit_without_hunks() {
+        let dir = init_repo();
+        let root = dir.path();
+        let t = 1_700_000_000;
+        let binary = commit_at(root, &[("logo.bin", b"\x00\x01binary\x00")], "logo", t - 1);
+        let text = commit_at(root, &[("a.txt", b"words\n")], "text", t);
+        let mut store = FactsStore::open(root).unwrap();
+        ingest_with(&mut store, no_limits());
+        assert_eq!(state_of(&store, &binary), (DIFF_STATE_INDEXED, None));
+        assert_eq!(hunks_for(&store, &binary), 0);
+        let limits = HistoryLimits {
+            window_days: Some(1),
+            ..no_limits()
+        };
+        assert_eq!(apply_window(&mut store, &limits, t + 86_400).unwrap(), 1);
+        assert_eq!(
+            state_of(&store, &binary),
+            (
+                DIFF_STATE_EVICTED,
+                Some(SKIP_NOTE_OUTSIDE_WINDOW.to_string())
+            )
+        );
+        assert_eq!(state_of(&store, &text), (DIFF_STATE_INDEXED, None));
+        let text_at: String = store
+            .conn()
+            .query_row(
+                "SELECT committed_at FROM commits WHERE oid = ?1",
+                [&text],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(store.index_state().diff_coverage_since, Some(text_at));
     }
 
     /// Pending commits before the cutoff are marked, the one at it is not.
