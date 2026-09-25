@@ -7,20 +7,28 @@ description: "Every number on the home page, with its method, its sample size an
 
 Every number below links to its method and raw data in the repository, with the scripts to re-run it on your own code. Losses sit next to wins.
 
-<!-- Each command in this box was run on a fresh clone of a third-party repository (psf/requests) with pixel 0.5.0 before it was written here; re-run them when an output or a prerequisite changes. -->
+<!-- Each command in this box was run on a fresh clone of a third-party repository (psf/requests) before it was written here: `pixel audit` at requests 611c616 with a build of #290 (b4187fc), the others with pixel 0.5.0. Re-run them when an output or a prerequisite changes. -->
 <aside class="measure" aria-labelledby="measure-it-on-your-own-code">
 
 ## Measure it on your own code
 
-Three checks, quickest first. Each needs `pixel` on your PATH ([install](../docs/#install)); the first two run inside a Git repository of yours, where the first Pixel command builds its index in `.pixel/` and adds that folder to `.gitignore`.
+Four checks, quickest first. Each needs `pixel` on your PATH ([install](../docs/#install)); the first three run inside a Git repository of yours, where the first Pixel command builds its index in `.pixel/` and adds that folder to `.gitignore`.
 
-**One large file, now.** `pixel list-signatures` prints the file's outline, then a report on stderr that compares it with reading the whole file, counted as below (bytes divided by four, rounded down):
+**Your largest files, now.** `pixel audit` compares each of the twenty largest source files the index holds with its outline, one row per file, then prints the total, the median file and the coverage per language, counted as below (bytes divided by four, rounded down):
+
+```bash
+pixel audit
+```
+
+On Requests (commit `611c616`), a first run on a fresh clone built the graph and read 95,693 tokens for the twenty files whole against 11,447 for their outlines (−88%): 89% saved on the median file, from 61% to 98%. It left `docs/conf.py` out, a Sphinx configuration with no function or class to outline, rather than count an empty outline as a saving. `--top N` measures more files and `--json` prints every count; nothing leaves your machine.
+
+**One large file, the same count.** `pixel list-signatures` prints the file's outline, then a report on stderr that compares it with reading the whole file, counted as below (bytes divided by four, rounded down):
 
 ```bash
 pixel list-signatures path/to/a/large/file.py
 ```
 
-On Requests' `src/requests/models.py` (1,184 lines) the report's last row read `full read 10365 tok, pixel answer 641 tok (-94%)`, in well under a second. The two counts are `wc -c` of the file and of the outline, divided by four; the report itself is left out of them.
+On Requests' `src/requests/models.py` (1,184 lines) the report's last row read `full read 10365 tok, pixel answer 641 tok (-94%)`, in well under a second: the same two counts as that file's row in `pixel audit`. The two counts are `wc -c` of the file and of the outline, divided by four; the report itself is left out of them.
 
 **Your agent's sessions, after a few days.** `pixel token-savings` reads the local action log (`.pixel/actions.jsonl`) and reports what Pixel's answers spared, each part labelled `measured` or `estimated`:
 
