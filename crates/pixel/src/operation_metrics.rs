@@ -1,5 +1,6 @@
 //! CLI measurement adapter for pixel-actionlog. No descriptor redirection,
-//! comparison subprocesses, source reads, or changes to terminal detection.
+//! comparison subprocesses, source reads, or changes to terminal detection;
+//! the one file a whole-file reader stands in for is measured by `stat`.
 use pixel_actionlog::{ComparisonGap, WorkflowEvidence};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -196,6 +197,39 @@ pub fn evidence(command: &str, succeeded: bool) -> Result<WorkflowEvidence, Comp
     if let Some(gap) = e.gap {
         return Err(gap);
     }
+    Ok(workflow_evidence(command, commands, e))
+}
+
+/// Commands whose native equivalent is reading one whole file, no command.
+const WHOLE_FILE_READERS: &[&str] = &["list-signatures"];
+
+/// The size of the one file a whole-file reader stood in for, from its metadata.
+///
+/// `None` when the command is not a whole-file reader, when its answer named
+/// no file or several, or when the file cannot be measured: the caller then
+/// keeps the policy estimate. A `stat`, never a read of the source.
+fn whole_file_bytes(command: &str, files: &HashSet<PathBuf>) -> Option<u64> {
+    if !WHOLE_FILE_READERS.contains(&command) || files.len() != 1 {
+        return None;
+    }
+    let file = files.iter().next()?;
+    std::fs::metadata(file)
+        .ok()
+        .filter(std::fs::Metadata::is_file)
+        .map(|meta| meta.len())
+}
+
+/// The baseline of one successful invocation from what its answer returned.
+fn workflow_evidence(command: &str, commands: u64, e: &Evidence) -> WorkflowEvidence {
+    if let Some(bytes) = whole_file_bytes(command, &e.files) {
+        return WorkflowEvidence {
+            distinct_files: 1,
+            relationships: 0,
+            native_commands: 0,
+            known_file_bytes: Some(bytes),
+            partial: e.partial,
+        };
+    }
     let reads_evidence = matches!(
         command,
         "search-content"
@@ -214,7 +248,7 @@ pub fn evidence(command: &str, succeeded: bool) -> Result<WorkflowEvidence, Comp
             | "list-areas"
             | "list-flows"
     );
-    Ok(WorkflowEvidence {
+    WorkflowEvidence {
         distinct_files: if reads_evidence {
             e.files.len() as u64
         } else {
@@ -228,7 +262,7 @@ pub fn evidence(command: &str, succeeded: bool) -> Result<WorkflowEvidence, Comp
         native_commands: commands,
         known_file_bytes: None,
         partial: e.partial,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -314,6 +348,78 @@ mod tests {
         assert_eq!(native_commands("push"), Some(1));
         assert_eq!(native_commands("status"), None);
         assert_eq!(native_commands("task-state"), None);
+    }
+
+    /// A scratch directory holding one file of `len` bytes, unique per test.
+    fn scratch_file(name: &str, len: usize) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-operation-metrics-{name}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("big.py");
+        std::fs::write(&file, "x".repeat(len)).unwrap();
+        (dir, file)
+    }
+
+    /// `list-signatures` stands in for reading the file it lists, so its
+    /// baseline is that file's measured size; every other shape (another
+    /// command, no file, two files, a directory, a missing path) keeps the
+    /// policy estimate instead of inventing a size.
+    #[test]
+    fn only_a_whole_file_reader_naming_one_real_file_is_measured() {
+        let (dir, file) = scratch_file("measured", 41);
+        let one = HashSet::from([file.clone()]);
+        assert_eq!(whole_file_bytes("list-signatures", &one), Some(41));
+        assert_eq!(whole_file_bytes("find-code", &one), None);
+        assert_eq!(whole_file_bytes("list-signatures", &HashSet::new()), None);
+        let two = HashSet::from([file, dir.join("other.py")]);
+        assert_eq!(whole_file_bytes("list-signatures", &two), None);
+        assert_eq!(
+            whole_file_bytes("list-signatures", &HashSet::from([dir.clone()])),
+            None
+        );
+        assert_eq!(
+            whole_file_bytes("list-signatures", &HashSet::from([dir.join("gone.py")])),
+            None
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The measured baseline replaces the policy: no assumed native command
+    /// and no relationship on top of the file, so the live line can state it
+    /// as a full read. Another command keeps the policy fields unchanged.
+    #[test]
+    fn a_measured_read_carries_the_file_size_and_no_assumed_command() {
+        let (dir, file) = scratch_file("evidence", 41);
+        let e = Evidence {
+            root: dir.clone(),
+            files: HashSet::from([file]),
+            relationships: HashSet::from(["callers:x".to_owned()]),
+            partial: true,
+            gap: None,
+        };
+        assert_eq!(
+            workflow_evidence("list-signatures", 1, &e),
+            WorkflowEvidence {
+                distinct_files: 1,
+                relationships: 0,
+                native_commands: 0,
+                known_file_bytes: Some(41),
+                partial: true,
+            }
+        );
+        assert_eq!(
+            workflow_evidence("find-code", 1, &e),
+            WorkflowEvidence {
+                distinct_files: 1,
+                relationships: 1,
+                native_commands: 1,
+                known_file_bytes: None,
+                partial: true,
+            }
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn nested_value(depth: usize) -> serde_json::Value {

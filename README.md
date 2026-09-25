@@ -35,6 +35,7 @@
 brew install LivioGama/tap/pixel
 pixel install      # once: wires Claude Code, Codex, Pi, OpenCode and Antigravity
 pixel doctor .     # optional health check
+pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
 
 Other channels, per-agent plugins and manual setup are in the [docs](https://liviogama.github.io/pixel/docs/).

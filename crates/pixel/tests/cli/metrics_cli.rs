@@ -770,13 +770,13 @@ fn legacy_savings_and_error_details_survive_with_workflow_summary() {
     assert_eq!(data["overall_savings"], 0.75);
     assert_eq!(data["workflow_metrics"]["legacy_records"], 1);
     assert!(
-        data["workflow_metrics"]["versions"]["workflow-v1"]["complete"]["operations"]
+        data["workflow_metrics"]["versions"]["workflow-v2"]["complete"]["operations"]
             .as_u64()
             .unwrap()
             >= 1
     );
     assert!(
-        data["workflow_metrics"]["versions"]["workflow-v1"]["unavailable"]["operations"]
+        data["workflow_metrics"]["versions"]["workflow-v2"]["unavailable"]["operations"]
             .as_u64()
             .unwrap()
             >= 1
@@ -1310,4 +1310,55 @@ fn push_baseline_replaces_git_push_and_states_the_single_step_time_gap() {
     assert_eq!(event["metrics"]["native_workflow_bytes"], 1024);
     assert_eq!(event["metrics"]["time_estimate"]["sequential_steps"], 1);
     assert!(event["metrics"]["comparison_gap"].is_null());
+}
+
+/// The first result a new user sees: `pixel list-signatures` on a large file
+/// states the whole-file read and its own answer, both as UTF-8 bytes / 4
+/// floored (the rule of `scripts/bench-read-savings.sh`), so `wc -c` on the
+/// file and on stdout re-derives the line. Under `workflow-v1` the baseline
+/// was a 4 KiB guess plus 1 KiB for an assumed command, whatever the file's
+/// size: a 20 KB file read as "47% saved" when the answer was 94% smaller.
+#[test]
+fn list_signatures_compares_the_measured_file_with_its_stdout_answer() {
+    let fixture = Fixture::new();
+    let body = (0..120)
+        .map(|n| {
+            format!(
+                "pub fn step_{n}(input: &str) -> usize {{\n{}    input.trim().len() + {n}\n}}\n\n",
+                "    let _ = input.split_whitespace().count();\n".repeat(8)
+            )
+        })
+        .collect::<String>();
+    fs::write(fixture.0.join("src/big.rs"), &body).unwrap();
+    let output = fixture.run(&["list-signatures", "src/big.rs"]);
+    assert_success(&output);
+    let file_bytes = body.len() as u64;
+    let answer_bytes = output.stdout.len() as u64;
+    assert!(
+        answer_bytes * 4 < file_bytes,
+        "the fixture must be large enough to show a saving: {answer_bytes} of {file_bytes}"
+    );
+    let (full_tok, answer_tok) = (file_bytes / 4, answer_bytes / 4);
+    let pct = (100.0 * (1.0 - answer_tok as f64 / full_tok as f64)).round() as i64;
+    let block = &metric_lines(&output)[0];
+    assert!(
+        block.contains(&format!(
+            "  ├─ § full read {full_tok} tok, pixel answer {answer_tok} tok (-{pct}%)\n"
+        )),
+        "{block}"
+    );
+    assert!(!block.contains("estimated LLM context saved"), "{block}");
+    // One read against one call: no round trip is saved, and the line says so.
+    assert!(
+        block.contains("├─ ⏱ no estimated time saving (baseline has no saved round trip)"),
+        "{block}"
+    );
+    let event = fixture.events("list-signatures").pop().unwrap();
+    let metrics = &event["metrics"];
+    assert_eq!(metrics["estimator_version"], "workflow-v2");
+    assert_eq!(metrics["evidence"]["known_file_bytes"], file_bytes);
+    assert_eq!(metrics["evidence"]["native_commands"], 0);
+    assert_eq!(metrics["evidence"]["relationships"], 0);
+    assert_eq!(metrics["native_workflow_bytes"], file_bytes);
+    assert_eq!(metrics["answer_bytes"], answer_bytes);
 }
