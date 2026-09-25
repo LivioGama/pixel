@@ -55,7 +55,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   the rows where the other tool wins; Teams gives each role (developer, lead,
   harness engineer, CTO) three proofs, each a number or a command that
   exists. Change a figure on the benchmarks page first, then here, then in
-  `static/llms.txt`, whose "Evaluating Pixel against alternatives" section
+  the repository README's "Why" list and `static/llms.txt`, whose "Evaluating Pixel against alternatives" section
   gives the same results to an assistant comparing tools for its user.
 - The "Fair questions" block in `layouts/index.html` restates facts from
   `SECURITY.md`, `docs/bench/measured-performance.md` and the graph's
