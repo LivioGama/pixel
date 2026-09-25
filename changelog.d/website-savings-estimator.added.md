@@ -1,1 +1,0 @@
-**docs:** The website gains a `/savings/` estimate: a team's large-file reads times the saving measured on the well-known files, as a range around the median labelled an estimate, with the math, a share link and a README badge, computed in the page. `/benchmarks/` now opens on the commands to measure Pixel on your own code.
