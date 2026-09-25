@@ -13,6 +13,13 @@ GitHub Pages on the apex and a `CNAME` for `www`, all "DNS only", since a
 proxied record keeps GitHub from issuing the certificate. GitHub redirects
 the old `liviogama.github.io/pixel/` paths to the domain.
 
+Visits are counted by Cloudflare Web Analytics, with no cookie and no
+personal data: `cf_analytics_token` in `hugo.toml` (the site's token from
+the Cloudflare dashboard, public by design) turns on the beacon in
+production builds and a footer line saying what the site counts and that
+the binary measures nothing. An empty token removes both. The records are
+"DNS only", so the beacon script is the only way Cloudflare sees a visit.
+
 ## Run it locally
 
 ```bash

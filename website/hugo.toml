@@ -12,6 +12,10 @@ disableKinds = ["taxonomy", "term", "RSS"]
 description = "A local code index for AI coding agents. Your agent queries Pixel instead of reading files: 95% fewer tokens to learn what a large file contains."
 github_url = "https://github.com/LivioGama/pixel"
 repo = "LivioGama/pixel"
+# Cloudflare Web Analytics site token (Cloudflare dashboard, Web Analytics,
+# pixel-cli.dev). Public by design: it ships in every page. Empty means no
+# beacon and no analytics line in the footer.
+cf_analytics_token = ""
 
 [markup.goldmark.renderer]
 unsafe = true

@@ -21,8 +21,15 @@
       <li><a href="{{ .Site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a></li>
     </ul>
     <p class="footer__license">MIT licensed. Runs on your machine; nothing leaves it.</p>
+    {{- with site.Params.cf_analytics_token }}
+    {{/* The site and the binary are two things: the site counts visits, without cookies or personal data; the binary still measures nothing. */}}
+    <p class="footer__license">This site counts visits with Cloudflare Web Analytics: no cookies, no personal data. The <code>pixel</code> binary measures nothing.</p>
+    {{- end }}
   </div>
 </footer>
+{{- with site.Params.cf_analytics_token }}{{ if hugo.IsProduction }}
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "{{ . }}"}'></script>
+{{- end }}{{ end }}
 <script>
   /* GitHub star count in the nav, behind a star icon: shown only once the API answers. */
   (function () {
