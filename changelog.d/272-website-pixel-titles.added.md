@@ -1,1 +1,1 @@
-**docs:** The website's section titles now assemble out of pixels the first time they scroll into view, and their green words light up last, like a LED sign; reduced motion keeps them static. ([#272](https://github.com/LivioGama/pixel/pull/272))
+**docs:** The website's section titles now assemble out of pixels the first time they scroll into view, each with its keyword in green that lights up last, like a LED sign; reduced motion keeps them static. ([#272](https://github.com/LivioGama/pixel/pull/272))
