@@ -69,8 +69,9 @@ enum LeftOut {
     /// Its bytes differ from the ones the graph indexed (or it is gone):
     /// the stored outline describes other contents.
     Stale,
-    /// The graph holds no signature for it: the grammar did not outline it,
-    /// so a saving would measure a parse failure, not an outline.
+    /// The graph holds no signature for it: it defines nothing to outline
+    /// (a module of assignments such as a Sphinx `conf.py`), or its grammar
+    /// did not parse it. Either way a saving would measure an empty outline.
     NoSignatures,
 }
 
@@ -247,7 +248,7 @@ fn render_human(
     }
     if !report.no_signatures.is_empty() {
         out.push_str(&format!(
-            "left out: {} with no signatures (the grammar did not outline them): {}\n",
+            "left out: {} with no signature to outline (no definitions, or a grammar that missed them): {}\n",
             report.no_signatures.len(),
             report.no_signatures.join(", ")
         ));
@@ -571,7 +572,7 @@ mod tests {
         assert_eq!(report.stale, ["src/big.rs"], "a deleted file is stale too");
     }
 
-    /// Rows with no signature would measure a parse failure as a saving:
+    /// Rows with no signature would count an empty outline as a saving:
     /// they are named, never measured. A non-code row (a concept file) is
     /// no candidate at all, however large.
     #[test]
@@ -625,7 +626,7 @@ mod tests {
             "total, 3 files: full read 1600 tok, pixel answer 300 tok (-81%)",
             "per file: median 80% saved, from 0% to 90%",
             "left out: 1 changed since indexing (`pixel prepare-repo .` refreshes them)",
-            "left out: 2 with no signatures (the grammar did not outline them): src/gen.rs, src/raw.rs",
+            "left out: 2 with no signature to outline (no definitions, or a grammar that missed them): src/gen.rs, src/raw.rs",
             "indexed: rust 3/4 (75.0%)",
         ] {
             assert!(
