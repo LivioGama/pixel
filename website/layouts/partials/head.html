@@ -1,4 +1,6 @@
 {{ $desc := .Description | default .Site.Params.description }}
+{{/* "Pixel" alone names Google's phone first: every title says what this Pixel is. */}}
+{{ $title := cond .IsHome "Pixel: a local code index for coding agents" (printf "%s | Pixel code index" .Title) }}
 <meta charset="utf-8">
 {{/* .js gates the scroll reveals: without it every block renders at rest. */}}
 <script>document.documentElement.className += " js";</script>
@@ -7,23 +9,32 @@
 <script>(function () { try { if (!matchMedia("(prefers-reduced-motion: reduce)").matches && !sessionStorage.getItem("pixel:splash")) document.documentElement.className += " splash"; } catch (_) {} })();</script>
 {{- end }}
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ if .IsHome }}Pixel: a local code index for coding agents{{ else }}{{ .Title }} | Pixel{{ end }}</title>
+<title>{{ $title }}</title>
 <meta name="description" content="{{ $desc }}">
-<meta property="og:title" content="{{ if .IsHome }}Pixel: a local code index for coding agents{{ else }}{{ .Title }} | Pixel{{ end }}">
+<meta property="og:title" content="{{ $title }}">
 <meta property="og:description" content="{{ $desc }}">
 <meta property="og:type" content="website">
 <meta property="og:url" content="{{ .Permalink }}">
-{{/* The agent demo's poster: 1600x1000, the finished state of the recording. */}}
-<meta property="og:image" content="{{ "examples/pixel-agent-demo.jpg" | absURL }}">
-<meta property="og:image:width" content="1600">
-<meta property="og:image:height" content="1000">
-<meta property="og:image:alt" content="Claude Code on the same task, with and without Pixel: faster, and fewer tokens.">
+{{/* The share card, 1200x630 (the 1.91:1 X, LinkedIn and Slack draw): og/render.sh renders it from data/read_savings.toml. Its alt restates the same row. */}}
+{{ $big := partial "wall-row.html" . }}
+{{ $alt := printf "The token wall: %s tokens to read %s %s, %s through Pixel, %v%% fewer." (lang.FormatNumberCustom 0 $big.full) $big.owner (path.Base $big.path) (lang.FormatNumberCustom 0 $big.pixel) (math.Floor $big.saved) }}
+<meta property="og:image" content="{{ "og.png" | absURL }}">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="{{ $alt }}">
+<meta property="og:site_name" content="Pixel">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{ $title }}">
+<meta name="twitter:description" content="{{ $desc }}">
+<meta name="twitter:image" content="{{ "og.png" | absURL }}">
+<meta name="twitter:image:alt" content="{{ $alt }}">
 <link rel="canonical" href="{{ .Permalink }}">
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#0b1f17">
 <link rel="icon" type="image/svg+xml" href="{{ "favicon.svg" | relURL }}">
 <link rel="alternate" type="text/plain" title="llms.txt" href="{{ "llms.txt" | absURL }}">
+<link rel="alternate" type="application/atom+xml" title="Pixel releases" href="{{ .Site.Params.github_url }}/releases.atom">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 {{/* Only the axes the stylesheet uses: Archivo 400 to 700 (no width axis), Handjet at 700 with ELSH 0 to 2 (the hero animates it). The full ranges cost 120 KB of CSS alone. */}}
@@ -32,18 +43,66 @@
 {{ if hugo.IsProduction }}{{ $css = $css | minify | fingerprint }}{{ end }}
 <link rel="stylesheet" href="{{ $css.RelPermalink }}"{{ if hugo.IsProduction }} integrity="{{ $css.Data.Integrity }}"{{ end }}>
 {{ if .IsHome }}
+{{/* One @graph: the site, the application, its source code, and the FAQ the
+     "Fair questions" chapter shows (data/objections.toml, rendered by the
+     same partial, so the markup never says something the page does not).
+     softwareVersion is the CLI crate's version (hugo.toml mounts its
+     Cargo.toml as data). */}}
+{{ $home := .Permalink }}
+{{ $app := printf "%s#software" $home }}
+{{ $faq := slice }}
+{{ range partial "objections.html" (dict "abs" true) }}
+  {{ $faq = $faq | append (dict "@type" "Question" "name" .question "acceptedAnswer" (dict "@type" "Answer" "text" .answer)) }}
+{{ end }}
+{{ $graph := slice
+  (dict
+    "@type" "WebSite"
+    "@id" (printf "%s#website" $home)
+    "url" $home
+    "name" "Pixel"
+    "description" $desc
+    "inLanguage" site.Language.Locale
+    "about" (dict "@id" $app))
+  (dict
+    "@type" "SoftwareApplication"
+    "@id" $app
+    "name" "Pixel"
+    "alternateName" (slice "pixel CLI" "Pixel code index")
+    "disambiguatingDescription" "Command-line code index for AI coding agents. Not affiliated with Google Pixel."
+    "applicationCategory" "DeveloperApplication"
+    "operatingSystem" "macOS, Linux"
+    "softwareVersion" hugo.Data.cli.package.version
+    "description" $desc
+    "url" $home
+    "installUrl" (printf "%s#install" $home)
+    "downloadUrl" (printf "%s/releases/latest" site.Params.github_url)
+    "license" "https://opensource.org/licenses/MIT"
+    "isAccessibleForFree" true
+    "featureList" (slice
+      "Text index of every file Git does not ignore, and a code graph of symbols, imports and calls parsed with tree-sitter"
+      "Local daemon that keeps the index warm and follows your edits"
+      "Answers fitted to a token budget, with a marker saying whether they are complete"
+      "Call graph, blast radius and Git history search from the shell"
+      "Wired into Claude Code, Codex, Cursor and other agents by pixel install: a CLI plus hooks, not an MCP server"
+      "No telemetry: the index stays in .pixel/ on your machine")
+    "sameAs" (slice site.Params.github_url "https://github.com/LivioGama/homebrew-tap/blob/main/Formula/pixel.rb")
+    "offers" (dict "@type" "Offer" "price" "0" "priceCurrency" "USD"))
+  (dict
+    "@type" "SoftwareSourceCode"
+    "@id" (printf "%s#source" $home)
+    "name" "pixel"
+    "codeRepository" site.Params.github_url
+    "programmingLanguage" "Rust"
+    "license" "https://opensource.org/licenses/MIT"
+    "targetProduct" (dict "@id" $app))
+  (dict
+    "@type" "FAQPage"
+    "@id" (printf "%s#faq" $home)
+    "url" (printf "%s#faq" $home)
+    "isPartOf" (dict "@id" (printf "%s#website" $home))
+    "mainEntity" $faq)
+}}
 <script type="application/ld+json">
-{{ dict
-  "@context" "https://schema.org"
-  "@type" "SoftwareApplication"
-  "name" "Pixel"
-  "applicationCategory" "DeveloperApplication"
-  "operatingSystem" "macOS, Linux"
-  "description" $desc
-  "url" .Permalink
-  "license" "https://opensource.org/licenses/MIT"
-  "codeRepository" .Site.Params.github_url
-  "offers" (dict "@type" "Offer" "price" "0" "priceCurrency" "USD")
-| jsonify | safeJS }}
+{{ dict "@context" "https://schema.org" "@graph" $graph | jsonify | safeJS }}
 </script>
 {{ end }}

@@ -74,14 +74,19 @@ main, .footer { position: relative; z-index: 1; }
 
 /* ---------- scroll reveals ----------
    Opt-in through data-reveal (layouts/index.html), and only when the
-   script is running and motion is welcome. A block rises 14px and fades
-   in once; a staggered list does it child by child (delays set inline). */
+   script is running and motion is welcome. Every block renders at rest
+   until the visitor first scrolls: only then does the script hide the
+   blocks still below the fold (.is-primed), so a full-page capture, a link
+   preview or a crawler that never scrolls sees the whole page. A primed
+   block rises 14px and fades in once; a staggered list does it child by
+   child (delays set inline). Priming is instant (the transition lives on
+   .is-shown), and it only ever happens off screen. */
 @media (prefers-reduced-motion: no-preference) {
-  .js [data-reveal]:not(.is-shown) { opacity: 0; transform: translateY(14px); }
-  .js [data-reveal] { transition: opacity 0.55s ease-out, transform 0.55s cubic-bezier(0.2, 0.7, 0.2, 1); }
+  .js [data-reveal].is-primed:not(.is-shown) { opacity: 0; transform: translateY(14px); }
+  .js [data-reveal].is-shown { transition: opacity 0.55s ease-out, transform 0.55s cubic-bezier(0.2, 0.7, 0.2, 1); }
   .js [data-reveal="stagger"] { opacity: 1; transform: none; transition: none; }
-  .js [data-reveal="stagger"] > * { transition: opacity 0.5s ease-out, transform 0.5s cubic-bezier(0.2, 0.7, 0.2, 1); }
-  .js [data-reveal="stagger"]:not(.is-shown) > * { opacity: 0; transform: translateY(14px); }
+  .js [data-reveal="stagger"].is-shown > * { transition: opacity 0.5s ease-out, transform 0.5s cubic-bezier(0.2, 0.7, 0.2, 1); }
+  .js [data-reveal="stagger"].is-primed:not(.is-shown) > * { opacity: 0; transform: translateY(14px); }
 }
 
 /* ---------- assembling titles ----------
@@ -274,10 +279,10 @@ main h2 { position: relative; }
 .numbers__meter b { aspect-ratio: 1; border-radius: 1px; box-shadow: inset 0 0 0 1px var(--cell); }
 .numbers__meter b.on { background: var(--cell-edge); box-shadow: none; }
 .numbers__meter .is-pixel b.on { background: var(--green); box-shadow: 0 0 5px rgba(34, 197, 94, 0.55); }
-/* Unlit until the panel counts up (layouts/index.html sets .is-counted and a delay per square). */
+/* Unlit until the panel counts up (layouts/index.html sets .is-primed once it will count, then .is-counted and a delay per square). */
 @media (prefers-reduced-motion: no-preference) {
   .numbers__meter b { transition: background-color 0.22s ease-out, box-shadow 0.22s ease-out; }
-  .js .numbers__list:not(.is-counted) .numbers__meter b.on { background: transparent; box-shadow: inset 0 0 0 1px var(--cell); }
+  .js .numbers__list.is-primed:not(.is-counted) .numbers__meter b.on { background: transparent; box-shadow: inset 0 0 0 1px var(--cell); }
 }
 .numbers__meter em { font: 400 0.68rem/1 var(--mono); font-style: normal; color: var(--ink-soft); white-space: nowrap; }
 .numbers__meter em:nth-of-type(2) { color: var(--green-hi); }
@@ -585,6 +590,7 @@ main { counter-reset: chapter; }
 #install .badges li::before { display: none; }
 #install .badges .px-icon { color: var(--green-hi); }
 .install__more { margin: 16px 0 0; color: var(--ink-soft); font-size: 0.95rem; }
+.install__ask { margin-top: 6px; }
 .badges a { color: inherit; text-decoration: underline; text-decoration-color: var(--green-dim); text-underline-offset: 3px; }
 .hero__lede strong { color: var(--ink); font-weight: 650; }
 
@@ -633,6 +639,7 @@ main { counter-reset: chapter; }
 .docs__head { padding-block: clamp(40px, 7vh, 80px) 8px; }
 .docs__head h1 { font: 700 clamp(3.2rem, 7vw, 6rem)/0.9 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; }
 .docs__lede { color: var(--ink-soft); font-size: 1.15rem; max-width: 38em; margin: 18px 0 0; }
+.docs__updated { color: var(--ink-soft); font: 400 0.8rem/1.4 var(--mono); margin: 12px 0 0; }
 .docs__layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: clamp(28px, 5vw, 72px); padding-block: 40px 96px; }
 .docs__toc { position: sticky; top: calc(var(--nav-h) + 24px); align-self: start; font-size: 0.93rem; }
 .docs__toc ul { list-style: none; margin: 0; padding: 0; }

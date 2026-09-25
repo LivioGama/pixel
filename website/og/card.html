@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<!-- The share card (static/og.png), 1200x630. Not part of the site: render.sh
+     fills DATA from data/read_savings.toml (the row marked `wall`), opens
+     this page at exactly 1200x630 and screenshots it. The colours and faces
+     are the site's (assets/css/main.css): coral is the tokens a full read
+     wastes, green what Pixel hands back. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pixel share card</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400..700&family=Handjet:ELGR,ELSH,wght@1..2,0..2,700&family=IBM+Plex+Mono:wght@400;500;600&display=block">
+<style>
+  :root {
+    --ground: #0b1f17; --panel: #133426; --ink: #ecf7ef; --ink-soft: #93b3a0;
+    --line: #1f4535; --green: #22c55e; --green-hi: #4ade80; --coral: #f0775a; --on-green: #04210e;
+    --display: "Handjet", "Archivo", sans-serif; --sans: "Archivo", sans-serif; --mono: "IBM Plex Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1200px; height: 630px; overflow: hidden; }
+  body {
+    background: radial-gradient(ellipse at 78% 50%, #10301f 0%, var(--ground) 62%); color: var(--ink);
+    font: 400 20px/1.4 var(--sans); -webkit-font-smoothing: antialiased;
+    display: grid; grid-template-columns: 1fr 520px; gap: 40px; padding: 58px 64px;
+  }
+  .copy { display: flex; flex-direction: column; min-width: 0; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand i { width: 22px; height: 22px; border-radius: 4px; background: var(--green); box-shadow: inset 0 0 0 2px #16a34a; }
+  .brand b { font: 700 44px/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; }
+  .brand span { margin-left: 8px; font: 500 15px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
+  h1 { margin: 44px 0 0; font: 700 84px/0.92 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; }
+  .glow { color: var(--green-hi); text-shadow: 0 0 18px rgba(74, 222, 128, 0.5), 0 0 48px rgba(34, 197, 94, 0.28); }
+  .count { margin: 34px 0 0; display: flex; align-items: center; gap: 14px; white-space: nowrap; font: 700 64px/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; font-variant-numeric: tabular-nums; }
+  .count s { color: var(--coral); text-decoration: none; opacity: 0.85; }
+  .count em { font-style: normal; color: var(--green-hi); }
+  .count small { font: 600 24px/1 var(--mono); padding: 8px 12px; border-radius: 4px; color: var(--on-green); background: var(--green); }
+  .what { margin: 12px 0 0; color: var(--ink-soft); font-size: 20px; }
+  .cmd { margin-top: auto; align-self: flex-start; background: var(--panel); border-radius: 4px; padding: 13px 20px; font: 500 21px/1 var(--mono); }
+  .cmd span { color: var(--green-hi); margin-right: 12px; }
+  .wall { align-self: center; display: grid; grid-template-columns: repeat(50, 1fr); gap: 2px; position: relative; }
+  .wall span { aspect-ratio: 1; border-radius: 1px; background: var(--coral); opacity: 0.09; }
+  .wall .kept { background: var(--green); opacity: 1; box-shadow: 0 0 10px rgba(34, 197, 94, 0.55); }
+</style>
+</head>
+<body>
+  <div class="copy">
+    <p class="brand" style="margin:0"><i></i><b>pixel</b><span>local code index for coding agents</span></p>
+    <h1>Read less.<br><span class="glow">Ship more.</span></h1>
+    <p class="count"><s data-full></s><span>&rarr;</span><em data-pixel></em><small data-saved></small></p>
+    <p class="what" data-what></p>
+    <p class="cmd"><span>$</span>brew install LivioGama/tap/pixel</p>
+  </div>
+  <div class="wall" data-wall></div>
+<script>
+  /*DATA*/
+  (function () {
+    var d = window.DATA;
+    var fmt = function (v) { return v.toLocaleString('en-US'); };
+    document.querySelector('[data-full]').textContent = fmt(d.full);
+    document.querySelector('[data-pixel]').textContent = fmt(d.pixel);
+    // Floored, as the home page's wall and its stats round it.
+    document.querySelector('[data-saved]').textContent = '−' + Math.floor(d.saved) + '%';
+    document.querySelector('[data-what]').textContent = 'tokens to learn what ' + d.owner + ' ' + d.file + ' contains: the whole file, or Pixel’s answer.';
+
+    // The wall's final state: one square per 25 tokens of the full read, 50
+    // to a row as on a wide screen, and the survivors gathered into a P of
+    // exactly as many squares. The P is the one layouts/index.html builds
+    // (the same search over bowl outlines and stem lengths), so the card
+    // matches what a visitor sees once the wall has burnt.
+    var per = 25, cols = 50;
+    var n = Math.round(d.full / per), k = Math.round(d.pixel / per);
+    var rows = Math.ceil(n / cols);
+    var outline = function (t, w, b, notch, x, y) {
+      return (x < t || y < t || y >= b - t || x >= w - t) && !(notch && x === w - 1 && (y === 0 || y === b - 1));
+    };
+    var best = null, near = null;
+    for (var t = 2; t <= 4; t++) for (var w = 3 * t; w <= 6 * t; w++) for (var b = 2 * t + 1; b <= 2 * t + 9; b++) {
+      [true, false].forEach(function (notch) {
+        var pts = [];
+        for (var y = 0; y < b; y++) for (var x = 0; x < w; x++) if (outline(t, w, b, notch, x, y)) pts.push([x, y]);
+        var rest = k - pts.length;
+        if (rest <= 0) return;
+        var len = Math.ceil(rest / t), h = b + len;
+        if (h > rows || w > cols || len < 0.6 * b || len > 1.2 * b) return;
+        for (var yy = b; yy < h; yy++) for (var xx = 0; xx < t; xx++) pts.push([xx, yy]);
+        var score = Math.abs(h / w - 1.6) + (t === 3 ? 0 : 0.2) + (notch ? 0 : 0.05);
+        var cand = { pts: pts.slice(0, k), w: w, h: h, score: score };
+        if (rest % t === 0) { if (!best || score < best.score) best = cand; }
+        else if (!near || score < near.score) near = cand;
+      });
+    }
+    var shape = best || near;
+    var c0 = Math.floor((cols - shape.w) / 2), r0 = Math.floor((rows - shape.h) / 2);
+    var on = {};
+    shape.pts.forEach(function (p) { on[(r0 + p[1]) * cols + c0 + p[0]] = true; });
+    var wall = document.querySelector('[data-wall]');
+    for (var i = 0; i < n; i++) {
+      var c = document.createElement('span');
+      if (on[i]) c.className = 'kept';
+      wall.appendChild(c);
+    }
+    document.fonts.ready.then(function () { document.body.setAttribute('data-ready', ''); });
+  })();
+</script>
+</body>
+</html>

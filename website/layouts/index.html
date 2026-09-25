@@ -10,13 +10,11 @@
   {{ $s := hugo.Data.scope }}
   {{/* The token wall's file and the spread its caption quotes: data/read_savings.toml, the well-known files scripts/bench-read-savings.sh measures. */}}
   {{ $reads := hugo.Data.read_savings.row }}
-  {{ $big := index (where $reads "wall" true) 0 }}
+  {{ $big := partial "wall-row.html" . }}
   {{ $kept := sort (apply (where $reads "status" "kept") "index" "." "saved") }}
   {{ $mid := div (len $kept) 2 }}
   {{ $median := cond (modBool (len $kept) 2) (div (add (index $kept (sub $mid 1)) (index $kept $mid)) 2.0) (index $kept $mid) }}
   {{ $bench := "benchmarks/" | relURL }}
-  {{/* The code graph's grammars: crates/pixel-graph/src/extract.rs. The last five use the generic extractor. */}}
-  {{ $langs := slice "TypeScript" "JavaScript" "Rust" "Go" "Java" "Python" "C#" "Ruby" "PHP" "C" "Swift" "Elixir" "Lua" }}
   {{/* The supported agents, shown by the hero's line and the Compatibility grid. Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
   {{ $agents := slice
     (dict "name" "Claude Code" "logo" "claude") (dict "name" "Codex" "logo" "codex")
@@ -363,35 +361,13 @@
         <h2 id="faq-title"><span class="glow">Fair</span> questions.</h2>
       </header>
       <div class="faq" data-reveal="stagger">
+        {{/* data/objections.toml, through partials/objections.html: the home's FAQPage (partials/head.html) reads the same list. */}}
+        {{ range partial "objections.html" (dict "abs" false) }}
         <details>
-          <summary>Will my agent actually use it?</summary>
-          <p>Not every time. Agents are trained on <code>grep</code> and fall back to it. Pixel does not wait for the agent to discover a tool: <code>pixel install</code> puts its protocol into every session, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files. The guard advises and never blocks.</p>
-          <p>With Pixel 0.5.0 it did: in each of the 11 recorded runs behind the demo, the agent called Pixel 6 to 17 times. An earlier release fared worse: given its protocol alone, the agent barely ran a Pixel command, yet still scoped tasks 29% faster, so part of the gain is the protocol's guidance itself. <a class="link" href="{{ $bench }}#on-whole-agent-tasks" target="_blank" rel="noopener">The runs</a></p>
+          <summary>{{ .question }}</summary>
+          {{ .answer | safeHTML }}
         </details>
-        <details>
-          <summary>Why not just grep?</summary>
-          <p>Grep finds the line. The cost is what comes next: the agent opens the whole file to understand the match. On {{ $big.owner }} {{ lang.FormatNumberCustom 0 $big.lines }}-line {{ path.Base $big.path }} that read costs {{ lang.FormatNumberCustom 0 $big.full }} tokens, and Pixel's answer to the same question {{ lang.FormatNumberCustom 0 $big.pixel }}. <code>pixel search-content</code> keeps grep's regex syntax, so the agent changes nothing but the bill.</p>
-        </details>
-        <details>
-          <summary>Why not a language server?</summary>
-          <p>A language server resolves types, so its "who calls this" is more exact than a syntax graph's. It also needs one running server per language and answers one cursor position at a time. Pixel is one binary, covers {{ len $langs }} languages and your Git history, and says when an answer may be incomplete: static analysis never sees every dynamic call, and every graph answer carries that warning.</p>
-        </details>
-        <details>
-          <summary>Why not my editor's index?</summary>
-          <p>It lives inside that editor. Pixel runs from the shell, so every agent on this page gets the same index, and it stays in <code>.pixel/</code> at your repository root.</p>
-        </details>
-        <details>
-          <summary>Pixel or semble?</summary>
-          <p>Both, if you search in plain English a lot. semble puts the right file in its top 10 for 100% of 45 natural-language queries, Pixel for 69%. Pixel adds the call graph, blast radius, Git history and guarded Git writes. Together they cost about 5,100 tokens of context per turn. <a class="link" href="{{ $bench }}#where-a-specialist-wins" target="_blank" rel="noopener">Where a specialist wins</a></p>
-        </details>
-        <details>
-          <summary>Does anything leave my machine?</summary>
-          <p>Nothing you did not ask for. The index lives in <code>.pixel/</code> and there is no telemetry. Pixel touches the network for four things only: the embedding model it downloads from Hugging Face on first use, the Git remote operations you run (<code>pixel fetch</code>, <code>pixel push</code>), <code>pixel classify</code>, which sends its question to the model you configure, and <code>pixel web-search</code>, which sends its query to the SearXNG endpoint you configure and nowhere else, or, without one, to DuckDuckGo and then Wikipedia. <a class="link" href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Security model</a></p>
-        </details>
-        <details>
-          <summary>Which languages?</summary>
-          <p>Text search covers every file Git does not ignore, up to 4 MiB. The code graph covers {{ delimit $langs ", " ", and " }}. The last five go through a generic extractor rather than a dedicated one.</p>
-        </details>
+        {{ end }}
       </div>
       {{/* The last objection answered by the visitor's own numbers, before the install that follows. */}}
       <aside class="yours" data-reveal>
@@ -431,6 +407,7 @@
   <span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></code></pre>
           </div>
           <p class="install__more">The script works on macOS and Linux. Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}" target="_blank" rel="noopener">Plugins and rules files</a>.</p>
+          <p class="install__more install__ask">Questions, or stuck on setup? <a class="link" href="{{ site.Params.github_url }}/discussions" target="_blank" rel="noopener">Ask in GitHub Discussions</a>.</p>
         </div>
       </div>
       <ul class="badges" data-reveal="stagger">
@@ -455,6 +432,22 @@
   {{ partial "footer.html" . }}
 
   <script>
+    /* At rest until the visitor moves. The scroll-driven effects below
+       (reveals, assembling titles, the counting numbers) prime what is
+       still below the fold only on the first scroll, so a full-page
+       capture, a link preview or a crawler that never scrolls sees every
+       block in its final state. afterFirstScroll runs its callback then (or
+       at once if the page is already scrolled); onScreen says whether an
+       element overlaps the viewport. */
+    var afterFirstScroll = function (fn) {
+      if (window.scrollY > 0) return fn();
+      addEventListener('scroll', function () { fn(); }, { once: true, passive: true });
+    };
+    var onScreen = function (el) {
+      var r = el.getBoundingClientRect();
+      return r.bottom > 0 && r.top < window.innerHeight;
+    };
+
     /* Token wall: one square per 25 tokens of a full file read. On load the
        wall burns down to what the same question costs through Pixel, the
        counter follows, and the survivors gather into a P. Reduced
@@ -710,7 +703,7 @@
        number counts up from zero to the value the HTML already holds, and
        each meter lights its squares one by one, baseline row then Pixel's.
        Without JavaScript or with reduced motion the final state is what
-       renders. */
+       renders, and so it is below the fold until the first scroll. */
     (function () {
       var list = document.querySelector('[data-count-up]');
       if (!list) return;
@@ -720,9 +713,13 @@
         var m = el.textContent.trim().match(/^(\D*)([\d.]+)(\D*)$/);
         if (!m) return null;
         var dec = (m[2].split('.')[1] || '').length;
-        el.textContent = m[1] + (0).toFixed(dec) + m[3];
         return { li: li, el: el, pre: m[1], to: +m[2], dec: dec, suf: m[3] };
       }).filter(Boolean);
+      // From here the numbers read zero and the meters are unlit, until go().
+      var prime = function () {
+        list.classList.add('is-primed');
+        items.forEach(function (it) { it.el.textContent = it.pre + (0).toFixed(it.dec) + it.suf; });
+      };
       var go = function () {
         list.classList.add('is-counted');
         items.forEach(function (it, i) {
@@ -742,13 +739,22 @@
           setTimeout(function () { requestAnimationFrame(tick); }, delay);
         });
       };
+      // On screen once the splash is gone: it counts in front of the reader.
+      // Off screen: it stays final until the first scroll, then primes and
+      // counts when it comes into view. On screen by the first scroll but
+      // not counted yet: it keeps its final state rather than drop to zero.
       var watch = function () {
-        var io = new IntersectionObserver(function (e) {
-          if (!e[0].isIntersecting) return;
-          io.disconnect();
-          go();
-        }, { threshold: 0.4 });
-        io.observe(list);
+        if (onScreen(list)) { prime(); return go(); }
+        afterFirstScroll(function () {
+          if (list.classList.contains('is-counted') || onScreen(list)) return;
+          prime();
+          var io = new IntersectionObserver(function (e) {
+            if (!e[0].isIntersecting) return;
+            io.disconnect();
+            go();
+          }, { threshold: 0.4 });
+          io.observe(list);
+        });
       };
       if (document.documentElement.classList.contains('splash')) addEventListener('pixel:splashdone', watch, { once: true });
       else watch();
@@ -819,7 +825,9 @@
        enters the viewport; data-reveal="stagger" does it child by child.
        The hidden state exists only under .js and no-preference motion, so
        a visitor without JavaScript or with reduced motion sees the page
-       at rest. Anything already in view on load shows without waiting. */
+       at rest; everyone else too until the first scroll, which primes the
+       blocks still below the fold. Anything in view then, or above it,
+       stays as it is. */
     (function () {
       var blocks = [].slice.call(document.querySelectorAll('[data-reveal]'));
       if (!blocks.length) return;
@@ -833,14 +841,20 @@
           [].forEach.call(b.children, function (c, i) { c.style.transitionDelay = Math.min(i, 8) * 70 + 'ms'; });
         }
       });
-      var io = new IntersectionObserver(function (entries) {
-        entries.forEach(function (e) {
-          if (!e.isIntersecting) return;
-          e.target.classList.add('is-shown');
-          io.unobserve(e.target);
+      afterFirstScroll(function () {
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (e) {
+            if (!e.isIntersecting) return;
+            e.target.classList.add('is-shown');
+            io.unobserve(e.target);
+          });
+        }, { rootMargin: '0px 0px -12% 0px', threshold: 0.05 });
+        blocks.forEach(function (b) {
+          if (b.getBoundingClientRect().top < window.innerHeight) return b.classList.add('is-shown');
+          b.classList.add('is-primed');
+          io.observe(b);
         });
-      }, { rootMargin: '0px 0px -12% 0px', threshold: 0.05 });
-      blocks.forEach(function (b) { io.observe(b); });
+      });
     })();
 
     /* Titles assemble: each h2 of the page builds itself out of pixels the
@@ -851,7 +865,10 @@
        flicker, hot first and then in their own colour; the real text fades
        back in under them and the canvas goes. About 0.7 s. The h2 stays in
        the DOM the whole time, so reading, selection and screen readers
-       never see the effect. Skipped under reduced motion, without
+       never see the effect. A title on screen when the fonts are ready
+       assembles then; the others stay static until the first scroll, and
+       from it assemble as they come into view (one on screen or above by
+       then stays as it is). Skipped under reduced motion, without
        IntersectionObserver, or when Handjet did not load (the fallback
        font has no pixels to assemble). */
     (function () {
@@ -960,9 +977,8 @@
         var handjet = false;
         document.fonts.forEach(function (f) { if (f.status === 'loaded' && f.family.replace(/["']/g, '') === 'Handjet') handjet = true; });
         if (!handjet) return;
-        // Hidden from here until its turn (only the fill: the computed
-        // colour the sampling reads is untouched).
-        titles.forEach(function (h) { h.classList.add('is-assembling'); });
+        // A title's fill is hidden from priming until its turn (only the
+        // fill: the computed colour the sampling reads is untouched).
         var io = new IntersectionObserver(function (entries) {
           entries.forEach(function (e) {
             if (!e.isIntersecting) return;
@@ -970,7 +986,17 @@
             assemble(e.target);
           });
         }, { rootMargin: '0px 0px -12% 0px', threshold: 0.3 });
-        titles.forEach(function (h) { io.observe(h); });
+        var prime = function (h) { h.classList.add('is-assembling'); io.observe(h); };
+        var later = titles.filter(function (h) {
+          if (!onScreen(h)) return true;
+          prime(h);
+          return false;
+        });
+        afterFirstScroll(function () {
+          later.forEach(function (h) {
+            if (h.getBoundingClientRect().top >= window.innerHeight) prime(h);
+          });
+        });
       });
     })();
 

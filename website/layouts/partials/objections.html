@@ -1,0 +1,32 @@
+{{/* The objections of data/objections.toml, their placeholders filled in:
+     a slice of (dict "question" "answer"), `answer` being the paragraphs as
+     one HTML string. The "Fair questions" chapter renders it and the home's
+     FAQPage (partials/head.html) serialises it, so both carry the same text.
+     Call with (dict "abs" true) for absolute links (the JSON-LD). */}}
+{{ $big := partial "wall-row.html" . }}
+{{/* The code graph's grammars: crates/pixel-graph/src/extract.rs. The last five use the generic extractor. */}}
+{{ $langs := slice "TypeScript" "JavaScript" "Rust" "Go" "Java" "Python" "C#" "Ruby" "PHP" "C" "Swift" "Elixir" "Lua" }}
+{{ $bench := cond .abs ("benchmarks/" | absURL) ("benchmarks/" | relURL) }}
+{{ $vars := dict
+  "{bench}" $bench
+  "{github}" site.Params.github_url
+  "{big.owner}" $big.owner
+  "{big.file}" (path.Base $big.path)
+  "{big.lines}" (lang.FormatNumberCustom 0 $big.lines)
+  "{big.full}" (lang.FormatNumberCustom 0 $big.full)
+  "{big.pixel}" (lang.FormatNumberCustom 0 $big.pixel)
+  "{langs.count}" (string (len $langs))
+  "{langs.list}" (delimit $langs ", " ", and ")
+}}
+{{ $out := slice }}
+{{ range hugo.Data.objections.objection }}
+  {{ $paras := slice }}
+  {{ range .answer }}
+    {{ $p := . }}
+    {{ range $k, $v := $vars }}{{ $p = replace $p $k $v }}{{ end }}
+    {{ with findRE `\{[a-z.]+\}` $p }}{{ errorf "data/objections.toml: unknown placeholder %v" . }}{{ end }}
+    {{ $paras = $paras | append (printf "<p>%s</p>" $p) }}
+  {{ end }}
+  {{ $out = $out | append (dict "question" .question "answer" (delimit $paras "\n")) }}
+{{ end }}
+{{ return $out }}
