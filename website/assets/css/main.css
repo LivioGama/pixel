@@ -471,6 +471,7 @@ main { counter-reset: chapter; }
 .roles__card li { position: relative; padding-left: 18px; font-size: 0.95rem; line-height: 1.5; color: var(--ink-soft); }
 .roles__card li::before { content: ""; position: absolute; left: 0; top: 0.5em; width: 8px; height: 8px; border-radius: 1px; background: var(--green); box-shadow: 0 0 6px rgba(34, 197, 94, 0.5); }
 .roles__card li strong { color: var(--ink); font-weight: 600; }
+.roles__more { margin-top: auto; align-self: flex-start; font-size: 0.92rem; }
 .roles code, .vs code { background: var(--ground-2); padding: 1px 6px; border-radius: 3px; overflow-wrap: anywhere; }
 
 .how { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 40px; counter-reset: how; }
@@ -732,6 +733,65 @@ a.agents__item { text-decoration: none; }
 .chroma .c, .chroma .c1, .chroma .cm { color: var(--ink-soft); font-style: italic; }
 .chroma .s, .chroma .s1, .chroma .s2, .chroma .sb { color: var(--green-hi); }
 .chroma .k, .chroma .nb, .chroma .nt { font-weight: 600; }
+
+/* ---------- savings estimate (/savings/) ----------
+   The form on the left, the result beside it (under it on narrow screens).
+   Coral is the whole-file reads, green what Pixel returns instead. Nothing
+   animates: a new value replaces the old one, so reduced motion needs no
+   special case. */
+.est { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: clamp(24px, 4vw, 56px); align-items: start; padding-block: 40px 24px; }
+@media (max-width: 900px) { .est { grid-template-columns: minmax(0, 1fr); } }
+.est__form { display: grid; gap: 18px; }
+.est__field { display: grid; gap: 6px; }
+.est__field label { font-weight: 600; font-size: 0.98rem; }
+.est__unit { color: var(--ink-soft); font-weight: 400; }
+.est__field input {
+  width: 100%; max-width: 16em; font: 500 1.05rem/1.2 var(--mono); color: var(--ink);
+  background: var(--panel); border: 0; border-radius: var(--r); padding: 10px 12px; box-shadow: inset 0 0 0 1px var(--cell-edge);
+}
+.est__field input:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.est__field input[aria-invalid="true"] { box-shadow: inset 0 0 0 2px var(--coral); }
+.est__help { margin: 0; color: var(--ink-soft); font-size: 0.88rem; line-height: 1.45; max-width: 34em; }
+.est__reset { justify-self: start; font: 600 0.85rem/1 var(--sans); color: var(--ink); background: var(--ground-2); border: 0; border-radius: var(--r); padding: 10px 14px; cursor: pointer; box-shadow: inset 0 0 0 1px var(--line); }
+.est__reset:hover { background: var(--line); }
+
+.est__result {
+  position: sticky; top: calc(var(--nav-h) + 24px); display: grid; gap: 14px; min-width: 0;
+  padding: clamp(20px, 3vw, 30px); border-radius: 8px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--cell-edge);
+}
+@media (max-width: 900px) { .est__result { position: static; } }
+.est__tag { display: inline-flex; align-items: center; gap: 8px; margin: 0; font: 600 0.72rem/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--green-hi); }
+.est__figures p { margin: 0; }
+.est__big { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.est__big strong { font: 700 clamp(3rem, 6vw, 4.4rem)/0.9 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; color: var(--green-hi); font-variant-numeric: tabular-nums; }
+.est__big--tok { margin-top: 14px !important; }
+.est__big--tok strong { font-size: clamp(2.2rem, 4vw, 3rem); }
+.est__big span { color: var(--ink-soft); }
+.est__range { color: var(--ink-soft); font: 400 0.9rem/1.4 var(--mono); margin-top: 4px !important; }
+.est__range span { color: var(--ink); }
+.est__bars { display: grid; gap: 8px; margin-top: 4px; }
+.est__bar { display: grid; gap: 4px; font: 400 0.8rem/1.3 var(--mono); color: var(--ink-soft); }
+.est__bar i { display: block; height: 10px; border-radius: 1px; }
+.est__bar b { color: var(--ink); font-weight: 500; }
+.est__bar--full i { background: var(--coral); }
+.est__bar--px i { width: max(4px, var(--w)); background: var(--green); box-shadow: 0 0 8px rgba(34, 197, 94, 0.5); }
+.est__rate, .est__scope { margin: 0; font-size: 0.92rem; color: var(--ink-soft); }
+.est__scope { padding-top: 12px; border-top: 1px solid var(--line); }
+.est__rate strong, .est__scope strong { color: var(--ink); }
+.est__math { border-top: 1px solid var(--line); padding-top: 12px; font-size: 0.92rem; }
+.est__math summary { cursor: pointer; font-weight: 650; color: var(--green-hi); }
+.est__math ol { margin: 12px 0; padding-left: 1.3em; display: grid; gap: 8px; font: 400 0.84rem/1.55 var(--mono); overflow-wrap: anywhere; }
+.est__math b { color: var(--green-hi); font-weight: 600; }
+.est__math p { margin: 0 0 10px; color: var(--ink-soft); }
+.est__math code, .est__share p code { background: var(--ground-2); padding: 1px 5px; border-radius: 3px; }
+.est__share { max-width: 46em; padding-block: 24px 96px; }
+.est__share h2 { font: 700 2.4rem/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; margin: 0 0 14px; }
+.est__share p { color: var(--ink-soft); margin: 18px 0 10px; }
+.est__share .cmd code { font-size: 0.84rem; }
+
+/* ---------- measure box (/benchmarks/) ---------- */
+.prose .measure { margin: 0 0 48px; padding: 22px 24px 8px; border-radius: 8px; background: color-mix(in srgb, var(--panel) 55%, transparent); box-shadow: inset 0 0 0 1px var(--cell-edge); }
+.prose .measure h2 { margin-top: 0; }
 
 /* ---------- 404 ---------- */
 .missing { padding-block: clamp(80px, 16vh, 180px); text-align: center; min-height: calc(100vh - var(--nav-h) - 160px); }

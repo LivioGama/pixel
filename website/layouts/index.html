@@ -217,6 +217,8 @@
             <li>No second model on the bill, no account, no telemetry: the index stays in <code>.pixel/</code>. The network sees only what you run: Git remotes, the optional <code>pixel classify</code> and <code>pixel web-search</code>, and a one-time embedding model download.</li>
             <li>MIT licensed, and the same index serves {{ len $agents }} agents, so switching agents does not mean switching tools.</li>
           </ul>
+          {{/* The estimate multiplies the well-known files' rate by the team's own numbers; the page says it is per large-file read, not per session. */}}
+          <a class="link roles__more" href="{{ "savings/" | relURL }}" target="_blank" rel="noopener">Estimate it for your team</a>
         </li>
       </ul>
     </section>

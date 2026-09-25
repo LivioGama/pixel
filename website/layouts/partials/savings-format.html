@@ -1,0 +1,11 @@
+{{- /* One figure of /savings/, formatted as the page's script formats it (fmtTok, fmtUsd in layouts/_default/savings.html): change both together, or the no-JavaScript render and the live one disagree. (dict "kind" "tok"|"usd"|"int"|"cents" "v" number). */ -}}
+{{- $v := float .v -}}
+{{- if eq .kind "usd" -}}
+${{ if ge $v 10 }}{{ lang.FormatNumberCustom 0 $v }}{{ else }}{{ lang.FormatNumberCustom 2 $v }}{{ end }}
+{{- else if eq .kind "cents" -}}
+${{ lang.FormatNumberCustom 2 $v }}
+{{- else if eq .kind "int" -}}
+{{ lang.FormatNumberCustom 0 $v }}
+{{- else -}}
+{{ if ge $v 1e9 }}{{ lang.FormatNumberCustom 1 (div $v 1e9) }}B{{ else if ge $v 1e6 }}{{ lang.FormatNumberCustom 1 (div $v 1e6) }}M{{ else if ge $v 1e4 }}{{ lang.FormatNumberCustom 0 (div $v 1e3) }}k{{ else }}{{ lang.FormatNumberCustom 0 $v }}{{ end }}
+{{- end -}}
