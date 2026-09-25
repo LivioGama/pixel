@@ -392,7 +392,7 @@ pub mod fast {
                 );
             }
             let options =
-                fastembed::InitOptions::new(fastembed::EmbeddingModel::MultilingualE5Small)
+                fastembed::TextInitOptions::new(fastembed::EmbeddingModel::MultilingualE5Small)
                     .with_cache_dir(cache_dir.to_path_buf())
                     .with_show_download_progress(download);
             let model = fastembed::TextEmbedding::try_new(options)
