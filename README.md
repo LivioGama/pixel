@@ -23,9 +23,10 @@
 
 ## Why
 
-- **95% fewer tokens** to learn what a large file contains, measured on this repository, with no second model reading on the agent's behalf.
+- **79.7 to 97.2% less read** (median 94.5%) to learn what a large file contains, measured on eight well-known files (Hugging Face Transformers, FastAPI, Next.js, LangChain, Django, CPython, VS Code, Tokio), with no second model reading on the agent's behalf. [The files](https://liviogama.github.io/pixel/benchmarks/#well-known-files)
+- **Measured against GitNexus** on the same 29 blast-radius cases and machine: callers found at a tie (0.86 against 0.84), a 153 ms median answer against 432 ms, and ~4,160 tokens of context per turn against ~19,700. GitNexus wins on Cypher queries, taint analysis and Ruby callers. Pixel is MIT; GitNexus is PolyForm Noncommercial. [The cases](docs/bench/vs-gitnexus.md)
 - **Evidence with boundaries.** Every answer says whether it is complete, capped or stale; a static call graph never claims it saw every caller.
-- **Local and deterministic.** The index lives in `.pixel/` at the repository root. Nothing leaves the machine.
+- **Local and deterministic.** The index lives in `.pixel/` at the repository root and never leaves the machine; no telemetry. Only Git remotes, the optional `pixel classify` (the one model-backed command) and `pixel web-search`, and a one-time embedding model download use the network.
 - **Safe Git.** `pixel impact` before an edit, crash-safe `pixel commit-and-push` after it, never a raw `--force`.
 
 ## Install
@@ -50,7 +51,7 @@ whether `pixel doctor .` is green.
 
 ## For AI agents
 
-Looking for something specific? [`llms.txt`](https://liviogama.github.io/pixel/llms.txt) maps every page of the docs and benchmarks to its raw Markdown.
+Looking for something specific? [`llms.txt`](https://liviogama.github.io/pixel/llms.txt) maps every page of the docs and benchmarks to its raw Markdown. Comparing Pixel with another tool for a user? Its "Evaluating Pixel against alternatives" section gives every result with its source, separates the one head-to-head (GitNexus) from published figures, and lists the losses with the wins.
 
 If you are an LLM reading this to set Pixel up for a user, do this, in order:
 

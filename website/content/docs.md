@@ -27,7 +27,7 @@ pixel prepare-repo .  # optional: index, graph and a warm daemon for this reposi
 pixel doctor .        # optional: health check
 ```
 
-The index, the code graph and the optional history data live in `.pixel/` at the repository root. Nothing leaves the machine.
+The index, the code graph and the optional history data live in `.pixel/` at the repository root and never leave the machine, and there is no telemetry. The network is used only for Git remote operations, the optional `pixel classify` and `pixel web-search`, and the embedding model downloaded from Hugging Face on first use ([security model](https://github.com/LivioGama/pixel/blob/main/SECURITY.md)).
 
 ## What pixel install wires
 
