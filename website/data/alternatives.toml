@@ -1,0 +1,331 @@
+# The tools Pixel is compared with: the home's "Alternatives" cards (the
+# tools marked `home`) and every page under /vs/ (content/vs/<slug>.md names
+# its tool with `tool = "<slug>"`). `layouts/partials/alternatives.html`
+# fills the placeholders and returns the list to both, so a card and its
+# page cannot disagree.
+#
+# Every figure restates content/benchmarks.md (or data/read_savings.toml,
+# which it reads): change it there first, then here. Never add a tool that
+# page does not measure, and never a figure it does not show.
+#
+# Per tool:
+#   slug, name     the page's path (/vs/<slug>/) and the tool's display name
+#   column         the table's column header, when `name` does not fit one
+#   home           a card in the home's Alternatives chapter, in this order
+#   pitch          the card's subtitle (home only)
+#   about          what the tool is, one sentence (the pages)
+#   measure        how the figures were obtained, shown above the table:
+#                    head-to-head      both tools, same cases, same machine
+#                    published-figure  Pixel's measurement beside the other
+#                                      tool's own published figure: different samples
+#                    baseline          the other tool is the baseline the measurement
+#                                      starts from (grep's match, then the file read)
+#                    design            no benchmark: how the two work, no figure
+#   bench          the section of /benchmarks/ the figures come from (anchor)
+#   answer         the short answer at the top of the page, HTML
+#   wins           where the other tool wins, HTML (the card's note and the page)
+#   note_label,    the card's note, when it is not "Where <name> wins: <wins>"
+#   note
+#   more           the card's link label; `more_href` replaces the link to
+#                  /benchmarks/#<bench> on the card (Jev points at #decisions)
+#   checked        the day the rows were last checked against /benchmarks/;
+#                  the page's "Updated" date is the later of it and its Git date
+#   [[tool.row]]   label, pixel, other; win = "pixel" or "other" marks the cell;
+#                  page = true keeps a row off the home card; page_other
+#                  replaces `other` on the page when the card quotes a figure
+#                  /benchmarks/ does not carry
+#
+# Placeholders, filled by the partial (an unknown one fails the build):
+#   {bench}        the /benchmarks/ page
+#   {kept.range}   the kept rows of data/read_savings.toml: "79.7 to 97.2%",
+#   {kept.count}     how many there are,
+#   {kept.median}    and their median, formatted as on /benchmarks/
+#   {big.owner}    the token wall's row (partials/wall-row.html): its owner,
+#   {big.file}       file name, line count, tokens of the full read and
+#   {big.lines}      tokens through Pixel
+#   {big.full}
+#   {big.pixel}
+
+[[tool]]
+slug = "gitnexus"
+name = "GitNexus"
+home = true
+pitch = "A code graph for agents, served as 17 MCP tools."
+about = "A code graph for coding agents, served as MCP tools, with Cypher queries over the graph."
+measure = "head-to-head"
+bench = "against-gitnexus"
+answer = '''Both answer "who calls this" from a code graph, and on 29 blast-radius cases they find as many callers: 0.86 against 0.84, a tie at this sample size. Pixel answers faster, costs less context on every turn and adds Git history and guarded Git writes. GitNexus queries its graph in Cypher, traces taint and maps API routes, and finds more callers in Ruby.'''
+wins = "Cypher queries, taint analysis, API route maps, and callers in Ruby."
+more = "The 29 cases"
+checked = 2026-09-25
+
+  [[tool.row]]
+  label = "Callers found (29&nbsp;cases)"
+  pixel = "0.86"
+  other = "0.84"
+
+  [[tool.row]]
+  label = "Median answer"
+  pixel = "153&nbsp;ms"
+  other = "432&nbsp;ms"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Mean answer size"
+  pixel = "4.5&nbsp;KB"
+  other = "11.0&nbsp;KB"
+  win = "pixel"
+  page = true
+
+  [[tool.row]]
+  label = "Context on every turn"
+  pixel = "~4,160&nbsp;tok"
+  other = "~19,700&nbsp;tok"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Cold index of Pixel's repository"
+  pixel = "9.3&nbsp;s, 8.6&nbsp;MB"
+  other = "28.7&nbsp;s, 184&nbsp;MB"
+  win = "pixel"
+  page = true
+
+  [[tool.row]]
+  label = "Git history, Git writes"
+  pixel = "Yes"
+  other = "No"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Cypher queries, taint analysis, API route maps"
+  pixel = "No"
+  other = "Yes"
+  win = "other"
+  page = true
+
+  [[tool.row]]
+  label = "Callers in Ruby (two repositories)"
+  pixel = "0.90 and 0.56"
+  other = "1.00 and 0.68"
+  win = "other"
+  page = true
+
+  [[tool.row]]
+  label = "Licence"
+  pixel = "MIT"
+  other = "PolyForm Noncommercial"
+  win = "pixel"
+
+[[tool]]
+slug = "shunt"
+name = "shunt"
+home = true
+pitch = "Spotify's plugin: large reads go to a second model."
+about = "Spotify's plugin that hands an agent's large file reads to a worker model, a second model on the bill."
+measure = "published-figure"
+bench = "well-known-files"
+answer = '''Both cut what the agent reads when it opens a large file. shunt hands the read to a second model; Pixel answers from its own index, with no second model on the bill: {kept.range} less read across {kept.count} well-known files, median {kept.median}. shunt needs a Spotify Portal instance with AiKA; Pixel is one binary.'''
+wins = "its worker also writes boilerplate code, which Pixel does not."
+more = "The {kept.count} files measured"
+checked = 2026-09-25
+
+  [[tool.row]]
+  label = "Less read on large files"
+  pixel = "{kept.range} measured"
+  other = "82 to 94% claimed"
+  # /benchmarks/ does not carry shunt's own figure: the page says what it does.
+  page_other = "A similar ratio, by its own benchmark"
+
+  [[tool.row]]
+  label = "Who reads the file"
+  pixel = "The index"
+  other = "A worker model"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Second model on the bill"
+  pixel = "None"
+  other = "Yes"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Needs"
+  pixel = "One binary"
+  other = "Spotify Portal with AiKA"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Writes boilerplate code"
+  pixel = "No"
+  other = "Yes"
+  win = "other"
+  page = true
+
+[[tool]]
+slug = "jev"
+name = "Jev"
+home = true
+pitch = "A dedicated model for coding judgement calls."
+about = "A dedicated model for coding judgement calls, scored on its own benchmark, JevBench."
+measure = "published-figure"
+bench = "coding-decisions"
+answer = '''For a bounded coding decision, <code>pixel classify</code> asks a model you configure and returns one probability per label. With deepseek-v4.1-flash it answered all 14 public JevBench coding items right; Jev publishes 0.839 on its 56. The samples differ, so read it as a direction. The rest of Pixel needs no decision model.'''
+wins = "its score covers all 56 of its coding items, where Pixel's run covers only the 14 public ones."
+note_label = "Read with care"
+note = "Jev's 83.9% is its published score on 56 items; Pixel's run covers the 14 public ones, and the rest of Pixel needs no decision model."
+more = "The optional add-on"
+more_href = "#decisions"
+checked = 2026-09-25
+
+  [[tool.row]]
+  label = "JevBench coding items"
+  pixel = "14 of 14 with deepseek-v4.1-flash"
+  other = "83.9%"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Model"
+  pixel = "The one you choose (13 of 14 with gpt-oss)"
+  other = "Jev's own"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Items scored"
+  pixel = "14, the public ones"
+  other = "56"
+  win = "other"
+  page = true
+
+[[tool]]
+slug = "semble"
+name = "semble"
+about = "A search tool that finds code from a question in plain English, with a small context footprint."
+measure = "head-to-head"
+bench = "where-a-specialist-wins"
+answer = '''For a question in plain English, semble is better: it puts the right file in its top 10 for 100% of 45 queries, Pixel for 69%, and it costs less context. Pixel adds the call graph, blast radius, Git history and guarded Git writes. They combine: semble for search and Pixel for the rest cost about 5,100 tokens of context per turn.'''
+wins = "natural-language search, and a lighter context on every turn."
+checked = 2026-09-25
+
+  [[tool.row]]
+  label = "Right file in the top 10 (45 plain-English queries)"
+  pixel = "69%"
+  other = "100%"
+  win = "other"
+
+  [[tool.row]]
+  label = "Context on every turn"
+  pixel = "~4,160&nbsp;tok"
+  other = "~980&nbsp;tok"
+  win = "other"
+
+  [[tool.row]]
+  label = "Call graph, blast radius"
+  pixel = "Yes"
+  other = "No"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Git history, Git writes"
+  pixel = "Yes"
+  other = "No"
+  win = "pixel"
+
+[[tool]]
+slug = "grep"
+name = "grep"
+about = "The line search every agent already knows, and the one it reaches for first: grep, ripgrep, the agent's own search tool."
+measure = "baseline"
+bench = "well-known-files"
+answer = '''Grep finds the line; the cost is what comes next, when the agent opens the whole file to understand the match. On {big.owner} {big.lines}-line {big.file} that read costs {big.full} tokens, and Pixel's answer to the same question {big.pixel}. <code>pixel search-content</code> keeps grep's regex syntax, so the agent changes nothing but the bill.'''
+wins = "nothing to install and no index to build: it runs on any file, anywhere, the moment it exists."
+checked = 2026-09-25
+
+  [[tool.row]]
+  label = "Finds the matching line"
+  pixel = "Yes, regex syntax kept"
+  other = "Yes"
+
+  [[tool.row]]
+  label = "What the agent reads to know what {big.file} contains"
+  pixel = "{big.pixel}&nbsp;tok"
+  other = "{big.full}&nbsp;tok, the whole file"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Less read across {kept.count} well-known files"
+  pixel = "{kept.range}"
+  other = "The baseline"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Callers, blast radius, Git history"
+  pixel = "Yes"
+  other = "No"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Index to build first"
+  pixel = "Yes, in <code>.pixel/</code>"
+  other = "None"
+  win = "other"
+
+[[tool]]
+slug = "language-server"
+name = "a language server"
+column = "Language server"
+about = "The type-aware engine behind an editor's go-to-definition and find-references: rust-analyzer, tsserver, gopls and the like."
+measure = "design"
+answer = '''A language server resolves types, so its "who calls this" is more exact than a syntax graph's. It also needs one running server per language and answers one cursor position at a time. Pixel is one binary for every language its graph parses, adds your Git history, and says when an answer may be incomplete: static analysis never sees every dynamic call, and every graph answer carries that warning.'''
+wins = "it resolves types, so its callers and references are more exact than a syntax graph's."
+checked = 2026-09-25
+
+  [[tool.row]]
+  label = "Callers and references"
+  pixel = "From a syntax graph, marked when incomplete"
+  other = "Type-resolved, more exact"
+  win = "other"
+
+  [[tool.row]]
+  label = "Languages"
+  pixel = "One binary for all of them"
+  other = "One server per language"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Question shape"
+  pixel = "A symbol, a file, a task"
+  other = "One cursor position"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Git history"
+  pixel = "Yes"
+  other = "No"
+  win = "pixel"
+
+[[tool]]
+slug = "editor-index"
+name = "an editor's index"
+column = "Editor index"
+about = "The index an editor or an AI editor builds for its own search and its own agent."
+measure = "design"
+answer = '''It lives inside that editor. Pixel runs from the shell, so every agent gets the same index, and it stays in <code>.pixel/</code> at your repository root.'''
+wins = "it is already there, with nothing to install or wire."
+checked = 2026-09-25
+
+  [[tool.row]]
+  label = "Who can query it"
+  pixel = "Any agent with a shell"
+  other = "That editor and its agent"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Where it lives"
+  pixel = "<code>.pixel/</code> at the repository root"
+  other = "Inside the editor"
+
+  [[tool.row]]
+  label = "Setup"
+  pixel = "<code>pixel install</code>"
+  other = "None"
+  win = "other"

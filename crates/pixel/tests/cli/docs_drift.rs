@@ -5,8 +5,9 @@
 //! checkout:
 //!
 //! - every backticked `` `pixel <name>` `` in the repository docs and in the
-//!   bundled agent prompts, and every `<code>pixel <name>` in the website's
-//!   landing page and its objections data, names a real subcommand (a
+//!   bundled agent prompts and the website's comparison pages, and every
+//!   `<code>pixel <name>` in the website's landing page and its objections
+//!   and alternatives data, names a real subcommand (a
 //!   removed or renamed command cannot linger in prose);
 //! - every subcommand appears in ARCHITECTURE.md's `## Command surface`
 //!   table (a new command cannot ship undocumented);
@@ -93,10 +94,45 @@ const DOCS: &[&str] = &[
     "js/sniper/README.md",
 ];
 
-/// The site's HTML sources: the landing page and the objections it and its
-/// FAQPage JSON-LD render. They quote commands as `<code>pixel …</code>`,
-/// which `html_code_as_backticks` turns into the Markdown form.
-const SITE_HTML: &[&str] = &["website/layouts/index.html", "website/data/objections.toml"];
+/// The site's HTML sources: the landing page, the objections it and its
+/// FAQPage JSON-LD render, and the alternatives its cards and the `/vs/`
+/// pages render. They quote commands as `<code>pixel …</code>`, which
+/// `html_code_as_backticks` turns into the Markdown form.
+const SITE_HTML: &[&str] = &[
+    "website/layouts/index.html",
+    "website/data/objections.toml",
+    "website/data/alternatives.toml",
+];
+
+/// The comparison pages, one Markdown file per tool.
+const VS_PAGES_DIR: &str = "website/content/vs";
+
+/// Every `website/content/vs/*.md`, read from the tree so a new comparison
+/// page is checked without an edit here.
+fn comparison_pages(root: &Path) -> Vec<String> {
+    let mut pages: Vec<String> = std::fs::read_dir(root.join(VS_PAGES_DIR))
+        .unwrap_or_else(|e| panic!("{VS_PAGES_DIR}: {e}"))
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".md"))
+        .map(|name| format!("{VS_PAGES_DIR}/{name}"))
+        .collect();
+    pages.sort();
+    pages
+}
+
+#[test]
+fn comparison_pages_are_listed_from_the_tree() {
+    let pages = comparison_pages(&repo_root());
+    // The index and the GitNexus page exist since the directory does; a
+    // listing without them means the path or the filter broke.
+    assert!(
+        pages.contains(&format!("{VS_PAGES_DIR}/_index.md"))
+            && pages.contains(&format!("{VS_PAGES_DIR}/gitnexus.md")),
+        "{pages:?}"
+    );
+    assert!(pages.iter().all(|p| p.ends_with(".md")), "{pages:?}");
+}
 
 /// `<code>pixel install</code>` read as `` `pixel install` ``, so HTML goes
 /// through the same `referenced_commands` as Markdown.
@@ -119,28 +155,41 @@ fn every_documented_pixel_command_exists() {
     let known = subcommands();
     let root = repo_root();
     let mut stale = Vec::new();
-    let markdown = DOCS.iter().map(|doc| (doc, false));
-    let html = SITE_HTML.iter().map(|doc| (doc, true));
+    let vs_pages = comparison_pages(&root);
+    let markdown = DOCS
+        .iter()
+        .map(|doc| ((*doc).to_string(), false))
+        .chain(vs_pages.iter().map(|doc| (doc.clone(), false)));
+    let html = SITE_HTML.iter().map(|doc| ((*doc).to_string(), true));
+    let mut vs_names = 0;
     for (doc, is_html) in markdown.chain(html) {
-        let text = std::fs::read_to_string(root.join(doc)).unwrap_or_else(|e| panic!("{doc}: {e}"));
+        let text =
+            std::fs::read_to_string(root.join(&doc)).unwrap_or_else(|e| panic!("{doc}: {e}"));
         let text = if is_html {
             html_code_as_backticks(&text)
         } else {
             text
         };
         let names = referenced_commands(&text);
-        // Both site files quote commands today: none found means the HTML
-        // form changed and this check went blind, not that the file is clean.
+        // Every site HTML source quotes commands today: none found means the
+        // HTML form changed and this check went blind, not that the file is
+        // clean.
         assert!(
             !is_html || !names.is_empty(),
             "{doc}: no <code>pixel …</code> found"
         );
+        if vs_pages.contains(&doc) {
+            vs_names += names.len();
+        }
         for name in names {
             if !known.contains(&name) {
                 stale.push(format!("{doc}: `pixel {name}`"));
             }
         }
     }
+    // The comparison pages quote commands today: none across all of them
+    // means the listing went blind.
+    assert!(vs_names > 0, "{VS_PAGES_DIR}: no `pixel …` found");
     assert!(
         stale.is_empty(),
         "documented commands the binary rejects:\n{}",

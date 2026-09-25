@@ -1,0 +1,10 @@
+{{/* How a /vs/ comparison's figures were obtained, from the tool's `measure`
+     in data/alternatives.toml: a (dict "label" "text") the page shows above
+     its table and the index beside each entry. Call with the tool. */}}
+{{ $m := dict
+  "head-to-head" (dict "label" "Measured head to head" "text" (printf "Pixel and %s on the same cases, on the same machine." .name))
+  "published-figure" (dict "label" "Published figures, different samples" "text" (printf "Pixel's own measurement set beside %s's published figure: not a head-to-head, and the samples differ." .name))
+  "baseline" (dict "label" "Measured from the baseline" "text" (printf "%s is where the measurement starts: the match, then the file read it leads to, against Pixel's answer." (strings.FirstUpper .name)))
+  "design" (dict "label" "Not benchmarked" "text" (printf "No figure: how Pixel and %s work, side by side. Nothing on this page is a measurement." .name))
+}}
+{{ return index $m .measure }}
