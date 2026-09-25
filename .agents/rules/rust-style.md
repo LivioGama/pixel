@@ -7,9 +7,8 @@ paths:
 
 Loaded when a Rust source file is in play. `cargo clippy --workspace
 --all-targets -- -D warnings` is the CI gate and the lint table in the root
-`Cargo.toml` is the policy; the four pedantic lints below were enabled after a
-323-site cleanup, so write new code in the shape they expect instead of fixing
-it after. Run `cargo clippy -p <crate> --all-targets -- -D warnings` before
+`Cargo.toml` is the policy; write new code in the shape the four pedantic lints
+below expect instead of fixing it after. Run `cargo clippy -p <crate> --all-targets -- -D warnings` before
 every commit; `cargo clippy --fix` handles three of the four but needs the
 cleanup listed at the end.
 
@@ -83,7 +82,7 @@ Other shapes met in this tree: `AsRef::as_ref`, `Vec::is_empty`,
 
 A `const`, `static`, `struct`, `fn` or `use` inside a body goes before the
 first `let`/expression of that body, or out of the body altogether. Which
-one, by what was moved in this cleanup:
+one, by kind of item:
 
 - **A cap or limit used by one operation** (`CONTENT_PROBE_LIMIT`,
   `MAP_FILE_CAP`, `SNIPPET_CAP_CHARS`, `MAX_INLINE_BACKLOG`): module-level
