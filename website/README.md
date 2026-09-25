@@ -1,9 +1,17 @@
 # website/
 
-The Hugo site published at <https://liviogama.github.io/pixel/> by
+The Hugo site published at <https://pixel-cli.dev/> by
 `.github/workflows/pages.yml` on every push to `main` that touches
 `website/**`, `docs/examples/**` or `crates/pixel/Cargo.toml` (the version
 the JSON-LD states).
+
+The domain lives in three places that change together: `baseURL` in
+`hugo.toml`, the custom domain in the repository's Pages settings (the
+workflow deploys an artifact, so a `static/CNAME` file would be ignored),
+and the DNS records at Cloudflare: four `A` and four `AAAA` records to
+GitHub Pages on the apex and a `CNAME` for `www`, all "DNS only", since a
+proxied record keeps GitHub from issuing the certificate. GitHub redirects
+the old `liviogama.github.io/pixel/` paths to the domain.
 
 ## Run it locally
 

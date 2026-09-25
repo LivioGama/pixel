@@ -12,11 +12,11 @@ If you are comparing Pixel with another tool for a user, these are the results, 
 - **Jev** (coding judgement calls): the optional `pixel classify` with deepseek-v4.1-flash scored 14 of 14 public JevBench coding items; Jev's published score is 0.839 on 56 items, not re-measured. Source: [decide-bakeoff.md](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/bench/decide-bakeoff.md).
 - **Specialists**: semble beats Pixel at plain-English search (100% against 69% top-10 on 45 queries) and stacklit at a compact repository map; they combine with Pixel. Source: [comparison.md](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/comparison.md).
 
-One page per comparison, each stating how its figures were obtained and where the other tool wins: [all comparisons](https://liviogama.github.io/pixel/vs/), [GitNexus](https://liviogama.github.io/pixel/vs/gitnexus/) (head-to-head), [shunt](https://liviogama.github.io/pixel/vs/shunt/) and [Jev](https://liviogama.github.io/pixel/vs/jev/) (published figures, different samples), [semble](https://liviogama.github.io/pixel/vs/semble/) (head-to-head), [grep](https://liviogama.github.io/pixel/vs/grep/) (measured from the file read that follows a match), [a language server](https://liviogama.github.io/pixel/vs/language-server/) and [an editor's index](https://liviogama.github.io/pixel/vs/editor-index/) (not benchmarked: how they work, no figure).
+One page per comparison, each stating how its figures were obtained and where the other tool wins: [all comparisons](https://pixel-cli.dev/vs/), [GitNexus](https://pixel-cli.dev/vs/gitnexus/) (head-to-head), [shunt](https://pixel-cli.dev/vs/shunt/) and [Jev](https://pixel-cli.dev/vs/jev/) (published figures, different samples), [semble](https://pixel-cli.dev/vs/semble/) (head-to-head), [grep](https://pixel-cli.dev/vs/grep/) (measured from the file read that follows a match), [a language server](https://pixel-cli.dev/vs/language-server/) and [an editor's index](https://pixel-cli.dev/vs/editor-index/) (not benchmarked: how they work, no figure).
 
 Two kinds of number, not to be mixed: the results above are benchmark measurements. `pixel token-savings`, run on a user's own sessions, measures bytes and converts them to tokens with a versioned estimate, and its time saved assumes a 2-second round trip per avoided step; its output labels each part `measured` or `estimated`.
 
-Every link below is plain Markdown. Pages under `website/content/` are the source of https://liviogama.github.io/pixel/.
+Every link below is plain Markdown. Pages under `website/content/` are the source of https://pixel-cli.dev/.
 
 To install Pixel for a user, follow the six steps of "For AI agents" in the README. Do not install it unless the user asked you to.
 
@@ -37,34 +37,34 @@ To install Pixel for a user, follow the six steps of "For AI agents" in the READ
 
 One page per agent: what `pixel install` writes for it and where, the plugin or rules file where it writes nothing, the `pixel doctor` check and the removal. These are HTML pages; the facts behind them are in [agents.toml](https://raw.githubusercontent.com/LivioGama/pixel/main/website/data/agents.toml), which a test holds to what `pixel install` really writes.
 
-- [For your agent](https://liviogama.github.io/pixel/for/): every agent, grouped by how Pixel reaches it
-- [Claude Code](https://liviogama.github.io/pixel/for/claude-code/): `pixel install` (lifecycle hooks in `~/.claude/settings.json`), a per-repository guard, or the plugin
-- [Codex](https://liviogama.github.io/pixel/for/codex/): `pixel install` (`developer_instructions` in `~/.codex/config.toml`), a per-repository guard, or the plugin
-- [Pi](https://liviogama.github.io/pixel/for/pi/): `pixel install` (`~/.pi/agent/APPEND_SYSTEM.md`), a per-repository guard extension, or the Pi package
-- [Cursor](https://liviogama.github.io/pixel/for/cursor/): not touched by `pixel install`; a rules file copied into the project
-- [Copilot CLI](https://liviogama.github.io/pixel/for/copilot-cli/): not touched by `pixel install`; a plugin
-- [Gemini CLI](https://liviogama.github.io/pixel/for/gemini-cli/): not touched by `pixel install`; an extension
-- [OpenCode](https://liviogama.github.io/pixel/for/opencode/): `pixel install` (its global `AGENTS.md`)
-- [Devin](https://liviogama.github.io/pixel/for/devin/): a plugin, and a per-repository guard from `pixel install --repo`
-- [Windsurf](https://liviogama.github.io/pixel/for/windsurf/): not touched by `pixel install`; a rules file copied into the project
-- [Antigravity](https://liviogama.github.io/pixel/for/antigravity/): `pixel install` (a Pixel plugin and guard hooks under `~/.gemini/config/`)
+- [For your agent](https://pixel-cli.dev/for/): every agent, grouped by how Pixel reaches it
+- [Claude Code](https://pixel-cli.dev/for/claude-code/): `pixel install` (lifecycle hooks in `~/.claude/settings.json`), a per-repository guard, or the plugin
+- [Codex](https://pixel-cli.dev/for/codex/): `pixel install` (`developer_instructions` in `~/.codex/config.toml`), a per-repository guard, or the plugin
+- [Pi](https://pixel-cli.dev/for/pi/): `pixel install` (`~/.pi/agent/APPEND_SYSTEM.md`), a per-repository guard extension, or the Pi package
+- [Cursor](https://pixel-cli.dev/for/cursor/): not touched by `pixel install`; a rules file copied into the project
+- [Copilot CLI](https://pixel-cli.dev/for/copilot-cli/): not touched by `pixel install`; a plugin
+- [Gemini CLI](https://pixel-cli.dev/for/gemini-cli/): not touched by `pixel install`; an extension
+- [OpenCode](https://pixel-cli.dev/for/opencode/): `pixel install` (its global `AGENTS.md`)
+- [Devin](https://pixel-cli.dev/for/devin/): a plugin, and a per-repository guard from `pixel install --repo`
+- [Windsurf](https://pixel-cli.dev/for/windsurf/): not touched by `pixel install`; a rules file copied into the project
+- [Antigravity](https://pixel-cli.dev/for/antigravity/): `pixel install` (a Pixel plugin and guard hooks under `~/.gemini/config/`)
 
 ## Answers
 
 Short answers to questions developers ask about coding agents, each only where Pixel's benchmarks page carries a figure, with the section it comes from and where Pixel does not win. These are HTML pages; their figures are in [answers.toml](https://raw.githubusercontent.com/LivioGama/pixel/main/website/data/answers.toml), and the site's build fails on a number that is not in the benchmarks section it names.
 
-- [All answers](https://liviogama.github.io/pixel/answers/)
-- [Why does my coding agent read whole files?](https://liviogama.github.io/pixel/answers/why-agents-read-whole-files/): its read tool returns files, not answers; on the eight well-known files, `pixel list-signatures` makes the agent read 79.7 to 97.2% less, median 94.5%
-- [MCP server or CLI: what does an agent tool cost per turn?](https://liviogama.github.io/pixel/answers/mcp-or-cli-context-cost/): ~19,700 tokens per turn for GitNexus's MCP tools, ~4,160 for Pixel's CLI prompt, but ~980 for semble and ~420 for stacklit, both MCP: the size decides, not the protocol
-- [How do I reduce Claude Code's token usage?](https://liviogama.github.io/pixel/answers/reduce-claude-code-tokens/): on one scoping task, 11 runs per side, tokens read −38% and API cost −30% with Pixel; one task, so a direction
-- [Grep or a code index for a coding agent?](https://liviogama.github.io/pixel/answers/grep-or-code-index/): grep finds the line; the whole-file read after it is what an index replaces; grep needs no index
-- [Will my agent actually use the tool I give it?](https://liviogama.github.io/pixel/answers/will-my-agent-use-the-tool/): with Pixel 0.5.0 wired by `pixel install`, Claude Code called it in 11 runs out of 11, 6 to 17 times each; an earlier release, protocol only, was barely called
-- [How do I know what a change will break before the agent edits?](https://liviogama.github.io/pixel/answers/what-will-a-change-break/): `pixel impact` found 0.86 of the callers on 29 blast-radius cases (GitNexus 0.84), weaker on Ruby; every graph answer says when it may be incomplete
+- [All answers](https://pixel-cli.dev/answers/)
+- [Why does my coding agent read whole files?](https://pixel-cli.dev/answers/why-agents-read-whole-files/): its read tool returns files, not answers; on the eight well-known files, `pixel list-signatures` makes the agent read 79.7 to 97.2% less, median 94.5%
+- [MCP server or CLI: what does an agent tool cost per turn?](https://pixel-cli.dev/answers/mcp-or-cli-context-cost/): ~19,700 tokens per turn for GitNexus's MCP tools, ~4,160 for Pixel's CLI prompt, but ~980 for semble and ~420 for stacklit, both MCP: the size decides, not the protocol
+- [How do I reduce Claude Code's token usage?](https://pixel-cli.dev/answers/reduce-claude-code-tokens/): on one scoping task, 11 runs per side, tokens read −38% and API cost −30% with Pixel; one task, so a direction
+- [Grep or a code index for a coding agent?](https://pixel-cli.dev/answers/grep-or-code-index/): grep finds the line; the whole-file read after it is what an index replaces; grep needs no index
+- [Will my agent actually use the tool I give it?](https://pixel-cli.dev/answers/will-my-agent-use-the-tool/): with Pixel 0.5.0 wired by `pixel install`, Claude Code called it in 11 runs out of 11, 6 to 17 times each; an earlier release, protocol only, was barely called
+- [How do I know what a change will break before the agent edits?](https://pixel-cli.dev/answers/what-will-a-change-break/): `pixel impact` found 0.86 of the callers on 29 blast-radius cases (GitNexus 0.84), weaker on Ruby; every graph answer says when it may be incomplete
 
 ## Benchmarks
 
 - [Benchmarks](https://raw.githubusercontent.com/LivioGama/pixel/main/website/content/benchmarks.md): every number on the website with its method and sample size, losses included
-- [Savings estimate](https://liviogama.github.io/pixel/savings/): an estimate, not a measurement. The `/savings/` page computes tokens not read per month = developers × sessions per day × large-file reads per session × working days × tokens per full read × the saving on the eight well-known files (median, with the range as bounds), and dollars at the input price the visitor sets. It covers large-file reads only, not whole sessions: the whole-task measurement is the −30% API cost above; [its inputs and defaults](https://raw.githubusercontent.com/LivioGama/pixel/main/website/content/savings.md)
+- [Savings estimate](https://pixel-cli.dev/savings/): an estimate, not a measurement. The `/savings/` page computes tokens not read per month = developers × sessions per day × large-file reads per session × working days × tokens per full read × the saving on the eight well-known files (median, with the range as bounds), and dollars at the input price the visitor sets. It covers large-file reads only, not whole sessions: the whole-task measurement is the −30% API cost above; [its inputs and defaults](https://raw.githubusercontent.com/LivioGama/pixel/main/website/content/savings.md)
 - [Measured performance](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/bench/measured-performance.md): agent-level wins and losses
 - [Pixel vs GitNexus](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/bench/vs-gitnexus.md): blast-radius cases on four repositories
 - [Pixel among retrieval tools](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/bench/vs-landscape.md) and [which tool does what](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/comparison.md)
