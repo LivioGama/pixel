@@ -5,6 +5,9 @@
      (its /vs/ page, relative). Call with (dict "abs" true) for absolute
      links (the JSON-LD). */}}
 {{ $vars := partial "figures.html" (dict "abs" .abs) }}
+{{/* The home matrix's trait rows, in its order: every tool marked `matrix`, and Pixel's own `[pixel.traits]`, fills each one. */}}
+{{ $traits := slice "how" "needs" "reach" "history" "licence" }}
+{{ range $traits }}{{ if not (index hugo.Data.alternatives.pixel.traits .) }}{{ errorf "data/alternatives.toml: [pixel.traits] misses %q" . }}{{ end }}{{ end }}
 {{ $measures := slice "head-to-head" "published-figure" "baseline" "design" }}
 {{ $out := slice }}
 {{ range hugo.Data.alternatives.tool }}
@@ -15,9 +18,13 @@
     {{ if .bench }}{{ errorf "data/alternatives.toml: %s: a design entry is not benchmarked, it names no /benchmarks/ section" .slug }}{{ end }}
     {{ $text := slice .answer .wins }}
     {{ range .row }}{{ $text = $text | append .label .pixel .other }}{{ end }}
-    {{ with findRE `[0-9]` (delimit $text " ") }}{{ errorf "data/alternatives.toml: %s: a design entry carries no figure" $tool.slug }}{{ end }}
+    {{/* The matrix traits too, but not the licence, an identifier (Apache-2.0) rather than a figure. */}}
+    {{ range $k, $v := .traits }}{{ if ne $k "licence" }}{{ $text = $text | append $v }}{{ end }}{{ end }}
+    {{/* A digit that starts a token is a figure; one inside a name (Neo4j) is not. */}}
+    {{ with findRE `(?:^|[^A-Za-z])[0-9]` (delimit $text " ") }}{{ errorf "data/alternatives.toml: %s: a design entry carries no figure" $tool.slug }}{{ end }}
   {{ end }}
   {{ if not .wins }}{{ errorf "data/alternatives.toml: %s: every tool says where it wins (wins)" .slug }}{{ end }}
+  {{ if .matrix }}{{ range $traits }}{{ if not (index $tool.traits .) }}{{ errorf "data/alternatives.toml: %s: a matrix tool fills every trait, %q is missing" $tool.slug . }}{{ end }}{{ end }}{{ end }}
   {{ $t := dict }}
   {{ range $k, $v := $tool }}
     {{ if eq $k "row" }}{{ continue }}{{ end }}
@@ -43,7 +50,7 @@
     {{ $rows = $rows | append $r }}
   {{ end }}
   {{ $url := printf "vs/%s/" .slug }}
-  {{ $t = merge $t (dict "rows" $rows "url" (cond $.abs ($url | absURL) ($url | relURL))) }}
+  {{ $t = merge $t (dict "rows" $rows "traits" (.traits | default dict) "url" (cond $.abs ($url | absURL) ($url | relURL))) }}
   {{ $out = $out | append $t }}
 {{ end }}
 {{ return $out }}

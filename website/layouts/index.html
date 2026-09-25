@@ -148,13 +148,64 @@
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Alternatives</span></p>
       <header class="section__head" data-reveal>
         <h2 id="alternatives-title">Measured against <span class="glow">the alternatives.</span></h2>
-        <p>The tools a team weighs Pixel against, with the rows where they win kept in. GitNexus was run against Pixel on the same cases and the same machine; shunt and Jev are their own published figures, set beside ours.</p>
+        <p>The code indexes a team weighs Pixel against, with the row where each one wins kept in. GitNexus was run against Pixel on the same cases and the same machine; the others are compared on how they work, with no figure until we measure them.</p>
       </header>
-      {{/* The cards are the tools marked `home` in data/alternatives.toml (partials/alternatives.html fills their figures), the same entries the /vs/ pages render: change a figure on content/benchmarks.md first, then there. */}}
+      {{/* The matrix is the tools marked `matrix` in data/alternatives.toml, in file order, beside Pixel's own `[pixel.traits]`; the cards below are the tools marked `home`. partials/alternatives.html fills both, the same entries the /vs/ pages render: change a figure on content/benchmarks.md first, then there. */}}
       {{/* The kept files' range, for the Teams chapter below. */}}
       {{ $range := printf "%s to %s%%" (lang.FormatNumber 1 ($r.min)) (lang.FormatNumber 1 ($r.max)) }}
+      {{ $alts := partial "alternatives.html" (dict "abs" false) }}
+      {{ $cols := where $alts "matrix" true }}
+      {{ $pixel := hugo.Data.alternatives.pixel }}
+      {{/* A figure row: the first matrix tool's row carrying that `matrix` key gives Pixel's cell; a tool without the row was not measured on it. */}}
+      {{ $figures := slice "callers" "context" }}
+      {{ $traits := slice (dict "key" "how" "label" "How it answers") (dict "key" "needs" "label" "What it needs") (dict "key" "reach" "label" "How the agent reaches it") (dict "key" "history" "label" "Git history") (dict "key" "licence" "label" "Licence") }}
+      <div class="mx" data-reveal>
+        <div class="mx__scroll" tabindex="0" role="region" aria-labelledby="alternatives-title">
+          <table class="mx__table">
+            <colgroup><col class="mx__col-label"><col class="mx__col-pixel">{{ range $cols }}<col>{{ end }}</colgroup>
+            <thead>
+              <tr>
+                <th scope="col"><span class="sr-only">Criterion</span></th>
+                <th scope="col" class="mx__pixel">Pixel</th>
+                {{ range $cols }}<th scope="col"><a href="{{ .url }}">{{ .column | default .name }}</a>{{ if ne .measure "design" }}<span class="mx__tag mx__tag--measured">{{ (partial "vs-measure.html" .).label }}</span>{{ end }}</th>{{ end }}
+              </tr>
+            </thead>
+            <tbody>
+              {{ range $i, $key := $figures }}
+              {{ $first := dict }}{{ range $cols }}{{ range .rows }}{{ if and (eq .matrix $key) (not $first) }}{{ $first = . }}{{ end }}{{ end }}{{ end }}
+              {{ if not $first }}{{ errorf "data/alternatives.toml: no matrix tool has a row with matrix = %q" $key }}{{ end }}
+              <tr>
+                <th scope="row">{{ $first.label | safeHTML }}</th>
+                <td class="mx__pixel{{ if eq $first.win "pixel" }} is-win{{ end }}">{{ $first.pixel | safeHTML }}</td>
+                {{/* A tool with no figure row gets one cell across every figure row, saying how it was compared. */}}
+                {{ range $c := $cols }}{{ with index (where $c.rows "matrix" $key) 0 }}<td{{ if eq .win "other" }} class="is-win"{{ end }}>{{ .other | safeHTML }}</td>{{ else }}{{ if eq $i 0 }}<td class="mx__none" rowspan="{{ len $figures }}"><span class="mx__tag">{{ (partial "vs-measure.html" $c).label }}</span></td>{{ end }}{{ end }}{{ end }}
+              </tr>
+              {{ end }}
+              {{ range $t := $traits }}
+              <tr>
+                <th scope="row">{{ $t.label }}</th>
+                <td class="mx__pixel">{{ index $pixel.traits $t.key | safeHTML }}</td>
+                {{ range $cols }}<td>{{ index .traits $t.key | safeHTML }}</td>{{ end }}
+              </tr>
+              {{ end }}
+              <tr class="mx__wins">
+                <th scope="row">Where it beats Pixel</th>
+                <td class="mx__pixel">&mdash;</td>
+                {{ range $cols }}<td>{{ .wins | safeHTML }}</td>{{ end }}
+              </tr>
+              <tr class="mx__links">
+                <th scope="row"><span class="sr-only">Full comparison</span></th>
+                <td class="mx__pixel"><a class="link" href="{{ $bench }}#against-gitnexus">How we measured</a></td>
+                {{ range $cols }}<td><a class="link" href="{{ .url }}">Full comparison<span class="sr-only"> with {{ .name }}</span></a></td>{{ end }}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <h3 class="vs__kicker" data-reveal>Other ways to spend fewer tokens</h3>
       <div class="vs" data-reveal="stagger">
-        {{ range where (partial "alternatives.html" (dict "abs" false)) "home" true }}{{ $tool := . }}
+        {{ range where $alts "home" true }}{{ $tool := . }}
         <article class="vs__card">
           <header class="vs__head"><h3>vs {{ .name }}</h3><p>{{ .pitch | safeHTML }}</p></header>
           <table class="vs__table">
