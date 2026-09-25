@@ -25,6 +25,7 @@ Then let your agents use it, and check the result:
 pixel install         # once, from anywhere
 pixel prepare-repo .  # optional: index, graph and a warm daemon for this repository
 pixel doctor .        # optional: health check
+pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
 
 The index, the code graph and the optional history data live in `.pixel/` at the repository root and never leave the machine, and there is no telemetry. The network is used only for Git remote operations, the optional `pixel classify` and `pixel web-search`, and the embedding model downloaded from Hugging Face on first use ([security model](https://github.com/LivioGama/pixel/blob/main/SECURITY.md)).
@@ -179,3 +180,5 @@ Pixel does not cover every job. Use the native command for grep flags Pixel lack
 `pixel token-savings` reports, for the retrieval commands you ran, the fraction of the candidate pool the agent did not have to read. It measures what reached the agent's context, not your invoice. The replay of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark on Pixel's own repository is on the [home page](../#savings), and its method on the [benchmarks page](../benchmarks/#reading-code).
 
 Each Pixel command also prints a `🟩 Pixel` line on stderr with its measured duration and two estimates: tokens saved against the native workflow, and time saved against sequential round trips. Both are estimates, and zero or negative values are valid. `--metrics=off` or `PIXEL_METRICS=0` turns the line off.
+
+One command measures instead of estimating: `pixel list-signatures <file>` stands in for reading that file, so its line compares the file with the outline it printed, as `full read 10365 tok, pixel answer 641 tok (-94%)` (Requests' `models.py`). Both counts are bytes divided by four, rounded down, the method of the [benchmarks page](../benchmarks/#well-known-files), and it works on a fresh clone with no session behind it.

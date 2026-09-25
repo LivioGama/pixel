@@ -1,6 +1,9 @@
-//! Workflow estimator v1. These are policy assumptions, not measured averages:
+//! Workflow estimator v2. These are policy assumptions, not measured averages:
 //! 4 KiB per distinct returned evidence file and 1 KiB per native command or
 //! returned relationship inspected. Known evidence bytes replace file assumptions.
+//! v2 adds the measured whole-file read: a command that stands in for reading
+//! one file (`list-signatures`) records that file's size as its known bytes and
+//! no native command, and the live line compares it with the answer on stdout.
 //! No source, graph, or native comparison operation is performed here. Tokens are
 //! always UTF-8 bytes / 4, including the live reporting line when emitted.
 
@@ -11,7 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::ActionEvent;
 
-pub const ESTIMATOR_VERSION: &str = "workflow-v1";
+/// Version history: `workflow-v1` estimated every file at 4 KiB; `workflow-v2`
+/// records the measured size of the one file `list-signatures` stands in for.
+pub const ESTIMATOR_VERSION: &str = "workflow-v2";
 pub const TIME_ESTIMATOR_VERSION: &str = "sequential-v1";
 pub const DEFAULT_ROUND_TRIP_MS: u64 = 2000;
 
@@ -91,6 +96,20 @@ impl WorkflowEvidence {
                     .saturating_mul(1024),
             )
     }
+
+    /// The measured size of the files read in full, when that is the whole baseline.
+    ///
+    /// `Some` only when the known bytes are the entire native workflow: no
+    /// native command and no relationship adds an assumed kilobyte on top, so
+    /// the baseline is exactly "read these files", a measurement and not a
+    /// policy estimate.
+    pub fn measured_file_read(&self) -> Option<u64> {
+        if self.native_commands == 0 && self.relationships == 0 {
+            self.known_file_bytes
+        } else {
+            None
+        }
+    }
 }
 
 /// Rough sequential workflow scenario, not a latency measurement. Each file
@@ -144,6 +163,10 @@ pub struct OperationMetrics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_scope: Option<String>,
     pub output_bytes: u64,
+    /// Bytes rendered on stdout alone: the answer, without diagnostics or
+    /// the reporting block. Absent on records written before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_bytes: Option<u64>,
     pub reporting_bytes: u64,
     pub estimator_version: String,
     pub native_workflow_bytes: Option<u64>,
@@ -166,6 +189,7 @@ impl OperationMetrics {
             duration_us,
             output_scope: None,
             output_bytes,
+            answer_bytes: None,
             reporting_bytes: 0,
             estimator_version: ESTIMATOR_VERSION.to_owned(),
             native_workflow_bytes: evidence.as_ref().map(WorkflowEvidence::estimated_bytes),
@@ -303,13 +327,25 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
         unavailable.clone()
     };
 
-    let token_section = if let Some(native_bytes) = metrics.native_workflow_bytes {
+    let measured_read = metrics
+        .evidence
+        .as_ref()
+        .and_then(WorkflowEvidence::measured_file_read)
+        .zip(metrics.answer_bytes);
+    let token_section = if let Some((file_bytes, answer_bytes)) = measured_read {
+        format!(
+            "{}{partial_tag}",
+            measured_read_section(file_bytes, answer_bytes)
+        )
+    } else if let Some(native_bytes) = metrics.native_workflow_bytes {
         let native_tok = native_bytes as f64 / 4.0;
         if native_tok > 0.0 {
             let saved_tok = native_tok - payload_tok;
             if saved_tok > 0.0 {
                 let pct = (saved_tok / native_tok * 100.0).round() as i64;
-                format!("estimated LLM context saved: ~{saved_tok:.0} tok ({pct}%){partial_tag}")
+                format!(
+                    "estimated LLM context saved: ~{saved_tok:.0} tok ({pct}%) against ~{native_tok:.0} tok estimated{partial_tag}"
+                )
             } else {
                 // The comparison exists, it is just not a saving: state the
                 // rendered volume against the baseline instead of dropping it.
@@ -340,6 +376,23 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
         .min(64);
     line.extend(std::iter::repeat_n(' ', padding as usize));
     Some(line)
+}
+
+/// The token row of a measured whole-file read: both sides, then the saving.
+///
+/// Counts are UTF-8 bytes divided by four, rounded down, on both sides: the
+/// rule of `scripts/bench-read-savings.sh`, so the line and the published
+/// table can be re-derived with `wc -c` and agree to the token.
+fn measured_read_section(file_bytes: u64, answer_bytes: u64) -> String {
+    let full_tok = file_bytes / 4;
+    let answer_tok = answer_bytes / 4;
+    let both = format!("full read {full_tok} tok, pixel answer {answer_tok} tok");
+    if answer_tok < full_tok {
+        let pct = (100.0 * (1.0 - answer_tok as f64 / full_tok as f64)).round() as i64;
+        format!("{both} (-{pct}%)")
+    } else {
+        format!("{both} (no saving)")
+    }
 }
 
 /// The clause after `unavailable: ` for a record with no comparison. The gap
@@ -625,7 +678,7 @@ mod tests {
             .unwrap()
             .estimator_version = "sequential-v2".to_owned();
         let mut future_tokens = make(2000, false);
-        future_tokens.metrics.as_mut().unwrap().estimator_version = "workflow-v2".to_owned();
+        future_tokens.metrics.as_mut().unwrap().estimator_version = "workflow-v3".to_owned();
         let mut old_metrics = make(2000, false);
         old_metrics.metrics.as_mut().unwrap().time_estimate = None;
         let unavailable = ActionEvent::new("index", ".").with_metrics(OperationMetrics::new(
@@ -673,7 +726,7 @@ mod tests {
         assert!(
             groups
                 .iter()
-                .any(|group| group["token_estimator_version"] == "workflow-v2")
+                .any(|group| group["token_estimator_version"] == "workflow-v3")
         );
     }
 
@@ -896,7 +949,7 @@ mod tests {
             0,
             Some(WorkflowEvidence::default()),
         ));
-        future.metrics.as_mut().unwrap().estimator_version = "workflow-v2".to_owned();
+        future.metrics.as_mut().unwrap().estimator_version = "workflow-v3".to_owned();
         let summary = summarize_metrics(&[
             complete.clone(),
             complete,
@@ -911,7 +964,7 @@ mod tests {
         assert_eq!(summary["duplicate_records"], 1);
         assert_eq!(summary["legacy_records"], 2);
         assert_eq!(summary["unavailable_records"], 1);
-        let v1 = &summary["versions"]["workflow-v1"];
+        let v1 = &summary["versions"][ESTIMATOR_VERSION];
         assert_eq!(v1["complete"]["operations"], 1);
         assert_eq!(v1["complete"]["measured"]["duration_us"], 12);
         assert_eq!(v1["complete"]["estimated"]["saved_tokens"], -226.0);
@@ -919,7 +972,7 @@ mod tests {
         assert!(v1["unavailable"]["estimated"]["saved_tokens"].is_null());
         assert_eq!(v1["unavailable"]["measured"]["output_bytes"], 120);
         assert_eq!(
-            summary["versions"]["workflow-v2"]["complete"]["estimated"]["saved_tokens"],
+            summary["versions"]["workflow-v3"]["complete"]["estimated"]["saved_tokens"],
             0.0
         );
     }
@@ -936,7 +989,7 @@ mod tests {
         ));
         let line = event.finalize_metrics_line().unwrap();
         let summary = summarize_metrics(&[event.clone(), event]);
-        let group = &summary["versions"]["workflow-v1"]["complete"];
+        let group = &summary["versions"][ESTIMATOR_VERSION]["complete"];
         assert_eq!(group["measured"]["reporting_bytes"], line.len() + 2);
         assert_eq!(
             group["estimated"]["output_tokens"],
@@ -1106,7 +1159,9 @@ mod tests {
             "{saving}"
         );
         assert!(
-            saving.contains("  ├─ § estimated LLM context saved: ~1280 tok (100%)"),
+            saving.contains(
+                "  ├─ § estimated LLM context saved: ~1280 tok (100%) against ~1280 tok estimated"
+            ),
             "{saving}"
         );
         let overhead = line_for(
@@ -1154,5 +1209,98 @@ mod tests {
         )
         .unwrap();
         assert_eq!(absent.comparison_gap, None);
+    }
+
+    /// Only a baseline made of the file bytes alone is a measurement: an
+    /// assumed kilobyte per command or relationship would turn the "full
+    /// read" figure back into the policy estimate it replaces.
+    #[test]
+    fn a_measured_read_is_the_known_bytes_only_when_nothing_is_assumed_on_top() {
+        let read = |native_commands, relationships, known_file_bytes| WorkflowEvidence {
+            distinct_files: 1,
+            native_commands,
+            relationships,
+            known_file_bytes,
+            partial: false,
+        };
+        assert_eq!(read(0, 0, Some(41_462)).measured_file_read(), Some(41_462));
+        assert_eq!(read(1, 0, Some(41_462)).measured_file_read(), None);
+        assert_eq!(read(0, 1, Some(41_462)).measured_file_read(), None);
+        assert_eq!(read(0, 0, None).measured_file_read(), None);
+    }
+
+    /// The row a first-time user reads under `pixel list-signatures`: the two
+    /// counts the bench script publishes, floored the same way, then the
+    /// saving. psf/requests `models.py` (41 462 bytes, a 2 567-byte answer)
+    /// is the case the website quotes.
+    #[test]
+    fn a_measured_read_states_both_counts_floored_like_the_bench() {
+        assert_eq!(
+            measured_read_section(41_462, 2_567),
+            "full read 10365 tok, pixel answer 641 tok (-94%)"
+        );
+        // Floored on both sides: 7 and 5 bytes are one token each, no saving.
+        assert_eq!(
+            measured_read_section(7, 5),
+            "full read 1 tok, pixel answer 1 tok (no saving)"
+        );
+        assert_eq!(
+            measured_read_section(400, 800),
+            "full read 100 tok, pixel answer 200 tok (no saving)"
+        );
+        assert_eq!(
+            measured_read_section(400, 300),
+            "full read 100 tok, pixel answer 75 tok (-25%)"
+        );
+        assert_eq!(
+            measured_read_section(0, 0),
+            "full read 0 tok, pixel answer 0 tok (no saving)"
+        );
+    }
+
+    /// The live line of a measured read carries both counts from the stdout
+    /// answer, never the estimate that also counts diagnostics: a stale-install
+    /// note on stderr must not move the "pixel answer" figure.
+    #[test]
+    fn the_live_line_of_a_measured_read_compares_the_file_with_the_stdout_answer() {
+        let evidence = WorkflowEvidence {
+            distinct_files: 1,
+            known_file_bytes: Some(41_462),
+            ..Default::default()
+        };
+        let mut metrics =
+            OperationMetrics::new(Duration::from_millis(167), 2_727, Some(evidence.clone()));
+        metrics.answer_bytes = Some(2_567);
+        let event = ActionEvent::new("list-signatures", "models.py").with_metrics(metrics);
+        let line = format_metrics_line(&event).unwrap();
+        assert!(
+            line.contains("  ├─ § full read 10365 tok, pixel answer 641 tok (-94%)\n"),
+            "{line}"
+        );
+        assert!(!line.contains("estimated LLM context saved"), "{line}");
+
+        let mut partial = evidence.clone();
+        partial.partial = true;
+        let mut metrics = OperationMetrics::new(Duration::from_millis(1), 2_727, Some(partial));
+        metrics.answer_bytes = Some(2_567);
+        let event = ActionEvent::new("list-signatures", "models.py").with_metrics(metrics);
+        assert!(
+            format_metrics_line(&event)
+                .unwrap()
+                .contains("pixel answer 641 tok (-94%), partial\n")
+        );
+
+        // A record without the answer size (written before the field) keeps
+        // the estimate, which now names its base.
+        let old = ActionEvent::new("list-signatures", "models.py").with_metrics(
+            OperationMetrics::new(Duration::from_millis(1), 2_727, Some(evidence)),
+        );
+        let line = format_metrics_line(&old).unwrap();
+        assert!(
+            line.contains(
+                "  ├─ § estimated LLM context saved: ~9684 tok (93%) against ~10366 tok estimated\n"
+            ),
+            "{line}"
+        );
     }
 }

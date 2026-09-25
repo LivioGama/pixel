@@ -14,15 +14,13 @@ Every number below links to its method and raw data in the repository, with the 
 
 Three checks, quickest first. Each needs `pixel` on your PATH ([install](../docs/#install)); the first two run inside a Git repository of yours, where the first Pixel command builds its index in `.pixel/` and adds that folder to `.gitignore`.
 
-**One large file, now.** The whole file against `pixel list-signatures` on it, counted as below (bytes divided by four), in bash or zsh:
+**One large file, now.** `pixel list-signatures` prints the file's outline, then a report on stderr that compares it with reading the whole file, counted as below (bytes divided by four, rounded down):
 
 ```bash
-f=path/to/a/large/file.py
-echo "full read: $(( $(wc -c < "$f") / 4 )) tokens"
-echo "pixel: $(( $(pixel list-signatures "$f" | wc -c) / 4 )) tokens"
+pixel list-signatures path/to/a/large/file.py
 ```
 
-On Requests' `src/requests/models.py` (1,184 lines) it printed `full read: 10365 tokens` and `pixel: 641 tokens`, 94% less. The report Pixel writes to stderr under each command is left out of the count.
+On Requests' `src/requests/models.py` (1,184 lines) the report's last row read `full read 10365 tok, pixel answer 641 tok (-94%)`, in well under a second. The two counts are `wc -c` of the file and of the outline, divided by four; the report itself is left out of them.
 
 **Your agent's sessions, after a few days.** `pixel token-savings` reads the local action log (`.pixel/actions.jsonl`) and reports what Pixel's answers spared, each part labelled `measured` or `estimated`:
 

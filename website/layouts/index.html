@@ -374,8 +374,11 @@
               <button class="cmd__copy term__copy" type="button" data-copy="{{ $brew }} && pixel install && pixel doctor .">Copy all</button>
             </div>
             <pre class="term__body"><code><span data-line="brew"><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl" hidden><span class="term__p">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</span><span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span>
-  <span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></code></pre>
+  <span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span>
+  <span class="term__p">$</span> pixel list-signatures &lt;a large file&gt;  <span class="term__c"># first result, in your repo</span></code></pre>
           </div>
+          {{/* Measured on a fresh clone of psf/requests with the pixel of this commit; re-run it when the report line changes (crates/pixel-actionlog/src/metrics.rs, measured_read_section). */}}
+          <p class="install__more">The last line needs no session: under the file's outline, Pixel's report compares it with reading the whole file. On Requests' <code>models.py</code>: <code>full read 10365 tok, pixel answer 641 tok (-94%)</code>.</p>
           <p class="install__more">The script works on macOS and Linux. Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}" target="_blank" rel="noopener">Plugins and rules files</a>.</p>
           <p class="install__more install__ask">Questions, or stuck on setup? <a class="link" href="{{ site.Params.github_url }}/discussions" target="_blank" rel="noopener">Ask in GitHub Discussions</a>.</p>
         </div>

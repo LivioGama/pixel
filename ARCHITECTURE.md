@@ -382,7 +382,12 @@ The byte approximation is roughly one token per four UTF-8 bytes and includes
 reporting overhead. Measured output covers rendered CLI stdout, CLI-owned diagnostics and top-level
 errors, not lower-level library or subprocess streams. V1's fallback volume policies are 4 KiB per assumed distinct
 returned file read and 1 KiB per native-command output. They are assumptions, not
-measured averages. Estimates consider only returned evidence/relationships and
+measured averages. `workflow-v2` measures the one case it can: `list-signatures`
+stands in for reading one whole file, so its baseline is that file's size (a
+`stat`, no source read) with no assumed command, and the live line states
+`full read N tok, pixel answer M tok (-X%)` from the file and the stdout answer
+(`answer_bytes`), both floored bytes / 4 as in `scripts/bench-read-savings.sh`.
+Records keep the version they were written with. Estimates consider only returned evidence/relationships and
 represented native steps. Partial results remain partial; meaningless comparisons
 are unavailable; zero and negative savings are retained. There is no external
 telemetry, hidden reasoning estimate, or monetary claim.

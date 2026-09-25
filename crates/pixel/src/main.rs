@@ -5124,6 +5124,9 @@ fn run() -> Result<(), String> {
             metrics = metrics.with_round_trip_ms(round_trip_ms);
         }
         metrics.output_scope = Some("cli-rendered-streams".to_owned());
+        // The answer alone, which a measured whole-file read compares with
+        // the file: the diagnostics above are not what the command returned.
+        metrics.answer_bytes = Some(operation_metrics::stdout_bytes());
         event = event.with_metrics(metrics);
     }
     if live && let Some(line) = event.finalize_metrics_line() {
@@ -7615,7 +7618,7 @@ fn run_log(
 }
 
 /// Preserve legacy snippet/pool reports, separately aggregate versioned
-/// invocation metrics. Old measurements are never silently reclassified as v1.
+/// invocation metrics. Old measurements are never silently reclassified as a workflow version.
 fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), String> {
     use std::collections::BTreeMap;
     /// Per-command aggregate: invocations, pool chars, snippet chars.
@@ -7693,7 +7696,7 @@ fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), 
                 "total_pool_chars": tot_pool,
                 "total_snippet_chars": tot_snippet,
                 "by_command": rows,
-                "legacy_basis": "legacy snippet/pool byte comparison; not workflow-v1",
+                "legacy_basis": "legacy snippet/pool byte comparison; not a workflow estimate",
                 "workflow_metrics": workflow_metrics,
             })
         );
@@ -7705,7 +7708,7 @@ fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), 
         "{}",
         serde_json::to_string_pretty(&workflow_metrics).map_err(|e| e.to_string())?
     );
-    println!("legacy savings (snippet vs candidate-pool chars; not workflow-v1)");
+    println!("legacy savings (snippet vs candidate-pool chars; not a workflow estimate)");
     println!(
         "{:<14} {:>5}  {:>12}  {:>14}  {:>7}",
         "command", "calls", "pool_chars", "snippet_chars", "savings"
