@@ -62,7 +62,7 @@
           <span class="key key--waste">{{ lang.FormatNumberCustom 0 $big.full }} tokens reading the file</span>
           <span class="key key--kept">{{ lang.FormatNumberCustom 0 $big.pixel }} tokens asking Pixel</span>
           {{/* One file is an example, so the caption gives the spread over every kept file, with the link to the table and the excluded one. */}}
-          <span class="wall__unit">One square is 25 tokens. Across <a class="link" href="{{ $bench }}#well-known-files" target="_blank" rel="noopener">{{ len $kept }} well-known files</a>, the agent reads {{ lang.FormatNumber 0 (index $kept 0) }} to {{ lang.FormatNumber 0 (index $kept (sub (len $kept) 1)) }}% less (median {{ lang.FormatNumber 1 $median }}%).</span>
+          <span class="wall__unit">One square is 25 tokens. Across <a class="link" href="{{ $bench }}#well-known-files" target="_blank" rel="noopener">{{ len $kept }} well-known files</a>, the agent reads {{ lang.FormatNumber 1 (index $kept 0) }} to {{ lang.FormatNumber 1 (index $kept (sub (len $kept) 1)) }}% less (median {{ lang.FormatNumber 1 $median }}%).</span>
           <button class="wall__replay" type="button" data-wall-replay hidden>Replay</button>
         </figcaption>
       </figure>
