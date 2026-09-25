@@ -322,6 +322,15 @@ fn collect_files(root: &Path) -> Vec<(String, Vec<u8>)> {
     out
 }
 
+/// The `blob_oid` the store keeps for a file: the xxh3 of its bytes, 16 hex
+/// digits. `build_graph` and the incremental update write source rows
+/// through it, so a reader holding the file's current bytes (`pixel audit`)
+/// can tell a row indexed from other contents. `update_concepts` and the
+/// daemon's context check still spell the same format by hand.
+pub fn content_oid(content: &[u8]) -> String {
+    format!("{:016x}", xxh3_64(content))
+}
+
 struct Extracted {
     rel: String,
     blob_oid: String,
@@ -354,7 +363,7 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
         .into_par_iter()
         .filter_map(|(rel, content)| {
             let fx = extract_file(&rel, &content)?;
-            let blob_oid = format!("{:016x}", xxh3_64(&content));
+            let blob_oid = content_oid(&content);
             Some(Extracted {
                 rel,
                 blob_oid,
@@ -1068,7 +1077,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             all_changed_names.insert(s.name.clone());
         }
 
-        let blob_oid = format!("{:016x}", xxh3_64(&content));
+        let blob_oid = content_oid(&content);
         let file_id = store.replace_file(rel, &blob_oid, fx.lang)?;
 
         let mut ids = Vec::with_capacity(fx.symbols.len());

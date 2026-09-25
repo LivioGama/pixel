@@ -26,6 +26,7 @@ macro_rules! eprintln {
 macro_rules! eprint {
     ($($arg:tt)*) => { crate::operation_metrics::print_error(format_args!($($arg)*)) };
 }
+mod audit_cmd;
 mod call_guard;
 mod classify;
 mod claude_controller;
@@ -583,6 +584,18 @@ enum Command {
     Coverage {
         #[arg(default_value = ".")]
         path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// What an agent reads to learn what the largest files contain: each
+    /// whole file against its `list-signatures` outline, in tokens, with
+    /// per-language coverage. Local and read-only.
+    Audit {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// How many of the largest indexed source files to measure.
+        #[arg(long, default_value_t = audit_cmd::AUDIT_DEFAULT_TOP, value_parser = clap::value_parser!(u32).range(1..))]
+        top: u32,
         #[arg(long)]
         json: bool,
     },
@@ -5534,20 +5547,17 @@ fn run_command(
                 let syms = d.get("symbols")?.as_array()?;
                 let fname = d.get("file")?.as_str().unwrap_or("");
                 let lang = d.get("lang")?.as_str().unwrap_or("");
-                let mut output = format!("// {fname} [{lang}]\n");
-                if syms.is_empty() {
-                    output.push_str("// (no indexed symbols — run `pixel build-index .` first)\n");
-                } else {
-                    for s in syms {
-                        let kind = s.get("kind")?.as_str().unwrap_or("");
-                        let sig = s.get("sig")?.as_str().unwrap_or("");
-                        let line = s.get("start_line")?.as_u64().unwrap_or(0);
-                        if !sig.is_empty() {
-                            output.push_str(&format!("  L{line:>5}  {kind}  {sig}\n"));
-                        }
-                    }
-                }
-                Some(output)
+                let rows = syms
+                    .iter()
+                    .map(|s| {
+                        Some((
+                            s.get("start_line")?.as_u64().unwrap_or(0),
+                            s.get("kind")?.as_str().unwrap_or(""),
+                            s.get("sig")?.as_str().unwrap_or(""),
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(audit_cmd::render_outline(fname, lang, rows))
             })?;
             Ok(())
         }
@@ -5954,6 +5964,9 @@ fn run_command(
         }
         Command::Coverage { path, json } => {
             coverage_cmd::run(coverage_cmd::CoverageOptions { path, json })
+        }
+        Command::Audit { path, top, json } => {
+            audit_cmd::run(audit_cmd::AuditOptions { path, top, json })
         }
         Command::Workspace { cmd } => workspace_cmd::run(cmd),
         Command::IndexPack {
