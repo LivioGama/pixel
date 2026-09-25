@@ -89,8 +89,15 @@ touched (Hugo 0.166; a plain `hugo` build is right).
 - `data/alternatives.toml`: one entry per tool Pixel is compared with, read
   through `layouts/partials/alternatives.html` (placeholders such as
   `{kept.range}` or `{big.full}` filled from `data/read_savings.toml`, an
-  unknown one fails the build). The tools marked `home` are the
-  Alternatives cards; every tool is a `/vs/<slug>/` page
+  unknown one fails the build). The tools marked `matrix` (the code
+  indexes: GitNexus, Serena, CodeGraphContext, code-graph-rag, Claude
+  Context, graphify) are the columns of the Alternatives matrix, beside
+  Pixel's own `[pixel.traits]`: each fills the same `traits` (how, needs,
+  reach, history, licence), or the build fails, and a row with
+  `matrix = "callers"` or `"context"` puts its figure in the matrix, where a
+  tool without one shows how it was compared instead. A phone scrolls the
+  matrix sideways under its pinned criterion column. The tools marked `home`
+  are the "Other ways to spend fewer tokens" cards under it (shunt, Jev); every tool is a `/vs/<slug>/` page
   (`content/vs/<slug>.md`, front matter `tool = "<slug>"`, rendered by
   `layouts/vs/single.html`; `/vs/` itself is `layouts/vs/list.html`). A
   page's Markdown is prose only: the short answer, the table and "Where …
@@ -100,7 +107,10 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   (not benchmarked, no figure). A tool or category `/benchmarks/` does not
   measure (a language server, an editor's index) gets a page only as
   `design`: no figure at all, "Not benchmarked" above its table, and the
-  build fails on a digit in its answer, wins or rows, or on a `bench`.
+  build fails on a digit that starts a token in its answer, wins, rows or
+  traits (the licence excepted, and "Neo4j" passes), or on a `bench`. A
+  design entry's facts come from the tool's own README and docs, read on
+  its `checked` day.
   No figure `/benchmarks/` does not show: a card figure from the other
   tool's own docs (shunt's claim) gets a `page_other` the page shows
   instead. A page's "Updated" date is the later of its Git date and the
