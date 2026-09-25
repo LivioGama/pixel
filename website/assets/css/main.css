@@ -297,6 +297,10 @@ main h2 { position: relative; }
 
 /* ---------- sections ---------- */
 .section { --pad: clamp(210px, 34vh, 380px); position: relative; padding-block: var(--pad) 0; }
+/* The first chapter follows the hero directly (the example before the
+   numbers): the hero's own bottom padding and scroll cue already open the
+   gap, so a full chapter pad would read as an empty screen. */
+.hero + .section { --pad: clamp(64px, 12vh, 150px); }
 /* Each chapter opens on a label (.chapter in layouts/index.html): its number
    and a category name, deliberately not the headline's words, across a row of
    squares. The numbers match the rail. */

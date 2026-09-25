@@ -27,7 +27,10 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   stats round it) appears once the wall has burnt, and the caption turns
   a square into lines of that same file; the survivors
   gather into a P of exactly that many squares, built from the count by
-  the script, so one square always means 25 tokens. The scope board
+  the script, so one square always means 25 tokens. The order after the
+  hero shows before it proves: the scope example comes first, then the
+  numbers band (its comparisons with GitNexus mean little before a visitor
+  has seen what Pixel does), then the chapters of proof. The scope board
   draws one pad per indexed file and routes a trace from each P0 pad to its
   file name. The job tabs load each video only when opened, and the agent
   demo in "Measured on whole agent tasks" plays once when it scrolls into
