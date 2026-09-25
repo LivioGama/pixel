@@ -50,6 +50,7 @@ Both audits set `PIXEL_DAEMON_AUTO_START=0` and clean up after themselves;
 
 | Script | Run | What |
 | --- | --- | --- |
+| `bench-read-savings.sh` | `scripts/bench-read-savings.sh` | the whole file vs `pixel list-signatures` on well-known large files pinned to a commit (bytes ÷ 4); needs `curl` and network, no agent, under a minute. Rows in `website/data/read_savings.toml`, method in `docs/bench/read-savings.md` |
 | `pixel-vs-manual.sh` | `scripts/pixel-vs-manual.sh [repo]` | five retrieval tasks, grep/git vs pixel, timings side by side; no agent. Indexes the repo on first run |
 | `pixel-excavate-demo.sh` | `scripts/pixel-excavate-demo.sh /path/to/repo` (`PHRASE=…`) | history archaeology, `git log -S` vs `pixel dig-history`; the repo needs `pixel build-index --history` once |
 | `pixel-demo.sh` | `SCENARIO=scope scripts/pixel-demo.sh [repo]` | one `claude -p` scenario, baseline (`--safe-mode`, pixel hooks stripped) vs pixel; a few minutes |

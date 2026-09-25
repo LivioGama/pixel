@@ -8,7 +8,12 @@
   <a href="#main" class="skip">Skip to content</a>
   {{ partial "nav.html" . }}
   {{ $s := hugo.Data.scope }}
-  {{ $big := index hugo.Data.savings.row 0 }}
+  {{/* The token wall's file and the spread its caption quotes: data/read_savings.toml, the well-known files scripts/bench-read-savings.sh measures. */}}
+  {{ $reads := hugo.Data.read_savings.row }}
+  {{ $big := index (where $reads "wall" true) 0 }}
+  {{ $kept := sort (apply (where $reads "status" "kept") "index" "." "saved") }}
+  {{ $mid := div (len $kept) 2 }}
+  {{ $median := cond (modBool (len $kept) 2) (div (add (index $kept (sub $mid 1)) (index $kept $mid)) 2.0) (index $kept $mid) }}
   {{ $bench := "benchmarks/" | relURL }}
   {{/* The code graph's grammars: crates/pixel-graph/src/extract.rs. The last five use the generic extractor. */}}
   {{ $langs := slice "TypeScript" "JavaScript" "Rust" "Go" "Java" "Python" "C#" "Ruby" "PHP" "C" "Swift" "Elixir" "Lua" }}
@@ -48,16 +53,16 @@
       <figure class="wall" data-wall data-full="{{ $big.full }}" data-pixel="{{ $big.pixel }}" data-per="25">
         <div class="wall__meter">
           <p class="wall__state" aria-hidden="true"><span data-wall-state>Without Pixel</span></p>
-          <p class="wall__label" data-wall-label aria-hidden="true">Your agent reading one {{ lang.FormatNumberCustom 0 $big.lines }}-line file</p>
+          <p class="wall__label" data-wall-label aria-hidden="true">Your agent reading {{ $big.owner }} {{ path.Base $big.path }}, all {{ lang.FormatNumberCustom 0 $big.lines }} lines</p>
           <p class="wall__count" aria-hidden="true"><span data-wall-count>{{ lang.FormatNumberCustom 0 $big.full }}</span> tokens <span class="wall__delta">&minus;{{ math.Floor $big.saved }}%</span></p>
-          <p class="sr-only" aria-live="polite" data-wall-announce>Your agent reading one {{ lang.FormatNumberCustom 0 $big.lines }}-line file: {{ lang.FormatNumberCustom 0 $big.full }} tokens. The same question through Pixel: {{ lang.FormatNumberCustom 0 $big.pixel }} tokens.</p>
+          <p class="sr-only" aria-live="polite" data-wall-announce>Your agent reading {{ $big.owner }} {{ path.Base $big.path }}, all {{ lang.FormatNumberCustom 0 $big.lines }} lines: {{ lang.FormatNumberCustom 0 $big.full }} tokens. The same question through Pixel: {{ lang.FormatNumberCustom 0 $big.pixel }} tokens.</p>
         </div>
         <div class="wall__grid" aria-hidden="true"></div>
         <figcaption class="wall__caption">
           <span class="key key--waste">{{ lang.FormatNumberCustom 0 $big.full }} tokens reading the file</span>
           <span class="key key--kept">{{ lang.FormatNumberCustom 0 $big.pixel }} tokens asking Pixel</span>
-          {{/* A token made concrete with the wall's own file: 25 tokens are this many of its lines. */}}
-          <span class="wall__unit">One square is 25 tokens, about {{ lang.FormatNumber 1 (div (mul 25.0 $big.lines) $big.full) }} lines of that file. Measured on Pixel's own repository.</span>
+          {{/* One file is an example, so the caption gives the spread over every kept file, with the link to the table and the excluded one. */}}
+          <span class="wall__unit">One square is 25 tokens. Across <a class="link" href="{{ $bench }}#well-known-files" target="_blank" rel="noopener">{{ len $kept }} well-known files</a>, the agent reads {{ lang.FormatNumber 0 (index $kept 0) }} to {{ lang.FormatNumber 0 (index $kept (sub (len $kept) 1)) }}% less (median {{ lang.FormatNumber 1 $median }}%).</span>
           <button class="wall__replay" type="button" data-wall-replay hidden>Replay</button>
         </figcaption>
       </figure>
@@ -262,7 +267,7 @@
         </details>
         <details>
           <summary>Why not just grep?</summary>
-          <p>Grep finds the line. The cost is what comes next: the agent opens the whole file to understand the match. On a {{ lang.FormatNumberCustom 0 $big.lines }}-line file that read costs {{ lang.FormatNumberCustom 0 $big.full }} tokens, and Pixel's answer to the same question {{ lang.FormatNumberCustom 0 $big.pixel }}. <code>pixel search-content</code> keeps grep's regex syntax, so the agent changes nothing but the bill.</p>
+          <p>Grep finds the line. The cost is what comes next: the agent opens the whole file to understand the match. On {{ $big.owner }} {{ lang.FormatNumberCustom 0 $big.lines }}-line {{ path.Base $big.path }} that read costs {{ lang.FormatNumberCustom 0 $big.full }} tokens, and Pixel's answer to the same question {{ lang.FormatNumberCustom 0 $big.pixel }}. <code>pixel search-content</code> keeps grep's regex syntax, so the agent changes nothing but the bill.</p>
         </details>
         <details>
           <summary>Why not a language server?</summary>

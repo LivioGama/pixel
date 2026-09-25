@@ -1,5 +1,6 @@
 # README "Token savings": shunt's benchmark shape replayed on this repository.
-# The first row drives the landing page's token wall.
+# Shown on /benchmarks/ ("Reading code"); the landing page's token wall reads
+# data/read_savings.toml, the same measurement on well-known files.
 [[row]]
 scenario = "Single large file"
 lines = 4661

@@ -1,0 +1,117 @@
+# What reaches an agent that needs to know what a well-known large file
+# contains: the whole file, or `pixel list-signatures` on it (UTF-8 bytes
+# divided by four on both sides). Produced by scripts/bench-read-savings.sh
+# with pixel 0.5.0, each file pinned to `commit`; raw output and method in
+# docs/bench/read-savings.md. The row marked `wall` drives the landing
+# page's token wall; the `kept` rows give the range and median its caption
+# quotes. `excluded` rows are shown on /benchmarks/ with the reason.
+[[row]]
+project = "Hugging Face Transformers"
+owner = "Hugging Face's"
+repo = "huggingface/transformers"
+path = "src/transformers/trainer.py"
+commit = "98d3982"
+lines = 4639
+full = 57058
+pixel = 1649
+saved = 97.1
+signatures = 90
+status = "kept"
+wall = true
+
+[[row]]
+project = "FastAPI"
+repo = "fastapi/fastapi"
+path = "fastapi/routing.py"
+commit = "d623544"
+lines = 6447
+full = 63908
+pixel = 2237
+saved = 96.5
+signatures = 150
+status = "kept"
+
+[[row]]
+project = "Next.js"
+repo = "vercel/next.js"
+path = "packages/next/src/server/base-server.ts"
+commit = "52788bd"
+lines = 3459
+full = 29454
+pixel = 832
+saved = 97.2
+signatures = 60
+status = "kept"
+
+[[row]]
+project = "LangChain"
+repo = "langchain-ai/langchain"
+path = "libs/core/langchain_core/language_models/chat_models.py"
+commit = "ed0ad74"
+lines = 2748
+full = 27493
+pixel = 876
+saved = 96.8
+signatures = 65
+status = "kept"
+
+[[row]]
+project = "Django"
+repo = "django/django"
+path = "django/db/models/query.py"
+commit = "6ade625"
+lines = 3137
+full = 30449
+pixel = 2453
+saved = 91.9
+signatures = 186
+status = "kept"
+
+[[row]]
+project = "CPython"
+repo = "python/cpython"
+path = "Lib/typing.py"
+commit = "de2ea9a"
+lines = 3955
+full = 34829
+pixel = 3386
+saved = 90.3
+signatures = 251
+status = "kept"
+
+[[row]]
+project = "VS Code"
+repo = "microsoft/vscode"
+path = "src/vs/editor/common/model/textModel.ts"
+commit = "227803b"
+lines = 2745
+full = 27255
+pixel = 5531
+saved = 79.7
+signatures = 217
+status = "kept"
+
+[[row]]
+project = "Tokio"
+repo = "tokio-rs/tokio"
+path = "tokio/src/runtime/scheduler/multi_thread/worker.rs"
+commit = "7bb6f07"
+lines = 1566
+full = 13995
+pixel = 1064
+saved = 92.4
+signatures = 66
+status = "kept"
+
+[[row]]
+project = "React"
+repo = "facebook/react"
+path = "packages/react-reconciler/src/ReactFiberWorkLoop.js"
+commit = "cbb046a"
+lines = 5683
+full = 50936
+pixel = 324
+saved = 99.4
+signatures = 20
+status = "excluded"
+reason = "Written in Flow: the JavaScript grammar lists 20 of its 125 top-level functions, so the saving is overstated."

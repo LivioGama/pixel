@@ -14,6 +14,10 @@ mise exec -- hugo server --disableFastRender
 
 Plain CSS, no Sass and no Node: the standard Hugo build is enough.
 
+After editing a shortcode, restart `hugo server`: it keeps serving the
+pages that call it with the old output, even when the content file is
+touched (Hugo 0.166; a plain `hugo` build is right).
+
 ## Where things live
 
 - `layouts/index.html`: the whole landing page, with its scripts inline at
@@ -21,7 +25,8 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   count of the rest, from the `$agents` list the Compatibility grid also
   draws), then states the problem in the reader's words before naming the
   category. The token wall draws one square per 25 tokens of a full file
-  read (`data/savings.toml`, first row) and burns down to what the same
+  read of a well-known file (`data/read_savings.toml`, the row marked
+  `wall`) and burns down to what the same
   question costs through Pixel once it scrolls into view. A Without / With
   Pixel chip names the side shown, the saving (`saved`, floored as the
   stats round it) appears once the wall has burnt, and the caption turns
@@ -60,6 +65,11 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
   wiring changes.
 - `data/scope.toml`: the real `pixel scope-task` run the hero grid replays.
   Refresh the task, the index size and every position together.
+- `data/read_savings.toml`: the well-known files `scripts/bench-read-savings.sh`
+  measures (method in `docs/bench/read-savings.md`). The token wall, its
+  caption's range and median and the `/benchmarks/` table
+  (`layouts/shortcodes/read-savings.html`) all read it: re-run the script
+  and replace the rows, never one number by hand.
 - `data/jobs.toml`, `data/savings.toml`: the six animations and the token
   table, both from the README. A job's `text` holds one line on a wide
   screen (about 70 characters): the tab panel reserves one line there and

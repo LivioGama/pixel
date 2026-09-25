@@ -20,6 +20,14 @@ What reaches the agent's context when it needs to know what a file contains, mea
 
 This counts what the agent reads, not your invoice. `pixel token-savings` reports the same ratio from your own sessions: 41 to 83% across 798 operations on the maintainer's machine. The scenarios replay the shape of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark, which reaches a similar ratio by rerouting reads through a paid second model. [Method and figures, as first published](https://github.com/LivioGama/pixel/blob/632b3685a97e941476cb42aa75333b79f0ed8955/README.md#-token-savings--measured-no-second-model)
 
+### Well-known files
+
+The same measurement on large files of popular projects, each pinned to a commit: the whole file against `pixel list-signatures` on it, with pixel 0.5.0 in September 2026. The home page's token wall shows the Transformers row. The agent reads {{% read-savings "summary" %}}; the files with the most signatures per line (VS Code's text model, CPython's `typing.py`) save the least.
+
+{{% read-savings %}}
+
+React's work loop is left out of the range: it is written in Flow, and the JavaScript grammar lists 20 of its 125 top-level functions, so its 99.4% measures a parse failure, not a saving. The Signatures column is the check for that on every row: each kept file lists its module- and class-level definitions (Transformers: 90 for 89 `def` and `class` lines). Re-run it with `scripts/bench-read-savings.sh`. [Method and raw output](https://github.com/LivioGama/pixel/blob/main/docs/bench/read-savings.md)
+
 ## Against GitNexus
 
 The jobs both tools do: 29 blast-radius cases on four repositories in Rust, TypeScript and Ruby, with callers found by grep as the ground truth. GitNexus 1.6.12 and Pixel 0.4.0, same machine, September 2026.
