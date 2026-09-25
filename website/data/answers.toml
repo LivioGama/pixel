@@ -1,6 +1,6 @@
 # The /answers/ pages: one question a developer asks about coding agents,
 # answered from Pixel's own measurements. Each entry is the data of
-# content/answers/<slug>.md (front matter `answer = "<slug>"`, the question
+# content/answers/<slug>.md (YAML front matter `answer: "<slug>"`, the question
 # as its `title`, the detail as its prose), read through
 # layouts/partials/answers.html by the page, the /answers/ index and their
 # JSON-LD, so the markup never says what the page does not.

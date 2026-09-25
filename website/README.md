@@ -95,7 +95,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   so they change with `baseURL`.
 - `data/answers.toml`: the `/answers/` section, one question per entry,
   read through `layouts/partials/answers.html` by each page
-  (`content/answers/<slug>.md`, front matter `answer = "<slug>"`, the
+  (`content/answers/<slug>.md`, YAML front matter `answer: "<slug>"`, the
   question as its `title`, the detail as its prose, rendered by
   `layouts/answers/single.html`), the index (`layouts/answers/list.html`)
   and their JSON-LD (`WebPage` with a `Question` as `mainEntity`, and
