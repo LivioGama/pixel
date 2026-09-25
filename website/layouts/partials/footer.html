@@ -66,7 +66,14 @@
     var min = Number(el.getAttribute('data-gh-stars-min')) || 0;
     var key = 'gh-stars:' + repo;
     var show = function (n) {
-      if (typeof n !== 'number' || n < min) return;
+      if (typeof n !== 'number') return;
+      /* A cached count can clear the bar and a fresh one fall under it: hide again. */
+      if (n < min) {
+        badge.hidden = true;
+        el.textContent = '';
+        badge.removeAttribute('aria-label');
+        return;
+      }
       el.textContent = n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
       badge.setAttribute('aria-label', n + ' stars on GitHub');
       badge.hidden = false;
