@@ -1,0 +1,1 @@
+**history:** a broad diff or path search no longer comes back short or empty: candidates held any one trigram of the query and only the first 400 were checked (0.5.1 found no commit for `main` in this repository), and several hunks of one commit used up the page. Candidates now hold every trigram and the page counts distinct commits.

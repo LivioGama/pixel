@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use pixel_git::GitRunner;
 
-use crate::search::covering_hashes;
 use crate::store::{FactsError, FactsStore, IndexState, Result, short_oid, subject_of};
+use crate::text_index::{CANDIDATE_CAP, matching_hunks};
 
 /// Diff-content suspect heuristic, shared with `pixel rescue`
 /// (`crates/pixel/src/rescue_cmd.rs`): returns the first search unit
@@ -348,30 +348,10 @@ impl FactsStore {
         limit: usize,
     ) -> Result<Vec<ExcavateCandidate>> {
         let units = vec![phrase.to_string()];
-        let hashes = covering_hashes(&units);
-        if hashes.is_empty() {
+        let Some(ids) = matching_hunks(self.conn(), &units, CANDIDATE_CAP)? else {
             return Ok(Vec::new());
-        }
-        let deleted = self.paths_deleted_from_head()?;
-        let placeholders = hashes.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        // DISTINCT: a single hunk's text commonly contains several matching
-        // trigrams (e.g. "secret_token" alone covers multiple 3-byte grams),
-        // so without it the same hunk_id repeats once per matching gram and
-        // every downstream candidate/plan entry is duplicated accordingly.
-        // search.rs's equivalent queries (`path_search`, `diff_search`) already
-        // use DISTINCT for the same reason.
-        let sql = format!(
-            "SELECT DISTINCT hunk_id FROM diff_grams WHERE hash IN ({placeholders}) LIMIT 10000"
-        );
-        let ids: Vec<i64> = {
-            let mut stmt = self.conn().prepare(&sql)?;
-            let mut q = stmt.query(rusqlite::params_from_iter(hashes.iter().map(|h| *h as i64)))?;
-            let mut v = Vec::new();
-            while let Some(r) = q.next()? {
-                v.push(r.get::<_, i64>(0)?);
-            }
-            v
         };
+        let deleted = self.paths_deleted_from_head()?;
         let mut out: Vec<ExcavateCandidate> = Vec::new();
         for id in ids {
             // Join `file_changes` for the REAL per-commit status (A/M/D) of

@@ -55,6 +55,13 @@ pub struct SearchResult {
 const SNIPPET_RADIUS: usize = 120;
 /// Above this candidate count, an ordered scan beats huge IN() fetches.
 const CANDIDATE_FETCH_MAX: usize = 10_000;
+/// Most turns an agent-filtered ordered scan reads through the session index
+/// and sorts before the first row. Above it, the scan walks the ts index
+/// instead and stops at the first page: sorting claude's 194k turns (text
+/// included) took 260 ms for 50 rows where the walk takes under 10 ms, while
+/// a walk for an agent with few turns in the repository can read the whole
+/// index (120 ms) where the sort is instant.
+const AGENT_SORT_MAX_TURNS: i64 = 20_000;
 
 pub fn search(
     store: &RecallStore,
@@ -210,9 +217,21 @@ pub(crate) fn filter_sql(
     filters: &SearchFilters,
     args: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
 ) -> String {
+    filter_sql_with(filters, args, "s.agent")
+}
+
+/// `filter_sql` with the agent compared through `agent_column`: `s.agent`
+/// lets the planner start from `idx_sessions_agent_ts`, `+s.agent` (a unary
+/// plus, same value) keeps it off that index so an ordered scan walks
+/// `idx_turns_ts` and stops early.
+fn filter_sql_with(
+    filters: &SearchFilters,
+    args: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
+    agent_column: &str,
+) -> String {
     let mut sql = String::new();
     if let Some(a) = &filters.agent {
-        sql.push_str(" AND s.agent = ?");
+        sql.push_str(&format!(" AND {agent_column} = ?"));
         args.push(Box::new(a.clone()));
     }
     if let Some(r) = &filters.repo_prefix {
@@ -281,6 +300,55 @@ fn fetch_rows_by_ids(
     Ok(rows)
 }
 
+/// Turns in the sessions the session-level filters (agent, repo) keep,
+/// from `sessions.turn_count`: what an agent-filtered ordered scan would
+/// have to sort through the session index.
+fn session_turns(store: &RecallStore, filters: &SearchFilters) -> Result<i64, String> {
+    let mut sql = "SELECT COALESCE(SUM(s.turn_count), 0) FROM sessions s WHERE 1=1".to_string();
+    let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    if let Some(a) = &filters.agent {
+        sql.push_str(" AND s.agent = ?");
+        args.push(Box::new(a.clone()));
+    }
+    if let Some(r) = &filters.repo_prefix {
+        sql.push_str(" AND s.cwd LIKE ? || '%'");
+        args.push(Box::new(r.clone()));
+    }
+    store
+        .connection()
+        .query_row(
+            &sql,
+            params_from_iter(args.iter().map(AsRef::as_ref)),
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// True when an agent-filtered ordered scan over `agent_turns` turns should
+/// walk the ts index rather than sort them (see `AGENT_SORT_MAX_TURNS`).
+fn walk_ts_index(agent_turns: i64, sort_max: i64) -> bool {
+    agent_turns > sort_max
+}
+
+/// The SQL and arguments of the ordered ts-desc scan. With an agent filter,
+/// the plan is picked from the turns its sessions hold: at most `sort_max`,
+/// start from the agent's sessions and sort; more, walk the ts index.
+fn ordered_scan_query(
+    store: &RecallStore,
+    filters: &SearchFilters,
+    sort_max: i64,
+) -> Result<(String, Vec<Box<dyn rusqlite::types::ToSql>>), String> {
+    let agent_column = match &filters.agent {
+        Some(_) if walk_ts_index(session_turns(store, filters)?, sort_max) => "+s.agent",
+        _ => "s.agent",
+    };
+    let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut sql = format!("{ROW_SELECT} WHERE 1=1");
+    sql.push_str(&filter_sql_with(filters, &mut args, agent_column));
+    sql.push_str(" ORDER BY t.ts DESC NULLS LAST, t.id DESC");
+    Ok((sql, args))
+}
+
 /// Ordered ts-desc scan with SQL filters; `visit` returns false to stop.
 /// Returns whether the scan stopped early.
 fn scan_ordered(
@@ -290,10 +358,7 @@ fn scan_ordered(
     tail_floor: i64,
     visit: &mut dyn FnMut(HitRow) -> bool,
 ) -> Result<bool, String> {
-    let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-    let mut sql = format!("{ROW_SELECT} WHERE 1=1");
-    sql.push_str(&filter_sql(filters, &mut args));
-    sql.push_str(" ORDER BY t.ts DESC NULLS LAST, t.id DESC");
+    let (sql, args) = ordered_scan_query(store, filters, AGENT_SORT_MAX_TURNS)?;
     let mut stmt = store
         .connection()
         .prepare(&sql)
@@ -599,5 +664,93 @@ mod tests {
             format_hit(&bare),
             "claude:ab #3 t2 ? - assistant \"the needle\""
         );
+    }
+
+    #[test]
+    fn walk_ts_index_only_above_the_sort_ceiling() {
+        assert!(
+            !walk_ts_index(20_000, AGENT_SORT_MAX_TURNS),
+            "at the ceiling: sort"
+        );
+        assert!(walk_ts_index(20_001, AGENT_SORT_MAX_TURNS));
+        assert!(
+            !walk_ts_index(0, AGENT_SORT_MAX_TURNS),
+            "no turn: nothing to walk for"
+        );
+    }
+
+    #[test]
+    fn session_turns_sums_the_turns_of_the_sessions_the_agent_and_repo_keep() {
+        let (_tmp, store, _segments) = corpus();
+        let turns = |agent: Option<&str>, repo: Option<&str>| {
+            let filters = SearchFilters {
+                agent: agent.map(ToString::to_string),
+                repo_prefix: repo.map(ToString::to_string),
+                ..SearchFilters::default()
+            };
+            session_turns(&store, &filters).unwrap()
+        };
+        assert_eq!(turns(Some("claude"), None), 2);
+        assert_eq!(turns(Some("codex"), Some("/work/")), 2);
+        assert_eq!(turns(Some("codex"), Some("/elsewhere")), 0);
+        assert_eq!(turns(Some("nobody"), None), 0);
+        assert_eq!(turns(None, None), 4);
+    }
+
+    fn query_plan(store: &RecallStore, filters: &SearchFilters, sort_max: i64) -> String {
+        let (sql, args) = ordered_scan_query(store, filters, sort_max).unwrap();
+        let mut stmt = store
+            .connection()
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let rows = stmt
+            .query_map(params_from_iter(args.iter().map(AsRef::as_ref)), |r| {
+                r.get::<_, String>(3)
+            })
+            .unwrap();
+        rows.map(Result::unwrap).collect::<Vec<_>>().join(" | ")
+    }
+
+    fn scanned_ids(store: &RecallStore, filters: &SearchFilters, sort_max: i64) -> Vec<i64> {
+        let (sql, args) = ordered_scan_query(store, filters, sort_max).unwrap();
+        let mut stmt = store.connection().prepare(&sql).unwrap();
+        let rows = stmt
+            .query_map(params_from_iter(args.iter().map(AsRef::as_ref)), |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    /// An agent with more turns than the ceiling walks the ts index, so the
+    /// first page comes without sorting every turn of the agent; one under
+    /// it starts from its sessions. Both plans return the same rows in the
+    /// same order, and a session filter keeps its own index either way.
+    #[test]
+    fn ordered_scan_walks_the_ts_index_for_a_large_agent_and_sorts_a_small_one() {
+        let (_tmp, store, _segments) = corpus();
+        let claude = SearchFilters {
+            agent: Some("claude".to_string()),
+            ..SearchFilters::default()
+        };
+        let walk = query_plan(&store, &claude, 1);
+        assert!(walk.contains("idx_turns_ts"), "{walk}");
+        assert!(!walk.contains("TEMP B-TREE"), "{walk}");
+        let sort = query_plan(&store, &claude, 2);
+        assert!(sort.contains("idx_sessions_agent_ts"), "{sort}");
+        assert!(sort.contains("TEMP B-TREE FOR ORDER BY"), "{sort}");
+        assert_eq!(
+            scanned_ids(&store, &claude, 1),
+            scanned_ids(&store, &claude, 2)
+        );
+        assert_eq!(scanned_ids(&store, &claude, 1), vec![2, 1]);
+
+        let session = SearchFilters {
+            session_id: Some(2),
+            ..claude.clone()
+        };
+        let one_session = query_plan(&store, &session, 1);
+        assert!(one_session.contains("idx_turns_session"), "{one_session}");
+        assert_eq!(scanned_ids(&store, &session, 1), Vec::<i64>::new());
     }
 }

@@ -133,8 +133,11 @@ persisted PDG with taint findings, API route/shape/impact maps, multi-repo
 contract groups, a web UI, generated wikis — all GitNexus, no pixel equivalent.
 
 **Disk, with history.** pixel's comparable index is 8.6 MB against GitNexus'
-184 MB on the same repo, but the opt-in history database adds ~849 MB. Leave
-`--history` off and the footprint stays small.
+184 MB on the same repo, but the history database added ~849 MB in that run
+(225 MB db + 624 MB WAL). That was before the history index moved to FTS5
+trigram indexes (383 MB with its WAL down to 25 MB on pixel's own repository) and gained
+a default ceiling of 256 MiB and 365 days of diffs; the GitNexus repo has not
+been re-measured since. History is built only when a history command runs.
 
 ## Running them together
 

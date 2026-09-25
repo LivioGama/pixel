@@ -4890,10 +4890,17 @@ fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
 // main
 // ---------------------------------------------------------------------------
 
+/// `bytes` as mebibytes with one decimal, for the human `status` output.
+fn mib(bytes: u64) -> String {
+    format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
+}
+
 /// Facts/history visibility block for `pixel status`: phase, commits indexed
 /// vs the git rev-list count, diff coverage, freshness, and schema version.
+/// `None` when history was never built: this runs on every session start,
+/// and opening the db for writing would create it in every repository.
 fn facts_status(root: &Path) -> Option<Value> {
-    let store = pixel_facts::FactsStore::open(root).ok()?;
+    let store = pixel_facts::FactsStore::open_existing(root).ok()??;
     let state = store.index_state();
     Some(json!({
         "phase": state.phase,
@@ -6006,6 +6013,12 @@ fn run_command(
             {
                 data["facts"] = facts;
             }
+            // An absent history db is reported as `{"present": false}`;
+            // the renderers below read it as "no facts".
+            let facts_block = data
+                .get("facts")
+                .filter(|f| f.get("present").and_then(Value::as_bool) != Some(false))
+                .cloned();
             if statusline {
                 // Compact one-liner — size + freshness + enrichment, so a
                 // shell prompt/statusline shows staleness & coverage without
@@ -6038,7 +6051,7 @@ fn run_command(
                 // Enrichment coverage (only when the facts db exists and has
                 // enough history to report a meaningful fraction): commits
                 // indexed + diff-text coverage %, plus the fresh/stale state.
-                if let Some(f) = data.get("facts") {
+                if let Some(f) = facts_block.as_ref() {
                     if let (Some(ci), Some(tc)) = (
                         f.get("commits_indexed").and_then(Value::as_u64),
                         f.get("total_commits").and_then(Value::as_u64),
@@ -6103,7 +6116,7 @@ fn run_command(
                     }
                     _ => output.push_str("graph: not built (runs on first graph command)\n"),
                 }
-                if let Some(f) = data.get("facts") {
+                if let Some(f) = facts_block.as_ref() {
                     output.push_str(&format!(
                         "facts: phase={} commits={}/{} diff_coverage={:.0}% fresh={} schema_version={}\n",
                         f.get("phase").and_then(Value::as_str).unwrap_or("?"),
@@ -6113,15 +6126,25 @@ fn run_command(
                         f.get("fresh").and_then(Value::as_bool).unwrap_or(false),
                         f.get("schema_version").and_then(Value::as_i64).unwrap_or(0),
                     ));
-                    // Only the daemon-side block carries the poisoning
+                    // Only the daemon-side block carries the text and size
                     // counters; print them when present.
-                    if let (Some(h), Some(g)) = (
+                    if let (Some(h), Some(used), Some(budget)) = (
                         f.get("hunks_with_text").and_then(Value::as_u64),
-                        f.get("diff_grams").and_then(Value::as_u64),
+                        f.get("used_bytes").and_then(Value::as_u64),
+                        f.get("budget_bytes").and_then(Value::as_u64),
                     ) {
-                        output
-                            .push_str(&format!("facts-text: hunks_with_text={h} diff_grams={g}\n"));
+                        output.push_str(&format!(
+                            "facts-size: {} of {} budget, hunks_with_text={h} diffs_evicted={} diff_since={}\n",
+                            mib(used),
+                            mib(budget),
+                            f.get("diffs_evicted").and_then(Value::as_u64).unwrap_or(0),
+                            f.get("diff_coverage_since")
+                                .and_then(Value::as_str)
+                                .unwrap_or("-"),
+                        ));
                     }
+                } else {
+                    output.push_str("facts: not built (runs on first history command)\n");
                 }
                 output.push_str(&format!(
                     "daemon: {}\n",
@@ -8040,6 +8063,36 @@ fn excavate_show(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn mib_prints_mebibytes_with_one_decimal() {
+        assert_eq!(mib(0), "0.0 MiB");
+        assert_eq!(mib(268_435_456), "256.0 MiB");
+        assert_eq!(mib(1_572_864), "1.5 MiB");
+    }
+
+    /// `status` runs on every session start: a repository that never asked
+    /// for history must come out of it without a history db.
+    #[test]
+    fn facts_status_reports_nothing_and_creates_nothing_before_history_is_built() {
+        let dir = std::env::temp_dir().join(format!("pixel-facts-status-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.as_path();
+        let ok = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        assert_eq!(facts_status(root), None);
+        assert!(!pixel_facts::store::history_db_path(root).exists());
+        drop(pixel_facts::FactsStore::open(root).unwrap());
+        let block = facts_status(root).expect("present once built");
+        assert_eq!(block["commits_indexed"], 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The `--json` failure envelope is decided from the parsed flag, not
     /// from argv: `--json` counts only where the command declares it, and it

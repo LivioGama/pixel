@@ -2169,7 +2169,6 @@ version = "0.5.1"
 dependencies = [
  "mutants",
  "pixel-git",
- "pixel-index",
  "rusqlite",
  "serde",
  "serde_json",

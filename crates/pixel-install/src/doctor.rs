@@ -1007,7 +1007,22 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         );
 
         runner.check_status("facts.freshness", || -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
-            let store = pixel_facts::FactsStore::open(root).map_err(|e| e.to_string())?;
+            // History is demand-driven: a db that does not exist, or that
+            // holds no commit yet, is a repository that never asked for
+            // history, which is healthy. Opening it for writing here would
+            // create it, and the old red verdict on the empty db made
+            // `--fix` run a full history build nobody had asked for.
+            let not_built = || {
+                Ok((CheckStatus::Green, DoctorCheckDetail {
+                    summary: "history index not built (built on the first history command)"
+                        .to_string(),
+                    detail: Some(serde_json::json!({ "present": false })),
+                }))
+            };
+            let Some(store) = pixel_facts::FactsStore::open_existing(root).map_err(|e| e.to_string())?
+            else {
+                return not_built();
+            };
             let state = store.index_state();
             // Red: schema version mismatch — the db was written by a different
             // build and must be rebuilt before it can be trusted.
@@ -1018,38 +1033,45 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     pixel_facts::store::FACTS_SCHEMA_VERSION
                 ));
             }
-            // Counter-based dead/poisoned detection: mtime and diff_state
-            // alone lie (the historical poisoned DB had every commit marked
-            // INDEXED with empty hunk text), so measure the actual text and
-            // gram rows.
+            // Counter-based poisoned detection: mtime and diff_state alone
+            // lie (the historical poisoned DB had every commit marked
+            // INDEXED with empty hunk text), so measure the actual text.
             let count = |sql: &str| -> i64 {
                 store.conn().query_row(sql, [], |r| r.get(0)).unwrap_or(0)
             };
             let hunks_with_text = count(
                 "SELECT count(*) FROM hunks WHERE length(added) > 0 OR length(removed) > 0",
             );
-            let diff_grams = count("SELECT count(*) FROM diff_grams");
+            let diffs_indexed = count(&format!(
+                "SELECT count(*) FROM commits WHERE diff_state = {}",
+                pixel_facts::store::DIFF_STATE_INDEXED
+            ));
+            let verdict =
+                facts_verdict(state.commits_indexed, diffs_indexed, hunks_with_text, state.fresh);
             let repo_commits = pixel_git::GitRunner::new(root)
                 .rev_list_count_all()
                 .unwrap_or(0);
-            if let Some(reason) =
-                facts_dead_reason(state.commits_indexed, repo_commits, diff_grams)
-            {
-                return Err(reason);
-            }
+            let used_bytes = store.used_bytes().unwrap_or(0);
+            let budget_bytes = pixel_facts::store::HistoryLimits::from_env().budget_bytes;
             let detail = Some(serde_json::json!({
+                "present": true,
                 "phase": state.phase,
                 "commits_indexed": state.commits_indexed,
                 "total_commits": repo_commits.max(state.total_commits),
                 "diff_indexed_pct": state.diff_indexed_pct,
                 "hunks_with_text": hunks_with_text,
-                "diff_grams": diff_grams,
+                "used_bytes": used_bytes,
+                "budget_bytes": budget_bytes,
+                "diffs_evicted": state.diffs_evicted,
+                "diff_coverage_since": state.diff_coverage_since,
                 "fresh": state.fresh,
                 "schema_version": state.schema_version,
             }));
-            if !state.fresh {
+            match verdict {
+                FactsVerdict::NotBuilt => not_built(),
+                FactsVerdict::Poisoned(reason) => Err(reason),
                 // Yellow: stale — ingest has not caught up to the current refs.
-                return Ok((CheckStatus::Yellow, DoctorCheckDetail {
+                FactsVerdict::Stale => Ok((CheckStatus::Yellow, DoctorCheckDetail {
                     summary: format!(
                         "facts db present but stale (phase {}, {} commits, {:.0}% diff coverage)",
                         state.phase,
@@ -1057,18 +1079,19 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                         state.diff_indexed_pct * 100.0
                     ),
                     detail,
-                }));
+                })),
+                FactsVerdict::Fresh => Ok((CheckStatus::Green, DoctorCheckDetail {
+                    summary: format!(
+                        "facts db fresh ({} commits, {:.0}% diff coverage, {} hunks with text, {} of {} budget)",
+                        state.commits_indexed,
+                        state.diff_indexed_pct * 100.0,
+                        hunks_with_text,
+                        size_mib(used_bytes),
+                        size_mib(budget_bytes)
+                    ),
+                    detail,
+                })),
             }
-            Ok((CheckStatus::Green, DoctorCheckDetail {
-                summary: format!(
-                    "facts db fresh ({} commits, {:.0}% diff coverage, {} hunks with text, {} grams)",
-                    state.commits_indexed,
-                    state.diff_indexed_pct * 100.0,
-                    hunks_with_text,
-                    diff_grams
-                ),
-                detail,
-            }))
         });
     }
 
@@ -1612,32 +1635,60 @@ fn capped(text: &str, max_chars: usize) -> String {
     cut
 }
 
-/// The dead/poisoned-DB predicate for `facts.freshness`, factored out so it
-/// is unit-testable without a real repo:
-/// - a repo with commits but an empty facts db is DEAD (never ingested, or a
-///   just-wiped poisoned db that nothing has re-ingested yet);
-/// - indexed commits with ZERO diff-gram postings is the poisoned signature
-///   (the historical bug stored every hunk with empty added/removed text, so
-///   `diff_grams` had no rows and excavate/search returned nothing forever
-///   while diff_state claimed INDEXED).
+/// What `facts.freshness` concludes from the history db's counters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FactsVerdict {
+    /// No commit indexed: history was never asked for. Green.
+    NotBuilt,
+    /// Diffs marked indexed while no hunk holds text. Red, with the reason.
+    Poisoned(String),
+    /// Ingest has not caught up with the refs. Yellow.
+    Stale,
+    /// Caught up. Green.
+    Fresh,
+}
+
+/// The `facts.freshness` verdict, factored out of the check so each branch
+/// is testable without a real repo.
+pub fn facts_verdict(
+    commits_indexed: u64,
+    diffs_indexed: i64,
+    hunks_with_text: i64,
+    fresh: bool,
+) -> FactsVerdict {
+    if commits_indexed == 0 {
+        return FactsVerdict::NotBuilt;
+    }
+    if let Some(reason) = facts_poisoned_reason(diffs_indexed, hunks_with_text) {
+        return FactsVerdict::Poisoned(reason);
+    }
+    if fresh {
+        FactsVerdict::Fresh
+    } else {
+        FactsVerdict::Stale
+    }
+}
+
+/// `bytes` as whole mebibytes, for a check summary.
+fn size_mib(bytes: u64) -> String {
+    format!("{} MiB", bytes / 1_048_576)
+}
+
+/// The poisoned-DB predicate for `facts.freshness`, factored out so it is
+/// unit-testable without a real repo: commits whose diff is marked indexed
+/// while no hunk holds any text is the signature of the historical bug that
+/// stored every hunk with empty added/removed text, so excavate and diff
+/// search returned nothing forever while `diff_state` claimed INDEXED.
+///
+/// An empty db is not dead: history is built on the first history command,
+/// so a repository that never ran one has nothing to report.
 ///
 /// Returns `Some(reason)` when the check must go RED.
-pub fn facts_dead_reason(
-    commits_indexed: u64,
-    repo_commits: u64,
-    diff_grams: i64,
-) -> Option<String> {
-    if commits_indexed == 0 && repo_commits > 0 {
+pub fn facts_poisoned_reason(diffs_indexed: i64, hunks_with_text: i64) -> Option<String> {
+    if diffs_indexed > 0 && hunks_with_text == 0 {
         return Some(format!(
-            "facts db has 0 commits indexed but the repo has {repo_commits} — \
-             history queries will return nothing; run `pixel build-index --history`"
-        ));
-    }
-    if commits_indexed > 0 && diff_grams == 0 {
-        return Some(format!(
-            "facts db poisoned: {commits_indexed} commits indexed but 0 diff-gram \
-             postings — diff text was never stored; delete .pixel/history.db or \
-             re-run `pixel build-index --history`"
+            "facts db poisoned: {diffs_indexed} commits have their diff marked indexed but no \
+             hunk holds text — delete .pixel/history.db or re-run `pixel build-index --history`"
         ));
     }
     None
@@ -1875,7 +1926,6 @@ pub use pixel_daemon::daemon::socket_path as daemon_socket_path;
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::facts_dead_reason;
     use super::{
         CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary, Remedy, Repair,
         RepairOutcome, RepairStatus, VARIADIC_SENTINEL, age_secs, capped, catalogue_steps,
@@ -1884,6 +1934,7 @@ mod tests {
         rtk_backup_check, run_repair, scenario_mismatches, selected, shell_word, spec,
         validate_selection,
     };
+    use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
 
     fn finding(
@@ -2789,26 +2840,44 @@ git clone https://example.com/repo.git
     #[test]
     fn poisoned_db_signature_is_red() {
         // The real-world poisoned DB: 11 commits marked indexed, 323 hunks all
-        // with empty text, therefore 0 diff_grams rows.
-        let reason = facts_dead_reason(11, 21, 0);
+        // with empty text.
+        let reason = facts_poisoned_reason(11, 0);
         assert!(
             reason.as_deref().unwrap_or("").contains("poisoned"),
-            "indexed commits with zero grams must be flagged poisoned, got {reason:?}"
+            "indexed diffs with no hunk text must be flagged poisoned, got {reason:?}"
         );
     }
 
     #[test]
-    fn empty_db_in_nonempty_repo_is_red() {
-        let reason = facts_dead_reason(0, 21, 0);
-        assert!(
-            reason.is_some(),
-            "0 indexed commits while the repo has commits must be RED"
+    fn facts_verdict_reads_not_built_then_poisoned_then_freshness() {
+        assert_eq!(facts_verdict(0, 0, 0, false), FactsVerdict::NotBuilt);
+        assert_eq!(facts_verdict(0, 5, 0, true), FactsVerdict::NotBuilt);
+        assert!(matches!(
+            facts_verdict(11, 11, 0, true),
+            FactsVerdict::Poisoned(r) if r.contains("11 commits")
+        ));
+        assert_eq!(facts_verdict(21, 20, 400, true), FactsVerdict::Fresh);
+        assert_eq!(facts_verdict(21, 20, 400, false), FactsVerdict::Stale);
+        assert_eq!(
+            facts_verdict(1, 0, 0, true),
+            FactsVerdict::Fresh,
+            "every diff evicted"
         );
     }
 
     #[test]
-    fn healthy_and_trivially_empty_cases_are_not_red() {
-        assert_eq!(facts_dead_reason(21, 21, 50_000), None, "healthy db");
-        assert_eq!(facts_dead_reason(0, 0, 0), None, "empty repo, empty db");
+    fn size_mib_prints_whole_mebibytes() {
+        assert_eq!(size_mib(268_435_456), "256 MiB");
+        assert_eq!(size_mib(3_145_727), "2 MiB");
+        assert_eq!(size_mib(0), "0 MiB");
+    }
+
+    /// History that was never asked for is not an error: `doctor --fix`
+    /// must not turn a health check into a full history build.
+    #[test]
+    fn healthy_and_never_built_cases_are_not_red() {
+        assert_eq!(facts_poisoned_reason(21, 400), None, "healthy db");
+        assert_eq!(facts_poisoned_reason(0, 0), None, "no diff indexed yet");
+        assert_eq!(facts_poisoned_reason(1, 1), None, "one diff, one hunk");
     }
 }

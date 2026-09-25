@@ -3,10 +3,10 @@
 //!
 //! Schema (per PLAN.md Engine 2): `refs`, `commits`, `file_changes`, `hunks`,
 //! `poison_paths`, `ingest_jobs`, `messages_fts` (FTS5, unicode61, NO prefix
-//! index), and two trigram posting tables (`diff_grams`, `path_grams`) that
-//! realize the "recall rowid-in-path trick": a gram's posting carries the
-//! rowid of the `hunks` / `file_changes` row it came from, so a hit's path is
-//! resolved at fetch time and stale rowids simply die on join.
+//! index), and two contentless FTS5 trigram indexes (`diff_fts`, `path_fts`)
+//! whose rowid is the `hunks` / `file_changes` row they index: a match is a
+//! candidate rowid, verified against that row's text at fetch time, and a
+//! stale rowid simply dies on join.
 
 use std::path::{Path, PathBuf};
 
@@ -36,14 +36,83 @@ pub const REACH_TAG: i64 = 4;
 pub const REACH_STASH: i64 = 8;
 pub const REACH_REFLOG_ONLY: i64 = 16;
 
-/// Budget the default eviction budget (bytes of diff residue kept).
-pub const DEFAULT_DIFF_BUDGET_BYTES: u64 = 150 * 1024 * 1024;
+/// Default ceiling on the pages `history.db` holds (256 MiB), text and
+/// indexes together. Past it the oldest diffs are evicted; commit metadata
+/// always stays. `PIXEL_HISTORY_BUDGET_MB` overrides it.
+pub const DEFAULT_HISTORY_BUDGET_BYTES: u64 = 268_435_456;
+
+/// Default age window, in days, of the commits whose diff text is indexed.
+/// Older commits keep their metadata (message, paths) but not their diff.
+/// `PIXEL_HISTORY_WINDOW_DAYS` overrides it; `0` lifts the window.
+pub const DEFAULT_DIFF_WINDOW_DAYS: u64 = 365;
+
+/// `skip_note` of a commit whose diff is older than the window.
+pub const SKIP_NOTE_OUTSIDE_WINDOW: &str = "outside-window";
+/// `skip_note` of a commit whose diff did not fit the size budget.
+pub const SKIP_NOTE_OVER_BUDGET: &str = "over-budget";
 
 /// The on-disk schema version, stamped via `PRAGMA user_version`. Bump this
 /// whenever the DDL changes. On open, a mismatch (or a pre-versioned DB that
 /// already has rows) routes through the corrupt-rebuild path so every poisoned
 /// DB self-heals on next open — no manual `rm` required.
-pub const FACTS_SCHEMA_VERSION: i64 = 1;
+///
+/// History: 1 = trigram posting tables (`diff_grams`, `path_grams`), one row
+/// per (gram, row) at ~52 bytes a posting, 14 times the text they indexed;
+/// 2 = contentless FTS5 trigram indexes (`diff_fts`, `path_fts`), about 60
+/// times smaller (pixel's own history: ~307 MB of postings to 4.8 MB), with
+/// `auto_vacuum = INCREMENTAL` so eviction shrinks the file.
+pub const FACTS_SCHEMA_VERSION: i64 = 2;
+
+/// How much diff history the index keeps: a size budget over the whole
+/// database and an age window over the commits whose diff is indexed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryLimits {
+    /// Ceiling on the database's used pages, in bytes.
+    pub budget_bytes: u64,
+    /// Commits older than this many days keep only their metadata; `None`
+    /// indexes every age.
+    pub window_days: Option<u64>,
+}
+
+impl Default for HistoryLimits {
+    fn default() -> Self {
+        HistoryLimits {
+            budget_bytes: DEFAULT_HISTORY_BUDGET_BYTES,
+            window_days: Some(DEFAULT_DIFF_WINDOW_DAYS),
+        }
+    }
+}
+
+impl HistoryLimits {
+    /// The limits from `PIXEL_HISTORY_BUDGET_MB` and
+    /// `PIXEL_HISTORY_WINDOW_DAYS`, each falling back to its default.
+    #[cfg_attr(test, mutants::skip)] // one-line adapter over the env; `from_values` is tested
+    pub fn from_env() -> Self {
+        Self::from_values(
+            std::env::var("PIXEL_HISTORY_BUDGET_MB").ok().as_deref(),
+            std::env::var("PIXEL_HISTORY_WINDOW_DAYS").ok().as_deref(),
+        )
+    }
+
+    /// Parse the two settings: a budget in MiB and a window in days, where a
+    /// window of `0` means no window. A missing or unparseable value keeps
+    /// its default, so a typo never lifts a limit.
+    pub fn from_values(budget_mb: Option<&str>, window_days: Option<&str>) -> Self {
+        let defaults = Self::default();
+        let budget_bytes = budget_mb
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(defaults.budget_bytes, |mb| mb.saturating_mul(1_048_576));
+        let window_days = match window_days.and_then(|v| v.trim().parse::<u64>().ok()) {
+            Some(0) => None,
+            Some(days) => Some(days),
+            None => defaults.window_days,
+        };
+        HistoryLimits {
+            budget_bytes,
+            window_days,
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum FactsError {
@@ -86,6 +155,15 @@ pub struct IndexState {
     /// The on-disk schema version (PRAGMA user_version) this store was opened
     /// with — lets visibility report it.
     pub schema_version: i64,
+    /// Commits whose diff text is not indexed because it was older than the
+    /// window or did not fit the budget: their message and paths stay
+    /// searchable, their diff content does not.
+    #[serde(default)]
+    pub diffs_evicted: u64,
+    /// `committed_at` of the oldest commit whose diff is indexed: diff
+    /// search sees nothing older. `None` when no diff is indexed.
+    #[serde(default)]
+    pub diff_coverage_since: Option<String>,
 }
 
 impl IndexState {
@@ -97,6 +175,8 @@ impl IndexState {
             diff_indexed_pct: 0.0,
             fresh: false,
             schema_version: FACTS_SCHEMA_VERSION,
+            diffs_evicted: 0,
+            diff_coverage_since: None,
         }
     }
 }
@@ -181,6 +261,18 @@ impl FactsStore {
         })
     }
 
+    /// Open the history db only when it already exists, for the read-only
+    /// callers (`status`, `doctor`) that must report on it without creating
+    /// it: an absent db means history was never asked for, and it is built
+    /// on the first history query, not on a health check. `Ok(None)` when
+    /// the file is absent.
+    pub fn open_existing(root: &Path) -> Result<Option<Self>> {
+        if !history_db_path(root).exists() {
+            return Ok(None);
+        }
+        Self::open(root).map(Some)
+    }
+
     /// True when the on-disk db at `path` must be rebuilt: the schema version
     /// (PRAGMA user_version) is missing or mismatched, or the db is
     /// pre-versioned (user_version 0) but already holds rows (a poisoned DB
@@ -256,6 +348,10 @@ impl FactsStore {
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        // Before the first table exists, or it has no effect: freed pages
+        // are then tracked so `incremental_vacuum` can hand them back after
+        // an eviction, instead of the file keeping its largest size forever.
+        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
@@ -284,6 +380,18 @@ impl FactsStore {
         &self.runner
     }
 
+    /// Bytes held by the database's used pages (its page count minus the
+    /// free list), WAL content included: what the size budget measures.
+    pub fn used_bytes(&self) -> Result<u64> {
+        let pragma = |name: &str| -> Result<i64> {
+            Ok(self
+                .conn
+                .query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))?)
+        };
+        let used_pages = pragma("page_count")? - pragma("freelist_count")?;
+        Ok(u64::try_from(used_pages * pragma("page_size")?).unwrap_or(0))
+    }
+
     /// Checkpoint the WAL file to keep -wal bounded in size during long-running sessions.
     pub fn wal_checkpoint(&self) -> Result<()> {
         let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
@@ -309,7 +417,26 @@ impl FactsStore {
             diff_indexed_pct,
             fresh: pending_diff == 0 && self.phase_a_fresh() && self.phase_b_done(),
             schema_version: FACTS_SCHEMA_VERSION,
+            diffs_evicted: self.count_in_state(DIFF_STATE_EVICTED) as u64,
+            diff_coverage_since: self
+                .conn
+                .query_row(
+                    "SELECT min(committed_at) FROM commits WHERE diff_state = ?1",
+                    [DIFF_STATE_INDEXED],
+                    |r| r.get(0),
+                )
+                .unwrap_or(None),
         }
+    }
+
+    fn count_in_state(&self, state: i64) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT count(*) FROM commits WHERE diff_state = ?1",
+                [state],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
     }
 
     fn current_phase(&self) -> &'static str {
@@ -432,8 +559,8 @@ impl FactsStore {
     }
 }
 
-/// The schema. FTS5 is used ONLY for commit messages (unicode61, no prefix
-/// index). Diff/path text uses trigram posting tables.
+/// The schema. Commit messages use FTS5 with unicode61 (no prefix index);
+/// diff and path text use contentless FTS5 trigram indexes.
 const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS refs (
   ref    TEXT PRIMARY KEY,
@@ -509,22 +636,27 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   tokenize="unicode61 tokenchars '_'"
 );
 
--- Trigram segments: the "recall rowid-in-path trick". `diff_grams.hash` is a
--- gram over hunks.added/removed text, `diff_grams.hunk_id` is the hunks rowid
--- that carried it. `path_grams` is the same for file_changes.path.
-CREATE TABLE IF NOT EXISTS diff_grams (
-  hash INTEGER NOT NULL,
-  hunk_id INTEGER NOT NULL
+-- Trigram candidate indexes. `diff_fts` rowid = hunks.id over its
+-- added/removed text, `path_fts` rowid = file_changes.id over its path.
+-- Contentless (the text lives in hunks / file_changes, never twice),
+-- detail=none (no positions: a match is "every trigram present", verified
+-- against the text afterwards), contentless_delete so eviction can drop a
+-- hunk's entries by rowid.
+CREATE VIRTUAL TABLE IF NOT EXISTS diff_fts USING fts5(
+  text,
+  content='',
+  contentless_delete=1,
+  detail=none,
+  tokenize='trigram'
 );
-CREATE INDEX IF NOT EXISTS diff_grams_hash ON diff_grams (hash);
-CREATE INDEX IF NOT EXISTS diff_grams_hunk ON diff_grams (hunk_id);
 
-CREATE TABLE IF NOT EXISTS path_grams (
-  hash INTEGER NOT NULL,
-  change_id INTEGER NOT NULL
+CREATE VIRTUAL TABLE IF NOT EXISTS path_fts USING fts5(
+  path,
+  content='',
+  contentless_delete=1,
+  detail=none,
+  tokenize='trigram'
 );
-CREATE INDEX IF NOT EXISTS path_grams_hash ON path_grams (hash);
-CREATE INDEX IF NOT EXISTS path_grams_change ON path_grams (change_id);
 
 -- Marker table: proves this db was created by pixel, not planted by a
 -- hostile repo. Checked in needs_rebuild; a db missing this marker is
@@ -535,6 +667,11 @@ CREATE TABLE IF NOT EXISTS _pixel_marker (
 );
 INSERT OR IGNORE INTO _pixel_marker (key, val) VALUES ('created_by', 'pixel-facts');
 "#;
+
+/// `root/.pixel/history.db`.
+pub fn history_db_path(root: &Path) -> PathBuf {
+    root.join(".pixel").join(HISTORY_DB_FILE)
+}
 
 /// Shorten an oid to the conventional 12-char display form.
 pub fn short_oid(oid: &str) -> String {
@@ -571,5 +708,83 @@ mod tests {
         assert_ne!(after_commit, before);
         git(dir.path(), &["tag", "v1"]);
         assert_ne!(store.current_refs_hash().unwrap(), after_commit);
+    }
+
+    #[test]
+    fn history_limits_parse_budget_and_window_and_keep_defaults_on_garbage() {
+        let d = HistoryLimits::default();
+        assert_eq!(d.budget_bytes, 268_435_456);
+        assert_eq!(d.window_days, Some(365));
+        assert_eq!(HistoryLimits::from_values(None, None), d);
+        assert_eq!(
+            HistoryLimits::from_values(Some(" 64 "), Some("30")),
+            HistoryLimits {
+                budget_bytes: 67_108_864,
+                window_days: Some(30),
+            }
+        );
+        assert_eq!(
+            HistoryLimits::from_values(None, Some("0")).window_days,
+            None,
+            "0 lifts the window"
+        );
+        assert_eq!(
+            HistoryLimits::from_values(Some("lots"), Some("-1")),
+            d,
+            "a typo never lifts a limit"
+        );
+        assert_eq!(
+            HistoryLimits::from_values(Some(&u64::MAX.to_string()), None).budget_bytes,
+            u64::MAX,
+            "saturates"
+        );
+    }
+
+    /// `status` and `doctor` report on history without creating it.
+    #[test]
+    fn open_existing_never_creates_the_history_db() {
+        let (dir, _, _) = two_commit_repo();
+        let db = history_db_path(dir.path());
+        assert!(FactsStore::open_existing(dir.path()).unwrap().is_none());
+        assert!(!db.exists(), "a read-only check must not create {db:?}");
+        drop(FactsStore::open(dir.path()).unwrap());
+        let store = FactsStore::open_existing(dir.path())
+            .unwrap()
+            .expect("present");
+        assert_eq!(store.path(), db.as_path());
+    }
+
+    /// Freed pages must be reclaimable, or an eviction never shrinks the
+    /// file; and the budget measures used pages, not the free list.
+    #[test]
+    fn a_new_db_reclaims_incrementally_and_used_bytes_excludes_free_pages() {
+        let (dir, _, _) = two_commit_repo();
+        let store = FactsStore::open(dir.path()).unwrap();
+        let pragma = |name: &str| -> i64 {
+            store
+                .conn()
+                .query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(pragma("auto_vacuum"), 2, "INCREMENTAL");
+        assert_eq!(
+            store.used_bytes().unwrap(),
+            (pragma("page_count") * pragma("page_size")) as u64
+        );
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TABLE filler (b BLOB);
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40)
+                 INSERT INTO filler SELECT randomblob(3000) FROM n;
+                 DELETE FROM filler;",
+            )
+            .unwrap();
+        let free = pragma("freelist_count");
+        assert!(free >= 20, "{free}");
+        assert_eq!(
+            store.used_bytes().unwrap(),
+            ((pragma("page_count") - free) * pragma("page_size")) as u64
+        );
     }
 }

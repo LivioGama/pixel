@@ -1,18 +1,17 @@
 //! `search.rs` — history search: `search {query, facet: message|path|diff|all}`.
 //!
-//! Diff/path scopes use trigram candidates (from `diff_grams` / `path_grams`)
-//! verified against the `hunks` / `file_changes` text — the recall rowid-in-path
-//! trick. Message scope uses FTS5. Ranking = occurrence count then recency
+//! Diff/path scopes take trigram candidates from `diff_fts` / `path_fts`
+//! (`text_index`), verified against the `hunks` / `file_changes` text.
+//! Message scope uses FTS5. Ranking = occurrence count then recency
 //! (usable-git's post-bm25 design). Budgeted: 200 candidates/scope.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
-use pixel_index::{GramExtractor, TrigramExtractor};
-
 use crate::store::{FactsStore, Result, short_oid, subject_of};
+use crate::text_index::{CANDIDATE_CAP, matching_changes, matching_hunks};
 
 pub const PER_SCOPE_CANDIDATES: usize = 200;
 
@@ -275,28 +274,16 @@ fn path_search(store: &FactsStore, units: &[String], limit: usize) -> Result<Vec
         return Ok(Vec::new());
     }
     // Trigram candidates over file_changes.path, verified against path text.
-    let hashes = covering_hashes(units);
-    if hashes.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut change_ids: Vec<i64> = Vec::new();
-    {
-        let placeholders = hashes.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "SELECT DISTINCT change_id FROM path_grams WHERE hash IN ({placeholders}) LIMIT 10000"
-        );
-        let mut stmt = store.conn().prepare(&sql)?;
-        let mut rows = stmt.query(rusqlite::params_from_iter(hashes.iter().map(|h| *h as i64)))?;
-        while let Some(row) = rows.next()? {
-            change_ids.push(row.get(0)?);
-        }
-    }
-    if change_ids.is_empty() {
-        return Ok(Vec::new());
-    }
+    let change_ids = matching_changes(store.conn(), units, CANDIDATE_CAP)?.unwrap_or_default();
     let max_id = max_commit_id(store);
     let mut hits = Vec::new();
-    for change_id in change_ids.iter().take(limit) {
+    // `limit` counts commits: several changed paths of one commit are one
+    // result once `search` dedups them, so they must not use up the page.
+    let mut commits: HashSet<String> = HashSet::new();
+    for change_id in &change_ids {
+        if commits.len() >= limit {
+            break;
+        }
         let row: Option<(i64, String, String, String, String, String, u64)> = store
             .conn()
             .query_row(
@@ -321,6 +308,10 @@ fn path_search(store: &FactsStore, units: &[String], limit: usize) -> Result<Vec
             .ok();
         if let Some((id, oid, at, author, message, path, ft)) = row {
             let rel = relevance_of(&path, units) as f64;
+            if rel == 0.0 {
+                continue; // trigrams present but not adjacent — drop
+            }
+            commits.insert(oid.clone());
             let score = rel + recency_score(id, max_id);
             hits.push(to_hit(
                 &oid,
@@ -342,30 +333,18 @@ fn diff_search(store: &FactsStore, units: &[String], limit: usize) -> Result<Vec
     if units.is_empty() {
         return Ok(Vec::new());
     }
-    let hashes = covering_hashes(units);
-    if hashes.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Candidate hunks whose grams intersect the query covering.
-    let mut hunk_ids: Vec<i64> = Vec::new();
-    {
-        let placeholders = hashes.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "SELECT DISTINCT hunk_id FROM diff_grams WHERE hash IN ({placeholders}) LIMIT 10000"
-        );
-        let mut stmt = store.conn().prepare(&sql)?;
-        let mut rows = stmt.query(rusqlite::params_from_iter(hashes.iter().map(|h| *h as i64)))?;
-        while let Some(row) = rows.next()? {
-            hunk_ids.push(row.get(0)?);
-        }
-    }
-    if hunk_ids.is_empty() {
-        return Ok(Vec::new());
-    }
+    // Candidate hunks holding every trigram of a unit, newest first.
+    let hunk_ids = matching_hunks(store.conn(), units, CANDIDATE_CAP)?.unwrap_or_default();
     let max_id = max_commit_id(store);
     let mut hits = Vec::new();
-    // Verified against hunks text: only count real (non-stale) hits.
-    for hunk_id in hunk_ids.iter().take(limit * 2) {
+    // Verified against hunks text: only count real hits, until `limit`
+    // commits. Several hunks of one commit are one result once `search`
+    // dedups them, so they must not use up the page.
+    let mut commits: HashSet<String> = HashSet::new();
+    for hunk_id in &hunk_ids {
+        if commits.len() >= limit {
+            break;
+        }
         #[allow(clippy::type_complexity)]
         let row: Option<(i64, String, String, String, String, u64, String, String)> = store
             .conn()
@@ -398,6 +377,7 @@ fn diff_search(store: &FactsStore, units: &[String], limit: usize) -> Result<Vec
             if rel == 0.0 {
                 continue; // stale gram or false positive — drop
             }
+            commits.insert(oid.clone());
             let score = rel + recency_score(id, max_id);
             let snippet = make_snippet(&text, units);
             hits.push(to_hit(
@@ -414,21 +394,6 @@ fn diff_search(store: &FactsStore, units: &[String], limit: usize) -> Result<Vec
         }
     }
     Ok(hits)
-}
-
-/// Covering gram hashes for the query units (union across units; candidates
-/// then verified against hunks text, so a false positive is harmless).
-pub fn covering_hashes(units: &[String]) -> Vec<u64> {
-    let extractor = TrigramExtractor;
-    let mut hashes: Vec<u64> = Vec::new();
-    for unit in units {
-        for h in extractor.covering(unit.as_bytes()) {
-            hashes.push(h);
-        }
-    }
-    hashes.sort_unstable();
-    hashes.dedup();
-    hashes
 }
 
 /// A small snippet around the first occurrence of any unit.
@@ -527,5 +492,69 @@ mod tests {
                 .unwrap_or("")
                 .contains("secret_token")
         );
+    }
+
+    /// A path holding a unit's trigrams apart is a candidate of the index
+    /// but not a hit: path search verifies the path text like diff search.
+    #[test]
+    fn path_search_reports_only_paths_that_contain_the_unit() {
+        let dir = crate::testutil::init_repo();
+        let root = dir.path();
+        let apart = crate::testutil::commit(root, &[("abc/xbcd.txt", b"1\n")], "apart");
+        let whole = crate::testutil::commit(root, &[("src/abcd.txt", b"2\n")], "whole");
+        let mut store = FactsStore::open(root).unwrap();
+        ingest_within(&mut store);
+        let hits = search(&store, "abcd", SearchFacet::Path, 50).unwrap();
+        let got: Vec<(String, Option<String>)> = hits
+            .candidates
+            .iter()
+            .map(|h| (h.oid.clone(), h.path.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![(short_oid(&whole), Some("src/abcd.txt".to_string()))]
+        );
+        assert_ne!(short_oid(&apart), short_oid(&whole));
+    }
+
+    /// The page counts commits, not hunks or paths: a recent commit that
+    /// touched three matching files must not push an older matching commit
+    /// off a two-result page.
+    #[test]
+    fn diff_and_path_search_fill_the_limit_with_distinct_commits() {
+        let dir = crate::testutil::init_repo();
+        let root = dir.path();
+        let older = crate::testutil::commit_at(
+            root,
+            &[("keep/one.txt", b"shared_word\n")],
+            "older",
+            crate::testutil::days_ago(2),
+        );
+        let newer = crate::testutil::commit_at(
+            root,
+            &[
+                ("keep/a.txt", b"shared_word a\n"),
+                ("keep/b.txt", b"shared_word b\n"),
+                ("keep/c.txt", b"shared_word c\n"),
+            ],
+            "newer",
+            crate::testutil::days_ago(1),
+        );
+        let mut store = FactsStore::open(root).unwrap();
+        ingest_within(&mut store);
+        let oids = |facet: SearchFacet, query: &str| -> Vec<String> {
+            let mut got: Vec<String> = search(&store, query, facet, 2)
+                .unwrap()
+                .candidates
+                .into_iter()
+                .map(|h| h.oid)
+                .collect();
+            got.sort_unstable();
+            got
+        };
+        let mut want = vec![short_oid(&older), short_oid(&newer)];
+        want.sort_unstable();
+        assert_eq!(oids(SearchFacet::Diff, "shared_word"), want);
+        assert_eq!(oids(SearchFacet::Path, "keep/"), want);
     }
 }

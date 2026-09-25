@@ -313,3 +313,47 @@ fn doctor_fix_should_say_so_when_nothing_can_be_repaired_automatically() {
         "{text}"
     );
 }
+
+/// History is built on the first history command. A repository that never
+/// ran one is healthy, and checking it must not create the db: the old red
+/// verdict on an empty db made `doctor --fix` run a full history build that
+/// nobody had asked for.
+#[test]
+fn doctor_should_pass_a_repo_whose_history_was_never_built_and_leave_it_unbuilt() {
+    let (home, repo) = fixture("history-not-built");
+    std::fs::write(repo.join("lib.rs"), "pub fn seed() {}\n").unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["add", "."],
+        &["commit", "-q", "-m", "seed"],
+    ] {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&*repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+    let out = doctor(
+        &home,
+        &repo,
+        &["--only", "facts.freshness", "--json", "--fail-on", "yellow"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let check = &report["checks"][0];
+    assert_eq!(check["id"], "facts.freshness", "{report}");
+    assert_eq!(check["status"], "green", "{report}");
+    assert_eq!(check["detail"]["present"], false, "{report}");
+    assert!(
+        !repo.join(".pixel").join("history.db").exists(),
+        "the check must not create history.db"
+    );
+}
