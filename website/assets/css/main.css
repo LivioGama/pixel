@@ -188,6 +188,9 @@ main h2 { position: relative; }
 .hero__mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--panel); box-shadow: 0 0 0 2px var(--ground), inset 0 0 0 1px var(--cell-edge); color: var(--ink); }
 .hero__mark + .hero__mark { margin-left: -8px; }
 .hero__mark svg { width: 16px; height: 16px; }
+/* Pi's mark fills its whole viewBox where the others keep a margin: drawn
+   at full size it reads heavier than its neighbours. */
+.hero__mark--pi svg { width: 12px; height: 12px; }
 .hero__lede { font-size: clamp(1.15rem, 1.8vw, 1.4rem); line-height: 1.5; color: var(--ink-soft); max-width: 32em; margin: clamp(24px, 3vw, 36px) 0 0; }
 .hero__cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; align-items: stretch; }
 .hero__cta .cmd { flex: 1 1 420px; min-width: 0; }

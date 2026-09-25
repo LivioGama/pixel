@@ -28,8 +28,8 @@
     {{/* ---------- hero: the token wall ---------- */}}
     <section class="hero wrap">
       <div class="hero__copy">
-      {{/* Who it is for, before the title: three marks a visitor recognises, then the count of the rest (the Compatibility grid lists them). The ids inside a mark get a prefix, since the grid inlines the same SVG. */}}
-      {{ $named := first 3 (where $agents "logo" "in" (slice "claude" "codex" "cursor")) }}
+      {{/* Who it is for, before the title: four marks a visitor recognises, then the count of the rest (the Compatibility grid lists them). The ids inside a mark get a prefix, since the grid inlines the same SVG. */}}
+      {{ $named := first 4 (where $agents "logo" "in" (slice "claude" "codex" "pi" "cursor")) }}
       <p class="hero__for">
         <span class="hero__marks" aria-hidden="true">{{ range $named }}<span class="hero__mark hero__mark--{{ .logo }}">{{ replace (resources.Get (printf "logos/%s.svg" .logo)).Content "lobe-icons-" "hero-lobe-icons-" | safeHTML }}</span>{{ end }}</span>
         <span>For {{ range $i, $a := $named }}{{ if $i }}, {{ end }}{{ $a.name }}{{ end }} and <a class="link" href="#agents">{{ sub (len $agents) (len $named) }} more coding agents</a></span>

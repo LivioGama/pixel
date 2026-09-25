@@ -17,7 +17,7 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
 ## Where things live
 
 - `layouts/index.html`: the whole landing page, with its scripts inline at
-  the bottom. The hero opens on who Pixel is for (three agent marks and the
+  the bottom. The hero opens on who Pixel is for (four agent marks and the
   count of the rest, from the `$agents` list the Compatibility grid also
   draws), then states the problem in the reader's words before naming the
   category. The token wall draws one square per 25 tokens of a full file
