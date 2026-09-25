@@ -196,8 +196,8 @@
           <p>A CLI plus hooks, not an MCP server. <code>pixel install</code> puts the protocol where each agent reads its instructions, and the agent calls Pixel from the shell it already has.</p>
         </li>
       </ol>
-      {{/* The six jobs an agent runs every day on that index, each a recording of the same task without Pixel and with it: data/jobs.toml. They live under How it works so the page has one chapter for what Pixel does, not two. */}}
-      <h3 class="vs__kicker" id="jobs" data-reveal>Six daily jobs, in milliseconds</h3>
+      {{/* The six jobs an agent runs every day on that index, each a recording of the same task without Pixel and with it: data/jobs.toml. No latency in the heading: commit-and-push waits on the remote, so a millisecond claim would not hold for all six. They live under How it works so the page has one chapter for what Pixel does, not two. */}}
+      <h3 class="vs__kicker" id="jobs" data-reveal>Six jobs your agent runs every day</h3>
       <div class="jobs" data-jobs data-reveal>
         <div class="jobs__tabs" role="tablist" aria-label="Jobs">
           {{ range $i, $j := hugo.Data.jobs.job }}
