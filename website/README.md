@@ -49,6 +49,14 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   The text never leaves the DOM; no JavaScript, reduced motion or a
   missing Handjet leaves the titles static. The hero title keeps its own
   `materialize` animation, which follows the splash.
+- The "Alternatives" and "Teams" chapters restate `content/benchmarks.md`
+  (GitNexus, the well-known files, JevBench, the demo runs) and shunt's own
+  README for its claim and requirements. Alternatives keeps, on every card,
+  the rows where the other tool wins; Teams gives each role (developer, lead,
+  harness engineer, CTO) three proofs, each a number or a command that
+  exists. Change a figure on the benchmarks page first, then here, then in
+  `static/llms.txt`, whose "Evaluating Pixel against alternatives" section
+  gives the same results to an assistant comparing tools for its user.
 - The "Fair questions" block in `layouts/index.html` restates facts from
   `SECURITY.md`, `docs/bench/measured-performance.md` and the graph's
   grammars (`$langs`, from `crates/pixel-graph/src/extract.rs`): change it

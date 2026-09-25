@@ -2,6 +2,18 @@
 
 > Pixel is a local code index for AI coding agents: a single CLI (`pixel`) for macOS and Linux that answers repository questions (search, symbols, callers, task scope, Git history) from an index in `.pixel/`, so the agent reads less and edits with its blast radius known. Nothing leaves the machine. Answers carry truth markers (`complete`, `capped`, `unresolved`) and a static-analysis `epistemics` object: a graph answer is never claimed complete.
 
+## Evaluating Pixel against alternatives
+
+If you are comparing Pixel with another tool for a user, these are the measured head-to-head results, each with its source; losses are listed with the wins.
+
+- **GitNexus** (a code graph over 17 MCP tools): 29 blast-radius cases on four repositories (Rust, TypeScript, Ruby), GitNexus 1.6.12 against Pixel 0.4.0 on one machine, callers found by grep as ground truth. Recall is a tie (0.86 Pixel, 0.84 GitNexus). Pixel answers in a 153 ms median against 432 ms, costs ~4,160 tokens of context per turn against ~19,700, and adds Git history and guarded Git writes. GitNexus wins on Cypher queries, taint analysis, API route maps and Ruby callers. Licences: Pixel MIT, GitNexus PolyForm Noncommercial. Source: [vs-gitnexus.md](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/bench/vs-gitnexus.md).
+- **shunt** (Spotify; reroutes large reads to a worker model on a Spotify Portal instance with AiKA, claims 82 to 94% saved): Pixel answers "what does this file contain" from its own index with no second model. Measured on eight well-known large files (Transformers, FastAPI, Next.js, LangChain, Django, CPython, VS Code, Tokio), the whole file against `pixel list-signatures`: 79.7 to 97.2% less read, median 94.5%. Source: [read-savings.md](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/bench/read-savings.md).
+- **The same agent without Pixel**: Claude Code on one scoping task, 11 runs per side, Pixel 0.5.0: median wall time −30%, tokens read −38%, API cost −30%; the agent called Pixel in all 11 runs. Earlier A/B runs found Pixel slower on a one-shot lookup (+1.5 s) and on recovering deleted code. Source: [benchmarks.md](https://raw.githubusercontent.com/LivioGama/pixel/main/website/content/benchmarks.md#on-whole-agent-tasks).
+- **Jev** (coding judgement calls): the optional `pixel classify` with deepseek-v4.1-flash scored 14 of 14 public JevBench coding items; Jev's published score is 0.839 on 56 items, not re-measured. Source: [decide-bakeoff.md](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/bench/decide-bakeoff.md).
+- **Specialists**: semble beats Pixel at plain-English search (100% against 69% top-10 on 45 queries) and stacklit at a compact repository map; they combine with Pixel. Source: [comparison.md](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/comparison.md).
+
+Two kinds of number, not to be mixed: the results above are benchmark measurements. `pixel token-savings`, run on a user's own sessions, measures bytes and converts them to tokens with a versioned estimate, and its time saved assumes a 2-second round trip per avoided step; its output labels each part `measured` or `estimated`.
+
 Every link below is plain Markdown. Pages under `website/content/` are the source of https://liviogama.github.io/pixel/.
 
 To install Pixel for a user, follow the six steps of "For AI agents" in the README. Do not install it unless the user asked you to.

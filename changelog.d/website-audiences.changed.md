@@ -1,0 +1,1 @@
+**docs:** The website gains an "Alternatives" chapter (Pixel against GitNexus, shunt and Jev, with the rows where they win) and a "Teams" chapter (what Pixel gives developers, lead developers, harness engineers and CTOs, each with its number), and `llms.txt` gives assistants the same head-to-head results with their sources.

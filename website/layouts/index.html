@@ -152,6 +152,109 @@
       <p class="ledger__fine" data-reveal>The two losses come from three runs per cell: read them as directions, not decimals. <a class="link" href="{{ $bench }}#on-whole-agent-tasks" target="_blank" rel="noopener">The runs and their caveats</a></p>
     </section>
 
+    {{/* ---------- alternatives ---------- */}}
+    <section class="section wrap" id="alternatives" aria-labelledby="alternatives-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Alternatives</span></p>
+      <header class="section__head" data-reveal>
+        <h2 id="alternatives-title">Measured against <span class="glow">the alternatives.</span></h2>
+        <p>The tools a team weighs Pixel against, on the same cases and the same machine, with the rows where they win kept in.</p>
+      </header>
+      {{/* Facts from content/benchmarks.md (#against-gitnexus, #well-known-files, #coding-decisions) and shunt's own README (plugins/shunt in spotify/portal-ai-plugins). Change them there first. */}}
+      {{ $range := printf "%s to %s%%" (lang.FormatNumber 0 (index $kept 0)) (lang.FormatNumber 0 (index $kept (sub (len $kept) 1))) }}
+      <div class="vs" data-reveal="stagger">
+        <article class="vs__card">
+          <header class="vs__head"><h3>vs GitNexus</h3><p>A code graph for agents, served as 17 MCP tools.</p></header>
+          <table class="vs__table">
+            <thead><tr><th scope="col"><span class="sr-only">Measure</span></th><th scope="col">Pixel</th><th scope="col">GitNexus</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Callers found (29&nbsp;cases)</th><td>0.86</td><td>0.84</td></tr>
+              <tr><th scope="row">Median answer</th><td class="is-win">153&nbsp;ms</td><td>432&nbsp;ms</td></tr>
+              <tr><th scope="row">Context on every turn</th><td class="is-win">~4,160&nbsp;tok</td><td>~19,700&nbsp;tok</td></tr>
+              <tr><th scope="row">Git history, Git writes</th><td class="is-win">Yes</td><td>No</td></tr>
+              <tr><th scope="row">Licence</th><td class="is-win">MIT</td><td>PolyForm Noncommercial</td></tr>
+            </tbody>
+          </table>
+          <p class="vs__theirs"><strong>Where GitNexus wins:</strong> Cypher queries, taint analysis, API route maps, and callers in Ruby.</p>
+          <a class="link vs__more" href="{{ $bench }}#against-gitnexus" target="_blank" rel="noopener">The 29 cases</a>
+        </article>
+        <article class="vs__card">
+          <header class="vs__head"><h3>vs shunt</h3><p>Spotify's plugin: large reads go to a second model.</p></header>
+          <table class="vs__table">
+            <thead><tr><th scope="col"><span class="sr-only">Measure</span></th><th scope="col">Pixel</th><th scope="col">shunt</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Less read on large files</th><td>{{ $range }} measured</td><td>82 to 94% claimed</td></tr>
+              <tr><th scope="row">Who reads the file</th><td class="is-win">The index</td><td>A worker model</td></tr>
+              <tr><th scope="row">Second model on the bill</th><td class="is-win">None</td><td>Yes</td></tr>
+              <tr><th scope="row">Needs</th><td class="is-win">One binary</td><td>Spotify Portal with AiKA</td></tr>
+            </tbody>
+          </table>
+          <p class="vs__theirs"><strong>Where shunt wins:</strong> its worker also writes boilerplate code, which Pixel does not.</p>
+          <a class="link vs__more" href="{{ $bench }}#well-known-files" target="_blank" rel="noopener">The {{ len $kept }} files measured</a>
+        </article>
+        <article class="vs__card">
+          <header class="vs__head"><h3>vs Jev</h3><p>A dedicated model for coding judgement calls.</p></header>
+          <table class="vs__table">
+            <thead><tr><th scope="col"><span class="sr-only">Measure</span></th><th scope="col">Pixel</th><th scope="col">Jev</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">JevBench coding items</th><td class="is-win">14 of 14</td><td>83.9%</td></tr>
+              <tr><th scope="row">Model</th><td class="is-win">The one you choose</td><td>Jev's own</td></tr>
+            </tbody>
+          </table>
+          <p class="vs__theirs"><strong>Read with care:</strong> Jev's 83.9% is its published score on 56 items; Pixel's run covers the 14 public ones, and the rest of Pixel never needs a model.</p>
+          <a class="link vs__more" href="#decisions">The optional add-on</a>
+        </article>
+      </div>
+      <p class="ledger__fine" data-reveal>Where a specialist beats Pixel at its one job (semble on plain-English search, stacklit on a compact repository map), the numbers are on the <a class="link" href="{{ $bench }}#where-a-specialist-wins" target="_blank" rel="noopener">benchmarks page</a> too.</p>
+    </section>
+
+    {{/* ---------- roles ---------- */}}
+    <section class="section wrap" id="teams" aria-labelledby="teams-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Teams</span></p>
+      <header class="section__head" data-reveal>
+        <h2 id="teams-title">Picked by developers, <span class="glow">signed off by the CTO.</span></h2>
+        <p>An agent tool stays in a team when every seat gets something from it. What Pixel gives each one, with the number behind it.</p>
+      </header>
+      {{/* Every figure is a benchmarks.md row (or the data files it reads); every command exists (docs_drift reads benchmarks.md, not this page: check with pixel <cmd> --help). */}}
+      <ul class="roles" data-reveal="stagger">
+        <li class="roles__card">
+          <p class="roles__who">{{ partial "icon.html" (dict "name" "laptop" "size" 16) }}Developers</p>
+          <h3>The agent stops opening whole files to find its way.</h3>
+          <ul>
+            <li><strong>{{ $range }} less</strong> read to learn what a large file holds, on {{ len $kept }} well-known files.</li>
+            <li>Callers of a symbol in a <strong>153&nbsp;ms</strong> median, and the files a task needs before the first edit.</li>
+            <li>Same agent, same prompts: <code>pixel install</code> once, and the agent calls Pixel from its own shell.</li>
+          </ul>
+        </li>
+        <li class="roles__card">
+          <p class="roles__who">{{ partial "icon.html" (dict "name" "user" "size" 16) }}Lead developers</p>
+          <h3>Agents that check the blast radius before they edit.</h3>
+          <ul>
+            <li><code>pixel impact</code> lists a symbol's callers and callees before the change; <code>pixel review-changes</code> shows the diff, structured.</li>
+            <li>Git writes that keep work: pushes go out leased, and <code>pixel plan-rollback</code> writes nothing until <code>--apply</code>.</li>
+            <li>One index for every agent the team runs, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files.</li>
+          </ul>
+        </li>
+        <li class="roles__card">
+          <p class="roles__who">{{ partial "icon.html" (dict "name" "robot" "size" 16) }}Harness engineers</p>
+          <h3>Deterministic answers that state their own limits.</h3>
+          <ul>
+            <li>Every answer is marked <code>complete</code>, <code>capped</code> or <code>unresolved</code>; a graph answer never claims it saw every caller.</li>
+            <li>A CLI plus hooks, not an MCP server: <strong>~4,160 tokens</strong> of context per turn, 4.7&times; less than GitNexus.</li>
+            <li>Not left to the model's goodwill: the protocol is injected at session start, and the agent called Pixel in <strong>11 of 11</strong> recorded runs.</li>
+          </ul>
+        </li>
+        <li class="roles__card">
+          <p class="roles__who">{{ partial "icon.html" (dict "name" "shield" "size" 16) }}CTOs</p>
+          <h3>Cheaper agent runs, no new vendor, nothing leaving.</h3>
+          <ul>
+            <li><strong>&minus;30% API cost</strong> on the measured scoping task, the median of 11 runs per side.</li>
+            <li>No second model on the bill, no account, no telemetry: the index stays in <code>.pixel/</code>.</li>
+            <li>MIT licensed, and the same index serves {{ len $agents }} agents, so switching agents does not mean switching tools.</li>
+          </ul>
+        </li>
+      </ul>
+    </section>
+
     {{/* ---------- six jobs ---------- */}}
     <section class="section wrap" id="jobs" aria-labelledby="jobs-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Everyday speed</span></p>
