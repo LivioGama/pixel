@@ -26,7 +26,7 @@ Pixel runs locally and processes repository data. Key security boundaries:
 - **Sidecar files** (`.pixel/`): directory is 0700, flow files and action logs are 0600. Flow files may contain fill values (passwords, OTPs) from flow replay.
 - **Command/argument injection**: all user input passed to shell commands is sanitized via `ref_guard`. Path traversal in `pixel-install` is blocked.
 - **No telemetry**: pixel does not phone home or send usage data anywhere.
-- **Network access**: limited to first-use model downloads (Hugging Face), explicit Git remote operations (`pixel fetch`, `pixel push`, `pixel commit-and-push`), and two opt-in commands that send their input out: `pixel classify` sends its question to the model endpoint you configure (OpenRouter, Ollama Cloud or a local server), and `pixel web-search` sends its query to the SearXNG endpoint you configure, else to DuckDuckGo and Wikipedia. The index and its sidecar files never leave the machine.
+- **Network access**: limited to first-use model downloads (Hugging Face), explicit Git remote operations (`pixel fetch`, `pixel push`, `pixel commit-and-push`), and two opt-in commands that send their input out: `pixel classify` sends its question to the model endpoint you configure (OpenRouter, Ollama Cloud or a local server), and `pixel web-search` sends its query to the SearXNG endpoint you configure (`PIXEL_WEB_SEARCH_URL`), then to DuckDuckGo and then Wikipedia whenever the hits so far are fewer than `--limit` (8 by default). That fallback also runs when SearXNG is configured, so a query SearXNG answers thinly, or not at all, still reaches both public services. The index and its sidecar files never leave the machine.
 
 ## Known limitations
 
