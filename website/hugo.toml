@@ -1,4 +1,4 @@
-baseURL = "https://liviogama.github.io/pixel/"
+baseURL = "https://pixel-cli.dev/"
 locale = "en-us"
 title = "Pixel"
 enableRobotsTXT = true

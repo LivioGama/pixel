@@ -12,9 +12,9 @@
 </p>
 
 <p align="center">
-  <a href="https://liviogama.github.io/pixel/"><b>Website</b></a> ·
-  <a href="https://liviogama.github.io/pixel/docs/"><b>Docs</b></a> ·
-  <a href="https://liviogama.github.io/pixel/benchmarks/"><b>Benchmarks</b></a>
+  <a href="https://pixel-cli.dev/"><b>Website</b></a> ·
+  <a href="https://pixel-cli.dev/docs/"><b>Docs</b></a> ·
+  <a href="https://pixel-cli.dev/benchmarks/"><b>Benchmarks</b></a>
 </p>
 
 <p align="center">
@@ -23,7 +23,7 @@
 
 ## Why
 
-- **79.7 to 97.2% less read** (median 94.5%) to learn what a large file contains, measured on eight well-known files (Hugging Face Transformers, FastAPI, Next.js, LangChain, Django, CPython, VS Code, Tokio), with no second model reading on the agent's behalf. [The files](https://liviogama.github.io/pixel/benchmarks/#well-known-files)
+- **79.7 to 97.2% less read** (median 94.5%) to learn what a large file contains, measured on eight well-known files (Hugging Face Transformers, FastAPI, Next.js, LangChain, Django, CPython, VS Code, Tokio), with no second model reading on the agent's behalf. [The files](https://pixel-cli.dev/benchmarks/#well-known-files)
 - **Measured against GitNexus** on the same 29 blast-radius cases and machine: callers found at a tie (0.86 against 0.84), a 153 ms median answer against 432 ms, and ~4,160 tokens of context per turn against ~19,700. GitNexus wins on Cypher queries, taint analysis and Ruby callers. Pixel is MIT; GitNexus is PolyForm Noncommercial. [The cases](docs/bench/vs-gitnexus.md)
 - **Evidence with boundaries.** Every answer says whether it is complete, capped or stale; a static call graph never claims it saw every caller.
 - **Local and deterministic.** The index lives in `.pixel/` at the repository root and never leaves the machine; no telemetry. Only Git remotes, the optional `pixel classify` (the one model-backed command) and `pixel web-search`, and a one-time embedding model download use the network.
@@ -38,7 +38,7 @@ pixel doctor .     # optional health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
 
-Other channels, per-agent plugins and manual setup are in the [docs](https://liviogama.github.io/pixel/docs/).
+Other channels, per-agent plugins and manual setup are in the [docs](https://pixel-cli.dev/docs/).
 
 ### Let your agent install it
 
@@ -52,7 +52,7 @@ whether `pixel doctor .` is green.
 
 ## For AI agents
 
-Looking for something specific? [`llms.txt`](https://liviogama.github.io/pixel/llms.txt) maps every page of the docs and benchmarks to its raw Markdown. Comparing Pixel with another tool for a user? Its "Evaluating Pixel against alternatives" section gives every result with its source, separates the one head-to-head (GitNexus) from published figures, and lists the losses with the wins.
+Looking for something specific? [`llms.txt`](https://pixel-cli.dev/llms.txt) maps every page of the docs and benchmarks to its raw Markdown. Comparing Pixel with another tool for a user? Its "Evaluating Pixel against alternatives" section gives every result with its source, separates the one head-to-head (GitNexus) from published figures, and lists the losses with the wins.
 
 If you are an LLM reading this to set Pixel up for a user, do this, in order:
 
@@ -63,7 +63,7 @@ If you are an LLM reading this to set Pixel up for a user, do this, in order:
 5. **Verify:** `pixel doctor . --json`. Report every check that is not green, with its message; do not claim success otherwise.
 6. **Tell the user to restart the agent session.** The protocol is injected when a session starts, so the current one does not have it yet.
 
-Then use Pixel the way [`PIXEL.md`](PIXEL.md) describes: it is the complete agent protocol, the same text `pixel install` deploys, and it says which command replaces `grep`, `git log`, `git blame` and whole-file reads, and when a native tool is still the right choice. An agent that `pixel install` does not wire (Cursor, Gemini CLI, Copilot…) needs that file in its own rules; see the [plugins table](https://liviogama.github.io/pixel/docs/#plugins).
+Then use Pixel the way [`PIXEL.md`](PIXEL.md) describes: it is the complete agent protocol, the same text `pixel install` deploys, and it says which command replaces `grep`, `git log`, `git blame` and whole-file reads, and when a native tool is still the right choice. An agent that `pixel install` does not wire (Cursor, Gemini CLI, Copilot…) needs that file in its own rules; see the [plugins table](https://pixel-cli.dev/docs/#plugins).
 
 ## The flow
 
@@ -73,8 +73,8 @@ task → scope-task → find-code → impact → edit → what-changed → revie
 
 ## More
 
-- [Documentation](https://liviogama.github.io/pixel/docs/): install, updating, plugins, every command
-- [Benchmarks](https://liviogama.github.io/pixel/benchmarks/): every number with its method, losses included
+- [Documentation](https://pixel-cli.dev/docs/): install, updating, plugins, every command
+- [Benchmarks](https://pixel-cli.dev/benchmarks/): every number with its method, losses included
 - [ARCHITECTURE.md](ARCHITECTURE.md): crates and the full command surface
 - [CONTRIBUTING.md](CONTRIBUTING.md): build from source, gates, pull requests
 

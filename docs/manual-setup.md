@@ -179,7 +179,7 @@ cp crates/pixel-install/assets/pixel-agent-prompt.md ~/.pi/agent/APPEND_SYSTEM.m
 
 `pixel install` covers the agents above, plus OpenCode and Antigravity when
 their config directories exist; the website's
-[per-agent pages](https://liviogama.github.io/pixel/for/) list what it writes
+[per-agent pages](https://pixel-cli.dev/for/) list what it writes
 for each, and the plugins or rules files for the others. For any other tool, put
 the full text of `~/.local/share/pixel/agent-prompt.md` wherever that tool
 reads always-on instructions: a rules file (`.cursor/rules`, `GEMINI.md`,
