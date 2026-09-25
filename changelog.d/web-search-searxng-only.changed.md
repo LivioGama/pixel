@@ -1,1 +1,0 @@
-**cli:** `pixel web-search` with `PIXEL_WEB_SEARCH_URL` set now queries that SearXNG instance alone: a thin, empty or failed answer is no longer topped up from DuckDuckGo and Wikipedia, so the query stays with your own instance. Without SearXNG the public chain is unchanged.
