@@ -280,6 +280,15 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   the CLI version linking to its release, then three columns (Product,
   Guides, Community) and the legal lines, which end on the links to the two
   legal pages.
+- `content/about.md`: the `/about/` page (why Pixel exists, who makes it,
+  how the project runs, the contact channels; no form, since the site
+  collects nothing). Its people come from `data/team.toml` through the
+  `team` shortcode, and the home's JSON-LD reads the same file for its
+  `Person` nodes, the `WebSite`'s `publisher` and the source code's
+  `creator` and `author`: a name is personal data, so an entry is added,
+  changed or kept only with that person's agreement, and there are no
+  photos. Linked from the footer's Community column, the legal pages and
+  `static/llms.txt`.
 - `content/legal/`: the Privacy Policy (`/legal/privacy-policy/`) and the
   Terms of Use (`/legal/terms-of-use/`), rendered by
   `layouts/_default/single.html`; the section's `_index.md` renders no
@@ -316,11 +325,11 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   (`absURL`, `.Permalink`), so a new domain is one line in `hugo.toml`.
 - `layouts/robots.txt` names the sitemap Hugo writes (`/`, `/docs/`,
   `/benchmarks/`, `/savings/`, `/vs/` and each comparison, `/for/` and each
-  agent page, `/answers/` and each question, the two `/legal/` pages; the
+  agent page, `/answers/` and each question, `/about/`, the two `/legal/` pages; the
   404 stays out). `enableGitInfo` dates each page by the
   last commit that touched its source: the sitemap's `lastmod` and the
-  "Updated" line under the `/docs/`, `/benchmarks/`, `/savings/`, `/for/`
-  and `/legal/` titles (`layouts/_default/single.html`, `savings.html`, `layouts/for/`). The Pages workflow checks out the full
+  "Updated" line under the `/docs/`, `/benchmarks/`, `/savings/`, `/for/`,
+  `/about/` and `/legal/` titles (`layouts/_default/single.html`, `savings.html`, `layouts/for/`). The Pages workflow checks out the full
   history for it; a shallow clone would date every page by HEAD.
 - `og/`: the share card. `og/render.sh` fills `og/card.html` with the
   wall's row of `data/read_savings.toml`, renders it at 1200x630 with
