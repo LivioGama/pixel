@@ -5,7 +5,7 @@ description: "The terms for using pixel-cli.dev. The pixel software is covered b
 
 ## About these terms
 
-These terms apply to the website pixel-cli.dev, published by Navid Emad, the main contributor to [Pixel](https://github.com/LivioGama/pixel), the open-source project Livio Gama created. By using the site, you accept them. If you do not accept them, please do not use the site.
+These terms apply to the website pixel-cli.dev, published by Navid Emad, the main contributor to [Pixel](https://github.com/LivioGama/pixel). Livio Gama created this open-source project and is a major contributor too. By using the site, you accept them. If you do not accept them, please do not use the site.
 
 ## The software is licensed separately
 
