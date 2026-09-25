@@ -101,7 +101,7 @@ jobs:
       # its own Docker image (musl toolchain included), so no host packages.
       - name: Install cross (Linux musl)
         if: runner.os == 'Linux'
-        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2
+        uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2
         with:
           tool: cross
 
