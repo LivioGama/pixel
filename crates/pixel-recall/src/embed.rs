@@ -95,6 +95,11 @@ pub fn embedder_revision(model_id: &str) -> u32 {
 /// Empty a vector store written at another revision of its model and mark
 /// every turn for embedding again, so the next backfill rebuilds it with no
 /// command to run. Returns whether it reset.
+///
+/// The turns are queued before the vectors go: a failure (or a stop)
+/// between the two leaves the store still stale, so the next pass resets it
+/// again. The other order could leave an empty store marked current with
+/// every turn still marked embedded, which nothing would ever rebuild.
 pub fn reset_if_stale(
     store: &crate::store::RecallStore,
     vectors: &mut crate::vector::VectorStore,
@@ -102,8 +107,8 @@ pub fn reset_if_stale(
     if !vectors.stale_revision() {
         return Ok(false);
     }
-    vectors.reset_for_reembed()?;
     store.reset_embeddings().map_err(|e| e.to_string())?;
+    vectors.reset_for_reembed()?;
     Ok(true)
 }
 
@@ -681,6 +686,28 @@ mod tests {
         assert!(
             !reset_if_stale(&store, &mut vectors).unwrap(),
             "once is enough"
+        );
+    }
+
+    /// A failed re-queue leaves the vectors untouched and the store stale,
+    /// so the next pass tries again instead of trusting an empty store.
+    #[test]
+    fn reset_if_stale_keeps_the_vectors_when_the_turns_cannot_be_requeued() {
+        let (_dir, store, vdir) = corpus("gpx-requeue", 5);
+        let mut vectors = crate::vector::VectorStore::open(&vdir).unwrap();
+        run_backfill(&store, &mut vectors, &mut NamedStub(POTION_REPO), |_, _| {}).unwrap();
+        age_meta(&vdir);
+        let mut vectors = crate::vector::VectorStore::open(&vdir).unwrap();
+        store
+            .connection()
+            .execute_batch("DROP TABLE vector_chunks")
+            .unwrap();
+        assert!(reset_if_stale(&store, &mut vectors).is_err());
+        assert_eq!(vectors.meta.segments.len(), 1, "vectors kept");
+        let reread = crate::vector::VectorStore::open(&vdir).unwrap();
+        assert!(
+            reread.stale_revision(),
+            "still stale on disk: the next pass retries"
         );
     }
 

@@ -296,6 +296,7 @@ impl RecallService {
                     &query,
                     &filters,
                     k,
+                    true,
                 )?;
                 let mut text = String::new();
                 if let Some(n) = &result.notice {

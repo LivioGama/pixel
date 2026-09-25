@@ -475,7 +475,9 @@ fn run_context(
         embedder_slot.as_deref_mut();
     step.open_ms = Some(crate::serve_trace::millis_since(opening));
     let (result, handle_ms) = crate::serve_trace::timed(|| {
-        pixel_recall::ask::ask(&store, &segments, &vectors, embedder, query, &filters, 10)
+        pixel_recall::ask::ask(
+            &store, &segments, &vectors, embedder, query, &filters, 10, false,
+        )
     });
     step.handle_ms = Some(handle_ms);
     crate::serve_trace::record(step);
@@ -656,7 +658,9 @@ fn run_ask(
     step.open_ms = Some(opened_ms.saturating_add(crate::serve_trace::millis_since(resumed)));
 
     let (result, handle_ms) = crate::serve_trace::timed(|| {
-        pixel_recall::ask::ask(&store, &segments, &vectors, embedder, query, &filters, k)
+        pixel_recall::ask::ask(
+            &store, &segments, &vectors, embedder, query, &filters, k, false,
+        )
     });
     step.handle_ms = Some(handle_ms);
     crate::serve_trace::record(step);
