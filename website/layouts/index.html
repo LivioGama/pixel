@@ -177,8 +177,12 @@
               <tr>
                 <th scope="row">{{ $first.label | safeHTML }}</th>
                 <td class="mx__pixel{{ if eq $first.win "pixel" }} is-win{{ end }}">{{ $first.pixel | safeHTML }}</td>
-                {{/* A tool with no figure row gets one cell across every figure row, saying how it was compared. */}}
-                {{ range $c := $cols }}{{ with index (where $c.rows "matrix" $key) 0 }}<td{{ if eq .win "other" }} class="is-win"{{ end }}>{{ .other | safeHTML }}</td>{{ else }}{{ if eq $i 0 }}<td class="mx__none" rowspan="{{ len $figures }}"><span class="mx__tag">{{ (partial "vs-measure.html" $c).label }}</span></td>{{ end }}{{ end }}{{ end }}
+                {{/* A tool with no figure row at all gets one cell across every figure row, saying how it was compared; a tool with some of them reads "Not measured" on each row it lacks, so every row keeps one cell per column. */}}
+                {{ range $c := $cols }}
+                  {{ $has := where $c.rows "matrix" "in" $figures }}
+                  {{ with index (where $c.rows "matrix" $key) 0 }}<td{{ if eq .win "other" }} class="is-win"{{ end }}>{{ .other | safeHTML }}</td>
+                  {{ else }}{{ if $has }}<td class="mx__none">Not measured</td>{{ else if eq $i 0 }}<td class="mx__none" rowspan="{{ len $figures }}"><span class="mx__tag">{{ (partial "vs-measure.html" $c).label }}</span></td>{{ end }}{{ end }}
+                {{ end }}
               </tr>
               {{ end }}
               {{ range $t := $traits }}
