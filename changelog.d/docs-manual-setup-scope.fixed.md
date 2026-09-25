@@ -1,1 +1,0 @@
-**docs:** The manual setup no longer says the Claude Code `SessionStart` hook reaches every session: it reaches the sessions that load `~/.claude/settings.json`, and CI runs such as `claude-code-action` still need the flags. The Plugins table of `/docs/` no longer lists OpenCode, which has no published plugin; a line under it points to `pixel install`.
