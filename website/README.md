@@ -15,12 +15,15 @@ GitHub Pages on the apex and a `CNAME` for `www`, all "DNS only", since a
 proxied record keeps GitHub from issuing the certificate. GitHub redirects
 the old `liviogama.github.io/pixel/` paths to the domain.
 
-Visits are counted by Cloudflare Web Analytics, with no cookie and no
-personal data: `cf_analytics_token` in `hugo.toml` (the site's token from
-the Cloudflare dashboard, public by design) turns on the beacon in
-production builds and a footer line saying what the site counts and that
-the binary measures nothing. An empty token removes both. The records are
-"DNS only", so the beacon script is the only way Cloudflare sees a visit.
+Visits are counted by Cloudflare Web Analytics, with no cookie:
+`cf_analytics_token` in `hugo.toml` (the site's token from the Cloudflare
+dashboard, public by design) turns on the beacon in production builds and a
+footer line saying what the site counts and that the binary measures
+nothing. An empty token removes both, and then the Cloudflare row and
+paragraph of the Privacy Policy go too. The records are "DNS only", so the
+beacon script is the only way Cloudflare sees a visit. Never write "no
+personal data": the beacon, the Google Fonts request and the star count's
+GitHub API call each reach their provider with the visitor's IP address.
 
 ## Run it locally
 
@@ -275,7 +278,17 @@ touched (Hugo 0.166; a plain `hugo` build is right).
 - Footer (`layouts/partials/footer.html`): the brand, a one-line tagline,
   the domain spelled out (`baseURL`'s host, for screenshots and prints) and
   the CLI version linking to its release, then three columns (Product,
-  Guides, Community) and the legal lines.
+  Guides, Community) and the legal lines, which end on the links to the two
+  legal pages.
+- `content/legal/`: the Privacy Policy (`/legal/privacy-policy/`) and the
+  Terms of Use (`/legal/terms-of-use/`), rendered by
+  `layouts/_default/single.html`; the section's `_index.md` renders no
+  `/legal/` page. The Privacy Policy lists every third party a visit reaches
+  (the host, Google Fonts, the GitHub API, the Cloudflare beacon), the
+  `sessionStorage` keys and the binary's network access from `SECURITY.md`:
+  a change that loads a new host, stores a new key or opens a new network
+  path in the binary updates it in the same commit. Their "Updated" date is
+  their Git date, so it moves only when the text does.
 - `static/cursor.svg`, `static/cursor-link.svg`: the pixel-arrow cursor, the
   green one over anything clickable, for fine pointers only.
 - `layouts/partials/icon.html`: the pixel icons, 8x8 bitmaps drawn in
@@ -303,10 +316,11 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   (`absURL`, `.Permalink`), so a new domain is one line in `hugo.toml`.
 - `layouts/robots.txt` names the sitemap Hugo writes (`/`, `/docs/`,
   `/benchmarks/`, `/savings/`, `/vs/` and each comparison, `/for/` and each
-  agent page, `/answers/` and each question; the 404 stays out). `enableGitInfo` dates each page by the
+  agent page, `/answers/` and each question, the two `/legal/` pages; the
+  404 stays out). `enableGitInfo` dates each page by the
   last commit that touched its source: the sitemap's `lastmod` and the
-  "Updated" line under the `/docs/`, `/benchmarks/`, `/savings/` and `/for/`
-  titles (`layouts/_default/single.html`, `savings.html`, `layouts/for/`). The Pages workflow checks out the full
+  "Updated" line under the `/docs/`, `/benchmarks/`, `/savings/`, `/for/`
+  and `/legal/` titles (`layouts/_default/single.html`, `savings.html`, `layouts/for/`). The Pages workflow checks out the full
   history for it; a shallow clone would date every page by HEAD.
 - `og/`: the share card. `og/render.sh` fills `og/card.html` with the
   wall's row of `data/read_savings.toml`, renders it at 1200x630 with

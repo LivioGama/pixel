@@ -45,9 +45,13 @@
     <div class="footer__legal">
       <p>MIT licensed. Runs on your machine; nothing leaves it.</p>
       {{- with site.Params.cf_analytics_token }}
-      {{/* The site and the binary are two things: the site counts visits, without cookies or personal data; the binary still measures nothing. */}}
-      <p>This site counts visits with Cloudflare Web Analytics: no cookies, no personal data. The <code>pixel</code> binary measures nothing.</p>
+      {{/* The site and the binary are two things: the site counts visits, without cookies; the binary still measures nothing. Not "no personal data": the beacon, like the fonts and the star count, reaches its provider with the visitor's IP (content/legal/privacy-policy.md). */}}
+      <p>This site counts visits with Cloudflare Web Analytics, without cookies. The <code>pixel</code> binary measures nothing.</p>
       {{- end }}
+      <ul class="footer__policies">
+        <li><a href="{{ "legal/privacy-policy/" | relURL }}">Privacy Policy</a></li>
+        <li><a href="{{ "legal/terms-of-use/" | relURL }}">Terms of Use</a></li>
+      </ul>
     </div>
   </div>
 </footer>
