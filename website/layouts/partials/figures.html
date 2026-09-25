@@ -1,0 +1,20 @@
+{{/* The placeholders a data file writes instead of a figure that lives
+     elsewhere: the kept rows of data/read_savings.toml (partials/kept-rates.html)
+     and the token wall's row (partials/wall-row.html), formatted as
+     /benchmarks/ shows them. data/alternatives.toml (partials/alternatives.html)
+     and data/answers.toml (partials/answers.html) both read it, so a /vs/ page
+     and an /answers/ page cannot quote the same row two ways. Call with
+     (dict "abs" true) for an absolute {bench} (the JSON-LD). */}}
+{{ $big := partial "wall-row.html" . }}
+{{ $rates := partial "kept-rates.html" . }}
+{{ return dict
+  "{bench}" (cond .abs ("benchmarks/" | absURL) ("benchmarks/" | relURL))
+  "{kept.range}" (printf "%s to %s%%" (lang.FormatNumber 1 ($rates.min)) (lang.FormatNumber 1 ($rates.max)))
+  "{kept.count}" (string ($rates.count))
+  "{kept.median}" (printf "%s%%" (lang.FormatNumber 1 $rates.median))
+  "{big.owner}" $big.owner
+  "{big.file}" (path.Base $big.path)
+  "{big.lines}" (lang.FormatNumberCustom 0 $big.lines)
+  "{big.full}" (lang.FormatNumberCustom 0 $big.full)
+  "{big.pixel}" (lang.FormatNumberCustom 0 $big.pixel)
+}}

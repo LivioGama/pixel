@@ -1,0 +1,189 @@
+# The /answers/ pages: one question a developer asks about coding agents,
+# answered from Pixel's own measurements. Each entry is the data of
+# content/answers/<slug>.md (YAML front matter `answer: "<slug>"`, the question
+# as its `title`, the detail as its prose), read through
+# layouts/partials/answers.html by the page, the /answers/ index and their
+# JSON-LD, so the markup never says what the page does not.
+#
+# A question gets a page only when /benchmarks/ carries its figure. The
+# partial fails the build when:
+#   - a `bench` anchor is not a heading of content/benchmarks.md;
+#   - a number in `short`, `limits`, a row, or the page's own prose is not
+#     written in one of the `bench` sections it names (a figure that lives
+#     in data/read_savings.toml is a placeholder instead, listed below);
+#   - `limits` is empty: every page says where Pixel does not win;
+#   - a `related` path is not a page of the site;
+#   - an entry has no page, or a page no entry.
+# crates/pixel/tests/cli/docs_drift.rs reads this file and the pages, so
+# every <code>pixel …</code> must be a real command, and static/llms.txt
+# must link every page under its question.
+#
+# Per entry:
+#   slug       the page's path (/answers/<slug>/)
+#   gist       one line after the question on the index and in llms.txt
+#   short      the answer in two or three sentences, HTML: the page's lede
+#              and the JSON-LD's acceptedAnswer
+#   bench      the /benchmarks/ sections (anchors) the figures come from
+#   limits     where Pixel does not win or the figure stops, HTML
+#   related    site paths ("vs/grep/", "for/claude-code/", "savings/")
+#   checked    the day the figures were last checked against /benchmarks/;
+#              the page's "Updated" date is the later of it and its Git date
+#   [[answer.row]]  label, value: the figure table, HTML
+#
+# Placeholders (partials/figures.html, shared with data/alternatives.toml):
+#   {bench} {kept.range} {kept.count} {kept.median}
+#   {big.owner} {big.file} {big.lines} {big.full} {big.pixel}
+
+[[answer]]
+slug = "why-agents-read-whole-files"
+gist = "its read tool returns files, not answers; an index answers what a file contains in a fraction of the tokens."
+short = '''Because its read tool returns files, not answers: to learn what a file contains, the agent opens all of it. On {big.owner} {big.lines}-line {big.file} that read costs {big.full} tokens, and <code>pixel list-signatures</code> answers the same question in {big.pixel}. Across {kept.count} well-known files the agent reads {kept.range} less, median {kept.median}.'''
+bench = ["well-known-files", "reading-code"]
+limits = '''The figure counts what reaches the agent's context, not your invoice. The files with the most signatures per line save the least, the low end of the range: VS Code's text model and CPython's <code>typing.py</code>. A file the graph cannot parse lists too few signatures and overstates the saving, which is why React's work loop, written in Flow, is left out of the range. When the agent edits, it still reads the lines it changes.'''
+related = ["vs/grep/", "vs/shunt/", "savings/"]
+checked = 2026-09-25
+
+  [[answer.row]]
+  label = "Full read of {big.file}"
+  value = "{big.full}&nbsp;tok"
+
+  [[answer.row]]
+  label = "<code>pixel list-signatures</code> on it"
+  value = "{big.pixel}&nbsp;tok"
+
+  [[answer.row]]
+  label = "Less read, {kept.count} well-known files"
+  value = "{kept.range}, median {kept.median}"
+
+  [[answer.row]]
+  label = "Pixel's own repository, single large file"
+  value = "48,465&nbsp;tok read in full, 2,172&nbsp;tok through Pixel"
+
+[[answer]]
+slug = "mcp-or-cli-context-cost"
+gist = "an MCP server costs its tool schemas on every turn, a CLI the prompt that teaches it; the size decides, not the protocol."
+short = '''An MCP server puts its tool schemas into the context of every turn; a CLI puts in the prompt that teaches the agent its commands. Measured on one machine, GitNexus's MCP tools cost about 19,700 tokens per turn and Pixel's CLI prompt about 4,160, 4.7× less. The protocol is not the lever, the size is: semble's and stacklit's MCP servers cost less than Pixel's prompt.'''
+bench = ["against-gitnexus", "where-a-specialist-wins"]
+limits = '''Pixel is the lighter one only against GitNexus: semble costs about 980 tokens per turn and stacklit about 420, both less than Pixel. None of these figures counts what an answer costs once the agent asks. A user can switch off individual MCP tools, which shrinks a server's share. <code>pixel mcp</code> serves the same index over MCP; its schemas are not measured, so this page gives no figure for it.'''
+related = ["vs/gitnexus/", "vs/semble/"]
+checked = 2026-09-25
+
+  [[answer.row]]
+  label = "GitNexus, MCP tool schemas and its <code>CLAUDE.md</code> block"
+  value = "~19,700&nbsp;tok"
+
+  [[answer.row]]
+  label = "Pixel, the agent prompt of its CLI"
+  value = "~4,160&nbsp;tok"
+
+  [[answer.row]]
+  label = "semble, MCP"
+  value = "~980&nbsp;tok"
+
+  [[answer.row]]
+  label = "stacklit, MCP"
+  value = "~420&nbsp;tok"
+
+  [[answer.row]]
+  label = "semble and Pixel together"
+  value = "~5,100&nbsp;tok"
+
+[[answer]]
+slug = "reduce-claude-code-tokens"
+gist = "cut the whole-file reads: on one scoping task, 11 runs per side, Claude Code read 38% fewer tokens with Pixel."
+short = '''Cut the reads that bring whole files into context: let the agent ask an index what a file contains, who calls a function and which files a task touches. On one scoping task, 11 runs per side, Claude Code with Pixel read 38% fewer tokens (median 10,655 against 17,268) and cost 30% less. <code>pixel token-savings</code> then reports what it spared on your own sessions.'''
+bench = ["on-whole-agent-tasks", "reading-code"]
+limits = '''One task in one repository, so read it as a direction: the spread is wide on both sides, 57 to 148 s without Pixel and 33 to 207 s with it. In the August runs Pixel was about 1.5 seconds slower on a single lookup, the cost of reading its guidance, and it is still slower at recovering deleted code from history. Other levers (a shorter <code>CLAUDE.md</code>, fewer MCP servers, compacting sooner) are not measured here.'''
+related = ["for/claude-code/", "savings/", "vs/shunt/"]
+checked = 2026-09-25
+
+  [[answer.row]]
+  label = "Tokens read into context, median"
+  value = "17,268 without Pixel, 10,655 with it (−38%)"
+
+  [[answer.row]]
+  label = "API cost, median"
+  value = "$0.394 without, $0.274 with (−30%)"
+
+  [[answer.row]]
+  label = "Wall time, median"
+  value = "86.5&nbsp;s without, 60.7&nbsp;s with (−30%)"
+
+  [[answer.row]]
+  label = "Sample"
+  value = "11 runs per side, Claude Sonnet 5, Pixel 0.5.0"
+
+  [[answer.row]]
+  label = "<code>pixel token-savings</code> on the maintainer's sessions"
+  value = "41 to 83% across 798 operations"
+
+[[answer]]
+slug = "grep-or-code-index"
+gist = "grep finds the line; the whole-file read after it is the cost an index removes."
+short = '''Both, for different steps. Grep finds the line with nothing to build; the cost is the whole-file read that follows, which an index replaces with the file's signatures: {big.full} tokens against {big.pixel} on {big.owner} {big.file}. For "who calls this", grep's matches are the ground truth our blast-radius benchmark scores against, and it returns every line that names the function, callers or not.'''
+bench = ["well-known-files", "against-gitnexus", "on-whole-agent-tasks"]
+limits = '''Grep needs no index and runs on any file the moment it exists; Pixel builds one in <code>.pixel/</code> first. On a single lookup the August runs found Pixel about 1.5 seconds slower. Pixel's graph misses callers grep sees: 0.86 of them overall, 0.56 on one Ruby repository. For a question in plain English, neither is the best tool: semble is.'''
+related = ["vs/grep/", "vs/semble/", "vs/language-server/"]
+checked = 2026-09-25
+
+  [[answer.row]]
+  label = "Finds the matching line"
+  value = "Both; <code>pixel search-content</code> keeps grep's regex syntax"
+
+  [[answer.row]]
+  label = "What the agent reads to know what {big.file} contains"
+  value = "{big.full}&nbsp;tok after grep, {big.pixel}&nbsp;tok through Pixel"
+
+  [[answer.row]]
+  label = "Less read, {kept.count} well-known files"
+  value = "{kept.range}"
+
+  [[answer.row]]
+  label = "Callers found, 29 blast-radius cases scored against grep"
+  value = "0.86 recall"
+
+[[answer]]
+slug = "will-my-agent-use-the-tool"
+gist = "only if the tool is in every session: with Pixel 0.5.0, Claude Code called it in 11 runs out of 11, 6 to 17 times each."
+short = '''Only if the tool is in front of it every session: agents are trained on grep and fall back to it. With Pixel 0.5.0 wired by <code>pixel install</code>, Claude Code called Pixel in 11 runs out of 11, 6 to 17 times each. An earlier release, given its protocol alone with no hooks, was barely called at all.'''
+bench = ["on-whole-agent-tasks"]
+limits = '''One agent, Claude Code, on one task: how often another agent calls Pixel is not measured. The per-repository guard advises and never blocks, so an agent can still read a whole file. Part of the gain is the protocol's guidance rather than its answers: the earlier release that was barely called still scoped tasks 29% faster.'''
+related = ["for/", "for/claude-code/"]
+checked = 2026-09-25
+
+  [[answer.row]]
+  label = "Runs in which the agent called Pixel"
+  value = "11 of 11"
+
+  [[answer.row]]
+  label = "Pixel calls per run"
+  value = "6 to 17"
+
+  [[answer.row]]
+  label = "Earlier release, protocol only, no hooks"
+  value = "Barely called; tasks still scoped 29% faster"
+
+[[answer]]
+slug = "what-will-a-change-break"
+gist = "ask for the blast radius first: pixel impact found 0.86 of the callers on 29 cases, with a warning when an answer may be incomplete."
+short = '''Ask for the blast radius before the edit: <code>pixel impact</code> lists the callers upstream of a symbol from a code graph, and <code>pixel who-calls</code> the direct ones. On 29 blast-radius cases in Rust, TypeScript and Ruby, Pixel found 0.86 of the callers grep confirms, in a 153 ms median. Static analysis never sees every dynamic call, so every graph answer says when it may be incomplete.'''
+bench = ["against-gitnexus"]
+limits = '''The figure is callers found, not breakage predicted: a caller is where to look, not proof that it breaks. Ruby is the weak spot, 0.90 and 0.56 on two repositories where GitNexus finds 1.00 and 0.68. A language server resolves types, so its references are more exact for the language it serves; this page has no figure for it.'''
+related = ["vs/gitnexus/", "vs/language-server/"]
+checked = 2026-09-25
+
+  [[answer.row]]
+  label = "Callers found, 29 cases"
+  value = "0.86 (GitNexus 0.84, a tie at this sample size)"
+
+  [[answer.row]]
+  label = "Callers found in Rust and TypeScript"
+  value = "Every one"
+
+  [[answer.row]]
+  label = "Callers found in Ruby, two repositories"
+  value = "0.90 and 0.56"
+
+  [[answer.row]]
+  label = "Median time per answer"
+  value = "153&nbsp;ms"

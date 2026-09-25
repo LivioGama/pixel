@@ -1,0 +1,78 @@
+{{/* The entries of data/answers.toml, placeholders filled in and every
+     figure checked against /benchmarks/: each /answers/ page, the index and
+     their JSON-LD read them from here. Returns the list in file order, each
+     entry a dict with the file's fields, `rows` in place of `row`, `url`
+     (its page, relative or absolute), `sources` (one dict "anchor" "title"
+     per `bench` section) and `sections` (every number those sections of
+     benchmarks.md write, which the page's own prose is checked against too). Call with
+     (dict "abs" true) for absolute links (the JSON-LD). */}}
+{{ $vars := partial "figures.html" (dict "abs" .abs) }}
+{{ $bp := site.GetPage "/benchmarks" }}
+{{ if not $bp }}{{ errorf "partials/answers.html: no /benchmarks/ page" }}{{ end }}
+{{ $raw := $bp.RawContent }}
+{{ $heads := findRE `(?m)^#{2,3} [^\n]+` $raw }}
+{{ $out := slice }}
+{{ range hugo.Data.answers.answer }}
+  {{ $a := . }}
+  {{ if not .bench }}{{ errorf "data/answers.toml: %s: names no /benchmarks/ section (bench)" .slug }}{{ end }}
+  {{ if not .limits }}{{ errorf "data/answers.toml: %s: every answer says where Pixel does not win (limits)" .slug }}{{ end }}
+  {{/* Each `bench` anchor is a heading of benchmarks.md; its section runs to the next heading of the same or a higher level. */}}
+  {{ $sources := slice }}
+  {{ $sections := slice }}
+  {{ range .bench }}
+    {{ $anchor := . }}
+    {{ $found := false }}
+    {{ range $heads }}
+      {{ $marks := index (findRE `^#+` .) 0 }}
+      {{ $title := strings.TrimSpace (strings.TrimPrefix $marks .) }}
+      {{ if and (not $found) (eq (anchorize $title) $anchor) }}
+        {{ $found = true }}
+        {{ $body := index (split $raw (printf "%s\n" .)) 1 }}
+        {{ $body = index (split $body "\n## ") 0 }}
+        {{ if eq $marks "###" }}{{ $body = index (split $body "\n### ") 0 }}{{ end }}
+        {{ $sources = $sources | append (dict "anchor" $anchor "title" $title) }}
+        {{ $sections = $sections | append $body }}
+      {{ end }}
+    {{ end }}
+    {{ if not $found }}{{ errorf "data/answers.toml: %s: %q is not a heading of content/benchmarks.md" $a.slug $anchor }}{{ end }}
+  {{ end }}
+  {{/* The numbers those sections write, whole: "7" does not pass on the strength of "4.7×". */}}
+  {{ $sections = findRE `[0-9][0-9,.]*[0-9]|[0-9]` (delimit $sections "\n") | uniq }}
+  {{/* Every number the entry writes is written in one of its sections; a figure of data/read_savings.toml is a placeholder, never a digit. */}}
+  {{ $text := slice .short .limits .gist }}
+  {{ range .row }}{{ $text = $text | append .label .value }}{{ end }}
+  {{ range findRE `[0-9][0-9,.]*[0-9]|[0-9]` (delimit $text " ") }}
+    {{ if not (in $sections .) }}{{ errorf "data/answers.toml: %s: %q is not in its /benchmarks/ sections %v" $a.slug . $a.bench }}{{ end }}
+  {{ end }}
+  {{ $related := slice }}
+  {{ range .related }}
+    {{ $p := site.GetPage (printf "/%s" (strings.TrimSuffix "/" .)) }}
+    {{ if not $p }}{{ errorf "data/answers.toml: %s: related %q is not a page of the site" $a.slug . }}{{ end }}
+    {{ $related = $related | append $p }}
+  {{ end }}
+  {{ $t := dict }}
+  {{ range $k, $v := $a }}
+    {{ if or (eq $k "row") (eq $k "related") }}{{ continue }}{{ end }}
+    {{ $s := $v }}
+    {{ if eq (printf "%T" $v) "string" }}
+      {{ range $pk, $pv := $vars }}{{ $s = replace $s $pk $pv }}{{ end }}
+      {{ with findRE `\{[a-z.]+\}` $s }}{{ errorf "data/answers.toml: %s: unknown placeholder %v" $a.slug . }}{{ end }}
+    {{ end }}
+    {{ $t = merge $t (dict $k $s) }}
+  {{ end }}
+  {{ $rows := slice }}
+  {{ range .row }}
+    {{ $r := dict }}
+    {{ range $k, $v := . }}
+      {{ $s := $v }}
+      {{ range $pk, $pv := $vars }}{{ $s = replace $s $pk $pv }}{{ end }}
+      {{ with findRE `\{[a-z.]+\}` $s }}{{ errorf "data/answers.toml: %s: unknown placeholder %v" $a.slug . }}{{ end }}
+      {{ $r = merge $r (dict $k $s) }}
+    {{ end }}
+    {{ $rows = $rows | append $r }}
+  {{ end }}
+  {{ $url := printf "answers/%s/" .slug }}
+  {{ $t = merge $t (dict "rows" $rows "related" $related "sources" $sources "sections" $sections "url" (cond $.abs ($url | absURL) ($url | relURL))) }}
+  {{ $out = $out | append $t }}
+{{ end }}
+{{ return $out }}

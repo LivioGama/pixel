@@ -64,7 +64,8 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   harness engineer, CTO) three proofs, each a number or a command that
   exists. Change a figure on the benchmarks page first, then in
   `data/alternatives.toml` (the Alternatives cards and the `/vs/` pages)
-  or the Teams chapter, then in the repository README's "Why" list and
+  or the Teams chapter (and `data/answers.toml`, whose build check names
+  the entry a changed figure leaves behind), then in the repository README's "Why" list and
   `static/llms.txt`, whose "Evaluating Pixel against alternatives" section
   gives the same results to an assistant comparing tools for its user and
   links each `/vs/` page.
@@ -92,6 +93,27 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   again. `docs_drift.rs` reads `content/vs/*.md` and this file.
   `static/llms.txt` is not a template: its `/vs/` links spell the domain,
   so they change with `baseURL`.
+- `data/answers.toml`: the `/answers/` section, one question per entry,
+  read through `layouts/partials/answers.html` by each page
+  (`content/answers/<slug>.md`, YAML front matter `answer: "<slug>"`, the
+  question as its `title`, the detail as its prose, rendered by
+  `layouts/answers/single.html`), the index (`layouts/answers/list.html`)
+  and their JSON-LD (`WebPage` with a `Question` as `mainEntity`, and
+  `BreadcrumbList`, pointing at the home's `#website` and `#software` by
+  `@id`). A question gets a page only when `/benchmarks/` carries its
+  figure. The entry names its sections of `content/benchmarks.md`
+  (`bench`, heading anchors), and the build fails on an anchor that is not
+  a heading there, on a number in the entry or in the page's prose that
+  those sections do not write (whole numbers: "7" does not pass on
+  "4.7×"), on an empty `limits` (where Pixel does not win), on a `related`
+  path that is not a page, and on an entry without a page or a page
+  without an entry. A figure of `data/read_savings.toml` is a placeholder
+  (`{big.full}`, `{kept.range}`…), filled by `layouts/partials/figures.html`,
+  which `partials/alternatives.html` reads too. The "Updated" date is the
+  later of the page's Git date and the entry's `checked`.
+  `crates/pixel/tests/cli/docs_drift.rs` reads the pages and this file for
+  `pixel …` commands, and fails when `static/llms.txt` ("Answers") misses a
+  page or states another question than its `title`. Linked from the footer.
 - `data/objections.toml`: the "Fair questions" chapter, and the home's
   `FAQPage` JSON-LD, from one list (`layouts/partials/objections.html`
   renders it for both, so the markup never says what the page does not).
@@ -224,7 +246,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   (`absURL`, `.Permalink`), so a new domain is one line in `hugo.toml`.
 - `layouts/robots.txt` names the sitemap Hugo writes (`/`, `/docs/`,
   `/benchmarks/`, `/savings/`, `/vs/` and each comparison, `/for/` and each
-  agent page; the 404 stays out). `enableGitInfo` dates each page by the
+  agent page, `/answers/` and each question; the 404 stays out). `enableGitInfo` dates each page by the
   last commit that touched its source: the sitemap's `lastmod` and the
   "Updated" line under the `/docs/`, `/benchmarks/`, `/savings/` and `/for/`
   titles (`layouts/_default/single.html`, `savings.html`, `layouts/for/`). The Pages workflow checks out the full

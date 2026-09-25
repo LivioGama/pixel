@@ -5,9 +5,9 @@
 //! checkout:
 //!
 //! - every backticked `` `pixel <name>` `` in the repository docs and in the
-//!   bundled agent prompts and the website's comparison pages, and every
-//!   `<code>pixel <name>` in the website's landing page and its objections
-//!   and alternatives data, names a real subcommand (a
+//!   bundled agent prompts and the website's comparison and answer pages,
+//!   and every `<code>pixel <name>` in the website's landing page and its
+//!   objections, alternatives and answers data, names a real subcommand (a
 //!   removed or renamed command cannot linger in prose);
 //! - every subcommand appears in ARCHITECTURE.md's `## Command surface`
 //!   table (a new command cannot ship undocumented);
@@ -112,30 +112,57 @@ fn agent_pages() -> Vec<String> {
 }
 
 /// The site's HTML sources: the landing page, the objections it and its
-/// FAQPage JSON-LD render, and the alternatives its cards and the `/vs/`
-/// pages render. They quote commands as `<code>pixel …</code>`, which
-/// `html_code_as_backticks` turns into the Markdown form.
+/// FAQPage JSON-LD render, the alternatives its cards and the `/vs/`
+/// pages render, and the answers the `/answers/` pages render. They quote
+/// commands as `<code>pixel …</code>`, which `html_code_as_backticks` turns
+/// into the Markdown form.
 const SITE_HTML: &[&str] = &[
     "website/layouts/index.html",
     "website/data/objections.toml",
     "website/data/alternatives.toml",
+    "website/data/answers.toml",
 ];
 
 /// The comparison pages, one Markdown file per tool.
 const VS_PAGES_DIR: &str = "website/content/vs";
 
-/// Every `website/content/vs/*.md`, read from the tree so a new comparison
-/// page is checked without an edit here.
-fn comparison_pages(root: &Path) -> Vec<String> {
-    let mut pages: Vec<String> = std::fs::read_dir(root.join(VS_PAGES_DIR))
-        .unwrap_or_else(|e| panic!("{VS_PAGES_DIR}: {e}"))
+/// The question pages, one Markdown file per question.
+const ANSWER_PAGES_DIR: &str = "website/content/answers";
+
+/// Every `<dir>/*.md` (the section's `_index.md` included), read from the
+/// tree so a new page is checked without an edit here, relative to the
+/// repository root.
+fn section_pages(root: &Path, dir: &str) -> Vec<String> {
+    let mut pages: Vec<String> = std::fs::read_dir(root.join(dir))
+        .unwrap_or_else(|e| panic!("{dir}: {e}"))
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .filter(|name| name.ends_with(".md"))
-        .map(|name| format!("{VS_PAGES_DIR}/{name}"))
+        .map(|name| format!("{dir}/{name}"))
         .collect();
     pages.sort();
     pages
+}
+
+/// Every `website/content/vs/*.md`.
+fn comparison_pages(root: &Path) -> Vec<String> {
+    section_pages(root, VS_PAGES_DIR)
+}
+
+/// Every `website/content/answers/*.md`.
+fn answer_pages(root: &Path) -> Vec<String> {
+    section_pages(root, ANSWER_PAGES_DIR)
+}
+
+#[test]
+fn answer_pages_are_listed_from_the_tree() {
+    let pages = answer_pages(&repo_root());
+    assert!(
+        pages.contains(&format!("{ANSWER_PAGES_DIR}/_index.md"))
+            && pages.contains(&format!("{ANSWER_PAGES_DIR}/grep-or-code-index.md")),
+        "{pages:?}"
+    );
+    assert!(pages.iter().all(|p| p.ends_with(".md")), "{pages:?}");
 }
 
 #[test]
@@ -173,13 +200,16 @@ fn every_documented_pixel_command_exists() {
     let root = repo_root();
     let mut stale = Vec::new();
     let vs_pages = comparison_pages(&root);
+    let ans_pages = answer_pages(&root);
     let markdown = DOCS
         .iter()
         .map(|doc| ((*doc).to_string(), false))
         .chain(vs_pages.iter().map(|doc| (doc.clone(), false)))
+        .chain(ans_pages.iter().map(|doc| (doc.clone(), false)))
         .chain(agent_pages().into_iter().map(|doc| (doc, false)));
     let html = SITE_HTML.iter().map(|doc| ((*doc).to_string(), true));
     let mut vs_names = 0;
+    let mut ans_names = 0;
     for (doc, is_html) in markdown.chain(html) {
         let text =
             std::fs::read_to_string(root.join(&doc)).unwrap_or_else(|e| panic!("{doc}: {e}"));
@@ -199,6 +229,9 @@ fn every_documented_pixel_command_exists() {
         if vs_pages.contains(&doc) {
             vs_names += names.len();
         }
+        if ans_pages.contains(&doc) {
+            ans_names += names.len();
+        }
         for name in names {
             if !known.contains(&name) {
                 stale.push(format!("{doc}: `pixel {name}`"));
@@ -208,6 +241,7 @@ fn every_documented_pixel_command_exists() {
     // The comparison pages quote commands today: none across all of them
     // means the listing went blind.
     assert!(vs_names > 0, "{VS_PAGES_DIR}: no `pixel …` found");
+    assert!(ans_names > 0, "{ANSWER_PAGES_DIR}: no `pixel …` found");
     assert!(
         stale.is_empty(),
         "documented commands the binary rejects:\n{}",
@@ -727,6 +761,65 @@ fn llms_txt_should_link_every_agent_page_under_the_site_base_url() {
         linked,
         expected.len(),
         "static/llms.txt links a /for/ page no agent has"
+    );
+}
+
+/// The `title` of a page's YAML front matter (`title: "…"`), which for an
+/// `/answers/` page is the question.
+fn front_matter_title(text: &str) -> Option<String> {
+    let front = text.strip_prefix("---\n")?.split("\n---").next()?;
+    front.lines().find_map(|line| {
+        let value = line.strip_prefix("title:")?.trim();
+        Some(value.trim_matches('"').to_string())
+    })
+}
+
+#[test]
+fn front_matter_title_reads_only_the_front_matter() {
+    let page = "---\ntitle: \"Why does my agent read whole files?\"\nanswer: \"x\"\n---\n\ntitle: not this\n";
+    assert_eq!(
+        front_matter_title(page).as_deref(),
+        Some("Why does my agent read whole files?")
+    );
+    assert_eq!(front_matter_title("title: \"no front matter\"\n"), None);
+    assert_eq!(
+        front_matter_title("---\nanswer: \"x\"\n---\ntitle: late\n"),
+        None
+    );
+}
+
+/// `static/llms.txt` is not a template, so it links each `/answers/` page by
+/// hand: under its question, at the `baseURL` of `hugo.toml`. A renamed
+/// page, a reworded question or a new one fails here instead of leaving an
+/// assistant with a 404 or a question the page no longer asks.
+#[test]
+fn llms_txt_should_link_every_answer_page_under_its_question() {
+    let root = repo_root();
+    let hugo: toml_edit::DocumentMut = std::fs::read_to_string(root.join("website/hugo.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let base = hugo["baseURL"].as_str().expect("hugo.toml has a baseURL");
+    let llms = std::fs::read_to_string(root.join("website/static/llms.txt")).unwrap();
+    let mut expected = vec![format!("]({base}answers/)")];
+    for page in answer_pages(&root) {
+        let stem = Path::new(&page).file_stem().unwrap().to_string_lossy();
+        if stem == "_index" {
+            continue;
+        }
+        let text = std::fs::read_to_string(root.join(&page)).unwrap();
+        let title = front_matter_title(&text).unwrap_or_else(|| panic!("{page}: no title"));
+        expected.push(format!("[{title}]({base}answers/{stem}/)"));
+    }
+    let missing: Vec<&String> = expected.iter().filter(|l| !llms.contains(*l)).collect();
+    assert!(
+        missing.is_empty(),
+        "static/llms.txt does not link: {missing:?}"
+    );
+    assert_eq!(
+        llms.matches(&format!("]({base}answers/")).count(),
+        expected.len(),
+        "static/llms.txt links an /answers/ page that does not exist"
     );
 }
 

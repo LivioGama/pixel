@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.Language.Locale }}">
+<head>
+  {{ partial "head.html" . }}
+</head>
+<body>
+  <a href="#main" class="skip">Skip to content</a>
+  {{ partial "nav.html" . }}
+  {{/* /answers/: every entry of data/answers.toml, in the file's order, each with its page (content/answers/<slug>.md). An entry without a page, or a page without an entry, fails the build. */}}
+  {{ $all := partialCached "answers.html" (dict "abs" false) false }}
+  {{ $pages := .Pages }}
+  {{ range $all }}{{ if not (where $pages "Params.answer" .slug) }}{{ errorf "data/answers.toml: %s has no page content/answers/%s.md" .slug .slug }}{{ end }}{{ end }}
+  {{ range $pages }}{{ if not (where $all "slug" .Params.answer) }}{{ errorf "%s: answer %q is not in data/answers.toml" .File.Path .Params.answer }}{{ end }}{{ end }}
+
+  <main class="docs wrap vsp" id="main">
+    <nav class="vsp__crumbs" aria-label="Breadcrumb"><a href="{{ "" | relURL }}" target="_blank" rel="noopener">Pixel</a> / <span aria-current="page">Answers</span></nav>
+    <header class="docs__head">
+      <h1>{{ .Title }}</h1>
+      <p class="docs__lede">{{ .Description }}</p>
+      <p class="docs__updated">Updated <time datetime="{{ .Lastmod.Format "2006-01-02" }}">{{ .Lastmod.Format "2 January 2006" }}</time></p>
+    </header>
+
+    <article class="vsp__body">
+      {{ with .Content }}<div class="prose vsp__prose">{{ . }}</div>{{ end }}
+      <ul class="vsp__index">
+        {{ range $all }}
+          {{ $p := index (where $pages "Params.answer" .slug) 0 }}
+          <li class="vsp__entry">
+            <h2><a class="link" href="{{ $p.RelPermalink }}" target="_blank" rel="noopener">{{ $p.Title }}</a></h2>
+            <p>{{ strings.FirstUpper .gist | safeHTML }}</p>
+          </li>
+        {{ end }}
+      </ul>
+    </article>
+  </main>
+
+  {{ partial "footer.html" . }}
+
+  {{/* The index and the pages it lists; the site and the application are the home's @graph entities, referenced by @id. */}}
+  {{ $home := "" | absURL }}
+  {{ $items := slice }}
+  {{ range $all }}{{ $p := index (where $pages "Params.answer" .slug) 0 }}{{ $items = $items | append (dict "@type" "ListItem" "position" (add (len $items) 1) "url" $p.Permalink "name" $p.Title) }}{{ end }}
+  {{ $graph := slice
+    (dict
+      "@type" "CollectionPage"
+      "@id" (printf "%s#webpage" .Permalink)
+      "url" .Permalink
+      "name" .Title
+      "description" .Description
+      "inLanguage" site.Language.Locale
+      "dateModified" (.Lastmod.Format "2006-01-02")
+      "isPartOf" (dict "@id" (printf "%s#website" $home))
+      "about" (dict "@id" (printf "%s#software" $home))
+      "breadcrumb" (dict "@id" (printf "%s#breadcrumb" .Permalink))
+      "mainEntity" (dict "@type" "ItemList" "itemListElement" $items))
+    (dict
+      "@type" "BreadcrumbList"
+      "@id" (printf "%s#breadcrumb" .Permalink)
+      "itemListElement" (slice
+        (dict "@type" "ListItem" "position" 1 "name" "Pixel" "item" $home)
+        (dict "@type" "ListItem" "position" 2 "name" "Answers" "item" .Permalink)))
+  }}
+  <script type="application/ld+json">
+  {{ dict "@context" "https://schema.org" "@graph" $graph | jsonify | safeJS }}
+  </script>
+</body>
+</html>
