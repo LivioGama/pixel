@@ -5,8 +5,11 @@
 # page cannot disagree.
 #
 # Every figure restates content/benchmarks.md (or data/read_savings.toml,
-# which it reads): change it there first, then here. Never add a tool that
-# page does not measure, and never a figure it does not show.
+# which it reads): change it there first, then here, and never a figure it
+# does not show. A tool that page does not measure gets a page only as
+# `measure = "design"`: no figure at all (no digit in its answer, wins or
+# rows, and no `bench`), and "Not benchmarked" above its table. The partial
+# fails the build otherwise.
 #
 # Per tool:
 #   slug, name     the page's path (/vs/<slug>/) and the tool's display name

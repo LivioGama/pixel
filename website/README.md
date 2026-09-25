@@ -79,8 +79,11 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   wins" (required, the build fails without it) come from the data. Each
   entry's `measure` is shown above its table: `head-to-head`,
   `published-figure` (different samples), `baseline` (grep) or `design`
-  (not benchmarked, no figure). No page for a tool `/benchmarks/` does not
-  measure, and no figure it does not show: a card figure from the other
+  (not benchmarked, no figure). A tool or category `/benchmarks/` does not
+  measure (a language server, an editor's index) gets a page only as
+  `design`: no figure at all, "Not benchmarked" above its table, and the
+  build fails on a digit in its answer, wins or rows, or on a `bench`.
+  No figure `/benchmarks/` does not show: a card figure from the other
   tool's own docs (shunt's claim) gets a `page_other` the page shows
   instead. A page's "Updated" date is the later of its Git date and the
   entry's `checked`: bump `checked` when you change its rows. Each page

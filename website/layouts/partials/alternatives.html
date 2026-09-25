@@ -26,6 +26,12 @@
   {{ $tool := . }}
   {{ if not (in $measures .measure) }}{{ errorf "data/alternatives.toml: %s: unknown measure %q" .slug .measure }}{{ end }}
   {{ if and (ne .measure "design") (not .bench) }}{{ errorf "data/alternatives.toml: %s: a measured tool names its /benchmarks/ section (bench)" .slug }}{{ end }}
+  {{ if eq .measure "design" }}
+    {{ if .bench }}{{ errorf "data/alternatives.toml: %s: a design entry is not benchmarked, it names no /benchmarks/ section" .slug }}{{ end }}
+    {{ $text := slice .answer .wins }}
+    {{ range .row }}{{ $text = $text | append .label .pixel .other }}{{ end }}
+    {{ with findRE `[0-9]` (delimit $text " ") }}{{ errorf "data/alternatives.toml: %s: a design entry carries no figure" $tool.slug }}{{ end }}
+  {{ end }}
   {{ if not .wins }}{{ errorf "data/alternatives.toml: %s: every tool says where it wins (wins)" .slug }}{{ end }}
   {{ $t := dict }}
   {{ range $k, $v := $tool }}
