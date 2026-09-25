@@ -11,11 +11,12 @@ wire (Cursor, Gemini CLI, Copilot, ...)? You don't need `pixel install`.
    prompt nor its history).
 3. **Add lifecycle hooks to `~/.claude/settings.json`**: a `SessionStart`
    hook injects the agent prompt as context into every Claude Code session
-   that loads your user settings, however `claude` is launched on this
-   machine (a terminal, an IDE, an agent, cron). A run that does not read
-   `~/.claude/settings.json`, such as `claude-code-action` in CI, needs the
-   flags instead ([In CI](#in-ci-claude-code-action)). No shell wrapper: an
-   older install's `claude()` function in the shell profile is removed.
+   that loads those user settings, however `claude` is launched on the
+   machine where `pixel install` ran (a terminal, an IDE, an agent, cron).
+   Another machine, such as a CI runner, has neither the hooks nor the
+   binary until it is set up too ([In CI](#in-ci-claude-code-action)). No
+   shell wrapper: an older install's `claude()` function in the shell
+   profile is removed.
 4. **Put the prompt into Codex's `config.toml`** as `developer_instructions`,
    so every Codex front end (CLI, desktop app, extension, sub-agents) gets it.
 5. **Put the prompt into Pi's `~/.pi/agent/APPEND_SYSTEM.md`**, and, when
@@ -81,8 +82,7 @@ To make it automatic, do what `pixel install` does: register Pixel's
 lifecycle hooks in `~/.claude/settings.json`. The `SessionStart` one prints
 the deployed `agent-prompt.md` as `hookSpecificOutput.additionalContext`, so
 every session that loads these user settings gets the prompt without a flag
-or a shell function, whatever starts `claude` on this machine (CI is the
-exception, below):
+or a shell function, whatever starts `claude` on this machine:
 
 ```json
 {
@@ -107,9 +107,18 @@ mode, pass `--append-subagent-system-prompt-file` as above.
 
 #### In CI (claude-code-action)
 
-The action runs `claude -p`, so both flags apply. It does not read your
-`~/.claude/settings.json`: check the two prompt files into the repository (or copy them in a
-previous step) and pass the flags through `claude_args`:
+The action runs Claude Code on the runner, not on your machine. It reads the
+runner's `~/.claude/settings.json`, merges its `settings` input into it and
+loads the user, project and local setting sources, hooks included; but a
+fresh runner has neither the `pixel` binary nor Pixel's hooks, since nobody
+ran `pixel install` there. Two ways to give the run the prompt, both with
+the binary installed in an earlier step:
+
+- run `pixel install` in an earlier step of the job, so the runner's user
+  settings carry the `SessionStart` hook the action then loads;
+- or check the two prompt files into the repository (or copy them in an
+  earlier step) and pass the flags through `claude_args`, which the action
+  forwards to the Claude Code CLI:
 
 ```yaml
 - uses: anthropics/claude-code-action@v1
