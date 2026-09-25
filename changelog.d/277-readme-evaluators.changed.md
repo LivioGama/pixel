@@ -1,0 +1,1 @@
+**docs:** The README's "Why" list now gives the GitNexus head-to-head, the licence difference and the well-known-files range, points assistants to `llms.txt`'s comparison section, and the README, the docs and the home badge name the network paths instead of claiming nothing leaves the machine. ([#277](https://github.com/LivioGama/pixel/pull/277))
