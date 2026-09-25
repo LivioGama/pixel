@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pixel_recall::ask::{ask, format_group};
-use pixel_recall::embed::{Embedder, open_default_embedder, run_backfill};
+use pixel_recall::embed::{Embedder, open_default_embedder, reset_if_stale, run_backfill_limited};
 use pixel_recall::ingest::{IngestReport, ingest_recent, ingest_source};
 use pixel_recall::search::{SearchFilters, format_hit, search};
 use pixel_recall::segment::SegmentSet;
@@ -16,10 +16,18 @@ use pixel_recall::store::RecallStore;
 use pixel_recall::vector::VectorStore;
 use serde_json::{Value, json};
 
-/// The embed backlog the daemon drains inline. The daemon loop is
-/// single-threaded, and a bulk backfill would block the socket for minutes
-/// (that is `pixel recall embed`'s job).
+/// The embed backlog the daemon drains inline, and the slice it embeds per
+/// pass. The daemon loop is single-threaded, and a bulk backfill would block
+/// the socket for minutes.
 const MAX_INLINE_BACKLOG: i64 = 5_000;
+
+/// True when the daemon should embed now: any backlog of a store already
+/// built with a model (a re-embed after a revision change, or a large
+/// catch-up), a slice per pass; for a store never built, only a backlog it
+/// can drain in one pass — a whole corpus is `pixel recall embed`'s job.
+fn drains_inline(backlog: i64, store_built: bool) -> bool {
+    backlog > 0 && (store_built || backlog <= MAX_INLINE_BACKLOG)
+}
 /// How often the daemon re-stats the recently modified transcripts
 /// independently of the watcher. FSEvents on macOS holds back the modify
 /// event of a file while its writer keeps it open, and an agent streams
@@ -400,20 +408,53 @@ impl RecallService {
             }
             Err(e) => eprintln!("recall daemon: segments: {e}"),
         }
-        // Drain the embed backlog only when it is small (see
-        // `MAX_INLINE_BACKLOG`).
+        // A store written at another revision of its model empties itself
+        // here, and the backlog below rebuilds it a slice per pass: nobody
+        // has to run `pixel recall embed --rebuild`.
+        let mut vectors = if self.vectors_dir.exists() {
+            match VectorStore::open(&self.vectors_dir) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!("recall daemon: vectors: {e}");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(v) = vectors.as_mut() {
+            match reset_if_stale(&self.store, v) {
+                Ok(true) => eprintln!(
+                    "recall daemon: vectors were embedded by an older model revision — re-embedding the corpus in the background"
+                ),
+                Ok(false) => {}
+                Err(e) => eprintln!("recall daemon: vector reset: {e}"),
+            }
+        }
+        let store_built = vectors
+            .as_ref()
+            .is_some_and(|v| !v.meta.model_id.is_empty());
         match self.store.embed_backlog() {
-            Ok(backlog) if backlog > 0 && backlog <= MAX_INLINE_BACKLOG => {
+            Ok(backlog) if drains_inline(backlog, store_built) => {
                 self.ensure_embedder();
                 if let Some(embedder) = self.embedder.as_deref_mut() {
-                    let mut vectors = match VectorStore::open(&self.vectors_dir) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            eprintln!("recall daemon: vectors: {e}");
-                            return;
-                        }
+                    let mut vectors = match vectors {
+                        Some(v) => v,
+                        None => match VectorStore::open(&self.vectors_dir) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                eprintln!("recall daemon: vectors: {e}");
+                                return;
+                            }
+                        },
                     };
-                    if let Err(e) = run_backfill(&self.store, &mut vectors, embedder, |_, _| {}) {
+                    if let Err(e) = run_backfill_limited(
+                        &self.store,
+                        &mut vectors,
+                        embedder,
+                        MAX_INLINE_BACKLOG as usize,
+                        |_, _| {},
+                    ) {
                         eprintln!("recall daemon: embed: {e}");
                     }
                 }
@@ -495,6 +536,20 @@ mod tests {
     use pixel_recall::sources::claude::ClaudeAdapter;
 
     use super::*;
+
+    /// A built store drains any backlog a slice per pass (a re-embed after a
+    /// model update rebuilds itself); a store never built drains only what
+    /// one pass can take, leaving a whole corpus to `pixel recall embed`.
+    #[test]
+    fn drains_inline_takes_any_backlog_of_a_built_store_and_small_ones_otherwise() {
+        assert!(!drains_inline(0, true), "nothing to embed");
+        assert!(!drains_inline(0, false));
+        assert!(drains_inline(1, false));
+        assert!(drains_inline(MAX_INLINE_BACKLOG, false), "at the cap");
+        assert!(!drains_inline(MAX_INLINE_BACKLOG + 1, false));
+        assert!(drains_inline(MAX_INLINE_BACKLOG + 1, true));
+        assert!(drains_inline(248_000, true));
+    }
 
     /// A recall service over a scratch corpus and one Claude store holding a
     /// single-turn session in `projects/-work-pixel/<id>.jsonl`.

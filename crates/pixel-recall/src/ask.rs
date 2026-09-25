@@ -130,6 +130,17 @@ fn word_pattern(word: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Why the semantic channel had nothing to search: a store bound to a model
+/// but holding no segment is being re-embedded (the recall daemon does it
+/// after a model revision change); one never built needs `recall embed`.
+fn empty_semantic_notice(model_id: &str) -> &'static str {
+    if model_id.is_empty() {
+        "semantic channel empty (run `pixel recall embed`) — lexical-only answer"
+    } else {
+        "semantic channel re-embedding after a model update (the recall daemon rebuilds it) — lexical-only answer"
+    }
+}
+
 pub fn ask(
     store: &RecallStore,
     segments: &SegmentSet,
@@ -230,10 +241,7 @@ pub fn ask(
         }
         Some(embedder) => {
             if vectors.meta.segments.is_empty() {
-                notice = Some(
-                    "semantic channel empty (run `pixel recall embed`) — lexical-only answer"
-                        .to_string(),
-                );
+                notice = Some(empty_semantic_notice(&vectors.meta.model_id).to_string());
             } else {
                 vectors.check_model(embedder.model_id(), embedder.dims())?;
                 let qvec = embedder
@@ -479,6 +487,20 @@ mod lexical_tests {
     use super::*;
     use crate::model::Role;
     use crate::testutil::{TS, add_session};
+
+    /// While the daemon re-embeds a store after a model update, `ask` says
+    /// so instead of sending the user to a command that is not needed.
+    #[test]
+    fn empty_semantic_notice_tells_a_rebuild_from_a_store_never_built() {
+        assert_eq!(
+            empty_semantic_notice(""),
+            "semantic channel empty (run `pixel recall embed`) — lexical-only answer"
+        );
+        assert_eq!(
+            empty_semantic_notice("potion-multilingual-128m"),
+            "semantic channel re-embedding after a model update (the recall daemon rebuilds it) — lexical-only answer"
+        );
+    }
 
     fn group(extra: usize, lexical: bool, semantic: bool) -> AskSessionGroup {
         AskSessionGroup {
