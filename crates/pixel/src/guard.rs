@@ -127,7 +127,7 @@ fn index_freshness_line(repo: &Value) -> Option<String> {
     let fresh = repo.get("facts_fresh").and_then(Value::as_bool);
     let phase = repo.get("facts_phase").and_then(Value::as_str);
     let history = match (fresh, phase) {
-        (None, _) => "no history index",
+        (None, _) => "history index built on the first history command",
         (Some(true), _) => "history index fresh",
         (Some(false), Some("phase_a")) => {
             "history index behind the refs (commits and file history incomplete)"
@@ -4972,11 +4972,11 @@ mod tests {
         );
         assert_eq!(
             line(serde_json::json!({})),
-            Some("Pixel index: commit unknown, no code graph (callers, impact and symbols unavailable), no history index.".into())
+            Some("Pixel index: commit unknown, no code graph (callers, impact and symbols unavailable), history index built on the first history command.".into())
         );
         assert_eq!(
             line(serde_json::json!({"index_commit": "0123456789abcdef", "graph_present": true})),
-            Some("Pixel index: commit 0123456789ab, code graph present, no history index.".into())
+            Some("Pixel index: commit 0123456789ab, code graph present, history index built on the first history command.".into())
         );
     }
 

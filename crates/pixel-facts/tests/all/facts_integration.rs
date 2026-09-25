@@ -358,7 +358,10 @@ fn query_never_blocks_on_in_progress_ingest() {
     // deterministically produces a genuine "ingest is still in progress"
     // state (phase_b, not fresh, zero diff text indexed) without any timing
     // race: everything here runs synchronously on one thread.
-    let opts = IngestOptions { tick_budget_ms: 0 };
+    let opts = IngestOptions {
+        tick_budget_ms: 0,
+        ..IngestOptions::default()
+    };
     let report = ingest_tick(&mut store, &opts).expect("one tick");
     assert!(
         !report.fresh,

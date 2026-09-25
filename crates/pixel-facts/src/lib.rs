@@ -9,6 +9,7 @@ pub mod lifecycle;
 pub mod poison;
 pub mod search;
 pub mod store;
+pub mod text_index;
 
 pub use store::{FactsError, FactsStore, IndexState};
 
@@ -21,10 +22,16 @@ pub(crate) mod testutil {
     use std::process::Command;
 
     pub(crate) fn git(root: &Path, args: &[&str]) -> String {
+        git_env(root, args, &[])
+    }
+
+    /// `git` with extra environment variables (a fixed commit date).
+    pub(crate) fn git_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
         let out = Command::new("git")
             .arg("-C")
             .arg(root)
             .args(args)
+            .envs(env.iter().copied())
             .env("GIT_AUTHOR_NAME", "t")
             .env("GIT_AUTHOR_EMAIL", "t@example.com")
             .env("GIT_COMMITTER_NAME", "t")
@@ -61,6 +68,40 @@ pub(crate) mod testutil {
         git(root, &["add", "-A"]);
         git(root, &["commit", "-q", "-m", message]);
         git(root, &["rev-parse", "HEAD"])
+    }
+
+    /// `commit` with author and committer dates at `unix` seconds (UTC).
+    pub(crate) fn commit_at(
+        root: &Path,
+        files: &[(&str, &[u8])],
+        message: &str,
+        unix: i64,
+    ) -> String {
+        for (path, bytes) in files {
+            let full = root.join(path);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(full, bytes).unwrap();
+        }
+        let date = format!("{unix} +0000");
+        let env = [
+            ("GIT_AUTHOR_DATE", date.as_str()),
+            ("GIT_COMMITTER_DATE", date.as_str()),
+        ];
+        git(root, &["add", "-A"]);
+        git_env(root, &["commit", "-q", "-m", message], &env);
+        git(root, &["rev-parse", "HEAD"])
+    }
+
+    /// Unix seconds `days` days before now: fixture dates relative to the
+    /// clock, so a window test means the same thing whenever it runs.
+    pub(crate) fn days_ago(days: i64) -> i64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        i64::try_from(now).unwrap() - days * 86_400
     }
 
     /// Two commits: `src/main.rs` added, then extended with `fn helper`.

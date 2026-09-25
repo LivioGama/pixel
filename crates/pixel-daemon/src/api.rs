@@ -2411,11 +2411,14 @@ impl Service {
     }
 
     /// Facts/history visibility for `op_status`: enough counters to tell a
-    /// healthy db from a dead or poisoned one at a glance. Read-only — never
-    /// triggers ingest (status must stay cheap).
+    /// healthy db from a dead or poisoned one at a glance, and its size
+    /// against the budget. Read-only — never triggers ingest (status must
+    /// stay cheap) and never creates the db: history is built on the first
+    /// history query, not on a status call.
     fn facts_visibility(&self) -> Value {
-        let facts = match FactsStore::open(&self.root) {
-            Ok(f) => f,
+        let facts = match FactsStore::open_existing(&self.root) {
+            Ok(Some(f)) => f,
+            Ok(None) => return json!({"present": false}),
             Err(e) => return json!({"present": false, "error": e.to_string()}),
         };
         let state = facts.index_state();
@@ -2448,7 +2451,10 @@ impl Service {
             "hunks_with_text": count(
                 "SELECT count(*) FROM hunks WHERE length(added) > 0 OR length(removed) > 0"
             ),
-            "diff_grams": count("SELECT count(*) FROM diff_grams"),
+            "used_bytes": facts.used_bytes().unwrap_or(0),
+            "budget_bytes": pixel_facts::store::HistoryLimits::from_env().budget_bytes,
+            "diffs_evicted": state.diffs_evicted,
+            "diff_coverage_since": state.diff_coverage_since,
             "fresh": state.fresh,
         })
     }
@@ -6932,10 +6938,11 @@ mod tests {
         let root = signals_repo("facts-visibility");
         let svc = Service::open(&root).unwrap();
         let before = svc.facts_visibility();
-        assert_eq!(before["present"], true, "{before}");
-        assert_eq!(before["phase_a_done"], false, "{before}");
-        assert_eq!(before["total_commits"], 2, "rev-list count: {before}");
-        assert_eq!(before["fresh"], false, "{before}");
+        assert_eq!(before, json!({"present": false}), "{before}");
+        assert!(
+            !pixel_facts::store::history_db_path(&root).exists(),
+            "status must not create history.db"
+        );
 
         let mut facts = FactsStore::open(&root).unwrap();
         let report = pixel_facts::ingest::ingest_until_fresh_within(
@@ -6951,6 +6958,14 @@ mod tests {
         assert_eq!(after["total_commits"], 2, "{after}");
         assert_eq!(after["fresh"], true, "{after}");
         assert!(after["hunks_with_text"].as_i64().unwrap() >= 1, "{after}");
+        assert_eq!(
+            after["used_bytes"].as_u64(),
+            Some(facts.used_bytes().unwrap()),
+            "{after}"
+        );
+        assert_eq!(after["budget_bytes"].as_u64(), Some(268_435_456), "{after}");
+        assert_eq!(after["diffs_evicted"], 0, "{after}");
+        assert!(after["diff_coverage_since"].is_string(), "{after}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

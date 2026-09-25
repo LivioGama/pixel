@@ -2,12 +2,13 @@
 //! removed-in, present-at-HEAD.
 //!
 //! Path lifecycle reads `file_changes` directly. Token lifecycle reads verified
-//! diff hunks (added/removed) via the trigram index.
+//! diff hunks (added/removed) via the trigram index (`text_index`).
 
 use serde::{Deserialize, Serialize};
 
-use crate::search::{covering_hashes, relevance_of};
+use crate::search::relevance_of;
 use crate::store::{CommitRef, FactsStore, Result, subject_of};
+use crate::text_index::matching_hunks;
 
 /// A lifecycle summary for a path or token.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -81,24 +82,13 @@ impl FactsStore {
     /// Lifecycle of a token (substring): uses verified diff hunks.
     pub fn token_lifecycle(&self, token: &str) -> Result<Option<Lifecycle>> {
         let units = vec![token.to_string()];
-        let hashes = covering_hashes(&units);
-        if hashes.is_empty() {
+        // Candidate hunks via trigrams, verified against text. Every
+        // candidate: first-seen needs the oldest touch, not the newest few.
+        let Some(ids) = matching_hunks(self.conn(), &units, usize::MAX)? else {
             // Token too short for trigram; fall back to a direct scan.
             return self.token_lifecycle_scan(token);
-        }
-        // Candidate hunks via trigrams, verified against text.
-        let mut rows: Vec<(String, String, String)> = Vec::new();
-        let placeholders = hashes.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT DISTINCT h.id FROM diff_grams WHERE hash IN ({placeholders})");
-        let ids: Vec<i64> = {
-            let mut stmt = self.conn().prepare(&sql)?;
-            let mut q = stmt.query(rusqlite::params_from_iter(hashes.iter().map(|h| *h as i64)))?;
-            let mut v = Vec::new();
-            while let Some(r) = q.next()? {
-                v.push(r.get::<_, i64>(0)?);
-            }
-            v
         };
+        let mut rows: Vec<(String, String, String)> = Vec::new();
         for id in ids {
             if let Ok((oid, at, msg, added, removed)) = self.conn.query_row(
                 "SELECT c.oid, c.committed_at, c.message, h.added, h.removed
@@ -199,5 +189,43 @@ impl FactsStore {
             present_at_head: present,
             total_touches: total,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::FactsStore;
+    use crate::ingest::tests::ingest_within;
+    use crate::store::short_oid;
+    use crate::testutil::{commit_at, days_ago, init_repo};
+
+    /// Token lifecycle runs through the trigram index (its SQL once named a
+    /// table alias that did not exist, so every token of three characters
+    /// or more failed): first-seen is the oldest touch, last-changed the
+    /// newest, and a hunk holding the trigrams apart is no touch.
+    #[test]
+    fn token_lifecycle_spans_the_oldest_and_newest_verified_touches() {
+        let dir = init_repo();
+        let root = dir.path();
+        let added = commit_at(
+            root,
+            &[("a.rs", b"let retry_budget = 3;\n")],
+            "add",
+            days_ago(3),
+        );
+        commit_at(root, &[("b.rs", b"retry\nbudget\n")], "apart", days_ago(2));
+        let removed = commit_at(root, &[("a.rs", b"let x = 3;\n")], "drop", days_ago(1));
+        let mut store = FactsStore::open(root).unwrap();
+        ingest_within(&mut store);
+        let life = store
+            .token_lifecycle("retry_budget")
+            .unwrap()
+            .expect("touched");
+        assert_eq!(life.what, "retry_budget");
+        assert_eq!(life.total_touches, 2, "{life:?}");
+        assert_eq!(life.first_seen.unwrap().oid, short_oid(&added));
+        assert_eq!(life.last_changed.unwrap().oid, short_oid(&removed));
+        assert!(!life.present_at_head);
+        assert_eq!(store.token_lifecycle("never_written").unwrap(), None);
     }
 }

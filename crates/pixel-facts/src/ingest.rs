@@ -3,7 +3,13 @@
 //! Three phases, resumable via the `ingest_jobs` cursor:
 //!   Phase A — refs, commit metadata and changed paths first, always completes.
 //!   Phase B — blob sizes of the changed paths (before any diff is requested).
-//!   Phase C — diff text, with skips decided BEFORE spawning git.
+//!   Phase C — diff text, newest commit first, with skips decided BEFORE
+//!             spawning git.
+//!
+//! Diff text is bounded twice (`HistoryLimits`): commits older than the age
+//! window never have their diff fetched, and once the database's used pages
+//! pass the size budget the oldest diffs are evicted. Commit metadata is
+//! never evicted.
 //!
 //! The engine yields control back to the caller (the daemon's ingest thread)
 //! every tick so queries are never blocked: each tick processes a bounded
@@ -20,7 +26,8 @@ use crate::poison::{
 };
 use crate::store::{
     DIFF_STATE_EVICTED, DIFF_STATE_INDEXED, DIFF_STATE_PENDING, DIFF_STATE_SKIPPED, FactsStore,
-    REACH_BRANCH, REACH_REFLOG_ONLY, REACH_REMOTE, REACH_STASH, REACH_TAG, Result,
+    HistoryLimits, REACH_BRANCH, REACH_REFLOG_ONLY, REACH_REMOTE, REACH_STASH, REACH_TAG, Result,
+    SKIP_NOTE_OUTSIDE_WINDOW, SKIP_NOTE_OVER_BUDGET,
 };
 
 /// Default wall-clock budget per tick (250ms per PLAN.md). Queries never wait
@@ -37,12 +44,15 @@ const BATCH_OUTPUT_CAP_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct IngestOptions {
     pub tick_budget_ms: u64,
+    /// The age window and size budget applied to diff text.
+    pub limits: HistoryLimits,
 }
 
 impl Default for IngestOptions {
     fn default() -> Self {
         IngestOptions {
             tick_budget_ms: DEFAULT_TICK_BUDGET_MS,
+            limits: HistoryLimits::from_env(),
         }
     }
 }
@@ -119,10 +129,12 @@ pub fn ingest_tick(store: &mut FactsStore, options: &IngestOptions) -> Result<Ti
         // fresh deadline so diff text ingestion always gets time to run,
         // even on large repos where phase B eats the entire original budget.
         let c_deadline = Instant::now() + Duration::from_millis(options.tick_budget_ms);
+        // The window first, so a commit too old to keep is never fetched.
+        apply_window(store, &options.limits, now_unix())?;
         let (_c_done, p, s) = phase_c(store, &c_deadline)?;
         poisoned += p;
         skipped += s;
-        let _ = evict_to_budget(store, crate::store::DEFAULT_DIFF_BUDGET_BYTES);
+        enforce_budget(store, options.limits.budget_bytes)?;
     }
 
     let state = store.index_state();
@@ -164,6 +176,7 @@ pub fn ingest_until_fresh_within(
     let mut n = 0u64;
     let start = Instant::now();
     let dbg = std::env::var("PIXEL_FACTS_DEBUG_TICKS").is_ok();
+    let mut last_mark: Option<String> = None;
     loop {
         let report = ingest_tick(store, options)?;
         n += 1;
@@ -173,6 +186,16 @@ pub fn ingest_until_fresh_within(
         if report.fresh {
             return Ok(report);
         }
+        // Every tick lands at least one batch of whichever phase is running,
+        // so a tick that leaves the state as it found it never will: fail
+        // now rather than spin until the wall-clock cap.
+        let mark = progress_mark(store)?;
+        if last_mark.as_ref() == Some(&mark) {
+            return Err(crate::store::FactsError::Msg(format!(
+                "ingest made no progress on tick {n} (state {mark}) — last report: {report:?}"
+            )));
+        }
+        last_mark = Some(mark);
         if start.elapsed() >= wall_clock {
             return Err(crate::store::FactsError::Msg(format!(
                 "ingest_until_fresh did not converge after {n} ticks / {:?} — last report: {:?}",
@@ -181,6 +204,21 @@ pub fn ingest_until_fresh_within(
             )));
         }
     }
+}
+
+/// What a tick that makes progress changes: the commit count (phase A), the
+/// pending diffs (phase C) and each phase's cursor and status (phase A's
+/// remaining oids, phase B's measured commit).
+fn progress_mark(store: &FactsStore) -> Result<String> {
+    Ok(store.conn().query_row(
+        "SELECT (SELECT count(*) FROM commits) || '/' ||
+                (SELECT count(*) FROM commits WHERE diff_state = ?1) || '/' ||
+                COALESCE((SELECT group_concat(job, ' ') FROM (
+                    SELECT phase || ':' || COALESCE(cursor, '') || ':' || status AS job
+                    FROM ingest_jobs ORDER BY phase)), '')",
+        [DIFF_STATE_PENDING],
+        |r| r.get(0),
+    )?)
 }
 
 /// Default wall-clock budget for the lazy query-path ingest loop (~3s).
@@ -205,6 +243,7 @@ pub fn lazy_ingest_budget_ms() -> u64 {
 pub fn ingest_until_fresh_bounded(store: &mut FactsStore, budget_ms: u64) -> Result<TickReport> {
     let options = IngestOptions {
         tick_budget_ms: DEFAULT_TICK_BUDGET_MS,
+        ..IngestOptions::default()
     };
     let start = Instant::now();
     let mut last = ingest_tick(store, &options)?;
@@ -605,10 +644,7 @@ fn insert_phase_a_batch(
         let mut ins_fc = tx.prepare(
             "INSERT OR IGNORE INTO file_changes (commit_id, path, status, old_path) VALUES (?1, ?2, ?3, ?4)",
         )?;
-        let mut sel_fc =
-            tx.prepare("SELECT id FROM file_changes WHERE commit_id = ?1 AND path = ?2")?;
-        let mut ins_pgram =
-            tx.prepare("INSERT INTO path_grams (hash, change_id) VALUES (?1, ?2)")?;
+        let mut ins_path = tx.prepare("INSERT INTO path_fts (rowid, path) VALUES (?1, ?2)")?;
         for c in commits {
             let reach = c.reach;
             // Merge in any reach bits discovered during enumeration.
@@ -642,31 +678,17 @@ fn insert_phase_a_batch(
             if let Ok(id) = sel.query_row([&c.oid], |r| r.get::<_, i64>(0)) {
                 ins_msg.execute(params![id, c.message])?;
                 for ch in &c.changes {
-                    ins_fc.execute(params![id, ch.path, ch.status, ch.old_path])?;
-                    // Emit path trigrams for path search (rowid-in-path trick).
-                    if let Ok(fc_id) =
-                        sel_fc.query_row(params![id, ch.path], |r| r.get::<_, i64>(0))
-                    {
-                        emit_path_grams(&mut ins_pgram, &ch.path, fc_id)?;
+                    // Index the path only when the row is new: `OR IGNORE`
+                    // skips a (commit, path) pair already recorded, and a
+                    // second index entry for its rowid would be a duplicate.
+                    if ins_fc.execute(params![id, ch.path, ch.status, ch.old_path])? == 1 {
+                        ins_path.execute(params![tx.last_insert_rowid(), ch.path])?;
                     }
                 }
             }
         }
     }
     tx.commit()?;
-    Ok(())
-}
-
-/// Emit trigram hashes for a path into `path_grams`, tagged with the
-/// file_changes rowid.
-fn emit_path_grams(ins: &mut rusqlite::Statement, path: &str, change_id: i64) -> Result<()> {
-    use pixel_index::{GramExtractor, TrigramExtractor};
-    let extractor = TrigramExtractor;
-    let mut hits = Vec::new();
-    extractor.grams(path.as_bytes(), &mut hits);
-    for h in hits {
-        ins.execute(params![h.hash as i64, change_id])?;
-    }
     Ok(())
 }
 
@@ -867,11 +889,14 @@ fn phase_c(store: &mut FactsStore, deadline: &Instant) -> Result<(bool, u64, u64
     Ok((idx >= pending.len(), poisoned, skipped))
 }
 
+/// Commits whose diff is still to fetch, newest first: the diffs a size
+/// budget keeps are the recent ones, so fetching them first means an
+/// eviction never throws away work just done on an old commit.
 fn pending_phase_c(store: &FactsStore) -> Result<Vec<i64>> {
     let mut stmt = store.conn().prepare(
         "SELECT id FROM commits
          WHERE diff_state = ?1
-         ORDER BY committed_at, id
+         ORDER BY unixepoch(committed_at) DESC, id DESC
          LIMIT 100000",
     )?;
     let rows = stmt.query_map([DIFF_STATE_PENDING], |r| r.get::<_, i64>(0))?;
@@ -1177,14 +1202,17 @@ fn insert_phase_c_commit(store: &mut FactsStore, commit: &PhaseCCommit) -> Resul
             "INSERT INTO hunks (commit_id, path, added, removed, truncated)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
-        let mut ins_gram = tx.prepare("INSERT INTO diff_grams (hash, hunk_id) VALUES (?1, ?2)")?;
+        let mut ins_text = tx.prepare("INSERT INTO diff_fts (rowid, text) VALUES (?1, ?2)")?;
         let mut mark =
             tx.prepare("UPDATE commits SET diff_state = ?1 WHERE id = ?2 AND diff_state = ?3")?;
         let mut commit_bytes = 0usize;
         let mut over_cap = false;
         for (i, file) in commit.files.iter().enumerate() {
             let path = &file.path;
-            if skip[i] {
+            // A hunk without text (a binary file, a pure rename or mode
+            // change) has nothing to search: no row, so a hunk row without
+            // text only ever means lost text (what `doctor` reports).
+            if skip[i] || (file.added.is_empty() && file.removed.is_empty()) {
                 continue;
             }
             if commit_bytes >= COMMIT_TEXT_CAP_BYTES {
@@ -1198,9 +1226,8 @@ fn insert_phase_c_commit(store: &mut FactsStore, commit: &PhaseCCommit) -> Resul
                 file.removed,
                 if file.truncated { 1 } else { 0 }
             ])?;
-            // Trigram the added+removed text into diff_grams keyed by hunk id.
-            emit_grams(&mut ins_gram, &file.added, id)?;
-            emit_grams(&mut ins_gram, &file.removed, id)?;
+            // Index the added+removed text under the hunk's rowid.
+            ins_text.execute(params![id, format!("{}\n{}", file.added, file.removed)])?;
             commit_bytes += file.added.len() + file.removed.len();
         }
         mark.execute(params![
@@ -1224,22 +1251,6 @@ fn insert_phase_c_commit(store: &mut FactsStore, commit: &PhaseCCommit) -> Resul
     Ok(())
 }
 
-/// Emit grams for `text` into the diff_grams posting table, tagged with the
-/// hunk rowid. Uses pixel-index's trigram extractor (xxh3-based).
-fn emit_grams(ins: &mut rusqlite::Statement, text: &str, hunk_id: i64) -> Result<()> {
-    use pixel_index::{GramExtractor, TrigramExtractor};
-    let extractor = TrigramExtractor;
-    let mut hits = Vec::new();
-    extractor.grams(text.as_bytes(), &mut hits);
-    let mut hashes: Vec<u64> = hits.iter().map(|h| h.hash).collect();
-    hashes.sort_unstable();
-    hashes.dedup();
-    for hash in hashes {
-        ins.execute(params![hash as i64, hunk_id])?;
-    }
-    Ok(())
-}
-
 fn now_iso() -> String {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1252,80 +1263,216 @@ fn split_nul_lines(bytes: &[u8]) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Eviction (budget)
+// Limits — age window and size budget
 // ---------------------------------------------------------------------------
 
-/// Enforce the diff-residue budget. Evicts oldest commits' hunks (diff_state=3,
-/// metadata retained) until under budget, skipping any commit that is the
-/// `removed-in` for a path deleted from HEAD (the rescue payload).
-pub fn evict_to_budget(store: &mut FactsStore, budget_bytes: u64) -> Result<u64> {
-    let total: i64 = store.conn().query_row(
-        "SELECT COALESCE(SUM(length(added)) + SUM(length(removed)), 0) FROM hunks",
-        [],
-        |r| r.get(0),
+/// Commits evicted between two measures of the database's used size.
+const EVICT_STEP: i64 = 25;
+
+/// SQL predicate: commit `c` deleted a path, so its removed text is what
+/// excavate restores a dropped file from. Such commits are evicted last.
+const RESCUE_PREDICATE: &str =
+    "EXISTS (SELECT 1 FROM file_changes fc WHERE fc.commit_id = c.id AND fc.status = 'D')";
+
+/// Unix seconds before which a commit is outside a window of `days` days.
+fn window_cutoff(now_unix: i64, days: u64) -> i64 {
+    let span = i64::try_from(days)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(86_400);
+    now_unix.saturating_sub(span)
+}
+
+/// Drop the diff text of every commit authored before the window, and mark
+/// the pending ones so their diff is never fetched. A commit exactly at the
+/// cutoff stays. A window widened or lifted since takes back the commits it
+/// now covers: they are pending again (a diff evicted for size is not, so a
+/// restored diff that does not fit is evicted once more and stays out).
+/// Returns the number of commits taken out of the diff index.
+pub fn apply_window(store: &mut FactsStore, limits: &HistoryLimits, now_unix: i64) -> Result<u64> {
+    let cutoff = limits
+        .window_days
+        .map_or(i64::MIN, |days| window_cutoff(now_unix, days));
+    store.conn().execute(
+        "UPDATE commits SET diff_state = ?1, skip_note = NULL
+         WHERE diff_state = ?2 AND skip_note = ?3 AND unixepoch(committed_at) >= ?4",
+        params![
+            DIFF_STATE_PENDING,
+            DIFF_STATE_EVICTED,
+            SKIP_NOTE_OUTSIDE_WINDOW,
+            cutoff
+        ],
     )?;
-    if (total as u64) <= budget_bytes {
-        return Ok(0);
-    }
+    let indexed = commits_with_hunks_before(store, cutoff)?;
+    let mut evicted = evict_commits(store, &indexed, SKIP_NOTE_OUTSIDE_WINDOW)?;
+    // What is left before the cutoff: pending commits, whose diff is never
+    // fetched, and indexed commits without a hunk (a binary-only change
+    // writes none), which would otherwise stay indexed outside the window
+    // and hold `diff_coverage_since` back.
+    evicted += store.conn().execute(
+        "UPDATE commits SET diff_state = ?1, skip_note = ?2
+         WHERE diff_state IN (?3, ?4) AND unixepoch(committed_at) < ?5",
+        params![
+            DIFF_STATE_EVICTED,
+            SKIP_NOTE_OUTSIDE_WINDOW,
+            DIFF_STATE_PENDING,
+            DIFF_STATE_INDEXED,
+            cutoff
+        ],
+    )? as u64;
+    reclaim(store)?;
+    Ok(evicted)
+}
+
+/// Evict the oldest diffs until the database's used pages fit
+/// `budget_bytes`: commits that deleted no path first, then the rescue
+/// commits, oldest first within each. Once a commit was evicted for size,
+/// every pending non-rescue commit as old or older is marked instead of
+/// fetched, since its diff would be the next one out. Metadata stays.
+/// Returns the number of commits taken out of the diff index.
+pub fn enforce_budget(store: &mut FactsStore, budget_bytes: u64) -> Result<u64> {
     let mut evicted = 0u64;
-    // Oldest non-rescue commits first.
-    let cids: Vec<i64> = {
-        let mut stmt = store.conn().prepare(
-            "SELECT h.commit_id
-             FROM hunks h
-             JOIN commits c ON c.id = h.commit_id
-             WHERE c.id NOT IN (
-                SELECT fc.commit_id FROM file_changes fc
-                WHERE fc.status = 'D'
-             )
-             ORDER BY c.committed_at, c.id
-             LIMIT 1000",
-        )?;
-        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
-        let mut v = Vec::new();
-        for row in rows {
-            v.push(row?);
-        }
-        v
-    };
-    for cid in cids {
-        let used: i64 = store.conn().query_row(
-            "SELECT COALESCE(SUM(length(added)) + SUM(length(removed)), 0) FROM hunks WHERE commit_id = ?1",
-            [cid],
-            |r| r.get(0),
-        )?;
-        store.conn().execute(
-            "DELETE FROM diff_grams WHERE hunk_id IN (SELECT id FROM hunks WHERE commit_id = ?1)",
-            [cid],
-        )?;
-        store.conn().execute(
-            "DELETE FROM path_grams WHERE change_id IN (SELECT id FROM file_changes WHERE commit_id = ?1)",
-            [cid],
-        )?;
-        store
-            .conn()
-            .execute("DELETE FROM hunks WHERE commit_id = ?1", [cid])?;
-        store.conn().execute(
-            "UPDATE commits SET diff_state = ?1 WHERE id = ?2",
-            params![DIFF_STATE_EVICTED, cid],
-        )?;
-        evicted += used as u64;
-        let now_total: i64 = store.conn().query_row(
-            "SELECT COALESCE(SUM(length(added)) + SUM(length(removed)), 0) FROM hunks",
-            [],
-            |r| r.get(0),
-        )?;
-        if (now_total as u64) <= budget_bytes {
+    let mut floor: Option<i64> = None;
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    // `used_bytes` leaves the free list out, so each step's eviction shows
+    // at the next measure without reclaiming the pages first.
+    while store.used_bytes()? > budget_bytes {
+        // Only commits not yet seen: one coming back means its eviction did
+        // not take, and stopping beats spinning on it. No commit left with
+        // diff text ends the loop too.
+        let victims: Vec<Victim> = oldest_victims(store)?
+            .into_iter()
+            .filter(|v| seen.insert(v.id))
+            .collect();
+        if victims.is_empty() {
             break;
         }
+        let ids: Vec<i64> = victims.iter().map(|v| v.id).collect();
+        evicted += evict_commits(store, &ids, SKIP_NOTE_OVER_BUDGET)?;
+        for v in victims.iter().filter(|v| !v.rescue) {
+            floor = floor.max(v.authored);
+        }
     }
+    if let Some(floor) = floor {
+        evicted += store.conn().execute(
+            &format!(
+                "UPDATE commits SET diff_state = ?1, skip_note = ?2
+                 WHERE id IN (SELECT c.id FROM commits c
+                              WHERE c.diff_state = ?3
+                                AND unixepoch(c.committed_at) <= ?4
+                                AND NOT {RESCUE_PREDICATE})"
+            ),
+            params![
+                DIFF_STATE_EVICTED,
+                SKIP_NOTE_OVER_BUDGET,
+                DIFF_STATE_PENDING,
+                floor
+            ],
+        )? as u64;
+    }
+    reclaim(store)?;
     Ok(evicted)
+}
+
+/// A commit holding diff text, as the budget sees it.
+struct Victim {
+    id: i64,
+    /// Authored time in unix seconds; `None` when unparseable.
+    authored: Option<i64>,
+    rescue: bool,
+}
+
+/// The next `EVICT_STEP` commits holding diff text, in eviction order.
+fn oldest_victims(store: &FactsStore) -> Result<Vec<Victim>> {
+    let mut stmt = store.conn().prepare(&format!(
+        "SELECT c.id, unixepoch(c.committed_at), {RESCUE_PREDICATE} AS rescue
+         FROM commits c
+         WHERE c.diff_state IN (?1, ?2)
+           AND EXISTS (SELECT 1 FROM hunks h WHERE h.commit_id = c.id)
+         ORDER BY rescue, unixepoch(c.committed_at), c.id
+         LIMIT ?3"
+    ))?;
+    let rows = stmt.query_map(
+        params![DIFF_STATE_INDEXED, DIFF_STATE_SKIPPED, EVICT_STEP],
+        |r| {
+            Ok(Victim {
+                id: r.get(0)?,
+                authored: r.get(1)?,
+                rescue: r.get(2)?,
+            })
+        },
+    )?;
+    let mut v = Vec::new();
+    for row in rows {
+        v.push(row?);
+    }
+    Ok(v)
+}
+
+/// Ids of the commits holding diff text authored before `cutoff`.
+fn commits_with_hunks_before(store: &FactsStore, cutoff: i64) -> Result<Vec<i64>> {
+    let mut stmt = store.conn().prepare(
+        "SELECT c.id FROM commits c
+         WHERE c.diff_state IN (?1, ?2)
+           AND EXISTS (SELECT 1 FROM hunks h WHERE h.commit_id = c.id)
+           AND unixepoch(c.committed_at) < ?3
+         ORDER BY c.id",
+    )?;
+    let rows = stmt.query_map(
+        params![DIFF_STATE_INDEXED, DIFF_STATE_SKIPPED, cutoff],
+        |r| r.get::<_, i64>(0),
+    )?;
+    let mut v = Vec::new();
+    for row in rows {
+        v.push(row?);
+    }
+    Ok(v)
+}
+
+/// Remove the diff text of `ids` (hunks and their index entries) in one
+/// transaction and mark each commit evicted with `note`. Returns the count.
+fn evict_commits(store: &mut FactsStore, ids: &[i64], note: &str) -> Result<u64> {
+    let tx = store.conn_mut().transaction()?;
+    {
+        let mut drop_text = tx.prepare(
+            "DELETE FROM diff_fts WHERE rowid IN (SELECT id FROM hunks WHERE commit_id = ?1)",
+        )?;
+        let mut drop_hunks = tx.prepare("DELETE FROM hunks WHERE commit_id = ?1")?;
+        let mut mark =
+            tx.prepare("UPDATE commits SET diff_state = ?1, skip_note = ?2 WHERE id = ?3")?;
+        for id in ids {
+            drop_text.execute([id])?;
+            drop_hunks.execute([id])?;
+            mark.execute(params![DIFF_STATE_EVICTED, note, id])?;
+        }
+    }
+    tx.commit()?;
+    Ok(ids.len() as u64)
+}
+
+/// Hand the pages an eviction freed back to the file system; with an empty
+/// free list it costs one statement and frees nothing.
+///
+/// The pragma frees one page per result row it yields, so it is stepped to
+/// the end: `execute_batch` steps once and would free a single page.
+fn reclaim(store: &FactsStore) -> Result<()> {
+    let mut stmt = store.conn().prepare("PRAGMA incremental_vacuum")?;
+    let mut rows = stmt.query([])?;
+    while rows.next()?.is_some() {}
+    Ok(())
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::testutil::{commit, git, init_repo, two_commit_repo};
+    use crate::search::{SearchFacet, search};
+    use crate::testutil::{commit, commit_at, days_ago, git, init_repo, two_commit_repo};
+    use crate::text_index::{CANDIDATE_CAP, matching_hunks};
 
     fn far() -> Instant {
         Instant::now() + Duration::from_secs(600)
@@ -1349,7 +1496,10 @@ pub(crate) mod tests {
     fn ingest_until_fresh_within_keeps_ticking_until_fresh_under_a_tiny_tick_budget() {
         let (dir, _, _) = two_commit_repo();
         let mut store = FactsStore::open(dir.path()).unwrap();
-        let options = IngestOptions { tick_budget_ms: 0 };
+        let options = IngestOptions {
+            tick_budget_ms: 0,
+            ..IngestOptions::default()
+        };
         let report = ingest_until_fresh_within(&mut store, &options, TEST_WALL_CLOCK).unwrap();
         assert!(report.fresh, "{report:?}");
         assert_eq!(report.commits_indexed, 2);
@@ -1664,5 +1814,498 @@ b
             rows.map(|r| r.unwrap()).collect()
         };
         assert_eq!(paths, vec!["a.txt".to_string()]);
+    }
+
+    fn no_limits() -> HistoryLimits {
+        HistoryLimits {
+            budget_bytes: u64::MAX,
+            window_days: None,
+        }
+    }
+
+    fn ingest_with(store: &mut FactsStore, limits: HistoryLimits) -> TickReport {
+        let options = IngestOptions {
+            limits,
+            ..IngestOptions::default()
+        };
+        ingest_until_fresh_within(store, &options, TEST_WALL_CLOCK).expect("ingest until fresh")
+    }
+
+    fn state_of(store: &FactsStore, oid: &str) -> (i64, Option<String>) {
+        store
+            .conn()
+            .query_row(
+                "SELECT diff_state, skip_note FROM commits WHERE oid = ?1",
+                [oid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    fn diff_hits(store: &FactsStore, needle: &str) -> usize {
+        matching_hunks(store.conn(), &[needle.to_string()], CANDIDATE_CAP)
+            .unwrap()
+            .unwrap()
+            .len()
+    }
+
+    /// A file without diff text (binary here) leaves no hunk row: every
+    /// stored hunk has text, which is what `doctor`'s poison check reads.
+    #[test]
+    fn ingest_writes_no_hunk_row_for_a_file_without_text() {
+        let dir = init_repo();
+        let root = dir.path();
+        let oid = commit(
+            root,
+            &[
+                ("logo.bin", b"\x00\x01\x02binary\x00"),
+                ("a.txt", b"words\n"),
+            ],
+            "binary and text",
+        );
+        let mut store = FactsStore::open(root).unwrap();
+        ingest_within(&mut store);
+        assert_eq!(state_of(&store, &oid), (DIFF_STATE_INDEXED, None));
+        let paths: Vec<(String, i64)> = {
+            let mut stmt = store
+                .conn()
+                .prepare("SELECT path, length(added) + length(removed) FROM hunks")
+                .unwrap();
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(paths, vec![("a.txt".to_string(), 6)]);
+    }
+
+    /// The mark moves with each tick's progress and holds still otherwise;
+    /// `ingest_until_fresh_within` reads a mark that held still as a stall.
+    #[test]
+    fn progress_mark_moves_with_a_tick_and_holds_still_without_one() {
+        let (dir, _, _) = two_commit_repo();
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        let empty = progress_mark(&store).unwrap();
+        assert_eq!(empty, "0/0/");
+        assert_eq!(progress_mark(&store).unwrap(), empty, "nothing ran");
+        let options = IngestOptions {
+            tick_budget_ms: 0,
+            ..IngestOptions::default()
+        };
+        ingest_tick(&mut store, &options).unwrap();
+        let after = progress_mark(&store).unwrap();
+        assert_ne!(after, empty);
+        assert!(after.starts_with("2/"), "{after}");
+    }
+
+    #[test]
+    fn now_unix_reads_the_clock_in_seconds() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let got = now_unix();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(
+            got >= before && got <= after,
+            "{before} <= {got} <= {after}"
+        );
+        assert!(got > 1_577_836_800, "{got}"); // 2020-01-01T00:00:00Z
+    }
+
+    #[test]
+    fn window_cutoff_is_now_minus_the_window_in_seconds() {
+        assert_eq!(window_cutoff(1_000_000, 1), 913_600);
+        assert_eq!(window_cutoff(1_000_000, 0), 1_000_000);
+        assert_eq!(
+            window_cutoff(0, u64::MAX),
+            -i64::MAX,
+            "saturates, never wraps"
+        );
+    }
+
+    /// The diffs a budget keeps are the recent ones, so phase C fetches
+    /// the newest commit first.
+    #[test]
+    fn pending_phase_c_lists_the_newest_commit_first() {
+        let dir = init_repo();
+        let root = dir.path();
+        let old = commit_at(root, &[("a.txt", b"a\n")], "old", days_ago(3));
+        let mid = commit_at(root, &[("b.txt", b"b\n")], "mid", days_ago(2));
+        let new = commit_at(root, &[("c.txt", b"c\n")], "new", days_ago(1));
+        let store = metadata_only(root);
+        let ids: Vec<i64> = [&new, &mid, &old]
+            .iter()
+            .map(|oid| commit_id(&store, oid))
+            .collect();
+        assert_eq!(pending_phase_c(&store).unwrap(), ids);
+    }
+
+    /// A commit older than the window keeps its message and paths but never
+    /// has its diff fetched; the index state says how many and since when.
+    #[test]
+    fn ingest_leaves_the_diff_of_a_commit_older_than_the_window_out() {
+        let dir = init_repo();
+        let root = dir.path();
+        let old = commit_at(
+            root,
+            &[("old.txt", b"ancient_marker\n")],
+            "ancient work",
+            days_ago(400),
+        );
+        let new = commit_at(
+            root,
+            &[("new.txt", b"recent_marker\n")],
+            "recent work",
+            days_ago(1),
+        );
+        let mut store = FactsStore::open(root).unwrap();
+        let report = ingest_with(
+            &mut store,
+            HistoryLimits {
+                window_days: Some(365),
+                ..no_limits()
+            },
+        );
+        assert!(report.fresh, "{report:?}");
+        assert_eq!(
+            state_of(&store, &old),
+            (
+                DIFF_STATE_EVICTED,
+                Some(SKIP_NOTE_OUTSIDE_WINDOW.to_string())
+            )
+        );
+        assert_eq!(hunks_for(&store, &old), 0, "never fetched");
+        assert_eq!(state_of(&store, &new), (DIFF_STATE_INDEXED, None));
+        assert_eq!(diff_hits(&store, "ancient_marker"), 0);
+        assert_eq!(diff_hits(&store, "recent_marker"), 1);
+        let by_message = search(&store, "ancient", SearchFacet::Message, 10).unwrap();
+        assert_eq!(by_message.candidates.len(), 1, "metadata stays searchable");
+        let state = store.index_state();
+        assert_eq!(state.diffs_evicted, 1);
+        let new_at: String = store
+            .conn()
+            .query_row(
+                "SELECT committed_at FROM commits WHERE oid = ?1",
+                [&new],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state.diff_coverage_since, Some(new_at));
+    }
+
+    /// The window also drops diffs that were indexed while still inside
+    /// it, index entries included; a commit exactly at the cutoff stays.
+    #[test]
+    fn apply_window_evicts_indexed_diffs_that_aged_out_and_keeps_the_cutoff() {
+        let dir = init_repo();
+        let root = dir.path();
+        let t = 1_700_000_000;
+        let older = commit_at(root, &[("a.txt", b"older_marker\n")], "older", t - 1);
+        let edge = commit_at(root, &[("b.txt", b"edge_marker\n")], "edge", t);
+        let mut store = FactsStore::open(root).unwrap();
+        ingest_with(&mut store, no_limits());
+        assert_eq!(diff_hits(&store, "older_marker"), 1);
+        let limits = HistoryLimits {
+            window_days: Some(1),
+            ..no_limits()
+        };
+        assert_eq!(apply_window(&mut store, &limits, t + 86_400).unwrap(), 1);
+        assert_eq!(
+            state_of(&store, &older),
+            (
+                DIFF_STATE_EVICTED,
+                Some(SKIP_NOTE_OUTSIDE_WINDOW.to_string())
+            )
+        );
+        assert_eq!(hunks_for(&store, &older), 0);
+        assert_eq!(
+            diff_hits(&store, "older_marker"),
+            0,
+            "index entries dropped too"
+        );
+        assert_eq!(state_of(&store, &edge), (DIFF_STATE_INDEXED, None));
+        assert_eq!(diff_hits(&store, "edge_marker"), 1);
+        let unlimited = no_limits();
+        assert_eq!(
+            apply_window(&mut store, &unlimited, t + 10 * 86_400).unwrap(),
+            0
+        );
+        assert_eq!(state_of(&store, &edge), (DIFF_STATE_INDEXED, None));
+    }
+
+    /// Widening the window takes back the commits it now covers, lifting it
+    /// takes back all of them, and a commit evicted for size stays out.
+    #[test]
+    fn apply_window_restores_commits_a_wider_or_lifted_window_covers() {
+        let dir = init_repo();
+        let root = dir.path();
+        let t = 1_700_000_000;
+        let old = commit_at(root, &[("a.txt", b"a\n")], "old", t - 10 * 86_400);
+        let mid = commit_at(root, &[("b.txt", b"b\n")], "mid", t - 3 * 86_400);
+        let sized = commit_at(root, &[("c.txt", b"c\n")], "sized", t - 3 * 86_400);
+        let mut store = metadata_only(root);
+        store
+            .conn()
+            .execute(
+                "UPDATE commits SET diff_state = ?1, skip_note = ?2 WHERE oid = ?3",
+                params![DIFF_STATE_EVICTED, SKIP_NOTE_OVER_BUDGET, sized],
+            )
+            .unwrap();
+        let window = |days| HistoryLimits {
+            window_days: Some(days),
+            ..no_limits()
+        };
+        assert_eq!(apply_window(&mut store, &window(1), t).unwrap(), 2);
+        let outside = (
+            DIFF_STATE_EVICTED,
+            Some(SKIP_NOTE_OUTSIDE_WINDOW.to_string()),
+        );
+        assert_eq!(state_of(&store, &mid), outside);
+
+        assert_eq!(apply_window(&mut store, &window(5), t).unwrap(), 0);
+        assert_eq!(
+            state_of(&store, &mid),
+            (DIFF_STATE_PENDING, None),
+            "back inside"
+        );
+        assert_eq!(state_of(&store, &old), outside, "still outside");
+
+        assert_eq!(apply_window(&mut store, &no_limits(), t).unwrap(), 0);
+        assert_eq!(
+            state_of(&store, &old),
+            (DIFF_STATE_PENDING, None),
+            "window lifted"
+        );
+        assert_eq!(
+            state_of(&store, &sized),
+            (DIFF_STATE_EVICTED, Some(SKIP_NOTE_OVER_BUDGET.to_string())),
+            "a size eviction is not the window's to undo"
+        );
+    }
+
+    /// A binary-only commit is indexed without a hunk; once it ages out it
+    /// is marked outside the window like the others, so the coverage date
+    /// moves with the window.
+    #[test]
+    fn apply_window_ages_out_an_indexed_commit_without_hunks() {
+        let dir = init_repo();
+        let root = dir.path();
+        let t = 1_700_000_000;
+        let binary = commit_at(root, &[("logo.bin", b"\x00\x01binary\x00")], "logo", t - 1);
+        let text = commit_at(root, &[("a.txt", b"words\n")], "text", t);
+        let mut store = FactsStore::open(root).unwrap();
+        ingest_with(&mut store, no_limits());
+        assert_eq!(state_of(&store, &binary), (DIFF_STATE_INDEXED, None));
+        assert_eq!(hunks_for(&store, &binary), 0);
+        let limits = HistoryLimits {
+            window_days: Some(1),
+            ..no_limits()
+        };
+        assert_eq!(apply_window(&mut store, &limits, t + 86_400).unwrap(), 1);
+        assert_eq!(
+            state_of(&store, &binary),
+            (
+                DIFF_STATE_EVICTED,
+                Some(SKIP_NOTE_OUTSIDE_WINDOW.to_string())
+            )
+        );
+        assert_eq!(state_of(&store, &text), (DIFF_STATE_INDEXED, None));
+        let text_at: String = store
+            .conn()
+            .query_row(
+                "SELECT committed_at FROM commits WHERE oid = ?1",
+                [&text],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(store.index_state().diff_coverage_since, Some(text_at));
+    }
+
+    /// Pending commits before the cutoff are marked, the one at it is not.
+    #[test]
+    fn apply_window_marks_pending_commits_before_the_cutoff() {
+        let dir = init_repo();
+        let root = dir.path();
+        let t = 1_700_000_000;
+        let older = commit_at(root, &[("a.txt", b"a\n")], "older", t - 1);
+        let edge = commit_at(root, &[("b.txt", b"b\n")], "edge", t);
+        let mut store = metadata_only(root);
+        let limits = HistoryLimits {
+            window_days: Some(1),
+            ..no_limits()
+        };
+        assert_eq!(apply_window(&mut store, &limits, t + 86_400).unwrap(), 1);
+        assert_eq!(
+            state_of(&store, &older),
+            (
+                DIFF_STATE_EVICTED,
+                Some(SKIP_NOTE_OUTSIDE_WINDOW.to_string())
+            )
+        );
+        assert_eq!(state_of(&store, &edge), (DIFF_STATE_PENDING, None));
+    }
+
+    /// `marker` on the first line, then ~16 KiB of distinct lines: enough
+    /// diff text per commit to fill whole pages, so evicting it frees them.
+    fn bulky(marker: &str) -> Vec<u8> {
+        let mut text = format!("{marker}\n");
+        for i in 0..600 {
+            text.push_str(&format!("{marker} line {i} of filler text\n"));
+        }
+        text.into_bytes()
+    }
+
+    /// Four commits with diff text: two that only add or modify, a rescue
+    /// commit (it deletes a path) and a newest one.
+    fn budget_repo() -> (tempfile::TempDir, [String; 4]) {
+        let dir = init_repo();
+        let root = dir.path();
+        let first = commit_at(
+            root,
+            &[("a.txt", &bulky("first_marker")), ("gone.txt", b"doomed\n")],
+            "first",
+            days_ago(4),
+        );
+        let second = commit_at(
+            root,
+            &[("b.txt", &bulky("second_marker"))],
+            "second",
+            days_ago(3),
+        );
+        std::fs::remove_file(root.join("gone.txt")).unwrap();
+        let rescue = commit_at(
+            root,
+            &[("c.txt", &bulky("rescue_marker"))],
+            "rescue",
+            days_ago(2),
+        );
+        let newest = commit_at(
+            root,
+            &[("d.txt", &bulky("newest_marker"))],
+            "newest",
+            days_ago(1),
+        );
+        (dir, [first, second, rescue, newest])
+    }
+
+    #[test]
+    fn oldest_victims_orders_plain_commits_oldest_first_then_rescue_commits() {
+        let (dir, [first, second, rescue, newest]) = budget_repo();
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        ingest_with(&mut store, no_limits());
+        let victims = oldest_victims(&store).unwrap();
+        let got: Vec<(i64, bool)> = victims.iter().map(|v| (v.id, v.rescue)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (commit_id(&store, &first), false),
+                (commit_id(&store, &second), false),
+                (commit_id(&store, &newest), false),
+                (commit_id(&store, &rescue), true),
+            ]
+        );
+        let first_at: i64 = store
+            .conn()
+            .query_row(
+                "SELECT unixepoch(committed_at) FROM commits WHERE oid = ?1",
+                [&first],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(victims[0].authored, Some(first_at));
+    }
+
+    /// A database already within budget loses nothing, even at the exact
+    /// budget.
+    #[test]
+    fn enforce_budget_keeps_everything_within_the_budget() {
+        let (dir, oids) = budget_repo();
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        ingest_with(&mut store, no_limits());
+        let used = store.used_bytes().unwrap();
+        assert_eq!(enforce_budget(&mut store, used).unwrap(), 0);
+        for oid in &oids {
+            assert_eq!(state_of(&store, oid), (DIFF_STATE_INDEXED, None), "{oid}");
+        }
+    }
+
+    /// Over budget, every diff goes if it must, and the loop ends when no
+    /// diff is left even though metadata alone still exceeds the budget.
+    #[test]
+    fn enforce_budget_evicts_diffs_but_never_metadata_and_terminates() {
+        let (dir, oids) = budget_repo();
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        ingest_with(&mut store, no_limits());
+        let pages_before: i64 = store
+            .conn()
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(enforce_budget(&mut store, 0).unwrap(), 4);
+        for oid in &oids {
+            assert_eq!(
+                state_of(&store, oid),
+                (DIFF_STATE_EVICTED, Some(SKIP_NOTE_OVER_BUDGET.to_string())),
+                "{oid}"
+            );
+            assert_eq!(hunks_for(&store, oid), 0, "{oid}");
+        }
+        assert_eq!(diff_hits(&store, "newest_marker"), 0);
+        let commits: i64 = store
+            .conn()
+            .query_row("SELECT count(*) FROM commits", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(commits, 4, "metadata is never evicted");
+        let freelist: i64 = store
+            .conn()
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(freelist, 0, "freed pages handed back to the file system");
+        let pages_after: i64 = store
+            .conn()
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .unwrap();
+        assert!(pages_after < pages_before, "{pages_after} < {pages_before}");
+    }
+
+    /// Once a plain commit went for size, pending plain commits as old or
+    /// older are marked instead of fetched; a pending rescue commit is not.
+    #[test]
+    fn enforce_budget_marks_older_pending_plain_commits_but_not_rescue_ones() {
+        let (dir, [first, second, rescue, newest]) = budget_repo();
+        let mut store = metadata_only(dir.path());
+        ingest_diff_single(&mut store, &newest).unwrap();
+        assert_eq!(enforce_budget(&mut store, 0).unwrap(), 3);
+        let over = (DIFF_STATE_EVICTED, Some(SKIP_NOTE_OVER_BUDGET.to_string()));
+        assert_eq!(state_of(&store, &newest), over);
+        assert_eq!(state_of(&store, &first), over);
+        assert_eq!(state_of(&store, &second), over);
+        assert_eq!(state_of(&store, &rescue), (DIFF_STATE_PENDING, None));
+    }
+
+    /// End to end: a budget below the metadata's own size still converges,
+    /// with no diff left and the history still answering by message.
+    #[test]
+    fn ingest_under_a_tiny_budget_converges_with_metadata_only() {
+        let (dir, oids) = budget_repo();
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        let report = ingest_with(
+            &mut store,
+            HistoryLimits {
+                budget_bytes: 0,
+                window_days: None,
+            },
+        );
+        assert!(report.fresh, "{report:?}");
+        let hunks: i64 = store
+            .conn()
+            .query_row("SELECT count(*) FROM hunks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hunks, 0);
+        assert_eq!(store.index_state().diffs_evicted, oids.len() as u64);
+        assert_eq!(store.index_state().diff_coverage_since, None);
+        let by_message = search(&store, "rescue", SearchFacet::Message, 10).unwrap();
+        assert_eq!(by_message.candidates.len(), 1);
     }
 }
