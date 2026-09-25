@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.Language.Locale }}">
+<head>
+  {{ partial "head.html" . }}
+</head>
+<body>
+  <a href="#main" class="skip">Skip to content</a>
+  {{ partial "nav.html" . }}
+  {{/* /for/: every agent of data/agents.toml, grouped by how Pixel reaches it, each linking to its page. */}}
+  {{ $agents := hugo.Data.agents.agent }}
+  {{ $groups := slice
+    (dict "wiring" "install" "title" "Wired by pixel install" "text" "One `pixel install` writes each agent's own configuration, and `pixel doctor` checks it.")
+    (dict "wiring" "plugin" "title" "Through the agent's plugins" "text" "`pixel install` does not touch these agents: their own plugin or extension mechanism loads Pixel's protocol.")
+    (dict "wiring" "rules" "title" "Through a rules file" "text" "`pixel install` does not touch these agents: copy the rule the repository ships into your project.")
+  }}
+  {{ range $agents }}
+    {{ if not (in (slice "install" "plugin" "rules") .wiring) }}{{ errorf "data/agents.toml: %s has wiring %q, which /for/ has no group for" .name .wiring }}{{ end }}
+    {{ if not (site.GetPage (printf "/for/%s" .slug)) }}{{ errorf "data/agents.toml: %s has no page content/for/%s.md" .name .slug }}{{ end }}
+  {{ end }}
+
+  <main class="docs wrap" id="main">
+    <header class="docs__head">
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <a href="{{ "" | relURL }}">Pixel</a><span aria-hidden="true">/</span><span aria-current="page">{{ .Title }}</span>
+      </nav>
+      <h1>{{ .Title }}</h1>
+      <p class="docs__lede">{{ .Description }}</p>
+      <p class="docs__updated">Updated <time datetime="{{ .Lastmod.Format "2006-01-02" }}">{{ .Lastmod.Format "2 January 2006" }}</time></p>
+    </header>
+    <div class="agents-index">
+      {{ range $groups }}
+      {{ $in := where $agents "wiring" .wiring }}
+      {{ if $in }}
+      <section class="agents-index__group" aria-labelledby="group-{{ .wiring }}">
+        <h2 id="group-{{ .wiring }}">{{ .title }}</h2>
+        <p>{{ .text | markdownify }}</p>
+        <ul class="agents">
+          {{ range $in }}
+          <li><a class="agents__item agents__item--{{ .logo }}" href="{{ printf "for/%s/" .slug | relURL }}">{{ (resources.Get (printf "logos/%s.svg" .logo)).Content | safeHTML }}<span>{{ .name }}</span></a></li>
+          {{ end }}
+        </ul>
+      </section>
+      {{ end }}
+      {{ end }}
+      <div class="prose agents-index__more">{{ .Content }}</div>
+    </div>
+  </main>
+
+  {{ partial "footer.html" . }}
+</body>
+</html>

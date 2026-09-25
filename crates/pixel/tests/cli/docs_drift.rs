@@ -92,7 +92,24 @@ const DOCS: &[&str] = &[
     ".agents/rules/graph-resolver.md",
     "scripts/README.md",
     "js/sniper/README.md",
+    "website/data/agents.toml",
+    "website/static/llms.txt",
 ];
+
+/// The per-agent pages, `website/content/for/*.md`, found on disk so a new
+/// page is checked the day it lands, relative to the repository root.
+fn agent_pages() -> Vec<String> {
+    let dir = repo_root().join("website/content/for");
+    let mut pages: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".md"))
+        .map(|name| format!("website/content/for/{name}"))
+        .collect();
+    pages.sort();
+    assert!(pages.len() > 1, "no agent page found: {pages:?}");
+    pages
+}
 
 /// The site's HTML sources: the landing page, the objections it and its
 /// FAQPage JSON-LD render, and the alternatives its cards and the `/vs/`
@@ -159,7 +176,8 @@ fn every_documented_pixel_command_exists() {
     let markdown = DOCS
         .iter()
         .map(|doc| ((*doc).to_string(), false))
-        .chain(vs_pages.iter().map(|doc| (doc.clone(), false)));
+        .chain(vs_pages.iter().map(|doc| (doc.clone(), false)))
+        .chain(agent_pages().into_iter().map(|doc| (doc, false)));
     let html = SITE_HTML.iter().map(|doc| ((*doc).to_string(), true));
     let mut vs_names = 0;
     for (doc, is_html) in markdown.chain(html) {
@@ -492,4 +510,236 @@ fn repo_paths_should_read_only_backticked_repo_prefixed_tokens() {
     assert_eq!(got, [".a/b", ".g/h"]);
     let got: Vec<String> = dot_paths(text).into_iter().collect();
     assert_eq!(got, [".e/f"]);
+}
+
+// ---------------------------------------------------------------------------
+// website/data/agents.toml: what the site says `pixel install` writes for
+// each agent, held to what a real install writes.
+// ---------------------------------------------------------------------------
+
+/// `website/data/agents.toml`, parsed.
+fn agents_data() -> toml_edit::DocumentMut {
+    let path = repo_root().join("website/data/agents.toml");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        .parse()
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// The strings of an array field, empty when the field is absent.
+fn string_list(item: Option<&toml_edit::Item>) -> Vec<String> {
+    item.and_then(toml_edit::Item::as_array)
+        .map(|array| {
+            array
+                .iter()
+                .map(|v| v.as_str().expect("a list of strings").to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The `field` list of every agent, concatenated in file order.
+fn agents_field(data: &toml_edit::DocumentMut, field: &str) -> Vec<String> {
+    let agents = data["agent"]
+        .as_array_of_tables()
+        .expect("agents.toml has [[agent]] tables");
+    assert!(
+        agents.len() > 5,
+        "agents.toml parsing broke: {}",
+        agents.len()
+    );
+    agents
+        .iter()
+        .flat_map(|agent| string_list(agent.get(field)))
+        .collect()
+}
+
+/// Every file under `dir`, relative to `base`, `/`-separated.
+fn files_under(dir: &Path, base: &Path, out: &mut BTreeSet<String>) {
+    for entry in std::fs::read_dir(dir).unwrap().map(Result::unwrap) {
+        let path = entry.path();
+        if path.is_dir() {
+            files_under(&path, base, out);
+        } else {
+            let rel = path.strip_prefix(base).unwrap();
+            out.insert(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+/// How `claimed` (paths, a trailing `/` claiming a whole directory) and
+/// `written` (files) disagree: the files no entry claims, then the entries
+/// that match no file. Both empty when the data says what the install did.
+fn claim_mismatch(claimed: &[String], written: &BTreeSet<String>) -> (Vec<String>, Vec<String>) {
+    let covers =
+        |claim: &str, file: &str| claim == file || claim.ends_with('/') && file.starts_with(claim);
+    let unclaimed = written
+        .iter()
+        .filter(|file| !claimed.iter().any(|claim| covers(claim, file)))
+        .cloned()
+        .collect();
+    let unmatched = claimed
+        .iter()
+        .filter(|claim| !written.iter().any(|file| covers(claim, file)))
+        .cloned()
+        .collect();
+    (unclaimed, unmatched)
+}
+
+#[test]
+fn claim_mismatch_should_match_files_and_whole_directories() {
+    let written: BTreeSet<String> = ["a/x.json", "d/one", "d/sub/two", "loose"]
+        .map(String::from)
+        .into();
+    let claimed = ["a/x.json", "d/", "gone.toml", "e/"].map(String::from);
+    let (unclaimed, unmatched) = claim_mismatch(&claimed, &written);
+    assert_eq!(unclaimed, ["loose"]);
+    assert_eq!(unmatched, ["gone.toml", "e/"]);
+    // A directory claim needs its slash: `d` alone names a file never written.
+    let (unclaimed, unmatched) = claim_mismatch(&["d".to_string()], &written);
+    assert_eq!(unclaimed.len(), 4);
+    assert_eq!(unmatched, ["d"]);
+}
+
+/// The agent pages tell a reader which files `pixel install` puts in their
+/// home. Run the real command into an empty one, with the config directories
+/// its conditional steps look for (OpenCode's, Antigravity's), and hold the
+/// data to exactly what landed: a file the install starts writing, stops
+/// writing or moves fails here until `website/data/agents.toml` says so.
+#[test]
+fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
+    let home = crate::support::Scratch::for_test("docs-drift", "agents-global");
+    for dir in [".config/opencode", ".gemini/config"] {
+        std::fs::create_dir_all(home.join(dir)).unwrap();
+    }
+    let out = crate::support::pixel_command()
+        .args(["install", "--shell", "zsh", "--json"])
+        .env("HOME", &*home)
+        .env_remove("CODEX_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "pixel install: {out:?}");
+    let mut written = BTreeSet::new();
+    files_under(&home, &home, &mut written);
+
+    let data = agents_data();
+    let claimed: Vec<String> = string_list(data.get("shared"))
+        .into_iter()
+        .chain(agents_field(&data, "global"))
+        .map(|path| {
+            path.strip_prefix("~/")
+                .unwrap_or_else(|| panic!("`{path}`: global paths start at ~/"))
+                .to_string()
+        })
+        .collect();
+    let (unclaimed, unmatched) = claim_mismatch(&claimed, &written);
+    assert!(
+        unclaimed.is_empty() && unmatched.is_empty(),
+        "website/data/agents.toml disagrees with `pixel install`:\n\
+         written but not listed: {unclaimed:?}\n\
+         listed but not written: {unmatched:?}"
+    );
+}
+
+/// The same contract for `pixel install --repo`: the data's `repo` lists are
+/// exactly `REPO_ARTIFACTS`, and a real run writes nothing outside them.
+#[test]
+fn agents_data_should_name_exactly_the_files_a_repo_install_writes() {
+    let claimed = agents_field(&agents_data(), "repo");
+    let listed: BTreeSet<String> = claimed.iter().cloned().collect();
+    assert_eq!(
+        listed.len(),
+        claimed.len(),
+        "a repo path listed twice: {claimed:?}"
+    );
+    assert_eq!(listed, repo_artifact_paths());
+
+    let root = crate::support::Scratch::for_test("docs-drift", "agents-repo");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let out = crate::support::pixel_command()
+        .args(["install", "--json", "--repo"])
+        .arg(&repo)
+        .env("HOME", root.join("home"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "pixel install --repo: {out:?}");
+    let mut written = BTreeSet::new();
+    files_under(&repo, &repo, &mut written);
+    // Every command run on a repository appends to its action log; that file
+    // is the CLI's, not an agent's.
+    written.retain(|file| !file.starts_with(".pixel/"));
+    let (unclaimed, _) = claim_mismatch(&claimed, &written);
+    assert!(
+        unclaimed.is_empty(),
+        "`pixel install --repo` wrote files agents.toml does not list: {unclaimed:?}"
+    );
+}
+
+/// `static/llms.txt` is a static file, so it cannot build its links from
+/// `baseURL` as the templates do: it names the site's `/for/` page and one
+/// page per agent under the `baseURL` of `hugo.toml`, and a renamed slug, a
+/// new agent or a moved site fails here instead of sending an assistant to
+/// a 404.
+#[test]
+fn llms_txt_should_link_every_agent_page_under_the_site_base_url() {
+    let root = repo_root();
+    let hugo: toml_edit::DocumentMut = std::fs::read_to_string(root.join("website/hugo.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let base = hugo["baseURL"].as_str().expect("hugo.toml has a baseURL");
+    let llms = std::fs::read_to_string(root.join("website/static/llms.txt")).unwrap();
+    let data = agents_data();
+    let slugs = data["agent"]
+        .as_array_of_tables()
+        .unwrap()
+        .iter()
+        .map(|agent| agent["slug"].as_str().unwrap().to_string());
+    let expected: Vec<String> = std::iter::once(format!("{base}for/"))
+        .chain(slugs.map(|slug| format!("{base}for/{slug}/")))
+        .collect();
+    let missing: Vec<&String> = expected
+        .iter()
+        .filter(|url| !llms.contains(&format!("]({url})")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "static/llms.txt does not link: {missing:?}"
+    );
+    let linked = llms.matches(&format!("]({base}for/")).count();
+    assert_eq!(
+        linked,
+        expected.len(),
+        "static/llms.txt links a /for/ page no agent has"
+    );
+}
+
+/// Every `checks` id is a `pixel doctor` check, and every agent check of the
+/// doctor belongs to an agent: a page cannot send a reader to `--only` a
+/// check that does not exist, nor leave out one that judges its agent.
+#[test]
+fn agents_data_checks_should_be_exactly_the_agent_checks_of_doctor() {
+    // Checks on Pixel's own files, which no single agent owns.
+    const NOT_AN_AGENT: &[&str] = &[
+        "install.agent-prompt",
+        "install.subagent-prompt",
+        "install.rtk-backup",
+        "install.legacy-wrappers",
+    ];
+    let named = agents_field(&agents_data(), "checks");
+    let named_set: BTreeSet<&str> = named.iter().map(String::as_str).collect();
+    assert_eq!(
+        named_set.len(),
+        named.len(),
+        "a check listed twice: {named:?}"
+    );
+    let agent_checks: BTreeSet<&str> = pixel_install::doctor::CHECKS
+        .iter()
+        .map(|check| check.id)
+        .filter(|id| id.starts_with("install.") || id.starts_with("repo."))
+        .filter(|id| !NOT_AN_AGENT.contains(id))
+        .collect();
+    assert_eq!(named_set, agent_checks);
 }

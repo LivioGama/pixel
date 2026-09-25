@@ -542,6 +542,8 @@ main { counter-reset: chapter; }
   color: var(--ink-soft); transition: color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
 }
 .agents__item:hover { color: var(--ink); background: var(--panel); box-shadow: inset 0 0 0 1px var(--cell-edge); }
+a.agents__item { text-decoration: none; }
+.agents__more { margin: 24px 0 0; text-align: center; color: var(--ink-soft); font-size: 0.95rem; }
 .agents__item svg { flex: none; width: 30px; height: 30px; color: var(--ink); }
 .agents__item span { font-weight: 600; font-size: 1rem; line-height: 1.2; }
 @media (max-width: 1000px) { .agents { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
@@ -684,6 +686,25 @@ main { counter-reset: chapter; }
   .docs__toc { position: static; }
   .docs__toc ul { display: flex; flex-wrap: wrap; gap: 2px 18px; }
 }
+
+/* ---------- agent pages (/for/ and /for/<agent>/) ----------
+   The trail above the title, the agent's mark beside it, and the home's
+   .agents grid, as links, for the other agents. */
+.crumbs { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 18px; font: 400 0.8rem/1.4 var(--mono); color: var(--ink-soft); }
+.crumbs a { color: var(--ink-soft); text-decoration: none; }
+.crumbs a:hover { color: var(--ink); }
+.crumbs [aria-current] { color: var(--ink); }
+.agent__title { display: flex; align-items: center; gap: clamp(14px, 2vw, 24px); }
+.agent__mark { display: grid; place-items: center; flex: none; width: clamp(48px, 7vw, 72px); height: clamp(48px, 7vw, 72px); border-radius: 12px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--cell-edge); color: var(--ink); }
+.agent__mark svg { width: 55%; height: 55%; }
+.agent__mark--pi svg { width: 42%; height: 42%; }
+.agents-more { padding-block: 0 96px; }
+.agents-more h2, .agents-index__group h2 { font: 700 2.4rem/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; margin: 0 0 18px; }
+.agents-index { padding-block: 40px 96px; }
+.agents-index__group + .agents-index__group { margin-top: 56px; }
+.agents-index__group p { color: var(--ink-soft); max-width: 46em; margin: 0 0 20px; }
+.agents-index__group code, .agents-index__more code { background: var(--panel); padding: 1px 5px; border-radius: 3px; }
+.agents-index__more { margin-top: 56px; }
 
 .prose { max-width: 46em; min-width: 0; }
 .prose h2 { font: 700 2.4rem/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; margin: 64px 0 18px; }

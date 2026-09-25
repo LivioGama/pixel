@@ -15,14 +15,8 @@
   {{ $mid := div (len $kept) 2 }}
   {{ $median := cond (modBool (len $kept) 2) (div (add (index $kept (sub $mid 1)) (index $kept $mid)) 2.0) (index $kept $mid) }}
   {{ $bench := "benchmarks/" | relURL }}
-  {{/* The supported agents, shown by the hero's line and the Compatibility grid. Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
-  {{ $agents := slice
-    (dict "name" "Claude Code" "logo" "claude") (dict "name" "Codex" "logo" "codex")
-    (dict "name" "Pi" "logo" "pi") (dict "name" "Cursor" "logo" "cursor")
-    (dict "name" "Copilot CLI" "logo" "copilot") (dict "name" "Gemini CLI" "logo" "gemini")
-    (dict "name" "OpenCode" "logo" "opencode") (dict "name" "Devin" "logo" "devin")
-    (dict "name" "Windsurf" "logo" "windsurf") (dict "name" "Antigravity" "logo" "antigravity")
-  }}
+  {{/* The supported agents, shown by the hero's line and the Compatibility grid, from data/agents.toml (which also feeds /for/ and the /docs/ wiring table). Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
+  {{ $agents := hugo.Data.agents.agent }}
 
   {{/* Where the reader is: one square per chapter (each section's .chapter label), filled as it passes. Built by the script below. */}}
   <nav class="rail" aria-label="Sections" data-rail hidden></nav>
@@ -292,10 +286,12 @@
         <h2 id="agents-title">Plugs into the agent <span class="glow">you already use.</span></h2>
       </header>
       <ul class="agents" data-reveal="stagger">
+        {{/* Each mark opens its /for/<slug>/ page: what Pixel writes for that agent, the check, the removal. */}}
         {{ range $agents }}
-        <li class="agents__item agents__item--{{ .logo }}">{{ (resources.Get (printf "logos/%s.svg" .logo)).Content | safeHTML }}<span>{{ .name }}</span></li>
+        <li><a class="agents__item agents__item--{{ .logo }}" href="{{ printf "for/%s/" .slug | relURL }}" target="_blank" rel="noopener">{{ (resources.Get (printf "logos/%s.svg" .logo)).Content | safeHTML }}<span>{{ .name }}</span></a></li>
         {{ end }}
       </ul>
+      <p class="agents__more"><a class="link" href="{{ "for/" | relURL }}" target="_blank" rel="noopener">What Pixel writes for each agent, and how to check it</a></p>
     </section>
 
     {{/* ---------- decisions ---------- */}}

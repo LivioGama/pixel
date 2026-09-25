@@ -25,27 +25,6 @@
   </main>
 
   {{ partial "footer.html" . }}
-
-  <script>
-    /* Mark the table-of-contents entry for the section being read. */
-    (function () {
-      var links = [].slice.call(document.querySelectorAll('.docs__toc a[href^="#"]'));
-      if (!links.length || !('IntersectionObserver' in window)) return;
-      var byId = {};
-      links.forEach(function (a) { byId[decodeURIComponent(a.hash.slice(1))] = a; });
-      var io = new IntersectionObserver(function (entries) {
-        entries.forEach(function (e) {
-          if (!e.isIntersecting) return;
-          links.forEach(function (a) { a.removeAttribute('aria-current'); });
-          var a = byId[e.target.id];
-          if (a) a.setAttribute('aria-current', 'location');
-        });
-      }, { rootMargin: '-15% 0px -75% 0px' });
-      Object.keys(byId).forEach(function (id) {
-        var h = document.getElementById(id);
-        if (h) io.observe(h);
-      });
-    })();
-  </script>
+  {{ partial "toc-current.html" . }}
 </body>
 </html>

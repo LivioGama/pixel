@@ -49,3 +49,8 @@ xxhash-rust = { workspace = true }
 rmcp = { version = "3.1.4", features = ["transport-io"] }
 schemars = "1"
 tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+# Reads website/data/agents.toml in tests/cli/docs_drift.rs; already in the
+# tree through pixel-install.
+toml_edit = "0.25.15"

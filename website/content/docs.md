@@ -33,13 +33,9 @@ The index, the code graph and the optional history data live in `.pixel/` at the
 
 `pixel install` is global: run it once, from anywhere. It deploys the agent prompt to `~/.local/share/pixel/` (`agent-prompt.md`, plus the short `subagent-prompt.md` for sub-agents) and wires it into the agents it knows:
 
-| Agent | How the prompt reaches it |
-| --- | --- |
-| Claude Code | `SessionStart` and `SubagentStart` hooks in `~/.claude/settings.json` inject the prompt as context. No shell wrapper, never blocks. |
-| Codex | the `developer_instructions` key of `~/.codex/config.toml`, which every Codex front end reads, plus a metrics `PostToolUse` hook |
-| Pi | `~/.pi/agent/APPEND_SYSTEM.md`, read automatically |
-| OpenCode | the prompt appended to `AGENTS.md` |
-| Antigravity | its plugin, hooks and configuration activated |
+{{% agents-install %}}
+
+Each agent's page under [For your agent](../for/) names the files, the check and the removal, including the agents `pixel install` leaves alone.
 
 `pixel uninstall` removes everything `pixel install` wrote, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: `brew uninstall LivioGama/tap/pixel`, or `mise uninstall pixel`.
 
