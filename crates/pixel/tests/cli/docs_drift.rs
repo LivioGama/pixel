@@ -5,8 +5,9 @@
 //! checkout:
 //!
 //! - every backticked `` `pixel <name>` `` in the repository docs and in the
-//!   bundled agent prompts names a real subcommand (a removed or renamed
-//!   command cannot linger in prose);
+//!   bundled agent prompts, and every `<code>pixel <name>` in the website's
+//!   landing page and its objections data, names a real subcommand (a
+//!   removed or renamed command cannot linger in prose);
 //! - every subcommand appears in ARCHITECTURE.md's `## Command surface`
 //!   table (a new command cannot ship undocumented);
 //! - the docs page's per-project list and `pixel install --help` name exactly
@@ -92,14 +93,49 @@ const DOCS: &[&str] = &[
     "js/sniper/README.md",
 ];
 
+/// The site's HTML sources: the landing page and the objections it and its
+/// FAQPage JSON-LD render. They quote commands as `<code>pixel …</code>`,
+/// which `html_code_as_backticks` turns into the Markdown form.
+const SITE_HTML: &[&str] = &["website/layouts/index.html", "website/data/objections.toml"];
+
+/// `<code>pixel install</code>` read as `` `pixel install` ``, so HTML goes
+/// through the same `referenced_commands` as Markdown.
+fn html_code_as_backticks(text: &str) -> String {
+    text.replace("<code>", "`").replace("</code>", "`")
+}
+
+#[test]
+fn html_code_spans_count_as_quoted_commands() {
+    let html = "<p><code>pixel search-content</code> keeps grep's syntax; \
+                <code>pixel install --repo</code> adds a guard. The pixel binary.</p>";
+    let got: Vec<String> = referenced_commands(&html_code_as_backticks(html))
+        .into_iter()
+        .collect();
+    assert_eq!(got, ["install", "search-content"]);
+}
+
 #[test]
 fn every_documented_pixel_command_exists() {
     let known = subcommands();
     let root = repo_root();
     let mut stale = Vec::new();
-    for doc in DOCS {
+    let markdown = DOCS.iter().map(|doc| (doc, false));
+    let html = SITE_HTML.iter().map(|doc| (doc, true));
+    for (doc, is_html) in markdown.chain(html) {
         let text = std::fs::read_to_string(root.join(doc)).unwrap_or_else(|e| panic!("{doc}: {e}"));
-        for name in referenced_commands(&text) {
+        let text = if is_html {
+            html_code_as_backticks(&text)
+        } else {
+            text
+        };
+        let names = referenced_commands(&text);
+        // Both site files quote commands today: none found means the HTML
+        // form changed and this check went blind, not that the file is clean.
+        assert!(
+            !is_html || !names.is_empty(),
+            "{doc}: no <code>pixel …</code> found"
+        );
+        for name in names {
             if !known.contains(&name) {
                 stale.push(format!("{doc}: `pixel {name}`"));
             }

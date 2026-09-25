@@ -2,7 +2,11 @@ baseURL = "https://liviogama.github.io/pixel/"
 locale = "en-us"
 title = "Pixel"
 enableRobotsTXT = true
-disableKinds = ["taxonomy", "term", "RSS", "sitemap"]
+# Each page's .Lastmod is the date of the last commit that touched its source
+# file: the sitemap's lastmod and the "Updated" line under the docs titles.
+# The Pages workflow checks out the full history for it (fetch-depth: 0).
+enableGitInfo = true
+disableKinds = ["taxonomy", "term", "RSS"]
 
 [params]
 description = "A local code index for AI coding agents. Your agent queries Pixel instead of reading files: 95% fewer tokens to learn what a large file contains."
@@ -34,3 +38,15 @@ target = "static"
 source = "../docs/examples"
 target = "static/examples"
 files = ["**.mp4", "**.jpg"]
+
+# The CLI crate's manifest, read as data (hugo.Data.cli.package.version) for
+# the JSON-LD's softwareVersion: the release's prepare.sh bumps it, so the
+# site never carries a second copy of the version. As with static/, a data
+# mount drops the default one, so data/ is mounted again first.
+[[module.mounts]]
+source = "data"
+target = "data"
+
+[[module.mounts]]
+source = "../crates/pixel/Cargo.toml"
+target = "data/cli.toml"

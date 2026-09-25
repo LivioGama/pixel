@@ -2,7 +2,8 @@
 
 The Hugo site published at <https://liviogama.github.io/pixel/> by
 `.github/workflows/pages.yml` on every push to `main` that touches
-`website/**` or `docs/examples/**`.
+`website/**`, `docs/examples/**` or `crates/pixel/Cargo.toml` (the version
+the JSON-LD states).
 
 ## Run it locally
 
@@ -41,6 +42,13 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   demo in "Measured on whole agent tasks" plays once when it scrolls into
   view. Videos never autoplay under reduced motion: the poster shows the
   finished state and the controls are there.
+- At rest until the first scroll: the scroll-driven effects (the
+  `data-reveal` fades, the assembling titles, the counting numbers) prime
+  only what is still below the fold when the visitor first scrolls
+  (`afterFirstScroll` at the top of the page script, `.is-primed` in
+  `main.css`). A full-page capture, a link preview or a crawler that never
+  scrolls sees every block in its final state; keep that for any new
+  effect.
 - Every `h2` of the landing page assembles out of pixels the first time it
   scrolls into view (the "Titles assemble" script in `layouts/index.html`,
   `.is-assembling` / `.is-assembled` in `main.css`): the title is sampled
@@ -57,10 +65,19 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   exists. Change a figure on the benchmarks page first, then here, then in
   the repository README's "Why" list and `static/llms.txt`, whose "Evaluating Pixel against alternatives" section
   gives the same results to an assistant comparing tools for its user.
-- The "Fair questions" block in `layouts/index.html` restates facts from
-  `SECURITY.md`, `docs/bench/measured-performance.md` and the graph's
-  grammars (`$langs`, from `crates/pixel-graph/src/extract.rs`): change it
-  when they change.
+- `data/objections.toml`: the "Fair questions" chapter, and the home's
+  `FAQPage` JSON-LD, from one list (`layouts/partials/objections.html`
+  renders it for both, so the markup never says what the page does not).
+  Answers are HTML paragraphs; a figure that lives elsewhere is a
+  placeholder (`{big.full}`, `{langs.count}`, `{bench}`…, listed at the top
+  of the file) the partial fills in, and an unknown one fails the build.
+  They restate `SECURITY.md`, `docs/bench/measured-performance.md` and the
+  graph's grammars (`$langs` in the partial, from
+  `crates/pixel-graph/src/extract.rs`): change them when those change.
+  `crates/pixel/tests/cli/docs_drift.rs` reads this file and
+  `layouts/index.html` too, so every `<code>pixel …</code>` must exist.
+- `layouts/partials/wall-row.html`: the `data/read_savings.toml` row marked
+  `wall`, for the token wall, the objections and the share card's alt text.
 - `content/benchmarks.md`: the `/benchmarks/` page. Every number the landing
   page shows lives here with its sample size, its source in `docs/bench/`,
   and the cases where Pixel loses. Add a claim to the landing page only once
@@ -77,7 +94,8 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   measures (method in `docs/bench/read-savings.md`). The token wall, its
   caption's range and median and the `/benchmarks/` table
   (`layouts/shortcodes/read-savings.html`) all read it: re-run the script
-  and replace the rows, never one number by hand.
+  and replace the rows, never one number by hand, then re-render the share
+  card (`og/render.sh`), whose figures come from the wall's row.
 - `data/jobs.toml`, `data/savings.toml`: the six animations and the token
   table, both from the README. A job's `text` holds one line on a wide
   screen (about 70 characters): the tab panel reserves one line there and
@@ -94,6 +112,10 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   Copilot, OpenCode, Windsurf) use `currentColor`, from Simple Icons and
   pi.dev's favicon. Add an agent there
   and in the `$agents` list of `layouts/index.html` together.
+- Community and updates: the line under the Install block and the footer
+  link to GitHub Discussions; the footer's "Follow releases" is the
+  releases' Atom feed (no newsletter, nothing to sign up for), also
+  announced by a `<link rel="alternate">` in the head.
 - Chapters: a landing section that opens on a `<p class="chapter">` gets a
   numbered divider (CSS counter in `main.css`) and a square in the
   right-edge rail (wide screens). A chapter name is a category, never the
@@ -119,6 +141,27 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   at 4.5 s if the script never finishes.
 - `layouts/404.html`: the not-found page GitHub Pages serves for any
   unknown path under the site.
+- Search and share metadata, all in `layouts/partials/head.html`: titles
+  that say "code index" (a bare "Pixel" is Google's phone), Open Graph and
+  Twitter tags, and on the home one JSON-LD `@graph` (`WebSite`,
+  `SoftwareApplication` with a `disambiguatingDescription`,
+  `SoftwareSourceCode`, `FAQPage`). Its `softwareVersion` is the CLI
+  crate's: `hugo.toml` mounts `../crates/pixel/Cargo.toml` as
+  `data/cli.toml`, which the release's `prepare.sh` bumps, and the Pages
+  workflow redeploys on it. Every absolute URL goes through `baseURL`
+  (`absURL`, `.Permalink`), so a new domain is one line in `hugo.toml`.
+- `layouts/robots.txt` names the sitemap Hugo writes (`/`, `/docs/`,
+  `/benchmarks/`; the 404 stays out). `enableGitInfo` dates each page by the
+  last commit that touched its source: the sitemap's `lastmod` and the
+  "Updated" line under the `/docs/` and `/benchmarks/` titles
+  (`layouts/_default/single.html`). The Pages workflow checks out the full
+  history for it; a shallow clone would date every page by HEAD.
+- `og/`: the share card. `og/render.sh` fills `og/card.html` with the
+  wall's row of `data/read_savings.toml`, renders it at 1200x630 with
+  `agent-browser` and writes `static/og.png`; re-run it when that row
+  changes, never edit the PNG. It shows the wall's final state (one square
+  per 25 tokens, the P built as the home builds it) and the same saving,
+  floored, as the wall. Hugo ignores the folder.
 - `assets/css/main.css`: one stylesheet, tokens first, dark only. Headlines
   use Handjet, a variable pixel face (`ELSH` 2 draws square elements; the
   hero title animates it from 0 once). `partials/head.html` requests only

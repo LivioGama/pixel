@@ -11,6 +11,8 @@
     <header class="docs__head">
       <h1>{{ .Title }}</h1>
       <p class="docs__lede">{{ .Description }}</p>
+      {{/* The last commit that touched the page's source (enableGitInfo in hugo.toml; the Pages workflow fetches the full history). */}}
+      <p class="docs__updated">Updated <time datetime="{{ .Lastmod.Format "2006-01-02" }}">{{ .Lastmod.Format "2 January 2006" }}</time></p>
     </header>
     <div class="docs__layout">
       <nav class="docs__toc" aria-label="On this page">

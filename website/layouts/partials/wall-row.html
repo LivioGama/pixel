@@ -1,0 +1,2 @@
+{{/* The token wall's file: the row of data/read_savings.toml marked `wall`. The hero's wall and the objections (partials/objections.html) both read it from here. */}}
+{{ return index (where hugo.Data.read_savings.row "wall" true) 0 }}
