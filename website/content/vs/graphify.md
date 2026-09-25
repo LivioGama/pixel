@@ -6,7 +6,7 @@ tool: "graphify"
 
 ## How they differ
 
-graphify parses code with tree-sitter into a graph written to local files, clusters it into communities, and reads docs, SQL schemas, PDFs, images and video through a model. An agent reaches it through a `/graphify` skill, a CLI, hooks or an optional MCP server. Pixel indexes code only, and answers the questions an edit raises: `pixel impact` before it, `pixel scope-task` to find the files, `pixel dig-history` for why the code is the way it is, `pixel commit` to land it.
+graphify parses code with tree-sitter into a graph written to local files, clusters it into communities, and adds docs, SQL schemas, PDFs and images through a model; video and audio are first transcribed locally with faster-whisper, and the transcripts then go through the same model. An agent reaches it through a `/graphify` skill, a CLI, hooks or an optional MCP server. Pixel indexes code only, and answers the questions an edit raises: `pixel impact` before it, `pixel scope-task` to find the files, `pixel dig-history` for why the code is the way it is, `pixel commit` to land it.
 
 ## Choosing
 

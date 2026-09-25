@@ -331,7 +331,7 @@ name = "graphify"
 matrix = true
 about = "A skill that turns a codebase, with its docs, schemas, PDFs and media, into a knowledge graph an agent can query."
 measure = "design"
-answer = '''graphify builds a knowledge graph of code and of everything around it: docs, SQL schemas, PDFs, images, video. Code is parsed with tree-sitter and no LLM; the other inputs go through a model. Pixel stays on code and Git: callers, blast radius, task scope, history search and guarded Git writes, in one binary.'''
+answer = '''graphify builds a knowledge graph of code and of everything around it: docs, SQL schemas, PDFs, images, video. Code is parsed with tree-sitter and no LLM; docs, PDFs and images go through a model, and video is transcribed locally before it does. Pixel stays on code and Git: callers, blast radius, task scope, history search and guarded Git writes, in one binary.'''
 wins = "non-code inputs (docs, PDFs, media, database schemas), community clustering and an interactive graph view."
 checked = 2026-09-25
 
@@ -345,7 +345,7 @@ checked = 2026-09-25
   [[tool.row]]
   label = "Reads docs, PDFs, media"
   pixel = "No, code only"
-  other = "Yes, through a model"
+  other = "Yes: a model, after local transcription for video"
   win = "other"
 
   [[tool.row]]

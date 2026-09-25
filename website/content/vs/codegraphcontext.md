@@ -6,7 +6,7 @@ tool: "codegraphcontext"
 
 ## How they differ
 
-CodeGraphContext indexes code with tree-sitter, or a SCIP indexer, into a graph database you pick (FalkorDB Lite by default, KuzuDB or Neo4j) and serves it as MCP tools and the `cgc` CLI, including raw Cypher. Pixel keeps its graph and a text and embedding search index in `.pixel/`, answers from the shell (`pixel who-calls`, `pixel impact`, `pixel search-meaning`) and covers Git: `pixel dig-history`, `pixel commit`.
+CodeGraphContext indexes code with tree-sitter, or a SCIP indexer, into a graph database you pick: FalkorDB Lite by default on Unix with Python 3.12+ once `falkordblite` is installed, KuzuDB where it is not (Windows included), or Neo4j when configured and serves it as MCP tools and the `cgc` CLI, including raw Cypher. Pixel keeps its graph and a text and embedding search index in `.pixel/`, answers from the shell (`pixel who-calls`, `pixel impact`, `pixel search-meaning`) and covers Git: `pixel dig-history`, `pixel commit`.
 
 ## Choosing
 
