@@ -157,10 +157,10 @@
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Alternatives</span></p>
       <header class="section__head" data-reveal>
         <h2 id="alternatives-title">Measured against <span class="glow">the alternatives.</span></h2>
-        <p>The tools a team weighs Pixel against, on the same cases and the same machine, with the rows where they win kept in.</p>
+        <p>The tools a team weighs Pixel against, with the rows where they win kept in. GitNexus was run against Pixel on the same cases and the same machine; shunt and Jev are their own published figures, set beside ours.</p>
       </header>
       {{/* Facts from content/benchmarks.md (#against-gitnexus, #well-known-files, #coding-decisions) and shunt's own README (plugins/shunt in spotify/portal-ai-plugins). Change them there first. */}}
-      {{ $range := printf "%s to %s%%" (lang.FormatNumber 0 (index $kept 0)) (lang.FormatNumber 0 (index $kept (sub (len $kept) 1))) }}
+      {{ $range := printf "%s to %s%%" (lang.FormatNumber 1 (index $kept 0)) (lang.FormatNumber 1 (index $kept (sub (len $kept) 1))) }}
       <div class="vs" data-reveal="stagger">
         <article class="vs__card">
           <header class="vs__head"><h3>vs GitNexus</h3><p>A code graph for agents, served as 17 MCP tools.</p></header>
@@ -200,7 +200,7 @@
               <tr><th scope="row">Model</th><td class="is-win">The one you choose</td><td>Jev's own</td></tr>
             </tbody>
           </table>
-          <p class="vs__theirs"><strong>Read with care:</strong> Jev's 83.9% is its published score on 56 items; Pixel's run covers the 14 public ones, and the rest of Pixel never needs a model.</p>
+          <p class="vs__theirs"><strong>Read with care:</strong> Jev's 83.9% is its published score on 56 items; Pixel's run covers the 14 public ones, and the rest of Pixel needs no decision model.</p>
           <a class="link vs__more" href="#decisions">The optional add-on</a>
         </article>
       </div>
@@ -236,9 +236,9 @@
         </li>
         <li class="roles__card">
           <p class="roles__who">{{ partial "icon.html" (dict "name" "robot" "size" 16) }}Harness engineers</p>
-          <h3>Deterministic answers that state their own limits.</h3>
+          <h3>Deterministic index answers that state their own limits.</h3>
           <ul>
-            <li>Every answer is marked <code>complete</code>, <code>capped</code> or <code>unresolved</code>; a graph answer never claims it saw every caller.</li>
+            <li>Every index and graph answer is marked <code>complete</code>, <code>capped</code> or <code>unresolved</code>, and a graph answer never claims it saw every caller. The one model-backed command, the optional <code>pixel classify</code>, says it is not deterministic.</li>
             <li>A CLI plus hooks, not an MCP server: <strong>~4,160 tokens</strong> of context per turn, 4.7&times; less than GitNexus.</li>
             <li>Not left to the model's goodwill: the protocol is injected at session start, and the agent called Pixel in <strong>11 of 11</strong> recorded runs.</li>
           </ul>
