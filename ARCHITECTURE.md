@@ -98,7 +98,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel recall` | Search and browse LLM CLI transcripts (machine-wide corpus) |
 | `pixel list-errors` | One-look error capture: query the sniper error sink |
 | `pixel classify` | Zero-shot decision over a bounded label set through an OpenAI-compatible chat completion: `--remote-preset openrouter\|ollama\|local` picks the endpoint and key variable, `--remote-model` the model. The model verbalizes one probability per label (strict JSON schema), renormalized to sum 1; output always discloses `snapshot.deterministic=false` and `snapshot.provider`. `--context` keeps shared framing out of the state. State, context and criteria are capped separately with disclosure. No daemon; `--jsonl` serves one decision per stdin line |
-| `pixel web-search` | Deterministic web lookup for terms the index cannot know — the refine step of a gated `pixel plan`. SearXNG via `PIXEL_WEB_SEARCH_URL`, then DuckDuckGo and Wikipedia whenever the hits are still fewer than `--limit`, even with SearXNG set. No LLM, no daemon |
+| `pixel web-search` | Deterministic web lookup for terms the index cannot know — the refine step of a gated `pixel plan`. SearXNG alone when `PIXEL_WEB_SEARCH_URL` is set; otherwise DuckDuckGo, then Wikipedia while the hits are fewer than `--limit`. No LLM, no daemon |
 | `pixel repo-state` | Show repo state: HEAD, branch, dirty files, fingerprints; `--include-clean` adds the capped tracked-clean list |
 | `pixel review-changes` | Review working-tree changes (staged, unstaged, untracked, conflicted) |
 | `pixel commit-history` | Commit history with detail levels and byte caps |

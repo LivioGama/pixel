@@ -5,10 +5,13 @@
 //! one bounded HTTP call per provider, JSON in, normalized results out —
 //! same spirit as the index ops: bounded, marked, never an instruction.
 //!
-//! Provider chain (first configured wins, then free JSON fallbacks):
-//!   1. SearXNG — `PIXEL_WEB_SEARCH_URL=<base>` → `GET <base>/search?format=json`
-//!   2. DuckDuckGo Instant Answer — free, no key
-//!   3. Wikipedia OpenSearch — free, no key
+//! Providers, chosen by whether a SearXNG instance is configured:
+//!   - SearXNG alone — `PIXEL_WEB_SEARCH_URL=<base>` → `GET <base>/search?format=json`.
+//!     Whoever runs their own instance keeps their queries off public
+//!     services, so a thin or failed answer is returned as it is, never
+//!     topped up elsewhere.
+//!   - Otherwise, the free public chain: DuckDuckGo Instant Answer, then
+//!     Wikipedia OpenSearch while the hits are fewer than the limit.
 //!
 //! Results are data: title, url, snippet, engine. The agent resolves the
 //! term and re-runs `pixel plan`; nothing here writes a checklist.
@@ -131,24 +134,43 @@ pub fn run(opts: WebSearchOptions) -> Result<(), String> {
     }
 }
 
-/// The provider chain over a fetch seam: tests inject canned bodies.
+/// The providers over a fetch seam: tests inject canned bodies. A configured
+/// SearXNG is the only provider; the public chain runs only without one.
 fn search_with(
     query: &str,
     limit: usize,
     searxng_base: Option<&str>,
     fetch: &dyn Fn(&str) -> Result<String, String>,
 ) -> Vec<Hit> {
+    let hits = match searxng_base {
+        Some(base) => searxng_hits(query, base, fetch),
+        None => public_hits(query, limit, fetch),
+    };
+    dedupe_and_cap(hits, limit)
+}
+
+/// One query to the configured SearXNG; a fetch error yields no hits.
+fn searxng_hits(
+    query: &str,
+    base: &str,
+    fetch: &dyn Fn(&str) -> Result<String, String>,
+) -> Vec<Hit> {
+    let url = format!(
+        "{}/search?q={}&format=json",
+        base.trim_end_matches('/'),
+        url_encode(query)
+    );
+    fetch(&url).map_or_else(|_| Vec::new(), |body| parse_searxng(&body))
+}
+
+/// The free public chain, used only when no SearXNG is configured:
+/// DuckDuckGo, then Wikipedia while the hits are still under `limit`.
+fn public_hits(
+    query: &str,
+    limit: usize,
+    fetch: &dyn Fn(&str) -> Result<String, String>,
+) -> Vec<Hit> {
     let mut hits = Vec::new();
-    if let Some(base) = searxng_base {
-        let url = format!(
-            "{}/search?q={}&format=json",
-            base.trim_end_matches('/'),
-            url_encode(query)
-        );
-        if let Ok(body) = fetch(&url) {
-            hits.extend(parse_searxng(&body));
-        }
-    }
     if hits.len() < limit {
         let url = format!(
             "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
@@ -168,7 +190,7 @@ fn search_with(
             hits.extend(parse_wikipedia(&body));
         }
     }
-    dedupe_and_cap(hits, limit)
+    hits
 }
 
 /// One GET, body to string. The only place the network is touched.
@@ -553,26 +575,96 @@ mod tests {
         assert_eq!(empty["snapshot"]["providers"], json!([]));
     }
 
-    #[test]
-    fn fallback_chain_skips_later_providers_when_full() {
-        let searxng_hit = r#"{"results":[{"title":"t","url":"u1","content":"c"}]}"#;
-        let calls = std::cell::RefCell::new(Vec::new());
-        let fetch = |url: &str| -> Result<String, String> {
+    /// A fetch seam that records every URL and answers by provider:
+    /// `searxng`, `ddg` and `wiki` are the bodies (or errors) to return.
+    fn recording_fetch<'a>(
+        calls: &'a std::cell::RefCell<Vec<String>>,
+        searxng: Result<&'a str, &'a str>,
+        ddg: &'a str,
+        wiki: &'a str,
+    ) -> impl Fn(&str) -> Result<String, String> + 'a {
+        move |url: &str| {
             calls.borrow_mut().push(url.to_string());
-            Ok(if url.contains("/search?") {
-                searxng_hit.to_string()
+            if url.contains("/search?q=") {
+                searxng.map(str::to_string).map_err(str::to_string)
+            } else if url.contains("duckduckgo") {
+                Ok(ddg.to_string())
             } else {
-                "{}".to_string()
-            })
-        };
-        let hits = search_with("q", 1, Some("https://sx.test"), &fetch);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].url, "u1");
-        assert_eq!(calls.borrow().len(), 1);
+                Ok(wiki.to_string())
+            }
+        }
+    }
 
-        // Under the limit, the chain falls through to the free providers.
-        let hits = search_with("q", 8, Some("https://sx.test"), &fetch);
-        assert_eq!(calls.borrow().len(), 4);
-        assert_eq!(hits.len(), 1);
+    const ONE_SEARXNG_HIT: &str =
+        r#"{"results":[{"title":"t","url":"https://sx.test/u1","content":"c"}]}"#;
+    const ONE_DDG_HIT: &str =
+        r#"{"Heading":"D","AbstractText":"d","AbstractURL":"https://ddg.test/a"}"#;
+    const ONE_WIKI_HIT: &str = r#"["q",["W"],["w"],["https://wiki.test/w"]]"#;
+    const DDG_URL: &str = "https://api.duckduckgo.com/?q=q&format=json&no_html=1&skip_disambig=1";
+
+    fn urls(hits: &[Hit]) -> Vec<&str> {
+        hits.iter().map(|h| h.url.as_str()).collect()
+    }
+
+    #[test]
+    fn a_configured_searxng_is_the_only_provider_queried() {
+        // Under the limit, with public providers that would answer: none of
+        // them may be asked, the query stays with the user's own instance.
+        let calls = std::cell::RefCell::new(Vec::new());
+        let fetch = recording_fetch(&calls, Ok(ONE_SEARXNG_HIT), ONE_DDG_HIT, ONE_WIKI_HIT);
+        let hits = search_with("q", 8, Some("https://sx.test/"), &fetch);
+        assert_eq!(urls(&hits), ["https://sx.test/u1"]);
+        assert_eq!(*calls.borrow(), ["https://sx.test/search?q=q&format=json"]);
+    }
+
+    #[test]
+    fn a_failing_searxng_does_not_fall_back_to_public_providers() {
+        // Unreachable or empty instance: the answer is unresolved, not
+        // topped up from DuckDuckGo or Wikipedia.
+        for searxng in [Err("connection refused"), Ok(r#"{"results":[]}"#)] {
+            let calls = std::cell::RefCell::new(Vec::new());
+            let fetch = recording_fetch(&calls, searxng, ONE_DDG_HIT, ONE_WIKI_HIT);
+            let hits = search_with("q", 8, Some("https://sx.test"), &fetch);
+            assert_eq!(hits, Vec::<Hit>::new(), "{searxng:?}");
+            assert_eq!(
+                *calls.borrow(),
+                ["https://sx.test/search?q=q&format=json"],
+                "{searxng:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_searxng_the_public_chain_stops_once_full() {
+        let wiki_url = |limit: usize| {
+            format!(
+                "https://en.wikipedia.org/w/api.php?action=opensearch&search=q&limit={limit}&namespace=0&format=json"
+            )
+        };
+        // One DuckDuckGo hit fills a limit of 1: Wikipedia is not asked.
+        let calls = std::cell::RefCell::new(Vec::new());
+        let fetch = recording_fetch(&calls, Err("unused"), ONE_DDG_HIT, ONE_WIKI_HIT);
+        assert_eq!(
+            urls(&search_with("q", 1, None, &fetch)),
+            ["https://ddg.test/a"]
+        );
+        assert_eq!(*calls.borrow(), [DDG_URL]);
+
+        // Under the limit, Wikipedia tops it up, after DuckDuckGo.
+        let calls = std::cell::RefCell::new(Vec::new());
+        let fetch = recording_fetch(&calls, Err("unused"), ONE_DDG_HIT, ONE_WIKI_HIT);
+        assert_eq!(
+            urls(&search_with("q", 8, None, &fetch)),
+            ["https://ddg.test/a", "https://wiki.test/w"]
+        );
+        assert_eq!(*calls.borrow(), [DDG_URL.to_string(), wiki_url(8)]);
+    }
+
+    #[test]
+    fn a_zero_limit_without_searxng_fetches_nothing() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let fetch = recording_fetch(&calls, Err("unused"), ONE_DDG_HIT, ONE_WIKI_HIT);
+        assert_eq!(search_with("q", 0, None, &fetch), Vec::<Hit>::new());
+        assert_eq!(*calls.borrow(), Vec::<String>::new());
     }
 }
