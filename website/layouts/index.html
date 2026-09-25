@@ -847,7 +847,11 @@
       };
 
       document.fonts.ready.then(function () {
-        if (!document.fonts.check('700 16px Handjet')) return;
+        // fonts.check() answers true when no face of the family exists at
+        // all (the stylesheet blocked or failed), so ask for a loaded one.
+        var handjet = false;
+        document.fonts.forEach(function (f) { if (f.status === 'loaded' && f.family.replace(/["']/g, '') === 'Handjet') handjet = true; });
+        if (!handjet) return;
         // Hidden from here until its turn (only the fill: the computed
         // colour the sampling reads is untouched).
         titles.forEach(function (h) { h.classList.add('is-assembling'); });
