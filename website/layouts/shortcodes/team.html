@@ -1,0 +1,4 @@
+{{- /* The people of data/team.toml, in its order, as a Markdown list: the same entries the home's JSON-LD declares as `Person` nodes. Call it as {{% team %}}. */ -}}
+{{ range hugo.Data.team.person -}}
+- **[{{ .name }}](https://github.com/{{ .github }})**: {{ .role }}.
+{{ end -}}

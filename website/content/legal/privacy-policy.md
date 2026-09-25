@@ -7,7 +7,7 @@ description: "What this site and the pixel binary do with your data: the site us
 
 ## Who is responsible
 
-This site, pixel-cli.dev, is published by Navid Emad, the main contributor to [Pixel](https://github.com/LivioGama/pixel). Livio Gama created this open-source project and is a major contributor too. For any question about this policy or your data, open a [discussion on GitHub](https://github.com/LivioGama/pixel/discussions). To send a request privately, use a [private advisory](https://github.com/LivioGama/pixel/security/advisories/new).
+This site, pixel-cli.dev, is published by Navid Emad, the main contributor to [Pixel](https://github.com/LivioGama/pixel). Livio Gama created this open-source project and is a major contributor too ([About](/about/)). For any question about this policy or your data, open a [discussion on GitHub](https://github.com/LivioGama/pixel/discussions). To send a request privately, use a [private advisory](https://github.com/LivioGama/pixel/security/advisories/new).
 
 ## What this site collects
 

@@ -43,7 +43,8 @@
 {{ if hugo.IsProduction }}{{ $css = $css | minify | fingerprint }}{{ end }}
 <link rel="stylesheet" href="{{ $css.RelPermalink }}"{{ if hugo.IsProduction }} integrity="{{ $css.Data.Integrity }}"{{ end }}>
 {{ if .IsHome }}
-{{/* One @graph: the site, the application, its source code, and the FAQ the
+{{/* One @graph: the site, the application, its source code, the people of
+     data/team.toml, and the FAQ the
      "Fair questions" chapter shows (data/objections.toml, rendered by the
      same partial, so the markup never says something the page does not).
      softwareVersion is the CLI crate's version (hugo.toml mounts its
@@ -51,6 +52,19 @@
 {{ $home := .Permalink }}
 {{ $app := printf "%s#software" $home }}
 {{ $faq := slice }}
+{{/* The people of data/team.toml (the /about/ list): the site's publisher, the project's creator and the code's authors, each by @id. */}}
+{{ $people := slice }}
+{{ $authors := slice }}
+{{ $publisher := dict }}
+{{ $creator := dict }}
+{{ range hugo.Data.team.person }}
+  {{ $id := printf "%s#person-%s" $home (lower .github) }}
+  {{ $gh := printf "https://github.com/%s" .github }}
+  {{ $people = $people | append (dict "@type" "Person" "@id" $id "name" .name "url" $gh "sameAs" (slice $gh)) }}
+  {{ $authors = $authors | append (dict "@id" $id) }}
+  {{ if .publisher }}{{ $publisher = dict "@id" $id }}{{ end }}
+  {{ if .creator }}{{ $creator = dict "@id" $id }}{{ end }}
+{{ end }}
 {{ range partial "objections.html" (dict "abs" true) }}
   {{ $faq = $faq | append (dict "@type" "Question" "name" .question "acceptedAnswer" (dict "@type" "Answer" "text" .answer)) }}
 {{ end }}
@@ -62,6 +76,7 @@
     "name" "Pixel"
     "description" $desc
     "inLanguage" site.Language.Locale
+    "publisher" $publisher
     "about" (dict "@id" $app))
   (dict
     "@type" "SoftwareApplication"
@@ -94,6 +109,8 @@
     "codeRepository" site.Params.github_url
     "programmingLanguage" "Rust"
     "license" "https://opensource.org/licenses/MIT"
+    "creator" $creator
+    "author" $authors
     "targetProduct" (dict "@id" $app))
   (dict
     "@type" "FAQPage"
@@ -102,6 +119,7 @@
     "isPartOf" (dict "@id" (printf "%s#website" $home))
     "mainEntity" $faq)
 }}
+{{ $graph = $graph | append $people }}
 <script type="application/ld+json">
 {{ dict "@context" "https://schema.org" "@graph" $graph | jsonify | safeJS }}
 </script>
