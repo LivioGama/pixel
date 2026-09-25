@@ -155,6 +155,10 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   page or states another question than its `title`. Linked from the footer.
 - `data/voices.toml`: quotes from people who run Pixel, shown under the
   Proof chapter's ledger. Nothing renders while the file holds no entry.
+  Below them, with or without quotes, an invite links a "Show and tell"
+  discussion prefilled with what a quote needs (repository, agent, the
+  `pixel token-savings` report, consent to be quoted); a reply moves to
+  this file only with its author's written yes.
   Each entry is a real, named person who agreed in writing to be quoted;
   the file's header lists the fields and the rules. A figure in a quote is
   theirs, measured on their code, and says so in `measured`.

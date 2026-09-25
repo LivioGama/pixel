@@ -141,6 +141,7 @@
         <li class="ledger__win"><strong>&minus;30%</strong><span>Scoping a multi-file task: the median of 11 runs per side above, with 38% fewer tokens read. Two earlier designs agree: &minus;31% and &minus;29%.</span></li>
         <li class="ledger__win"><strong>Same answer</strong><span>Both sides named <code>push.rs</code>, the file the change starts in, among their first two in every one of the 22 runs. Pixel gets there sooner, not differently.</span></li>
       </ul>
+      <p class="ledger__fine" data-reveal>Where Pixel loses: a one-shot lookup runs about 1.5&nbsp;s slower, and recovering deleted code from history is still slower. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
       {{/* Real users' words, from data/voices.toml: nothing renders until it holds an entry, and the file says what an entry needs. */}}
       {{ with hugo.Data.voices.voice }}
       <ul class="voices" data-reveal="stagger" aria-label="What people who run Pixel say">
@@ -153,7 +154,17 @@
         {{ end }}
       </ul>
       {{ end }}
-      <p class="ledger__fine" data-reveal>Where Pixel loses: a one-shot lookup runs about 1.5&nbsp;s slower, and recovering deleted code from history is still slower. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
+      {{/* The call for more voices, shown with or without quotes above it: a Show and tell discussion prefilled with what a quote needs (the numbers, the repository, the agent). A quote only moves to data/voices.toml with its author's written consent. */}}
+      {{ $title := "My pixel token-savings numbers" }}
+      {{ $body := "Repository (language, rough size):\nAgent:\nHow long I have run Pixel:\n\n```\n<paste the output of pixel token-savings>\n```\n\nOK to quote this on pixel-cli.dev under my name and role? (yes / no)" }}
+      {{ $share := printf "%s/discussions/new?category=show-and-tell&title=%s&body=%s" site.Params.github_url (replace (urlquery $title) "+" "%20") (replace (urlquery $body) "+" "%20") }}
+      <aside class="invite" data-reveal>
+        <div class="invite__text">
+          <h3>Running Pixel on your own code?</h3>
+          <p>Post what <code>pixel token-savings</code> reports, with your repository's language and size and the agent you run. With your permission, it can be quoted here under your name.</p>
+        </div>
+        <a class="button button--ghost invite__cta" href="{{ $share }}" target="_blank" rel="noopener">Share your numbers</a>
+      </aside>
     </section>
 
     {{/* ---------- how it works ---------- */}}
