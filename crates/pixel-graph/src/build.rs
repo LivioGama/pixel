@@ -329,8 +329,8 @@ fn collect_files(root: &Path) -> Vec<(String, Vec<u8>)> {
 /// The `blob_oid` the store keeps for a file: the xxh3 of its bytes, 16 hex
 /// digits. `build_graph` and the incremental update write source rows
 /// through it, so a reader holding the file's current bytes (`pixel audit`)
-/// can tell a row indexed from other contents. `update_concepts` and the
-/// daemon's context check still spell the same format by hand.
+/// can tell a row indexed from other contents. The daemon's context check
+/// still spells the same format by hand.
 pub fn content_oid(content: &[u8]) -> String {
     format!("{:016x}", xxh3_64(content))
 }
@@ -1247,26 +1247,6 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
 /// Incrementally re-index one file (see [`update_files`]).
 pub fn update_file(root: &Path, db_path: &Path, rel: &str) -> Result<Publication, BoxErr> {
     update_files(root, db_path, &[(rel, false)])
-}
-
-/// Concepts-only refresh for a file that is NOT a graph language (e.g. a
-/// `.svelte`/`.vue`/`.html`/`.json`/`.yaml`/`.css` file the symbol graph
-/// ignores). Ensures the file row exists, then replaces its concepts in one
-/// transaction. No-op for files outside the concept gate.
-pub fn update_concepts(root: &Path, db_path: &Path, rel: &str) -> Result<(), BoxErr> {
-    if crate::concept::concept_lang_of(rel).is_none() {
-        return Ok(());
-    }
-    let mut store = GraphStore::open(db_path)?;
-    let abs = root.join(rel);
-    let Some(content) = read_source_file(&abs) else {
-        store.remove_file(rel)?;
-        return Ok(());
-    };
-    let concepts = crate::concept::extract_concepts(rel, &content);
-    let file_id = store.replace_file(rel, &format!("{:016x}", xxh3_64(&content)), "concept")?;
-    store.replace_concepts(file_id, &concepts)?;
-    Ok(())
 }
 
 #[cfg(test)]
