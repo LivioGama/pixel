@@ -643,9 +643,12 @@ fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
 }
 
 /// The same contract for `pixel install --repo`: the data's `repo` lists are
-/// exactly `REPO_ARTIFACTS`, and a real run writes nothing outside them.
+/// exactly `REPO_ARTIFACTS`, and a real run into an empty repository writes
+/// every one of them but the conditional ones, and nothing outside them.
 #[test]
 fn agents_data_should_name_exactly_the_files_a_repo_install_writes() {
+    // Written only when the guard takes over an `rtk hook claude` group.
+    const CONDITIONAL: &[&str] = &[".claude/pixel-rtk-hooks.json"];
     let claimed = agents_field(&agents_data(), "repo");
     let listed: BTreeSet<String> = claimed.iter().cloned().collect();
     assert_eq!(
@@ -670,10 +673,21 @@ fn agents_data_should_name_exactly_the_files_a_repo_install_writes() {
     // Every command run on a repository appends to its action log; that file
     // is the CLI's, not an agent's.
     written.retain(|file| !file.starts_with(".pixel/"));
-    let (unclaimed, _) = claim_mismatch(&claimed, &written);
+    let (unclaimed, unmatched) = claim_mismatch(&claimed, &written);
     assert!(
         unclaimed.is_empty(),
         "`pixel install --repo` wrote files agents.toml does not list: {unclaimed:?}"
+    );
+    // The pages promise these files to anyone who runs the command, so an
+    // install that writes nothing must fail here too. Only the conditional
+    // ones may be missing from an empty repository.
+    let missing: Vec<&String> = unmatched
+        .iter()
+        .filter(|path| !CONDITIONAL.contains(&path.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "`pixel install --repo` did not write files agents.toml lists: {missing:?} (wrote {written:?})"
     );
 }
 
