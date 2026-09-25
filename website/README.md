@@ -17,9 +17,15 @@ Plain CSS, no Sass and no Node: the standard Hugo build is enough.
 ## Where things live
 
 - `layouts/index.html`: the whole landing page, with its scripts inline at
-  the bottom. The token wall draws one square per 25 tokens of a full file
+  the bottom. The hero opens on who Pixel is for (four agent marks and the
+  count of the rest, from the `$agents` list the Compatibility grid also
+  draws), then states the problem in the reader's words before naming the
+  category. The token wall draws one square per 25 tokens of a full file
   read (`data/savings.toml`, first row) and burns down to what the same
-  question costs through Pixel once it scrolls into view; the survivors
+  question costs through Pixel once it scrolls into view. A Without / With
+  Pixel chip names the side shown, the saving (`saved`, floored as the
+  stats round it) appears once the wall has burnt, and the caption turns
+  a square into lines of that same file; the survivors
   gather into a P of exactly that many squares, built from the count by
   the script, so one square always means 25 tokens. The scope board
   draws one pad per indexed file and routes a trace from each P0 pad to its

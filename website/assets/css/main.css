@@ -183,6 +183,14 @@ main h2 { position: relative; }
   from { font-variation-settings: "ELSH" 0, "ELGR" 1.5; opacity: 0.4; }
   to { font-variation-settings: "ELSH" 2, "ELGR" 1.5; opacity: 1; }
 }
+.hero__for { display: flex; align-items: center; gap: 12px; margin: 0 0 clamp(18px, 2.4vw, 28px); font-size: 0.98rem; line-height: 1.35; color: var(--ink-soft); }
+.hero__marks { display: inline-flex; flex: none; }
+.hero__mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--panel); box-shadow: 0 0 0 2px var(--ground), inset 0 0 0 1px var(--cell-edge); color: var(--ink); }
+.hero__mark + .hero__mark { margin-left: -8px; }
+.hero__mark svg { width: 16px; height: 16px; }
+/* Pi's mark fills its whole viewBox where the others keep a margin: drawn
+   at full size it reads heavier than its neighbours. */
+.hero__mark--pi svg { width: 12px; height: 12px; }
 .hero__lede { font-size: clamp(1.15rem, 1.8vw, 1.4rem); line-height: 1.5; color: var(--ink-soft); max-width: 32em; margin: clamp(24px, 3vw, 36px) 0 0; }
 .hero__cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; align-items: stretch; }
 .hero__cta .cmd { flex: 1 1 420px; min-width: 0; }
@@ -197,6 +205,26 @@ main h2 { position: relative; }
 .wall { margin: 0; }
 @media (max-width: 1000px) { .wall { margin-top: 24px; } }
 .wall__meter { margin-bottom: 18px; }
+/* Which side of the comparison the wall shows: coral while it is the
+   full read, green once it is the answer through Pixel, with the saving. */
+.wall__state { margin: 0 0 10px; }
+.wall__state span {
+  display: inline-block; padding: 4px 8px; border-radius: 3px; font: 600 0.72rem/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--coral); background: color-mix(in srgb, var(--coral) 12%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--coral) 45%, transparent);
+}
+.wall.is-done .wall__state span { color: var(--green-hi); background: color-mix(in srgb, var(--green) 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--green) 50%, transparent); }
+.wall__delta {
+  display: inline-block; vertical-align: 0.35em; margin-left: 6px; padding: 6px 9px; border-radius: var(--r);
+  font: 600 1rem/1 var(--mono); letter-spacing: 0; color: var(--on-green); background: var(--green);
+  opacity: 0; transform: scale(0.6);
+}
+.wall.is-done .wall__delta { opacity: 1; transform: none; }
+/* Reduced motion lands on the final state at once (final() sets .is-done
+   on load): the chip and the badge only animate when motion is welcome. */
+@media (prefers-reduced-motion: no-preference) {
+  .wall__state span { transition: color 0.4s ease, background-color 0.4s ease, box-shadow 0.4s ease; }
+  .wall__delta { transition: opacity 0.3s ease 0.2s, transform 0.4s cubic-bezier(0.3, 1.6, 0.5, 1) 0.2s; }
+}
 .wall__label { margin: 0; font-size: 1.05rem; color: var(--ink-soft); }
 .wall__count { margin: 0; font: 700 clamp(2.6rem, 5vw, 4rem)/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; font-variant-numeric: tabular-nums; color: var(--coral); transition: color 0.4s ease; }
 .wall__count { margin-top: 6px; }

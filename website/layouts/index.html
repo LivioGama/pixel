@@ -12,6 +12,14 @@
   {{ $bench := "benchmarks/" | relURL }}
   {{/* The code graph's grammars: crates/pixel-graph/src/extract.rs. The last five use the generic extractor. */}}
   {{ $langs := slice "TypeScript" "JavaScript" "Rust" "Go" "Java" "Python" "C#" "Ruby" "PHP" "C" "Swift" "Elixir" "Lua" }}
+  {{/* The supported agents, shown by the hero's line and the Compatibility grid. Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
+  {{ $agents := slice
+    (dict "name" "Claude Code" "logo" "claude") (dict "name" "Codex" "logo" "codex")
+    (dict "name" "Pi" "logo" "pi") (dict "name" "Cursor" "logo" "cursor")
+    (dict "name" "Copilot CLI" "logo" "copilot") (dict "name" "Gemini CLI" "logo" "gemini")
+    (dict "name" "OpenCode" "logo" "opencode") (dict "name" "Devin" "logo" "devin")
+    (dict "name" "Windsurf" "logo" "windsurf") (dict "name" "Antigravity" "logo" "antigravity")
+  }}
 
   {{/* Where the reader is: one square per chapter (each section's .chapter label), filled as it passes. Built by the script below. */}}
   <nav class="rail" aria-label="Sections" data-rail hidden></nav>
@@ -20,8 +28,14 @@
     {{/* ---------- hero: the token wall ---------- */}}
     <section class="hero wrap">
       <div class="hero__copy">
+      {{/* Who it is for, before the title: four marks a visitor recognises, then the count of the rest (the Compatibility grid lists them). The ids inside a mark get a prefix, since the grid inlines the same SVG. */}}
+      {{ $named := first 4 (where $agents "logo" "in" (slice "claude" "codex" "pi" "cursor")) }}
+      <p class="hero__for">
+        <span class="hero__marks" aria-hidden="true">{{ range $named }}<span class="hero__mark hero__mark--{{ .logo }}">{{ replace (resources.Get (printf "logos/%s.svg" .logo)).Content "lobe-icons-" "hero-lobe-icons-" | safeHTML }}</span>{{ end }}</span>
+        <span>For {{ range $i, $a := $named }}{{ if $i }}, {{ end }}{{ $a.name }}{{ end }} and <a class="link" href="#agents">{{ sub (len $agents) (len $named) }} more coding agents</a></span>
+      </p>
       <h1 class="hero__title"><span>Read less.</span> <span class="glow">Ship more.</span></h1>
-      <p class="hero__lede"><strong>A local code index for AI coding agents.</strong> Your agent queries Pixel instead of reading your repo file by file. Same agent, same prompts. A fraction of the tokens.</p>
+      <p class="hero__lede"><strong>Your coding agent reads whole files to find its way.</strong> Pixel is a local code index that hands it only the lines it needs. Same agent, same prompts, a fraction of the tokens.</p>
       <div class="hero__cta">
         <div class="cmd">
           <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
@@ -33,15 +47,17 @@
 
       <figure class="wall" data-wall data-full="{{ $big.full }}" data-pixel="{{ $big.pixel }}" data-per="25">
         <div class="wall__meter">
+          <p class="wall__state" aria-hidden="true"><span data-wall-state>Without Pixel</span></p>
           <p class="wall__label" data-wall-label aria-hidden="true">Your agent reading one {{ lang.FormatNumberCustom 0 $big.lines }}-line file</p>
-          <p class="wall__count" aria-hidden="true"><span data-wall-count>{{ lang.FormatNumberCustom 0 $big.full }}</span> tokens</p>
+          <p class="wall__count" aria-hidden="true"><span data-wall-count>{{ lang.FormatNumberCustom 0 $big.full }}</span> tokens <span class="wall__delta">&minus;{{ math.Floor $big.saved }}%</span></p>
           <p class="sr-only" aria-live="polite" data-wall-announce>Your agent reading one {{ lang.FormatNumberCustom 0 $big.lines }}-line file: {{ lang.FormatNumberCustom 0 $big.full }} tokens. The same question through Pixel: {{ lang.FormatNumberCustom 0 $big.pixel }} tokens.</p>
         </div>
         <div class="wall__grid" aria-hidden="true"></div>
         <figcaption class="wall__caption">
           <span class="key key--waste">{{ lang.FormatNumberCustom 0 $big.full }} tokens reading the file</span>
           <span class="key key--kept">{{ lang.FormatNumberCustom 0 $big.pixel }} tokens asking Pixel</span>
-          <span class="wall__unit">One square is 25 tokens. Measured on Pixel's own repository.</span>
+          {{/* A token made concrete with the wall's own file: 25 tokens are this many of its lines. */}}
+          <span class="wall__unit">One square is 25 tokens, about {{ lang.FormatNumber 1 (div (mul 25.0 $big.lines) $big.full) }} lines of that file. Measured on Pixel's own repository.</span>
           <button class="wall__replay" type="button" data-wall-replay hidden>Replay</button>
         </figcaption>
       </figure>
@@ -195,14 +211,6 @@
       <header class="section__head" data-reveal>
         <h2 id="agents-title">Plugs into the agent <span class="glow">you already use.</span></h2>
       </header>
-      {{/* Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
-      {{ $agents := slice
-        (dict "name" "Claude Code" "logo" "claude") (dict "name" "Codex" "logo" "codex")
-        (dict "name" "Pi" "logo" "pi") (dict "name" "Cursor" "logo" "cursor")
-        (dict "name" "Copilot CLI" "logo" "copilot") (dict "name" "Gemini CLI" "logo" "gemini")
-        (dict "name" "OpenCode" "logo" "opencode") (dict "name" "Devin" "logo" "devin")
-        (dict "name" "Windsurf" "logo" "windsurf") (dict "name" "Antigravity" "logo" "antigravity")
-      }}
       <ul class="agents" data-reveal="stagger">
         {{ range $agents }}
         <li class="agents__item agents__item--{{ .logo }}">{{ (resources.Get (printf "logos/%s.svg" .logo)).Content | safeHTML }}<span>{{ .name }}</span></li>
@@ -355,6 +363,8 @@
       var full = +fig.dataset.full, kept = +fig.dataset.pixel, per = +fig.dataset.per;
       var n = Math.round(full / per), k = Math.round(kept / per);
       var startLabel = label.textContent;
+      var state = fig.querySelector('[data-wall-state]');
+      var startState = state.textContent;
       var cells = [];
       var frag = document.createDocumentFragment();
       for (var i = 0; i < n; i++) { var c = document.createElement('span'); cells.push(c); frag.appendChild(c); }
@@ -422,7 +432,8 @@
         burn.forEach(function (i) { cells[i].className = 'is-gone'; });
         keep.forEach(function (i) { cells[i].className = 'is-kept'; });
         count.textContent = fmt(kept);
-        label.textContent = 'The same question, asked through Pixel';
+        label.textContent = 'Your agent asking the same question';
+        state.textContent = 'With Pixel';
         fig.classList.add('is-done');
         gather();
       };
@@ -432,6 +443,7 @@
         cells.forEach(function (c) { c.className = ''; c.style.transform = ''; });
         count.textContent = fmt(full);
         label.textContent = startLabel;
+        state.textContent = startState;
         announce.textContent = '';
         var t0 = null, dur = 1800;
         var burnt = 0;
@@ -445,7 +457,8 @@
           count.textContent = fmt(full - (full - kept) * e);
           if (p < 1) return requestAnimationFrame(tick);
           keep.forEach(function (i) { cells[i].className = 'is-kept'; });
-          label.textContent = 'The same question, asked through Pixel';
+          label.textContent = 'Your agent asking the same question';
+          state.textContent = 'With Pixel';
           fig.classList.add('is-done');
           announce.textContent = said;
           setTimeout(gather, 250);
