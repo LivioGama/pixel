@@ -371,10 +371,10 @@ fn config_key_is_unreachable_from_build_graph() {
     // (the symbol-extraction gate: ts/tsx/js/rs/go/java/py only) rather than
     // `concept::concept_lang_of` (which adds svelte/vue/html/json/yaml/css).
     // `package.json` never even gets read into `inputs`, so `insert_concepts`
-    // is never called for it. The correctly-gated `build::update_concepts`
-    // function exists but is dead code — grep confirms it is called from
-    // nowhere in the entire workspace (not build.rs, not pixel-daemon's
-    // watcher). Net effect: config_key concepts are extracted correctly in
+    // is never called for it. No concepts-only path exists either: the
+    // correctly-gated `build::update_concepts` was never called from
+    // build.rs or pixel-daemon's watcher, and was removed as dead code.
+    // Net effect: config_key concepts are extracted correctly in
     // isolation but are completely unreachable in a real build or a real
     // running daemon. This is a build.rs/pixel-daemon wiring gap, out of
     // scope for this pass (those files are not owned here) — reported, not
