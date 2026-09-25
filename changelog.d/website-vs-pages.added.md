@@ -1,1 +1,0 @@
-**docs:** The website gains a comparison page per alternative under `/vs/` (GitNexus, shunt, Jev, semble, grep, a language server, an editor's index), each with a short answer, the figures side by side, how they were measured and where the other tool wins. The home's Alternatives cards and the pages read one file, `data/alternatives.toml`, and `llms.txt` links every page.
