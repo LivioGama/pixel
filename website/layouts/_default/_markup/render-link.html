@@ -1,4 +1,5 @@
-{{- /* Every link in docs and benchmarks opens in a new tab, except an anchor on the same page. */ -}}
-{{- $inpage := strings.HasPrefix .Destination "#" -}}
-<a href="{{ .Destination | safeURL }}"{{ with .Title }} title="{{ . }}"{{ end }}{{ if not $inpage }} target="_blank" rel="noopener"{{ end }}>{{ .Text }}</a>
+{{- /* A link that leaves the site (GitHub, another tool's docs) opens in a new tab; a page of this site, or an anchor on it, opens in place. */ -}}
+{{- $d := .Destination -}}
+{{- $external := and (or (strings.HasPrefix $d "http://") (strings.HasPrefix $d "https://")) (not (strings.HasPrefix $d site.BaseURL)) -}}
+<a href="{{ $d | safeURL }}"{{ with .Title }} title="{{ . }}"{{ end }}{{ if $external }} target="_blank" rel="noopener"{{ end }}>{{ .Text }}</a>
 {{- /* chomp */ -}}

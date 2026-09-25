@@ -19,7 +19,7 @@
   {{ with $tool.checked }}{{ if (time .).After $updated }}{{ $updated = time . }}{{ end }}{{ end }}
 
   <main class="docs wrap vsp" id="main">
-    <nav class="vsp__crumbs" aria-label="Breadcrumb"><a href="{{ "" | relURL }}" target="_blank" rel="noopener">Pixel</a> / <a href="{{ "vs/" | relURL }}" target="_blank" rel="noopener">Comparisons</a> / <span aria-current="page">{{ .Title }}</span></nav>
+    <nav class="vsp__crumbs" aria-label="Breadcrumb"><a href="{{ "" | relURL }}">Pixel</a> / <a href="{{ "vs/" | relURL }}">Comparisons</a> / <span aria-current="page">{{ .Title }}</span></nav>
     <header class="docs__head">
       <h1>{{ .Title }}</h1>
       <p class="docs__lede">{{ $tool.about | safeHTML }}</p>
@@ -42,7 +42,7 @@
             {{ end }}
           </tbody>
         </table>
-        {{ with $tool.bench }}<p class="vsp__source">Every figure above is on the <a class="link" href="{{ $bench }}#{{ . }}" target="_blank" rel="noopener">benchmarks page</a>, with its sample size, its method and the cases where Pixel loses.</p>{{ end }}
+        {{ with $tool.bench }}<p class="vsp__source">Every figure above is on the <a class="link" href="{{ $bench }}#{{ . }}">benchmarks page</a>, with its sample size, its method and the cases where Pixel loses.</p>{{ end }}
       </section>
 
       <section class="vsp__theirs" aria-labelledby="where-they-win">
@@ -55,7 +55,7 @@
       <nav class="vsp__more" aria-labelledby="more-comparisons">
         <h2 id="more-comparisons">More comparisons</h2>
         <ul>
-          {{ range $all }}{{ if ne .slug $slug }}<li><a class="link" href="{{ .url }}" target="_blank" rel="noopener">Pixel vs {{ .name }}</a></li>{{ end }}{{ end }}
+          {{ range $all }}{{ if ne .slug $slug }}<li><a class="link" href="{{ .url }}">Pixel vs {{ .name }}</a></li>{{ end }}{{ end }}
         </ul>
       </nav>
     </article>

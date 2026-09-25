@@ -20,7 +20,7 @@
   {{ with $a.checked }}{{ if (time .).After $updated }}{{ $updated = time . }}{{ end }}{{ end }}
 
   <main class="docs wrap vsp" id="main">
-    <nav class="vsp__crumbs" aria-label="Breadcrumb"><a href="{{ "" | relURL }}" target="_blank" rel="noopener">Pixel</a> / <a href="{{ "answers/" | relURL }}" target="_blank" rel="noopener">Answers</a> / <span aria-current="page">{{ .Title }}</span></nav>
+    <nav class="vsp__crumbs" aria-label="Breadcrumb"><a href="{{ "" | relURL }}">Pixel</a> / <a href="{{ "answers/" | relURL }}">Answers</a> / <span aria-current="page">{{ .Title }}</span></nav>
     <header class="docs__head">
       <h1>{{ .Title }}</h1>
       <p class="docs__updated">Updated <time datetime="{{ $updated.Format "2006-01-02" }}">{{ $updated.Format "2 January 2006" }}</time></p>
@@ -42,7 +42,7 @@
             {{ end }}
           </tbody>
         </table>
-        <p class="vsp__source">Every figure above is on the benchmarks page, with its sample size and its method: {{ range $i, $s := $a.sources }}{{ if $i }}, {{ end }}<a class="link" href="{{ $bench }}#{{ $s.anchor }}" target="_blank" rel="noopener">{{ $s.title }}</a>{{ end }}.</p>
+        <p class="vsp__source">Every figure above is on the benchmarks page, with its sample size and its method: {{ range $i, $s := $a.sources }}{{ if $i }}, {{ end }}<a class="link" href="{{ $bench }}#{{ $s.anchor }}">{{ $s.title }}</a>{{ end }}.</p>
       </section>
 
       <section class="vsp__theirs" aria-labelledby="limits">
@@ -53,14 +53,14 @@
       <nav class="vsp__more" aria-labelledby="related">
         <h2 id="related">Related</h2>
         <ul>
-          {{ range $a.related }}<li><a class="link" href="{{ .RelPermalink }}" target="_blank" rel="noopener">{{ .Title }}</a></li>{{ end }}
+          {{ range $a.related }}<li><a class="link" href="{{ .RelPermalink }}">{{ .Title }}</a></li>{{ end }}
         </ul>
       </nav>
 
       <nav class="vsp__more" aria-labelledby="more-answers">
         <h2 id="more-answers">More answers</h2>
         <ul>
-          {{ range $all }}{{ if ne .slug $slug }}{{ with site.GetPage (printf "/answers/%s" .slug) }}<li><a class="link" href="{{ .RelPermalink }}" target="_blank" rel="noopener">{{ .Title }}</a></li>{{ end }}{{ end }}{{ end }}
+          {{ range $all }}{{ if ne .slug $slug }}{{ with site.GetPage (printf "/answers/%s" .slug) }}<li><a class="link" href="{{ .RelPermalink }}">{{ .Title }}</a></li>{{ end }}{{ end }}{{ end }}
         </ul>
       </nav>
     </article>

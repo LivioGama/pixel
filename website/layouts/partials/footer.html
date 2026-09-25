@@ -1,30 +1,54 @@
 {{ partial "backdrop.html" . }}
 <footer class="footer">
+  {{- $gh := .Site.Params.github_url }}
+  {{- $v := hugo.Data.cli.package.version }}
   <div class="wrap footer__inner">
-    <a class="brand brand--small" href="{{ if .IsHome }}#main{{ else }}{{ "" | relURL }}{{ end }}"{{ if not .IsHome }} target="_blank" rel="noopener"{{ end }}>
-      <span class="brand__pixel" aria-hidden="true"></span>
-      <span class="brand__name">pixel</span>
-    </a>
-    <ul class="footer__links">
-      <li><a href="{{ "docs/" | relURL }}" target="_blank" rel="noopener">Docs</a></li>
-      <li><a href="{{ .Site.Params.github_url }}" target="_blank" rel="noopener">Source on GitHub</a></li>
-      <li><a href="{{ "benchmarks/" | relURL }}" target="_blank" rel="noopener">Benchmarks</a></li>
-      <li><a href="{{ "vs/" | relURL }}" target="_blank" rel="noopener">Comparisons</a></li>
-      <li><a href="{{ "for/" | relURL }}" target="_blank" rel="noopener">For your agent</a></li>
-      <li><a href="{{ "answers/" | relURL }}" target="_blank" rel="noopener">Answers</a></li>
-      <li><a href="{{ "savings/" | relURL }}" target="_blank" rel="noopener">Savings estimate</a></li>
-      <li><a href="{{ .Site.Params.github_url }}/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a></li>
-      {{/* An Atom feed of the releases rather than a newsletter: nothing to sign up for, nothing to store. */}}
-      <li><a href="{{ .Site.Params.github_url }}/releases.atom" target="_blank" rel="noopener" type="application/atom+xml" title="Atom feed of every release; on GitHub, Watch, then Custom, then Releases">Follow releases</a></li>
-      <li><a href="{{ .Site.Params.github_url }}/discussions" target="_blank" rel="noopener">Discussions</a></li>
-      <li><a href="{{ .Site.Params.github_url }}/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a></li>
-      <li><a href="{{ .Site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a></li>
-    </ul>
-    <p class="footer__license">MIT licensed. Runs on your machine; nothing leaves it.</p>
-    {{- with site.Params.cf_analytics_token }}
-    {{/* The site and the binary are two things: the site counts visits, without cookies or personal data; the binary still measures nothing. */}}
-    <p class="footer__license">This site counts visits with Cloudflare Web Analytics: no cookies, no personal data. The <code>pixel</code> binary measures nothing.</p>
-    {{- end }}
+    <div class="footer__about">
+      <a class="brand brand--small" href="{{ if .IsHome }}#main{{ else }}{{ "" | relURL }}{{ end }}">
+        <span class="brand__pixel" aria-hidden="true"></span>
+        <span class="brand__name">pixel</span>
+      </a>
+      <p class="footer__tagline">A local code index for AI coding agents: the lines they need, not whole files.</p>
+      {{/* The domain spelled out, for a screenshot or a print, and the release the site describes (the CLI crate's version, as in the JSON-LD). */}}
+      <p class="footer__meta"><a href="{{ "" | absURL }}">{{ (urls.Parse site.BaseURL).Host }}</a><span aria-hidden="true"> · </span><a href="{{ $gh }}/releases/tag/v{{ $v }}" target="_blank" rel="noopener">v{{ $v }}</a></p>
+    </div>
+    <nav class="footer__cols" aria-label="Footer">
+      <div>
+        <h2 class="footer__head">Product</h2>
+        <ul class="footer__links">
+          <li><a href="{{ "docs/" | relURL }}">Docs</a></li>
+          <li><a href="{{ "benchmarks/" | relURL }}">Benchmarks</a></li>
+          <li><a href="{{ "savings/" | relURL }}">Savings estimate</a></li>
+          <li><a href="{{ $gh }}/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a></li>
+        </ul>
+      </div>
+      <div>
+        <h2 class="footer__head">Guides</h2>
+        <ul class="footer__links">
+          <li><a href="{{ "for/" | relURL }}">For your agent</a></li>
+          <li><a href="{{ "vs/" | relURL }}">Comparisons</a></li>
+          <li><a href="{{ "answers/" | relURL }}">Answers</a></li>
+        </ul>
+      </div>
+      <div>
+        <h2 class="footer__head">Community</h2>
+        <ul class="footer__links">
+          <li><a href="{{ $gh }}" target="_blank" rel="noopener">Source on GitHub</a></li>
+          <li><a href="{{ $gh }}/discussions" target="_blank" rel="noopener">Discussions</a></li>
+          {{/* An Atom feed of the releases rather than a newsletter: nothing to sign up for, nothing to store. */}}
+          <li><a href="{{ $gh }}/releases.atom" target="_blank" rel="noopener" type="application/atom+xml" title="Atom feed of every release; on GitHub, Watch, then Custom, then Releases">Follow releases</a></li>
+          <li><a href="{{ $gh }}/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a></li>
+          <li><a href="{{ $gh }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a></li>
+        </ul>
+      </div>
+    </nav>
+    <div class="footer__legal">
+      <p>MIT licensed. Runs on your machine; nothing leaves it.</p>
+      {{- with site.Params.cf_analytics_token }}
+      {{/* The site and the binary are two things: the site counts visits, without cookies or personal data; the binary still measures nothing. */}}
+      <p>This site counts visits with Cloudflare Web Analytics: no cookies, no personal data. The <code>pixel</code> binary measures nothing.</p>
+      {{- end }}
+    </div>
   </div>
 </footer>
 {{- with site.Params.cf_analytics_token }}{{ if hugo.IsProduction }}

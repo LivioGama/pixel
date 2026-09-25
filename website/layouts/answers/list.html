@@ -13,7 +13,7 @@
   {{ range $pages }}{{ if not (where $all "slug" .Params.answer) }}{{ errorf "%s: answer %q is not in data/answers.toml" .File.Path .Params.answer }}{{ end }}{{ end }}
 
   <main class="docs wrap vsp" id="main">
-    <nav class="vsp__crumbs" aria-label="Breadcrumb"><a href="{{ "" | relURL }}" target="_blank" rel="noopener">Pixel</a> / <span aria-current="page">Answers</span></nav>
+    <nav class="vsp__crumbs" aria-label="Breadcrumb"><a href="{{ "" | relURL }}">Pixel</a> / <span aria-current="page">Answers</span></nav>
     <header class="docs__head">
       <h1>{{ .Title }}</h1>
       <p class="docs__lede">{{ .Description }}</p>
@@ -26,7 +26,7 @@
         {{ range $all }}
           {{ $p := index (where $pages "Params.answer" .slug) 0 }}
           <li class="vsp__entry">
-            <h2><a class="link" href="{{ $p.RelPermalink }}" target="_blank" rel="noopener">{{ $p.Title }}</a></h2>
+            <h2><a class="link" href="{{ $p.RelPermalink }}">{{ $p.Title }}</a></h2>
             <p>{{ strings.FirstUpper .gist | safeHTML }}</p>
           </li>
         {{ end }}

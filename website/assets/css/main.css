@@ -188,7 +188,7 @@ main h2 { position: relative; }
   from { font-variation-settings: "ELSH" 0, "ELGR" 1.5; opacity: 0.4; }
   to { font-variation-settings: "ELSH" 2, "ELGR" 1.5; opacity: 1; }
 }
-.hero__for { display: flex; align-items: center; gap: 12px; margin: 0 0 clamp(18px, 2.4vw, 28px); font-size: 0.98rem; line-height: 1.35; color: var(--ink-soft); }
+.hero__for { text-wrap: balance; display: flex; align-items: center; gap: 12px; margin: 0 0 clamp(18px, 2.4vw, 28px); font-size: 0.98rem; line-height: 1.35; color: var(--ink-soft); }
 .hero__marks { display: inline-flex; flex: none; }
 .hero__mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--panel); box-shadow: 0 0 0 2px var(--ground), inset 0 0 0 1px var(--cell-edge); color: var(--ink); }
 .hero__mark + .hero__mark { margin-left: -8px; }
@@ -199,6 +199,14 @@ main h2 { position: relative; }
 .hero__lede { font-size: clamp(1.15rem, 1.8vw, 1.4rem); line-height: 1.5; color: var(--ink-soft); max-width: 32em; margin: clamp(24px, 3vw, 36px) 0 0; }
 .hero__cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; align-items: stretch; }
 .hero__cta .cmd { flex: 1 1 420px; min-width: 0; }
+/* A short label keeps the button beside the command on a wide screen; the GitHub mark says where it goes. */
+.hero__star { flex: none; padding-inline: 20px; }
+/* On a phone the command holds one line: a break inside it reads like two commands. */
+@media (max-width: 480px) {
+  .hero__cta .cmd code { font-size: 0.8rem; }
+  .hero__cta .cmd__prompt { display: none; }
+  .hero__cta .cmd__copy { padding-inline: 10px; }
+}
 .hero__down { grid-column: 1 / -1; justify-self: center; display: grid; place-items: center; width: 48px; height: 48px; margin-top: clamp(8px, 3vh, 32px); color: var(--green-hi); border-radius: var(--r); }
 .hero__down:hover { background: var(--panel); }
 @media (prefers-reduced-motion: no-preference) {
@@ -663,12 +671,28 @@ a.agents__item { text-decoration: none; }
 .closing__cta { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 40px; }
 
 /* ---------- footer ---------- */
-.footer { background: var(--ground-2); padding-block: 40px 52px; }
-.footer__inner { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 32px; }
-.footer__links { display: flex; flex-wrap: wrap; gap: 8px 22px; list-style: none; margin: 0; padding: 0; font-size: 0.93rem; }
+.footer { background: var(--ground-2); padding-block: 56px 40px; border-top: 1px solid var(--line); }
+.footer__inner { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr); gap: 40px 64px; }
+.footer__about { display: grid; align-content: start; gap: 14px; }
+.footer__tagline { margin: 0; max-width: 26em; font-size: 0.95rem; line-height: 1.5; color: var(--ink-soft); }
+.footer__meta { margin: 0; font: 500 0.85rem/1.4 var(--mono); color: var(--ink-soft); }
+.footer__meta a { color: var(--green-hi); text-decoration: none; }
+.footer__meta a:hover { text-decoration: underline; }
+.footer__cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px; }
+.footer__head { margin: 0 0 14px; font: 600 0.78rem/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink); }
+.footer__links { display: grid; gap: 10px; list-style: none; margin: 0; padding: 0; font-size: 0.93rem; }
 .footer__links a { color: var(--ink-soft); text-decoration: none; }
 .footer__links a:hover { color: var(--ink); }
-.footer__license { flex-basis: 100%; margin: 0; font-size: 0.88rem; color: var(--ink-soft); }
+/* A link that leaves the site says so before the click: the same rule that opens it in a new tab. */
+.footer__links a[target="_blank"]::after { content: " \2197"; font-size: 0.8em; opacity: 0.6; }
+.footer__legal { grid-column: 1 / -1; display: grid; gap: 6px; padding-top: 24px; border-top: 1px solid var(--line); font-size: 0.85rem; color: var(--ink-soft); }
+.footer__legal p { margin: 0; }
+@media (max-width: 760px) {
+  .footer__inner { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 480px) {
+  .footer__cols { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 
 /* ---------- docs pages (docs, benchmarks) ---------- */
 .docs__head { padding-block: clamp(40px, 7vh, 80px) 8px; }

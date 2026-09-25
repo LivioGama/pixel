@@ -11,7 +11,7 @@
   {{ $pages := .Pages }}
 
   <main class="docs wrap vsp" id="main">
-    <nav class="vsp__crumbs" aria-label="Breadcrumb"><a href="{{ "" | relURL }}" target="_blank" rel="noopener">Pixel</a> / <span aria-current="page">Comparisons</span></nav>
+    <nav class="vsp__crumbs" aria-label="Breadcrumb"><a href="{{ "" | relURL }}">Pixel</a> / <span aria-current="page">Comparisons</span></nav>
     <header class="docs__head">
       <h1>{{ .Title }}</h1>
       <p class="docs__lede">{{ .Description }}</p>
@@ -27,7 +27,7 @@
             {{ $p := index . 0 }}
             {{ $m := partial "vs-measure.html" $tool }}
             <li class="vsp__entry">
-              <h2><a class="link" href="{{ $p.RelPermalink }}" target="_blank" rel="noopener">{{ $p.Title }}</a></h2>
+              <h2><a class="link" href="{{ $p.RelPermalink }}">{{ $p.Title }}</a></h2>
               <p class="vsp__tag vsp__measure--{{ $tool.measure }}">{{ $m.label }}</p>
               <p>{{ $tool.about | safeHTML }}</p>
               <p class="vsp__entry-wins"><strong>Where {{ $tool.name }} wins:</strong> {{ $tool.wins | safeHTML }}</p>
