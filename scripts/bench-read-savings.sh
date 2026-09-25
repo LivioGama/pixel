@@ -19,7 +19,15 @@
 set -euo pipefail
 
 find_pixel() {
-  if [ -n "${PIXEL_BIN:-}" ]; then echo "$PIXEL_BIN"; return; fi
+  # Absolute, since the measurements run from the throwaway repository.
+  if [ -n "${PIXEL_BIN:-}" ]; then
+    case "$PIXEL_BIN" in
+      /*) echo "$PIXEL_BIN" ;;
+      */*) echo "$PWD/$PIXEL_BIN" ;;
+      *) command -v "$PIXEL_BIN" || { echo "bench-read-savings: PIXEL_BIN=$PIXEL_BIN not found" >&2; exit 1; } ;;
+    esac
+    return
+  fi
   if command -v pixel >/dev/null 2>&1; then command -v pixel; return; fi
   for p in target/dev-release/pixel target/release/pixel; do
     if [ -x "$p" ]; then echo "$PWD/$p"; return; fi

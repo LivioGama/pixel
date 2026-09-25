@@ -62,7 +62,7 @@
           <span class="key key--waste">{{ lang.FormatNumberCustom 0 $big.full }} tokens reading the file</span>
           <span class="key key--kept">{{ lang.FormatNumberCustom 0 $big.pixel }} tokens asking Pixel</span>
           {{/* One file is an example, so the caption gives the spread over every kept file, with the link to the table and the excluded one. */}}
-          <span class="wall__unit">One square is 25 tokens. Across <a class="link" href="{{ $bench }}#well-known-files" target="_blank" rel="noopener">{{ len $kept }} well-known files</a>, the agent reads {{ lang.FormatNumber 0 (index $kept 0) }} to {{ lang.FormatNumber 0 (index $kept (sub (len $kept) 1)) }}% less (median {{ lang.FormatNumber 1 $median }}%).</span>
+          <span class="wall__unit">One square is 25 tokens. Across <a class="link" href="{{ $bench }}#well-known-files" target="_blank" rel="noopener">{{ len $kept }} well-known files</a>, the agent reads {{ lang.FormatNumber 1 (index $kept 0) }} to {{ lang.FormatNumber 1 (index $kept (sub (len $kept) 1)) }}% less (median {{ lang.FormatNumber 1 $median }}%).</span>
           <button class="wall__replay" type="button" data-wall-replay hidden>Replay</button>
         </figcaption>
       </figure>
@@ -955,7 +955,11 @@
       };
 
       document.fonts.ready.then(function () {
-        if (!document.fonts.check('700 16px Handjet')) return;
+        // fonts.check() answers true when no face of the family exists at
+        // all (the stylesheet blocked or failed), so ask for a loaded one.
+        var handjet = false;
+        document.fonts.forEach(function (f) { if (f.status === 'loaded' && f.family.replace(/["']/g, '') === 'Handjet') handjet = true; });
+        if (!handjet) return;
         // Hidden from here until its turn (only the fill: the computed
         // colour the sampling reads is untouched).
         titles.forEach(function (h) { h.classList.add('is-assembling'); });
