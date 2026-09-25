@@ -33,7 +33,15 @@
 #                  /benchmarks/#<bench> on the card (Jev points at #decisions)
 #   checked        the day the rows were last checked against /benchmarks/;
 #                  the page's "Updated" date is the later of it and its Git date
+#   matrix         a column of the home's matrix, in this order (the code
+#                  indexes); it then fills every `traits` key
+#   [tool.traits]  the matrix's shared rows, plain words: how (how it answers),
+#                  needs (what it takes to run), reach (how an agent calls it),
+#                  history (Git history), licence (an SPDX-style name, the one
+#                  trait a design entry may spell with digits)
 #   [[tool.row]]   label, pixel, other; win = "pixel" or "other" marks the cell;
+#                  matrix = "callers" or "context" also shows the row in the
+#                  matrix, where a matrix tool without it reads "Not measured";
 #                  page = true keeps a row off the home card; page_other
 #                  replaces `other` on the page when the card quotes a figure
 #                  /benchmarks/ does not carry
@@ -49,10 +57,18 @@
 #   {big.full}
 #   {big.pixel}
 
+# Pixel's own column of the home's matrix.
+[pixel.traits]
+how = "A tree-sitter graph, text and embedding search"
+needs = "One binary, an index in <code>.pixel/</code>"
+reach = "Shell commands via hooks or rules, or MCP"
+history = "Yes, and guarded Git writes"
+licence = "MIT"
+
 [[tool]]
 slug = "gitnexus"
 name = "GitNexus"
-home = true
+matrix = true
 pitch = "A code graph for agents, served as 17 MCP tools."
 about = "A code graph for coding agents, served as MCP tools, with Cypher queries over the graph."
 measure = "head-to-head"
@@ -62,8 +78,16 @@ wins = "Cypher queries, taint analysis, API route maps, and callers in Ruby."
 more = "The 29 cases"
 checked = 2026-09-25
 
+  [tool.traits]
+  how = "A tree-sitter graph in LadybugDB, queried in Cypher; embeddings optional"
+  needs = "Node.js, installed with npm"
+  reach = "MCP tools, a CLI, skills and hooks"
+  history = "No"
+  licence = "PolyForm Noncommercial"
+
   [[tool.row]]
   label = "Callers found (29&nbsp;cases)"
+  matrix = "callers"
   pixel = "0.86"
   other = "0.84"
 
@@ -85,6 +109,7 @@ checked = 2026-09-25
   pixel = "~4,160&nbsp;tok"
   other = "~19,700&nbsp;tok"
   win = "pixel"
+  matrix = "context"
 
   [[tool.row]]
   label = "Cold index of Pixel's repository"
@@ -117,6 +142,227 @@ checked = 2026-09-25
   label = "Licence"
   pixel = "MIT"
   other = "PolyForm Noncommercial"
+  win = "pixel"
+
+[[tool]]
+slug = "serena"
+name = "Serena"
+matrix = true
+about = "An MCP toolkit that gives an agent an IDE's symbol-level retrieval and editing, through language servers or a JetBrains plugin."
+measure = "design"
+answer = '''Serena asks a language server, so its references are type-resolved and it can edit and refactor at the symbol level, which Pixel does not. It runs as an MCP server beside a language server per language. Pixel is one binary with one index for every language it parses, scopes a whole task across files, and adds your Git history.'''
+wins = "type-resolved references, and symbol-level editing and refactoring through the language server."
+checked = 2026-09-25
+
+  [tool.traits]
+  how = "Language servers, or a paid JetBrains plugin"
+  needs = "Python through uv, plus a language server per language"
+  reach = "MCP tools"
+  history = "None documented"
+  licence = "GPL-3.0-or-later"
+
+  [[tool.row]]
+  label = "Callers and references"
+  pixel = "From a syntax graph, marked when incomplete"
+  other = "Type-resolved by the language server"
+  win = "other"
+
+  [[tool.row]]
+  label = "Edits and refactors symbols"
+  pixel = "Renames only, with <code>pixel rename</code>"
+  other = "Yes: replace a body, insert, rename, safe delete"
+  win = "other"
+
+  [[tool.row]]
+  label = "Scopes a task across files"
+  pixel = "Yes, <code>pixel scope-task</code>"
+  other = "No"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Git history"
+  pixel = "Yes, with guarded Git writes"
+  other = "None documented"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Runs as"
+  pixel = "One binary"
+  other = "An MCP server and a language server per language"
+  win = "pixel"
+
+[[tool]]
+slug = "codegraphcontext"
+name = "CodeGraphContext"
+# A soft hyphen, so the matrix's narrow column can break the name.
+column = "CodeGraph\u00adContext"
+matrix = true
+about = "An MCP server and CLI that indexes local code into a graph database, queried for callers, call chains and raw Cypher."
+measure = "design"
+answer = '''Both parse code with tree-sitter into a call graph and answer callers, call chains and impact. CodeGraphContext keeps it in a graph database you choose, runs raw Cypher and draws the graph as HTML. Pixel keeps its index in <code>.pixel/</code>, adds text and plain-English search, your Git history and guarded Git writes, and needs no Python.'''
+wins = "a graph database of your choice, raw Cypher queries, an HTML graph view and code complexity reports."
+checked = 2026-09-25
+
+  [tool.traits]
+  how = "A tree-sitter or SCIP graph in FalkorDB, KuzuDB or Neo4j"
+  needs = "Python, or its Docker image; Neo4j needs a server"
+  reach = "MCP tools and a CLI"
+  history = "None documented"
+  licence = "MIT"
+
+  [[tool.row]]
+  label = "Callers, call chains, impact"
+  pixel = "Yes"
+  other = "Yes"
+
+  [[tool.row]]
+  label = "Raw graph queries"
+  pixel = "No"
+  other = "Cypher"
+  win = "other"
+
+  [[tool.row]]
+  label = "Graph view"
+  pixel = "No"
+  other = "Standalone HTML"
+  win = "other"
+
+  [[tool.row]]
+  label = "Plain-English search"
+  pixel = "Yes, <code>pixel search-meaning</code>"
+  other = "No"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Git history"
+  pixel = "Yes, with guarded Git writes"
+  other = "None documented"
+  win = "pixel"
+
+[[tool]]
+slug = "code-graph-rag"
+name = "code-graph-rag"
+matrix = true
+about = "A knowledge graph of a codebase in Memgraph, queried and edited in plain English through an LLM that writes the Cypher."
+measure = "design"
+answer = '''code-graph-rag builds a knowledge graph in Memgraph with a vector store beside it, and an LLM turns a plain-English question into Cypher; its fixed graph tools need no LLM. It can also edit code and overlay runtime traces. Pixel needs no database, no Docker and no LLM key: one binary, one local index, your Git history.'''
+wins = "plain-English questions turned into Cypher, code edits through the agent, runtime traces and data-flow checks."
+checked = 2026-09-25
+
+  [tool.traits]
+  how = "A tree-sitter graph in Memgraph, vectors in Qdrant; an LLM writes Cypher"
+  needs = "Python, Docker for Memgraph, an LLM key for plain-English queries"
+  reach = "MCP tools, a CLI and a Python SDK"
+  history = "None documented"
+  licence = "MIT"
+
+  [[tool.row]]
+  label = "Callers and callees"
+  pixel = "Yes"
+  other = "Yes"
+
+  [[tool.row]]
+  label = "Plain-English questions"
+  pixel = "Search, <code>pixel search-meaning</code>"
+  other = "Answered through an LLM that writes Cypher"
+  win = "other"
+
+  [[tool.row]]
+  label = "Edits code"
+  pixel = "Renames only"
+  other = "Yes"
+  win = "other"
+
+  [[tool.row]]
+  label = "Services to run"
+  pixel = "None"
+  other = "Memgraph and Qdrant, in Docker"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Git history"
+  pixel = "Yes, with guarded Git writes"
+  other = "None documented"
+  win = "pixel"
+
+[[tool]]
+slug = "claude-context"
+name = "Claude Context"
+matrix = true
+about = "Zilliz's MCP plugin for semantic code search: code split along its syntax tree, embedded, and stored in Milvus or Zilliz Cloud."
+measure = "design"
+answer = '''Claude Context is a search tool: hybrid keyword and vector search over chunks of code, with embeddings from a provider you configure and a vector database, Zilliz Cloud by default. It has no call graph. Pixel searches too, and adds callers, blast radius, task scope and your Git history, from one local index with no API key.'''
+wins = "a managed cloud vector store, a choice of embedding provider, and a VS Code extension."
+checked = 2026-09-25
+
+  [tool.traits]
+  how = "Keyword and vector search over code chunks, in Milvus"
+  needs = "Node.js, a vector database and an embedding provider; cloud by default"
+  reach = "MCP tools, a VS Code extension"
+  history = "None documented"
+  licence = "MIT"
+
+  [[tool.row]]
+  label = "Plain-English search"
+  pixel = "Yes, local"
+  other = "Yes, through an embedding provider"
+
+  [[tool.row]]
+  label = "Callers, blast radius"
+  pixel = "Yes"
+  other = "No"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Where the index lives"
+  pixel = "<code>.pixel/</code>, on your machine"
+  other = "Milvus, or Zilliz Cloud by default"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Keys to configure"
+  pixel = "None"
+  other = "An embedding provider and a vector database"
+  win = "pixel"
+
+[[tool]]
+slug = "graphify"
+name = "graphify"
+matrix = true
+about = "A skill that turns a codebase, with its docs, schemas, PDFs and media, into a knowledge graph an agent can query."
+measure = "design"
+answer = '''graphify builds a knowledge graph of code and of everything around it: docs, SQL schemas, PDFs, images, video. Code is parsed with tree-sitter and no LLM; docs, PDFs and images go through a model, and video is transcribed locally before it does. Pixel stays on code and Git: callers, blast radius, task scope, history search and guarded Git writes, in one binary.'''
+wins = "non-code inputs (docs, PDFs, media, database schemas), community clustering and an interactive graph view."
+checked = 2026-09-25
+
+  [tool.traits]
+  how = "A tree-sitter graph in local files; a model reads non-code inputs"
+  needs = "Python through uv or pipx; a model for docs and media"
+  reach = "A skill, a CLI, hooks, optional MCP"
+  history = "No history search; hooks rebuild the graph on commit"
+  licence = "Apache-2.0"
+
+  [[tool.row]]
+  label = "Reads docs, PDFs, media"
+  pixel = "No, code only"
+  other = "Yes: a model, after local transcription for video"
+  win = "other"
+
+  [[tool.row]]
+  label = "Graph view"
+  pixel = "No"
+  other = "Interactive HTML"
+  win = "other"
+
+  [[tool.row]]
+  label = "Blast radius before an edit"
+  pixel = "Yes, <code>pixel impact</code>"
+  other = "Paths between two nodes, PR impact"
+
+  [[tool.row]]
+  label = "Git history"
+  pixel = "Search and archaeology, guarded writes"
+  other = "Rebuilds on commit"
   win = "pixel"
 
 [[tool]]
