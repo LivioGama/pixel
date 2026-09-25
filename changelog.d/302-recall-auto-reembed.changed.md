@@ -1,0 +1,1 @@
+**recall:** a semantic index built by an older revision of its model now rebuilds itself: the recall daemon empties it and re-embeds the corpus in 5 000-turn slices per pass, and `recall embed` does the same, so the model2vec-rs 0.3 update (it moved 133 of 300 sampled turn vectors) needs no `recall embed --rebuild`. ([#302](https://github.com/LivioGama/pixel/pull/302))

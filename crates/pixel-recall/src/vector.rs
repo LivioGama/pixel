@@ -32,6 +32,12 @@ const HEADER_LEN: usize = 96;
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct VectorMeta {
     pub model_id: String,
+    /// `crate::embed::embedder_revision` of the model when the vectors were
+    /// written: the same model id can embed differently across library
+    /// releases, and vectors of two revisions must not be mixed. Absent in
+    /// stores written before it existed, which reads as revision 0.
+    #[serde(default)]
+    pub revision: u32,
     pub dim: usize,
     pub segments: Vec<String>,
     /// Highest chunk_id stored, for append bookkeeping.
@@ -77,6 +83,27 @@ impl VectorStore {
             ));
         }
         Ok(())
+    }
+
+    /// True when the stored vectors were written by an older (or newer)
+    /// revision of the model the store is built with: they no longer match
+    /// what the model embeds today, so the store must be re-embedded.
+    pub fn stale_revision(&self) -> bool {
+        !self.meta.model_id.is_empty()
+            && self.meta.revision != crate::embed::embedder_revision(&self.meta.model_id)
+    }
+
+    /// Drop every segment but keep the model, now at its current revision:
+    /// the store stays bound to the model it was built with while the
+    /// corpus is embedded again.
+    pub fn reset_for_reembed(&mut self) -> Result<(), String> {
+        for seg in &self.meta.segments {
+            let _ = fs::remove_file(self.dir.join(seg));
+        }
+        self.meta.segments.clear();
+        self.meta.last_chunk_id = 0;
+        self.meta.revision = crate::embed::embedder_revision(&self.meta.model_id);
+        self.write_meta()
     }
 
     fn write_meta(&self) -> Result<(), String> {
@@ -143,6 +170,9 @@ impl VectorStore {
             w.get_ref().sync_all().map_err(|e| e.to_string())?;
         }
         fs::rename(&tmp, self.dir.join(&name)).map_err(|e| e.to_string())?;
+        if self.meta.segments.is_empty() {
+            self.meta.revision = crate::embed::embedder_revision(model_id);
+        }
         self.meta.model_id = model_id.to_string();
         self.meta.dim = dim;
         self.meta.segments.push(name);
@@ -271,5 +301,44 @@ mod tests {
         // Model mismatch is a loud error.
         assert!(store.check_model("other-model", 3).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A store is stale only when bound to a model whose revision moved
+    /// since it was written; a reset keeps the model and takes the current
+    /// revision.
+    #[test]
+    fn stale_revision_and_reset_for_reembed_track_the_model_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = VectorStore::open(dir.path()).unwrap();
+        assert!(!store.stale_revision(), "an empty store is never stale");
+        let potion = crate::embed::POTION_REPO;
+        store
+            .append_segment(potion, 3, &[(7i64, vec![1.0, 0.0, 0.0])])
+            .unwrap();
+        assert_eq!(store.meta.revision, crate::embed::MODEL2VEC_REVISION);
+        assert!(!store.stale_revision());
+        let segment = dir.path().join(&store.meta.segments[0]);
+        assert!(segment.exists());
+
+        store.meta.revision = 0;
+        assert!(store.stale_revision());
+        store.reset_for_reembed().unwrap();
+        assert!(store.meta.segments.is_empty());
+        assert!(!segment.exists(), "old segment files removed");
+        assert_eq!(store.meta.last_chunk_id, 0);
+        assert_eq!(store.meta.model_id, potion);
+        assert_eq!(store.meta.revision, crate::embed::MODEL2VEC_REVISION);
+        let reread = VectorStore::open(dir.path()).unwrap();
+        assert!(!reread.stale_revision(), "the reset is on disk");
+
+        let mut other = VectorStore::open(&dir.path().join("other")).unwrap();
+        other
+            .append_segment(crate::embed::E5_MODEL_ID, 3, &[(1i64, vec![0.0, 1.0, 0.0])])
+            .unwrap();
+        assert_eq!(other.meta.revision, 0);
+        assert!(
+            !other.stale_revision(),
+            "a model at revision 0 written at 0"
+        );
     }
 }

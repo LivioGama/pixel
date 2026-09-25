@@ -61,6 +61,57 @@ pub fn embed_text(agent: &str, cwd: Option<&str>, role: &str, chunk: &str) -> St
 pub const POTION_MODEL_ID: &str = "potion-multilingual-128m";
 pub const E5_MODEL_ID: &str = "multilingual-e5-small-q";
 
+/// The Hugging Face repository of the default potion model: the id a
+/// model2vec embedder records in the vector store (`PIXEL_RECALL_MODEL_REPO`
+/// can name another one).
+pub const POTION_REPO: &str = "minishlab/potion-multilingual-128M";
+
+/// Revision of what a model loaded through model2vec-rs embeds. Bump it when
+/// a library change moves the vectors of unchanged text, with a line below:
+/// a store written at another revision re-embeds itself (`reset_if_stale`).
+///
+/// History: 0 = model2vec-rs 0.2; 1 = model2vec-rs 0.3 drops the unknown
+/// token of Unigram tokenizers (the default potion tokenizer is Unigram
+/// without byte fallback), which moved 133 of 300 sampled turns (cosine
+/// median 1.0000, minimum 0.928).
+pub const MODEL2VEC_REVISION: u32 = 1;
+
+/// Revision of what the fastembed E5 model (`E5_MODEL_ID`) embeds.
+pub const E5_REVISION: u32 = 0;
+
+/// The revision of what `model_id` embeds today. Two embedders exist: the
+/// fastembed E5 one records `E5_MODEL_ID`, and every model2vec one records
+/// its repository (the default potion, one named by
+/// `PIXEL_RECALL_MODEL_REPO`, the potion-code models), all at
+/// `MODEL2VEC_REVISION`.
+pub fn embedder_revision(model_id: &str) -> u32 {
+    if model_id == E5_MODEL_ID {
+        E5_REVISION
+    } else {
+        MODEL2VEC_REVISION
+    }
+}
+
+/// Empty a vector store written at another revision of its model and mark
+/// every turn for embedding again, so the next backfill rebuilds it with no
+/// command to run. Returns whether it reset.
+///
+/// The turns are queued before the vectors go: a failure (or a stop)
+/// between the two leaves the store still stale, so the next pass resets it
+/// again. The other order could leave an empty store marked current with
+/// every turn still marked embedded, which nothing would ever rebuild.
+pub fn reset_if_stale(
+    store: &crate::store::RecallStore,
+    vectors: &mut crate::vector::VectorStore,
+) -> Result<bool, String> {
+    if !vectors.stale_revision() {
+        return Ok(false);
+    }
+    store.reset_embeddings().map_err(|e| e.to_string())?;
+    vectors.reset_for_reembed()?;
+    Ok(true)
+}
+
 /// The model id the existing vector store was built with, if any.
 fn stored_model_id() -> Option<String> {
     let bytes = std::fs::read(crate::vectors_dir().join("meta.json")).ok()?;
@@ -136,14 +187,30 @@ const FLUSH_CHUNKS: usize = 8192;
 
 /// Drain the embed backlog into vector segments. Resumable: an interrupted
 /// run leaves turns unmarked and orphan chunk rows, both healed on entry.
+/// A store written at another revision of its model is emptied first and
+/// rebuilt (`reset_if_stale`).
 pub fn run_backfill(
     store: &crate::store::RecallStore,
     vectors: &mut crate::vector::VectorStore,
     embedder: &mut dyn Embedder,
+    progress: impl FnMut(usize, i64),
+) -> Result<BackfillReport, String> {
+    run_backfill_limited(store, vectors, embedder, usize::MAX, progress)
+}
+
+/// `run_backfill` that stops once `max_turns` turns are embedded (whole
+/// batches, so it may pass the limit by up to one batch): the daemon drains
+/// a large backlog a slice per pass instead of blocking its socket.
+pub fn run_backfill_limited(
+    store: &crate::store::RecallStore,
+    vectors: &mut crate::vector::VectorStore,
+    embedder: &mut dyn Embedder,
+    max_turns: usize,
     mut progress: impl FnMut(usize, i64),
 ) -> Result<BackfillReport, String> {
     let started = std::time::Instant::now();
     let mut report = BackfillReport::default();
+    reset_if_stale(store, vectors)?;
     store
         .drop_orphan_chunks(vectors.meta.last_chunk_id)
         .map_err(|e| e.to_string())?;
@@ -155,7 +222,7 @@ pub fn run_backfill(
     // Keyset cursor over turn ids: rows behind it are either flushed or
     // sitting in `pending_rows` awaiting flush — never re-fetched.
     let mut after_id = 0i64;
-    loop {
+    while report.turns_embedded < max_turns {
         let batch = store
             .pending_embed(after_id, BATCH_TURNS)
             .map_err(|e| e.to_string())?;
@@ -255,7 +322,7 @@ pub mod potion {
         model_id: String,
     }
 
-    const REPO: &str = "minishlab/potion-multilingual-128M";
+    const REPO: &str = super::POTION_REPO;
 
     /// Resolve the transcript model override. Repository `ask` passes its own
     /// model repository explicitly, without changing this process-wide choice.
@@ -511,6 +578,174 @@ mod tests {
         );
         assert_eq!(store.embed_backlog().unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An embedder that answers under a given model id.
+    struct NamedStub(&'static str);
+
+    impl Embedder for NamedStub {
+        fn model_id(&self) -> &str {
+            self.0
+        }
+        fn dims(&self) -> usize {
+            4
+        }
+        fn embed_batch(
+            &mut self,
+            texts: &[&str],
+            _kind: EmbedKind,
+        ) -> Result<Vec<Vec<f32>>, String> {
+            Ok(texts.iter().map(|_| vec![0.5; 4]).collect())
+        }
+    }
+
+    /// A store of `n` short turns in one session, plus its vector dir.
+    fn corpus(
+        tag: &str,
+        n: i64,
+    ) -> (
+        tempfile::TempDir,
+        crate::store::RecallStore,
+        std::path::PathBuf,
+    ) {
+        use crate::model::{Role, TsSource, UnifiedSession, UnifiedTurn};
+        let dir = tempfile::Builder::new().prefix(tag).tempdir().unwrap();
+        let mut store = crate::store::RecallStore::open(&dir.path().join("recall.db")).unwrap();
+        let session = UnifiedSession {
+            agent: "claude",
+            source_session_id: "s1".into(),
+            source_path: "test".into(),
+            cwd: Some("/tmp/x".into()),
+            git_branch: None,
+            title: None,
+            ts_source: TsSource::Iso,
+            is_subagent: false,
+            parent_source_session_id: None,
+        };
+        let turns: Vec<UnifiedTurn> = (0..n)
+            .map(|i| UnifiedTurn {
+                role: Role::Assistant,
+                intent_source: None,
+                ts: Some(i),
+                text: format!("turn number {i}"),
+                truncated: false,
+                source_byte_start: None,
+                source_byte_len: None,
+            })
+            .collect();
+        let st = crate::store::IngestState {
+            file_size: 1,
+            mtime_ms: 1,
+            bytes_ingested: 1,
+            cursor: None,
+        };
+        store.replace_session(&session, &turns, "u1", &st).unwrap();
+        let vectors = dir.path().join("vectors");
+        (dir, store, vectors)
+    }
+
+    /// Rewrite the store's meta as an older build left it: no revision.
+    fn age_meta(vectors: &std::path::Path) {
+        let path = vectors.join("meta.json");
+        let mut meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        meta.as_object_mut().unwrap().remove("revision");
+        std::fs::write(&path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    }
+
+    /// The ids are what the embedders record: a model2vec model's is its
+    /// repository (the default, or any other potion one), E5's its own id.
+    #[test]
+    fn embedder_revision_is_bumped_for_model2vec_models_only() {
+        assert_eq!(embedder_revision(POTION_REPO), 1);
+        assert_eq!(embedder_revision("minishlab/potion-code-16M-v2"), 1);
+        assert_eq!(embedder_revision(E5_MODEL_ID), 0);
+    }
+
+    /// Vectors of an older revision of the same model are dropped and every
+    /// turn is queued again, the model kept; a current store is left alone.
+    #[test]
+    fn reset_if_stale_requeues_every_turn_of_a_store_from_an_older_revision() {
+        let (_dir, store, vdir) = corpus("gpx-stale", 5);
+        let mut vectors = crate::vector::VectorStore::open(&vdir).unwrap();
+        run_backfill(&store, &mut vectors, &mut NamedStub(POTION_REPO), |_, _| {}).unwrap();
+        assert_eq!(vectors.meta.revision, MODEL2VEC_REVISION);
+        assert!(
+            !reset_if_stale(&store, &mut vectors).unwrap(),
+            "current store"
+        );
+        assert_eq!(store.embed_backlog().unwrap(), 0);
+
+        age_meta(&vdir);
+        let mut vectors = crate::vector::VectorStore::open(&vdir).unwrap();
+        assert!(reset_if_stale(&store, &mut vectors).unwrap());
+        assert!(vectors.meta.segments.is_empty());
+        assert_eq!(vectors.meta.model_id, POTION_REPO, "the model stays bound");
+        assert_eq!(vectors.meta.revision, MODEL2VEC_REVISION);
+        assert_eq!(store.embed_backlog().unwrap(), 5);
+        assert!(
+            !reset_if_stale(&store, &mut vectors).unwrap(),
+            "once is enough"
+        );
+    }
+
+    /// A failed re-queue leaves the vectors untouched and the store stale,
+    /// so the next pass tries again instead of trusting an empty store.
+    #[test]
+    fn reset_if_stale_keeps_the_vectors_when_the_turns_cannot_be_requeued() {
+        let (_dir, store, vdir) = corpus("gpx-requeue", 5);
+        let mut vectors = crate::vector::VectorStore::open(&vdir).unwrap();
+        run_backfill(&store, &mut vectors, &mut NamedStub(POTION_REPO), |_, _| {}).unwrap();
+        age_meta(&vdir);
+        let mut vectors = crate::vector::VectorStore::open(&vdir).unwrap();
+        store
+            .connection()
+            .execute_batch("DROP TABLE vector_chunks")
+            .unwrap();
+        assert!(reset_if_stale(&store, &mut vectors).is_err());
+        assert_eq!(vectors.meta.segments.len(), 1, "vectors kept");
+        let reread = crate::vector::VectorStore::open(&vdir).unwrap();
+        assert!(
+            reread.stale_revision(),
+            "still stale on disk: the next pass retries"
+        );
+    }
+
+    /// The rebuild needs no command: a backfill over a stale store embeds
+    /// the whole corpus again at the current revision.
+    #[test]
+    fn run_backfill_rebuilds_a_store_from_an_older_revision() {
+        let (_dir, store, vdir) = corpus("gpx-rebuild", 5);
+        let mut vectors = crate::vector::VectorStore::open(&vdir).unwrap();
+        run_backfill(&store, &mut vectors, &mut NamedStub(POTION_REPO), |_, _| {}).unwrap();
+        age_meta(&vdir);
+        let mut vectors = crate::vector::VectorStore::open(&vdir).unwrap();
+        let report =
+            run_backfill(&store, &mut vectors, &mut NamedStub(POTION_REPO), |_, _| {}).unwrap();
+        assert_eq!(report.turns_embedded, 5);
+        assert!(!vectors.stale_revision());
+        assert_eq!(vectors.meta.segments.len(), 1, "old segments gone, one new");
+    }
+
+    /// The limit stops the drain after the batch that reaches it, so the
+    /// daemon embeds a bounded slice per pass and the rest stays queued.
+    #[test]
+    fn run_backfill_limited_stops_after_the_batch_that_reaches_the_limit() {
+        let (_dir, store, vdir) = corpus("gpx-limited", 300);
+        let mut vectors = crate::vector::VectorStore::open(&vdir).unwrap();
+        let first = run_backfill_limited(
+            &store,
+            &mut vectors,
+            &mut StubEmbedder,
+            BATCH_TURNS,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(first.turns_embedded, BATCH_TURNS);
+        assert_eq!(first.backlog_remaining, 300 - BATCH_TURNS as i64);
+        let rest = run_backfill(&store, &mut vectors, &mut StubEmbedder, |_, _| {}).unwrap();
+        assert_eq!(rest.turns_embedded, 300 - BATCH_TURNS);
+        assert_eq!(store.embed_backlog().unwrap(), 0);
     }
 
     #[test]

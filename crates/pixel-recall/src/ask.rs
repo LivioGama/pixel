@@ -130,6 +130,25 @@ fn word_pattern(word: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Why the semantic channel had nothing to search. A store never built
+/// needs `recall embed`. A store bound to a model but holding no segment was
+/// emptied by a model update: the recall daemon rebuilds it in the
+/// background, while an in-process answer (no daemon) must say how to.
+fn empty_semantic_notice(model_id: &str, daemon_rebuilds: bool) -> &'static str {
+    match (model_id.is_empty(), daemon_rebuilds) {
+        (true, _) => "semantic channel empty (run `pixel recall embed`) — lexical-only answer",
+        (false, true) => {
+            "semantic channel re-embedding after a model update (the recall daemon rebuilds it) — lexical-only answer"
+        }
+        (false, false) => {
+            "semantic channel emptied by a model update (run `pixel recall embed`, or start the recall daemon, to rebuild it) — lexical-only answer"
+        }
+    }
+}
+
+/// `daemon_rebuilds` is true when the recall daemon serves the answer: it
+/// re-embeds an emptied store itself, which the notice then says.
+#[allow(clippy::too_many_arguments)]
 pub fn ask(
     store: &RecallStore,
     segments: &SegmentSet,
@@ -138,6 +157,7 @@ pub fn ask(
     query: &str,
     filters: &SearchFilters,
     k: usize,
+    daemon_rebuilds: bool,
 ) -> Result<AskResult, String> {
     // --- lexical channel: rank turns by how many query words they contain.
     // Harness-injected "user" text (system reminders, global rules) repeats
@@ -231,8 +251,7 @@ pub fn ask(
         Some(embedder) => {
             if vectors.meta.segments.is_empty() {
                 notice = Some(
-                    "semantic channel empty (run `pixel recall embed`) — lexical-only answer"
-                        .to_string(),
+                    empty_semantic_notice(&vectors.meta.model_id, daemon_rebuilds).to_string(),
                 );
             } else {
                 vectors.check_model(embedder.model_id(), embedder.dims())?;
@@ -480,6 +499,82 @@ mod lexical_tests {
     use crate::model::Role;
     use crate::testutil::{TS, add_session};
 
+    /// An embedder that answers every text with the same vector.
+    struct FlatEmbedder;
+
+    impl Embedder for FlatEmbedder {
+        fn model_id(&self) -> &str {
+            crate::embed::POTION_REPO
+        }
+        fn dims(&self) -> usize {
+            3
+        }
+        fn embed_batch(
+            &mut self,
+            texts: &[&str],
+            _kind: crate::embed::EmbedKind,
+        ) -> Result<Vec<Vec<f32>>, String> {
+            Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0]).collect())
+        }
+    }
+
+    /// With a model but no vector to search, `ask` says why, through the
+    /// call site the answer takes: a store never built needs `recall
+    /// embed`; one a model update emptied is being rebuilt when the daemon
+    /// answers, and needs `recall embed` or the daemon when it does not.
+    #[test]
+    fn ask_says_why_the_semantic_channel_is_empty_on_each_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+        add_session(
+            &mut store,
+            "claude",
+            "aaaa1111",
+            &[(Role::Assistant, "the daemon socket rotates on restart")],
+        );
+        let mut segments = SegmentSet::open(&tmp.path().join("segments")).unwrap();
+        segments.index_new(&store).unwrap();
+        let notice = |vectors: &VectorStore, daemon: bool| -> String {
+            ask(
+                &store,
+                &segments,
+                vectors,
+                Some(&mut FlatEmbedder),
+                "daemon socket",
+                &SearchFilters::default(),
+                5,
+                daemon,
+            )
+            .unwrap()
+            .notice
+            .unwrap_or_default()
+        };
+        let never_built = VectorStore::open(&tmp.path().join("never")).unwrap();
+        assert_eq!(notice(&never_built, true), empty_semantic_notice("", true));
+        assert!(notice(&never_built, false).contains("run `pixel recall embed`"));
+
+        let mut emptied = VectorStore::open(&tmp.path().join("emptied")).unwrap();
+        emptied
+            .append_segment(crate::embed::POTION_REPO, 3, &[(1, vec![1.0, 0.0, 0.0])])
+            .unwrap();
+        emptied.reset_for_reembed().unwrap();
+        assert_eq!(
+            notice(&emptied, true),
+            "semantic channel re-embedding after a model update (the recall daemon rebuilds it) — lexical-only answer"
+        );
+        assert_eq!(
+            notice(&emptied, false),
+            "semantic channel emptied by a model update (run `pixel recall embed`, or start the recall daemon, to rebuild it) — lexical-only answer"
+        );
+    }
+
+    #[test]
+    fn empty_semantic_notice_sends_a_store_never_built_to_recall_embed_on_both_paths() {
+        let manual = "semantic channel empty (run `pixel recall embed`) — lexical-only answer";
+        assert_eq!(empty_semantic_notice("", true), manual);
+        assert_eq!(empty_semantic_notice("", false), manual);
+    }
+
     fn group(extra: usize, lexical: bool, semantic: bool) -> AskSessionGroup {
         AskSessionGroup {
             best: AskHit {
@@ -555,6 +650,7 @@ mod lexical_tests {
             "daemon socket",
             &SearchFilters::default(),
             5,
+            false,
         )
         .unwrap();
         assert_eq!(result.groups.len(), 1, "{:?}", result.groups);
