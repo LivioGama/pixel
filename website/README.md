@@ -114,7 +114,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   day, large-file reads per session, tokens per full read, input price,
   working days) with their defaults and help texts; the layout multiplies
   them by the kept rows' saving (min, median, max from
-  `layouts/partials/kept-rates.html`, which the `/benchmarks/` summary reads
+  `layouts/partials/kept-rates.html`, which the home, `/vs/` and the `/benchmarks/` summary read
   too), so the rates move when `data/read_savings.toml` does and are never
   copied. The defaults' result is rendered by Hugo for a visit without
   JavaScript; the inline script recomputes the same figures, formatted as
@@ -166,7 +166,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   measures (method in `docs/bench/read-savings.md`). The token wall, its
   caption's range and median and the `/benchmarks/` table
   (`layouts/shortcodes/read-savings.html`) and the `/savings/` estimate all read it: re-run the script
-  and replace the rows, never one number by hand, then re-render the share
+  and replace the rows, never one number by hand (the kept rows' count, range and median are computed once, in `layouts/partials/kept-rates.html`), then re-render the share
   card (`og/render.sh`), whose figures come from the wall's row.
 - `data/jobs.toml`, `data/savings.toml`: the six animations and the token
   table, both from the README. A job's `text` holds one line on a wide

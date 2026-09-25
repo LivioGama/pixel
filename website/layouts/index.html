@@ -9,11 +9,9 @@
   {{ partial "nav.html" . }}
   {{ $s := hugo.Data.scope }}
   {{/* The token wall's file and the spread its caption quotes: data/read_savings.toml, the well-known files scripts/bench-read-savings.sh measures. */}}
-  {{ $reads := hugo.Data.read_savings.row }}
   {{ $big := partial "wall-row.html" . }}
-  {{ $kept := sort (apply (where $reads "status" "kept") "index" "." "saved") }}
-  {{ $mid := div (len $kept) 2 }}
-  {{ $median := cond (modBool (len $kept) 2) (div (add (index $kept (sub $mid 1)) (index $kept $mid)) 2.0) (index $kept $mid) }}
+  {{/* The kept files' count, range and median: partials/kept-rates.html, which /benchmarks/, /vs/ (partials/alternatives.html) and /savings/ read too. */}}
+  {{ $r := partial "kept-rates.html" . }}
   {{ $bench := "benchmarks/" | relURL }}
   {{/* The supported agents, shown by the hero's line and the Compatibility grid, from data/agents.toml (which also feeds /for/ and the /docs/ wiring table). Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
   {{ $agents := hugo.Data.agents.agent }}
@@ -54,7 +52,7 @@
           <span class="key key--waste">{{ lang.FormatNumberCustom 0 $big.full }} tokens reading the file</span>
           <span class="key key--kept">{{ lang.FormatNumberCustom 0 $big.pixel }} tokens asking Pixel</span>
           {{/* One file is an example, so the caption gives the spread over every kept file, with the link to the table and the excluded one. */}}
-          <span class="wall__unit">One square is 25 tokens. Across <a class="link" href="{{ $bench }}#well-known-files" target="_blank" rel="noopener">{{ len $kept }} well-known files</a>, the agent reads {{ lang.FormatNumber 1 (index $kept 0) }} to {{ lang.FormatNumber 1 (index $kept (sub (len $kept) 1)) }}% less (median {{ lang.FormatNumber 1 $median }}%).</span>
+          <span class="wall__unit">One square is 25 tokens. Across <a class="link" href="{{ $bench }}#well-known-files" target="_blank" rel="noopener">{{ $r.count }} well-known files</a>, the agent reads {{ lang.FormatNumber 1 ($r.min) }} to {{ lang.FormatNumber 1 ($r.max) }}% less (median {{ lang.FormatNumber 1 $r.median }}%).</span>
           <button class="wall__replay" type="button" data-wall-replay hidden>Replay</button>
         </figcaption>
       </figure>
@@ -153,7 +151,7 @@
       </header>
       {{/* The cards are the tools marked `home` in data/alternatives.toml (partials/alternatives.html fills their figures), the same entries the /vs/ pages render: change a figure on content/benchmarks.md first, then there. */}}
       {{/* The kept files' range, for the Teams chapter below. */}}
-      {{ $range := printf "%s to %s%%" (lang.FormatNumber 1 (index $kept 0)) (lang.FormatNumber 1 (index $kept (sub (len $kept) 1))) }}
+      {{ $range := printf "%s to %s%%" (lang.FormatNumber 1 ($r.min)) (lang.FormatNumber 1 ($r.max)) }}
       <div class="vs" data-reveal="stagger">
         {{ range where (partial "alternatives.html" (dict "abs" false)) "home" true }}{{ $tool := . }}
         <article class="vs__card">
@@ -186,7 +184,7 @@
           <p class="roles__who">{{ partial "icon.html" (dict "name" "laptop" "size" 16) }}Developers</p>
           <h3>The agent stops opening whole files to find its way.</h3>
           <ul>
-            <li><strong>{{ $range }} less</strong> read to learn what a large file holds, on {{ len $kept }} well-known files.</li>
+            <li><strong>{{ $range }} less</strong> read to learn what a large file holds, on {{ $r.count }} well-known files.</li>
             <li>Callers of a symbol in a <strong>153&nbsp;ms</strong> median, and the files a task needs before the first edit.</li>
             <li>Same agent, same prompts: <code>pixel install</code> once, and the agent calls Pixel from its own shell.</li>
           </ul>
