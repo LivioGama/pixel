@@ -3,16 +3,22 @@
 Prefer to control your own setup, or using an agent `pixel install` does not
 wire (Cursor, Gemini CLI, Copilot, ...)? You don't need `pixel install`.
 
-`pixel install` does four things, and you can do all of them by hand:
+`pixel install` does these things, and you can do each of them by hand:
 
 1. **Deploy the agent system prompt** to `~/.local/share/pixel/agent-prompt.md`.
 2. **Deploy the sub-agent prompt** to `~/.local/share/pixel/subagent-prompt.md`
    (a short version for Claude Code sub-agents, which see neither the session
    prompt nor its history).
-3. **Wrap `claude`** in your shell profile so every invocation includes
-   those prompts automatically.
+3. **Add lifecycle hooks to `~/.claude/settings.json`**: a `SessionStart`
+   hook injects the agent prompt into every Claude Code session as context,
+   however `claude` is launched (a terminal, an IDE, an agent, cron). No
+   shell wrapper: an older install's `claude()` function in the shell profile
+   is removed.
 4. **Put the prompt into Codex's `config.toml`** as `developer_instructions`,
    so every Codex front end (CLI, desktop app, extension, sub-agents) gets it.
+5. **Put the prompt into Pi's `~/.pi/agent/APPEND_SYSTEM.md`**, and, when
+   their config directories exist, into OpenCode's global `AGENTS.md` and an
+   Antigravity plugin under `~/.gemini/config/`.
 
 ## 1. Install the binary
 
@@ -69,47 +75,37 @@ claude -p --append-system-prompt-file ~/.local/share/pixel/agent-prompt.md \
           "your task"
 ```
 
-Or add a shell function to `~/.zshrc` (or `~/.bashrc`) so it's automatic. It
-adds the sub-agent flag only when `-p`/`--print` is among the arguments
-(`pixel install` writes this block when `claude --version` is at least
-2.1.261, and the plain one-liner from the previous section otherwise; with no
-usable `claude` it keeps whatever an earlier install decided, or writes the
-plain one-liner on a first install; `pixel doctor` tells you to re-run `pixel
-install` once Claude Code crosses the line):
+To make it automatic, do what `pixel install` does: register Pixel's
+lifecycle hooks in `~/.claude/settings.json`. The `SessionStart` one prints
+the deployed `agent-prompt.md` as `hookSpecificOutput.additionalContext`, so
+every session gets the prompt without a flag or a shell function, whatever
+starts `claude`:
 
-```bash
-claude() {
-  local _pixel_arg
-  for _pixel_arg in "$@"; do
-    case "$_pixel_arg" in
-      -p*|-[!-]*p*|--print) command claude --append-system-prompt-file "$HOME/.local/share/pixel/agent-prompt.md" --append-subagent-system-prompt-file "$HOME/.local/share/pixel/subagent-prompt.md" "$@"; return $?;;
-    esac
-  done
-  command claude --append-system-prompt-file "$HOME/.local/share/pixel/agent-prompt.md" "$@"
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "'/path/to/pixel' run-hook session-start", "timeout": 10 }] }
+    ]
+  }
 }
 ```
 
-For fish, put the equivalent in `~/.config/fish/conf.d/pixel.fish`:
-
-```fish
-function claude
-  if contains -- --print $argv; or string match -qr -- '^-[^-]*p' $argv
-    command claude --append-system-prompt-file "$HOME/.local/share/pixel/agent-prompt.md" --append-subagent-system-prompt-file "$HOME/.local/share/pixel/subagent-prompt.md" $argv
-  else
-    command claude --append-system-prompt-file "$HOME/.local/share/pixel/agent-prompt.md" $argv
-  end
-end
-```
-
-`pixel install --shell fish` writes this function inside a
-`# >>> pixel-managed >>>` block in `~/.config/fish/conf.d/pixel.fish`.
-Both variants also treat a short-flag cluster containing `p` (`-pc`, `-cp`)
-as print mode, since Claude Code splits those.
+`pixel install` writes that entry with the absolute path of the `pixel` it
+runs from, beside `UserPromptSubmit` (`run-hook prompt-submit --provider
+claude`), `PostToolUse` on `Edit` (`run-hook post-tool-use --provider claude`)
+and a `SessionStart` entry matched on `compact` (`run-hook post-compaction
+--provider claude`), and leaves any hook of yours in place. Releases before
+the hooks wrapped `claude` in a `claude()` function in `~/.zshrc`,
+`~/.bashrc` or `~/.config/fish/conf.d/pixel.fish`; `pixel install` now
+removes that block, and `pixel doctor` reports one that remains
+(`install.legacy-wrappers`). The hook does not reach sub-agents: in print
+mode, pass `--append-subagent-system-prompt-file` as above.
 
 #### In CI (claude-code-action)
 
-The action runs `claude -p`, so both flags apply. There is no shell wrapper
-there: check the two prompt files into the repository (or copy them in a
+The action runs `claude -p`, so both flags apply. It does not read your
+`~/.claude/settings.json`: check the two prompt files into the repository (or copy them in a
 previous step) and pass the flags through `claude_args`:
 
 ```yaml
@@ -169,7 +165,10 @@ cp crates/pixel-install/assets/pixel-agent-prompt.md ~/.pi/agent/APPEND_SYSTEM.m
 
 ### Any other agent
 
-`pixel install` covers only the three agents above. For any other tool, put
+`pixel install` covers the agents above, plus OpenCode and Antigravity when
+their config directories exist; the website's
+[per-agent pages](https://liviogama.github.io/pixel/for/) list what it writes
+for each, and the plugins or rules files for the others. For any other tool, put
 the full text of `~/.local/share/pixel/agent-prompt.md` wherever that tool
 reads always-on instructions: a rules file (`.cursor/rules`, `GEMINI.md`,
 `.github/copilot-instructions.md`), a system-prompt flag, or a global
@@ -206,14 +205,14 @@ of the prompt in one command.
 
 ## Uninstall
 
-Remove the prompt files, the Pi copy, the `claude` shell function and the
-Codex block:
+Remove the prompt files, the Pi copy, the Claude Code hooks and the Codex
+block:
 
 ```bash
 rm -f ~/.local/share/pixel/agent-prompt.md
 rm -f ~/.local/share/pixel/subagent-prompt.md
 rm -f ~/.pi/agent/APPEND_SYSTEM.md
-# then remove the claude() function from your shell profile and the
+# then remove the `run-hook` entries from ~/.claude/settings.json and the
 # pixel block from developer_instructions in ~/.codex/config.toml
 ```
 

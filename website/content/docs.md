@@ -85,7 +85,7 @@ Each agent CLI below can load Pixel's protocol through its own plugin mechanism,
 | Devin | add `github.com/LivioGama/pixel` as a Devin plugin |
 | Gemini CLI | `gemini extensions install https://github.com/LivioGama/pixel` |
 | Pi | `pi install git:github.com/LivioGama/pixel` |
-| OpenCode | `"plugin": ["@liviogama/pixel"]` in `opencode.json` |
+| OpenCode | no plugin package is published yet: `pixel install` puts the protocol in its global `AGENTS.md` ([OpenCode](../for/opencode/)) |
 | Cursor, Windsurf, Kiro, Cline, Qoder | rules ship under `.cursor/rules/`, `.windsurf/rules/`, `.kiro/steering/`, `.clinerules/` and `.qoder/rules/`: copy them into your project |
 
 Any other agent: paste [`PIXEL.md`](https://github.com/LivioGama/pixel/blob/main/PIXEL.md), the plain-Markdown protocol, into whatever instruction surface it offers. [Manual setup](https://github.com/LivioGama/pixel/blob/main/docs/manual-setup.md) covers wiring the full prompt by hand.
