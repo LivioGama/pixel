@@ -1,0 +1,1 @@
+**docs:** The website has a page per agent under `/for/`: what `pixel install` writes for it and where, the plugin or rules file when it writes nothing, the `pixel doctor` check and the removal. One data file feeds them, the home and the `/docs/` table, and a test holds it to what `pixel install` really writes. ([#282](https://github.com/LivioGama/pixel/pull/282))
