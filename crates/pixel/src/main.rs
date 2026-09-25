@@ -4890,6 +4890,15 @@ fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
 // main
 // ---------------------------------------------------------------------------
 
+/// The `facts` block of a `status` answer when history is built: the daemon
+/// reports an absent history db as `{"present": false}`, which the
+/// renderers must read as "no facts", like a missing block.
+fn present_facts(data: &Value) -> Option<Value> {
+    data.get("facts")
+        .filter(|f| f.get("present").and_then(Value::as_bool) != Some(false))
+        .cloned()
+}
+
 /// `bytes` as mebibytes with one decimal, for the human `status` output.
 fn mib(bytes: u64) -> String {
     format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
@@ -6013,12 +6022,7 @@ fn run_command(
             {
                 data["facts"] = facts;
             }
-            // An absent history db is reported as `{"present": false}`;
-            // the renderers below read it as "no facts".
-            let facts_block = data
-                .get("facts")
-                .filter(|f| f.get("present").and_then(Value::as_bool) != Some(false))
-                .cloned();
+            let facts_block = present_facts(&data);
             if statusline {
                 // Compact one-liner — size + freshness + enrichment, so a
                 // shell prompt/statusline shows staleness & coverage without
@@ -8063,6 +8067,26 @@ fn excavate_show(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn present_facts_drops_an_absent_history_db_and_keeps_the_rest() {
+        assert_eq!(
+            present_facts(&serde_json::json!({"facts": {"present": false}})),
+            None
+        );
+        assert_eq!(present_facts(&serde_json::json!({})), None);
+        let daemon = serde_json::json!({"present": true, "phase": "fresh"});
+        assert_eq!(
+            present_facts(&serde_json::json!({"facts": daemon.clone()})),
+            Some(daemon)
+        );
+        let client = serde_json::json!({"phase": "phase_c"});
+        assert_eq!(
+            present_facts(&serde_json::json!({"facts": client.clone()})),
+            Some(client),
+            "the client-side block carries no `present` key"
+        );
+    }
 
     #[test]
     fn mib_prints_mebibytes_with_one_decimal() {
