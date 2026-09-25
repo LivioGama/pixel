@@ -3,6 +3,7 @@
 //! instead of one per file (linking dominated `cargo test -p pixel-cli`).
 
 mod ask_contract;
+mod audit_cli;
 mod classify_cli;
 mod docs_drift;
 mod doctor_cli;

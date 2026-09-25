@@ -384,15 +384,27 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
 /// rule of `scripts/bench-read-savings.sh`, so the line and the published
 /// table can be re-derived with `wc -c` and agree to the token.
 fn measured_read_section(file_bytes: u64, answer_bytes: u64) -> String {
-    let full_tok = file_bytes / 4;
-    let answer_tok = answer_bytes / 4;
+    let full_tok = read_tokens(file_bytes);
+    let answer_tok = read_tokens(answer_bytes);
     let both = format!("full read {full_tok} tok, pixel answer {answer_tok} tok");
-    if answer_tok < full_tok {
-        let pct = (100.0 * (1.0 - answer_tok as f64 / full_tok as f64)).round() as i64;
-        format!("{both} (-{pct}%)")
-    } else {
-        format!("{both} (no saving)")
+    match saved_percent(full_tok, answer_tok) {
+        Some(pct) => format!("{both} (-{pct}%)"),
+        None => format!("{both} (no saving)"),
     }
+}
+
+/// Tokens a measured read counts for `bytes` of UTF-8: divided by four,
+/// rounded down, the rule `scripts/bench-read-savings.sh` publishes.
+pub fn read_tokens(bytes: u64) -> u64 {
+    bytes / 4
+}
+
+/// The saving of an answer over the whole read, in whole percent rounded to
+/// nearest; `None` when the answer is not smaller, so no caller can print a
+/// zero or negative saving.
+pub fn saved_percent(full_tok: u64, answer_tok: u64) -> Option<i64> {
+    (answer_tok < full_tok)
+        .then(|| (100.0 * (1.0 - answer_tok as f64 / full_tok as f64)).round() as i64)
 }
 
 /// The clause after `unavailable: ` for a record with no comparison. The gap
@@ -1256,6 +1268,19 @@ mod tests {
             measured_read_section(0, 0),
             "full read 0 tok, pixel answer 0 tok (no saving)"
         );
+    }
+
+    /// `pixel audit` prints these two numbers per file and must agree with
+    /// the row above to the token: a tie is no saving, never `-0%`.
+    #[test]
+    fn read_tokens_and_saved_percent_are_the_rows_parts() {
+        assert_eq!(read_tokens(41_462), 10_365);
+        assert_eq!(read_tokens(3), 0);
+        assert_eq!(saved_percent(10_365, 641), Some(94));
+        assert_eq!(saved_percent(100, 75), Some(25));
+        assert_eq!(saved_percent(100, 100), None);
+        assert_eq!(saved_percent(100, 200), None);
+        assert_eq!(saved_percent(0, 0), None);
     }
 
     /// The live line of a measured read carries both counts from the stdout

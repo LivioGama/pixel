@@ -23,7 +23,7 @@ mod metrics;
 mod serve;
 pub use metrics::{
     ComparisonGap, OperationMetrics, WorkflowEvidence, WorkflowTimeEstimate, format_metrics_line,
-    summarize_metrics,
+    read_tokens, saved_percent, summarize_metrics,
 };
 pub use serve::{InProcessReason, ServeRoute, ServeStep};
 

@@ -27,16 +27,16 @@ pub struct CoverageOptions {
 }
 
 #[derive(Debug, Default, Serialize)]
-struct Row {
-    on_disk: u64,
-    indexed: u64,
-    symbols: u64,
+pub(crate) struct Row {
+    pub(crate) on_disk: u64,
+    pub(crate) indexed: u64,
+    pub(crate) symbols: u64,
 }
 
 /// Per-language counts merged from the disk walk and the graph snapshot.
 /// `unrecognized` counts files whose extension maps to no language — they
 /// can never be indexed, which is also coverage information.
-fn collect(root: &Path) -> Result<(BTreeMap<String, Row>, u64, bool), String> {
+pub(crate) fn collect(root: &Path) -> Result<(BTreeMap<String, Row>, u64, bool), String> {
     let mut rows: BTreeMap<String, Row> = BTreeMap::new();
     let mut unrecognized = 0u64;
     for entry in policy_walk(root).flatten() {
@@ -165,7 +165,7 @@ fn render_human(
     out
 }
 
-fn pct(part: u64, whole: u64) -> f64 {
+pub(crate) fn pct(part: u64, whole: u64) -> f64 {
     if whole == 0 {
         0.0
     } else {
