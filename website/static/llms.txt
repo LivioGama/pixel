@@ -49,6 +49,18 @@ One page per agent: what `pixel install` writes for it and where, the plugin or 
 - [Windsurf](https://liviogama.github.io/pixel/for/windsurf/): not touched by `pixel install`; a rules file copied into the project
 - [Antigravity](https://liviogama.github.io/pixel/for/antigravity/): `pixel install` (a Pixel plugin and guard hooks under `~/.gemini/config/`)
 
+## Answers
+
+Short answers to questions developers ask about coding agents, each only where Pixel's benchmarks page carries a figure, with the section it comes from and where Pixel does not win. These are HTML pages; their figures are in [answers.toml](https://raw.githubusercontent.com/LivioGama/pixel/main/website/data/answers.toml), and the site's build fails on a number that is not in the benchmarks section it names.
+
+- [All answers](https://liviogama.github.io/pixel/answers/)
+- [Why does my coding agent read whole files?](https://liviogama.github.io/pixel/answers/why-agents-read-whole-files/): its read tool returns files, not answers; on the eight well-known files, `pixel list-signatures` makes the agent read 79.7 to 97.2% less, median 94.5%
+- [MCP server or CLI: what does an agent tool cost per turn?](https://liviogama.github.io/pixel/answers/mcp-or-cli-context-cost/): ~19,700 tokens per turn for GitNexus's MCP tools, ~4,160 for Pixel's CLI prompt, but ~980 for semble and ~420 for stacklit, both MCP: the size decides, not the protocol
+- [How do I reduce Claude Code's token usage?](https://liviogama.github.io/pixel/answers/reduce-claude-code-tokens/): on one scoping task, 11 runs per side, tokens read −38% and API cost −30% with Pixel; one task, so a direction
+- [Grep or a code index for a coding agent?](https://liviogama.github.io/pixel/answers/grep-or-code-index/): grep finds the line; the whole-file read after it is what an index replaces; grep needs no index
+- [Will my agent actually use the tool I give it?](https://liviogama.github.io/pixel/answers/will-my-agent-use-the-tool/): with Pixel 0.5.0 wired by `pixel install`, Claude Code called it in 11 runs out of 11, 6 to 17 times each; an earlier release, protocol only, was barely called
+- [How do I know what a change will break before the agent edits?](https://liviogama.github.io/pixel/answers/what-will-a-change-break/): `pixel impact` found 0.86 of the callers on 29 blast-radius cases (GitNexus 0.84), weaker on Ruby; every graph answer says when it may be incomplete
+
 ## Benchmarks
 
 - [Benchmarks](https://raw.githubusercontent.com/LivioGama/pixel/main/website/content/benchmarks.md): every number on the website with its method and sample size, losses included

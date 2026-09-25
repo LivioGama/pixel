@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.Language.Locale }}">
+<head>
+  {{ partial "head.html" . }}
+</head>
+<body>
+  <a href="#main" class="skip">Skip to content</a>
+  {{ partial "nav.html" . }}
+  {{/* One question: its entry in data/answers.toml (front matter `answer`), filled and checked by partials/answers.html. The title is the question; the page's Markdown is the detail, and its numbers are held to the same /benchmarks/ sections as the data's. */}}
+  {{ $slug := .Params.answer }}
+  {{ $all := partialCached "answers.html" (dict "abs" false) false }}
+  {{ $a := index (where $all "slug" $slug) 0 }}
+  {{ if not $a }}{{ errorf "%s: answer %q is not in data/answers.toml" .File.Path $slug }}{{ end }}
+  {{ range findRE `[0-9][0-9,.]*[0-9]|[0-9]` .RawContent }}
+    {{ if not (in $a.sections .) }}{{ errorf "%s: %q is not in its /benchmarks/ sections %v" $.File.Path . $a.bench }}{{ end }}
+  {{ end }}
+  {{ $bench := "benchmarks/" | relURL }}
+  {{/* The later of the page's last commit and the day its figures were last checked against /benchmarks/. */}}
+  {{ $updated := .Lastmod }}
+  {{ with $a.checked }}{{ if (time .).After $updated }}{{ $updated = time . }}{{ end }}{{ end }}
+
+  <main class="docs wrap vsp" id="main">
+    <nav class="vsp__crumbs" aria-label="Breadcrumb"><a href="{{ "" | relURL }}" target="_blank" rel="noopener">Pixel</a> / <a href="{{ "answers/" | relURL }}" target="_blank" rel="noopener">Answers</a> / <span aria-current="page">{{ .Title }}</span></nav>
+    <header class="docs__head">
+      <h1>{{ .Title }}</h1>
+      <p class="docs__updated">Updated <time datetime="{{ $updated.Format "2006-01-02" }}">{{ $updated.Format "2 January 2006" }}</time></p>
+    </header>
+
+    <article class="vsp__body">
+      <section class="vsp__answer" aria-labelledby="short-answer">
+        <h2 id="short-answer">Short answer</h2>
+        <p>{{ $a.short | safeHTML }}</p>
+      </section>
+
+      {{ with .Content }}<div class="prose vsp__prose">{{ . }}</div>{{ end }}
+
+      <section aria-labelledby="the-figures">
+        <h2 id="the-figures">The figures</h2>
+        <table class="vs__table vsp__table ans__table">
+          <tbody>
+            {{ range $a.rows }}<tr><th scope="row">{{ .label | safeHTML }}</th><td>{{ .value | safeHTML }}</td></tr>
+            {{ end }}
+          </tbody>
+        </table>
+        <p class="vsp__source">Every figure above is on the benchmarks page, with its sample size and its method: {{ range $i, $s := $a.sources }}{{ if $i }}, {{ end }}<a class="link" href="{{ $bench }}#{{ $s.anchor }}" target="_blank" rel="noopener">{{ $s.title }}</a>{{ end }}.</p>
+      </section>
+
+      <section class="vsp__theirs" aria-labelledby="limits">
+        <h2 id="limits">Where Pixel does not win</h2>
+        <p>{{ $a.limits | safeHTML }}</p>
+      </section>
+
+      <nav class="vsp__more" aria-labelledby="related">
+        <h2 id="related">Related</h2>
+        <ul>
+          {{ range $a.related }}<li><a class="link" href="{{ .RelPermalink }}" target="_blank" rel="noopener">{{ .Title }}</a></li>{{ end }}
+        </ul>
+      </nav>
+
+      <nav class="vsp__more" aria-labelledby="more-answers">
+        <h2 id="more-answers">More answers</h2>
+        <ul>
+          {{ range $all }}{{ if ne .slug $slug }}{{ with site.GetPage (printf "/answers/%s" .slug) }}<li><a class="link" href="{{ .RelPermalink }}" target="_blank" rel="noopener">{{ .Title }}</a></li>{{ end }}{{ end }}{{ end }}
+        </ul>
+      </nav>
+    </article>
+  </main>
+
+  {{ partial "footer.html" . }}
+
+  {{/* The page, the question it answers and its place in the site, by reference to the entities the home's @graph declares (#website, #software): nothing is declared twice. A WebPage, not a QAPage: the answer is the publisher's own, not a forum's. */}}
+  {{ $home := "" | absURL }}
+  {{ $abs := index (where (partialCached "answers.html" (dict "abs" true) true) "slug" $slug) 0 }}
+  {{ $graph := slice
+    (dict
+      "@type" "WebPage"
+      "@id" (printf "%s#webpage" .Permalink)
+      "url" .Permalink
+      "name" .Title
+      "description" (.Description | default ($abs.short | plainify))
+      "inLanguage" site.Language.Locale
+      "dateModified" ($updated.Format "2006-01-02")
+      "isPartOf" (dict "@id" (printf "%s#website" $home))
+      "about" (dict "@id" (printf "%s#software" $home))
+      "breadcrumb" (dict "@id" (printf "%s#breadcrumb" .Permalink))
+      "mainEntity" (dict
+        "@type" "Question"
+        "name" .Title
+        "acceptedAnswer" (dict
+          "@type" "Answer"
+          "text" ($abs.short | plainify)
+          "url" (printf "%s#short-answer" .Permalink))))
+    (dict
+      "@type" "BreadcrumbList"
+      "@id" (printf "%s#breadcrumb" .Permalink)
+      "itemListElement" (slice
+        (dict "@type" "ListItem" "position" 1 "name" "Pixel" "item" $home)
+        (dict "@type" "ListItem" "position" 2 "name" "Answers" "item" ("answers/" | absURL))
+        (dict "@type" "ListItem" "position" 3 "name" .Title "item" .Permalink)))
+  }}
+  <script type="application/ld+json">
+  {{ dict "@context" "https://schema.org" "@graph" $graph | jsonify | safeJS }}
+  </script>
+</body>
+</html>
