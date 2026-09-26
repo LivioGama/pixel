@@ -26,7 +26,12 @@
 #    merged pull request contains (pushed straight to main, so nobody filed
 #    an entry for them); skipped when `gh` is missing or offline;
 # 7. `pixel check-release` runs from the tree exactly as the Release
-#    workflow's verify job runs it, and its exit code is the script's.
+#    workflow's verify job runs it;
+# 8. `scripts/release-prepare-only.py HEAD` checks that the uncommitted diff
+#    holds only what this script writes: the rule the CI `scope` job applies
+#    before it skips the prepare pull request's jobs, so a refusal shows here
+#    instead of as a full CI run. The first failing step's exit code is the
+#    script's.
 #
 # Review the result with `git diff`, then commit `release: prepare x.y.z`.
 set -eu
@@ -403,3 +408,9 @@ if [ -n "$LAST_TAG" ] && command -v gh >/dev/null 2>&1; then
 fi
 
 cargo run -q -p pixel-cli -- check-release "v$VERSION" --repo .
+
+# Absent from a disposable fixture that copies only this script.
+if [ -f scripts/release-prepare-only.py ]; then
+    python3 scripts/release-prepare-only.py HEAD
+    echo "release-prepare-only: the diff is what prepare.sh writes"
+fi

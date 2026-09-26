@@ -16,7 +16,10 @@ Allowed, and nothing else:
 A `Cargo.lock` dependency bump changes its `checksum` line too, so it fails
 the version-line rule and keeps the gates.
 
-Usage: release-prepare-only.py <base-sha> <head-sha>  (diffs base...head)
+Usage: release-prepare-only.py <base> [<head>]
+  With <head>, diffs base...head (CI: the pull request). Without it, diffs
+  <base> against the working tree, untracked files included (prepare.sh:
+  `HEAD`, what it has just written before anything is committed).
 """
 
 import re
@@ -57,8 +60,9 @@ def violations(files, changed_lines):
     return reasons
 
 
-def read_diff(base, head):
-    rng = f"{base}...{head}"
+def read_diff(base, head=None):
+    """The diff base...head, or base against the working tree without head."""
+    rng = base if head is None else f"{base}...{head}"
     status = subprocess.run(
         ["git", "diff", "--name-status", "--no-renames", rng],
         check=True, capture_output=True, text=True,
@@ -67,6 +71,13 @@ def read_diff(base, head):
     for row in status.splitlines():
         letter, path = row.split("\t", 1)
         files[path] = letter[0]
+    if head is None:
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        for path in untracked.splitlines():
+            files[path] = "A"
     patch = subprocess.run(
         ["git", "diff", "-U0", "--no-renames", rng],
         check=True, capture_output=True, text=True,
@@ -84,10 +95,10 @@ def read_diff(base, head):
 
 
 def main(argv):
-    if len(argv) != 3:
-        print(__doc__.strip().splitlines()[-1], file=sys.stderr)
+    if len(argv) not in (2, 3):
+        print(__doc__[__doc__.index("Usage:"):].strip(), file=sys.stderr)
         return 2
-    reasons = violations(*read_diff(argv[1], argv[2]))
+    reasons = violations(*read_diff(*argv[1:]))
     for reason in reasons:
         print(reason, file=sys.stderr)
     return 1 if reasons else 0

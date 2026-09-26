@@ -117,6 +117,31 @@ class ReleasePrepareOnly(unittest.TestCase):
         Path(self.repo, "plugin.yaml").unlink()
         self.assertEqual(self.reasons(), ["plugin.yaml: prepare.sh only edits it (D)"])
 
+    def worktree_reasons(self):
+        cwd = os.getcwd()
+        os.chdir(self.repo)
+        try:
+            return rpo.violations(*rpo.read_diff("HEAD"))
+        finally:
+            os.chdir(cwd)
+
+    # prepare.sh runs the check before anything is committed: the same rule
+    # must hold against the working tree, or the local check passes a diff
+    # that CI then refuses.
+    def test_the_uncommitted_prepare_diff_passes(self):
+        self.bump()
+        self.assertEqual(self.worktree_reasons(), [])
+
+    def test_an_uncommitted_source_change_is_refused(self):
+        self.bump()
+        self.write({"crates/pixel/src/lib.rs": "pub fn f() { panic!() }\n"})
+        self.assertEqual(self.worktree_reasons(), ["crates/pixel/src/lib.rs: not a file prepare.sh writes"])
+
+    def test_an_untracked_file_is_refused(self):
+        self.bump()
+        self.write({"crates/pixel/src/new.rs": "pub fn g() {}\n"})
+        self.assertEqual(self.worktree_reasons(), ["crates/pixel/src/new.rs: not a file prepare.sh writes"])
+
     def test_the_exit_code_is_the_verdict(self):
         self.bump()
         head = self.commit()
