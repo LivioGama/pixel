@@ -1,0 +1,1 @@
+**index:** building an index no longer edits a tracked `.gitignore`: when git does not already ignore `.pixel/`, the entry goes to the clone's own `info/exclude`, so `what-changed` and other read-only commands leave `git status` clean and the next `git checkout` unblocked, and a repo without a `.gitignore` no longer gets one. ([#307](https://github.com/LivioGama/pixel/pull/307))
