@@ -34,7 +34,8 @@
 //! A third receiver rule, also capped at `Probable`, reads a receiver path as
 //! a module (`pixel_rank::signals::is_test_path`, `gitsync::blob_size`): the
 //! free function of that name in the one Rust file whose module path ends
-//! with the receiver's segments. The extractor also records the stated type
+//! with the receiver's segments (exactly, from the caller's module, for a
+//! `crate::`/`self::`/`super::` path). The extractor also records the stated type
 //! of a local receiver in place of the expression (`runner.current_branch()`
 //! with `runner: &GitRunner` is stored with receiver `GitRunner`), which is
 //! what lets the type tiebreak pick `GitRunner::current_branch` among
@@ -167,9 +168,11 @@ pub struct ResolveIndex {
     /// the callee to be one of them, and the call site to sit where the
     /// import's names are in scope.
     import_bindings: HashMap<(i64, String), Vec<ImportTarget>>,
-    /// file_id → the module path a Rust file defines (`rust_module_path`),
-    /// for the module-path receiver rule (`module_match`).
-    rust_modules: HashMap<i64, Vec<String>>,
+    /// file_id → the module path a Rust file defines (`rust_module_path`)
+    /// and how many of its leading segments name the crate
+    /// (`rust_crate_depth`), for the module-path receiver rule
+    /// (`module_match`).
+    rust_modules: HashMap<i64, (Vec<String>, usize)>,
 }
 
 fn callable(kind: SymbolKind) -> bool {
@@ -207,9 +210,10 @@ impl ResolveIndex {
         let rust_modules = {
             let mut stmt = conn.prepare("SELECT id, path FROM files WHERE lang = 'rust'")?;
             let rows = stmt.query_map([], |row| {
+                let path = row.get::<_, String>(1)?;
                 Ok((
                     row.get::<_, i64>(0)?,
-                    rust_module_path(&row.get::<_, String>(1)?),
+                    (rust_module_path(&path), rust_crate_depth(&path)),
                 ))
             })?;
             rows.collect::<Result<HashMap<_, _>, _>>()?
@@ -422,7 +426,7 @@ impl ResolveIndex {
         }
         if has_real_receiver(receiver) && self.defines_in_file(caller_file_id, name) {
             if let Some(r) = receiver
-                && let Some(id) = self.receiver_match(r, name)
+                && let Some(id) = self.receiver_match(caller_file_id, r, name)
             {
                 return Decision::Probable(id);
             }
@@ -447,7 +451,7 @@ impl ResolveIndex {
             // is better evidence than nothing.
             if matches!(raw, Decision::Unresolved)
                 && let Some(r) = receiver
-                && let Some(id) = self.receiver_match(r, name)
+                && let Some(id) = self.receiver_match(caller_file_id, r, name)
             {
                 return Decision::Probable(id);
             }
@@ -496,34 +500,45 @@ impl ResolveIndex {
     /// The candidate a receiver names: the method of the type it ends with
     /// (`qualified_match`), else the free function of the module it spells
     /// (`module_match`).
-    fn receiver_match(&self, receiver: &str, name: &str) -> Option<i64> {
+    fn receiver_match(&self, caller_file_id: i64, receiver: &str, name: &str) -> Option<i64> {
         self.qualified_match(receiver, name)
-            .or_else(|| self.module_match(receiver, name))
+            .or_else(|| self.module_match(caller_file_id, receiver, name))
     }
 
-    /// The sole free function `name` defined in a Rust file whose module path
-    /// ends with the receiver's segments, a leading `crate`/`self`/`super`
-    /// dropped: `pixel_rank::signals` names `crates/pixel-rank/src/signals.rs`,
-    /// `gitsync` any `gitsync.rs` or `gitsync/mod.rs`. Methods never match: a
-    /// module path calls a free function, and a type path is
-    /// `qualified_match`'s. Two files ending the same way (`a/util.rs` and
-    /// `b/util.rs` for `util::f`) are ambiguous and return `None`, as does a
-    /// receiver that is not a plain path.
-    fn module_match(&self, receiver: &str, name: &str) -> Option<i64> {
+    /// The sole free function `name` defined in the Rust file whose module
+    /// path the receiver spells. A path anchored at the caller (`crate::`,
+    /// `self::`, `super::`) is resolved against the caller's own module and
+    /// must equal the file's path; any other path names a module by its
+    /// trailing segments: `pixel_rank::signals` is
+    /// `crates/pixel-rank/src/signals.rs`, `gitsync` any `gitsync.rs` or
+    /// `gitsync/mod.rs`. Methods never match: a module path calls a free
+    /// function, and a type path is `qualified_match`'s. Two files ending the
+    /// same way (`a/util.rs` and `b/util.rs` for `util::f`) are ambiguous and
+    /// return `None`, as do a receiver that is not a plain path and an anchor
+    /// the caller's module cannot place (no Rust caller, `super` past the
+    /// crate root). The caller's module is its file's: inside an inline
+    /// `mod`, `self`/`super` read one level off, which the `Probable` tier
+    /// allows for.
+    fn module_match(&self, caller_file_id: i64, receiver: &str, name: &str) -> Option<i64> {
         if !is_value_receiver(receiver) {
             return None;
         }
-        let segments: Vec<&str> = receiver
-            .trim()
-            .split("::")
-            .skip_while(|s| matches!(*s, "crate" | "self" | "super"))
-            .collect();
+        let segments: Vec<&str> = receiver.trim().split("::").collect();
+        let target = if matches!(segments[0], "crate" | "self" | "super") {
+            let (caller, depth) = self.rust_modules.get(&caller_file_id)?;
+            Some(anchor_module_path(caller, *depth, &segments)?)
+        } else {
+            None
+        };
         let mut hit: Option<i64> = None;
         for cand in self.by_name.get(name)? {
-            let Some(module) = self.rust_modules.get(&cand.file_id) else {
+            let Some((module, _)) = self.rust_modules.get(&cand.file_id) else {
                 continue;
             };
-            if cand.kind != SymbolKind::Function || !ends_with_path(module, &segments) {
+            let names_it = target
+                .as_ref()
+                .map_or_else(|| ends_with_path(module, &segments), |t| module == t);
+            if cand.kind != SymbolKind::Function || !names_it {
                 continue;
             }
             if hit.is_some() {
@@ -676,6 +691,37 @@ fn rust_module_path(path: &str) -> Vec<String> {
         }
     }
     module
+}
+
+/// How many leading segments of `rust_module_path(path)` name the crate: one
+/// when a directory holds `src/`, none for a top-level `src/` or no `src/`.
+fn rust_crate_depth(path: &str) -> usize {
+    let parts: Vec<&str> = path.split('/').collect();
+    usize::from(
+        parts
+            .iter()
+            .rposition(|p| *p == "src")
+            .is_some_and(|src| src > 0),
+    )
+}
+
+/// The module path an anchored `segments` names from a caller in `caller`
+/// (whose first `depth` segments are the crate): `crate::a` is the crate's
+/// `a`, `self::a` the caller's child `a`, each leading `super` one level up.
+/// `None` when a `super` climbs past the crate root.
+fn anchor_module_path(caller: &[String], depth: usize, segments: &[&str]) -> Option<Vec<String>> {
+    let (base, rest) = match segments.first() {
+        Some(&"crate") => (&caller[..depth.min(caller.len())], &segments[1..]),
+        Some(&"self") => (caller, &segments[1..]),
+        _ => {
+            let ups = segments.iter().take_while(|s| **s == "super").count();
+            let keep = caller.len().checked_sub(ups).filter(|k| *k >= depth)?;
+            (&caller[..keep], &segments[ups..])
+        }
+    };
+    let mut path = base.to_vec();
+    path.extend(rest.iter().map(ToString::to_string));
+    Some(path)
 }
 
 /// True iff `module` ends with `segments` (and `segments` is not empty).
@@ -1090,9 +1136,10 @@ mod tests {
     }
 
     /// `is_test_path` in three files, one of them a method: the module path
-    /// picks the free function of the file it spells, `crate`/`self`/`super`
-    /// dropped; a path two files end with, a method-only match, a chained
-    /// receiver and an unknown module pick nothing.
+    /// picks the free function of the file it spells, an anchored one from
+    /// the caller's module; a path two files end with, a method-only match, a
+    /// chained receiver, an unknown module and an anchor no caller module
+    /// places pick nothing.
     #[test]
     fn module_match_picks_the_free_function_of_the_named_module() {
         let mut store = GraphStore::open_in_memory().unwrap();
@@ -1133,31 +1180,75 @@ mod tests {
                 "",
             )
             .unwrap();
+        let rank_lib = store
+            .replace_file("crates/pixel-rank/src/lib.rs", "o5", "rust")
+            .unwrap();
+        let rank_sub = store
+            .replace_file("crates/pixel-rank/src/sub/deep.rs", "o6", "rust")
+            .unwrap();
         let idx = ResolveIndex::build(&store).unwrap();
         let cases = [
-            ("pixel_rank::signals", Some(rank_fn)),
-            ("crate::pixel_rank::signals", Some(rank_fn)),
-            ("pixel_graph::signals", Some(graph_fn)),
-            ("signals", None),
-            ("concept", None),
-            ("pixel_graph::concept", None),
-            ("pixel_rank::signals()", None),
-            ("unknown", None),
-            ("super", None),
+            (ts, "pixel_rank::signals", Some(rank_fn)),
+            (ts, "pixel_graph::signals", Some(graph_fn)),
+            (ts, "signals", None),
+            (ts, "concept", None),
+            (ts, "pixel_graph::concept", None),
+            (ts, "pixel_rank::signals()", None),
+            (ts, "unknown", None),
+            // Anchored paths resolve against the caller's module, exactly.
+            (rank_lib, "crate::signals", Some(rank_fn)),
+            (graph, "crate::signals", Some(graph_fn)),
+            (rank_lib, "self::signals", Some(rank_fn)),
+            (rank_sub, "super::super::signals", Some(rank_fn)),
+            (rank_sub, "super::signals", None),
+            (rank_lib, "crate::pixel_rank::signals", None),
+            (rank_lib, "super::signals", None),
+            (ts, "crate::signals", None),
         ];
-        for (receiver, want) in cases {
+        for (caller, receiver, want) in cases {
             assert_eq!(
-                idx.module_match(receiver, "is_test_path"),
+                idx.module_match(caller, receiver, "is_test_path"),
                 want,
-                "{receiver}"
+                "{receiver} from file {caller}"
             );
         }
         assert_eq!(
-            idx.receiver_match("pixel_rank::signals", "is_test_path"),
+            idx.receiver_match(ts, "pixel_rank::signals", "is_test_path"),
             Some(rank_fn),
             "receiver_match falls back to the module path"
         );
-        assert_eq!(idx.module_match("pixel_rank::signals", "absent"), None);
+        assert_eq!(idx.module_match(ts, "pixel_rank::signals", "absent"), None);
+    }
+
+    #[test]
+    fn anchored_module_paths_start_from_the_caller() {
+        let caller: Vec<String> = ["a", "store", "rows"].map(String::from).to_vec();
+        let cases: [(&[&str], Option<&str>); 5] = [
+            (&["crate", "x"], Some("a::x")),
+            (&["self", "x"], Some("a::store::rows::x")),
+            (&["super", "x"], Some("a::store::x")),
+            (&["super", "super", "x"], Some("a::x")),
+            (&["super", "super", "super", "x"], None),
+        ];
+        for (segments, want) in cases {
+            assert_eq!(
+                anchor_module_path(&caller, 1, segments).map(|p| p.join("::")),
+                want.map(String::from),
+                "{segments:?}"
+            );
+        }
+        assert_eq!(
+            anchor_module_path(&["gitsync".to_string()], 0, &["super", "x"]).map(|p| p.join("::")),
+            Some("x".to_string()),
+            "a crate without a named directory climbs to its root"
+        );
+    }
+
+    #[test]
+    fn rust_crate_depth_counts_the_directory_holding_src() {
+        assert_eq!(rust_crate_depth("crates/pixel-rank/src/signals.rs"), 1);
+        assert_eq!(rust_crate_depth("src/signals.rs"), 0);
+        assert_eq!(rust_crate_depth("tools/gen.rs"), 0);
     }
 
     #[test]
