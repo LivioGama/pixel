@@ -1380,7 +1380,9 @@ fn rust_let_binding(w: &Walker, binding: Node, ident: &str) -> Option<Option<Str
     if !rust_binds(w, pattern, ident) {
         return None;
     }
-    if !rust_is_ident_pattern(w, pattern, ident) {
+    // Bound, so a bare identifier pattern is `ident` itself; anything else
+    // destructures. A `mut` sits beside the pattern, not in it.
+    if pattern.kind() != "identifier" {
         return Some(None);
     }
     Some(
@@ -1412,18 +1414,12 @@ fn rust_param_binding(w: &Walker, params: Node, ident: &str) -> Option<Option<St
         if !rust_binds(w, pattern, ident) {
             continue;
         }
-        if !rust_is_ident_pattern(w, pattern, ident) {
+        if pattern.kind() != "identifier" {
             return Some(None);
         }
         return Some(ty.and_then(|ty| rust_type_name(w, ty)));
     }
     None
-}
-
-/// True iff `pattern` is the single binding `ident`. A `mut` sits beside the
-/// pattern (`let mut ident`, `mut ident: T`), not in it.
-fn rust_is_ident_pattern(w: &Walker, pattern: Node, ident: &str) -> bool {
-    pattern.kind() == "identifier" && w.text(pattern) == ident
 }
 
 /// True iff an identifier `ident` appears in `pattern`: a pattern holding it
@@ -3479,6 +3475,8 @@ export function wire(emitter: any) {
             "fn opaque(runner: impl Branch) { runner.current_branch(); }",
             "fn lower(runner: &GitRunner) { GitRunner::new(r).current_branch(); git::new(r).current_branch(); }",
             "fn opener(r: &Path) { GitRunner::open(r).current_branch(); }",
+            "fn wrapped(r: &Path) { let Wrapper(runner) = Wrapper::new(r); runner.current_branch(); }",
+            "fn wrapped_param(Wrapper(runner): Wrapper) { runner.current_branch(); }",
         ]
         .join("\n");
         let got = rust_receivers(&source, "current_branch");
@@ -3496,6 +3494,8 @@ export function wire(emitter: any) {
             (11, "GitRunner"),
             (11, "git::new(r)"),
             (12, "GitRunner::open(r)"),
+            (13, "runner"),
+            (14, "runner"),
         ]
         .map(|(line, ty)| (line, Some(ty.to_string())));
         assert_eq!(got, want);
