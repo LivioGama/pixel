@@ -418,7 +418,10 @@ Defined cases: `t ∈ C_s` → `identity` witness; `added` symbols are in
 negative becomes `unknown/unanchored_changes` (a positive found elsewhere
 stays valid); empty diff → `absent_in_snapshot` with `changed_symbols: 0`
 and `M` trivially true; `uncovered_changes` non-empty → any negative
-becomes `unknown/unmapped_changes`.
+becomes `unknown/unmapped_changes`. *Superseded by the 2026-09-26
+measurement (C3 below): the narrowed predicate lists uncovered portions in
+`coverage` and counts them in the summary instead of downgrading; the
+deleted-symbol case stands.*
 
 Every `diff-reaches` summary ends with: "This follows indexed call
 relations only; it does not cover constants, types, schemas, imports,
@@ -454,6 +457,33 @@ Before Delivery 2 the abstention rate per motif is measured on reference
 repos; if it makes the command unusable, the predicate is explicitly
 narrowed to mapped symbols in its name and summary, never by hiding
 omissions.
+
+**Measured 2026-09-26, and the rule applies**
+([docs/bench/evaluate-abstention.md](../bench/evaluate-abstention.md)).
+Under the whole-change promise, 96 % to 100 % of commits abstain on pixel,
+GitNexus and openclaw, and 68 % on a Rails monolith. Even if docs, tests,
+comments, imports, attributes and assets stopped downgrading, 56 % to 90 %
+still would, on module-level code outside any symbol and on configuration.
+Both are real behaviour the call graph cannot see, so no refinement of the
+motif list rescues the promise. Delivery 2 therefore ships the narrowed
+predicate:
+
+- **Name**: `changed-symbols-reach` (`Predicate::ChangedSymbolsReach`, wire
+  tag `changed_symbols_reach`), renamed from `diff-reaches` in the Delivery 2
+  PR together with the proto variant and its summary constant. The earlier
+  sections keep the old name until then.
+- **Claim**: a path exists, or none exists, from or to the changed symbols
+  the graph maps (`C_s`), within the stored relation. Nothing is said about
+  the rest of the change.
+- **Unmapped portions**: `uncovered_changes` no longer downgrades a
+  negative. Every portion is listed in `coverage` with its motif, and the
+  summary's first sentence counts them ("…; 3 changed portions have no
+  symbol and are not covered"). `unmapped_changes` is never returned by this
+  predicate; the reason stays reserved for a future whole-change predicate.
+- **Deleted symbols**: `unanchored` still turns a negative into
+  `unknown/unanchored_changes`. A deleted symbol was part of the change the
+  predicate is about, and the current graph cannot anchor it. Measured cost:
+  8 % to 42 % of commits.
 
 ### Later — `diff-touches`, policy
 
@@ -521,6 +551,10 @@ below already forbids a synchronous hook in that case.
 - Targets to measure, not to claim: warm p95 < 100 ms in a hook, < 300 ms
   for an agent call on the reference repo, whole-tree check included. If
   missed, the command is not placed in any synchronous hook by default.
+  Measured on openclaw (43 839 graph files, 2026-09-26): `what-changed`,
+  which the diff predicate builds on, took about 100 s per call end to end,
+  12 to 20 s of it the incremental graph update
+  ([evaluate-abstention.md](../bench/evaluate-abstention.md#cost)).
 
 ## `call-path` migration
 
@@ -579,9 +613,13 @@ Demo transcript (Delivery 2, 30 s, every step shown):
    `probable`: `absent_in_snapshot` **in the exact relation**, first
    sentence naming the relation. This is a bounded absence, shown as such,
    not an abstention.
-5. Edit a constant next to `charge`: `unknown/unmapped_changes` with the
-   uncovered range and motif `outside_symbol`. This is the real refusal,
-   and it changes the answer.
+5. Edit a constant next to `charge`: `absent_in_snapshot` for the changed
+   symbols the graph maps, with the first sentence counting one changed
+   portion without a symbol (motif `outside_symbol`, range listed). This is
+   the reserve, stated in the answer. Then delete `charge`:
+   `unknown/unanchored_changes`. This is the real refusal, and it changes
+   the answer. (Revised after the C3 measurement; before it, step 5 showed
+   the constant edit itself as `unknown/unmapped_changes`.)
 
 ## Arbitrations
 
@@ -631,6 +669,9 @@ time of writing.
    negative.
 7. `--json` on exits 2 and 3 yields one parseable object.
 8. Abstention rate of `diff-reaches` per motif, measured, leaves real use.
+   **Measured 2026-09-26**: the whole-change promise does not leave real use,
+   so the predicate is narrowed to mapped symbols (C3,
+   `changed-symbols-reach`).
 9. The demo transcript includes the refresh and distinguishes bounded
    absence, reserve, and abstention.
 10. The `call-path` migration and the compatibility policy from Delivery 1
