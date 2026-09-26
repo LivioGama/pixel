@@ -27,6 +27,7 @@ mod support;
 mod targets_cli;
 mod uninstall_cli;
 #[cfg(unix)]
+mod update_notice_cli;
 mod upgrade_cli;
 mod version_cli;
 mod web_search_cli;

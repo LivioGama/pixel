@@ -41,6 +41,7 @@ This policy covers the website. The `pixel` command-line tool runs on your machi
 
 - first-use model downloads from Hugging Face;
 - Git remote operations you ask for;
+- at most once a day, and only when a command runs at a terminal, one request to GitHub for the latest release tag, so it can tell you an update is out; GitHub sees your IP address and the pixel version, nothing about your code or usage. `PIXEL_NO_UPDATE_CHECK=1` turns it off;
 - two opt-in commands that send their input to a service: `pixel classify` sends it to the model endpoint you configure, and `pixel web-search` sends it to the search endpoint you configure, or to DuckDuckGo and Wikipedia when none is configured.
 
 ## Your rights
