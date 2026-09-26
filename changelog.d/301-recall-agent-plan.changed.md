@@ -1,1 +1,0 @@
-**recall:** `recall search --agent` walks the time index and stops at the first page when the agent's sessions hold over 20 000 turns, instead of sorting them all first (`recall search . --agent claude --limit 50`, 248k turns: 1.34 s to 11 ms). A smaller agent, or one whose turns sit behind more newer turns, keeps the sort. ([#301](https://github.com/LivioGama/pixel/pull/301))
