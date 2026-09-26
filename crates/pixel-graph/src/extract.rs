@@ -1420,16 +1420,10 @@ fn rust_param_binding(w: &Walker, params: Node, ident: &str) -> Option<Option<St
     None
 }
 
-/// True iff `pattern` is the single binding `ident` (`ident`, `mut ident`).
+/// True iff `pattern` is the single binding `ident`. A `mut` sits beside the
+/// pattern (`let mut ident`, `mut ident: T`), not in it.
 fn rust_is_ident_pattern(w: &Walker, pattern: Node, ident: &str) -> bool {
-    match pattern.kind() {
-        "identifier" => w.text(pattern) == ident,
-        "mut_pattern" => each_child(pattern)
-            .into_iter()
-            .filter(Node::is_named)
-            .any(|c| rust_is_ident_pattern(w, c, ident)),
-        _ => false,
-    }
+    pattern.kind() == "identifier" && w.text(pattern) == ident
 }
 
 /// True iff an identifier `ident` appears in `pattern`: a pattern holding it
@@ -3440,6 +3434,7 @@ export function wire(emitter: any) {
             "fn default_ctor() { git::GitRunner::default().current_branch(); }",
             "fn closure(runner: &GitRunner) { let f = || runner.current_branch(); }",
             "fn nearest(runner: &Old) { let runner = GitRunner::new(root); runner.current_branch(); }",
+            "fn other_names(runner: &GitRunner) { let branch = 1; for x in xs { runner.current_branch(); } }",
             "struct Store;",
             "impl Store { fn open() { let s = Self::new(); s.current_branch(); let t = Self {}; t.current_branch(); } }",
         ]
@@ -3455,8 +3450,9 @@ export function wire(emitter: any) {
             (7, "GitRunner"),
             (8, "GitRunner"),
             (9, "GitRunner"),
-            (11, "Store"),
-            (11, "Store"),
+            (10, "GitRunner"),
+            (12, "Store"),
+            (12, "Store"),
         ]
         .map(|(line, ty)| (line, Some(ty.to_string())));
         assert_eq!(got, want);
@@ -3482,6 +3478,7 @@ export function wire(emitter: any) {
             "fn later() { runner.current_branch(); let runner = GitRunner::new(r); }",
             "fn opaque(runner: impl Branch) { runner.current_branch(); }",
             "fn lower(runner: &GitRunner) { GitRunner::new(r).current_branch(); git::new(r).current_branch(); }",
+            "fn opener(r: &Path) { GitRunner::open(r).current_branch(); }",
         ]
         .join("\n");
         let got = rust_receivers(&source, "current_branch");
@@ -3498,6 +3495,7 @@ export function wire(emitter: any) {
             (10, "runner"),
             (11, "GitRunner"),
             (11, "git::new(r)"),
+            (12, "GitRunner::open(r)"),
         ]
         .map(|(line, ty)| (line, Some(ty.to_string())));
         assert_eq!(got, want);
