@@ -64,32 +64,42 @@ fn qualified_call_no_longer_links_the_callers_own_same_name_symbol() {
         .find(|s| s.file_id == bridge_file.id)
         .expect("bridge's own `g` is extracted");
 
+    let graph_file = store
+        .file_by_path("crates/graph/src/build.rs")
+        .unwrap()
+        .unwrap();
+    let graph_f = store
+        .symbols_by_name("f", None, 10)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.file_id == graph_file.id)
+        .expect("graph's `f` is extracted");
+
     // Pre-fix, `graph::build::f()` inside `f` resolved (Probable) to `f`
-    // itself: the wrapper was its own caller. The call is now unresolved.
-    assert!(
-        store
-            .edges_from(bridge_f.id, Some(EdgeKind::Calls))
-            .unwrap()
-            .is_empty(),
-        "the qualified call must not link `f` to itself"
+    // itself: the wrapper was its own caller. The receiver spells the module
+    // `graph::build`, so the call now links to that file's `f`, at Probable:
+    // the path is read from the file layout, not proven by an import.
+    let calls = store
+        .edges_from(bridge_f.id, Some(EdgeKind::Calls))
+        .unwrap();
+    assert_eq!(calls.len(), 1, "one call site, one edge: {calls:?}");
+    assert_eq!(
+        calls[0].dst_id, graph_f.id,
+        "the qualified call targets graph's `f`"
     );
+    assert_eq!(calls[0].tier, Tier::Probable);
     // The unqualified `f()` inside `g` still resolves Exact to the local `f`.
     let callers = store.edges_to(bridge_f.id, Some(EdgeKind::Calls)).unwrap();
     assert_eq!(callers.len(), 1, "callers: {callers:?}");
     assert_eq!(callers[0].src_id, bridge_g.id);
     assert_eq!(callers[0].tier, Tier::Exact);
-    // The unresolved row keeps the epistemic envelope honest, which is what
-    // makes `pixel plan --query dead-code` skip the name.
+    // No `f` site is left unresolved.
     let envelope = store.envelope_for_name("f").unwrap();
-    assert!(envelope.lower_bound, "envelope: {envelope:?}");
-    assert_eq!(
-        envelope.unresolved_same_name, 1,
-        "one unresolved `graph::build::f()` site"
-    );
-    // `pixel plan --query dead-code` keys on that envelope: the real `f` has
-    // no linked caller, so without it the name would be listed as removable.
-    // The genuinely uncalled `h` (no same-name shadow) is still listed, so
-    // the assertion is not vacuous.
+    assert!(!envelope.lower_bound, "envelope: {envelope:?}");
+    assert_eq!(envelope.unresolved_same_name, 0);
+    // `pixel plan --query dead-code`: the real `f` now has its caller, so it
+    // is not listed; the genuinely uncalled `h` still is, so the assertion is
+    // not vacuous.
     let runner = GitRunner::new(root.path());
     let findings = run_plan_queries(&store, root.path(), &runner, &[PlanQuery::DeadCode]).unwrap();
     assert!(
@@ -102,8 +112,58 @@ fn qualified_call_no_longer_links_the_callers_own_same_name_symbol() {
         findings
             .iter()
             .all(|f| f.file != "crates/graph/src/build.rs"),
-        "the shadowed `f` must not be listed as dead: {findings:?}"
+        "the called `f` must not be listed as dead: {findings:?}"
     );
+}
+
+/// A module path shared by two files names neither: `util::f()` with a
+/// `util.rs` in two crates stays unresolved (the envelope says so), while
+/// `a::util::f()`, which only one of them ends with, links to it.
+#[test]
+fn a_module_path_two_files_end_with_stays_unresolved() {
+    let root = tempfile::tempdir().unwrap();
+    for (path, body) in [
+        ("crates/a/src/util.rs", "pub fn f() -> u32 {\n    1\n}\n"),
+        ("crates/b/src/util.rs", "pub fn f() -> u32 {\n    2\n}\n"),
+        (
+            "crates/app/src/lib.rs",
+            "pub fn vague() -> u32 {\n    util::f()\n}\n\npub fn precise() -> u32 {\n    a::util::f()\n}\n",
+        ),
+    ] {
+        let path = root.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+    let db = root.path().join(".pixel/graph.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    build_graph(root.path(), &db).unwrap();
+    let store = GraphStore::open(&db).unwrap();
+
+    let symbol = |name: &str, path: &str| {
+        let file = store.file_by_path(path).unwrap().unwrap();
+        store
+            .symbols_by_name(name, None, 10)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.file_id == file.id)
+            .unwrap()
+    };
+    let a_f = symbol("f", "crates/a/src/util.rs");
+    let vague = symbol("vague", "crates/app/src/lib.rs");
+    let precise = symbol("precise", "crates/app/src/lib.rs");
+
+    let vague_calls = store.edges_from(vague.id, Some(EdgeKind::Calls)).unwrap();
+    assert!(
+        vague_calls.is_empty(),
+        "`util::f()` must not pick one of the two `util.rs`: {vague_calls:?}"
+    );
+    let calls = store.edges_from(precise.id, Some(EdgeKind::Calls)).unwrap();
+    assert_eq!(calls.len(), 1, "calls: {calls:?}");
+    assert_eq!(calls[0].dst_id, a_f.id);
+    assert_eq!(calls[0].tier, Tier::Probable);
+    let envelope = store.envelope_for_name("f").unwrap();
+    assert!(envelope.lower_bound);
+    assert_eq!(envelope.unresolved_same_name, 1, "only `util::f()` is left");
 }
 
 #[test]
