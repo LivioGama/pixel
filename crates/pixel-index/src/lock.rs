@@ -67,6 +67,13 @@ pub fn is_pixel_only_gitignore_text(content: &str) -> bool {
 /// command such as `what-changed` dirty the tree it reported on, put that
 /// edit in its own diff, and blocked the next `git checkout`.
 ///
+/// The entry is written at most once. A `!.pixel/` in the tracked
+/// `.gitignore` outranks `info/exclude`, so the sidecar stays visible and
+/// `check-ignore` keeps failing; the entry already present stops a second
+/// append rather than one per build. The exclude file is handled as bytes
+/// and left untouched on any read error but "absent": a non-UTF-8 byte in a
+/// user's rules must not turn into an empty file.
+///
 /// No-op outside a git work tree root or when git cannot run; idempotent;
 /// non-fatal.
 pub fn ensure_pixel_gitignored(root: &Path) {
@@ -86,11 +93,22 @@ pub fn ensure_pixel_gitignored(root: &Path) {
     };
     // `--git-path` answers relative to the `-C` directory unless absolute.
     let path = root.join(String::from_utf8_lossy(&exclude).trim());
-    let mut content = std::fs::read_to_string(&path).unwrap_or_default();
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
+    let mut content = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return,
+    };
+    let entry = format!("/{sidecar}");
+    if content
+        .split(|b| *b == b'\n')
+        .any(|line| line.trim_ascii() == entry.as_bytes())
+    {
+        return;
     }
-    content.push_str(&format!("{GITIGNORE_HEADER}/{sidecar}\n"));
+    if !content.is_empty() && !content.ends_with(b"\n") {
+        content.push(b'\n');
+    }
+    content.extend_from_slice(format!("{GITIGNORE_HEADER}{entry}\n").as_bytes());
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -283,6 +301,59 @@ mod tests {
         let once = std::fs::read_to_string(exclude_file(&git)).unwrap();
         ensure_pixel_gitignored(&dir);
         assert_eq!(std::fs::read_to_string(exclude_file(&git)).unwrap(), once);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A tracked `!.pixel/` outranks `info/exclude`: `check-ignore` keeps
+    /// failing, and every build used to append one more entry. It is
+    /// written once, and the sidecar is left as visible as the user asked.
+    #[test]
+    fn a_negated_sidecar_gets_one_exclude_entry_not_one_per_build() {
+        let (dir, git) = git_repo();
+        std::fs::write(dir.join(".gitignore"), "!.pixel/\n").unwrap();
+        let exclude = exclude_file(&git);
+        std::fs::remove_file(&exclude).ok();
+
+        ensure_pixel_gitignored(&dir);
+        ensure_pixel_gitignored(&dir);
+        ensure_pixel_gitignored(&dir);
+
+        assert_eq!(
+            std::fs::read_to_string(&exclude).unwrap(),
+            format!("{GITIGNORE_HEADER}/.pixel/\n")
+        );
+        assert!(git.run_opt(&["check-ignore", "-q", ".pixel/"]).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rules the user wrote in another encoding survive byte for byte: a
+    /// UTF-8 read of them failed and the file was rewritten from empty.
+    #[test]
+    fn a_non_utf8_exclude_keeps_its_bytes() {
+        let (dir, git) = git_repo();
+        let exclude = exclude_file(&git);
+        std::fs::write(&exclude, b"caf\xe9/\n").unwrap();
+
+        ensure_pixel_gitignored(&dir);
+
+        let mut expected = b"caf\xe9/\n".to_vec();
+        expected.extend_from_slice(format!("{GITIGNORE_HEADER}/.pixel/\n").as_bytes());
+        assert_eq!(std::fs::read(&exclude).unwrap(), expected);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An exclude path that cannot be read for another reason than being
+    /// absent (here a directory) is left as it is, never replaced.
+    #[test]
+    fn an_unreadable_exclude_is_left_alone() {
+        let (dir, git) = git_repo();
+        let exclude = exclude_file(&git);
+        std::fs::remove_file(&exclude).ok();
+        std::fs::create_dir_all(exclude.join("kept")).unwrap();
+
+        ensure_pixel_gitignored(&dir);
+
+        assert!(exclude.join("kept").is_dir(), "the directory is untouched");
         std::fs::remove_dir_all(&dir).ok();
     }
 
