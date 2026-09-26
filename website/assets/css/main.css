@@ -550,6 +550,23 @@ main { counter-reset: chapter; }
 .how__icon { position: absolute; top: 22px; right: 20px; color: var(--green-hi); opacity: 0.9; filter: drop-shadow(0 0 6px rgba(34, 197, 94, 0.45)); }
 .how h3 { font: 700 1.9rem/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; }
 .how p { margin: 12px 0 0; color: var(--ink-soft); font-size: 0.98rem; }
+/* The spec sheet under the steps: label above value, six cells in a row. */
+.specs { margin: 40px 0 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.specs div { padding: 16px 12px; }
+.specs div + div { border-left: 1px solid var(--line); }
+.specs dt { font: 600 0.72rem/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
+.specs dd { margin: 8px 0 0; color: var(--ink); }
+@media (max-width: 1000px) {
+  .specs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .specs div:nth-child(4) { border-left: 0; }
+  .specs div:nth-child(n+4) { border-top: 1px solid var(--line); }
+}
+@media (max-width: 560px) {
+  .specs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .specs div:nth-child(n) { border-left: 0; border-top: 0; }
+  .specs div:nth-child(even) { border-left: 1px solid var(--line); }
+  .specs div:nth-child(n+3) { border-top: 1px solid var(--line); }
+}
 .how code, .faq code, .yours code { background: var(--ground-2); padding: 1px 6px; border-radius: 3px; }
 @media (max-width: 1000px) {
   .how { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 40px 40px; }
