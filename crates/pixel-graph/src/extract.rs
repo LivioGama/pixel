@@ -1275,8 +1275,12 @@ fn rust_callee(w: &mut Walker, call: Node, f: Node) -> Option<String> {
         }
         "field_expression" => {
             if let Some(name) = field_text(w, f, "field") {
+                // `.` marks a method call (`split_method_receiver`): the
+                // receiver is a value, never a module path.
                 let recv = f.child_by_field_name("value").map(|value| {
-                    rust_receiver_type(w, call, value).unwrap_or_else(|| w.text(value))
+                    let receiver =
+                        rust_receiver_type(w, call, value).unwrap_or_else(|| w.text(value));
+                    format!(".{receiver}")
                 });
                 w.push_call(name.clone(), recv, call);
                 Some(name)
@@ -3450,7 +3454,7 @@ export function wire(emitter: any) {
             (12, "Store"),
             (12, "Store"),
         ]
-        .map(|(line, ty)| (line, Some(ty.to_string())));
+        .map(|(line, ty)| (line, Some(format!(".{ty}"))));
         assert_eq!(got, want);
     }
 
@@ -3497,7 +3501,7 @@ export function wire(emitter: any) {
             (13, "runner"),
             (14, "runner"),
         ]
-        .map(|(line, ty)| (line, Some(ty.to_string())));
+        .map(|(line, ty)| (line, Some(format!(".{ty}"))));
         assert_eq!(got, want);
     }
 

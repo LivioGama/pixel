@@ -169,10 +169,10 @@ pub struct ResolveIndex {
     /// import's names are in scope.
     import_bindings: HashMap<(i64, String), Vec<ImportTarget>>,
     /// file_id → the module path a Rust file defines (`rust_module_path`)
-    /// and how many of its leading segments name the crate
-    /// (`rust_crate_depth`), for the module-path receiver rule
-    /// (`module_match`).
-    rust_modules: HashMap<i64, (Vec<String>, usize)>,
+    /// and how many of its leading segments name its Cargo target's crate
+    /// root (`rust_crate_depth`, `None` outside `src/`), for the module-path
+    /// receiver rule (`module_match`).
+    rust_modules: HashMap<i64, (Vec<String>, Option<usize>)>,
 }
 
 fn callable(kind: SymbolKind) -> bool {
@@ -411,6 +411,7 @@ impl ResolveIndex {
         receiver: Option<&str>,
         site_line: Option<u32>,
     ) -> Decision {
+        let (receiver, method_call) = split_method_receiver(receiver);
         if self.ruby_files.contains(&caller_file_id)
             && self.ambiguous_local_name(caller_file_id, name)
         {
@@ -426,7 +427,7 @@ impl ResolveIndex {
         }
         if has_real_receiver(receiver) && self.defines_in_file(caller_file_id, name) {
             if let Some(r) = receiver
-                && let Some(id) = self.receiver_match(caller_file_id, r, name)
+                && let Some(id) = self.receiver_match(caller_file_id, r, name, method_call)
             {
                 return Decision::Probable(id);
             }
@@ -451,7 +452,7 @@ impl ResolveIndex {
             // is better evidence than nothing.
             if matches!(raw, Decision::Unresolved)
                 && let Some(r) = receiver
-                && let Some(id) = self.receiver_match(caller_file_id, r, name)
+                && let Some(id) = self.receiver_match(caller_file_id, r, name, method_call)
             {
                 return Decision::Probable(id);
             }
@@ -498,11 +499,21 @@ impl ResolveIndex {
     }
 
     /// The candidate a receiver names: the method of the type it ends with
-    /// (`qualified_match`), else the free function of the module it spells
-    /// (`module_match`).
-    fn receiver_match(&self, caller_file_id: i64, receiver: &str, name: &str) -> Option<i64> {
-        self.qualified_match(receiver, name)
-            .or_else(|| self.module_match(caller_file_id, receiver, name))
+    /// (`qualified_match`), else, for a path call (`util::run()`, never the
+    /// method call `util.run()`, which calls a method of the value `util`),
+    /// the free function of the module it spells (`module_match`).
+    fn receiver_match(
+        &self,
+        caller_file_id: i64,
+        receiver: &str,
+        name: &str,
+        method_call: bool,
+    ) -> Option<i64> {
+        self.qualified_match(receiver, name).or_else(|| {
+            (!method_call)
+                .then(|| self.module_match(caller_file_id, receiver, name))
+                .flatten()
+        })
     }
 
     /// The sole free function `name` defined in the Rust file whose module
@@ -514,19 +525,21 @@ impl ResolveIndex {
     /// `gitsync/mod.rs`. Methods never match: a module path calls a free
     /// function, and a type path is `qualified_match`'s. Two files ending the
     /// same way (`a/util.rs` and `b/util.rs` for `util::f`) are ambiguous and
-    /// return `None`, as do a receiver that is not a plain path and an anchor
-    /// the caller's module cannot place (no Rust caller, `super` past the
-    /// crate root). The caller's module is its file's: inside an inline
+    /// return `None`, as do a receiver that is not a plain path, a caller
+    /// that is not a Rust file, and an anchor the caller's module cannot
+    /// place (a file outside `src/`, `super` past the crate root). `crate`
+    /// is the caller's Cargo target: a binary under `src/bin/` is its own
+    /// crate, not the library's. The caller's module is its file's: inside an inline
     /// `mod`, `self`/`super` read one level off, which the `Probable` tier
     /// allows for.
     fn module_match(&self, caller_file_id: i64, receiver: &str, name: &str) -> Option<i64> {
         if !is_value_receiver(receiver) {
             return None;
         }
+        let (caller, depth) = self.rust_modules.get(&caller_file_id)?;
         let segments: Vec<&str> = receiver.trim().split("::").collect();
         let target = if matches!(segments[0], "crate" | "self" | "super") {
-            let (caller, depth) = self.rust_modules.get(&caller_file_id)?;
-            Some(anchor_module_path(caller, *depth, &segments)?)
+            Some(anchor_module_path(caller, (*depth)?, &segments)?)
         } else {
             None
         };
@@ -693,16 +706,32 @@ fn rust_module_path(path: &str) -> Vec<String> {
     module
 }
 
-/// How many leading segments of `rust_module_path(path)` name the crate: one
-/// when a directory holds `src/`, none for a top-level `src/` or no `src/`.
-fn rust_crate_depth(path: &str) -> usize {
+/// How many leading segments of `rust_module_path(path)` name the crate root
+/// of the Cargo target the file belongs to: the package directory holding
+/// `src/` (when there is one), plus `bin::<name>` for a binary target under
+/// `src/bin/` (`src/bin/<name>.rs`, `src/bin/<name>/main.rs` and the modules
+/// beside them), which is a crate of its own, not the library's. `None` for a
+/// file outside `src/` (`tests/`, `examples/`, a script), whose target root
+/// the path does not tell.
+/// <https://doc.rust-lang.org/cargo/reference/cargo-targets.html>
+fn rust_crate_depth(path: &str) -> Option<usize> {
     let parts: Vec<&str> = path.split('/').collect();
-    usize::from(
-        parts
-            .iter()
-            .rposition(|p| *p == "src")
-            .is_some_and(|src| src > 0),
-    )
+    let src = parts.iter().rposition(|p| *p == "src")?;
+    let package = usize::from(src > 0);
+    let binary = parts.len() > src + 2 && parts[src + 1] == "bin";
+    Some(package + if binary { 2 } else { 0 })
+}
+
+/// A Rust method call's receiver, as the extractor records it: the value's
+/// text or stated type behind a leading `.` (`.runner`, `.GitRunner`), which
+/// no path or expression starts with. Returns the receiver without the mark
+/// and whether it was there; a path receiver (`gitsync`, `a::b`) and every
+/// other language's receiver come back as they are.
+fn split_method_receiver(receiver: Option<&str>) -> (Option<&str>, bool) {
+    match receiver.and_then(|r| r.strip_prefix('.')) {
+        Some(value) => (Some(value), true),
+        None => (receiver, false),
+    }
 }
 
 /// The module path an anchored `segments` names from a caller in `caller`
@@ -1188,13 +1217,13 @@ mod tests {
             .unwrap();
         let idx = ResolveIndex::build(&store).unwrap();
         let cases = [
-            (ts, "pixel_rank::signals", Some(rank_fn)),
-            (ts, "pixel_graph::signals", Some(graph_fn)),
-            (ts, "signals", None),
-            (ts, "concept", None),
-            (ts, "pixel_graph::concept", None),
-            (ts, "pixel_rank::signals()", None),
-            (ts, "unknown", None),
+            (concept, "pixel_rank::signals", Some(rank_fn)),
+            (concept, "pixel_graph::signals", Some(graph_fn)),
+            (concept, "signals", None),
+            (concept, "concept", None),
+            (concept, "pixel_graph::concept", None),
+            (concept, "pixel_rank::signals()", None),
+            (concept, "unknown", None),
             // Anchored paths resolve against the caller's module, exactly.
             (rank_lib, "crate::signals", Some(rank_fn)),
             (graph, "crate::signals", Some(graph_fn)),
@@ -1204,6 +1233,7 @@ mod tests {
             (rank_lib, "crate::pixel_rank::signals", None),
             (rank_lib, "super::signals", None),
             (ts, "crate::signals", None),
+            (ts, "pixel_rank::signals", None),
         ];
         for (caller, receiver, want) in cases {
             assert_eq!(
@@ -1213,11 +1243,19 @@ mod tests {
             );
         }
         assert_eq!(
-            idx.receiver_match(ts, "pixel_rank::signals", "is_test_path"),
+            idx.receiver_match(concept, "pixel_rank::signals", "is_test_path", false),
             Some(rank_fn),
             "receiver_match falls back to the module path"
         );
-        assert_eq!(idx.module_match(ts, "pixel_rank::signals", "absent"), None);
+        assert_eq!(
+            idx.receiver_match(concept, "pixel_rank::signals", "is_test_path", true),
+            None,
+            "but not for a method call"
+        );
+        assert_eq!(
+            idx.module_match(concept, "pixel_rank::signals", "absent"),
+            None
+        );
     }
 
     #[test]
@@ -1245,10 +1283,93 @@ mod tests {
     }
 
     #[test]
-    fn rust_crate_depth_counts_the_directory_holding_src() {
-        assert_eq!(rust_crate_depth("crates/pixel-rank/src/signals.rs"), 1);
-        assert_eq!(rust_crate_depth("src/signals.rs"), 0);
-        assert_eq!(rust_crate_depth("tools/gen.rs"), 0);
+    fn rust_crate_depth_counts_the_target_root() {
+        let cases = [
+            ("crates/pixel-rank/src/signals.rs", Some(1)),
+            ("crates/pixel-rank/src/lib.rs", Some(1)),
+            ("src/signals.rs", Some(0)),
+            ("crates/a/src/bin/foo.rs", Some(3)),
+            ("crates/a/src/bin/foo/main.rs", Some(3)),
+            ("crates/a/src/bin/foo/util.rs", Some(3)),
+            ("src/bin/foo.rs", Some(2)),
+            ("crates/a/src/bin.rs", Some(1)),
+            ("tools/gen.rs", None),
+            ("crates/a/tests/all/main.rs", None),
+        ];
+        for (path, want) in cases {
+            assert_eq!(rust_crate_depth(path), want, "{path}");
+        }
+    }
+
+    #[test]
+    fn split_method_receiver_reads_the_dot_mark() {
+        assert_eq!(
+            split_method_receiver(Some(".runner")),
+            (Some("runner"), true)
+        );
+        assert_eq!(
+            split_method_receiver(Some("gitsync")),
+            (Some("gitsync"), false)
+        );
+        assert_eq!(split_method_receiver(None), (None, false));
+    }
+
+    /// A binary is its own crate: `crate::util` from `src/bin/foo.rs` is
+    /// `src/bin/foo/util.rs`, never the library's `src/util.rs`; and a method
+    /// call `util.run()` never reaches the free `util::run`, which the path
+    /// call `util::run()` does. A caller in another language never uses the
+    /// module rule.
+    #[test]
+    fn module_paths_follow_the_cargo_target_and_the_call_form() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let lib_util = store
+            .replace_file("crates/a/src/util.rs", "o1", "rust")
+            .unwrap();
+        let bin_util = store
+            .replace_file("crates/a/src/bin/foo/util.rs", "o2", "rust")
+            .unwrap();
+        let bin = store
+            .replace_file("crates/a/src/bin/foo.rs", "o3", "rust")
+            .unwrap();
+        let lib = store
+            .replace_file("crates/a/src/lib.rs", "o4", "rust")
+            .unwrap();
+        let script = store
+            .replace_file("crates/a/tests/it.rs", "o5", "rust")
+            .unwrap();
+        let ts = store
+            .replace_file("web/app.ts", "o6", "typescript")
+            .unwrap();
+        let other = store
+            .replace_file("crates/b/src/other.rs", "o7", "rust")
+            .unwrap();
+        let lib_run = insert(&store, lib_util, "crates/a/src/util.rs", "run");
+        let bin_run = insert(&store, bin_util, "crates/a/src/bin/foo/util.rs", "run");
+        insert(&store, other, "crates/b/src/other.rs", "run");
+        let idx = ResolveIndex::build(&store).unwrap();
+        let cases = [
+            (bin, "crate::util", Some(bin_run)),
+            (lib, "crate::util", Some(lib_run)),
+            (bin, "self::util", Some(bin_run)),
+            (script, "crate::util", None),
+            (ts, "a::util", None),
+        ];
+        for (caller, receiver, want) in cases {
+            assert_eq!(
+                idx.module_match(caller, receiver, "run"),
+                want,
+                "{receiver} from {caller}"
+            );
+        }
+        assert_eq!(
+            idx.decide(lib, "run", Some("crate::util")),
+            Decision::Probable(lib_run)
+        );
+        assert_eq!(
+            idx.decide(lib, "run", Some(".util")),
+            Decision::Unresolved,
+            "a method call on a value named `util` is not `util::run`"
+        );
     }
 
     #[test]
