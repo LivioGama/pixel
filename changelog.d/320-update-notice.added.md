@@ -1,0 +1,1 @@
+**cli:** a command run at a terminal prints one yellow line, at most once a day, when a newer release is out, with the command that updates this install (`brew`, `mise` or `install.sh`); hooks, agents, MCP and `CI` never see it, and `PIXEL_NO_UPDATE_CHECK=1` turns it off ([#320](https://github.com/LivioGama/pixel/pull/320)).

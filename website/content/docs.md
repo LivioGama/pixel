@@ -28,7 +28,7 @@ pixel doctor .        # optional: health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
 
-The index, the code graph and the optional history data live in `.pixel/` at the repository root and never leave the machine, and there is no telemetry. The network is used only for Git remote operations, the optional `pixel classify` and `pixel web-search`, and the embedding model downloaded from Hugging Face on first use ([security model](https://github.com/LivioGama/pixel/blob/main/SECURITY.md)).
+The index, the code graph and the optional history data live in `.pixel/` at the repository root and never leave the machine, and there is no telemetry. The network is used only for Git remote operations, the optional `pixel classify` and `pixel web-search`, the embedding model downloaded from Hugging Face on first use, and a once-a-day release check for a person at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) ([security model](https://github.com/LivioGama/pixel/blob/main/SECURITY.md)).
 
 ## What pixel install wires
 

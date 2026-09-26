@@ -443,7 +443,7 @@ fn terminate_group(process_group: i32, pid: u32) -> Result<(), String> {
     }
 }
 
-fn now_unix() -> u64 {
+pub(crate) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())

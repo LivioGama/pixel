@@ -53,6 +53,7 @@ mod task_plan;
 mod task_runtime;
 mod task_sandbox;
 mod task_scheduler;
+mod update_notice;
 mod web_search;
 mod workspace_cmd;
 use pixel_actionlog::{InProcessReason, ServeRoute, ServeStep};
@@ -4318,6 +4319,21 @@ fn package_manager_roots(
     roots
 }
 
+/// The update command `update_notice` shows for the running binary, from
+/// where it resolves and the package-manager roots `self-update` refuses.
+#[cfg_attr(test, mutants::skip)] // reads the process environment; `upgrade_hint` is tested
+fn release_upgrade_hint() -> Option<String> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let exe = std::env::current_exe().ok()?;
+    let exe = exe.canonicalize().unwrap_or(exe);
+    let roots = package_manager_roots(
+        &home,
+        std::env::var_os("MISE_DATA_DIR").as_deref(),
+        std::env::var_os("HOMEBREW_CELLAR").as_deref(),
+    );
+    update_notice::upgrade_hint(&exe, &roots, &home)
+}
+
 /// Why `pixel upgrade` refuses `target`, or `None` when it may write there.
 ///
 /// Overwriting a package manager's binary is silent corruption: on
@@ -5161,6 +5177,21 @@ fn run() -> Result<(), String> {
         && std::env::var_os("PIXEL_METRICS").is_none_or(|v| v != "0")
         && config_cmd::metrics_enabled(root.as_deref().ok());
     operation_metrics::begin(root.as_deref().unwrap_or(Path::new(".")));
+    let release_check = update_notice::enabled(
+        protected,
+        &command_label,
+        std::io::IsTerminal::is_terminal(&std::io::stderr()),
+        |name| std::env::var_os(name),
+    )
+    .then(|| update_notice::state_path(|name| std::env::var_os(name)))
+    .flatten()
+    .map(|path| {
+        update_notice::begin(
+            path,
+            task_scheduler::now_unix(),
+            update_notice::fetch_latest_tag,
+        )
+    });
     // After `begin`, which zeroes the byte counters: both notes are rendered
     // output the caller reads.
     if let Some(note) = rename_note(&argv, !protected) {
@@ -5215,6 +5246,20 @@ fn run() -> Result<(), String> {
         .map(|error| format!("pixel: {error}\n"));
     let _ = std::io::stdout().flush();
     let elapsed = started.elapsed();
+    // After the answer, before the metrics block: a person at a terminal
+    // reads it last-but-one, and nothing else ever sees it. After `elapsed`
+    // too: waiting on the release check is not the command's cost.
+    if let Some(check) = release_check
+        && let Some(notice) = update_notice::finish(
+            check,
+            task_scheduler::now_unix(),
+            env!("CARGO_PKG_VERSION"),
+            release_upgrade_hint,
+            std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()),
+        )
+    {
+        eprint!("{notice}");
+    }
     // A command that owns its exit code still reports its outcome to the
     // journal: a non-zero code is a failure there, even though it never
     // travelled as an `Err`.

@@ -26,7 +26,7 @@
 - **79.7 to 97.2% less read** (median 94.5%) to learn what a large file contains, measured on eight well-known files (Hugging Face Transformers, FastAPI, Next.js, LangChain, Django, CPython, VS Code, Tokio), with no second model reading on the agent's behalf. [The files](https://pixel-cli.dev/benchmarks/#well-known-files)
 - **Measured against GitNexus** on the same 29 blast-radius cases and machine: callers found at a tie (0.86 against 0.84), a 153 ms median answer against 432 ms, and ~4,160 tokens of context per turn against ~19,700. GitNexus wins on Cypher queries, taint analysis and Ruby callers. Pixel is MIT; GitNexus is PolyForm Noncommercial. [The cases](docs/bench/vs-gitnexus.md)
 - **Evidence with boundaries.** Every answer says whether it is complete, capped or stale; a static call graph never claims it saw every caller.
-- **Local and deterministic.** The index lives in `.pixel/` at the repository root and never leaves the machine; no telemetry. Only Git remotes, the optional `pixel classify` (the one model-backed command) and `pixel web-search`, and a one-time embedding model download use the network.
+- **Local and deterministic.** The index lives in `.pixel/` at the repository root and never leaves the machine; no telemetry. Only Git remotes, the optional `pixel classify` (the one model-backed command) and `pixel web-search`, a one-time embedding model download, and a once-a-day release check made only for a person at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) use the network.
 - **Safe Git.** `pixel impact` before an edit, crash-safe `pixel commit-and-push` after it, never a raw `--force`.
 
 ## Install
@@ -37,6 +37,8 @@ pixel install      # once: wires Claude Code, Codex, Pi, OpenCode and Antigravit
 pixel doctor .     # optional health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
+
+Once a day, a command run at a terminal prints one yellow line when a newer release is out, with the command that updates your install (`brew`, `mise` or `install.sh`); hooks and agents never see it, and `PIXEL_NO_UPDATE_CHECK=1` turns it off.
 
 Other channels, per-agent plugins and manual setup are in the [docs](https://pixel-cli.dev/docs/).
 
