@@ -207,9 +207,11 @@ It must end with `release-check: all checks passed`. Then:
   with `git cat-file -e v<last>:<path>` before calling it new.
 - **Release body.** Read the new `## [x.y.z]` section as a stranger: it is
   published verbatim. Fix wording or section order now, not after the tag.
-- **Diff.** `pixel review-changes`: 17 `Cargo.toml` one-liners, `Cargo.lock`,
-  `CHANGELOG.md`, the deleted `changelog.d/*.md` fragments, the 7 plugin
-  manifests. Anything else is a bug.
+- **Diff.** `prepare.sh` ends with `scripts/release-prepare-only.py HEAD`,
+  the rule CI's `scope` job applies: only version lines (17 `Cargo.toml`,
+  `Cargo.lock`, the 7 plugin manifests), `CHANGELOG.md` and deleted
+  `changelog.d/*.md` fragments. A refusal names each offending file: it is a
+  bug in the release branch, not something to push.
 - **Gates.** `GIT_CONFIG_GLOBAL=/dev/null scripts/gates.sh --force` (fmt,
   clippy, tests). Without `GIT_CONFIG_GLOBAL`, a developer's global git
   config fails tests that CI passes (`blame.ignoreRevsFile`,
@@ -224,16 +226,26 @@ gh pr create --base main --title "release: prepare x.y.z" --body-file <body>
 ```
 
 Body: the version, the reason for patch/minor, the gate output, "tag `vx.y.z`
-follows on this PR's merge commit". Watch its checks in the background
-(`gh pr checks <n> --watch`, `run_in_background: true`). The prepare PR skips
-every CI job (Test + Format, MSRV, cargo-deny, Mutants, Cross-build) and
-CodeRabbit (`ignore_title_keywords`) once each workflow's `scope` job has
-checked the diff with `scripts/release-prepare-only.py` (version lines,
-`CHANGELOG.md`, deleted fragments; anything more keeps every job): it holds
-no code, and step 3's
-local gates plus the push run on its merge commit, which step 4 waits for,
-cover it. A maintenance release into `release/x.y` keeps them all. All green and no actionable review comment: merge it,
-squash like every PR on `main` (`gh pr merge <n> --squash --delete-branch`).
+follows on this PR's merge commit".
+
+Watch its checks in the background (`run_in_background: true`), but only
+once they exist: right after `gh pr create`, `gh pr checks <n> --watch`
+finds no check yet and exits 0 at once, a watcher that reports nothing
+(0.5.2). Start it with `sleep 20; gh pr checks <n> --watch --interval 30`.
+
+A healthy prepare PR shows three `scope / Release-prepare scope` checks
+passing (one per workflow: CI, Mutants, Cross-build) and every other CI job
+skipping (Test + Format, MSRV, cargo-deny, Mutants plan and gate,
+Cross-build); CodeRabbit skips on the title (`ignore_title_keywords`). The
+diff holds no code, and step 3's local gates plus the push run on its merge
+commit, which step 4 waits for, cover it. If Test + Format or Mutants runs,
+`scope` refused the diff: stop and read its log, do not wait for green. A
+maintenance release into `release/x.y` keeps every job, and there green is
+the bar.
+
+All skipped but `scope`, or all green on `release/x.y`, and no actionable
+review comment: merge it, squash like every PR on `main`
+(`gh pr merge <n> --squash --delete-branch`).
 
 ## 4. Tag
 
@@ -273,7 +285,9 @@ on musl).
 
 Start from the `smoke` jobs: `gh run view <run-id> --repo LivioGama/pixel`
 must show all three green, and each job log names what it installed and
-the `--version` it read. A step that printed a `::notice::` (install.sh on a
+the `--version` it read. Skipped steps inside `build` and `smoke` are the other
+target's lane (each matrix entry skips the cross or native build it does not
+use), not a caveat. A step that printed a `::notice::` (install.sh on a
 tag that is not the latest) or was skipped (Homebrew without the token) is a
 caveat to report, not a pass.
 
