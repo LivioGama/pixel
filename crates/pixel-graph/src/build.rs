@@ -99,7 +99,11 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    (`imports.path`), each resolved to its own file.
 /// 10: a Rust `use` records the lines where its names are in scope
 ///    (`imports.scope`), and T1 ignores it outside them.
-pub const EXTRACTOR_VERSION: &str = "10";
+/// 11: a Rust method call on a local of stated type or on a constructor
+///    (`runner.x()` with `runner: &GitRunner`, `GitRunner::new(root).x()`)
+///    records that type as its receiver, and a module-path receiver
+///    (`signals::is_test_path`) resolves to that module's free function.
+pub const EXTRACTOR_VERSION: &str = "11";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -2494,6 +2498,134 @@ mod tests {
             .collect();
         callers.sort_by(|a, b| a.0.cmp(&b.0));
         callers
+    }
+
+    /// The callers of `name` defined in `path`, as `(caller name, tier)`.
+    fn callers_in(store: &GraphStore, path: &str, name: &str) -> Vec<(String, Tier)> {
+        let file = store.file_by_path(path).unwrap().unwrap().id;
+        let target = store
+            .symbols_in_file(file)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == name)
+            .unwrap();
+        let mut callers: Vec<(String, Tier)> = store
+            .edges_to(target.id, Some(EdgeKind::Calls))
+            .unwrap()
+            .into_iter()
+            .map(|e| {
+                let src: String = store
+                    .conn()
+                    .query_row(
+                        "SELECT name FROM symbols WHERE id = ?1",
+                        rusqlite::params![e.src_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                (src, e.tier)
+            })
+            .collect();
+        callers.sort_by(|a, b| a.0.cmp(&b.0));
+        callers
+    }
+
+    /// Three definitions of `current_branch` (a `GitRunner` method and two
+    /// free functions) leave the name tiers nothing to pick. The typed local
+    /// `runner: &GitRunner` links `run` to the method, and the module path
+    /// `gitsync::current_branch` links `wrap` to `gitsync.rs`'s function, both
+    /// at Probable. Each incremental route re-derives the decision from what
+    /// it stored: rewriting the caller or the target keeps both edges, and a
+    /// second `gitsync.rs` makes the module path ambiguous without touching
+    /// the typed call.
+    #[test]
+    fn typed_and_module_receivers_survive_incremental_updates() {
+        let root = tmpdir("typed-receivers");
+        let files = [
+            (
+                "crates/git/src/lib.rs",
+                "pub struct GitRunner;\nimpl GitRunner {\n    pub fn current_branch(&self) {}\n}\n",
+            ),
+            ("crates/guard/src/lib.rs", "pub fn current_branch() {}\n"),
+            ("crates/idx/src/gitsync.rs", "pub fn current_branch() {}\n"),
+            (
+                "crates/ops/src/lib.rs",
+                "pub fn run(runner: &git::GitRunner) {\n    runner.current_branch();\n}\npub fn wrap() {\n    idx::gitsync::current_branch();\n}\n",
+            ),
+        ];
+        for (path, body) in files {
+            std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            std::fs::write(root.join(path), body).unwrap();
+        }
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let both = |db: &Path| {
+            let store = GraphStore::open(db).unwrap();
+            (
+                callers_in(&store, "crates/git/src/lib.rs", "current_branch"),
+                callers_in(&store, "crates/idx/src/gitsync.rs", "current_branch"),
+                callers_in(&store, "crates/guard/src/lib.rs", "current_branch"),
+            )
+        };
+        let run = vec![("run".to_string(), Tier::Probable)];
+        let wrap = vec![("wrap".to_string(), Tier::Probable)];
+        assert_eq!(both(&db), (run.clone(), wrap.clone(), vec![]), "full build");
+
+        std::fs::write(
+            root.join("crates/ops/src/lib.rs"),
+            format!("// v2\n{}", files[3].1),
+        )
+        .unwrap();
+        update_file(&root, &db, "crates/ops/src/lib.rs").unwrap();
+        assert_eq!(
+            both(&db),
+            (run.clone(), wrap.clone(), vec![]),
+            "caller rewritten"
+        );
+
+        std::fs::write(
+            root.join("crates/git/src/lib.rs"),
+            format!("// v2\n{}", files[0].1),
+        )
+        .unwrap();
+        update_file(&root, &db, "crates/git/src/lib.rs").unwrap();
+        std::fs::write(
+            root.join("crates/idx/src/gitsync.rs"),
+            format!("// v2\n{}", files[2].1),
+        )
+        .unwrap();
+        update_file(&root, &db, "crates/idx/src/gitsync.rs").unwrap();
+        assert_eq!(
+            both(&db),
+            (run.clone(), wrap.clone(), vec![]),
+            "targets rewritten"
+        );
+
+        std::fs::create_dir_all(root.join("crates/other/src/idx")).unwrap();
+        std::fs::write(
+            root.join("crates/other/src/idx/gitsync.rs"),
+            "pub fn current_branch() {}\n",
+        )
+        .unwrap();
+        update_file(&root, &db, "crates/other/src/idx/gitsync.rs").unwrap();
+        assert_eq!(
+            both(&db),
+            (run, vec![], vec![]),
+            "a second `idx::gitsync` makes the module path name neither"
+        );
+        let store = GraphStore::open(&db).unwrap();
+        assert!(
+            callers_in(&store, "crates/other/src/idx/gitsync.rs", "current_branch").is_empty(),
+            "nor the new one"
+        );
+        assert_eq!(
+            store
+                .envelope_for_name("current_branch")
+                .unwrap()
+                .unresolved_same_name,
+            1
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// `use crate::push::push as leased;` puts `leased` in scope, not `push`.
