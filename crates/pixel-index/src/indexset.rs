@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use pixel_git::BatchObject;
 use rayon::prelude::*;
 
 use crate::cache;
@@ -264,6 +265,11 @@ fn extract_blob(
     let Some(content) = gitsync::show_blob(root, commit_oid, rel) else {
         return BlobExtraction::Unreadable;
     };
+    extract_content(rel, &content, extractor)
+}
+
+/// The grams of one committed blob's `content`, or why it is not indexed.
+fn extract_content(rel: &str, content: &[u8], extractor: &dyn GramExtractor) -> BlobExtraction {
     if content.is_empty() || content[..content.len().min(8192)].contains(&0) {
         return BlobExtraction::Skipped;
     }
@@ -272,15 +278,56 @@ fn extract_blob(
     // tracked project content — keep it out of the file universe just like
     // `.pixel/` itself. Judged on the committed blob, so the shard stays a
     // function of the commit and can be shared across worktrees.
-    if rel == ".gitignore" && is_pixel_only_gitignore_text(&String::from_utf8_lossy(&content)) {
+    if rel == ".gitignore" && is_pixel_only_gitignore_text(&String::from_utf8_lossy(content)) {
         return BlobExtraction::Skipped;
     }
     let mut hits = Vec::new();
-    extractor.grams(&content, &mut hits);
+    extractor.grams(content, &mut hits);
     let mut hashes: Vec<u64> = hits.iter().map(|h| h.hash).collect();
     hashes.sort_unstable();
     hashes.dedup();
     BlobExtraction::Indexed(rel.to_string(), hashes)
+}
+
+/// [`extract_blob`] for a run of paths, read through one `git cat-file
+/// --batch` instead of two git processes per path. A path the batch's line
+/// protocol cannot carry (a newline in its name) goes through
+/// [`extract_blob`]; a path git never answered, because the batch failed
+/// part-way, is unreadable, which keeps the shard out of the shared cache.
+fn extract_blobs(
+    root: &Path,
+    commit_oid: &str,
+    rels: &[&String],
+    extractor: &dyn GramExtractor,
+) -> Vec<BlobExtraction> {
+    let mut outcomes: Vec<Option<BlobExtraction>> = rels.iter().map(|_| None).collect();
+    let specs: Vec<String> = rels
+        .iter()
+        .map(|rel| format!("{commit_oid}:{rel}"))
+        .collect();
+    let _ = gitsync::cat_file_blobs(root, &specs, MAX_FILE_BYTES, |i, object| {
+        outcomes[i] = Some(match object {
+            BatchObject::Blob(content) => extract_content(rels[i], content, extractor),
+            BatchObject::Oversized(_) => BlobExtraction::Skipped,
+            BatchObject::Unsendable => extract_blob(root, commit_oid, rels[i], extractor),
+            BatchObject::Missing => BlobExtraction::Unreadable,
+        });
+    });
+    outcomes
+        .into_iter()
+        .map(|outcome| outcome.unwrap_or(BlobExtraction::Unreadable))
+        .collect()
+}
+
+/// Fewest paths one `cat-file --batch` process is given: below it the
+/// process costs more than the parallelism it buys, so a small delta reads
+/// through a single git.
+const MIN_PATHS_PER_BATCH: usize = 64;
+
+/// Paths per batch when `paths` are spread over `threads` workers: one
+/// batch per worker, never fewer than [`MIN_PATHS_PER_BATCH`] paths each.
+fn batch_len(paths: usize, threads: usize) -> usize {
+    paths.div_ceil(threads.max(1)).max(MIN_PATHS_PER_BATCH)
 }
 
 /// True unless `PIXEL_INDEX_NO_DEFAULT_IGNORES` asks to index the default
@@ -322,11 +369,14 @@ fn build_shard_from(
     dest: &Path,
     prune_default: bool,
 ) -> Result<BuiltShard, IndexSetError> {
-    let outcomes: Vec<BlobExtraction> = rel_paths
-        .par_iter()
+    let admitted: Vec<&String> = rel_paths
+        .iter()
         .filter(|rel| !is_internal(rel))
         .filter(|rel| !prune_default || !rel.split('/').any(crate::index::is_ignored_dir_name))
-        .map(|rel| extract_blob(root, commit_oid, rel, extractor))
+        .collect();
+    let outcomes: Vec<BlobExtraction> = admitted
+        .par_chunks(batch_len(admitted.len(), rayon::current_num_threads()))
+        .flat_map_iter(|chunk| extract_blobs(root, commit_oid, chunk, extractor))
         .collect();
     let mut unreadable = 0;
     let mut extracted: Vec<(String, Vec<u64>)> = Vec::with_capacity(outcomes.len());
@@ -1127,6 +1177,77 @@ mod tests {
         assert_eq!(all.unreadable, 1);
         assert_eq!(all.shard.file_count(), 2);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Reading through `cat-file --batch` keeps every blob under its own
+    /// path across several batches, indexes a path the batch protocol
+    /// cannot carry (a newline in its name) through the per-file read,
+    /// skips an over-cap blob and counts a path the commit lacks as
+    /// unreadable.
+    #[test]
+    fn build_shard_from_keeps_every_blob_on_its_own_path_across_batches() {
+        const FILES: usize = 150;
+        let dir = scratch("build-shard-batches");
+        git(&dir, &["init", "-q"]);
+        let mut contents: Vec<(String, String)> = (0..FILES)
+            .map(|i| {
+                (
+                    format!("f{i:03}.rs"),
+                    format!("fn needle_{i:03}_{}() {{}}\n", i * 7),
+                )
+            })
+            .collect();
+        contents.push((
+            "odd\nname.rs".to_string(),
+            "fn newline_needle() {}\n".to_string(),
+        ));
+        for (rel, text) in &contents {
+            std::fs::write(dir.join(rel), text).unwrap();
+        }
+        let cap = usize::try_from(MAX_FILE_BYTES).unwrap();
+        std::fs::write(dir.join("big.txt"), "b".repeat(cap + 1)).unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "many"]);
+        let head = git_out(&dir, &["rev-parse", "HEAD"]);
+        let mut paths: Vec<String> = contents.iter().map(|(rel, _)| rel.clone()).collect();
+        paths.push("big.txt".to_string());
+        paths.push("ghost.rs".to_string());
+        let dest = dir.join("out.shard");
+
+        let built = build_shard_from(&dir, &paths, ex().as_ref(), &head, &dest, true).unwrap();
+
+        assert_eq!(built.unreadable, 1, "ghost.rs is not in the commit");
+        let mut expected: Vec<String> = contents.iter().map(|(rel, _)| rel.clone()).collect();
+        expected.sort();
+        assert_eq!(
+            built.shard.files(),
+            expected.as_slice(),
+            "big.txt is over the cap"
+        );
+        for (file_id, rel) in built.shard.files().iter().enumerate() {
+            let text = &contents.iter().find(|(r, _)| r == rel).unwrap().1;
+            let mut hits = Vec::new();
+            ex().grams(text.as_bytes(), &mut hits);
+            let id = u32::try_from(file_id).unwrap();
+            for hit in hits {
+                assert!(
+                    built.shard.postings(hit.hash).contains(&id),
+                    "{rel:?} lacks a gram of its own content"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One batch per worker, never so small that a git process costs more
+    /// than it saves, and a zero thread count does not divide by zero.
+    #[test]
+    fn batch_len_spreads_paths_over_workers_with_a_floor() {
+        assert_eq!(batch_len(19_001, 8), 2_376);
+        assert_eq!(batch_len(700, 10), 70);
+        assert_eq!(batch_len(3, 8), MIN_PATHS_PER_BATCH);
+        assert_eq!(batch_len(0, 8), MIN_PATHS_PER_BATCH);
+        assert_eq!(batch_len(1_000, 0), 1_000);
     }
 
     /// The shared cache holds only complete shards for their exact key: a

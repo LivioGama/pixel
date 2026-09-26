@@ -60,6 +60,20 @@ pub fn show_blob(root: &Path, oid: &str, rel: &str) -> Option<Vec<u8>> {
     GitRunner::new(root).show_blob(oid, rel)
 }
 
+/// Every object `specs` names, through one `git cat-file --batch` (see
+/// `GitRunner::cat_file_blobs`).
+pub fn cat_file_blobs<F>(
+    root: &Path,
+    specs: &[String],
+    max_blob_bytes: u64,
+    visit: F,
+) -> Result<(), pixel_git::GitError>
+where
+    F: FnMut(usize, pixel_git::BatchObject<'_>),
+{
+    GitRunner::new(root).cat_file_blobs(specs, max_blob_bytes, visit)
+}
+
 /// Size of a committed blob without materializing it. `oid` is validated
 /// via `pixel_git::validate_ref` (the original wrapper did not validate).
 pub fn blob_size(root: &Path, oid: &str, rel: &str) -> Option<u64> {

@@ -21,6 +21,7 @@
 //! }
 //! ```
 
+mod batch;
 mod discover;
 mod error;
 mod plumbing;
@@ -28,6 +29,7 @@ mod redact;
 mod ref_guard;
 mod runner;
 
+pub use batch::BatchObject;
 pub use discover::{discover_root, discover_root_follow_submodules};
 pub use error::GitError;
 pub use redact::redact;

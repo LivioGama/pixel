@@ -87,7 +87,7 @@ impl GitOutput {
 
 pub struct GitRunner {
     root: PathBuf,
-    options: GitOptions,
+    pub(crate) options: GitOptions,
 }
 
 impl GitRunner {
@@ -173,6 +173,36 @@ impl GitRunner {
         cmd.arg("-C").arg(&self.root).args(args);
         let arg_strings: Vec<String> = args.iter().map(ToString::to_string).collect();
         execute_output_with_stdin(cmd, arg_strings, &self.options, Some(input.to_vec()))
+    }
+
+    /// Read every object `specs` names (`<commit>:<path>`, a blob oid, any
+    /// object name git accepts) through one `git cat-file --batch`, calling
+    /// `visit(index, object)` once per spec. Blobs of at most `max_blob_bytes`
+    /// come back with their content; larger ones as
+    /// [`crate::batch::BatchObject::Oversized`], read past without being held in memory.
+    ///
+    /// The runner's timeout is an idle limit here, not a total: git is
+    /// killed when it goes that long without answering the next object, so a
+    /// hung process cannot block the caller, while a batch whose consumer
+    /// spends minutes on the content is not cut short.
+    ///
+    /// # Errors
+    ///
+    /// The spawn failed, git exited early or unsuccessfully, or it stopped
+    /// answering for the timeout. Specs visited before the failure keep
+    /// their answer; the rest are never visited.
+    pub fn cat_file_blobs<F>(
+        &self,
+        specs: &[String],
+        max_blob_bytes: u64,
+        visit: F,
+    ) -> Result<(), GitError>
+    where
+        F: FnMut(usize, crate::batch::BatchObject<'_>),
+    {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(self.root()).args(["cat-file", "--batch"]);
+        crate::batch::batch_session(cmd, specs, max_blob_bytes, self.options.timeout, visit)
     }
 
     /// Runs `git merge-file <current> <base> <other>` — git's result is the

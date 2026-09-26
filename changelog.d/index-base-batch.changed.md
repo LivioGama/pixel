@@ -1,0 +1,1 @@
+**index:** a base or delta built from git reads every blob through one `git cat-file --batch` per worker instead of two git processes per file. On a repository of about 19 000 files, a base build from a cold cache falls from 208 s to 1.8 s on a laptop, with a byte-identical shard. (PR link pending)
