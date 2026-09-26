@@ -196,6 +196,15 @@
           <p>A CLI plus hooks, not an MCP server. <code>pixel install</code> puts the protocol where each agent reads its instructions, and the agent calls Pixel from the shell it already has.</p>
         </li>
       </ol>
+      {{/* What a visitor checks before installing, at a glance. Each value restates a fact stated elsewhere: the platforms release.yml builds, the licence, the telemetry line of the hero. */}}
+      <dl class="specs" data-reveal>
+        <div><dt>Language</dt><dd>Rust</dd></div>
+        <div><dt>Licence</dt><dd>MIT</dd></div>
+        <div><dt>Architecture</dt><dd>CLI, hooks and a local daemon</dd></div>
+        <div><dt>Platforms</dt><dd>macOS on Apple Silicon, Linux</dd></div>
+        <div><dt>Account</dt><dd>None</dd></div>
+        <div><dt>Telemetry</dt><dd>None</dd></div>
+      </dl>
       {{/* The six jobs an agent runs every day on that index, each a recording of the same task without Pixel and with it: data/jobs.toml. No latency in the heading: commit-and-push waits on the remote, so a millisecond claim would not hold for all six. They live under How it works so the page has one chapter for what Pixel does, not two. */}}
       <h3 class="vs__kicker" id="jobs" data-reveal>Six jobs your agent runs every day</h3>
       <div class="jobs" data-jobs data-reveal>
@@ -304,7 +313,7 @@
         {{ end }}
       </div>
       {{ end }}
-      <p class="ledger__fine" data-reveal>Other ways to spend fewer tokens have a page each: <a class="link" href="{{ "vs/shunt/" | relURL }}">shunt</a>, which hands large reads to a second model, and <a class="link" href="{{ "vs/jev/" | relURL }}">Jev</a>, a model for coding judgement calls. Where a specialist beats Pixel at its one job (semble on plain-English search, stacklit on a compact repository map), the numbers are on the <a class="link" href="{{ $bench }}#where-a-specialist-wins">benchmarks page</a>, and <a class="link" href="{{ "vs/" | relURL }}">every comparison</a> is listed.</p>
+      <p class="ledger__fine" data-reveal>Other ways to spend fewer tokens have a page each: <a class="link" href="{{ "vs/shunt/" | relURL }}">shunt</a>, which hands large reads to a second model, <a class="link" href="{{ "vs/jev/" | relURL }}">Jev</a>, a model for coding judgement calls, and <a class="link" href="{{ "vs/rtk/" | relURL }}">RTK</a>, which compresses command output and runs beside Pixel. Where a specialist beats Pixel at its one job (semble on plain-English search, stacklit on a compact repository map), the numbers are on the <a class="link" href="{{ $bench }}#where-a-specialist-wins">benchmarks page</a>, and <a class="link" href="{{ "vs/" | relURL }}">every comparison</a> is listed.</p>
     </section>
 
     {{/* ---------- roles ---------- */}}
