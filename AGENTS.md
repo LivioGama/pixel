@@ -8,7 +8,7 @@ Mutation testing runs in CI only: the `Mutants` workflow runs `cargo mutants --i
 
 Two habits keep that loop from being the bottleneck (from 2026-09-21 to 2026-09-26, 42 of 121 `Mutants` runs failed, each one a push-and-wait round trip of 5 to 10 minutes):
 
-- **Review the list before the push.** `cargo mutants --list --in-diff <(git diff <base>...HEAD)`, on a committed tree, prints every mutant CI will run as `file:line: replace f -> T with …` in a second or two, building nothing. For each line, name the test that fails under it; a line without one gets its test, or its reasoned skip, before the push. The CI run then confirms instead of discovering.
+- **Review the list before the push.** `git diff <base>...HEAD > target/pr.diff && cargo mutants --list --in-diff target/pr.diff`, on a committed tree (a file rather than `<(…)`, which fish lacks), prints every mutant CI will run as `file:line: replace f -> T with …` in a second or two, building nothing. For each line, name the test that fails under it; a line without one gets its test, or its reasoned skip, before the push. The CI run then confirms instead of discovering.
 - **Do not wait on the job.** Start `gh pr checks <pr> --watch` as a background task and work on the next unit (the next pull request of the stack, another worktree) until it returns; then read the `MISSED` lines. Never a foreground `sleep` loop.
 
 For each `MISSED` line either:
