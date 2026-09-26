@@ -293,13 +293,18 @@ mod tests {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
+    /// The idle timeout of a test whose process is expected to end on its
+    /// own: a mutant that stops waiting for the right event then fails in
+    /// seconds instead of hanging the suite.
+    const TEST_IDLE: Option<Duration> = Some(Duration::from_secs(2));
+
     /// A runner whose idle timeout a broken batch loop reaches in seconds,
     /// not the production two minutes.
     fn runner(root: impl Into<PathBuf>) -> GitRunner {
         GitRunner::with_options(
             root,
             GitOptions {
-                timeout: Some(Duration::from_secs(5)),
+                timeout: TEST_IDLE,
                 max_output_bytes: None,
             },
         )
@@ -485,7 +490,7 @@ mod tests {
     fn an_early_exit_is_an_error_carrying_the_exit_code_and_stderr() {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "cat >/dev/null; echo boom >&2; exit 3"]);
-        let result = batch_session(cmd, &["x".to_string()], 1024, None, |_, _| {});
+        let result = batch_session(cmd, &["x".to_string()], 1024, TEST_IDLE, |_, _| {});
         match result {
             Err(GitError::NonZeroExit { code, stderr, .. }) => {
                 assert_eq!(code, Some(3));
@@ -496,7 +501,7 @@ mod tests {
         let mut cmd = Command::new("sh");
         let oid = "b".repeat(40);
         cmd.args(["-c", &format!("cat >/dev/null; printf '{oid} blob 5\\nab'")]);
-        let result = batch_session(cmd, &["x".to_string()], 1024, None, |_, _| {});
+        let result = batch_session(cmd, &["x".to_string()], 1024, TEST_IDLE, |_, _| {});
         assert!(
             matches!(&result, Err(GitError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof),
             "{result:?}"
@@ -507,7 +512,7 @@ mod tests {
             "-c",
             &format!("cat >/dev/null; printf '{oid} blob 5000\\nab'"),
         ]);
-        let result = batch_session(cmd, &["x".to_string()], 1024, None, |_, _| {});
+        let result = batch_session(cmd, &["x".to_string()], 1024, TEST_IDLE, |_, _| {});
         assert!(
             matches!(&result, Err(GitError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof),
             "{result:?}"
@@ -542,7 +547,7 @@ mod tests {
     #[test]
     fn a_writer_blocked_on_an_unread_stdin_is_released_by_the_timeout() {
         let mut cmd = Command::new("sh");
-        cmd.args(["-c", "exec 1>&-; sleep 10"]);
+        cmd.args(["-c", "exec 1>&-; sleep 6"]);
         // Far past a pipe buffer (64 KiB on Linux and macOS).
         let specs: Vec<String> = (0..4_000).map(|i| format!("{i:0>100}")).collect();
         let start = Instant::now();
@@ -558,7 +563,7 @@ mod tests {
             "{result:?}"
         );
         assert!(
-            start.elapsed() < Duration::from_secs(5),
+            start.elapsed() < Duration::from_secs(3),
             "{:?}",
             start.elapsed()
         );
