@@ -292,20 +292,37 @@ fn extract_content(rel: &str, content: &[u8], extractor: &dyn GramExtractor) -> 
 /// [`extract_blob`] for a run of paths, read through one `git cat-file
 /// --batch` instead of two git processes per path. A path the batch's line
 /// protocol cannot carry (a newline in its name) goes through
-/// [`extract_blob`]; a path git never answered, because the batch failed
-/// part-way, is unreadable, which keeps the shard out of the shared cache.
+/// [`extract_blob`], and so does every path git never answered because the
+/// batch failed part-way: a failed batch costs speed, never files.
 fn extract_blobs(
     root: &Path,
     commit_oid: &str,
     rels: &[&String],
     extractor: &dyn GramExtractor,
 ) -> Vec<BlobExtraction> {
+    extract_blobs_via(root, commit_oid, rels, extractor, |specs, visit| {
+        gitsync::cat_file_blobs(root, specs, MAX_FILE_BYTES, visit)
+    })
+}
+
+/// [`extract_blobs`] over any batch reader, so a batch that fails part-way
+/// can be tested without breaking a real git.
+fn extract_blobs_via<R>(
+    root: &Path,
+    commit_oid: &str,
+    rels: &[&String],
+    extractor: &dyn GramExtractor,
+    read_batch: R,
+) -> Vec<BlobExtraction>
+where
+    R: FnOnce(&[String], &mut dyn FnMut(usize, BatchObject<'_>)) -> Result<(), pixel_git::GitError>,
+{
     let mut outcomes: Vec<Option<BlobExtraction>> = rels.iter().map(|_| None).collect();
     let specs: Vec<String> = rels
         .iter()
         .map(|rel| format!("{commit_oid}:{rel}"))
         .collect();
-    let _ = gitsync::cat_file_blobs(root, &specs, MAX_FILE_BYTES, |i, object| {
+    let _ = read_batch(&specs, &mut |i, object| {
         outcomes[i] = Some(match object {
             BatchObject::Blob(content) => extract_content(rels[i], content, extractor),
             BatchObject::Oversized(_) => BlobExtraction::Skipped,
@@ -315,7 +332,10 @@ fn extract_blobs(
     });
     outcomes
         .into_iter()
-        .map(|outcome| outcome.unwrap_or(BlobExtraction::Unreadable))
+        .zip(rels)
+        .map(|(outcome, rel)| {
+            outcome.unwrap_or_else(|| extract_blob(root, commit_oid, rel, extractor))
+        })
         .collect()
 }
 
@@ -1236,6 +1256,45 @@ mod tests {
                 );
             }
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A batch that dies after its first answer loses no file: every path
+    /// it never answered is read on its own, and only a path the commit
+    /// really lacks stays unreadable.
+    #[test]
+    fn a_batch_failing_part_way_falls_back_to_one_read_per_path() {
+        let dir = scratch("batch-part-way");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn first_needle() {}\n").unwrap();
+        std::fs::write(dir.join("b.rs"), "fn second_needle() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "two"]);
+        let head = git_out(&dir, &["rev-parse", "HEAD"]);
+        let rels: Vec<String> = ["a.rs", "b.rs", "ghost.rs"]
+            .iter()
+            .map(|p| (*p).to_string())
+            .collect();
+        let refs: Vec<&String> = rels.iter().collect();
+        let extractor = ex();
+        let outcomes = extract_blobs_via(&dir, &head, &refs, extractor.as_ref(), |_, visit| {
+            visit(0, BatchObject::Blob(b"fn first_needle() {}\n"));
+            Err(pixel_git::GitError::Timeout {
+                args: vec!["cat-file".to_string()],
+            })
+        });
+        let shape: Vec<String> = outcomes
+            .iter()
+            .map(|outcome| match outcome {
+                BlobExtraction::Indexed(rel, hashes) if !hashes.is_empty() => {
+                    format!("indexed {rel}")
+                }
+                BlobExtraction::Indexed(rel, _) => format!("empty {rel}"),
+                BlobExtraction::Skipped => "skipped".to_string(),
+                BlobExtraction::Unreadable => "unreadable".to_string(),
+            })
+            .collect();
+        assert_eq!(shape, ["indexed a.rs", "indexed b.rs", "unreadable"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

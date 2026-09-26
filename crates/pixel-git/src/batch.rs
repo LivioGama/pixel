@@ -121,11 +121,20 @@ where
     });
     let child = Arc::new(Mutex::new(child));
     let timed_out = Arc::new(AtomicBool::new(false));
-    let (progress, watchdog) = spawn_watchdog(&child, &timed_out, idle_timeout);
+    let paused = Arc::new(AtomicBool::new(false));
+    let (progress, watchdog) = spawn_watchdog(&child, &timed_out, &paused, idle_timeout);
 
     let mut reader = BufReader::new(stdout);
     let mut line = Vec::new();
     let mut content = Vec::new();
+    // Hands one answer to the caller with the idle clock stopped, then
+    // restarts it: a slow consumer is not a silent git.
+    let mut deliver = |i: usize, object: BatchObject<'_>| {
+        paused.store(true, Ordering::SeqCst);
+        visit(i, object);
+        paused.store(false, Ordering::SeqCst);
+        let _ = progress.send(());
+    };
     let mut read = || -> std::io::Result<()> {
         for &i in &sent {
             line.clear();
@@ -139,7 +148,7 @@ where
                     if content.len() as u64 != size {
                         return Err(std::io::ErrorKind::UnexpectedEof.into());
                     }
-                    visit(i, BatchObject::Blob(&content));
+                    deliver(i, BatchObject::Blob(&content));
                 }
                 Header::Found { blob, size } => {
                     let skipped =
@@ -147,7 +156,7 @@ where
                     if skipped != size {
                         return Err(std::io::ErrorKind::UnexpectedEof.into());
                     }
-                    visit(
+                    deliver(
                         i,
                         if blob {
                             BatchObject::Oversized(size)
@@ -157,15 +166,13 @@ where
                     );
                 }
                 Header::Missing => {
-                    visit(i, BatchObject::Missing);
-                    let _ = progress.send(());
+                    deliver(i, BatchObject::Missing);
                     continue;
                 }
             }
             // The content is followed by one newline of its own.
             let mut lf = [0u8; 1];
             reader.read_exact(&mut lf)?;
-            let _ = progress.send(());
         }
         Ok(())
     };
@@ -202,16 +209,19 @@ where
 }
 
 /// Start the thread that kills `child` once `idle_timeout` passes without a
-/// message on the returned sender; dropping the sender ends the thread. With
-/// no timeout, the thread only waits for the drop.
+/// message on the returned sender while `paused` is false; dropping the
+/// sender ends the thread. With no timeout, the thread only waits for the
+/// drop.
 fn spawn_watchdog(
     child: &Arc<Mutex<Child>>,
     timed_out: &Arc<AtomicBool>,
+    paused: &Arc<AtomicBool>,
     idle_timeout: Option<Duration>,
 ) -> (mpsc::Sender<()>, std::thread::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel::<()>();
     let child = Arc::clone(child);
     let timed_out = Arc::clone(timed_out);
+    let paused = Arc::clone(paused);
     let handle = std::thread::spawn(move || {
         loop {
             let next = match idle_timeout {
@@ -219,6 +229,8 @@ fn spawn_watchdog(
                 None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
             };
             match next {
+                // Time spent in the caller's `visit` is not git's silence.
+                Ok(()) | Err(RecvTimeoutError::Timeout) if paused.load(Ordering::SeqCst) => {}
                 Ok(()) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
                 Err(RecvTimeoutError::Timeout) => {
@@ -438,7 +450,7 @@ mod tests {
     #[test]
     fn a_silent_process_is_killed_at_the_idle_timeout() {
         let mut cmd = Command::new("sleep");
-        cmd.arg("10");
+        cmd.arg("6");
         let start = Instant::now();
         let result = batch_session(
             cmd,
@@ -452,7 +464,7 @@ mod tests {
             "{result:?}"
         );
         assert!(
-            start.elapsed() < Duration::from_secs(5),
+            start.elapsed() < Duration::from_secs(3),
             "{:?}",
             start.elapsed()
         );
@@ -539,6 +551,31 @@ mod tests {
         );
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(blobs, 1);
+    }
+
+    /// The idle clock stops while `visit` runs: a consumer slower than the
+    /// timeout on every answer still gets them all.
+    #[test]
+    fn a_slow_visit_is_not_counted_as_git_being_idle() {
+        let mut cmd = Command::new("sh");
+        let oid = "e".repeat(40);
+        cmd.args([
+            "-c",
+            &format!("printf '{oid} blob 1\\nz\\n{oid} blob 1\\nz\\n'; cat >/dev/null"),
+        ]);
+        let mut blobs = 0;
+        let result = batch_session(
+            cmd,
+            &["x".to_string(), "y".to_string()],
+            1024,
+            Some(Duration::from_millis(200)),
+            |_, _| {
+                std::thread::sleep(Duration::from_millis(500));
+                blobs += 1;
+            },
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(blobs, 2);
     }
 
     /// A process that closes its stdout without reading its stdin leaves the
