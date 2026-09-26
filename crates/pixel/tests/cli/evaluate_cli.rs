@@ -322,3 +322,108 @@ fn the_action_log_should_record_an_evaluation_and_its_outcome() {
         "both runs are journalled, and a usage error is not recorded as a success: {log}"
     );
 }
+
+/// `call-path` points to its successor without changing what it already
+/// printed, and the command it names runs as is.
+///
+/// Its `found: false` cannot tell "no path" from "the depth cap cut the
+/// search", so an agent that keeps calling it keeps misreading negatives;
+/// the field is how one learns the replacement from the output it already
+/// parses. It is additive because `call-path` stays compatible for two
+/// minor versions, and it is a complete command because a suggestion that
+/// no longer parses (a renamed flag), or that drops the repository it was
+/// asked about, sends the agent into an error or into another repository.
+/// The fixture path holds a space and an apostrophe, and the command runs
+/// from another directory, so only its own quoted repository argument can
+/// make it answer.
+#[test]
+fn call_path_should_name_a_runnable_evaluate_command_and_keep_its_fields() {
+    let dir = fixture("call path's successor");
+    let output = pixel_command()
+        .args(["call-path", "work", "helper"])
+        .arg(&*dir)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(
+        value["found"], true,
+        "call-path keeps its own answer: {value}"
+    );
+    let command = value["successor"]["command"].as_str().unwrap_or_default();
+    let argv = posix_words(command);
+    let repo = dir.to_string_lossy();
+    assert_eq!(
+        argv,
+        [
+            "pixel",
+            "evaluate",
+            "path",
+            "--from",
+            "work",
+            "--to",
+            "helper",
+            repo.as_ref(),
+        ],
+        "{command}"
+    );
+
+    let followed = pixel_command()
+        .args(&argv[1..])
+        .arg("--json")
+        .current_dir(std::env::temp_dir())
+        .output()
+        .unwrap();
+    assert_eq!(followed.status.code(), Some(0), "{followed:?}");
+    let verdict: serde_json::Value = serde_json::from_slice(&followed.stdout).unwrap();
+    assert_eq!(verdict["status"], "established", "{verdict}");
+}
+
+/// Split a command line the way a POSIX shell does for the forms a
+/// single-quoting producer emits: blanks separate words, `'…'` is literal,
+/// and a backslash outside quotes escapes the next character (the `'\''`
+/// that closes, escapes and reopens around an apostrophe).
+fn posix_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quoted = false;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                quoted = !quoted;
+                in_word = true;
+            }
+            '\\' if !quoted => {
+                word.extend(chars.next());
+                in_word = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            c => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    assert!(!quoted, "unbalanced quote in {line:?}");
+    if in_word {
+        words.push(word);
+    }
+    words
+}
+
+#[test]
+fn posix_words_should_undo_single_quoting() {
+    assert_eq!(
+        posix_words("pixel a 'b c' 'it'\\''s' ''"),
+        ["pixel", "a", "b c", "it's", ""]
+    );
+}

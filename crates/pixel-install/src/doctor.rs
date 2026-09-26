@@ -1782,22 +1782,25 @@ pub fn normalize_rule_command(line: &str) -> Option<Vec<String>> {
     // whitespace-separated tokens, so strip the characters up front.
     let unbracketed: String = line.chars().filter(|c| *c != '[' && *c != ']').collect();
 
-    // Tokenize, honoring double quotes.
+    // Tokenize, honoring double and single quotes: a prompt single-quotes a
+    // uid (`'<uid>'`) so a copied one reaches the shell unexpanded, and each
+    // quote character is literal inside the other (`"<the user's words>"`).
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
-    let mut in_quotes = false;
+    let mut quote: Option<char> = None;
     for c in unbracketed.chars() {
-        match c {
-            '"' => in_quotes = !in_quotes,
-            c if c.is_whitespace() && !in_quotes => {
+        match (quote, c) {
+            (None, '"' | '\'') => quote = Some(c),
+            (Some(open), c) if c == open => quote = None,
+            (None, c) if c.is_whitespace() => {
                 if !current.is_empty() {
                     tokens.push(std::mem::take(&mut current));
                 }
             }
-            c => current.push(c),
+            (_, c) => current.push(c),
         }
     }
-    if in_quotes {
+    if quote.is_some() {
         return None; // unbalanced quotes — can't normalize
     }
     if !current.is_empty() {
@@ -2752,11 +2755,49 @@ git clone https://example.com/repo.git
         );
     }
 
+    /// A prompt single-quotes the uids an agent copies so the shell passes
+    /// them unexpanded; the normalizer must still check those lines rather
+    /// than report them unparsed, and an apostrophe inside double quotes
+    /// stays prose, not the start of a quote.
+    #[test]
+    fn single_quoted_placeholders_are_normalized_like_double_quoted_ones() {
+        assert_eq!(
+            normalize_rule_command("pixel evaluate path --from '<uid>' --to '<uid>' --json"),
+            Some(vec![
+                "pixel".into(),
+                "evaluate".into(),
+                "path".into(),
+                "--from".into(),
+                "x".into(),
+                "--to".into(),
+                "x".into(),
+                "--json".into(),
+            ])
+        );
+        assert_eq!(
+            normalize_rule_command("pixel plan-rollback \"<what broke, in the user's words>\""),
+            Some(vec!["pixel".into(), "plan-rollback".into(), "x".into()])
+        );
+        assert_eq!(
+            normalize_rule_command("pixel impact 'it\"s' --json"),
+            Some(vec![
+                "pixel".into(),
+                "impact".into(),
+                "it\"s".into(),
+                "--json".into(),
+            ])
+        );
+    }
+
     #[test]
     fn unnormalizable_lines_are_reported_not_silently_passed() {
-        // Unbalanced quotes.
+        // Unbalanced quotes, of either kind.
         assert_eq!(
             normalize_rule_command("pixel search-content \"unclosed"),
+            None
+        );
+        assert_eq!(
+            normalize_rule_command("pixel search-content 'unclosed"),
             None
         );
         // Ellipsis placeholder syntax the normalizer doesn't understand.

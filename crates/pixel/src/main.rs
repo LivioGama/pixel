@@ -470,6 +470,10 @@ enum Command {
         json: bool,
     },
     /// Call path between two symbols.
+    ///
+    /// `evaluate path` asks the same question and tells an exhaustive
+    /// absence from a search the depth cap cut; the output's `successor`
+    /// field names that command for these two symbols.
     #[command(alias = "trace")]
     CallPath {
         from: String,
@@ -2685,6 +2689,24 @@ mod render_data_tests {
         compact_repo_state(&mut bare);
         assert_eq!(bare, json!([]));
     }
+}
+
+/// The `successor` field `call-path` adds to its output: the `evaluate path`
+/// command asking the same question of the same repository, ready to run,
+/// and what it adds. The rest of the output is untouched: `call-path` stays
+/// compatible for two minor versions (`docs/design/evaluate.md`,
+/// "`call-path` migration").
+fn call_path_successor(from: &str, to: &str, repo: &Path) -> Value {
+    json!({
+        "command": format!(
+            "pixel evaluate path --from {} --to {} {}",
+            search_compat::shell_quote(from),
+            search_compat::shell_quote(to),
+            search_compat::shell_quote(&repo.to_string_lossy()),
+        ),
+        "why": "tells an exhaustive absence from a traversal cut by the depth cap, \
+                and returns the witness edges with their call sites",
+    })
 }
 
 /// Shared graph-command epilogue: candidates protocol + build announcement.
@@ -5889,7 +5911,11 @@ fn run_command(
             path,
             json,
         } => {
-            let data = execute(&path, Request::Trace { from, to }, false)?;
+            let successor = call_path_successor(&from, &to, &path);
+            let mut data = execute(&path, Request::Trace { from, to }, false)?;
+            if let Some(fields) = data.as_object_mut() {
+                fields.insert("successor".into(), successor);
+            }
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }
@@ -8067,6 +8093,25 @@ fn excavate_show(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// A uid embeds a file path, and a path may hold `$`, a space or a
+    /// quote: every argument is single-quoted so the pasted command runs
+    /// with the symbols and the repository `call-path` was given, without
+    /// the shell expanding or splitting any of them.
+    #[test]
+    fn call_path_successor_should_quote_uids_names_and_the_repo_for_the_shell() {
+        let successor = call_path_successor(
+            "src/$(x).rs#Svc::run#method",
+            "it's",
+            Path::new("/tmp/my repo"),
+        );
+        assert_eq!(
+            successor["command"],
+            "pixel evaluate path --from 'src/$(x).rs#Svc::run#method' --to 'it'\\''s' '/tmp/my repo'"
+        );
+        let why = successor["why"].as_str().unwrap_or_default();
+        assert!(why.contains("depth cap"), "{why}");
+    }
 
     #[test]
     fn present_facts_drops_an_absent_history_db_and_keeps_the_rest() {
