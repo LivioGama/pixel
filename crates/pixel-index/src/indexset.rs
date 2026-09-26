@@ -1817,6 +1817,31 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// `reconcile_delta` itself: a diff git cannot compute is an error, never
+    /// an empty change list recorded as HEAD's delta.
+    #[test]
+    fn reconcile_delta_should_fail_on_a_diff_git_cannot_compute() {
+        let _cache = IsolatedCache::new("failed-diff");
+        let dir = scratch("failed-diff");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn diffed() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        let head = git_out(&dir, &["rev-parse", "HEAD"]);
+        let mut set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        let gpx = dir.join(SHARD_DIR);
+
+        let missing = "0".repeat(40);
+        let err = set.reconcile_delta(&gpx, &missing, &head).unwrap_err();
+        assert!(
+            matches!(&err, IndexSetError::Io(e) if e.to_string().contains("git diff")),
+            "{err:?}"
+        );
+        let state = DeltaState::load(&gpx).expect("the open saved a state");
+        assert_eq!(state.delta_oid, None, "nothing recorded as HEAD's delta");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A restored `.pixel/` can carry a base built at a commit this clone
     /// never fetched (a CI cache filled on another pull request's merge
     /// ref). `git diff base..HEAD` then fails, and reading that failure as
