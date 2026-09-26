@@ -322,3 +322,48 @@ fn the_action_log_should_record_an_evaluation_and_its_outcome() {
         "both runs are journalled, and a usage error is not recorded as a success: {log}"
     );
 }
+
+/// `call-path` points to its successor without changing what it already
+/// printed, and the command it names runs as is.
+///
+/// Its `found: false` cannot tell "no path" from "the depth cap cut the
+/// search", so an agent that keeps calling it keeps misreading negatives;
+/// the field is how one learns the replacement from the output it already
+/// parses. It is additive because `call-path` stays compatible for two
+/// minor versions, and it is a complete command because a suggestion that
+/// no longer parses (a renamed flag) would send the agent into a usage
+/// error instead of an answer.
+#[test]
+fn call_path_should_name_a_runnable_evaluate_command_and_keep_its_fields() {
+    let dir = fixture("call-path-successor");
+    let output = pixel_command()
+        .args(["call-path", "work", "helper"])
+        .arg(&*dir)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(
+        value["found"], true,
+        "call-path keeps its own answer: {value}"
+    );
+    let command = value["successor"]["command"].as_str().unwrap_or_default();
+    assert_eq!(command, "pixel evaluate path --from 'work' --to 'helper'");
+
+    let argv: Vec<String> = command
+        .split_whitespace()
+        .skip(1)
+        .map(|token| token.trim_matches('\'').to_string())
+        .collect();
+    let followed = pixel_command()
+        .args(&argv)
+        .arg(&*dir)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(followed.status.code(), Some(0), "{followed:?}");
+    let verdict: serde_json::Value = serde_json::from_slice(&followed.stdout).unwrap();
+    assert_eq!(verdict["status"], "established", "{verdict}");
+}

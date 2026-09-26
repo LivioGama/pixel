@@ -50,7 +50,7 @@ pixel commit --files <f1> --files <f2> -m "msg" --request-id "id"   # only when 
 | `pixel search-meaning "how is auth handled?"` | conceptual question, not regex |
 | `pixel impact "symbol"` | callers + callees in one op |
 | `pixel who-calls "X" --role callers\|callees` | direct edges only |
-| `pixel call-path "A" "B"` | the whole path between two symbols |
+| `pixel evaluate path --from "A" --to "B"` | does A reach B in the call graph: the witness path, or a bounded absence (replaces `call-path`) |
 | `pixel pack-context <uid>` | one symbol budget-fitted, not a whole file |
 | `pixel plan "task"` | deterministic todo list for multi-file work |
 | `pixel list-areas` / `pixel list-flows` / `pixel status` | modules, flows, index freshness |
@@ -118,6 +118,12 @@ callers exist" — never claim a symbol is uncalled on that alone.
 `extraction_limits` lists the known blind spots (callbacks passed as
 arguments, dynamic dispatch, macro-generated calls); `lower_bound` flags
 resolver uncertainty — more edges may exist.
+
+`pixel evaluate path` answers with a `status`, never a guess:
+`established` = a path was found, cite its `witness` edges;
+`absent_in_snapshot` = no path in the indexed relation, traversal exhaustive —
+not "A never calls B at runtime"; `unknown` = no answer: follow `reason` and
+`next_actions`, never read it as `false` or as permission.
 
 ## Recall — past agent sessions
 
