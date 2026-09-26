@@ -405,6 +405,18 @@ fn capped_search_human_output_names_the_stdout_cap() {
 #[test]
 fn prepare_repo_reports_where_the_time_went() {
     let dir = fixture("timings");
+    // Every fixture commits the same tree, so the shard cache under the
+    // shared test HOME may already hold this base: its own cache keeps the
+    // first open a build from git.
+    let cache = Scratch::for_test("pixel-json-contract", "timings-cache");
+    let pixel = |dir: &Path, args: &[&str]| {
+        pixel_command()
+            .args(args)
+            .current_dir(dir)
+            .env("XDG_CACHE_HOME", cache.as_os_str())
+            .output()
+            .unwrap()
+    };
     let out = pixel(&dir, &["prepare-repo", ".", "--json", "--no-daemon"]);
     assert!(out.status.success(), "{out:?}");
     let docs = parse_stdout_lines(&out, "prepare-repo --json");
