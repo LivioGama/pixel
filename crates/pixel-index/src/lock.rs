@@ -342,18 +342,22 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// An exclude path that cannot be read for another reason than being
-    /// absent (here a directory) is left as it is, never replaced.
+    /// An exclude file that cannot be read for another reason than being
+    /// absent is left as it is. Write-only is the case that loses data: the
+    /// read fails but a write would succeed and replace the user's rules
+    /// with pixel's entry alone.
     #[test]
     fn an_unreadable_exclude_is_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
         let (dir, git) = git_repo();
         let exclude = exclude_file(&git);
-        std::fs::remove_file(&exclude).ok();
-        std::fs::create_dir_all(exclude.join("kept")).unwrap();
+        std::fs::write(&exclude, "keep/\n").unwrap();
+        std::fs::set_permissions(&exclude, std::fs::Permissions::from_mode(0o200)).unwrap();
 
         ensure_pixel_gitignored(&dir);
 
-        assert!(exclude.join("kept").is_dir(), "the directory is untouched");
+        std::fs::set_permissions(&exclude, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read_to_string(&exclude).unwrap(), "keep/\n");
         std::fs::remove_dir_all(&dir).ok();
     }
 
