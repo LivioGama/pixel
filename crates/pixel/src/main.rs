@@ -611,6 +611,11 @@ enum Command {
         /// Build indexes only; do not start or use the background daemon.
         #[arg(long)]
         no_daemon: bool,
+        /// Rebuild the code graph from scratch even when the stored one
+        /// still matches the tree (by default it is kept, or updated in
+        /// place when few files changed).
+        #[arg(long)]
+        rebuild_graph: bool,
         #[arg(long)]
         json: bool,
     },
@@ -4872,11 +4877,12 @@ fn compact_repo_state(data: &mut Value) {
 /// daemon state, `dirty_count` — and never embeds the status snapshot: the
 /// dirty file list is irrelevant to "is the index ready" and is what blew
 /// past the output cap on repos with untracked vendor trees.
-fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
+fn ready(path: PathBuf, no_daemon: bool, rebuild_graph: bool, json: bool) -> Result<(), String> {
     let started = Instant::now();
     let root = discover_root(&path)?;
     let mut status = execute(&root, Request::Status {}, no_daemon)?;
-    let mut graph = execute(&root, Request::Graph {}, no_daemon)?;
+    let if_stale = !rebuild_graph;
+    let mut graph = execute(&root, Request::Graph { if_stale }, no_daemon)?;
     if !no_daemon {
         daemon_start(root.clone(), false, json)?;
     }
@@ -4913,32 +4919,37 @@ fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
 }
 
 /// The `timings` block of `prepare-repo`: the index open's layers (moved out
-/// of `index.open`) and the graph build's phases (moved out of
-/// `graph.phases`), beside the command's wall time, so one `jq .timings`
-/// says where the time went. An older daemon that sends neither leaves
-/// `null` in their place.
+/// of `index.open`), how the graph was obtained and its phases (moved out of
+/// `graph.build` and `graph.phases`), beside the command's wall time, so one
+/// `jq .timings` says where the time went. An older daemon that sends none
+/// of them leaves `null` in their place.
 fn ready_timings(status: &mut Value, graph: &mut Value, total: Duration) -> Value {
     let index = status
         .get_mut("index")
         .and_then(Value::as_object_mut)
         .and_then(|index| index.remove("open"))
         .unwrap_or(Value::Null);
-    let phases = graph
-        .as_object_mut()
-        .and_then(|graph| graph.remove("phases"))
-        .unwrap_or(Value::Null);
+    let mut take = |key: &str| {
+        graph
+            .as_object_mut()
+            .and_then(|graph| graph.remove(key))
+            .unwrap_or(Value::Null)
+    };
+    let (build, phases) = (take("build"), take("phases"));
     serde_json::json!({
         "total_ms": pixel_index::indexset::millis(total),
         "index": index,
         "graph": {
             "elapsed_ms": graph.get("elapsed_ms").cloned().unwrap_or(Value::Null),
+            "build": build,
             "phases": phases,
         },
     })
 }
 
 /// One human line out of [`ready_timings`]: the total, how the index base
-/// was obtained, the graph build, and its slowest phase — the one to look at.
+/// was obtained, how the graph was (kept, updated, rebuilt), and its slowest
+/// phase — the one to look at.
 fn timings_line(timings: &Value) -> String {
     let ms = |v: &Value| {
         v.as_u64()
@@ -4960,11 +4971,12 @@ fn timings_line(timings: &Value) -> String {
         .map(|(name, n)| format!(", slowest {} {n} ms", name.trim_end_matches("_ms")))
         .unwrap_or_default();
     format!(
-        "timings: total {}, index {} (base {}), graph {}{slowest}",
+        "timings: total {}, index {} (base {}), graph {} ({}){slowest}",
         ms(&timings["total_ms"]),
         index_ms.map_or_else(|| "?".to_string(), |n| format!("{n} ms")),
         index["base"].as_str().unwrap_or("?"),
         ms(&timings["graph"]["elapsed_ms"]),
+        timings["graph"]["build"]["mode"].as_str().unwrap_or("?"),
     )
 }
 
@@ -6053,7 +6065,7 @@ fn run_command(
             Ok(())
         }
         Command::RebuildGraph { path, json } => {
-            let v = execute(&path, Request::Graph {}, false)?;
+            let v = execute(&path, Request::Graph { if_stale: false }, false)?;
             eprintln!(
                 "graph built in {} ms -> {}",
                 v.get("elapsed_ms").and_then(Value::as_u64).unwrap_or(0),
@@ -6251,8 +6263,9 @@ fn run_command(
         Command::PrepareRepo {
             path,
             no_daemon,
+            rebuild_graph,
             json,
-        } => ready(path, no_daemon, json),
+        } => ready(path, no_daemon, rebuild_graph, json),
         Command::Evidence { path, jsonl } => {
             if !jsonl {
                 return Err("evidence requires --jsonl".into());
@@ -8163,7 +8176,7 @@ mod tests {
             "index": {"base_files": 3, "open": {"base": "reused", "base_ms": 7}},
         });
         let mut graph = serde_json::json!({
-            "symbols": 9, "elapsed_ms": 40, "phases": {"extract_ms": 30},
+            "symbols": 9, "elapsed_ms": 40, "build": {"mode": "fresh"}, "phases": {"extract_ms": 30},
         });
         let timings = ready_timings(&mut status, &mut graph, Duration::from_millis(52));
         assert_eq!(
@@ -8171,7 +8184,7 @@ mod tests {
             serde_json::json!({
                 "total_ms": 52,
                 "index": {"base": "reused", "base_ms": 7},
-                "graph": {"elapsed_ms": 40, "phases": {"extract_ms": 30}},
+                "graph": {"elapsed_ms": 40, "build": {"mode": "fresh"}, "phases": {"extract_ms": 30}},
             })
         );
         assert_eq!(status, serde_json::json!({"index": {"base_files": 3}}));
@@ -8186,7 +8199,7 @@ mod tests {
         assert_eq!(old["index"], Value::Null);
         assert_eq!(
             old["graph"],
-            serde_json::json!({"elapsed_ms": 5, "phases": null})
+            serde_json::json!({"elapsed_ms": 5, "build": null, "phases": null})
         );
     }
 
@@ -8197,17 +8210,17 @@ mod tests {
         let timings = serde_json::json!({
             "total_ms": 160,
             "index": {"base": "reused", "base_ms": 1, "delta_ms": 2, "overlay_ms": 4},
-            "graph": {"elapsed_ms": 150, "phases": {
+            "graph": {"elapsed_ms": 150, "build": {"mode": "full"}, "phases": {
                 "collect_ms": 20, "extract_ms": 90, "verify_ms": 30,
             }},
         });
         assert_eq!(
             timings_line(&timings),
-            "timings: total 160 ms, index 7 ms (base reused), graph 150 ms, slowest extract 90 ms"
+            "timings: total 160 ms, index 7 ms (base reused), graph 150 ms (full), slowest extract 90 ms"
         );
         assert_eq!(
             timings_line(&Value::Null),
-            "timings: total ?, index ? (base ?), graph ?"
+            "timings: total ?, index ? (base ?), graph ? (?)"
         );
     }
 

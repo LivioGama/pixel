@@ -431,19 +431,49 @@ fn prepare_repo_reports_where_the_time_went() {
         timings["graph"]["phases"]["publish_ms"].is_u64(),
         "{timings}"
     );
-    assert!(docs[0]["index"].get("open").is_none(), "moved, not copied");
-    assert!(
-        docs[0]["graph"].get("phases").is_none(),
-        "moved, not copied"
+    assert_eq!(
+        timings["graph"]["build"],
+        serde_json::json!({"mode": "full", "reason": "missing"}),
+        "{timings}"
     );
+    for moved in ["phases", "build"] {
+        assert!(
+            docs[0]["graph"].get(moved).is_none(),
+            "{moved}: moved, not copied"
+        );
+    }
+    assert!(docs[0]["index"].get("open").is_none(), "moved, not copied");
 
     let out = pixel(&dir, &["prepare-repo", ".", "--no-daemon"]);
     assert!(out.status.success(), "{out:?}");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.lines()
-            .any(|l| l.starts_with("timings: total ") && l.contains("(base reused)")),
-        "the second run reuses the base it built: {text}"
+        text.lines().any(|l| l.starts_with("timings: total ")
+            && l.contains("(base reused)")
+            && l.contains("(fresh)")),
+        "the second run reuses the base and the graph it built: {text}"
+    );
+
+    let out = pixel(
+        &dir,
+        &[
+            "prepare-repo",
+            ".",
+            "--json",
+            "--no-daemon",
+            "--rebuild-graph",
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let docs = parse_stdout_lines(&out, "prepare-repo --rebuild-graph");
+    assert_eq!(
+        docs[0]["timings"]["graph"]["build"],
+        serde_json::json!({"mode": "full", "reason": "requested"})
+    );
+    assert!(
+        docs[0]["graph"]["symbols"].as_u64() > Some(0),
+        "{}",
+        docs[0]
     );
 }
 

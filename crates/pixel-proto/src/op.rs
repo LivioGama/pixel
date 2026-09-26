@@ -106,7 +106,15 @@ pub enum Op {
         #[serde(default)]
         include_tests: bool,
     },
-    Graph {},
+    /// Build the code graph. By default a full rebuild, whatever is stored.
+    /// With `if_stale`, the stored graph is kept when its signature still
+    /// matches the tree and updated in place when few files drifted: a
+    /// restored or already-current graph costs one walk, not a rebuild. An
+    /// older daemon ignores the field and rebuilds, which is the safe side.
+    Graph {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        if_stale: bool,
+    },
     Status {},
     /// Force a rebuild of the text index shard. Returns BuildStats.
     /// When sent to the daemon, the daemon's already-open Service does
@@ -368,7 +376,7 @@ impl Op {
             Op::Processes { .. } => "processes",
             Op::Clusters { .. } => "clusters",
             Op::Changes { .. } => "changes",
-            Op::Graph {} => "graph",
+            Op::Graph { .. } => "graph",
             Op::Status {} => "status",
             Op::Resolve { .. } => "resolve",
             Op::History { .. } => "history",
@@ -523,10 +531,23 @@ mod tests {
         assert_eq!(parsed, op);
     }
 
+    /// `if_stale` is opt-in on the wire: an older CLI's bare `graph` keeps
+    /// asking for a rebuild, and only a caller that sets it sends the field.
+    #[test]
+    fn graph_if_stale_defaults_off_and_is_sent_only_when_set() {
+        let bare: Op = serde_json::from_value(json!({"op": "graph"})).unwrap();
+        assert_eq!(bare, Op::Graph { if_stale: false });
+        let reuse = Op::Graph { if_stale: true };
+        assert_eq!(
+            serde_json::to_value(&reuse).unwrap(),
+            json!({"op": "graph", "if_stale": true})
+        );
+    }
+
     #[test]
     fn graph_and_status_serialize_as_empty_object_variants() {
         assert_eq!(
-            serde_json::to_value(Op::Graph {}).unwrap(),
+            serde_json::to_value(Op::Graph { if_stale: false }).unwrap(),
             json!({"op": "graph"})
         );
         assert_eq!(
@@ -689,7 +710,7 @@ mod tests {
                 },
                 "changes",
             ),
-            (Op::Graph {}, "graph"),
+            (Op::Graph { if_stale: false }, "graph"),
             (Op::Status {}, "status"),
             (
                 Op::Resolve {
