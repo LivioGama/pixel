@@ -41,13 +41,15 @@ import sys
 REPO = Path(__file__).resolve().parent.parent
 CONFIG = REPO / ".cargo/mutants.toml"
 
-#: Mutants one shard is sized for. A shard pays a baseline (one to three
-#: minutes with the shared cache) before its first mutant, then about 25 s
-#: per `pixel-cli` mutant and 10 to 15 s per library mutant. At 20 mutants,
-#: the baseline is at most a third of a shard's run.
-MUTANTS_PER_SHARD = 20
+#: Mutants one shard is sized for. A shard pays about 40 s of setup and a
+#: baseline (35 to 80 s with the shared cache) before its first mutant, then
+#: about 25 s per `pixel-cli` mutant and 10 to 15 s per library mutant. The
+#: pull request waits for the slowest shard, and runners are free on this
+#: public repository, so 10 mutants keep a `pixel-cli` shard near six
+#: minutes where 20 take about ten, for one more baseline per 10 mutants.
+MUTANTS_PER_SHARD = 10
 #: Upper bound on parallel shard jobs. Free accounts run 20 jobs at a time,
-#: and this leaves room for the CI workflow of the same push. Past 200
+#: and this leaves room for the CI workflow of the same push. Past 100
 #: mutants, shards grow beyond `MUTANTS_PER_SHARD`: a 658-mutant diff puts
 #: 66 on each shard, about 30 minutes against the job's 90-minute limit.
 MAX_SHARDS = 10

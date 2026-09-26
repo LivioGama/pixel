@@ -118,7 +118,7 @@ jobs:
           SRC: ${{ steps.diff.outputs.src }}
         run: cargo mutants --list --dir "$SRC" --in-diff "$PWD/pr.diff" > mutants-list.txt
 
-      # One shard per 20 mutants, at most 10 (the reasoning sits beside
+      # One shard per 10 mutants, at most 10 (the reasoning sits beside
       # MUTANTS_PER_SHARD and MAX_SHARDS in the script). No mutants means an
       # empty matrix and no shard job: each one would pay a baseline build
       # to test nothing.
