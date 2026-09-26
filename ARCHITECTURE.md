@@ -290,6 +290,18 @@ envelope talks to the daemon socket directly.
   stderr notice reads `updated graph.db for N changed file(s)` versus
   `built graph.db on first use`. Call edges carry a resolution tier, and
   analyses report a lower bound when same-name call sites stay unresolved.
+- The `graph` op rebuilds from scratch by default (`rebuild-graph`,
+  `prepare-repo --rebuild-graph`). With `"if_stale": true` (a request field
+  that defaults to `false` and is sent only when set, so an older daemon
+  ignores it and rebuilds), it takes the same keep / update / rebuild
+  decision as the first graph command above; `prepare-repo` sends it. Every
+  `graph` answer carries `build`: `{"mode": "fresh"}`, `{"mode":
+  "incremental", "changed_files", "removed_files"}` or `{"mode": "full",
+  "reason"}` (`requested` for an explicit rebuild), and `phases`: the full
+  build's phase timings plus `publish_ms`, or `check_ms` (the walk that
+  chose) and `apply_ms` for a kept or updated graph. `prepare-repo --json`
+  moves both into `timings.graph`, beside `timings.index` (how each index
+  layer was obtained) and `timings.total_ms`.
 - History facts are ingested by a dedicated low-priority thread. Queries
   never wait on ingest; they answer from what is already in `history.db` and
   say so through epistemics.
