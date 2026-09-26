@@ -353,6 +353,13 @@ mod tests {
         let exclude = exclude_file(&git);
         std::fs::write(&exclude, "keep/\n").unwrap();
         std::fs::set_permissions(&exclude, std::fs::Permissions::from_mode(0o200)).unwrap();
+        if std::fs::read(&exclude).is_ok() {
+            // Root reads through the mode bits, so there is no read error to
+            // provoke; the CI runner is not root and still checks this.
+            eprintln!("skipped: {} is readable despite mode 0200", exclude.display());
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
 
         ensure_pixel_gitignored(&dir);
 
