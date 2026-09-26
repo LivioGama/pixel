@@ -1259,9 +1259,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A batch that dies after its first answer loses no file: every path
-    /// it never answered is read on its own, and only a path the commit
-    /// really lacks stays unreadable.
+    /// A batch that dies after its first answer loses no file: the answer
+    /// it gave is kept, every path it never answered is read on its own,
+    /// and only a path the commit really lacks stays unreadable.
     #[test]
     fn a_batch_failing_part_way_falls_back_to_one_read_per_path() {
         let dir = scratch("batch-part-way");
@@ -1278,7 +1278,8 @@ mod tests {
         let refs: Vec<&String> = rels.iter().collect();
         let extractor = ex();
         let outcomes = extract_blobs_via(&dir, &head, &refs, extractor.as_ref(), |_, visit| {
-            visit(0, BatchObject::Blob(b"fn first_needle() {}\n"));
+            // Not the committed bytes: the grams must come from the answer.
+            visit(0, BatchObject::Blob(b"fn batch_only_needle() {}\n"));
             Err(pixel_git::GitError::Timeout {
                 args: vec!["cat-file".to_string()],
             })
@@ -1295,6 +1296,15 @@ mod tests {
             })
             .collect();
         assert_eq!(shape, ["indexed a.rs", "indexed b.rs", "unreadable"]);
+        let mut hits = Vec::new();
+        extractor.grams(b"fn batch_only_needle() {}\n", &mut hits);
+        let mut from_batch: Vec<u64> = hits.iter().map(|h| h.hash).collect();
+        from_batch.sort_unstable();
+        from_batch.dedup();
+        assert!(
+            matches!(&outcomes[0], BlobExtraction::Indexed(_, hashes) if *hashes == from_batch),
+            "a.rs is indexed from the batch's answer, not re-read"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

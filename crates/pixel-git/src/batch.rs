@@ -132,8 +132,10 @@ where
     let mut deliver = |i: usize, object: BatchObject<'_>| {
         paused.store(true, Ordering::SeqCst);
         visit(i, object);
-        paused.store(false, Ordering::SeqCst);
+        // Progress before the unpause: a wait that expires in between then
+        // finds either the pause or the message, never neither.
         let _ = progress.send(());
+        paused.store(false, Ordering::SeqCst);
     };
     let mut read = || -> std::io::Result<()> {
         for &i in &sent {
@@ -229,10 +231,12 @@ fn spawn_watchdog(
                 None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
             };
             match next {
-                // Time spent in the caller's `visit` is not git's silence.
-                Ok(()) | Err(RecvTimeoutError::Timeout) if paused.load(Ordering::SeqCst) => {}
                 Ok(()) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
+                // Time spent in the caller's `visit` is not git's silence, nor
+                // is an answer whose progress landed as the wait expired.
+                Err(RecvTimeoutError::Timeout)
+                    if paused.load(Ordering::SeqCst) || rx.try_recv().is_ok() => {}
                 Err(RecvTimeoutError::Timeout) => {
                     timed_out.store(true, Ordering::SeqCst);
                     if let Ok(mut child) = child.lock() {
