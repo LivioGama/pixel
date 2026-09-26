@@ -399,8 +399,8 @@ impl IndexSet {
         };
         // A git repo demands a git-anchored base; a plain-walk base (no OID)
         // cannot be delta'd against and is rebuilt.
-        if head.is_some() && base.as_ref().is_some_and(|s| !delta_anchor_held(root, s)) {
-            base = None;
+        if head.is_some() {
+            base = base.filter(|s| delta_anchor_held(root, s));
         }
         // Non-Git repos: the base shard has no commit anchor, so it can go
         // stale when files are added/removed/edited. Invalidate it when the
@@ -1372,6 +1372,28 @@ mod tests {
         let (m, _) = set.search("plainWalkNeedle", None).unwrap();
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].path, "solo.txt");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The anchor check is for git repositories only: an unchanged plain
+    /// directory reopens on the base it built, without rewriting it.
+    #[test]
+    fn an_unchanged_plain_directory_reopens_without_rebuilding_its_base() {
+        let _cache = IsolatedCache::new("plain-reopen");
+        let dir = scratch("plain-reopen");
+        std::fs::write(dir.join("solo.txt"), "plainReopenNeedle\n").unwrap();
+        let base = dir.join(SHARD_DIR).join(SHARD_FILE);
+        drop(IndexSet::open_or_build(&dir, ex()).unwrap());
+        let written = std::fs::metadata(&base).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert_eq!(set.search("plainReopenNeedle", None).unwrap().0.len(), 1);
+        assert_eq!(
+            std::fs::metadata(&base).unwrap().modified().unwrap(),
+            written,
+            "the base shard was rebuilt"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
