@@ -44,7 +44,8 @@ Always loaded: how to run the long gates without losing an afternoon.
   `just clean` takes the build output of all of them (CONTRIBUTING.md,
   "Reclaiming disk"); a `mutants.out` left by an aborted run is in that list.
 - **Stacked PRs diff against their base**, not `main`:
-  `cargo mutants --in-diff <(git diff <base-branch>...HEAD)`. A lower PR fixed after
+  `git diff <base-branch>...HEAD > target/pr.diff && cargo mutants
+  --in-diff target/pr.diff`. A lower PR fixed after
   review gets a follow-up commit pushed to its branch; the branches above
   keep their diff and the merge order stays bottom-up.
 - **Work on a lower branch from a second worktree**

@@ -136,7 +136,7 @@ mutates the tree of the range's right end:
 finding locally, scope the run to the function:
 
 ```bash
-cargo mutants --in-diff <(git diff main...HEAD) -F '<function name>'
+git diff main...HEAD > target/pr.diff && cargo mutants --in-diff target/pr.diff -F '<function name>'
 ```
 
 Optional but recommended when the change touches the CLI surface, hooks, or
@@ -205,10 +205,14 @@ are for a human who chooses to spend the time.
 ```bash
 cargo install --locked cargo-mutants        # or: cargo binstall cargo-mutants
 
-cargo mutants --in-diff <(git diff main...HEAD) -F '<fn>'   # one finding from the CI job
-cargo mutants -p pixel-proto                                    # one crate, full sweep (about a minute)
-cargo mutants --in-diff <(git diff main...HEAD)              # what CI runs; hours on a laptop for a big PR
+git diff main...HEAD > target/pr.diff                # the branch's diff (commit first)
+cargo mutants --in-diff target/pr.diff -F '<fn>'     # one finding from the CI job
+cargo mutants -p pixel-proto                         # one crate, full sweep (about a minute)
+cargo mutants --in-diff target/pr.diff               # what CI runs; hours on a laptop for a big PR
 ```
+
+The diff goes through a file rather than `<(git diff …)` so the same lines
+run in bash, zsh and fish, which has no `<(…)` process substitution.
 
 Read the summary line and `mutants.out/missed.txt`:
 
@@ -358,9 +362,10 @@ Pixel is dogfooded on itself. When an agent works in this repository:
   Push until the job reports no missed mutant; do not weaken an assertion to
   get there. Run `cargo mutants` locally only when asked, scoped with `-F`
   to one or two functions, never the full diff. Two things keep the job off
-  the critical path: before the push, read `cargo mutants --list --in-diff
-  <(git diff <base>...HEAD)` (seconds, no build) and name the test that
-  fails under each listed mutant, writing the missing ones; after it, watch
+  the critical path: before the push, read `git diff <base>...HEAD >
+  target/pr.diff && cargo mutants --list --in-diff target/pr.diff`
+  (seconds, no build) and name the test that fails under each listed
+  mutant, writing the missing ones; after it, watch
   the checks in the background (`gh pr checks <pr> --watch`) and move to the
   next unit instead of waiting.
 - The CodeRabbit review is a gate like the `Mutants` job, not a suggestion
