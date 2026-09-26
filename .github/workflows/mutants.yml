@@ -118,7 +118,7 @@ jobs:
           SRC: ${{ steps.diff.outputs.src }}
         run: cargo mutants --list --dir "$SRC" --in-diff "$PWD/pr.diff" > mutants-list.txt
 
-      # One shard per 20 mutants, at most 10 (the reasoning sits beside
+      # One shard per 10 mutants, at most 10 (the reasoning sits beside
       # MUTANTS_PER_SHARD and MAX_SHARDS in the script). No mutants means an
       # empty matrix and no shard job: each one would pay a baseline build
       # to test nothing.
@@ -161,10 +161,24 @@ jobs:
       # single job filled the runner's disk at its 101st mutant, and the 546
       # builds after that failed at the link step and came back `unviable`.
       # The preinstalled .NET, Android and GHC toolchains are never used here
-      # and hold most of the image's free space.
+      # and hold 16 GB, but deleting them costs 40 to 110 s per shard, often
+      # more than the shard's mutants. ubuntu-26.04 starts with 92 GB free
+      # and a shard used at most 9 GB (cache, baseline, 20 mutants; runs
+      # 36182035966, 36195319520, 36200090079), so the toolchains go only
+      # when an image leaves less than MIN_FREE_GB: about 5 GB of cache and
+      # baseline plus 0.2 GB a mutant puts the largest shard the plan allows
+      # (66 mutants, see MAX_SHARDS) near 25 GB, doubled here. A shard that
+      # still fills the disk fails the gate as `disk-full`, never passes.
       - name: Free the runner's disk
+        env:
+          MIN_FREE_GB: 50
         run: |
           df -h /
+          free_gb=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+          if [ "$free_gb" -ge "$MIN_FREE_GB" ]; then
+            echo "${free_gb} GB free, at least ${MIN_FREE_GB} GB: nothing to delete"
+            exit 0
+          fi
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           df -h /
 

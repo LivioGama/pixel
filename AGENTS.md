@@ -6,6 +6,11 @@ Build, gates, PR format and the definition of done live in [CONTRIBUTING.md](CON
 
 Mutation testing runs in CI only: the `Mutants` workflow runs `cargo mutants --in-diff` against the PR's base and fails the pull request on any surviving mutant. Do not run `cargo mutants` locally on your own initiative; it holds the tree (`--in-place`) and a laptop for up to hours, which is what the workflow's runners are for. The local loop is: write the code in the shapes `.agents/rules/mutation-gate.md` describes, pass the fast gates (`cargo fmt`, `cargo test`, `cargo clippy`), push, open the PR, then read the `MISSED`/`TIMEOUT` lines: the `Mutants in diff` job summary lists every shard's survivors, and `gh run view --log` on a `Mutants shard k/n` job or the annotations give the detail. A local `cargo mutants … -F '<fn>'` on one or two functions, bounded to a few minutes, is acceptable only when explicitly asked for.
 
+Two habits keep that loop from being the bottleneck (from 2026-09-21 to 2026-09-26, 42 of 121 `Mutants` runs failed, each one a push-and-wait round trip of 5 to 10 minutes):
+
+- **Review the list before the push.** `cargo mutants --list --in-diff <(git diff <base>...HEAD)`, on a committed tree, prints every mutant CI will run as `file:line: replace f -> T with …` in a second or two, building nothing. For each line, name the test that fails under it; a line without one gets its test, or its reasoned skip, before the push. The CI run then confirms instead of discovering.
+- **Do not wait on the job.** Start `gh pr checks <pr> --watch` as a background task and work on the next unit (the next pull request of the stack, another worktree) until it returns; then read the `MISSED` lines. Never a foreground `sleep` loop.
+
 For each `MISSED` line either:
 
 - add a test that fails under that exact mutation (an assertion on the observable contract, not a weaker one), or

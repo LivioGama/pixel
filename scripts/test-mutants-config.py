@@ -316,8 +316,17 @@ class ShardedMutantsGate(unittest.TestCase):
                 self.assertEqual(shards, [f"{k}/{count}" for k in range(count)])
 
     def test_a_small_diff_keeps_one_baseline_and_a_large_one_is_split(self):
-        self.assertEqual(len(self.shards_for(20)), 1)
+        self.assertEqual(len(self.shards_for(10)), 1)
+        self.assertEqual(len(self.shards_for(11)), 2)
         self.assertGreater(len(self.shards_for(95)), 1)
+
+    def test_a_shard_holds_at_most_ten_mutants_below_the_job_budget(self):
+        """The pull request waits for the slowest shard: past 10 `pixel-cli`
+        mutants, one shard runs longer than the setup and baseline a second
+        one would add."""
+        for listed in (10, 32, 100):
+            with self.subTest(listed=listed):
+                self.assertEqual(len(self.shards_for(listed)), -(-listed // 10))
 
     def test_a_huge_diff_does_not_exceed_the_concurrent_job_budget(self):
         """A free account runs 20 jobs at once; the CI workflow needs some of them."""

@@ -15,7 +15,10 @@ the replacement of the whole body (`Ok(Default::default())`, `vec![]`, `()`).
 A one-token change in an untested function is therefore enough to get its
 body replaced, and a reformatted line brings every operator on it. Measure
 the exposure before pushing, in seconds and without building:
-`cargo mutants --list --in-diff <(git diff <base>...HEAD)`. Two settings in
+`cargo mutants --list --in-diff <(git diff <base>...HEAD)`, then read it
+line by line: every listed mutant names the test that fails under it, or
+gets one before the push: each failed CI run is a 5-to-10-minute round
+trip, and 42 of 121 failed from 2026-09-21 to 26. Two settings in
 `.cargo/mutants.toml` shape the answer: `test_workspace = false` runs only
 the mutated crate's tests (a CLI contract test never kills a library
 mutant), and `crates/*/build.rs` is excluded: cargo build scripts only, so
