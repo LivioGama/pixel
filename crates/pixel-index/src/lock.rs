@@ -356,7 +356,10 @@ mod tests {
         if std::fs::read(&exclude).is_ok() {
             // Root reads through the mode bits, so there is no read error to
             // provoke; the CI runner is not root and still checks this.
-            eprintln!("skipped: {} is readable despite mode 0200", exclude.display());
+            eprintln!(
+                "skipped: {} is readable despite mode 0200",
+                exclude.display()
+            );
             std::fs::remove_dir_all(&dir).ok();
             return;
         }
