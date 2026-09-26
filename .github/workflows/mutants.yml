@@ -47,6 +47,12 @@ env:
 jobs:
   plan:
     name: Mutants plan
+    # A release-prepare pull request into main mutates nothing it wrote
+    # (version bumps, Cargo.lock, changelog): skipped, as in ci.yml.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.base_ref != 'main'
+      || !startsWith(github.head_ref, 'release-')
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     outputs:
@@ -284,8 +290,9 @@ jobs:
     name: Mutants in diff
     needs: [plan, shard]
     # Runs after failed or skipped shards too: it is the job that says what
-    # they add up to.
-    if: always()
+    # they add up to. Not after a skipped plan: a release-prepare pull
+    # request has no diff to gate.
+    if: always() && needs.plan.result != 'skipped'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:

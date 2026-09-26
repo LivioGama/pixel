@@ -70,6 +70,14 @@ on:
       - ".qoder/**"
       - ".windsurf/**"
 
+# A release-prepare pull request into main (`release-x.y.z` branch) skips
+# every job, as it skips Cross-build: its diff is version bumps, Cargo.lock
+# and the changelog, `prepare.sh` already ran `check-release` and the gates
+# on it, and the release skill tags only once the push run on the merge
+# commit is green, so the pull request run would test the same tree twice.
+# A maintenance release into `release/x.y` keeps them: no push run covers
+# that branch.
+#
 # A new push to a pull request cancels the run still in flight for its
 # previous commit. Pushes to main are never cancelled so every
 # merge keeps a complete run.
@@ -87,6 +95,10 @@ env:
 jobs:
   test:
     name: Test + Format
+    if: >-
+      github.event_name != 'pull_request'
+      || github.base_ref != 'main'
+      || !startsWith(github.head_ref, 'release-')
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -212,6 +224,10 @@ jobs:
 
   msrv:
     name: MSRV (rust-version in Cargo.toml)
+    if: >-
+      github.event_name != 'pull_request'
+      || github.base_ref != 'main'
+      || !startsWith(github.head_ref, 'release-')
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -252,6 +268,10 @@ jobs:
 
   deny:
     name: Dependency policy (cargo-deny)
+    if: >-
+      github.event_name != 'pull_request'
+      || github.base_ref != 'main'
+      || !startsWith(github.head_ref, 'release-')
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
