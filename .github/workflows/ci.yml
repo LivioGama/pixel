@@ -70,6 +70,15 @@ on:
       - ".qoder/**"
       - ".windsurf/**"
 
+# A release-prepare pull request into main (`release-x.y.z` branch whose
+# diff the `scope` job verifies) skips every job, as it skips Cross-build:
+# its diff is version bumps, Cargo.lock
+# and the changelog, `prepare.sh` already ran `check-release` and the gates
+# on it, and the release skill tags only once the push run on the merge
+# commit is green, so the pull request run would test the same tree twice.
+# A maintenance release into `release/x.y` keeps them: no push run covers
+# that branch.
+#
 # A new push to a pull request cancels the run still in flight for its
 # previous commit. Pushes to main are never cancelled so every
 # merge keeps a complete run.
@@ -85,8 +94,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Release-prepare pull request? See release-prepare-scope.yml.
+  scope:
+    uses: ./.github/workflows/release-prepare-scope.yml
+
   test:
     name: Test + Format
+    needs: scope
+    if: needs.scope.outputs.release-prepare != 'true'
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -175,6 +190,9 @@ jobs:
       - name: Release prepare contract (stub gh and cargo, disposable repo)
         run: python3 scripts/test-prepare.py
 
+      - name: Release-prepare skip contract (disposable repo)
+        run: python3 scripts/test-release-prepare-only.py
+
       - name: Mutation gate config contract (no module silently excluded)
         run: python3 scripts/test-mutants-config.py
 
@@ -212,6 +230,8 @@ jobs:
 
   msrv:
     name: MSRV (rust-version in Cargo.toml)
+    needs: scope
+    if: needs.scope.outputs.release-prepare != 'true'
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -252,6 +272,8 @@ jobs:
 
   deny:
     name: Dependency policy (cargo-deny)
+    needs: scope
+    if: needs.scope.outputs.release-prepare != 'true'
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
