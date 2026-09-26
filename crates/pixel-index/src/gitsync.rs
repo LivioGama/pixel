@@ -231,4 +231,36 @@ mod tests {
              exceeds the old 1 MiB cap"
         );
     }
+
+    /// The index reads committed blobs through this one call: each spec is
+    /// answered on its own index, content for a blob under the cap, the size
+    /// of one over it, and missing for a path the commit lacks.
+    #[test]
+    fn cat_file_blobs_answers_every_spec_from_the_commit() {
+        let dir = tmpdir("cat-file-blobs");
+        init_repo(&dir);
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("big.txt"), "0123456789A").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "blobs"]);
+        let head = rev_parse_head(&dir).unwrap();
+        let specs: Vec<String> = ["a.rs", "big.txt", "ghost.rs"]
+            .iter()
+            .map(|p| format!("{head}:{p}"))
+            .collect();
+        let mut seen = Vec::new();
+        cat_file_blobs(&dir, &specs, 10, |i, object| {
+            seen.push(format!("{i} {object:?}"));
+        })
+        .unwrap();
+        assert_eq!(
+            seen,
+            [
+                format!("0 {:?}", pixel_git::BatchObject::Blob(b"fn a() {}\n")),
+                "1 Oversized(11)".to_string(),
+                "2 Missing".to_string(),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
