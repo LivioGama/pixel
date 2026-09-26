@@ -201,7 +201,7 @@ fn extract_blob(
         return BlobExtraction::Skipped;
     }
     // A `.gitignore` carrying *only* pixel's housekeeping `.pixel/` entry
-    // (created from scratch by `ensure_pixel_gitignored`) is not real
+    // (created from scratch by an earlier `ensure_pixel_gitignored`) is not real
     // tracked project content — keep it out of the file universe just like
     // `.pixel/` itself. Judged on the committed blob, so the shard stays a
     // function of the commit and can be shared across worktrees.
@@ -474,7 +474,7 @@ impl IndexSet {
                     continue;
                 }
                 // A `.gitignore` carrying *only* pixel's housekeeping `.pixel/` entry
-                // (created from scratch by `ensure_pixel_gitignored`) is not real
+                // (created from scratch by an earlier `ensure_pixel_gitignored`) is not real
                 // project content — keep it out of the file/search universe just
                 // like `.pixel/` itself. A real user `.gitignore` with any other
                 // ignore rule is fully indexed.
