@@ -133,7 +133,14 @@ def main(pairs):
         # the missing ones form the tail of commits.txt) or failed its
         # checkout (errors.txt). The rates below are over the rows only, so
         # say which case it is instead of letting the sample shrink unseen.
-        measured = {r["commit"] for r in rows}
+        seen = [r["commit"] for r in rows]
+        stray = sorted(set(seen) - set(listed))
+        if stray:
+            sys.exit(f"{name}: results for commits outside commits.txt ({stray[:5]}…); another sample's files are mixed in")
+        doubled = sorted(c for c, k in collections.Counter(seen).items() if k > 1)
+        if doubled:
+            sys.exit(f"{name}: several result files for {doubled[:5]}…")
+        measured = set(seen)
         missing = [i for i, c in enumerate(listed) if c not in measured]
         failed = (out / "errors.txt").read_text().split("\n") if (out / "errors.txt").exists() else []
         failed = [l for l in failed if l.strip()]
