@@ -399,6 +399,42 @@ fn capped_search_human_output_names_the_stdout_cap() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `prepare-repo` says where its time went: CI reads `.timings` to tell a
+/// reused index from a rebuilt one and to name the slow graph phase, and a
+/// human gets the same answer on one line.
+#[test]
+fn prepare_repo_reports_where_the_time_went() {
+    let dir = fixture("timings");
+    let out = pixel(&dir, &["prepare-repo", ".", "--json", "--no-daemon"]);
+    assert!(out.status.success(), "{out:?}");
+    let docs = parse_stdout_lines(&out, "prepare-repo --json");
+    let timings = &docs[0]["timings"];
+    assert_eq!(timings["index"]["base"], "built_from_git", "{timings}");
+    assert!(timings["total_ms"].is_u64(), "{timings}");
+    assert!(
+        timings["graph"]["phases"]["extract_ms"].is_u64(),
+        "{timings}"
+    );
+    assert!(
+        timings["graph"]["phases"]["publish_ms"].is_u64(),
+        "{timings}"
+    );
+    assert!(docs[0]["index"].get("open").is_none(), "moved, not copied");
+    assert!(
+        docs[0]["graph"].get("phases").is_none(),
+        "moved, not copied"
+    );
+
+    let out = pixel(&dir, &["prepare-repo", ".", "--no-daemon"]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("timings: total ") && l.contains("(base reused)")),
+        "the second run reuses the base it built: {text}"
+    );
+}
+
 /// A repo with a big untracked tree (a `vendor/bundle`) is the everyday
 /// case that used to break the contract: `status`/`ready` embedded the full
 /// dirty list, blew the 256 KB cap, and the whole answer degraded to a

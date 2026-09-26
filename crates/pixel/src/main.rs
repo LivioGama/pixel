@@ -4873,12 +4873,14 @@ fn compact_repo_state(data: &mut Value) {
 /// dirty file list is irrelevant to "is the index ready" and is what blew
 /// past the output cap on repos with untracked vendor trees.
 fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
+    let started = Instant::now();
     let root = discover_root(&path)?;
-    let status = execute(&root, Request::Status {}, no_daemon)?;
-    let graph = execute(&root, Request::Graph {}, no_daemon)?;
+    let mut status = execute(&root, Request::Status {}, no_daemon)?;
+    let mut graph = execute(&root, Request::Graph {}, no_daemon)?;
     if !no_daemon {
         daemon_start(root.clone(), false, json)?;
     }
+    let timings = ready_timings(&mut status, &mut graph, started.elapsed());
     let snapshot = status.get("snapshot");
     let dirty_count = snapshot
         .and_then(|s| s.get("dirty_count"))
@@ -4896,16 +4898,74 @@ fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
         "graph": graph,
         "daemon": if no_daemon { "skipped" } else { "running" },
         "dirty_count": dirty_count,
+        "timings": timings,
     });
     if json {
         print_data(&data, true)
     } else {
         write_stdout(&format!(
-            "ready: {}\nindex: ready\ngraph: ready\ndaemon: {}\n",
+            "ready: {}\nindex: ready\ngraph: ready\ndaemon: {}\n{}\n",
             data.get("root").and_then(Value::as_str).unwrap_or("?"),
-            data.get("daemon").and_then(Value::as_str).unwrap_or("?")
+            data.get("daemon").and_then(Value::as_str).unwrap_or("?"),
+            timings_line(&data["timings"])
         ))
     }
+}
+
+/// The `timings` block of `prepare-repo`: the index open's layers (moved out
+/// of `index.open`) and the graph build's phases (moved out of
+/// `graph.phases`), beside the command's wall time, so one `jq .timings`
+/// says where the time went. An older daemon that sends neither leaves
+/// `null` in their place.
+fn ready_timings(status: &mut Value, graph: &mut Value, total: Duration) -> Value {
+    let index = status
+        .get_mut("index")
+        .and_then(Value::as_object_mut)
+        .and_then(|index| index.remove("open"))
+        .unwrap_or(Value::Null);
+    let phases = graph
+        .as_object_mut()
+        .and_then(|graph| graph.remove("phases"))
+        .unwrap_or(Value::Null);
+    serde_json::json!({
+        "total_ms": pixel_index::indexset::millis(total),
+        "index": index,
+        "graph": {
+            "elapsed_ms": graph.get("elapsed_ms").cloned().unwrap_or(Value::Null),
+            "phases": phases,
+        },
+    })
+}
+
+/// One human line out of [`ready_timings`]: the total, how the index base
+/// was obtained, the graph build, and its slowest phase — the one to look at.
+fn timings_line(timings: &Value) -> String {
+    let ms = |v: &Value| {
+        v.as_u64()
+            .map_or_else(|| "?".to_string(), |n| format!("{n} ms"))
+    };
+    let index = &timings["index"];
+    let index_ms = ["base_ms", "delta_ms", "overlay_ms"]
+        .iter()
+        .map(|key| index[*key].as_u64())
+        .sum::<Option<u64>>();
+    let slowest = timings["graph"]["phases"]
+        .as_object()
+        .and_then(|phases| {
+            phases
+                .iter()
+                .filter_map(|(name, v)| Some((name, v.as_u64()?)))
+                .max_by_key(|&(_, n)| n)
+        })
+        .map(|(name, n)| format!(", slowest {} {n} ms", name.trim_end_matches("_ms")))
+        .unwrap_or_default();
+    format!(
+        "timings: total {}, index {} (base {}), graph {}{slowest}",
+        ms(&timings["total_ms"]),
+        index_ms.map_or_else(|| "?".to_string(), |n| format!("{n} ms")),
+        index["base"].as_str().unwrap_or("?"),
+        ms(&timings["graph"]["elapsed_ms"]),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -8093,6 +8153,63 @@ fn excavate_show(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// `jq .timings` is the one place a CI log reads the cost split from:
+    /// the index layers and the graph phases move there (not copied, so a
+    /// reader never has two answers), beside the wall time.
+    #[test]
+    fn ready_timings_should_gather_the_index_layers_and_graph_phases() {
+        let mut status = serde_json::json!({
+            "index": {"base_files": 3, "open": {"base": "reused", "base_ms": 7}},
+        });
+        let mut graph = serde_json::json!({
+            "symbols": 9, "elapsed_ms": 40, "phases": {"extract_ms": 30},
+        });
+        let timings = ready_timings(&mut status, &mut graph, Duration::from_millis(52));
+        assert_eq!(
+            timings,
+            serde_json::json!({
+                "total_ms": 52,
+                "index": {"base": "reused", "base_ms": 7},
+                "graph": {"elapsed_ms": 40, "phases": {"extract_ms": 30}},
+            })
+        );
+        assert_eq!(status, serde_json::json!({"index": {"base_files": 3}}));
+        assert_eq!(graph, serde_json::json!({"symbols": 9, "elapsed_ms": 40}));
+
+        // An older daemon sends neither block: nulls, never an error.
+        let old = ready_timings(
+            &mut serde_json::json!({"index": {}}),
+            &mut serde_json::json!({"elapsed_ms": 5}),
+            Duration::ZERO,
+        );
+        assert_eq!(old["index"], Value::Null);
+        assert_eq!(
+            old["graph"],
+            serde_json::json!({"elapsed_ms": 5, "phases": null})
+        );
+    }
+
+    /// The human line names the phase to look at: the slowest one, by value
+    /// and not by position, with the index cost summed over its layers.
+    #[test]
+    fn timings_line_should_name_the_index_source_and_the_slowest_phase() {
+        let timings = serde_json::json!({
+            "total_ms": 160,
+            "index": {"base": "reused", "base_ms": 1, "delta_ms": 2, "overlay_ms": 4},
+            "graph": {"elapsed_ms": 150, "phases": {
+                "collect_ms": 20, "extract_ms": 90, "verify_ms": 30,
+            }},
+        });
+        assert_eq!(
+            timings_line(&timings),
+            "timings: total 160 ms, index 7 ms (base reused), graph 150 ms, slowest extract 90 ms"
+        );
+        assert_eq!(
+            timings_line(&Value::Null),
+            "timings: total ?, index ? (base ?), graph ?"
+        );
+    }
 
     /// A uid embeds a file path, and a path may hold `$`, a space or a
     /// quote: every argument is single-quoted so the pasted command runs

@@ -139,12 +139,16 @@ fn ready_answers_with_the_json_of_prepare_repo() {
         );
         let mut doc: serde_json::Value = serde_json::from_slice(&out.stdout)
             .unwrap_or_else(|e| panic!("{name} stdout is one JSON document ({e}): {out:?}"));
-        // Wall-clock time of the graph pass is the only field that varies
-        // between two runs on the same tree.
+        // Wall-clock times are the only fields that vary between two runs
+        // on the same tree.
         doc["graph"]
             .as_object_mut()
             .expect("graph block")
             .remove("elapsed_ms");
+        doc.as_object_mut()
+            .expect("one JSON object")
+            .remove("timings")
+            .expect("timings block");
         doc
     };
     // The first run builds the index and the graph; compare two warm runs.

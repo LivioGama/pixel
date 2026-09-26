@@ -20,7 +20,7 @@ use pixel_facts::FactsStore;
 use pixel_graph::{EdgeKind, EdgeRow, FileRow, GraphStore, SymbolKind, SymbolRow};
 use pixel_index::TrigramExtractor;
 use pixel_index::index::{MAX_FILE_BYTES, open_regular_bounded};
-use pixel_index::indexset::{IndexSet, IndexSetError, RefreshOutcome};
+use pixel_index::indexset::{IndexSet, IndexSetError, OpenTimings, RefreshOutcome, millis};
 use pixel_proto::{Envelope, Epistemics, ErrorCode, PixelError, SnapshotInfo, Warning};
 use pixel_recall::embed::{EmbedKind, Embedder, open_default_embedder};
 
@@ -609,7 +609,8 @@ impl Service {
         self.graph.take();
         remove_sqlite_files(&tmp)?;
         let started = Instant::now();
-        let stats = bridge::build_graph(&self.root, &tmp)?;
+        let mut stats = bridge::build_graph(&self.root, &tmp)?;
+        let publish = Instant::now();
         {
             let checkpoint = GraphStore::open(&tmp).map_err(|error| error.to_string())?;
             checkpoint
@@ -627,6 +628,7 @@ impl Service {
         })?;
         remove_sqlite_sidecars(&tmp)?;
         self.graph = Some(GraphStore::open(&db).map_err(|error| error.to_string())?);
+        stats["phases"]["publish_ms"] = json!(millis(publish.elapsed()));
         Ok((stats, started.elapsed().as_millis() as u64))
     }
 
@@ -2140,6 +2142,7 @@ impl Service {
             "edges": stats.get("edges").cloned().unwrap_or(Value::Null),
             "unresolved": stats.get("unresolved").cloned().unwrap_or(Value::Null),
             "elapsed_ms": build_ms,
+            "phases": stats.get("phases").cloned().unwrap_or(Value::Null),
         }))
     }
 
@@ -2261,6 +2264,9 @@ impl Service {
                 "delta_files": s.delta_files,
                 "overlay_files": s.overlay_files,
                 "tombstones": s.tombstones,
+                "open": open_timings_json(
+                    self.index.read().expect("index lock poisoned").open_timings(),
+                ),
             },
             "graph": graph,
             "watcher": {
@@ -4032,6 +4038,19 @@ fn remove_sqlite_sidecars(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The `index.open` block of a status answer: which layer the open reused
+/// or rebuilt, and what each one cost.
+fn open_timings_json(t: OpenTimings) -> Value {
+    json!({
+        "base": t.base.as_str(),
+        "base_ms": t.base_ms,
+        "delta": t.delta.as_str(),
+        "delta_ms": t.delta_ms,
+        "overlay_ms": t.overlay_ms,
+        "overlay_files": t.overlay_files,
+    })
+}
+
 fn remove_sqlite_files(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => {}
@@ -4067,12 +4086,23 @@ mod bridge {
 
     pub fn build_graph(root: &Path, db: &Path) -> Result<Value, String> {
         let s = pixel_graph::build::build_graph(root, db).map_err(es)?;
+        let p = &s.phases;
         Ok(serde_json::json!({
             "files": s.files,
             "symbols": s.symbols,
             "edges": s.edges,
             "unresolved": s.unresolved,
             "elapsed_ms": s.elapsed_ms as u64,
+            "phases": {
+                "collect_ms": p.collect_ms,
+                "extract_ms": p.extract_ms,
+                "store_ms": p.store_ms,
+                "concepts_ms": p.concepts_ms,
+                "imports_ms": p.imports_ms,
+                "resolve_calls_ms": p.resolve_calls_ms,
+                "resolve_references_ms": p.resolve_references_ms,
+                "verify_ms": p.verify_ms,
+            },
         }))
     }
 
@@ -7172,6 +7202,50 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `prepare-repo --json` is how a CI log tells a reused index from a
+    /// rebuilt one and names the slow graph phase: `status` carries the
+    /// index open's layers, `graph` every build phase plus the publish.
+    #[test]
+    fn status_and_graph_should_report_where_the_time_went() {
+        let root = tmpdir("phase-timings");
+        std::fs::write(root.join("login.rs"), "pub fn login() -> bool { true }\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let open_of = |svc: &mut Service| {
+            let status = svc.handle(Request::Status {});
+            assert!(status.ok, "{status:?}");
+            status.into_data()["index"]["open"].clone()
+        };
+        let first = open_of(&mut Service::open(&root).unwrap());
+        assert_eq!(first["base"], "built_from_git", "{first}");
+        assert_eq!(first["delta"], "none", "{first}");
+        assert_eq!(first["overlay_files"], 0, "{first}");
+        for key in ["base_ms", "delta_ms", "overlay_ms"] {
+            assert!(first[key].is_u64(), "{key} in {first}");
+        }
+        let mut svc = Service::open(&root).unwrap();
+        assert_eq!(open_of(&mut svc)["base"], "reused");
+
+        let graph = svc.handle(Request::Graph {});
+        assert!(graph.ok, "{graph:?}");
+        let phases = graph.into_data()["phases"].clone();
+        for key in [
+            "collect_ms",
+            "extract_ms",
+            "store_ms",
+            "concepts_ms",
+            "imports_ms",
+            "resolve_calls_ms",
+            "resolve_references_ms",
+            "verify_ms",
+            "publish_ms",
+        ] {
+            assert!(phases[key].is_u64(), "{key} in {phases}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

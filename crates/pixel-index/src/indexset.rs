@@ -12,6 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
@@ -93,6 +94,72 @@ pub struct IndexSet {
     /// Paths superseded between base OID and HEAD (from state.json).
     delta_tombstones: HashSet<String>,
     overlay: Overlay,
+    open_timings: OpenTimings,
+}
+
+/// Whole milliseconds in `elapsed`, saturating rather than wrapping on a
+/// duration no build reaches. The one spelling of a phase timing across the
+/// index and the graph.
+pub fn millis(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Where the base layer of an open came from, cheapest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseSource {
+    /// `.pixel/base.shard` was already valid.
+    Reused,
+    /// Linked in from the shard cache another worktree filled.
+    SharedCache,
+    /// Extracted from the blobs of HEAD's tree.
+    BuiltFromGit,
+    /// Extracted from a walk of a directory that is not a git repository.
+    BuiltFromWalk,
+}
+
+impl BaseSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BaseSource::Reused => "reused",
+            BaseSource::SharedCache => "shared_cache",
+            BaseSource::BuiltFromGit => "built_from_git",
+            BaseSource::BuiltFromWalk => "built_from_walk",
+        }
+    }
+}
+
+/// How the delta layer (base commit to HEAD) of an open was obtained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaSource {
+    /// HEAD is the base commit, or the directory has no git: no delta.
+    None,
+    /// `state.json` already pinned a delta to this HEAD.
+    Reused,
+    /// Re-extracted from `git diff base..HEAD`.
+    Rebuilt,
+}
+
+impl DeltaSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeltaSource::None => "none",
+            DeltaSource::Reused => "reused",
+            DeltaSource::Rebuilt => "rebuilt",
+        }
+    }
+}
+
+/// What opening the index cost, layer by layer, so a slow open names the
+/// layer that was rebuilt instead of one opaque total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenTimings {
+    pub base: BaseSource,
+    pub base_ms: u64,
+    pub delta: DeltaSource,
+    pub delta_ms: u64,
+    /// `git status` plus the re-extraction of every dirty file.
+    pub overlay_ms: u64,
+    pub overlay_files: usize,
 }
 
 /// Paths inside our own sidecar dir are never indexed or tombstoned.
@@ -310,9 +377,11 @@ impl IndexSet {
         extractor: Box<dyn GramExtractor>,
         bypass_cache: bool,
     ) -> Result<Self, IndexSetError> {
+        let started = Instant::now();
         let gpx_dir = root.join(SHARD_DIR);
         let base_path = gpx_dir.join(SHARD_FILE);
         let head = gitsync::rev_parse_head(root);
+        let mut source = BaseSource::Reused;
 
         // --- base layer (fast path: no lock if shard is valid) ---
         let mut base = match Shard::open(&base_path) {
@@ -354,7 +423,8 @@ impl IndexSet {
                             && load_plain_sig(&gpx_dir).as_deref() == Some(&plain_signature(root))
                     };
                     if valid {
-                        return Self::finish_open(root, s, extractor, head, &gpx_dir);
+                        let base = (BaseSource::Reused, millis(started.elapsed()));
+                        return Self::finish_open(root, s, extractor, head, &gpx_dir, base);
                     }
                 }
 
@@ -382,8 +452,10 @@ impl IndexSet {
                             && s.extractor_id() == extractor_id
                             && s.commit_oid() == Some(oid.as_str())
                         {
+                            source = BaseSource::SharedCache;
                             s
                         } else {
+                            source = BaseSource::BuiltFromGit;
                             if cached {
                                 // The entry did not open as this commit's shard:
                                 // drop it so the rebuild below can replace it
@@ -428,6 +500,7 @@ impl IndexSet {
                         shard
                     }
                     None => {
+                        source = BaseSource::BuiltFromWalk;
                         index::build(root, extractor.as_ref())?;
                         let shard = Shard::open(&base_path)?;
                         save_plain_sig(&gpx_dir, &plain_signature(root));
@@ -437,7 +510,8 @@ impl IndexSet {
             }
         };
 
-        Self::finish_open(root, base, extractor, head, &gpx_dir)
+        let base_timing = (source, millis(started.elapsed()));
+        Self::finish_open(root, base, extractor, head, &gpx_dir, base_timing)
     }
 
     /// Complete the open after the base shard is resolved — build delta +
@@ -448,6 +522,7 @@ impl IndexSet {
         extractor: Box<dyn GramExtractor>,
         head: Option<String>,
         gpx_dir: &Path,
+        (base_source, base_ms): (BaseSource, u64),
     ) -> Result<Self, IndexSetError> {
         let mut set = Self {
             root: root.to_path_buf(),
@@ -456,6 +531,14 @@ impl IndexSet {
             delta: None,
             delta_tombstones: HashSet::new(),
             overlay: Overlay::new(),
+            open_timings: OpenTimings {
+                base: base_source,
+                base_ms,
+                delta: DeltaSource::None,
+                delta_ms: 0,
+                overlay_ms: 0,
+                overlay_files: 0,
+            },
         };
 
         // --- delta + overlay (git repos only) ---
@@ -465,9 +548,12 @@ impl IndexSet {
                 .commit_oid()
                 .expect("git-anchored base has an oid")
                 .to_string();
+            let clock = Instant::now();
             if head_oid != base_oid {
-                set.reconcile_delta(gpx_dir, &base_oid, &head_oid)?;
+                set.open_timings.delta = set.reconcile_delta(gpx_dir, &base_oid, &head_oid)?;
             }
+            set.open_timings.delta_ms = millis(clock.elapsed());
+            let clock = Instant::now();
             // Dirty working tree -> overlay.
             for (xy, path) in gitsync::status_porcelain(root) {
                 if is_internal(&path) {
@@ -487,9 +573,16 @@ impl IndexSet {
                     set.overlay
                         .refresh_file(root, &path, set.extractor.as_ref());
                 }
+                set.open_timings.overlay_files += 1;
             }
+            set.open_timings.overlay_ms = millis(clock.elapsed());
         }
         Ok(set)
+    }
+
+    /// What the open that produced this set cost, layer by layer.
+    pub fn open_timings(&self) -> OpenTimings {
+        self.open_timings
     }
 
     /// Build or reuse the delta layer covering `base_oid..head_oid`.
@@ -498,7 +591,7 @@ impl IndexSet {
         gpx_dir: &Path,
         base_oid: &str,
         head_oid: &str,
-    ) -> Result<(), IndexSetError> {
+    ) -> Result<DeltaSource, IndexSetError> {
         let delta_path = delta_shard_path(gpx_dir);
         // Reuse a delta already pinned to this exact HEAD.
         if let Some(state) = DeltaState::load(gpx_dir)
@@ -509,7 +602,7 @@ impl IndexSet {
         {
             self.delta_tombstones = state.tombstones.into_iter().collect();
             self.delta = Some(s);
-            return Ok(());
+            return Ok(DeltaSource::Reused);
         }
         // Cumulative diff base..HEAD — simple and correct however HEAD moved.
         let diff = gitsync::diff_name_status(&self.root, base_oid, head_oid);
@@ -552,7 +645,7 @@ impl IndexSet {
         }
         .save(gpx_dir)?;
         self.delta_tombstones = tombstones.into_iter().collect();
-        Ok(())
+        Ok(DeltaSource::Rebuilt)
     }
 
     /// Re-extract one admitted file into the overlay, or tombstone an excluded path.
@@ -1660,6 +1753,86 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(std::env::var_os("XDG_CACHE_HOME"), previous);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The phase timings are read by people deciding where a slow open or
+    /// build goes: a millisecond count that rounds up, wraps or truncates
+    /// would send them to the wrong phase.
+    #[test]
+    fn millis_counts_whole_milliseconds_and_saturates_instead_of_wrapping() {
+        assert_eq!(millis(Duration::ZERO), 0);
+        assert_eq!(millis(Duration::from_micros(1_999)), 1);
+        assert_eq!(millis(Duration::from_millis(154_321)), 154_321);
+        assert_eq!(millis(Duration::MAX), u64::MAX);
+    }
+
+    /// These names are the JSON a CI log is grepped for (`base: reused`
+    /// is the line that says a restored index was used).
+    #[test]
+    fn layer_sources_should_spell_their_json_names() {
+        assert_eq!(BaseSource::Reused.as_str(), "reused");
+        assert_eq!(BaseSource::SharedCache.as_str(), "shared_cache");
+        assert_eq!(BaseSource::BuiltFromGit.as_str(), "built_from_git");
+        assert_eq!(BaseSource::BuiltFromWalk.as_str(), "built_from_walk");
+        assert_eq!(DeltaSource::None.as_str(), "none");
+        assert_eq!(DeltaSource::Reused.as_str(), "reused");
+        assert_eq!(DeltaSource::Rebuilt.as_str(), "rebuilt");
+    }
+
+    /// Each open reports which layer it rebuilt: the answer to "why did a
+    /// restored index still cost minutes" is the layer that was not reused.
+    #[test]
+    fn open_timings_should_name_the_layer_each_open_rebuilt() {
+        let _cache = IsolatedCache::new("open-timings");
+        let dir = scratch("open-timings");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn first() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        let layers = |root: &Path| {
+            let t = IndexSet::open_or_build(root, ex()).unwrap().open_timings();
+            (t.base, t.delta, t.overlay_files)
+        };
+
+        assert_eq!(
+            layers(&dir),
+            (BaseSource::BuiltFromGit, DeltaSource::None, 0)
+        );
+        assert_eq!(layers(&dir), (BaseSource::Reused, DeltaSource::None, 0));
+
+        let clone = scratch("open-timings-clone");
+        std::fs::remove_dir_all(&clone).ok();
+        let out = Command::new("git")
+            .args(["clone", "-q"])
+            .arg(&dir)
+            .arg(&clone)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "clone: {out:?}");
+        assert_eq!(
+            layers(&clone),
+            (BaseSource::SharedCache, DeltaSource::None, 0),
+            "same commit, another checkout"
+        );
+
+        std::fs::write(dir.join("a.rs"), "fn second() {}\n").unwrap();
+        git(&dir, &["commit", "-qam", "two"]);
+        assert_eq!(layers(&dir), (BaseSource::Reused, DeltaSource::Rebuilt, 0));
+        assert_eq!(layers(&dir), (BaseSource::Reused, DeltaSource::Reused, 0));
+
+        std::fs::write(dir.join("a.rs"), "fn dirty() {}\n").unwrap();
+        std::fs::write(dir.join("b.rs"), "fn untracked() {}\n").unwrap();
+        assert_eq!(layers(&dir), (BaseSource::Reused, DeltaSource::Reused, 2));
+
+        let plain = scratch("open-timings-plain");
+        std::fs::write(plain.join("c.rs"), "fn plain() {}\n").unwrap();
+        assert_eq!(
+            layers(&plain),
+            (BaseSource::BuiltFromWalk, DeltaSource::None, 0)
+        );
+        for d in [dir, clone, plain] {
+            std::fs::remove_dir_all(d).ok();
+        }
     }
 
     /// Every test that opens an index holds [`IsolatedCache`]: one that does

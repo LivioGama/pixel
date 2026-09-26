@@ -1,0 +1,1 @@
+**prepare-repo:** `--json` gains a `timings` block: how the index base was obtained (`reused`, `shared_cache`, `built_from_git`) with the cost of each index layer, and the wall time of every graph build phase; the human output gets a `timings:` line naming the slowest phase. `status --json` carries the index layers as `index.open`. (PR_LINK)
