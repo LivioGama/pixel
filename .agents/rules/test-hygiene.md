@@ -26,6 +26,13 @@ Loaded when a Rust source file is in play. Companion of `mutation-gate.md`.
   directory (`support::neutral_home()`): a test that spawns the binary
   itself sets `HOME` too, or a machine with another release's
   `pixel install` adds a stale-prompt note to every stderr it reads.
+- **A fixture's commit is not unique.** Two fixtures with the same tree,
+  committed in the same second by the same identity, get the same OID, and
+  the base-shard cache (`$XDG_CACHE_HOME/pixel/shards`, else under the
+  shared test `HOME`) then answers the second one. A test that asserts how
+  an index was built (`base: built_from_git`) points `XDG_CACHE_HOME` at its
+  own scratch directory: #309's contract test read `shared_cache` in a CI
+  baseline and passed everywhere else.
 - **Compare canonical paths.** macOS's temp dir is a symlink
   (`/var` to `/private/var`); anything that stores `root.canonicalize()`
   will not match `temp_dir().join(..)`. Canonicalize the expectation.
