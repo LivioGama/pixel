@@ -74,6 +74,22 @@ pub fn diff_name_status(root: &Path, from: &str, to: &str) -> Vec<(char, String)
     GitRunner::new(root).diff_name_status(from, to)
 }
 
+/// [`diff_name_status`], but a failed diff is an error instead of an empty
+/// list: for a caller that records the result as "HEAD's changes", an
+/// empty list would claim nothing changed.
+pub fn diff_name_status_or_err(
+    root: &Path,
+    from: &str,
+    to: &str,
+) -> Result<Vec<(char, String)>, pixel_git::GitError> {
+    GitRunner::new(root).diff_name_status_or_err(from, to)
+}
+
+/// Whether `oid` names a commit the repository at `root` holds.
+pub fn commit_exists(root: &Path, oid: &str) -> bool {
+    GitRunner::new(root).commit_exists(oid)
+}
+
 /// `git status --porcelain -z --untracked-files=all --no-renames` as
 /// (XY, path). Untracked files appear with XY `"??"`.
 pub fn status_porcelain(root: &Path) -> Vec<(String, String)> {

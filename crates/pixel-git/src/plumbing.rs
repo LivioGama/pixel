@@ -162,6 +162,18 @@ impl GitRunner {
         Ok(parse_ls_tree_blobs(&out))
     }
 
+    /// Whether `oid` names a commit this repository holds
+    /// (`git cat-file -e <oid>^{commit}`). `false` for an invalid ref, an
+    /// object that is not a commit, or a commit that was never fetched or
+    /// has been pruned.
+    pub fn commit_exists(&self, oid: &str) -> bool {
+        if validate_ref(oid).is_err() {
+            return false;
+        }
+        let spec = format!("{oid}^{{commit}}");
+        self.run(&["cat-file", "-e", &spec]).is_ok()
+    }
+
     /// Size of a committed blob without materializing it.
     pub fn blob_size(&self, oid: &str, rel: &str) -> Option<u64> {
         validate_ref(oid).ok()?;
@@ -463,6 +475,26 @@ mod tests {
     fn init_repo(dir: &Path) {
         git(dir, &["init", "-q"]);
         git(dir, &["config", "commit.gpgsign", "false"]);
+    }
+
+    /// The index rebuilds a restored base whose commit this clone lacks, so
+    /// `commit_exists` must say no to an absent commit, to a malformed ref and
+    /// to an object that is not a commit, and yes to a commit it holds.
+    #[test]
+    fn commit_exists_accepts_only_commits_the_repository_holds() {
+        let root = tmpdir("plumbing-commit-exists");
+        init_repo(&root);
+        std::fs::write(root.join("a.txt"), b"hello\n").unwrap();
+        git(&root, &["add", "a.txt"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        let runner = GitRunner::new(&root);
+        let head = runner.rev_parse_head().unwrap();
+        let tree = String::from_utf8(runner.run(&["rev-parse", "HEAD^{tree}"]).unwrap()).unwrap();
+
+        assert!(runner.commit_exists(&head));
+        assert!(!runner.commit_exists(&"0".repeat(40)), "never fetched");
+        assert!(!runner.commit_exists(tree.trim()), "a tree, not a commit");
+        assert!(!runner.commit_exists("--output=/tmp/x"), "not a ref");
     }
 
     #[test]
