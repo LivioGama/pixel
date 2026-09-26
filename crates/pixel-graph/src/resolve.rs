@@ -1293,6 +1293,9 @@ mod tests {
             ("crates/a/src/bin/foo/util.rs", Some(3)),
             ("src/bin/foo.rs", Some(2)),
             ("crates/a/src/bin.rs", Some(1)),
+            ("crates/a/src/store/rows.rs", Some(1)),
+            ("crates/a/src/bin", Some(1)),
+            ("src/bin", Some(0)),
             ("tools/gen.rs", None),
             ("crates/a/tests/all/main.rs", None),
         ];
