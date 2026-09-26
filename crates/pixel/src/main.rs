@@ -5245,8 +5245,10 @@ fn run() -> Result<(), String> {
         .filter(|_| live)
         .map(|error| format!("pixel: {error}\n"));
     let _ = std::io::stdout().flush();
+    let elapsed = started.elapsed();
     // After the answer, before the metrics block: a person at a terminal
-    // reads it last-but-one, and nothing else ever sees it.
+    // reads it last-but-one, and nothing else ever sees it. After `elapsed`
+    // too: waiting on the release check is not the command's cost.
     if let Some(check) = release_check
         && let Some(notice) = update_notice::finish(
             check,
@@ -5258,7 +5260,6 @@ fn run() -> Result<(), String> {
     {
         eprint!("{notice}");
     }
-    let elapsed = started.elapsed();
     // A command that owns its exit code still reports its outcome to the
     // journal: a non-zero code is a failure there, even though it never
     // travelled as an `Err`.
