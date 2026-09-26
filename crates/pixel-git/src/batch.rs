@@ -170,14 +170,26 @@ where
         Ok(())
     };
     let outcome = read();
+    // The writer is awaited while the watchdog still runs: a read that
+    // stopped early can leave it blocked on a stdin the process no longer
+    // drains, and only the kill on timeout breaks that pipe.
+    while !writer.is_finished() && !timed_out.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     drop(progress);
     let _ = watchdog.join();
+    if timed_out.load(Ordering::SeqCst) {
+        if let Ok(mut child) = child.lock() {
+            let _ = child.wait();
+        }
+        // The writer and stderr threads are left to end on their own, as in
+        // `runner.rs`: a grandchild that inherited a pipe can hold it open
+        // past the deadline, and joining them would hand it the caller.
+        return Err(GitError::Timeout { args });
+    }
     let _ = writer.join();
     let status = wait_within(&child, idle_timeout);
     let stderr = stderr_reader.join().unwrap_or_default();
-    if timed_out.load(Ordering::SeqCst) {
-        return Err(GitError::Timeout { args });
-    }
     let status = status?;
     if !status.success() {
         return Err(GitError::NonZeroExit {
@@ -248,7 +260,7 @@ fn wait_within(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::GitRunner;
+    use crate::runner::{GitOptions, GitRunner};
     use std::path::{Path, PathBuf};
 
     fn tmpdir(tag: &str) -> PathBuf {
@@ -279,6 +291,18 @@ mod tests {
             .unwrap();
         assert!(out.status.success(), "git {args:?}: {out:?}");
         String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    /// A runner whose idle timeout a broken batch loop reaches in seconds,
+    /// not the production two minutes.
+    fn runner(root: impl Into<PathBuf>) -> GitRunner {
+        GitRunner::with_options(
+            root,
+            GitOptions {
+                timeout: Some(Duration::from_secs(5)),
+                max_output_bytes: None,
+            },
+        )
     }
 
     /// A repository holding every shape a batch answer takes, and its HEAD.
@@ -343,7 +367,7 @@ mod tests {
         .iter()
         .map(|p| format!("{head}:{p}"))
         .collect();
-        let seen = collect(&GitRunner::new(&dir), &specs, 10);
+        let seen = collect(&runner(&dir), &specs, 10);
         assert_eq!(
             seen,
             vec![
@@ -371,7 +395,7 @@ mod tests {
             format!("{head}:a.rs"),
             String::new(),
         ];
-        let mut seen = collect(&GitRunner::new(&dir), &specs, 1024);
+        let mut seen = collect(&runner(&dir), &specs, 1024);
         seen.sort_by_key(|(i, _)| *i);
         assert_eq!(
             seen,
@@ -381,7 +405,7 @@ mod tests {
                 (2, Owned::Unsendable),
             ]
         );
-        let nowhere = GitRunner::new(dir.join("no-such-dir"));
+        let nowhere = runner(dir.join("no-such-dir"));
         assert_eq!(
             collect(&nowhere, &[String::new()], 1024),
             vec![(0, Owned::Unsendable)]
@@ -393,10 +417,9 @@ mod tests {
     fn outside_a_repository_is_an_error_not_a_list_of_missing_blobs() {
         let dir = tmpdir("not-a-repo");
         let mut visited = 0;
-        let result =
-            GitRunner::new(&dir).cat_file_blobs(&["HEAD:a.rs".to_string()], 1024, |_, _| {
-                visited += 1;
-            });
+        let result = runner(&dir).cat_file_blobs(&["HEAD:a.rs".to_string()], 1024, |_, _| {
+            visited += 1;
+        });
         assert!(
             matches!(result, Err(GitError::NonZeroExit { .. })),
             "{result:?}"
@@ -511,6 +534,34 @@ mod tests {
         );
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(blobs, 1);
+    }
+
+    /// A process that closes its stdout without reading its stdin leaves the
+    /// request writer blocked on a full pipe; the idle timeout still ends it
+    /// instead of the caller waiting for the process to exit on its own.
+    #[test]
+    fn a_writer_blocked_on_an_unread_stdin_is_released_by_the_timeout() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exec 1>&-; sleep 10"]);
+        // Far past a pipe buffer (64 KiB on Linux and macOS).
+        let specs: Vec<String> = (0..4_000).map(|i| format!("{i:0>100}")).collect();
+        let start = Instant::now();
+        let result = batch_session(
+            cmd,
+            &specs,
+            1024,
+            Some(Duration::from_millis(300)),
+            |_, _| {},
+        );
+        assert!(
+            matches!(result, Err(GitError::Timeout { .. })),
+            "{result:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     /// A process that answers everything and then does not exit is killed
