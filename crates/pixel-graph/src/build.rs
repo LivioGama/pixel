@@ -8,8 +8,9 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use pixel_index::indexset::millis;
 use rayon::prelude::*;
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -112,6 +113,32 @@ pub struct GraphStats {
     pub edges: u64,
     pub unresolved: u64,
     pub elapsed_ms: u128,
+    pub phases: BuildPhases,
+}
+
+/// Wall time of each phase of a full [`build_graph`], in milliseconds and
+/// in the order the phases run, so a slow build names the phase to work on
+/// instead of one opaque total. `concepts_ms` is the share of `store_ms`
+/// spent in the concept pass; every other field is disjoint from the rest.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BuildPhases {
+    /// Walk the tree and read every supported source file.
+    pub collect_ms: u64,
+    /// Parse every file (rayon, so wall time, not CPU time).
+    pub extract_ms: u64,
+    /// Pass 1: file, symbol, crux, concept and JSX rows.
+    pub store_ms: u64,
+    /// Part of `store_ms`: the concept extraction and its rows.
+    pub concepts_ms: u64,
+    /// Pass 2: import rows and the pending call and reference lists.
+    pub imports_ms: u64,
+    /// Tiered call resolution.
+    pub resolve_calls_ms: u64,
+    /// Reference resolution.
+    pub resolve_references_ms: u64,
+    /// The second walk and hash that proves the tree did not move during
+    /// the build, before the graph is signed fresh.
+    pub verify_ms: u64,
 }
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -360,9 +387,12 @@ fn input_signature(inputs: &[(String, Vec<u8>)]) -> String {
 /// symbols, imports, and resolved call edges.
 pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
     let t0 = Instant::now();
+    let mut phases = BuildPhases::default();
 
     let inputs = collect_files(root);
     let snapshot_signature = input_signature(&inputs);
+    phases.collect_ms = millis(t0.elapsed());
+    let clock = Instant::now();
     let mut extracted: Vec<Extracted> = inputs
         .into_par_iter()
         .filter_map(|(rel, content)| {
@@ -376,6 +406,8 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
             })
         })
         .collect();
+    phases.extract_ms = millis(clock.elapsed());
+    let clock = Instant::now();
 
     let all_paths: Vec<String> = extracted.iter().map(|e| e.rel.clone()).collect();
 
@@ -396,6 +428,7 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
     // Pass 1: files + symbols (need every file id before import resolution).
     let mut path_to_id: HashMap<String, i64> = HashMap::new();
     let mut sym_ids: Vec<Vec<i64>> = Vec::with_capacity(extracted.len());
+    let mut concepts = Duration::ZERO;
     for (i, e) in extracted.iter_mut().enumerate() {
         let file_id = store.replace_file(&e.rel, &e.blob_oid, e.fx.lang)?;
         path_to_id.insert(e.rel.clone(), file_id);
@@ -440,7 +473,9 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
         }
         sym_ids.push(ids);
         // Engine 1: concept pass alongside symbol extraction with O(1) content access.
+        let concept_clock = Instant::now();
         insert_concepts(&store, file_id, &e.rel, &e.content, &sym_ids[i], &lines)?;
+        concepts += concept_clock.elapsed();
         // Plan pass: persist JSX elements for dead-interactive queries.
         for jsx in &e.fx.jsx_elements {
             store.insert_jsx_element(
@@ -455,6 +490,9 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
         e.content.clear();
         e.content.shrink_to_fit();
     }
+    phases.store_ms = millis(clock.elapsed());
+    phases.concepts_ms = millis(concepts);
+    let clock = Instant::now();
 
     // Pass 2: imports (resolved against the full file list) + pending calls
     // and references.
@@ -501,13 +539,20 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
         });
     }
 
+    phases.imports_ms = millis(clock.elapsed());
+    let clock = Instant::now();
     resolve_calls(&store, &pending)?;
+    phases.resolve_calls_ms = millis(clock.elapsed());
+    let clock = Instant::now();
     resolve_references(&store, &pending_refs)?;
+    phases.resolve_references_ms = millis(clock.elapsed());
+    let clock = Instant::now();
 
     // Bind freshness to the exact bytes parsed above. If the source tree moved
     // during extraction/storage, publishing this graph as fresh would attach
     // old symbols to a new filesystem signature.
     let current_signature = freshness_signature(root);
+    phases.verify_ms = millis(clock.elapsed());
     if current_signature != snapshot_signature {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
@@ -529,6 +574,7 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
         edges,
         unresolved,
         elapsed_ms: t0.elapsed().as_millis(),
+        phases,
     })
 }
 
@@ -1276,6 +1322,38 @@ mod tests {
             "an unconfigured build is capped, and the cap it reports is the \
              one `collect_files` stops at"
         );
+    }
+
+    /// The phases split one build: disjoint ones cannot add up to more than
+    /// the total the build reports, and the concept pass is a part of the
+    /// store pass, not a phase beside it.
+    #[test]
+    fn build_phases_partition_the_reported_build_time() {
+        let root = tmpdir("phases");
+        std::fs::write(
+            root.join("c.rs"),
+            "fn helper() -> u32 { 1 }\nfn run() -> u32 { helper() }\n",
+        )
+        .unwrap();
+        let stats = build_graph(&root, &root.join(".pixel").join("graph.db")).unwrap();
+        let p = &stats.phases;
+        let disjoint = p.collect_ms
+            + p.extract_ms
+            + p.store_ms
+            + p.imports_ms
+            + p.resolve_calls_ms
+            + p.resolve_references_ms
+            + p.verify_ms;
+        assert!(
+            u128::from(disjoint) <= stats.elapsed_ms,
+            "phases {p:?} exceed the build's {} ms",
+            stats.elapsed_ms
+        );
+        assert!(
+            p.concepts_ms <= p.store_ms,
+            "concepts are inside store: {p:?}"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     fn tmpdir(tag: &str) -> std::path::PathBuf {
