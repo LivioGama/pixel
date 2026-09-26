@@ -386,6 +386,17 @@ fn input_signature(inputs: &[(String, Vec<u8>)]) -> String {
 /// Full graph build: parse everything in parallel, then write files,
 /// symbols, imports, and resolved call edges.
 pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
+    build_graph_with(root, db_path, freshness_signature)
+}
+
+/// [`build_graph`] with the signature of the tree as it stands after the
+/// writes supplied by `signature_now`: production re-walks the tree, a test
+/// makes it move to reach the rollback.
+fn build_graph_with(
+    root: &Path,
+    db_path: &Path,
+    signature_now: impl FnOnce(&Path) -> String,
+) -> Result<GraphStats, BoxErr> {
     let t0 = Instant::now();
     let mut phases = BuildPhases::default();
 
@@ -412,6 +423,10 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
     let all_paths: Vec<String> = extracted.iter().map(|e| e.rel.clone()).collect();
 
     let mut store = GraphStore::open(db_path)?;
+    // One transaction for the whole build: without it every row below is its
+    // own autocommit, and on a 60 000-symbol repository the store and
+    // resolution passes spent 43 s of a 49 s build committing (#309).
+    store.begin_write()?;
 
     // Drop files that vanished since the last build.
     let known: std::collections::HashSet<&str> = all_paths.iter().map(String::as_str).collect();
@@ -551,7 +566,7 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
     // Bind freshness to the exact bytes parsed above. If the source tree moved
     // during extraction/storage, publishing this graph as fresh would attach
     // old symbols to a new filesystem signature.
-    let current_signature = freshness_signature(root);
+    let current_signature = signature_now(root);
     phases.verify_ms = millis(clock.elapsed());
     if current_signature != snapshot_signature {
         return Err(std::io::Error::new(
@@ -566,6 +581,7 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
     // no evaluation can see a cap that belongs to a half-written build.
     store.meta_set(GRAPH_FILE_CAP_KEY, &graph_file_cap_value(graph_file_cap()))?;
     store.meta_set(FRESHNESS_KEY, &snapshot_signature)?;
+    store.commit_write()?;
 
     let (files, symbols, edges, unresolved) = store.counts()?;
     Ok(GraphStats {
@@ -1322,6 +1338,41 @@ mod tests {
             "an unconfigured build is capped, and the cap it reports is the \
              one `collect_files` stops at"
         );
+    }
+
+    /// A build that finds the tree moved under it publishes nothing: the rows
+    /// and the signature of the graph it was rebuilding stay as they were.
+    /// Without the transaction, the rewritten rows stayed under the previous
+    /// build's signature, and a later reader took them for fresh.
+    #[test]
+    fn a_build_interrupted_by_a_moving_tree_leaves_the_previous_graph_intact() {
+        let root = tmpdir("rollback");
+        std::fs::write(root.join("a.rs"), "fn kept() -> u32 { 1 }\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let snapshot = || {
+            let store = GraphStore::open(&db).unwrap();
+            let names: Vec<String> = store
+                .symbols_by_name("kept", None, 10)
+                .unwrap()
+                .into_iter()
+                .chain(store.symbols_by_name("added", None, 10).unwrap())
+                .map(|s| s.name)
+                .collect();
+            (store.meta_get(FRESHNESS_KEY).unwrap(), names)
+        };
+        let before = snapshot();
+        assert_eq!(before.1, ["kept"]);
+
+        std::fs::write(root.join("b.rs"), "fn added() -> u32 { 2 }\n").unwrap();
+        let err = build_graph_with(&root, &db, |_| "moved".into()).unwrap_err();
+        assert!(err.to_string().contains("source changed"), "{err}");
+        assert_eq!(
+            snapshot(),
+            before,
+            "no row and no signature of the failed build"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// The phases split one build: disjoint ones cannot add up to more than
