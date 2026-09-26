@@ -1,0 +1,1 @@
+**install, cli:** the bundled agent and sub-agent prompts send "does A reach B" to `pixel evaluate path` and say how to read its `established` / `absent_in_snapshot` / `unknown` statuses, and `call-path` output gains a `successor` field with the ready-to-run `evaluate path` command; its other fields are unchanged. ([#304](https://github.com/LivioGama/pixel/pull/304))
