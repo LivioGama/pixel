@@ -294,8 +294,10 @@ envelope talks to the daemon socket directly.
   `prepare-repo --rebuild-graph`). With `"if_stale": true` (a request field
   that defaults to `false` and is sent only when set, so an older daemon
   ignores it and rebuilds), it takes the same keep / update / rebuild
-  decision as the first graph command above; `prepare-repo` sends it. Every
-  `graph` answer carries `build`: `{"mode": "fresh"}`, `{"mode":
+  decision as the first graph command above; `prepare-repo` sends it. A
+  `graph` answer from a daemon that knows the field carries `build`
+  (an older one sends none, and `prepare-repo --json` then shows
+  `timings.graph.build: null`): `{"mode": "fresh"}`, `{"mode":
   "incremental", "changed_files", "removed_files"}` or `{"mode": "full",
   "reason"}` (`requested` for an explicit rebuild), and `phases`: the full
   build's phase timings plus `publish_ms`, or `check_ms` (the walk that
