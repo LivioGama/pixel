@@ -1275,7 +1275,9 @@ fn rust_callee(w: &mut Walker, call: Node, f: Node) -> Option<String> {
         }
         "field_expression" => {
             if let Some(name) = field_text(w, f, "field") {
-                let recv = field_text(w, f, "value");
+                let recv = f.child_by_field_name("value").map(|value| {
+                    rust_receiver_type(w, call, value).unwrap_or_else(|| w.text(value))
+                });
                 w.push_call(name.clone(), recv, call);
                 Some(name)
             } else {
@@ -1291,6 +1293,185 @@ fn rust_callee(w: &mut Walker, call: Node, f: Node) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// The type of a method call's receiver `value`, when the code states it,
+/// recorded as the call's receiver instead of the expression so the
+/// resolver's receiver-type tiebreak (`qualified_match`) can pick the
+/// method of that type among same-name definitions:
+///
+/// - a local read where it is bound: a parameter annotated with a path type
+///   (`runner: &GitRunner`, `mut idx: pixel_graph::Index<'_>`), or a `let`
+///   whose annotation or value names one (`let runner: GitRunner = …`,
+///   `let runner = GitRunner::new(root);`, `let s = Store { … };`);
+/// - a constructor call as the receiver itself (`GitRunner::new(root).x()`).
+///
+/// Only `new` and `default` count as constructors: they return `Self` by
+/// convention, where `open()?` or `from_env()` may return anything. `None`
+/// (the expression is kept) when the binding the call reads states no type,
+/// is shadowed by a pattern (`for`, `match`, `if let`, a closure parameter,
+/// a destructuring `let`), or is not found before the function's own
+/// parameters.
+fn rust_receiver_type(w: &Walker, call: Node, value: Node) -> Option<String> {
+    match value.kind() {
+        "identifier" => rust_local_type(w, call, &w.text(value)),
+        "call_expression" => rust_constructed_type(w, value),
+        _ => None,
+    }
+}
+
+/// The type stated for the local `ident` that `call` reads: the nearest
+/// binding before it, searched outward from the call through each enclosing
+/// block, pattern and closure up to the function's parameters.
+fn rust_local_type(w: &Walker, call: Node, ident: &str) -> Option<String> {
+    let site = call.start_byte();
+    let mut node = call;
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            "block" => {
+                let lets = each_child(parent)
+                    .into_iter()
+                    .filter(|c| c.kind() == "let_declaration" && c.end_byte() <= site);
+                let mut bound = None;
+                for binding in lets {
+                    if let Some(ty) = rust_let_binding(w, binding, ident) {
+                        bound = Some(ty);
+                    }
+                }
+                if let Some(ty) = bound {
+                    return ty;
+                }
+            }
+            "function_item" => {
+                return rust_param_binding(w, parent.child_by_field_name("parameters")?, ident)?;
+            }
+            "closure_expression" => {
+                if let Some(params) = parent.child_by_field_name("parameters")
+                    && let Some(ty) = rust_param_binding(w, params, ident)
+                {
+                    return ty;
+                }
+            }
+            "for_expression" | "match_arm" | "if_expression" | "while_expression" => {
+                let patterns = ["pattern", "condition"]
+                    .iter()
+                    .filter_map(|field| parent.child_by_field_name(field))
+                    .filter(|p| p.id() != node.id());
+                for pattern in patterns {
+                    if rust_binds(w, pattern, ident) {
+                        return None;
+                    }
+                }
+            }
+            _ => {}
+        }
+        node = parent;
+    }
+    None
+}
+
+/// `Some(type)` when the `let` binds `ident`: the stated type when its
+/// pattern is `ident` alone (`None` when neither its annotation nor its value
+/// states one), `None` inside the outer `Some` for a destructuring pattern
+/// that binds it. `None` when the `let` does not bind `ident`.
+#[allow(clippy::option_option)]
+fn rust_let_binding(w: &Walker, binding: Node, ident: &str) -> Option<Option<String>> {
+    let pattern = binding.child_by_field_name("pattern")?;
+    if !rust_binds(w, pattern, ident) {
+        return None;
+    }
+    // Bound, so a bare identifier pattern is `ident` itself; anything else
+    // destructures. A `mut` sits beside the pattern, not in it.
+    if pattern.kind() != "identifier" {
+        return Some(None);
+    }
+    Some(
+        binding
+            .child_by_field_name("type")
+            .and_then(|ty| rust_type_name(w, ty))
+            .or_else(|| {
+                binding
+                    .child_by_field_name("value")
+                    .and_then(|value| rust_constructed_type(w, value))
+            }),
+    )
+}
+
+/// `Some(type)` when a parameter of `params` binds `ident` (a function's
+/// `parameters` or a closure's `closure_parameters`): its annotated path
+/// type, or `None` inside for an unannotated or destructured one.
+#[allow(clippy::option_option)]
+fn rust_param_binding(w: &Walker, params: Node, ident: &str) -> Option<Option<String>> {
+    for param in each_child(params) {
+        let (pattern, ty) = match param.kind() {
+            "parameter" => (
+                param.child_by_field_name("pattern"),
+                param.child_by_field_name("type"),
+            ),
+            _ => (Some(param), None),
+        };
+        let Some(pattern) = pattern else { continue };
+        if !rust_binds(w, pattern, ident) {
+            continue;
+        }
+        if pattern.kind() != "identifier" {
+            return Some(None);
+        }
+        return Some(ty.and_then(|ty| rust_type_name(w, ty)));
+    }
+    None
+}
+
+/// True iff an identifier `ident` appears in `pattern`: a pattern holding it
+/// rebinds the name for the code it scopes.
+fn rust_binds(w: &Walker, pattern: Node, ident: &str) -> bool {
+    (pattern.kind() == "identifier" && w.text(pattern) == ident)
+        || each_child(pattern)
+            .into_iter()
+            .any(|c| rust_binds(w, c, ident))
+}
+
+/// The last segment of a path type (`&mut pixel_git::GitRunner<'_>` →
+/// `GitRunner`); `None` for any other type (`impl Trait`, `dyn`, tuples,
+/// slices).
+fn rust_type_name(w: &Walker, ty: Node) -> Option<String> {
+    match ty.kind() {
+        "type_identifier" => Some(w.text(ty)),
+        "scoped_type_identifier" => field_text(w, ty, "name"),
+        "generic_type" | "reference_type" => rust_type_name(w, ty.child_by_field_name("type")?),
+        _ => None,
+    }
+}
+
+/// The type a constructor expression builds: `T::new(…)`, `T::default()`
+/// (`T` a path whose last segment is a type name), or a struct literal
+/// `T { … }`. `Self::new()` names the enclosing impl's type.
+fn rust_constructed_type(w: &Walker, value: Node) -> Option<String> {
+    let segment = match value.kind() {
+        "struct_expression" => rust_type_name(w, value.child_by_field_name("name")?)?,
+        "call_expression" => {
+            let f = value.child_by_field_name("function")?;
+            if f.kind() != "scoped_identifier"
+                || !matches!(field_text(w, f, "name").as_deref(), Some("new" | "default"))
+            {
+                return None;
+            }
+            let path = w.text(f.child_by_field_name("path")?);
+            path.split("::<")
+                .next()?
+                .rsplit("::")
+                .next()?
+                .trim()
+                .to_string()
+        }
+        _ => return None,
+    };
+    if segment == "Self" {
+        return w.stack.last().cloned();
+    }
+    segment
+        .starts_with(|c: char| c.is_ascii_uppercase())
+        .then_some(segment)
 }
 
 // --- Go ------------------------------------------------------------------
@@ -3223,6 +3404,103 @@ export function wire(emitter: any) {
     /// `impl Display for X { fn fmt }` is called through the trait: its
     /// methods are marked, inherent and trait-definition methods are not,
     /// and the mark ends with the impl block, nested impls included.
+    /// The receiver each `current_branch()` call records, by site line.
+    fn rust_receivers(source: &str, callee: &str) -> Vec<(u32, Option<String>)> {
+        let fx = extract_file("src/lib.rs", source.as_bytes()).expect("rust extracts");
+        fx.calls
+            .into_iter()
+            .filter(|c| c.callee_name == callee)
+            .map(|c| (c.site_line, c.receiver))
+            .collect()
+    }
+
+    /// A method call on a local records the type the code states for it, so
+    /// the resolver can pick that type's method among same-name definitions;
+    /// every binding form that states one is read, and the nearest binding
+    /// before the call wins.
+    #[test]
+    fn rust_receiver_records_the_stated_type_of_a_local() {
+        let source = [
+            "fn param(runner: &pixel_git::GitRunner) { runner.current_branch(); }",
+            "fn param_mut(mut runner: GitRunner<'_>) { runner.current_branch(); }",
+            "fn ctor(root: &Path) { let runner = GitRunner::new(root); runner.current_branch(); }",
+            "fn annotated() { let runner: Box<GitRunner> = make(); runner.current_branch(); }",
+            "fn literal() { let mut runner = Runner { root }; runner.current_branch(); }",
+            "fn chained(root: &Path) { GitRunner::new(root).current_branch(); }",
+            "fn default_ctor() { git::GitRunner::default().current_branch(); }",
+            "fn closure(runner: &GitRunner) { let f = || runner.current_branch(); }",
+            "fn nearest(runner: &Old) { let runner = GitRunner::new(root); runner.current_branch(); }",
+            "fn other_names(runner: &GitRunner) { let branch = 1; for x in xs { runner.current_branch(); } }",
+            "struct Store;",
+            "impl Store { fn open() { let s = Self::new(); s.current_branch(); let t = Self {}; t.current_branch(); } }",
+        ]
+        .join("\n");
+        let got = rust_receivers(&source, "current_branch");
+        let want = [
+            (1, "GitRunner"),
+            (2, "GitRunner"),
+            (3, "GitRunner"),
+            (4, "Box"),
+            (5, "Runner"),
+            (6, "GitRunner"),
+            (7, "GitRunner"),
+            (8, "GitRunner"),
+            (9, "GitRunner"),
+            (10, "GitRunner"),
+            (12, "Store"),
+            (12, "Store"),
+        ]
+        .map(|(line, ty)| (line, Some(ty.to_string())));
+        assert_eq!(got, want);
+    }
+
+    /// Where the code does not state the local's type, the receiver stays the
+    /// expression as written: an untyped or non-constructor `let`, a pattern
+    /// that rebinds the name (`for`, `match`, `if let`, a closure parameter,
+    /// a destructuring `let`), a `let` in a block that closed before the
+    /// call, a binding after the call, a constructor other than `new` or
+    /// `default`, and a type that is not a path.
+    #[test]
+    fn rust_receiver_keeps_the_expression_without_a_stated_type() {
+        let source = [
+            "fn untyped(runner: &GitRunner) { let runner = open(); runner.current_branch(); }",
+            "fn fallible(root: &Path) { let runner = GitRunner::open(root)?; runner.current_branch(); }",
+            "fn looped(runner: &GitRunner) { for runner in all() { runner.current_branch(); } }",
+            "fn matched(runner: &GitRunner) { match x { Some(runner) => runner.current_branch(), _ => {} } }",
+            "fn if_let(runner: &GitRunner) { if let Some(runner) = x { runner.current_branch(); } }",
+            "fn closure_param(runner: &GitRunner) { let f = |runner| runner.current_branch(); }",
+            "fn destructured(runner: &GitRunner) { let (runner, _) = pair(); runner.current_branch(); }",
+            "fn closed_block() { { let runner = GitRunner::new(r); } runner.current_branch(); }",
+            "fn later() { runner.current_branch(); let runner = GitRunner::new(r); }",
+            "fn opaque(runner: impl Branch) { runner.current_branch(); }",
+            "fn lower(runner: &GitRunner) { GitRunner::new(r).current_branch(); git::new(r).current_branch(); }",
+            "fn opener(r: &Path) { GitRunner::open(r).current_branch(); }",
+            "fn wrapped(r: &Path) { let Wrapper(runner) = Wrapper::new(r); runner.current_branch(); }",
+            "fn wrapped_param(Wrapper(runner): Wrapper) { runner.current_branch(); }",
+        ]
+        .join("\n");
+        let got = rust_receivers(&source, "current_branch");
+        let want = [
+            (1, "runner"),
+            (2, "runner"),
+            (3, "runner"),
+            (4, "runner"),
+            (5, "runner"),
+            (6, "runner"),
+            (7, "runner"),
+            (8, "runner"),
+            (9, "runner"),
+            (10, "runner"),
+            (11, "GitRunner"),
+            (11, "git::new(r)"),
+            (12, "GitRunner::open(r)"),
+            (13, "runner"),
+            (14, "runner"),
+        ]
+        .map(|(line, ty)| (line, Some(ty.to_string())));
+        assert_eq!(got, want);
+    }
+
     #[test]
     fn rust_trait_impl_methods_are_marked() {
         let source = br#"
