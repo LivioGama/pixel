@@ -7382,7 +7382,11 @@ mod tests {
         std::fs::write(root.join("login.rs"), "pub fn login() -> bool { true }\n").unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["add", "."]);
-        git(&root, &["commit", "-qm", "init"]);
+        // A message no other fixture writes: the same tree committed in the
+        // same second by another test gets the same OID, and the shared
+        // shard cache then answers `shared_cache` instead of a build.
+        let message = format!("init {}", root.display());
+        git(&root, &["commit", "-qm", &message]);
         let open_of = |svc: &mut Service| {
             let status = svc.handle(Request::Status {});
             assert!(status.ok, "{status:?}");
