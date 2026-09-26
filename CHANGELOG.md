@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-26
+
+This release makes pixel lighter on disk and faster on large repositories: the history index is about 14 times smaller and bounded, and `prepare-repo` stops rebuilding a graph that still matches the tree.
+
+### Highlights
+
+- **A bounded history index**: `history.db` moves to FTS5 trigram indexes (359 MB to 25 MB here), evicts old diffs past a 365-day window or a 256 MiB budget, and is only created by the first history command.
+- **Faster graph builds**: a full build writes in one SQLite transaction (49 s to 9 s on a 60 000-symbol repository), and `prepare-repo` reuses or incrementally updates a fresh graph, so a CI-cached `.pixel/` costs seconds.
+- **`prepare-repo` timings** now report where the time goes, index layer by layer and graph phase by phase.
+
+### Added
+- **prepare-repo:** `--json` gains a `timings` block: how the index base was obtained (`reused`, `shared_cache`, `built_from_git`) with the cost of each index layer, and the wall time of every graph build phase; the human output gets a `timings:` line naming the slowest phase. `status --json` carries the index layers as `index.open`. ([#309](https://github.com/LivioGama/pixel/pull/309))
+
+### Changed
+- **history:** `history.db` is about 14 times smaller and bounded: diff and path text sit in FTS5 trigram indexes instead of a row per trigram (this repository: 359 MB + 24 MB WAL to 25 MB), diffs older than 365 days or past 256 MiB are evicted newest-kept with metadata intact (`PIXEL_HISTORY_WINDOW_DAYS`, `PIXEL_HISTORY_BUDGET_MB`), and `status`, `doctor` and session start no longer create the db. ([#301](https://github.com/LivioGama/pixel/pull/301))
+- **recall:** `recall search --agent` walks the time index and stops at the first page when the agent's sessions hold over 20 000 turns, instead of sorting them all first (`recall search . --agent claude --limit 50`, 248k turns: 1.34 s to 11 ms). A smaller agent, or one whose turns sit behind more newer turns, keeps the sort. ([#301](https://github.com/LivioGama/pixel/pull/301))
+- **recall:** a semantic index built by an older revision of its model now rebuilds itself: the recall daemon empties it and re-embeds the corpus in 5 000-turn slices per pass, and `recall embed` does the same, so the model2vec-rs 0.3 update (it moved 133 of 300 sampled turn vectors) needs no `recall embed --rebuild`. ([#302](https://github.com/LivioGama/pixel/pull/302))
+- **install, cli:** the bundled agent and sub-agent prompts send "does A reach B" to `pixel evaluate path` and say how to read its `established` / `absent_in_snapshot` / `unknown` statuses, and `call-path` output gains a `successor` field with the ready-to-run `evaluate path` command; its other fields are unchanged. ([#304](https://github.com/LivioGama/pixel/pull/304))
+- **graph:** a full graph build (`prepare-repo`, `rebuild-graph`, a first graph query) writes its rows in one SQLite transaction instead of one commit per row: on a 60 000-symbol Rails repository the build drops from 49 s to 9 s, with the same rows. ([#310](https://github.com/LivioGama/pixel/pull/310))
+- **prepare-repo:** keeps a stored graph that still matches the tree, and updates it in place when few files changed, instead of rebuilding it every run: a `.pixel/` restored from a CI cache now costs seconds (3 s on a 60 000-symbol repository, 8 s 40 commits apart). `timings.graph.build` names the mode (`fresh`, `incremental`, `full` and why); `--rebuild-graph` forces the rebuild. ([#311](https://github.com/LivioGama/pixel/pull/311))
+
+### Fixed
+- **history:** a broad diff or path search no longer comes back short or empty: candidates held any one trigram of the query and only the first 400 were checked (0.5.1 found no commit for `main` in this repository), and several hunks of one commit used up the page. Candidates now hold every trigram and the page counts distinct commits. ([#301](https://github.com/LivioGama/pixel/pull/301))
+- **history:** `lifecycle` on a token of three characters or more no longer fails: its query named a table alias that did not exist, so every such token errored. ([#301](https://github.com/LivioGama/pixel/pull/301))
+- **index:** building an index no longer edits a tracked `.gitignore`: when git does not already ignore `.pixel/`, the entry goes to the clone's own `info/exclude`, so `what-changed` and other read-only commands leave `git status` clean and the next `git checkout` unblocked, and a repo without a `.gitignore` no longer gets one. ([#307](https://github.com/LivioGama/pixel/pull/307))
+- **index:** a `.pixel/` whose base shard was built at a commit this clone does not hold (a CI cache filled on another pull request's merge ref, an amended and pruned commit) is rebuilt at HEAD; a failed `git diff base..HEAD` used to read as "nothing changed", and the index served the other commit's text as HEAD's. ([#312](https://github.com/LivioGama/pixel/pull/312))
+
 ## [0.5.1] - 2026-09-25
 
 This release sharpens how Pixel measures itself and how it resolves Rust imports, and gives the project a website at <https://pixel-cli.dev/>.
