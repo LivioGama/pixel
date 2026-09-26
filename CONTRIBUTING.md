@@ -357,7 +357,12 @@ Pixel is dogfooded on itself. When an agent works in this repository:
   function with `#[cfg_attr(test, mutants::skip)]` and a one-line reason.
   Push until the job reports no missed mutant; do not weaken an assertion to
   get there. Run `cargo mutants` locally only when asked, scoped with `-F`
-  to one or two functions, never the full diff.
+  to one or two functions, never the full diff. Two things keep the job off
+  the critical path: before the push, read `cargo mutants --list --in-diff
+  <(git diff <base>...HEAD)` (seconds, no build) and name the test that
+  fails under each listed mutant, writing the missing ones; after it, watch
+  the checks in the background (`gh pr checks <pr> --watch`) and move to the
+  next unit instead of waiting.
 - The CodeRabbit review is a gate like the `Mutants` job, not a suggestion
   box: read the findings when the pass lands, fix or refute each one in its
   thread, resolve it, and say in the pull request which ones you declined and
