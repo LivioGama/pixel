@@ -350,6 +350,15 @@ fn build_shard_from(
     })
 }
 
+/// Whether a git repository can delta `base` to HEAD: the shard is anchored
+/// to a commit, and that commit is in this repository. A `.pixel/` restored
+/// from another checkout can hold a base built at a commit this clone never
+/// fetched; `git diff base..HEAD` fails on it, so the base is rebuilt.
+fn delta_anchor_held(root: &Path, base: &Shard) -> bool {
+    base.commit_oid()
+        .is_some_and(|oid| gitsync::commit_exists(root, oid))
+}
+
 impl IndexSet {
     /// Open the index at `root/.pixel`, (re)building layers as needed.
     /// Concurrent callers building the same root are serialized via an
@@ -390,8 +399,8 @@ impl IndexSet {
         };
         // A git repo demands a git-anchored base; a plain-walk base (no OID)
         // cannot be delta'd against and is rebuilt.
-        if head.is_some() && base.as_ref().is_some_and(|s| s.commit_oid().is_none()) {
-            base = None;
+        if head.is_some() {
+            base = base.filter(|s| delta_anchor_held(root, s));
         }
         // Non-Git repos: the base shard has no commit anchor, so it can go
         // stale when files are added/removed/edited. Invalidate it when the
@@ -417,7 +426,7 @@ impl IndexSet {
                     && s.extractor_id() == extractor.id()
                 {
                     let valid = if head.is_some() {
-                        s.commit_oid().is_some()
+                        delta_anchor_held(root, &s)
                     } else {
                         s.commit_oid().is_none()
                             && load_plain_sig(&gpx_dir).as_deref() == Some(&plain_signature(root))
@@ -605,7 +614,14 @@ impl IndexSet {
             return Ok(DeltaSource::Reused);
         }
         // Cumulative diff base..HEAD — simple and correct however HEAD moved.
-        let diff = gitsync::diff_name_status(&self.root, base_oid, head_oid);
+        // A failed diff is not "nothing changed": recording it as HEAD's
+        // delta would serve the base commit's text as HEAD's.
+        let diff =
+            gitsync::diff_name_status_or_err(&self.root, base_oid, head_oid).map_err(|e| {
+                IndexSetError::Io(std::io::Error::other(format!(
+                    "git diff {base_oid}..{head_oid}: {e}"
+                )))
+            })?;
         let mut changed: Vec<String> = Vec::new();
         let mut tombstones: Vec<String> = Vec::new();
         for (status, path) in diff {
@@ -1359,6 +1375,28 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The anchor check is for git repositories only: an unchanged plain
+    /// directory reopens on the base it built, without rewriting it.
+    #[test]
+    fn an_unchanged_plain_directory_reopens_without_rebuilding_its_base() {
+        let _cache = IsolatedCache::new("plain-reopen");
+        let dir = scratch("plain-reopen");
+        std::fs::write(dir.join("solo.txt"), "plainReopenNeedle\n").unwrap();
+        let base = dir.join(SHARD_DIR).join(SHARD_FILE);
+        drop(IndexSet::open_or_build(&dir, ex()).unwrap());
+        let written = std::fs::metadata(&base).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert_eq!(set.search("plainReopenNeedle", None).unwrap().0.len(), 1);
+        assert_eq!(
+            std::fs::metadata(&base).unwrap().modified().unwrap(),
+            written,
+            "the base shard was rebuilt"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Phase 3 item 4: hidden files (dotfiles, `.github/`, `.claude/`) are
     /// real project content and must be indexed — while `.git/` and our own
     /// `.pixel/` sidecar must never be, even with the hidden filter off.
@@ -1752,6 +1790,81 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(std::env::var_os("XDG_CACHE_HOME"), previous);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Only a base anchored to a commit this repository holds can be the
+    /// start of `git diff base..HEAD`.
+    #[test]
+    fn delta_anchor_held_requires_an_anchor_commit_the_repository_holds() {
+        let dir = scratch("anchor-held");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn anchored() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        let head = git_out(&dir, &["rev-parse", "HEAD"]);
+        let shard_at = |oid: &str| {
+            let path = dir.join(format!("{oid}.shard"));
+            build_shard_from(&dir, &[], ex().as_ref(), oid, &path, true)
+                .unwrap()
+                .shard
+        };
+        assert!(delta_anchor_held(&dir, &shard_at(&head)));
+        assert!(!delta_anchor_held(&dir, &shard_at(&"0".repeat(40))));
+        let unanchored = dir.join("plain.shard");
+        ShardBuilder::new(&ex().id()).write(&unanchored).unwrap();
+        assert!(!delta_anchor_held(&dir, &Shard::open(&unanchored).unwrap()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `reconcile_delta` itself: a diff git cannot compute is an error, never
+    /// an empty change list recorded as HEAD's delta.
+    #[test]
+    fn reconcile_delta_should_fail_on_a_diff_git_cannot_compute() {
+        let _cache = IsolatedCache::new("failed-diff");
+        let dir = scratch("failed-diff");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn diffed() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        let head = git_out(&dir, &["rev-parse", "HEAD"]);
+        let mut set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        let gpx = dir.join(SHARD_DIR);
+
+        let missing = "0".repeat(40);
+        let err = set.reconcile_delta(&gpx, &missing, &head).unwrap_err();
+        assert!(
+            matches!(&err, IndexSetError::Io(e) if e.to_string().contains("git diff")),
+            "{err:?}"
+        );
+        let state = DeltaState::load(&gpx).expect("the open saved a state");
+        assert_eq!(state.delta_oid, None, "nothing recorded as HEAD's delta");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A restored `.pixel/` can carry a base built at a commit this clone
+    /// never fetched (a CI cache filled on another pull request's merge
+    /// ref). `git diff base..HEAD` then fails, and reading that failure as
+    /// "nothing changed" served the other commit's text as HEAD's: the base
+    /// must be rebuilt at HEAD instead.
+    #[test]
+    fn a_base_whose_commit_is_gone_should_be_rebuilt_not_diffed_as_empty() {
+        let _cache = IsolatedCache::new("gone-base");
+        let dir = scratch("gone-base");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn goneNeedle() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        drop(IndexSet::open_or_build(&dir, ex()).unwrap());
+
+        std::fs::write(dir.join("a.rs"), "fn headNeedle() {}\n").unwrap();
+        git(&dir, &["commit", "-qa", "--amend", "-m", "one, amended"]);
+        git(&dir, &["reflog", "expire", "--expire=now", "--all"]);
+        git(&dir, &["gc", "-q", "--prune=now"]);
+
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert_eq!(set.search("headNeedle", None).unwrap().0.len(), 1);
+        assert!(set.search("goneNeedle", None).unwrap().0.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

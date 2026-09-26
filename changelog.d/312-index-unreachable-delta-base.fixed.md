@@ -1,0 +1,1 @@
+**index:** a `.pixel/` whose base shard was built at a commit this clone does not hold (a CI cache filled on another pull request's merge ref, an amended and pruned commit) is rebuilt at HEAD; a failed `git diff base..HEAD` used to read as "nothing changed", and the index served the other commit's text as HEAD's. ([#312](https://github.com/LivioGama/pixel/pull/312))
