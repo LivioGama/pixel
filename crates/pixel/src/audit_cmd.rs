@@ -401,7 +401,7 @@ pub fn run(opts: AuditOptions) -> Result<(), String> {
     let root = crate::discover_root(&opts.path).map_err(|e| format!("audit: {e}"))?;
     if !root.join(SHARD_DIR).join(GRAPH_DB_FILE).exists() {
         eprintln!("{FIRST_RUN_NOTICE}");
-        crate::execute(&root, crate::Request::Graph {}, false)
+        crate::execute(&root, crate::Request::Graph { if_stale: false }, false)
             .map_err(|e| format!("audit: {e}"))?;
     }
     print!("{}", report_for(&root, opts.top, opts.json)?);

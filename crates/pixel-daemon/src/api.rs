@@ -933,7 +933,7 @@ impl Service {
                 offset,
                 include_tests,
             } => self.op_changes(base.as_deref(), offset, include_tests),
-            Request::Graph {} => self.op_graph(),
+            Request::Graph { if_stale } => self.op_graph(if_stale),
             Request::Status {} => self.op_status(),
             Request::Reindex {} => self.op_reindex(),
             Request::Resolve { phrase, limit } => self.op_resolve(&phrase, limit),
@@ -2125,7 +2125,10 @@ impl Service {
             .is_some_and(|(files, _, _, _)| files >= cap as u64)
     }
 
-    fn op_graph(&mut self) -> Result<Value, String> {
+    fn op_graph(&mut self, if_stale: bool) -> Result<Value, String> {
+        if if_stale {
+            return self.op_graph_if_stale();
+        }
         let publication = Arc::clone(&self.publication);
         let mut state = publication.write().expect("publication lock poisoned");
         state.healthy = false;
@@ -2142,7 +2145,33 @@ impl Service {
             "edges": stats.get("edges").cloned().unwrap_or(Value::Null),
             "unresolved": stats.get("unresolved").cloned().unwrap_or(Value::Null),
             "elapsed_ms": build_ms,
+            "build": {"mode": "full", "reason": "requested"},
             "phases": stats.get("phases").cloned().unwrap_or(Value::Null),
+        }))
+    }
+
+    /// `graph` with `if_stale`: [`Self::ensure_graph`] keeps, updates or
+    /// rebuilds the stored graph — the decision every graph query already
+    /// takes — and the answer names the one it took and what it cost, so a
+    /// restored graph that was rebuilt anyway shows up as `mode: full`.
+    fn op_graph_if_stale(&mut self) -> Result<Value, String> {
+        let started = Instant::now();
+        let built = self.ensure_graph()?;
+        let elapsed_ms = millis(started.elapsed());
+        let store = self
+            .graph
+            .as_ref()
+            .expect("ensure_graph leaves the graph open on success");
+        let (files, symbols, edges, unresolved) = store.counts().map_err(|e| e.to_string())?;
+        let (build, phases) = graph_build_outcome(built.as_ref(), elapsed_ms);
+        Ok(json!({
+            "files": files,
+            "symbols": symbols,
+            "edges": edges,
+            "unresolved": unresolved,
+            "elapsed_ms": elapsed_ms,
+            "build": build,
+            "phases": phases,
         }))
     }
 
@@ -4015,6 +4044,35 @@ fn incremental_allowed(changed: usize, indexed: usize, pct: u64) -> bool {
     (changed as u128) * 100 <= (indexed as u128) * (pct as u128)
 }
 
+/// The `build` and `phases` blocks of a `graph` answer out of the record
+/// [`Service::ensure_graph`] returned (`None`: the stored graph was kept).
+/// Whatever the build did not spend of `elapsed_ms` went to the check that
+/// chose it: the tree walk and hash against the stored signature.
+fn graph_build_outcome(built: Option<&Value>, elapsed_ms: u64) -> (Value, Value) {
+    let Some(info) = built else {
+        return (json!({"mode": "fresh"}), json!({"check_ms": elapsed_ms}));
+    };
+    let build_ms = info["build_ms"].as_u64().unwrap_or(0);
+    let check_ms = elapsed_ms.saturating_sub(build_ms);
+    if info["incremental"] == json!(true) {
+        return (
+            json!({
+                "mode": "incremental",
+                "changed_files": info["changed_files"],
+                "removed_files": info["removed_files"],
+            }),
+            json!({"check_ms": check_ms, "apply_ms": build_ms}),
+        );
+    }
+    let mut phases = info["stats"]["phases"].clone();
+    if let Some(obj) = phases.as_object_mut() {
+        obj.insert("check_ms".into(), json!(check_ms));
+    } else {
+        phases = json!({"check_ms": check_ms});
+    }
+    (json!({"mode": "full", "reason": info["reason"]}), phases)
+}
+
 fn merge_build_info(out: &mut Value, built: Option<Value>) {
     if let (Some(info), Some(obj)) = (built, out.as_object_mut()) {
         obj.insert("graph_build".into(), info);
@@ -4941,7 +4999,7 @@ mod tests {
         let reqs: Vec<Request> = vec![
             Request::Ping,
             Request::Status {},
-            Request::Graph {},
+            Request::Graph { if_stale: false },
             serde_json::from_value(json!({"op":"search","pattern":"login"})).unwrap(),
             serde_json::from_value(json!({"op":"search","pattern":"("})).unwrap(),
             serde_json::from_value(json!({"op":"symbol","name":"login"})).unwrap(),
@@ -6076,7 +6134,7 @@ mod tests {
         // Bug 2 describes.
         {
             let mut builder = Service::open(&root).unwrap();
-            let built = builder.handle(Request::Graph {});
+            let built = builder.handle(Request::Graph { if_stale: false });
             assert!(built.ok, "graph build: {:?}", built.error);
         }
 
@@ -7205,6 +7263,116 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The answer of an `if_stale` graph names what the call did, and the
+    /// cost a kept or updated graph still pays is the check that chose it.
+    #[test]
+    fn graph_build_outcome_should_name_the_mode_and_split_off_the_check() {
+        assert_eq!(
+            graph_build_outcome(None, 900),
+            (json!({"mode": "fresh"}), json!({"check_ms": 900}))
+        );
+        let incremental = json!({
+            "incremental": true, "changed_files": 3, "removed_files": 1, "build_ms": 200,
+        });
+        assert_eq!(
+            graph_build_outcome(Some(&incremental), 900),
+            (
+                json!({"mode": "incremental", "changed_files": 3, "removed_files": 1}),
+                json!({"check_ms": 700, "apply_ms": 200}),
+            )
+        );
+        let full = json!({
+            "incremental": false, "reason": "threshold", "build_ms": 800,
+            "stats": {"phases": {"extract_ms": 500}},
+        });
+        assert_eq!(
+            graph_build_outcome(Some(&full), 900),
+            (
+                json!({"mode": "full", "reason": "threshold"}),
+                json!({"extract_ms": 500, "check_ms": 100}),
+            )
+        );
+        // A build longer than the measured total (clock skew between the
+        // two reads) never wraps, and a record without phases still reports
+        // the check.
+        let bare = json!({"incremental": false, "reason": "missing", "build_ms": 1000});
+        assert_eq!(
+            graph_build_outcome(Some(&bare), 900),
+            (
+                json!({"mode": "full", "reason": "missing"}),
+                json!({"check_ms": 0})
+            )
+        );
+    }
+
+    /// `prepare-repo` asks for `if_stale`: a graph that still matches the
+    /// tree is kept as it is (same file on disk), a small drift is applied in
+    /// place, a missing graph is built; without the flag the graph is always
+    /// rebuilt (`rebuild-graph`, `prepare-repo --rebuild-graph`).
+    #[test]
+    fn graph_if_stale_should_keep_update_or_build_the_stored_graph() {
+        use std::os::unix::fs::MetadataExt;
+        let root = tmpdir("graph-if-stale");
+        for i in 0..10 {
+            std::fs::write(
+                root.join(format!("m{i}.rs")),
+                format!("pub fn f{i}() -> u32 {{ {i} }}\n"),
+            )
+            .unwrap();
+        }
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let graph = |if_stale: bool| {
+            let mut svc = Service::open(&root).unwrap();
+            let resp = svc.handle(Request::Graph { if_stale });
+            assert!(resp.ok, "{resp:?}");
+            resp.into_data()
+        };
+        let inode = |svc_root: &Path| {
+            std::fs::metadata(
+                svc_root
+                    .join(pixel_index::index::SHARD_DIR)
+                    .join(GRAPH_DB_FILE),
+            )
+            .unwrap()
+            .ino()
+        };
+
+        let first = graph(true);
+        assert_eq!(first["build"], json!({"mode": "full", "reason": "missing"}));
+        assert_eq!(first["symbols"], 10, "{first}");
+        assert!(first["phases"]["extract_ms"].is_u64(), "{first}");
+        let built = inode(&root);
+
+        let kept = graph(true);
+        assert_eq!(kept["build"], json!({"mode": "fresh"}), "{kept}");
+        assert_eq!(kept["symbols"], 10, "{kept}");
+        assert!(kept["phases"]["check_ms"].is_u64(), "{kept}");
+        assert_eq!(inode(&root), built, "a fresh graph is not rewritten");
+
+        std::fs::write(root.join("m0.rs"), "pub fn g0() -> u32 { 0 }\n").unwrap();
+        let updated = graph(true);
+        assert_eq!(
+            updated["build"],
+            json!({"mode": "incremental", "changed_files": 1, "removed_files": 0}),
+            "{updated}"
+        );
+        assert!(updated["phases"]["apply_ms"].is_u64(), "{updated}");
+
+        let forced = graph(false);
+        assert_eq!(
+            forced["build"],
+            json!({"mode": "full", "reason": "requested"})
+        );
+        assert_ne!(
+            inode(&root),
+            built,
+            "a requested rebuild publishes a new file"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// `prepare-repo --json` is how a CI log tells a reused index from a
     /// rebuilt one and names the slow graph phase: `status` carries the
     /// index open's layers, `graph` every build phase plus the publish.
@@ -7230,7 +7398,7 @@ mod tests {
         let mut svc = Service::open(&root).unwrap();
         assert_eq!(open_of(&mut svc)["base"], "reused");
 
-        let graph = svc.handle(Request::Graph {});
+        let graph = svc.handle(Request::Graph { if_stale: false });
         assert!(graph.ok, "{graph:?}");
         let phases = graph.into_data()["phases"].clone();
         for key in [
