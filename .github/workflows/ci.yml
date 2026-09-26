@@ -80,10 +80,14 @@ on:
 # that branch.
 #
 # A new push to a pull request cancels the run still in flight for its
-# previous commit. Pushes to main are never cancelled so every
-# merge keeps a complete run.
+# previous commit. A push to main gets a group of its own commit: with one
+# group per ref, GitHub keeps one run in progress and one pending, and each
+# new merge cancelled the pending one (#310's merge lost its run that way)
+# and waited behind the one in progress, a website merge included. Every
+# merge now keeps a complete run, started at once, which is what the
+# release skill waits on before it tags.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # CI only reads the checkout; it never writes to the repository.

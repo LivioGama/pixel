@@ -28,9 +28,11 @@ on:
       - "rust-toolchain*"
 
 # A new push to a pull request cancels the run still in flight for its
-# previous commit; branch pushes keep a complete run.
+# previous commit. A push to main gets a group of its own commit, so a merge
+# neither waits behind the previous merge's run nor cancels a pending one
+# (see ci.yml).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # CI only reads the checkout; it never writes to the repository.

@@ -109,7 +109,8 @@ before acting, and fix the record where it is stale.
 git fetch origin --tags
 pixel repo-state                                   # clean tree
 LAST=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)
-gh run list --branch main -L 4                     # CI and Cross-build green on origin/main's head
+gh run list --branch main --workflow ci.yml --status completed -L 1           # success
+gh run list --branch main --workflow cross-build.yml --status completed -L 1  # success
 git merge-base --is-ancestor "$LAST" origin/main && echo "$LAST is on main"
 git log --oneline "$LAST"..origin/main | head      # something to release
 gh secret list | grep HOMEBREW_TAP_TOKEN
@@ -118,6 +119,9 @@ gh secret list | grep HOMEBREW_TAP_TOKEN
 - Pick the last tag by version sort, not `git describe`: v0.2.4's commit is
   not an ancestor of `main` (it was replayed before the histories were
   joined), so `describe` can answer an older tag.
+- Read the last *completed* run of each workflow, not `main`'s head: a run
+  still in progress there (a website merge, say) does not hold the prepare,
+  since step 4 waits for the prepare commit's own push run before tagging.
 - A red `Cross-build` on `main` means a release lane fails with `--locked`:
   the `build` job will fail the same way. A red `Dependency policy
   (cargo-deny)` blocks every PR, the prepare PR included: a fresh RustSec
