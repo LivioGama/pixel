@@ -412,6 +412,10 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
     let all_paths: Vec<String> = extracted.iter().map(|e| e.rel.clone()).collect();
 
     let mut store = GraphStore::open(db_path)?;
+    // One transaction for the whole build: without it every row below is its
+    // own autocommit, and on a 60 000-symbol repository the store and
+    // resolution passes spent 43 s of a 49 s build committing (#309).
+    store.begin_write()?;
 
     // Drop files that vanished since the last build.
     let known: std::collections::HashSet<&str> = all_paths.iter().map(String::as_str).collect();
@@ -566,6 +570,7 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
     // no evaluation can see a cap that belongs to a half-written build.
     store.meta_set(GRAPH_FILE_CAP_KEY, &graph_file_cap_value(graph_file_cap()))?;
     store.meta_set(FRESHNESS_KEY, &snapshot_signature)?;
+    store.commit_write()?;
 
     let (files, symbols, edges, unresolved) = store.counts()?;
     Ok(GraphStats {

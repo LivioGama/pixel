@@ -1,0 +1,1 @@
+**graph:** a full graph build (`prepare-repo`, `rebuild-graph`, a first graph query) writes its rows in one SQLite transaction instead of one commit per row: on a 60 000-symbol Rails repository the build drops from 49 s to 9 s, with the same rows. (PR_LINK)
