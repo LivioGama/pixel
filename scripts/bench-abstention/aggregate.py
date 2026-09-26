@@ -92,6 +92,7 @@ def classify(tree, commit, change):
 
 def main(pairs):
     report = {}
+    coverage = {}
     for pair in pairs:
         name, _, repo = pair.partition("=")
         out = ROOT / "out" / name
@@ -99,6 +100,7 @@ def main(pairs):
         # objects, so the working tree it was measured in need not survive.
         tree = pathlib.Path(repo).expanduser()
         assert tree.is_dir(), f"object store for {name} missing: {tree}"
+        listed = (out / "commits.txt").read_text().split()
         rows = []
         for f in sorted(out.glob("[0-9][0-9][0-9]-*.json")):
             commit = f.stem.split("-", 1)[1]
@@ -127,13 +129,28 @@ def main(pairs):
                 "lower_bound": d.get("uncovered_lower_bound", False),
                 "build": d.get("graph_build"),
             })
+        # A commit with no JSON was either never reached (a run cut short:
+        # the missing ones form the tail of commits.txt) or failed its
+        # checkout (errors.txt). The rates below are over the rows only, so
+        # say which case it is instead of letting the sample shrink unseen.
+        measured = {r["commit"] for r in rows}
+        missing = [i for i, c in enumerate(listed) if c not in measured]
+        failed = (out / "errors.txt").read_text().split("\n") if (out / "errors.txt").exists() else []
+        failed = [l for l in failed if l.strip()]
+        if failed:
+            sys.exit(f"{name}: {len(failed)} checkout(s) still failing in errors.txt; run rerun.sh first")
+        if missing and missing != list(range(missing[0], len(listed))):
+            sys.exit(f"{name}: commits missing inside the sample (indices {missing[:10]}…); the run is incomplete")
+        coverage[name] = (len(rows), len(listed))
         report[name] = rows
     json.dump(report, open(ROOT / "out" / "report.json", "w"), indent=1)
 
     for name, rows in report.items():
         ok = [r for r in rows if not r.get("error")]
         code = [r for r in ok if r["symbols"] > 0]
-        print(f"\n== {name}: {len(ok)} commits evaluated ({len(rows) - len(ok)} unreadable), {len(code)} with >=1 changed symbol")
+        done, listed = coverage[name]
+        cut = f", run cut after {done} of {listed} listed" if done < listed else ""
+        print(f"\n== {name}: {len(ok)} commits evaluated ({len(rows) - len(ok)} unreadable{cut}), {len(code)} with >=1 changed symbol")
         for label, pop in (("all", ok), ("with symbols", code)):
             if not pop:
                 continue

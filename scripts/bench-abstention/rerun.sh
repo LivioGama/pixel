@@ -1,24 +1,22 @@
 #!/bin/bash
-# Re-run the commits whose checkout failed: before #307, ensure_pixel_gitignored
-# appends `.pixel/` to a tracked .gitignore that lacks it, which blocks the
-# next checkout. --force discards that edit (the .pixel/ dir is untracked).
+# Re-run the commits whose checkout failed in run.sh. Before #307 the pixel
+# under test appended `.pixel/` to a tracked .gitignore that lacked it, and
+# that edit blocked the next checkout; common.sh undoes exactly that edit,
+# and refuses any other.
 # Usage: rerun.sh <name> <tree>
 set -u
 name=$1 tree=$2
 BIN=${PIXEL_BIN:-pixel}
-out=$(dirname "$0")/out/$name
+. "$(dirname "$0")/common.sh"
+out=$(out_dir "$name")
 [ -f "$out/errors.txt" ] || exit 0
-mv "$out/errors.txt" "$out/errors.first-pass.txt"
 cd "$tree" || exit 1
+require_clean || exit 1
+start_rev=$(git rev-parse HEAD)
+mv "$out/errors.txt" "$out/errors.first-pass.txt"
 while read -r i c _; do
-  git checkout -q -f --detach "$c" || { echo "$i $c checkout-failed" >> "$out/errors.txt"; continue; }
-  f="$out/$(printf %03d "$i")-$c"
-  start=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
-  PIXEL_METRICS=0 "$BIN" what-changed --base "$c^" --json . > "$f.json" 2> "$f.err"
-  rc=$?
-  end=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
-  echo "$i $c rc=$rc secs=$(echo "$end - $start" | bc) rerun" >> "$out/progress.txt"
+  measure "$out" "$i" "$c" rerun
 done < "$out/errors.first-pass.txt"
-git checkout -q -f --detach "$(tail -1 "$out/commits.txt")"
+restore "$start_rev"
 "$BIN" daemon stop . >/dev/null 2>&1 || true
 echo "rerun done $name"
