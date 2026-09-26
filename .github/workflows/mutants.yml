@@ -45,14 +45,46 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Decides whether this run is a release-prepare pull request into main,
+  # whose jobs are skipped: a `release-` head branch AND a diff that
+  # scripts/release-prepare-only.py accepts (version lines, CHANGELOG.md,
+  # deleted fragments). The branch name alone would let any code change
+  # skip the gates. Any other event, or a failed check, keeps every job.
+  scope:
+    name: Release-prepare scope
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      release-prepare: ${{ steps.check.outputs.release-prepare }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: github.event_name == 'pull_request' && github.base_ref == 'main' && startsWith(github.head_ref, 'release-')
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          verdict=false
+          if [ "$EVENT" = pull_request ] && [ "$BASE_REF" = main ] && [[ "$HEAD_REF" == release-* ]] \
+            && python3 scripts/release-prepare-only.py "$BASE_SHA" "$HEAD_SHA"; then
+            verdict=true
+          fi
+          echo "release-prepare=$verdict" | tee -a "$GITHUB_OUTPUT"
+
   plan:
     name: Mutants plan
     # A release-prepare pull request into main mutates nothing it wrote
-    # (version bumps, Cargo.lock, changelog): skipped, as in ci.yml.
-    if: >-
-      github.event_name != 'pull_request'
-      || github.base_ref != 'main'
-      || !startsWith(github.head_ref, 'release-')
+    # (version bumps, Cargo.lock, changelog): skipped once `scope` verified
+    # the diff, as in ci.yml.
+    needs: scope
+    if: needs.scope.outputs.release-prepare != 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     outputs:
@@ -288,11 +320,11 @@ jobs:
     # docs and habits that point at "Mutants in diff" still land on the
     # verdict.
     name: Mutants in diff
-    needs: [plan, shard]
+    needs: [scope, plan, shard]
     # Runs after failed or skipped shards too: it is the job that says what
     # they add up to. Not after a skipped plan: a release-prepare pull
     # request has no diff to gate.
-    if: always() && needs.plan.result != 'skipped'
+    if: always() && needs.scope.outputs.release-prepare != 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:

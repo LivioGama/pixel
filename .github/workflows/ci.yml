@@ -70,8 +70,9 @@ on:
       - ".qoder/**"
       - ".windsurf/**"
 
-# A release-prepare pull request into main (`release-x.y.z` branch) skips
-# every job, as it skips Cross-build: its diff is version bumps, Cargo.lock
+# A release-prepare pull request into main (`release-x.y.z` branch whose
+# diff the `scope` job verifies) skips every job, as it skips Cross-build:
+# its diff is version bumps, Cargo.lock
 # and the changelog, `prepare.sh` already ran `check-release` and the gates
 # on it, and the release skill tags only once the push run on the merge
 # commit is green, so the pull request run would test the same tree twice.
@@ -93,12 +94,43 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Decides whether this run is a release-prepare pull request into main,
+  # whose jobs are skipped: a `release-` head branch AND a diff that
+  # scripts/release-prepare-only.py accepts (version lines, CHANGELOG.md,
+  # deleted fragments). The branch name alone would let any code change
+  # skip the gates. Any other event, or a failed check, keeps every job.
+  scope:
+    name: Release-prepare scope
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      release-prepare: ${{ steps.check.outputs.release-prepare }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: github.event_name == 'pull_request' && github.base_ref == 'main' && startsWith(github.head_ref, 'release-')
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          verdict=false
+          if [ "$EVENT" = pull_request ] && [ "$BASE_REF" = main ] && [[ "$HEAD_REF" == release-* ]] \
+            && python3 scripts/release-prepare-only.py "$BASE_SHA" "$HEAD_SHA"; then
+            verdict=true
+          fi
+          echo "release-prepare=$verdict" | tee -a "$GITHUB_OUTPUT"
+
   test:
     name: Test + Format
-    if: >-
-      github.event_name != 'pull_request'
-      || github.base_ref != 'main'
-      || !startsWith(github.head_ref, 'release-')
+    needs: scope
+    if: needs.scope.outputs.release-prepare != 'true'
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -187,6 +219,9 @@ jobs:
       - name: Release prepare contract (stub gh and cargo, disposable repo)
         run: python3 scripts/test-prepare.py
 
+      - name: Release-prepare skip contract (disposable repo)
+        run: python3 scripts/test-release-prepare-only.py
+
       - name: Mutation gate config contract (no module silently excluded)
         run: python3 scripts/test-mutants-config.py
 
@@ -224,10 +259,8 @@ jobs:
 
   msrv:
     name: MSRV (rust-version in Cargo.toml)
-    if: >-
-      github.event_name != 'pull_request'
-      || github.base_ref != 'main'
-      || !startsWith(github.head_ref, 'release-')
+    needs: scope
+    if: needs.scope.outputs.release-prepare != 'true'
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -268,10 +301,8 @@ jobs:
 
   deny:
     name: Dependency policy (cargo-deny)
-    if: >-
-      github.event_name != 'pull_request'
-      || github.base_ref != 'main'
-      || !startsWith(github.head_ref, 'release-')
+    needs: scope
+    if: needs.scope.outputs.release-prepare != 'true'
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

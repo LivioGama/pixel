@@ -227,7 +227,10 @@ Body: the version, the reason for patch/minor, the gate output, "tag `vx.y.z`
 follows on this PR's merge commit". Watch its checks in the background
 (`gh pr checks <n> --watch`, `run_in_background: true`). The prepare PR skips
 every CI job (Test + Format, MSRV, cargo-deny, Mutants, Cross-build) and
-CodeRabbit (`ignore_title_keywords`): its diff holds no code, and step 3's
+CodeRabbit (`ignore_title_keywords`) once each workflow's `scope` job has
+checked the diff with `scripts/release-prepare-only.py` (version lines,
+`CHANGELOG.md`, deleted fragments; anything more keeps every job): it holds
+no code, and step 3's
 local gates plus the push run on its merge commit, which step 4 waits for,
 cover it. A maintenance release into `release/x.y` keeps them all. All green and no actionable review comment: merge it,
 squash like every PR on `main` (`gh pr merge <n> --squash --delete-branch`).
