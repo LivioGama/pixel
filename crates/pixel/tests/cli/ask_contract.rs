@@ -70,7 +70,7 @@ fn ask_reports_cosine_ranking_coverage_and_honest_human_labels() {
     assert!(!text.contains("note: searched a deterministic sample"));
 
     // Twelve files: the default returns ten hits and says the list was cut,
-    // with the whole tree inside the default file budget.
+    // with no file budget.
     for i in 0..10 {
         std::fs::write(
             repo.join(format!("extra{i}.rs")),
@@ -84,10 +84,23 @@ fn ask_reports_cosine_ranking_coverage_and_honest_human_labels() {
     assert_eq!(defaults["hits"].as_array().unwrap().len(), 10);
     assert_eq!(defaults["coverage"]["result_limit_reached"], true);
     assert_eq!(defaults["coverage"]["candidate_files"], 12);
-    assert_eq!(defaults["coverage"]["max_files"], 6000);
+    assert_eq!(defaults["coverage"]["max_files"], serde_json::Value::Null);
+    assert_eq!(defaults["coverage"]["file_budget"], "none");
     assert_eq!(defaults["coverage"]["file_limit_reached"], false);
 
     // Over an explicit budget, the human output names the sample.
+    let sampled_json = run(&["--json", "--max-files", "5"]);
+    let sampled_json: serde_json::Value = serde_json::from_slice(&sampled_json.stdout).unwrap();
+    assert_eq!(sampled_json["coverage"]["max_files"], 5);
+    assert_eq!(sampled_json["coverage"]["file_budget"], "explicit");
+    assert_eq!(sampled_json["coverage"]["file_limit_reached"], true);
+    assert_eq!(sampled_json["coverage"]["searched_files"], 5);
+    let resampled: serde_json::Value =
+        serde_json::from_slice(&run(&["--json", "--max-files", "5"]).stdout).unwrap();
+    assert_eq!(
+        resampled["hits"], sampled_json["hits"],
+        "an explicit budget samples the same files on every run"
+    );
     let sampled = run(&["--max-files", "5"]);
     assert!(sampled.status.success());
     let text = String::from_utf8(sampled.stdout).unwrap();
@@ -128,7 +141,8 @@ fn ask_reports_cosine_ranking_coverage_and_honest_human_labels() {
 }
 
 /// The defaults a user reads in `--help` are the ones the command applies:
-/// ten hits, and a file budget of 6000 that covers a mid-size repository.
+/// ten hits, and no file budget (`--max-files` is opt-in), with the ceiling
+/// that guards an unbudgeted question.
 #[test]
 fn search_meaning_help_states_the_defaults() {
     let out = crate::support::pixel_command()
@@ -151,6 +165,62 @@ fn search_meaning_help_states_the_defaults() {
     let limit = flag("--limit");
     assert!(limit.contains("[default: 10]"), "{help}");
     let max_files = flag("--max-files");
-    assert!(max_files.contains("[default: 6000]"), "{help}");
+    assert!(!max_files.contains("[default:"), "{help}");
+    assert!(
+        max_files.contains("every eligible file is searched"),
+        "{help}"
+    );
+    assert!(
+        max_files.contains("safety ceiling of 50000 files"),
+        "{help}"
+    );
     assert!(max_files.contains("deterministic sample"), "{help}");
+}
+
+/// With no `--max-files`, the command searches every eligible file of a tree
+/// larger than the previous default budget (6 000): the coverage names no
+/// budget and no sample, and the answer, alone in the alphabetically-last
+/// directory, comes first.
+#[cfg(feature = "model2vec")]
+#[test]
+fn search_meaning_default_searches_every_file_of_a_tree_over_the_old_budget() {
+    let root = std::env::temp_dir().join(format!("pixel-ask-uncapped-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let repo = root.as_path();
+    std::fs::create_dir_all(repo.join("a")).unwrap();
+    for i in 0..6001 {
+        std::fs::write(
+            repo.join(format!("a/filler{i:04}.rs")),
+            "pub fn unrelated_filler() {}\n",
+        )
+        .unwrap();
+    }
+    std::fs::create_dir_all(repo.join("zz")).unwrap();
+    std::fs::write(
+        repo.join("zz/billing.rs"),
+        "/// Generates the monthly parking invoice.\npub fn generate_invoice() {}\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_pixel"))
+        .args(["search-meaning", "generate invoice", ".", "--json"])
+        .current_dir(repo)
+        .env("PIXEL_DAEMON_AUTO_START", "0")
+        .env("PIXEL_METRICS", "0")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let coverage = &value["coverage"];
+    assert_eq!(coverage["candidate_files"], 6002);
+    assert_eq!(coverage["searched_files"], 6002);
+    assert_eq!(coverage["max_files"], serde_json::Value::Null);
+    assert_eq!(coverage["file_budget"], "none");
+    assert_eq!(coverage["file_limit_reached"], false);
+    assert_eq!(coverage["degraded"], false);
+    assert_eq!(value["hits"][0]["path"], "zz/billing.rs");
+    std::fs::remove_dir_all(&root).unwrap();
 }
