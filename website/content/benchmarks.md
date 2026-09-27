@@ -62,7 +62,7 @@ This counts what the agent reads, not your invoice. `pixel token-savings` report
 
 ### Well-known files
 
-The same measurement on large files of popular projects, each pinned to a commit: the whole file against `pixel list-signatures` on it, with pixel 0.5.0 in September 2026. The home page's token wall shows the Transformers row. The agent reads {{% read-savings "summary" %}}; the files with the most signatures per line (VS Code's text model, CPython's `typing.py`) save the least.
+The same measurement on large files of popular projects, each pinned to a commit: the whole file against `pixel list-signatures` on it, with pixel 0.5.0 in September 2026. The home page's token wall shows the Transformers row: read whole, that one file takes {{% read-savings "window" %}}, before the agent has written anything. The agent reads {{% read-savings "summary" %}}; the files with the most signatures per line (VS Code's text model, CPython's `typing.py`) save the least.
 
 {{% read-savings %}}
 

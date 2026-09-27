@@ -1,0 +1,4 @@
+{{/* What the token wall's full read takes out of a context window: the wall's row of data/read_savings.toml against a 200,000-token window, floored. The one place the window size is written: the home's Problem chapter and the /benchmarks/ well-known files ({{% read-savings "window" %}}) both read it here. */}}
+{{ $big := partial "wall-row.html" . }}
+{{ $window := 200000 }}
+{{ return dict "window" $window "share" (math.Floor (div (mul (float $big.full) 100) $window)) "full" $big.full }}
