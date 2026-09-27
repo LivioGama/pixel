@@ -812,6 +812,29 @@ pub struct Bm25Doc {
 /// document scored zero), so callers can fall back rather than emit an
 /// arbitrary path-ordered list.
 pub fn bm25_rank(terms: &[String], docs: &[Bm25Doc]) -> Option<Vec<String>> {
+    let scores = bm25_scores(terms, docs)?;
+    let mut scored: Vec<(i64, String)> = docs
+        .iter()
+        .zip(scores)
+        // Negate so an ascending sort yields best-first.
+        .map(|(d, score)| (-bm25_fixed(score), d.path.clone()))
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    Some(scored.into_iter().map(|(_, p)| p).collect())
+}
+
+/// A BM25 score on the scaled integer domain [`bm25_rank`] orders by (x1e6,
+/// truncated), for callers that compare or group scores without
+/// float-ordering hazards.
+pub fn bm25_fixed(score: f64) -> i64 {
+    (score * 1_000_000.0) as i64
+}
+
+/// The Okapi BM25 score of every document of `docs`, aligned with it, for a
+/// caller that fuses or aggregates scores rather than taking one order (a
+/// best chunk per file). Same formula, pool and `None` cases as
+/// [`bm25_rank`], which orders these scores.
+pub fn bm25_scores(terms: &[String], docs: &[Bm25Doc]) -> Option<Vec<f64>> {
     if terms.is_empty() || docs.is_empty() {
         return None;
     }
@@ -835,7 +858,7 @@ pub fn bm25_rank(terms: &[String], docs: &[Bm25Doc]) -> Option<Vec<String>> {
         })
         .collect();
 
-    let mut scored: Vec<(i64, String)> = Vec::with_capacity(docs.len());
+    let mut scores = Vec::with_capacity(docs.len());
     let mut any_nonzero = false;
     for d in docs {
         let norm = 1.0 - BM25_B + BM25_B * (d.len as f64 / avgdl);
@@ -850,14 +873,9 @@ pub fn bm25_rank(terms: &[String], docs: &[Bm25Doc]) -> Option<Vec<String>> {
         if score > 0.0 {
             any_nonzero = true;
         }
-        // Negate so an ascending sort yields best-first.
-        scored.push((-((score * 1_000_000.0) as i64), d.path.clone()));
+        scores.push(score);
     }
-    if !any_nonzero {
-        return None;
-    }
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    Some(scored.into_iter().map(|(_, p)| p).collect())
+    any_nonzero.then_some(scores)
 }
 
 const EXACT_NAME_BONUS: f64 = 0.05;
@@ -2168,6 +2186,30 @@ mod tests {
             term_freqs: tfs.to_vec(),
             len,
         }
+    }
+
+    /// `bm25_scores` is the formula itself, aligned with the documents:
+    /// two docs over one term, df 1 of 2 (idf ln(1 + 1.5/1.5) = ln 2),
+    /// lengths 10 and 30 (avgdl 20).
+    #[test]
+    fn bm25_scores_are_the_okapi_formula_aligned_with_the_docs() {
+        let terms = vec!["ledger".to_string()];
+        let docs = vec![bm25_doc("a.rs", &[2], 10), bm25_doc("b.rs", &[0], 30)];
+        let scores = bm25_scores(&terms, &docs).expect("signal present");
+        let norm = 1.0 - BM25_B + BM25_B * 0.5;
+        let expected = 2.0f64.ln() * (2.0 * (BM25_K1 + 1.0)) / (2.0 + BM25_K1 * norm);
+        assert_eq!(scores.len(), 2);
+        assert!(
+            (scores[0] - expected).abs() < 1e-12,
+            "{scores:?} vs {expected}"
+        );
+        assert_eq!(scores[1], 0.0);
+        assert_eq!(bm25_fixed(1.234_567_89), 1_234_567);
+        assert_eq!(bm25_fixed(0.0), 0);
+        assert!(bm25_scores(&[], &docs).is_none());
+        assert!(bm25_scores(&terms, &[]).is_none());
+        assert!(bm25_scores(&terms, &[bm25_doc("z.rs", &[0], 5)]).is_none());
+        assert!(bm25_scores(&terms, &[bm25_doc("z.rs", &[1], 0)]).is_none());
     }
 
     #[test]

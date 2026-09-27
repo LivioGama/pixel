@@ -2,7 +2,9 @@
 //!
 //! `ask(root, query, k, max_files)` answers open-ended questions like "how is
 //! authentication handled?" by embedding the question and every candidate code
-//! chunk, then fusing semantic ranks with distinct full-file lexical coverage.
+//! chunk, then fusing semantic ranks with a BM25 lexical rank (best chunk per
+//! file); tests, configuration, data and docs rank below code unless the
+//! question names them ([`FileKind`]).
 //! Reuses this crate's embedding seam
 //! (`Embedder` trait + `PotionEmbedder` behind the `model2vec` feature), so the
 //! model downloads once into the shared recall model cache on first use and the
@@ -33,6 +35,12 @@ pub struct AskHit {
     pub semantic_score: f32,
     pub ranking_score: f64,
     pub lexical_matches: usize,
+    /// BM25 score of the file's best chunk for the question's terms.
+    pub lexical_score: f64,
+    /// The kind of file this is when its score was lowered for it
+    /// ([`FileKind`], [`DEMOTED_WEIGHT`]); `None` for code and for a kind the
+    /// question names.
+    pub demoted: Option<FileKind>,
     pub query_terms: usize,
     pub snippet: String,
 }
@@ -610,14 +618,15 @@ fn ask_opening(
         )
     });
 
-    let mut result = ask_collected(query, k, files, coverage, embedder.as_mut(), store.as_ref())?;
-    for hit in &mut result.hits {
-        let path = Path::new(&hit.path);
-        if let Ok(relative) = path.strip_prefix(root) {
-            hit.path = relative.to_string_lossy().into_owned();
-        }
-    }
-    Ok(result)
+    ask_collected(
+        root,
+        query,
+        k,
+        files,
+        coverage,
+        embedder.as_mut(),
+        store.as_ref(),
+    )
 }
 
 fn open_code_embedder(download: bool) -> Result<Box<dyn crate::embed::Embedder>, String> {
@@ -628,6 +637,7 @@ fn open_code_embedder(download: bool) -> Result<Box<dyn crate::embed::Embedder>,
 /// `store` or the embedder ([`chunk_vectors`]), fuse semantic and lexical
 /// ranks.
 fn ask_collected(
+    root: &Path,
     query: &str,
     k: usize,
     files: Vec<PathBuf>,
@@ -641,9 +651,13 @@ fn ask_collected(
         crate::embed::embedder_revision(&model_id),
         CHUNKER_VERSION,
     );
-    // Build the corpus: chunk every file, key every chunk by its text.
+    // Build the corpus: chunk every file, key every chunk by its text, and
+    // count the query's terms in each chunk for the lexical channel.
+    let terms = sorted_query_terms(query);
     let mut corpus: Vec<CorpusEntry> = Vec::new();
-    let mut lexical_coverage = HashMap::new();
+    let mut file_paths: Vec<String> = Vec::new();
+    // Every chunk's term counts, with the index of its file in `file_paths`.
+    let mut lexical_chunks: Vec<(usize, pixel_rank::Bm25Doc)> = Vec::new();
     for file in &files {
         let Ok(bytes) = std::fs::read(file) else {
             coverage.skipped_files += 1;
@@ -662,36 +676,45 @@ fn ask_collected(
             continue;
         }
         coverage.searched_files += 1;
+        let path = file
+            .strip_prefix(root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .into_owned();
         // Filenames are evidence too, but directory names and language extensions
         // must not add shared noise or change ranks when the repository moves.
-        let mut filename_tokens = HashSet::new();
-        if let Some(name) = file.file_name() {
-            // A filename can have compound extensions (`types.d.ts`). Keep
-            // only the basename before its first dot so suffix components
-            // cannot become lexical evidence.
+        // A filename can have compound extensions (`types.d.ts`): only the
+        // basename before its first dot counts, so suffix components cannot
+        // become lexical evidence.
+        let stem = file.file_name().map_or_else(String::new, |name| {
             let basename = name.to_string_lossy();
-            let stem = basename.split('.').next().unwrap_or_default();
-            filename_tokens = words(stem);
-        }
-        let terms = query_terms(query);
-        let mut best_coverage = terms
-            .iter()
-            .filter(|term| filename_tokens.contains(*term))
-            .count();
+            basename.split('.').next().unwrap_or_default().to_string()
+        });
+        let (stem_freqs, stem_len) = term_counts(&stem, &terms);
+        let file_index = file_paths.len();
         for (start, end) in chunk_offsets(&text) {
             let chunk = text[start..end].to_string();
-            let mut tokens = words(lexical_chunk(&text, start, end));
-            tokens.extend(filename_tokens.iter().cloned());
-            let chunk_coverage = terms.iter().filter(|term| tokens.contains(*term)).count();
-            best_coverage = best_coverage.max(chunk_coverage);
+            // Every chunk carries the filename stem's tokens, as if the name
+            // were written once at its top.
+            let (mut freqs, len) = term_counts(lexical_chunk(&text, start, end), &terms);
+            for (freq, stem_freq) in freqs.iter_mut().zip(&stem_freqs) {
+                *freq += stem_freq;
+            }
+            let doc = pixel_rank::Bm25Doc {
+                path: String::new(),
+                term_freqs: freqs,
+                len: len + stem_len,
+            };
+            lexical_chunks.push((file_index, doc));
             corpus.push(CorpusEntry {
-                path: file.display().to_string(),
+                path: path.clone(),
                 key: namespace.key(&chunk),
                 text: chunk,
             });
         }
-        lexical_coverage.insert(file.display().to_string(), best_coverage);
+        file_paths.push(path);
     }
+    let lexical = lexical_evidence(&terms, file_paths, lexical_chunks);
     coverage.degraded |= coverage.skipped_files > 0;
     if corpus.is_empty() {
         return Ok(AskResult {
@@ -724,7 +747,7 @@ fn ask_collected(
 
     coverage.result_limit_reached = best.len() > k;
     Ok(AskResult {
-        hits: rank_files(query, &lexical_coverage, best, snippet_of, k),
+        hits: rank_files(query, &lexical, best, snippet_of, k),
         coverage,
     })
 }
@@ -831,11 +854,23 @@ fn lexical_chunk(text: &str, start: usize, end: usize) -> &str {
 /// Preserve complete identifiers and split snake_case, camelCase and acronyms.
 fn words(text: &str) -> HashSet<String> {
     let mut out = HashSet::new();
+    for_each_word(text, |word| {
+        out.insert(word);
+    });
+    out
+}
+
+/// Every token [`words`] draws from `text`, lowercased, once per occurrence:
+/// each identifier, then its snake_case, camelCase and acronym parts unless
+/// the only part is the identifier itself (`readHTTPResponse` gives
+/// `readhttpresponse`, `read`, `http`, `response`; `_setup` gives `_setup`,
+/// `setup`; `setup` gives `setup` once).
+fn for_each_word(text: &str, mut emit: impl FnMut(String)) {
     for word in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
         if word.is_empty() {
             continue;
         }
-        out.insert(word.to_lowercase());
+        let mut parts = Vec::new();
         for part in word.split('_').filter(|s| !s.is_empty()) {
             let chars: Vec<(usize, char)> = part.char_indices().collect();
             let mut start = 0;
@@ -846,14 +881,41 @@ fn words(text: &str) -> HashSet<String> {
                 if (prev.is_lowercase() && current.is_uppercase())
                     || (prev.is_uppercase() && current.is_uppercase() && next_lower)
                 {
-                    out.insert(part[start..offset].to_lowercase());
+                    parts.push(&part[start..offset]);
                     start = offset;
                 }
             }
-            out.insert(part[start..].to_lowercase());
+            parts.push(&part[start..]);
+        }
+        emit(word.to_lowercase());
+        // A lone part equal to the identifier is that identifier again.
+        if parts != [word] {
+            for part in parts {
+                emit(part.to_lowercase());
+            }
         }
     }
-    out
+}
+
+/// How often each of `terms` occurs among the tokens of `text` (aligned with
+/// `terms`), and the token count: one BM25 document.
+fn term_counts(text: &str, terms: &[String]) -> (Vec<u32>, u32) {
+    let mut freqs = vec![0u32; terms.len()];
+    let mut len = 0u32;
+    for_each_word(text, |word| {
+        len += 1;
+        if let Ok(index) = terms.binary_search(&word) {
+            freqs[index] += 1;
+        }
+    });
+    (freqs, len)
+}
+
+/// [`query_terms`], sorted: the term order of every lexical document.
+fn sorted_query_terms(query: &str) -> Vec<String> {
+    let mut terms: Vec<String> = query_terms(query).into_iter().collect();
+    terms.sort_unstable();
+    terms
 }
 
 fn query_terms(query: &str) -> HashSet<String> {
@@ -917,38 +979,173 @@ fn query_terms(query: &str) -> HashSet<String> {
         .collect()
 }
 
+/// Each file of `files` with its [`Lexical`] evidence, from the term counts
+/// of its chunks (`chunks`: the index of the chunk's file in `files`, and
+/// the chunk as a BM25 document over `terms`).
+///
+/// A chunk, not a file, is the BM25 document: the terms must meet in one
+/// place of the file to count together, as the distinct-term coverage this
+/// replaced required, and the document frequency behind each term's IDF is
+/// taken over every chunk of the searched universe. The file keeps its best
+/// chunk's score.
+fn lexical_evidence(
+    terms: &[String],
+    files: Vec<String>,
+    chunks: Vec<(usize, pixel_rank::Bm25Doc)>,
+) -> HashMap<String, Lexical> {
+    let mut evidence = vec![Lexical::default(); files.len()];
+    let (owners, docs): (Vec<usize>, Vec<pixel_rank::Bm25Doc>) = chunks.into_iter().unzip();
+    let scores = pixel_rank::bm25_scores(terms, &docs).unwrap_or_else(|| vec![0.0; docs.len()]);
+    for ((file, doc), score) in owners.into_iter().zip(&docs).zip(scores) {
+        let found = &mut evidence[file];
+        found.score = found.score.max(score);
+        let matches = doc.term_freqs.iter().filter(|freq| **freq > 0).count();
+        found.matches = found.matches.max(matches);
+    }
+    files.into_iter().zip(evidence).collect()
+}
+
+/// A file's lexical evidence for one question.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Lexical {
+    /// BM25 score of its best chunk (0 when no query term occurs).
+    score: f64,
+    /// Most distinct query terms found together in one chunk.
+    matches: usize,
+}
+
+/// Kinds of file that answer a question about code less often than the code
+/// they test, configure or describe, and rank below it unless the question
+/// names the kind ([`FileKind::named_by`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileKind {
+    /// A test or spec: under `test/`, `__tests__/` or `spec/`, or named
+    /// `*_test.*`, `*.test.*`, `*.spec.*` or `*_spec.*`.
+    Test,
+    /// Configuration or data: `json`, `yaml`/`yml`, `toml`, or anything under
+    /// `locales/`, `locale/` or `i18n/`.
+    Config,
+    /// Prose documentation: `md`.
+    Docs,
+}
+
+impl FileKind {
+    /// The kind of the file at the repository-relative `path`, `None` for code.
+    /// Test comes first: a JSON fixture under `spec/` is a test file.
+    fn of(path: &str) -> Option<Self> {
+        let path = path.to_lowercase();
+        let (dirs, name) = path.rsplit_once('/').unwrap_or(("", &path));
+        let mut dirs = dirs.split('/');
+        let ext = name.rsplit_once('.').map_or("", |(_, ext)| ext);
+        if dirs
+            .clone()
+            .any(|dir| matches!(dir, "test" | "__tests__" | "spec"))
+            || ["_test.", ".test.", ".spec.", "_spec."]
+                .iter()
+                .any(|marker| name.contains(marker))
+        {
+            Some(Self::Test)
+        } else if matches!(ext, "json" | "yaml" | "yml" | "toml")
+            || dirs.any(|dir| matches!(dir, "locales" | "locale" | "i18n"))
+        {
+            Some(Self::Config)
+        } else if ext == "md" {
+            Some(Self::Docs)
+        } else {
+            None
+        }
+    }
+
+    /// Whether a question with the query `terms` asks for this kind of file,
+    /// which then ranks on its evidence alone.
+    fn named_by(self, terms: &[String]) -> bool {
+        terms.iter().any(|term| {
+            let term = term.as_str();
+            match self {
+                Self::Test => matches!(term, "test" | "tests" | "testing" | "spec" | "specs"),
+                Self::Config => matches!(
+                    term,
+                    "config"
+                        | "configs"
+                        | "configuration"
+                        | "settings"
+                        | "json"
+                        | "yaml"
+                        | "yml"
+                        | "toml"
+                        | "locale"
+                        | "locales"
+                        | "translation"
+                        | "translations"
+                        | "i18n"
+                ),
+                Self::Docs => matches!(
+                    term,
+                    "readme" | "doc" | "docs" | "documentation" | "markdown" | "md" | "changelog"
+                ),
+            }
+        })
+    }
+
+    /// The name JSON hits carry in `demoted`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Test => "test",
+            Self::Config => "config",
+            Self::Docs => "docs",
+        }
+    }
+}
+
+/// Factor on the fused score of a [`FileKind`] file the question does not
+/// name: it keeps its place among its peers and still ranks when its
+/// evidence is strong, but a source file with the same evidence goes first.
+const DEMOTED_WEIGHT: f64 = 0.8;
+
 fn rank_files(
     query: &str,
-    lexical_coverage: &HashMap<String, usize>,
+    lexical: &HashMap<String, Lexical>,
     best: HashMap<String, f32>,
     mut snippets: HashMap<String, String>,
     k: usize,
 ) -> Vec<AskHit> {
-    let terms = query_terms(query);
-    let lexical_ranks = competition_ranks(lexical_coverage.values().copied());
+    let terms = sorted_query_terms(query);
+    let lexical_ranks = competition_ranks(
+        lexical
+            .values()
+            .map(|evidence| pixel_rank::bm25_fixed(evidence.score)),
+    );
     let mut semantic: Vec<_> = best.into_iter().collect();
     semantic.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     let mut hits: Vec<_> = semantic
         .into_iter()
         .enumerate()
         .map(|(index, (path, score))| {
-            let coverage = lexical_coverage.get(&path).copied().unwrap_or_default();
-            // Competition ranks: equal coverage receives exactly equal evidence weight.
-            let ranking_score = 2.0 / (60.0 + (index + 1) as f64)
-                + if coverage == 0 {
+            let evidence = lexical.get(&path).copied().unwrap_or_default();
+            let fixed = pixel_rank::bm25_fixed(evidence.score);
+            // Competition ranks: equal scores receive exactly equal evidence weight.
+            let fused = 2.0 / (60.0 + (index + 1) as f64)
+                + if fixed == 0 {
                     0.0
                 } else {
                     lexical_ranks
-                        .get(&coverage)
+                        .get(&fixed)
                         .map_or(0.0, |&rank| 1.0 / (60.0 + rank as f64))
                 };
+            let demoted = FileKind::of(&path).filter(|kind| !kind.named_by(&terms));
             AskHit {
                 snippet: snippets.remove(&path).unwrap_or_default(),
                 path,
                 score,
                 semantic_score: score,
-                ranking_score,
-                lexical_matches: coverage,
+                ranking_score: if demoted.is_some() {
+                    fused * DEMOTED_WEIGHT
+                } else {
+                    fused
+                },
+                lexical_matches: evidence.matches,
+                lexical_score: evidence.score,
+                demoted,
                 query_terms: terms.len(),
             }
         })
@@ -962,21 +1159,22 @@ fn rank_files(
     hits
 }
 
-/// The competition rank of every coverage value in `coverages`: one plus the
-/// number of values strictly greater, so equal values share a rank and the
-/// next value skips the tied ones (5, 3, 3, 1 rank 1, 2, 2, 4). One pass
-/// over a histogram of the values, which are few (at most the query's term
-/// count, plus zero): a scan of every file per ranked file cost 4 s at the
-/// 50 000-file ceiling.
-fn competition_ranks(coverages: impl Iterator<Item = usize>) -> HashMap<usize, usize> {
+/// The competition rank of every value in `values`: one plus the number of
+/// values strictly greater, so equal values share a rank and the next value
+/// skips the tied ones (5, 3, 3, 1 rank 1, 2, 2, 4). One pass over a
+/// histogram of the values: a scan of every file per ranked file cost 4 s at
+/// the 50 000-file ceiling.
+fn competition_ranks<T: Ord + std::hash::Hash + Copy>(
+    values: impl Iterator<Item = T>,
+) -> HashMap<T, usize> {
     let mut counts = BTreeMap::new();
-    for coverage in coverages {
-        *counts.entry(coverage).or_insert(0usize) += 1;
+    for value in values {
+        *counts.entry(value).or_insert(0usize) += 1;
     }
     let mut ranks = HashMap::with_capacity(counts.len());
     let mut above = 0;
-    for (coverage, count) in counts.into_iter().rev() {
-        ranks.insert(coverage, 1 + above);
+    for (value, count) in counts.into_iter().rev() {
+        ranks.insert(value, 1 + above);
         above += count;
     }
     ranks
@@ -1001,24 +1199,38 @@ fn make_snippet(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Rank `entries` (path, chunk text, cosine), one chunk each, through
+    /// the production lexical evidence and fusion.
     fn rank(query: &str, entries: &[(&str, &str, f32)]) -> Vec<AskHit> {
-        let terms = query_terms(query);
-        let mut lexical_coverage: HashMap<String, usize> = HashMap::new();
+        let terms = sorted_query_terms(query);
+        let mut files: Vec<String> = Vec::new();
+        let mut chunks = Vec::new();
         for (path, text, _) in entries {
-            let coverage = terms
+            let index = files
                 .iter()
-                .filter(|term| words(text).contains(*term))
-                .count();
-            lexical_coverage
-                .entry(path.to_string())
-                .and_modify(|best| *best = (*best).max(coverage))
-                .or_insert(coverage);
+                .position(|file| file == path)
+                .unwrap_or_else(|| {
+                    files.push(path.to_string());
+                    files.len() - 1
+                });
+            let (term_freqs, len) = term_counts(text, &terms);
+            let doc = pixel_rank::Bm25Doc {
+                path: String::new(),
+                term_freqs,
+                len,
+            };
+            chunks.push((index, doc));
         }
+        let lexical = lexical_evidence(&terms, files, chunks);
         let best = entries
             .iter()
             .map(|(path, _, score)| (path.to_string(), *score))
             .collect();
-        rank_files(query, &lexical_coverage, best, HashMap::new(), usize::MAX)
+        rank_files(query, &lexical, best, HashMap::new(), usize::MAX)
+    }
+
+    fn lexical(score: f64, matches: usize) -> Lexical {
+        Lexical { score, matches }
     }
 
     /// Competition ranking, exactly: ties share the rank of the first of
@@ -1029,18 +1241,23 @@ mod tests {
         let ranks = competition_ranks([3, 1, 3, 0, 2, 1, 3].into_iter());
         let expected: HashMap<usize, usize> = [(3, 1), (2, 4), (1, 5), (0, 7)].into();
         assert_eq!(ranks, expected);
-        assert!(competition_ranks(std::iter::empty()).is_empty());
+        assert!(competition_ranks(std::iter::empty::<usize>()).is_empty());
         assert_eq!(competition_ranks([4].into_iter()), [(4, 1)].into());
     }
 
     /// The lexical half of the fused score uses those ranks: two files
-    /// tied on coverage get the same lexical weight, the next one the rank
-    /// after both, and a file with no coverage none at all.
+    /// tied on BM25 score get the same lexical weight, the next one the rank
+    /// after both, and a file with no score none at all.
     #[test]
-    fn rank_files_gives_tied_coverage_the_same_lexical_weight() {
-        let coverage: HashMap<String, usize> = [("a", 2), ("b", 2), ("c", 1), ("d", 0)]
-            .map(|(path, value)| (path.to_string(), value))
-            .into();
+    fn rank_files_gives_tied_scores_the_same_lexical_weight() {
+        let coverage: HashMap<String, Lexical> = [
+            ("a", lexical(2.5, 2)),
+            ("b", lexical(2.5, 2)),
+            ("c", lexical(1.0, 1)),
+            ("d", lexical(0.0, 0)),
+        ]
+        .map(|(path, value)| (path.to_string(), value))
+        .into();
         let best: HashMap<String, f32> = [("a", 0.9), ("b", 0.8), ("c", 0.7), ("d", 0.6)]
             .map(|(path, score)| (path.to_string(), score))
             .into();
@@ -1152,6 +1369,8 @@ mod tests {
             semantic_score,
             ranking_score: 0.0,
             lexical_matches: 0,
+            lexical_score: 0.0,
+            demoted: None,
             query_terms: 0,
             snippet: String::new(),
         }
@@ -1234,6 +1453,7 @@ mod tests {
         std::fs::write(dir.path().join("manual.md"), "manual setup").unwrap();
         let (files, coverage) = collect_files(dir.path(), Some(10));
         let result = ask_collected(
+            dir.path(),
             "manual setup",
             8,
             files,
@@ -1268,6 +1488,7 @@ mod tests {
         .unwrap();
         let (files, coverage) = collect_files(dir.path(), Some(10));
         let result = ask_collected(
+            dir.path(),
             "manual",
             8,
             files,
@@ -1294,6 +1515,7 @@ mod tests {
         .unwrap();
         let (files, coverage) = collect_files(dir.path(), Some(10));
         let result = ask_collected(
+            dir.path(),
             "manual setup",
             8,
             files,
@@ -1327,6 +1549,7 @@ mod tests {
             std::fs::write(root.join("imports.rs"), "fn parse_items() {}").unwrap();
             let (files, coverage) = collect_files(&root, Some(10));
             let result = ask_collected(
+                &root,
                 "imports graph rs",
                 8,
                 files,
@@ -1351,6 +1574,7 @@ mod tests {
         std::fs::write(root.join("types.d.ts"), "unrelated body").unwrap();
         let (files, coverage) = collect_files(root, Some(10));
         let result = ask_collected(
+            root,
             "d",
             8,
             files,
@@ -1388,6 +1612,7 @@ mod tests {
             std::fs::write(root.join(filename), body).unwrap();
             let (files, coverage) = collect_files(&root, Some(10));
             let result = ask_collected(
+                &root,
                 query,
                 8,
                 files,
@@ -1422,6 +1647,7 @@ mod tests {
         for vector in [vec![], vec![0.0, 0.0], vec![f32::NAN, 1.0], vec![1.0]] {
             let (files, coverage) = collect_files(dir.path(), Some(10));
             let result = ask_collected(
+                dir.path(),
                 "manual setup",
                 8,
                 files,
@@ -1439,12 +1665,13 @@ mod tests {
     #[test]
     fn real_files_flow_through_ranking_and_truthful_coverage() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("manual.md"), "manual setup").unwrap();
+        std::fs::write(dir.path().join("manual.rs"), "manual setup").unwrap();
         std::fs::write(dir.path().join("noise.rs"), "manually setup").unwrap();
         std::fs::write(dir.path().join("invalid.rs"), [0xff]).unwrap();
         std::fs::write(dir.path().join("binary.rs"), [0]).unwrap();
         let (files, coverage) = collect_files(dir.path(), Some(10));
         let result = ask_collected(
+            dir.path(),
             "manual setup",
             1,
             files,
@@ -1453,13 +1680,14 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(result.hits[0].path.ends_with("manual.md"));
+        assert!(result.hits[0].path.ends_with("manual.rs"));
         assert_eq!(result.coverage.candidate_files, 4);
         assert_eq!(result.coverage.searched_files, 2);
         assert_eq!(result.coverage.skipped_files, 2);
         assert!(result.coverage.degraded && result.coverage.result_limit_reached);
         let (files, coverage) = collect_files(dir.path(), Some(10));
         let err = ask_collected(
+            dir.path(),
             "manual setup",
             1,
             files,
@@ -1558,6 +1786,247 @@ mod tests {
             assert_eq!(hit.score, hit.semantic_score);
             assert_ne!(hit.score as f64, hit.ranking_score);
         }
+    }
+
+    /// Every file of `tree` (relative path, content) asked `query` through
+    /// the production ranking, with a model that scores every chunk alike:
+    /// the semantic channel then orders by path, so only the lexical channel
+    /// and the file-kind weight can move a file.
+    fn ask_tree(tree: &[(&str, &str)], query: &str) -> Vec<AskHit> {
+        let dir = tempfile::tempdir().unwrap();
+        for (path, text) in tree {
+            write(dir.path(), path, text);
+        }
+        let (files, coverage) = collect_files(dir.path(), None);
+        ask_collected(
+            dir.path(),
+            query,
+            usize::MAX,
+            files,
+            coverage,
+            &mut FixtureEmbedder { fail: false },
+            None,
+        )
+        .unwrap()
+        .hits
+    }
+
+    fn found<'a>(hits: &'a [AskHit], path: &str) -> &'a AskHit {
+        hits.iter().find(|hit| hit.path == path).unwrap()
+    }
+
+    fn position(hits: &[AskHit], path: &str) -> usize {
+        hits.iter().position(|hit| hit.path == path).unwrap()
+    }
+
+    /// IDF: a term most files carry says little, a term one file carries
+    /// says a lot. `a_noisy.rs` repeats the common term forty times,
+    /// `b_rare.rs` names the rare one once; the distinct-term count this
+    /// replaced tied them (one term each, both lexical rank 1), BM25 gives
+    /// the rare file rank 1 and the noisy file rank 2, exactly.
+    #[test]
+    fn rare_term_file_beats_a_file_repeating_a_common_term() {
+        let noisy = "fn handler() {}\n".repeat(40);
+        let hits = ask_tree(
+            &[
+                ("a_noisy.rs", &noisy),
+                ("b_rare.rs", "fn settle_ledger() {}"),
+                ("c.rs", "fn handler() {}"),
+                ("d.rs", "fn handler() {}"),
+                ("e.rs", "fn handler() {}"),
+            ],
+            "ledger handler",
+        );
+        let (noisy, rare) = (found(&hits, "a_noisy.rs"), found(&hits, "b_rare.rs"));
+        assert_eq!((noisy.lexical_matches, rare.lexical_matches), (1, 1));
+        assert!(rare.lexical_score > noisy.lexical_score);
+        // Path order puts the noisy file first semantically (tied cosine);
+        // lexically the rare file is first and the noisy one second.
+        assert_eq!(
+            rare.ranking_score.to_bits(),
+            (2.0 / 62.0 + 1.0 / 61.0_f64).to_bits()
+        );
+        assert_eq!(
+            noisy.ranking_score.to_bits(),
+            (2.0 / 61.0 + 1.0 / 62.0_f64).to_bits()
+        );
+        let common = found(&hits, "c.rs").lexical_score;
+        assert!(noisy.lexical_score > common, "tf still counts, saturated");
+        assert!(
+            noisy.lexical_score < 2.0 * common,
+            "forty occurrences must not weigh forty times one: {} vs {common}",
+            noisy.lexical_score
+        );
+    }
+
+    /// Length normalisation: a long file that says the term thirty times,
+    /// scattered through a lot of other text, does not outscore a short file
+    /// that is about the term, on volume alone.
+    #[test]
+    fn a_huge_file_does_not_win_on_volume() {
+        let mut huge = String::new();
+        for line in 0..240 {
+            let word = if line % 8 == 0 { "ledger" } else { "filler" };
+            huge.push_str(&format!(
+                "// {word} entry {line:03} with many other words around it here\n"
+            ));
+        }
+        assert_eq!(huge.matches("ledger").count(), 30);
+        let hits = ask_tree(
+            &[
+                ("a_huge.rs", &huge),
+                ("b_small.rs", "fn ledger() {}"),
+                ("c.rs", "fn unrelated() {}"),
+            ],
+            "ledger",
+        );
+        let (huge, small) = (found(&hits, "a_huge.rs"), found(&hits, "b_small.rs"));
+        assert_eq!((huge.lexical_matches, small.lexical_matches), (1, 1));
+        assert!(
+            small.lexical_score > huge.lexical_score,
+            "{} vs {}",
+            small.lexical_score,
+            huge.lexical_score
+        );
+    }
+
+    /// A test file loses to the source it tests when the question does not
+    /// ask for tests, although it sorts first and carries more of the
+    /// question's words; named in the question ("test"), it ranks on its
+    /// evidence and wins. The weight is reported on the hit.
+    #[test]
+    fn a_test_file_loses_to_its_source_unless_the_question_names_tests() {
+        let tree = [
+            (
+                "__tests__/invoice.test.ts",
+                "generateInvoice(); // generate invoice lines",
+            ),
+            ("src/invoice.ts", "export function generateInvoice() {}"),
+        ];
+        let plain = ask_tree(&tree, "generate invoice");
+        assert_eq!(plain[0].path, "src/invoice.ts");
+        assert_eq!(plain[1].demoted, Some(FileKind::Test));
+        assert_eq!(plain[0].demoted, None);
+        let fused = 2.0 / 61.0 + 1.0 / 61.0;
+        assert_eq!(
+            plain[1].ranking_score.to_bits(),
+            (fused * DEMOTED_WEIGHT).to_bits()
+        );
+        for query in ["generate invoice test", "generate invoice specs"] {
+            let named = ask_tree(&tree, query);
+            assert_eq!(named[0].path, "__tests__/invoice.test.ts", "{query}");
+            assert_eq!(named[0].demoted, None, "{query}");
+        }
+    }
+
+    /// A locale file shares the words of a product question ("invoice") but
+    /// is not where it is answered; asked about translations, it is.
+    #[test]
+    fn a_locale_file_loses_to_code_unless_the_question_names_translations() {
+        let tree = [
+            (
+                "config/locales/en.yml",
+                "en:\n  invoice:\n    generated: Invoice generated\n",
+            ),
+            ("lib/invoice.rb", "def generated_invoice; end"),
+        ];
+        let plain = ask_tree(&tree, "invoice generated");
+        assert_eq!(plain[0].path, "lib/invoice.rb");
+        assert_eq!(
+            found(&plain, "config/locales/en.yml").demoted,
+            Some(FileKind::Config)
+        );
+        let named = ask_tree(&tree, "invoice generated translation");
+        assert_eq!(named[0].path, "config/locales/en.yml");
+        assert_eq!(named[0].demoted, None);
+    }
+
+    /// The filename stem stays lexical evidence under BM25: a file whose
+    /// name is the question's term outscores one that never says it, and the
+    /// directory does not count.
+    #[test]
+    fn filename_stem_still_counts_as_lexical_evidence() {
+        let hits = ask_tree(
+            &[
+                ("ledger/a.rs", "fn body() {}"),
+                ("src/ledger.rs", "fn body() {}"),
+            ],
+            "ledger",
+        );
+        assert_eq!(hits[0].path, "src/ledger.rs");
+        assert_eq!(found(&hits, "ledger/a.rs").lexical_score, 0.0);
+        assert!(found(&hits, "src/ledger.rs").lexical_score > 0.0);
+        assert_eq!(position(&hits, "ledger/a.rs"), 1);
+    }
+
+    /// Which paths are tests, configuration/data or docs, test first.
+    #[test]
+    fn file_kinds_follow_directories_and_names() {
+        for (path, kind) in [
+            ("test/models/invoice_test.rb", Some(FileKind::Test)),
+            ("lib/__tests__/a.ts", Some(FileKind::Test)),
+            ("spec/fixtures/data.json", Some(FileKind::Test)),
+            ("pkg/invoice_test.go", Some(FileKind::Test)),
+            ("src/a.test.ts", Some(FileKind::Test)),
+            ("src/a.spec.ts", Some(FileKind::Test)),
+            ("lib/a_spec.rb", Some(FileKind::Test)),
+            ("Src/A.Spec.TS", Some(FileKind::Test)),
+            ("package.json", Some(FileKind::Config)),
+            ("config/app.yaml", Some(FileKind::Config)),
+            ("config/app.yml", Some(FileKind::Config)),
+            ("Cargo.toml", Some(FileKind::Config)),
+            ("config/locales/fr.rb", Some(FileKind::Config)),
+            ("app/locale/x.ts", Some(FileKind::Config)),
+            ("web/i18n/index.ts", Some(FileKind::Config)),
+            ("README.md", Some(FileKind::Docs)),
+            ("docs/guide.md", Some(FileKind::Docs)),
+            ("src/testing.rs", None),
+            ("src/contest/spec_parser.rs", None),
+            ("lib/latest.rb", None),
+            ("src/main.rs", None),
+            ("md", None),
+        ] {
+            assert_eq!(FileKind::of(path), kind, "{path}");
+        }
+        let names = [FileKind::Test, FileKind::Config, FileKind::Docs].map(FileKind::as_str);
+        assert_eq!(names, ["test", "config", "docs"]);
+    }
+
+    /// Each kind is lifted by its own words only.
+    #[test]
+    fn a_question_names_a_file_kind_by_its_own_words() {
+        let terms = |query: &str| sorted_query_terms(query);
+        for (query, test, config, docs) in [
+            ("where is invoice generated", false, false, false),
+            ("invoice tests", true, false, false),
+            ("invoice spec", true, false, false),
+            ("testing invoices", true, false, false),
+            ("invoice config", false, true, false),
+            ("yaml settings", false, true, false),
+            ("toml json", false, true, false),
+            ("locale translations i18n", false, true, false),
+            ("readme", false, false, true),
+            ("docs changelog", false, false, true),
+            ("markdown documentation", false, false, true),
+        ] {
+            let terms = terms(query);
+            assert_eq!(FileKind::Test.named_by(&terms), test, "{query}");
+            assert_eq!(FileKind::Config.named_by(&terms), config, "{query}");
+            assert_eq!(FileKind::Docs.named_by(&terms), docs, "{query}");
+        }
+    }
+
+    /// The tokens BM25 counts: identifiers once per occurrence, their parts
+    /// once each, a lone part equal to its identifier not twice.
+    #[test]
+    fn term_counts_count_occurrences_and_split_parts_once() {
+        let terms = sorted_query_terms("read http setup private");
+        let (freqs, len) = term_counts("readHTTP setup setup _private", &terms);
+        // terms sorted: http, private, read, setup
+        assert_eq!(freqs, [1, 1, 1, 2]);
+        // readhttp read http | setup | setup | _private private
+        assert_eq!(len, 7);
+        assert_eq!(term_counts("", &terms), (vec![0, 0, 0, 0], 0));
     }
 
     #[test]
@@ -1753,6 +2222,7 @@ mod tests {
         assert_eq!(relative(root, &files), ["src/billing.rs"]);
         assert_eq!(coverage.candidate_files, 1);
         let result = ask_collected(
+            root,
             "invoice",
             DEFAULT_LIMIT,
             files,
@@ -1762,7 +2232,7 @@ mod tests {
         )
         .unwrap();
         let hits: Vec<_> = result.hits.iter().map(|h| h.path.as_str()).collect();
-        assert_eq!(hits, [root.join("src/billing.rs").display().to_string()]);
+        assert_eq!(hits, ["src/billing.rs"]);
         assert_eq!(result.coverage.searched_files, 1);
     }
 
@@ -1855,6 +2325,7 @@ mod tests {
             let (files, coverage) = collect_files(root, Some(max_files));
             let searched = files.len();
             let result = ask_collected(
+                root,
                 "f",
                 DEFAULT_LIMIT,
                 files,
@@ -2022,7 +2493,7 @@ mod tests {
         let root = dir.path();
         write(root, "src/billing.rs", "fn invoice_total() {}");
         write(root, "src/other.rs", "fn unrelated() {}");
-        write(root, "docs/ledger.md", &three_window_text("invoice_marker"));
+        write(root, "src/audit.rs", &three_window_text("invoice_marker"));
         let cache = vector_cache_for(root, None);
         assert_eq!(cache, VectorCache::Persisted);
 
@@ -2051,7 +2522,7 @@ mod tests {
         assert_eq!(warm.coverage.cached_chunks, 5);
         assert_eq!(warm.coverage.chunks, 5);
         assert_eq!(ranking(&warm), ranking(&cold));
-        assert_eq!(warm.hits[0].path, "docs/ledger.md");
+        assert_eq!(warm.hits[0].path, "src/audit.rs");
         assert!(
             !warm.coverage.degraded,
             "{:?}",
@@ -2073,7 +2544,7 @@ mod tests {
         let dir = indexed_tree();
         let root = dir.path();
         let before = three_window_text("alpha_marker");
-        write(root, "src/ledger.rs", &before);
+        write(root, "src/audit.rs", &before);
         write(root, "src/other.rs", "fn unrelated() {}");
         let cache = vector_cache_for(root, None);
         let omega = |text: &str| {
@@ -2086,7 +2557,7 @@ mod tests {
         let (cold, _) = ask_counting(root, "omega", cache, "m", omega);
         assert_eq!(cold.hits[0].semantic_score, 0.0, "no omega yet");
 
-        let path = root.join("src/ledger.rs");
+        let path = root.join("src/audit.rs");
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
         let after = before.replace("alpha_marker", "omega_marker");
         assert_eq!(after.len(), before.len());
@@ -2116,7 +2587,7 @@ mod tests {
             edited.coverage.cached_chunks,
             edited.coverage.chunks - changed
         );
-        assert_eq!(edited.hits[0].path, "src/ledger.rs");
+        assert_eq!(edited.hits[0].path, "src/audit.rs");
         assert_eq!(edited.hits[0].semantic_score, 1.0, "the new text is found");
     }
 

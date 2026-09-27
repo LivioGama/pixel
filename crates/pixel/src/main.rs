@@ -247,7 +247,9 @@ enum Command {
     /// downloads the embedding model into the shared recall model cache
     /// (once; subsequent calls are offline). At a root carrying a pixel
     /// index, chunk vectors persist in .pixel/code-vectors, so a repeated
-    /// question embeds only the code that changed.
+    /// question embeds only the code that changed. Tests, configuration and
+    /// data files and docs rank below code unless the question names them
+    /// ("test", "config", "readme"...); a JSON hit's `demoted` says which.
     #[command(alias = "ask")]
     SearchMeaning {
         /// The natural-language question.
@@ -7961,6 +7963,8 @@ fn run_ask(
                     "semantic_score": h.semantic_score,
                     "ranking_score": h.ranking_score,
                     "lexical_matches": h.lexical_matches,
+                    "lexical_score": h.lexical_score,
+                    "demoted": h.demoted.map(pixel_recall::code_search::FileKind::as_str),
                     "query_terms": h.query_terms,
                     "snippet": h.snippet,
                 })
