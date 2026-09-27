@@ -484,15 +484,27 @@ name = "semble"
 about = "A search tool that finds code from a question in plain English, with a small context footprint."
 measure = "head-to-head"
 bench = "where-a-specialist-wins"
-answer = '''For a question in plain English, semble is better: it puts the right file in its top 10 for 100% of 45 queries, Pixel for 69%, and it costs less context. Pixel adds the call graph, blast radius, Git history and guarded Git writes. They combine: semble for search and Pixel for the rest cost about 5,100 tokens of context per turn.'''
-wins = "natural-language search, and a lighter context on every turn."
-checked = 2026-09-25
+answer = '''For a question in plain English, semble has the right file in its top 10 for 100% of 45 queries, Pixel 0.6.0 for 96%; Pixel puts it first more often, 87% against 64%, and answers in 0.7 s against 1.6 s on average. semble costs less context on every turn. Pixel adds the call graph, blast radius, Git history and guarded Git writes. They combine: semble for search and Pixel for the rest cost about 5,100 tokens of context per turn.'''
+wins = "a top 10 that held the right file on every query, and a lighter context on every turn."
+checked = 2026-09-27
 
   [[tool.row]]
-  label = "Right file in the top 10 (45 plain-English queries)"
-  pixel = "69%"
+  label = "Right file first (45 plain-English queries)"
+  pixel = "87%"
+  other = "64%"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Right file in the top 10"
+  pixel = "96%"
   other = "100%"
   win = "other"
+
+  [[tool.row]]
+  label = "Average answer time"
+  pixel = "0.7&nbsp;s"
+  other = "1.6&nbsp;s"
+  win = "pixel"
 
   [[tool.row]]
   label = "Context on every turn"
@@ -511,6 +523,50 @@ checked = 2026-09-25
   pixel = "Yes"
   other = "No"
   win = "pixel"
+
+[[tool]]
+slug = "warpgrep"
+name = "WarpGrep"
+about = "Morph's search subagent: a model trained with reinforcement learning drives ripgrep and file reads on your code for a few turns and hands back the relevant spans."
+measure = "head-to-head"
+bench = "where-a-specialist-wins"
+answer = '''On 45 plain-English queries, Pixel 0.6.0 puts the right file first for 87%, WarpGrep for 69%, and has it in its top 10 for 96% against 71%; Pixel answers in 0.7 s on average, WarpGrep in 6.8 s. WarpGrep needs no index and hands the agent the code spans themselves; each search is a paid call, and the lines its tools read go to Morph's API. Its own claim is agent-level, on SWE-Bench Pro, which this benchmark does not measure.'''
+wins = "nothing to build before the first search, and an answer that is the code itself, in one or two files, rather than a ranked list."
+checked = 2026-09-27
+
+  [[tool.row]]
+  label = "Right file first (45 plain-English queries)"
+  pixel = "87%"
+  other = "69%"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Right file in the top 10"
+  pixel = "96%"
+  other = "71%"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Average answer time"
+  pixel = "0.7&nbsp;s"
+  other = "6.8&nbsp;s"
+  win = "pixel"
+
+  [[tool.row]]
+  label = "Index to build first"
+  pixel = "Yes, in <code>.pixel/</code>"
+  other = "None"
+  win = "other"
+
+  [[tool.row]]
+  label = "Where the search runs"
+  pixel = "On your machine"
+  other = "Tools local, model on Morph's API"
+
+  [[tool.row]]
+  label = "Cost per search"
+  pixel = "None"
+  other = "A paid API call"
 
 [[tool]]
 slug = "grep"

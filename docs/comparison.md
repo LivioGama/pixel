@@ -6,8 +6,9 @@ links to the measurement that produced it, and the harnesses are committed so
 you can re-run them on your own repository.
 
 Measured 2026-09-21 on an Apple M2 / 16 GiB: pixel 0.4.0, **GitNexus 1.6.12**
-(`737634705`), **semble 0.6.0**, **stacklit** (`6aa0176`). Newer versions may
-differ. Method and raw data:
+(`737634705`), **semble 0.6.0**, **stacklit** (`6aa0176`); natural-language
+search re-measured on 2026-09-27 on pixel 0.6.0, beside WarpGrep's run of the
+same day. Newer versions may differ. Method and raw data:
 [`bench/vs-gitnexus.md`](bench/vs-gitnexus.md) (graph capabilities) and
 [`bench/vs-landscape.md`](bench/vs-landscape.md) (search, map, context cost).
 
@@ -16,7 +17,7 @@ differ. Method and raw data:
 | | [GitNexus](https://github.com/abhigyanpatwari/GitNexus) | [semble](https://github.com/MinishLab/semble) | [stacklit](https://github.com/glincker/stacklit) | pixel |
 |---|---|---|---|---|
 | Blast radius / call graph | yes | — | no, by design | yes |
-| Semantic code search | flows, not files | **its whole purpose** | — | yes, weaker |
+| Semantic code search | flows, not files | **its whole purpose** | — | yes |
 | Compact repo map | — | — | **its whole purpose** | yes, weaker |
 | Git history archaeology | — | — | — | **yes** |
 | Repo operations (commit, push, branch) | — | — | — | **yes** |
@@ -59,7 +60,14 @@ other three implements this.
 idempotent, so an agent that dies mid-operation does not leave a half-committed
 tree. None of the other three implements this.
 
-**Compact answers.** 3.5× fewer bytes per search result than semble, 2.4× fewer
+**The first answer to a plain-English search.** pixel 0.6.0's `search-meaning`
+ranks the right file first for 87 % of 45 doc-comment queries, against 64 % for
+semble and 69 % for WarpGrep, in 0.7 s against 1.6 s and 6.8 s. The queries are
+the code's own doc comments, which favours pixel's symbol-with-comment chunks;
+semble still has more files in its top 10 (below).
+([measurement](bench/vs-landscape.md#natural-language-retrieval--pixel-060-four-arms-45-queries))
+
+**Compact answers.** 3.3× fewer bytes per search result than semble, 2.4× fewer
 than GitNexus on impact. pixel's answers are consistently the cheapest to read.
 
 **Stated uncertainty.** Every graph answer carries `epistemics`: `closed_world`
@@ -73,17 +81,16 @@ These are measured, on the same corpora, with the same harnesses.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/retrieval-recall-dark.svg">
-  <img alt="Recall@10 on doc-comment queries: semble 1.00 on Rust, TypeScript and Ruby; pixel search-meaning 1.00, 0.27, 0.80; pixel find-code 0.07, 0.00, 0.07." src="bench/charts/retrieval-recall-light.svg">
+  <img alt="Recall@10 on doc-comment queries, Rust, TypeScript and Ruby: semble 1.00, 1.00, 1.00; pixel search-meaning 1.00, 0.93, 0.93; pixel find-code 0.07, 0.00, 0.07; WarpGrep 0.73, 0.60, 0.80." src="bench/charts/retrieval-recall-light.svg">
 </picture>
 
-**Semantic search: semble is better overall.** Over 45 doc-comment-derived
-queries across Rust, TypeScript and Ruby, semble found the right file in its top
-10 in 100 % of cases against pixel's 69 %, and was ~1.7× faster. The gap is not
-uniform: on Rust the two tie at 100 %, and pixel actually ranks the right file
-first more often (87 % vs 67 %); on TypeScript pixel manages 27 %. If
-natural-language search across mixed languages is your main need, install
-semble.
-([measurement](bench/vs-landscape.md#natural-language-retrieval--semble-vs-pixel-45-queries))
+**Semantic search, the top 10: semble still leads.** Over 45 doc-comment-derived
+queries across Rust, TypeScript and Ruby, semble had the right file in its top
+10 in 100 % of cases against pixel 0.6.0's 96 %: pixel misses one TypeScript
+and one Ruby file that semble ranks first. On pixel 0.4.0 and 0.5.2 the gap was
+100 % against 69 %; #326 to #330 closed most of it. If a candidate list that
+never misses matters more to you than the first answer, semble is the one.
+([measurement](bench/vs-landscape.md#natural-language-retrieval--pixel-060-four-arms-45-queries))
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="bench/charts/map-cost-coverage-dark.svg">
