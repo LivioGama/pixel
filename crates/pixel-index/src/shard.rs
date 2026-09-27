@@ -108,9 +108,36 @@ pub fn read_varint(buf: &[u8], pos: &mut usize) -> Option<u32> {
 
 // --- builder ---
 
+/// The hasher of the builder's gram map. Its keys are already xxh3 hashes
+/// (`gram_hash`), spread over all 64 bits, so the map uses them as they are
+/// instead of hashing them a second time with SipHash.
+#[derive(Default)]
+struct GramKeyHasher(u64);
+
+impl std::hash::Hasher for GramKeyHasher {
+    // The map's keys are u64: std hashes them through `write_u64`, never
+    // here, so no mutation of this body can reach a build.
+    #[cfg_attr(test, mutants::skip)]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(b);
+        }
+    }
+
+    fn write_u64(&mut self, key: u64) {
+        self.0 = key;
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type GramMap<V> = HashMap<u64, V, std::hash::BuildHasherDefault<GramKeyHasher>>;
+
 pub struct ShardBuilder {
     /// Sorted-on-finish inverted map gram_hash -> sorted file ids.
-    postings: HashMap<u64, Vec<u32>>,
+    postings: GramMap<Vec<u32>>,
     files: Vec<String>,
     extractor_id: String,
     commit_oid: Option<String>,
@@ -119,7 +146,7 @@ pub struct ShardBuilder {
 impl ShardBuilder {
     pub fn new(extractor_id: &str) -> Self {
         Self {
-            postings: HashMap::new(),
+            postings: GramMap::default(),
             files: Vec::new(),
             extractor_id: extractor_id.to_string(),
             commit_oid: None,
@@ -466,6 +493,23 @@ impl Shard {
 
 #[cfg(test)]
 mod tests {
+    use std::hash::{BuildHasher, Hasher};
+
+    /// The gram map must spread its keys by their own bits: they are
+    /// already xxh3 hashes, and a hasher that collapsed them (a constant, a
+    /// zero) would keep the map correct but turn every insert into a probe
+    /// of one long chain.
+    #[test]
+    fn gram_key_hasher_uses_the_key_as_its_hash() {
+        let build = std::hash::BuildHasherDefault::<super::GramKeyHasher>::default();
+        for key in [0u64, 1, 0x9e37_79b9_7f4a_7c15, u64::MAX] {
+            assert_eq!(build.hash_one(key), key);
+        }
+        let mut h = super::GramKeyHasher::default();
+        h.write_u64(7);
+        h.write_u64(42);
+        assert_eq!(h.finish(), 42, "the last key replaces the state");
+    }
     use super::*;
     use crate::gram::{GramExtractor, SparseGramExtractor};
     use crate::weights::Crc32Weigher;
