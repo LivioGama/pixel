@@ -1,0 +1,1 @@
+**search:** `search-meaning` searches every eligible file by default (was a 6000-file budget); `--max-files` is now an opt-in budget, and a safety ceiling of 50 000 files guards runaway trees such as a home directory. `coverage.max_files` is `null` when no limit applied and `coverage.file_budget` names it (`none`, `explicit`, `ceiling`). yespark-rails, 11 299 files: warm 2.2 s.
