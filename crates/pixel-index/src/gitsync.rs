@@ -60,6 +60,20 @@ pub fn show_blob(root: &Path, oid: &str, rel: &str) -> Option<Vec<u8>> {
     GitRunner::new(root).show_blob(oid, rel)
 }
 
+/// Every object `specs` names, through one `git cat-file --batch` (see
+/// `GitRunner::cat_file_blobs`).
+pub fn cat_file_blobs<F>(
+    root: &Path,
+    specs: &[String],
+    max_blob_bytes: u64,
+    visit: F,
+) -> Result<(), pixel_git::GitError>
+where
+    F: FnMut(usize, pixel_git::BatchObject<'_>),
+{
+    GitRunner::new(root).cat_file_blobs(specs, max_blob_bytes, visit)
+}
+
 /// Size of a committed blob without materializing it. `oid` is validated
 /// via `pixel_git::validate_ref` (the original wrapper did not validate).
 pub fn blob_size(root: &Path, oid: &str, rel: &str) -> Option<u64> {
@@ -216,5 +230,39 @@ mod tests {
             "status_porcelain must see every untracked file in a tree whose status output \
              exceeds the old 1 MiB cap"
         );
+    }
+
+    /// The index reads committed blobs through this one call: each spec is
+    /// answered on its own index, content for a blob under the cap, the size
+    /// of one over it, and missing for a path the commit lacks.
+    #[test]
+    fn cat_file_blobs_answers_every_spec_from_the_commit() {
+        let dir = tmpdir("cat-file-blobs");
+        init_repo(&dir);
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("big.txt"), "0123456789A").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "blobs"]);
+        let head = rev_parse_head(&dir).unwrap();
+        let specs: Vec<String> = ["a.rs", "big.txt", "ghost.rs"]
+            .iter()
+            .map(|p| format!("{head}:{p}"))
+            .collect();
+        let mut seen = Vec::new();
+        cat_file_blobs(&dir, &specs, 10, |i, object| {
+            seen.push(format!("{i} {object:?}"));
+        })
+        .unwrap();
+        // Answers come in no particular order.
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                format!("0 {:?}", pixel_git::BatchObject::Blob(b"fn a() {}\n")),
+                "1 Oversized(11)".to_string(),
+                "2 Missing".to_string(),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

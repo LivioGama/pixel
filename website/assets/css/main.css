@@ -551,6 +551,37 @@ main { counter-reset: chapter; }
 .how h3 { font: 700 1.9rem/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; }
 .how p { margin: 12px 0 0; color: var(--ink-soft); font-size: 0.98rem; }
 /* The spec sheet under the steps: label above value, six cells in a row. */
+/* Cold start: the big value beside a 60-cell track, one cell per 0.2 s of the median run. */
+.coldstart { margin: clamp(40px, 5vw, 56px) 0 0; display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.6fr); gap: clamp(20px, 4vw, 56px); align-items: center; padding: clamp(22px, 3vw, 34px); border: 1px solid var(--line); border-radius: 6px; background: linear-gradient(180deg, rgba(34, 197, 94, 0.06), rgba(34, 197, 94, 0) 70%), var(--ground-2); }
+.coldstart__lead { display: flex; flex-direction: column; gap: 12px; }
+.coldstart__value { font: 700 clamp(3.6rem, 7vw, 6rem)/0.85 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; color: var(--green-hi); font-variant-numeric: tabular-nums; text-shadow: 0 0 22px rgba(34, 197, 94, 0.35); }
+.coldstart figcaption { color: var(--ink-soft); font-size: 0.98rem; line-height: 1.45; max-width: 20em; }
+.coldstart figcaption b { color: var(--ink); font-weight: 600; }
+.coldstart__run { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.coldstart__track { display: grid; grid-template-columns: repeat(60, minmax(0, 1fr)); gap: 3px; }
+.coldstart__track b { aspect-ratio: 1 / 2.2; border-radius: 1px; background: var(--green-dim); }
+.coldstart__track b.is-text { background: var(--green); box-shadow: 0 0 6px rgba(34, 197, 94, 0.6); }
+.coldstart__scale { position: relative; height: 1em; font: 400 0.68rem/1 var(--mono); color: var(--ink-soft); }
+.coldstart__scale em { position: absolute; top: 0; font-style: normal; }
+.coldstart__scale em:nth-child(1) { left: 0; }
+.coldstart__scale em:nth-child(2) { left: calc(100% / 6); transform: translateX(-50%); color: var(--green-hi); }
+.coldstart__scale em:nth-child(3) { right: 0; }
+.coldstart__legend { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 6px 0 0; }
+.coldstart__legend div { display: flex; align-items: baseline; gap: 8px; }
+.coldstart__legend div::before { content: ""; width: 10px; height: 10px; border-radius: 1px; background: var(--green-dim); align-self: center; }
+.coldstart__legend .is-text::before { background: var(--green); box-shadow: 0 0 5px rgba(34, 197, 94, 0.55); }
+.coldstart__legend dt { font: 600 0.72rem/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
+.coldstart__legend dd { margin: 0; color: var(--ink); }
+.coldstart__note { margin: 4px 0 0; color: var(--ink-soft); font-size: 0.86rem; line-height: 1.45; }
+@media (prefers-reduced-motion: no-preference) {
+  .coldstart__track b { transition: background-color 0.18s ease-out, box-shadow 0.18s ease-out; }
+  .js .coldstart.is-waiting:not(.is-lit) .coldstart__track b { background: transparent; box-shadow: inset 0 0 0 1px var(--cell); }
+}
+@media (max-width: 760px) {
+  .coldstart { grid-template-columns: minmax(0, 1fr); }
+  .coldstart__track { grid-template-columns: repeat(30, minmax(0, 1fr)); }
+  .coldstart__scale { display: none; }
+}
 .specs { margin: 40px 0 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .specs div { padding: 16px 12px; }
 .specs div + div { border-left: 1px solid var(--line); }

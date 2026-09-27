@@ -175,6 +175,66 @@ impl GitRunner {
         execute_output_with_stdin(cmd, arg_strings, &self.options, Some(input.to_vec()))
     }
 
+    /// Read every object `specs` names (`<commit>:<path>`, a blob oid, any
+    /// object name git accepts), calling `visit(index, object)` once per
+    /// spec, in no particular order. Blobs of at most `max_blob_bytes` come
+    /// back with their content, larger ones as
+    /// [`crate::BatchObject::Oversized`] without git ever inflating them.
+    ///
+    /// Two processes whatever the number of specs: `git cat-file
+    /// --batch-check` sizes every object first (bounded like any `run`), then
+    /// `git cat-file --batch` streams the content of the blobs under the cap,
+    /// asked by the oids the check resolved, so the second pass reads exactly
+    /// what the first one measured. On that stream the runner's timeout is an
+    /// idle limit, not a total: git is given up on when it goes that long
+    /// without the next answer, never for the time `visit` spends.
+    ///
+    /// # Errors
+    ///
+    /// A spawn failed, either git exited early or unsuccessfully, the check
+    /// did not answer every spec, or the stream stopped answering for the
+    /// timeout. Specs visited before the failure keep their answer; the
+    /// rest are never visited.
+    pub fn cat_file_blobs<F>(
+        &self,
+        specs: &[String],
+        max_blob_bytes: u64,
+        mut visit: F,
+    ) -> Result<(), GitError>
+    where
+        F: FnMut(usize, crate::batch::BatchObject<'_>),
+    {
+        let (sent, input) = crate::batch::requests(specs, &mut visit);
+        if sent.is_empty() {
+            return Ok(());
+        }
+        let check_args = ["cat-file", "--batch-check"];
+        let check = self
+            .with_max_output_bytes(Some(ENUMERATION_MAX_OUTPUT_BYTES))
+            .run_with_stdin(&check_args, &input)?;
+        if !check.success() {
+            return Err(GitError::NonZeroExit {
+                args: check_args.iter().map(ToString::to_string).collect(),
+                code: check.code,
+                stderr: check.stderr,
+            });
+        }
+        let reads = crate::batch::plan_reads(&check.stdout, &sent, max_blob_bytes, &mut visit)
+            .map_err(GitError::Io)?;
+        let oids: Vec<String> = reads.iter().map(|(_, oid)| oid.clone()).collect();
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(self.root()).args(["cat-file", "--batch"]);
+        crate::batch::batch_session(
+            cmd,
+            &oids,
+            max_blob_bytes,
+            self.options.timeout,
+            |j, object| {
+                visit(reads[j].0, object);
+            },
+        )
+    }
+
     /// Runs `git merge-file <current> <base> <other>` — git's result is the
     /// exit code, not its output: 0 means a clean merge, a positive count
     /// means that many conflicts were left with markers in `current`,

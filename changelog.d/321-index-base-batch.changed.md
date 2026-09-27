@@ -1,0 +1,1 @@
+**index:** a base or delta built from git sizes every blob with one `git cat-file --batch-check` and streams those under the cap through one `git cat-file --batch` per worker, instead of two git processes per file: a cold text index of about 19 000 files builds in about 2 s. ([#321](https://github.com/LivioGama/pixel/pull/321))

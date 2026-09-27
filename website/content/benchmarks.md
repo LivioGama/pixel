@@ -68,6 +68,17 @@ The same measurement on large files of popular projects, each pinned to a commit
 
 React's work loop is left out of the range: it is written in Flow, and the JavaScript grammar lists 20 of its 125 top-level functions, so its 99.4% measures a parse failure, not a saving. The Signatures column is the check for that on every row: each kept file lists its module- and class-level definitions (Transformers: 90 for 89 `def` and `class` lines). Re-run it with `scripts/bench-read-savings.sh`. [Method and raw output](https://github.com/LivioGama/pixel/blob/main/docs/bench/read-savings.md)
 
+## Cold start on a large repository
+
+The first Pixel command on a repository builds everything from nothing: the text index from the committed files, then the code graph. On a private Rails application of 18,782 tracked files, from a fresh clone with an empty cache, Apple M2, September 2026, median of three runs:
+
+| Cold, from nothing | Time |
+| --- | --- |
+| Text index | **2.0 s** |
+| Text index and code graph (59,609 symbols) | **12 s** |
+
+Later commands reuse the index and read only what changed. One repository on one machine: re-run the command on yours. [Method and raw runs](https://github.com/LivioGama/pixel/blob/main/docs/bench/cold-index.md)
+
 ## Against GitNexus
 
 The jobs both tools do: 29 blast-radius cases on four repositories in Rust, TypeScript and Ruby, with callers found by grep as the ground truth. GitNexus 1.6.12 and Pixel 0.4.0, same machine, September 2026.

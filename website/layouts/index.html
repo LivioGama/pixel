@@ -196,6 +196,24 @@
           <p>A CLI plus hooks, not an MCP server. <code>pixel install</code> puts the protocol where each agent reads its instructions, and the agent calls Pixel from the shell it already has.</p>
         </li>
       </ol>
+      {{/* Cold start: the first command on a large repository, from nothing. The figures are the "Cold start on a large repository" table of content/benchmarks.md (median of three runs, docs/bench/cold-index.md): change them there first. The track draws that median run at one cell per 0.2 s, 60 cells for 12 s: the text index's 2 s in bright green, the code graph and the rest in the dim green. */}}
+      {{ $coldCells := 60 }}{{ $indexCells := 10 }}
+      <figure class="coldstart" data-reveal data-coldstart>
+        <div class="coldstart__lead">
+          <span class="numbers__tag">Cold start</span>
+          <strong class="coldstart__value">12 s</strong>
+          <figcaption>from nothing to a full index of <b>18,782 files</b>: text and code graph, no cache.</figcaption>
+        </div>
+        <div class="coldstart__run">
+          <span class="coldstart__track" aria-hidden="true">{{ range seq $coldCells }}<b class="{{ if le . $indexCells }}is-text{{ else }}is-graph{{ end }}"></b>{{ end }}</span>
+          <span class="coldstart__scale" aria-hidden="true"><em>0 s</em><em>2 s</em><em>12 s</em></span>
+          <dl class="coldstart__legend">
+            <div class="is-text"><dt>Text index</dt><dd>2.0&nbsp;s</dd></div>
+            <div class="is-graph"><dt>Code graph</dt><dd>about 10&nbsp;s, 59,609 symbols</dd></div>
+          </dl>
+          <p class="coldstart__note">A private Rails application, fresh clone, Apple M2, median of three runs. Later commands reuse the index and read only what changed. <a class="link" href="{{ $bench }}#cold-start-on-a-large-repository">Method</a></p>
+        </div>
+      </figure>
       {{/* What a visitor checks before installing, at a glance. Each value restates a fact stated elsewhere: the platforms release.yml builds, the licence, the telemetry line of the hero. */}}
       <dl class="specs" data-reveal>
         <div><dt>Language</dt><dd>Rust</dd></div>
@@ -786,6 +804,54 @@
             go();
           }, { threshold: 0.4 });
           io.observe(list);
+        });
+      };
+      if (document.documentElement.classList.contains('splash')) addEventListener('pixel:splashdone', watch, { once: true });
+      else watch();
+    })();
+
+    /* Cold start: once the figure is on screen, the value counts up to its
+       12 s while the track lights cell by cell, the text index's cells
+       first. Same rules as the results panel: without JavaScript or with
+       reduced motion the final state renders, and a figure below the fold
+       stays final until the first scroll. */
+    (function () {
+      var fig = document.querySelector('[data-coldstart]');
+      if (!fig) return;
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches || !('IntersectionObserver' in window)) { fig.classList.add('is-lit'); return; }
+      var el = fig.querySelector('.coldstart__value');
+      var m = el.textContent.trim().match(/^(\D*)([\d.]+)(\D*)$/);
+      if (!m) return;
+      var to = +m[2], cells = fig.querySelectorAll('.coldstart__track b');
+      var prime = function () {
+        fig.classList.add('is-waiting');
+        el.textContent = m[1] + '0' + m[3];
+      };
+      var go = function () {
+        var dur = 1800, t0 = null;
+        [].forEach.call(cells, function (cell, j) {
+          cell.style.transitionDelay = Math.round(j * dur / cells.length) + 'ms';
+        });
+        fig.classList.add('is-lit');
+        var tick = function (now) {
+          if (t0 === null) t0 = now;
+          var p = Math.min(1, (now - t0) / dur);
+          el.textContent = m[1] + Math.round(to * p) + m[3];
+          if (p < 1) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      };
+      var watch = function () {
+        if (onScreen(fig)) { prime(); return go(); }
+        afterFirstScroll(function () {
+          if (fig.classList.contains('is-lit') || onScreen(fig)) return;
+          prime();
+          var io = new IntersectionObserver(function (e) {
+            if (!e[0].isIntersecting) return;
+            io.disconnect();
+            go();
+          }, { threshold: 0.5 });
+          io.observe(fig);
         });
       };
       if (document.documentElement.classList.contains('splash')) addEventListener('pixel:splashdone', watch, { once: true });
