@@ -2068,6 +2068,32 @@ mod tests {
         assert_eq!(repaired.coverage.vector_cache_note(), None);
     }
 
+    /// A cache error adds to what already degraded the answer (here a
+    /// skipped non-UTF-8 file); it never clears it.
+    #[test]
+    fn cache_error_should_keep_an_already_degraded_answer_degraded() {
+        let dir = indexed_tree();
+        let root = dir.path();
+        write(root, "src/billing.rs", "fn invoice_total() {}");
+        std::fs::write(root.join("src/invalid.rs"), [0xff]).unwrap();
+        let cache = vector_cache_for(root, None);
+        ask_counting(root, "invoice", cache, "m", invoice_vector);
+        for entry in std::fs::read_dir(store_dir(root)).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "vec") {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        let (result, count) = ask_counting(root, "invoice", cache, "m", invoice_vector);
+        assert_eq!(count, 1, "the lost chunk is embedded again");
+        assert_eq!(result.coverage.skipped_files, 1);
+        assert_eq!(result.coverage.vector_cache_errors.len(), 1);
+        assert!(
+            result.coverage.degraded,
+            "a cache error never clears degraded"
+        );
+    }
+
     #[test]
     fn vector_cache_note_should_join_every_error() {
         let mut coverage = AskCoverage::default();
