@@ -8,23 +8,10 @@
 //! stale split would hand `impact`/`pack-context` another symbol's guards,
 //! so each path is pinned on a file with two symbols.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use pixel_graph::build::{build_graph, update_files};
 use pixel_graph::store::GraphStore;
-
-fn tmpdir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "pixel-crux-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 fn git(dir: &Path, args: &[&str]) {
     let out = std::process::Command::new("git")
@@ -94,16 +81,18 @@ pub fn second(n: u32) -> u32 {
 
 #[test]
 fn each_symbol_keeps_its_own_guard_lines_through_both_build_paths() {
-    let root = tmpdir("paths");
+    // Dropped at the end of the test, and on a failed assertion's unwind.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
     let src = root.join("src");
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(src.join("lib.rs"), V1).unwrap();
-    git(&root, &["init", "-q"]);
-    git(&root, &["add", "."]);
-    git(&root, &["commit", "-q", "-m", "v1"]);
+    git(root, &["init", "-q"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "v1"]);
     let db = root.join(".pixel").join("graph.v2.db");
 
-    build_graph(&root, &db).unwrap();
+    build_graph(root, &db).unwrap();
     assert_eq!(crux_of(&db, "first"), ["if x < 0 {", "return 0;"]);
     assert_eq!(
         crux_of(&db, "second"),
@@ -111,12 +100,10 @@ fn each_symbol_keeps_its_own_guard_lines_through_both_build_paths() {
     );
 
     std::fs::write(src.join("lib.rs"), V2).unwrap();
-    update_files(&root, &db, &[("src/lib.rs", false)]).unwrap();
+    update_files(root, &db, &[("src/lib.rs", false)]).unwrap();
     assert_eq!(
         crux_of(&db, "first"),
         ["if x < 0 {", "return 0;", "if x > 100 {", "return 100;"]
     );
     assert_eq!(crux_of(&db, "second"), Vec::<String>::new());
-
-    std::fs::remove_dir_all(&root).ok();
 }
