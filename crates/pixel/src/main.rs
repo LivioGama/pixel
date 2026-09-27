@@ -253,10 +253,11 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Number of ranked hits to return.
-        #[arg(long, default_value_t = 8)]
+        #[arg(long, default_value_t = pixel_recall::code_search::DEFAULT_LIMIT)]
         limit: usize,
-        /// Cap on how many source files are scanned.
-        #[arg(long, default_value_t = 2000)]
+        /// Most eligible files embedded; above it, a deterministic sample
+        /// spread across the whole tree is searched and the coverage says so.
+        #[arg(long, default_value_t = pixel_recall::code_search::DEFAULT_MAX_FILES)]
         max_files: usize,
         #[arg(long)]
         json: bool,
@@ -7963,8 +7964,12 @@ fn run_ask(
         );
         return Ok(());
     }
+    let sample_note = result.coverage.sample_note();
     if hits.is_empty() {
         println!("no matches found for \"{question}\" in {}", root.display());
+        if let Some(note) = &sample_note {
+            println!("note: {note}");
+        }
         return Ok(());
     }
     println!("hybrid matches for \"{question}\" (RRF ranking score; cosine semantic score):");
@@ -7977,6 +7982,9 @@ fn run_ask(
             h.path,
             h.snippet
         );
+    }
+    if let Some(note) = &sample_note {
+        println!("note: {note}");
     }
     Ok(())
 }
