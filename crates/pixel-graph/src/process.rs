@@ -310,5 +310,7 @@ mod tests {
         let (listed, total) = list(&store, 10, 10, 0).unwrap();
         assert_eq!(total, 1, "the process is persisted, not only returned");
         assert_eq!(listed[0].entry_uid, found[0].entry_uid);
+        let stored: Vec<&str> = listed[0].steps.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(stored, ["run", "load", "parse"], "steps read back in order");
     }
 }
