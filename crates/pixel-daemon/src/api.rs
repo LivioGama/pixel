@@ -5834,7 +5834,7 @@ mod tests {
         assert_eq!(caps.len(), 3, "{caps:?}");
         assert_eq!(caps[0], "probe capped");
         assert!(caps[1].starts_with("semantic leads are unverified"));
-        assert!(caps[2].contains("first 2000"));
+        assert!(caps[2].contains("sample of 2000"));
 
         let mut no_caps = report_with(Vec::new(), None);
         apply_semantic_leads(&mut no_caps, &fallback, 10);

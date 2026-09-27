@@ -33,12 +33,28 @@ pub struct AskHit {
 
 const MAX_FILE_BYTES: usize = 512 * 1024;
 
-/// Walk a tree, returning code-like files. Rejects binary/noise paths.
+/// Default for `pixel search-meaning --max-files`: how many eligible files one
+/// question embeds. Sized to cover a mid-size repository whole (GitNexus has
+/// 4 806 eligible files, dd-trace-rb 2 306); a larger tree is sampled across
+/// its whole extent (see [`collect_files`]), never truncated to the files a
+/// walk happens to reach first.
+pub const DEFAULT_MAX_FILES: usize = 6000;
+
+/// Default for `pixel search-meaning --limit`: ranked hits returned. Ten, so a
+/// recall@10 measurement reads the list a user actually gets.
+pub const DEFAULT_LIMIT: usize = 10;
+
+/// What one question covered: the eligible universe, the part embedded, and
+/// every reason a file was left out.
 #[derive(Default, serde::Serialize)]
 pub struct AskCoverage {
+    /// Eligible files under the root (walk policy, excluded directories,
+    /// nested checkouts and extensions applied), whether searched or not.
     pub candidate_files: usize,
+    /// Files actually read, chunked and embedded.
     pub searched_files: usize,
     pub max_files: usize,
+    /// More than `max_files` files were eligible: only a sample was searched.
     pub file_limit_reached: bool,
     pub skipped_files: usize,
     pub empty_files: usize,
@@ -48,70 +64,131 @@ pub struct AskCoverage {
     pub degraded: bool,
 }
 
+impl AskCoverage {
+    /// The line a human reader gets when the question searched a sample, so
+    /// a missing answer is never passed off as an absent one. `None` when the
+    /// whole eligible universe was in reach.
+    pub fn sample_note(&self) -> Option<String> {
+        self.file_limit_reached.then(|| {
+            format!(
+                "searched a deterministic sample of {} of {} eligible files (--max-files {}); raise --max-files to search them all",
+                self.searched_files, self.candidate_files, self.max_files
+            )
+        })
+    }
+}
+
 pub struct AskResult {
     pub hits: Vec<AskHit>,
     pub coverage: AskCoverage,
 }
 
+/// The files one question embeds, absolute, sorted by repository-relative
+/// path, with the coverage of the walk.
+///
+/// The universe is the indexing walk policy ([`pixel_index::index::policy_walk`],
+/// the walk behind `policy_file_paths`): `.gitignore`/`.ignore` honoured even
+/// without git, `.git`, `.pixel` and the default-ignored build and dependency
+/// directories pruned, symlinks never followed, nothing written. On top of it,
+/// a path is eligible when no directory on it is a [`skip_dir`] name or the top
+/// of a nested checkout, and its name is a [`is_code_file`] one. The walk is
+/// iterated directly rather than through `policy_file_paths` so its errors are
+/// counted in `traversal_errors` instead of vanishing, and non-UTF-8 names
+/// keep their bytes.
+///
+/// Over `max_files`, the files kept are a sample spread over the whole tree
+/// ([`sample_across_tree`]); `candidate_files` still counts every eligible
+/// file, and `file_limit_reached` and `degraded` say that the search was
+/// partial.
 fn collect_files(root: &Path, max_files: usize) -> (Vec<PathBuf>, AskCoverage) {
-    use std::collections::VecDeque;
-    let mut out = Vec::new();
     let mut coverage = AskCoverage {
         max_files,
-        scope: "eligible source/document extensions; excluded noise directories; nested checkouts skipped; no symlinks; files <=512KiB; UTF-8 text only",
+        scope: "eligible source/document extensions; gitignored files and excluded noise directories skipped; nested checkouts skipped; no symlinks; files <=512KiB; UTF-8 text only",
         ..Default::default()
     };
-    let mut queue = VecDeque::from([root.to_path_buf()]);
     if std::fs::symlink_metadata(root).is_ok_and(|m| m.file_type().is_symlink()) {
         coverage.skipped_files += 1;
         coverage.degraded = true;
-        return (out, coverage);
+        return (Vec::new(), coverage);
     }
-    'walk: while let Some(dir) = queue.pop_front() {
-        let read = match std::fs::read_dir(&dir) {
-            Ok(read) => read,
-            Err(_) => {
-                coverage.traversal_errors += 1;
-                continue;
-            }
+    let mut nested = HashMap::new();
+    let mut eligible = Vec::new();
+    for entry in pixel_index::index::policy_walk(root) {
+        let Ok(entry) = entry else {
+            coverage.traversal_errors += 1;
+            continue;
         };
-        let mut entries = Vec::new();
-        for entry in read {
-            match entry {
-                Ok(entry) => entries.push(entry),
-                Err(_) => coverage.traversal_errors += 1,
-            }
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
         }
-        entries.sort_by_key(std::fs::DirEntry::file_name);
-        for entry in entries {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let kind = match entry.file_type() {
-                Ok(kind) => kind,
-                Err(_) => {
-                    coverage.traversal_errors += 1;
-                    continue;
-                }
-            };
-            if kind.is_symlink() {
-                continue;
-            }
-            if kind.is_dir() {
-                let path = entry.path();
-                if !skip_dir(&name) && !is_nested_checkout(&path) {
-                    queue.push_back(path);
-                }
-            } else if kind.is_file() && is_code_file(&name) {
-                if out.len() == max_files {
-                    coverage.file_limit_reached = true;
-                    break 'walk;
-                }
-                out.push(entry.path());
-            }
+        let Ok(relative) = entry.path().strip_prefix(root) else {
+            continue;
+        };
+        if is_eligible(root, relative, &mut nested) {
+            eligible.push(relative.to_path_buf());
         }
     }
-    coverage.candidate_files = out.len();
+    coverage.candidate_files = eligible.len();
+    coverage.file_limit_reached = eligible.len() > max_files;
     coverage.degraded = coverage.file_limit_reached || coverage.traversal_errors > 0;
-    (out, coverage)
+    let files = sample_across_tree(eligible, max_files)
+        .into_iter()
+        .map(|relative| root.join(relative))
+        .collect();
+    (files, coverage)
+}
+
+/// Whether the walk-admitted file at `relative` (below `root`) is searched:
+/// no directory on its path is a [`skip_dir`] name or another checkout's top,
+/// and its name has a code or document extension. `nested` memoises the
+/// checkout probe per directory, which every file below it would repeat.
+fn is_eligible(root: &Path, relative: &Path, nested: &mut HashMap<PathBuf, bool>) -> bool {
+    let Some(name) = relative.file_name() else {
+        return false;
+    };
+    if !is_code_file(&name.to_string_lossy()) {
+        return false;
+    }
+    let mut dir = PathBuf::new();
+    for component in relative.parent().into_iter().flat_map(Path::components) {
+        dir.push(component);
+        if skip_dir(&component.as_os_str().to_string_lossy()) {
+            return false;
+        }
+        let is_checkout = *nested
+            .entry(dir.clone()) // the memo owns its key; `dir` keeps growing
+            .or_insert_with(|| is_nested_checkout(&root.join(&dir)));
+        if is_checkout {
+            return false;
+        }
+    }
+    true
+}
+
+/// At most `max_files` of the repository-relative `files`, sorted by path.
+///
+/// Over the budget, the sample keeps the files with the smallest
+/// [`sample_key`] (an xxh3 hash of the relative path): every directory is
+/// represented in proportion to its size, whatever its depth or its place in
+/// the alphabet, where a walk cut at the budget searched only the shallowest,
+/// alphabetically-first directories. A hash rather than a stride over the
+/// sorted list because the sample then depends on each path alone: the same
+/// tree gives the same sample on every run and from every checkout location,
+/// and adding or removing one file changes at most one other member, where a
+/// stride would shift every pick after the edit.
+///
+/// Under the budget the ordering pass and `truncate` keep every file, so one
+/// code path serves both regimes.
+fn sample_across_tree(mut files: Vec<PathBuf>, max_files: usize) -> Vec<PathBuf> {
+    files.sort_by_cached_key(|path| (sample_key(path), path.clone()));
+    files.truncate(max_files);
+    files.sort();
+    files
+}
+
+/// Stable, platform-independent sampling key of a repository-relative path.
+fn sample_key(relative: &Path) -> u64 {
+    xxhash_rust::xxh3::xxh3_64(relative.as_os_str().as_encoded_bytes())
 }
 
 /// Whether `dir` is the top of another working tree: a linked worktree or a
@@ -220,7 +297,8 @@ pub struct SemanticFallback {
     /// `(repo-relative path, cosine similarity)`, best first, at most `limit`.
     pub hits: Vec<(String, f64)>,
     pub searched_files: usize,
-    /// The scan stopped at [`SEMANTIC_FALLBACK_MAX_FILES`].
+    /// More than [`SEMANTIC_FALLBACK_MAX_FILES`] files were eligible: the
+    /// scan embedded a deterministic sample of them, spread across the tree.
     pub file_limit_reached: bool,
     /// The fallback was gated off (`PIXEL_SEMANTIC_FALLBACK` unset): no
     /// model load and no corpus embed ran. Named so a caller can report
@@ -245,7 +323,7 @@ impl SemanticFallback {
         ];
         if self.file_limit_reached {
             caps.push(format!(
-                "semantic fallback embedded only the first {} of the eligible files",
+                "semantic fallback embedded only a deterministic sample of {} of the eligible files",
                 self.searched_files
             ));
         }
@@ -688,11 +766,20 @@ mod tests {
         std::os::unix::fs::symlink(dir.path(), dir.path().join("loop")).unwrap();
         let (files, coverage) = collect_files(dir.path(), 2);
         assert_eq!(files.len(), 2);
-        assert!(files[0].ends_with("a.rs"));
-        assert!(files[1].ends_with("b.rs"));
+        assert!(files[0] < files[1], "sorted by path: {files:?}");
+        assert_eq!(
+            files,
+            collect_files(dir.path(), 2).0,
+            "same tree, same sample"
+        );
+        assert_eq!(coverage.candidate_files, 3, "the universe, not the sample");
         assert!(coverage.file_limit_reached && coverage.degraded);
         let (files, coverage) = collect_files(dir.path(), 3);
-        assert_eq!(files.len(), 3);
+        assert_eq!(
+            files,
+            ["a.rs", "b.rs", "c.rs"].map(|name| dir.path().join(name)),
+            "exactly the budget: everything, nothing through the symlink"
+        );
         assert!(!coverage.file_limit_reached && !coverage.degraded);
         let (files, coverage) = collect_files(dir.path(), 0);
         assert!(files.is_empty() && coverage.file_limit_reached);
@@ -728,7 +815,7 @@ mod tests {
             .iter()
             .map(|f| f.strip_prefix(root).unwrap().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(rel, ["src/lib.rs", ".claude/hooks/guard.py"]);
+        assert_eq!(rel, [".claude/hooks/guard.py", "src/lib.rs"]);
         assert_eq!(coverage.candidate_files, 2);
         assert_eq!(coverage.max_files, 10);
         // The coverage tells the caller what was left out of the search.
@@ -803,7 +890,7 @@ mod tests {
         fallback.file_limit_reached = true;
         assert_eq!(
             fallback.caps()[1],
-            "semantic fallback embedded only the first 2000 of the eligible files"
+            "semantic fallback embedded only a deterministic sample of 2000 of the eligible files"
         );
     }
 
@@ -1167,5 +1254,241 @@ mod tests {
         assert!(!is_code_file("logo.png"));
         assert!(!is_code_file("Makefile"));
         assert!(!is_code_file("archive.tar.gz"));
+    }
+
+    /// Scores 1 for a text that mentions `word`, 0 otherwise, so a fixture
+    /// can make exactly one file the semantic answer.
+    struct MentionEmbedder {
+        word: &'static str,
+    }
+    impl crate::embed::Embedder for MentionEmbedder {
+        fn model_id(&self) -> &str {
+            "mention"
+        }
+        fn dims(&self) -> usize {
+            2
+        }
+        fn embed_batch(&mut self, texts: &[&str], _: EmbedKind) -> Result<Vec<Vec<f32>>, String> {
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    if text.contains(self.word) {
+                        vec![1.0, 0.0]
+                    } else {
+                        vec![0.0, 1.0]
+                    }
+                })
+                .collect())
+        }
+    }
+
+    fn write(root: &Path, relative: &str, body: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn relative(root: &Path, files: &[PathBuf]) -> Vec<String> {
+        files
+            .iter()
+            .map(|f| f.strip_prefix(root).unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The answer of a mid-size repository lives in its deepest,
+    /// alphabetically-last directory, behind more than 2 000 files: the old
+    /// default (2 000 files, walked breadth-first and cut at the budget)
+    /// stopped inside `a/` and never read it. The default budget covers the
+    /// whole tree and the question finds it first.
+    #[test]
+    fn default_budget_reaches_the_deepest_last_directory_of_a_mid_size_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..2001 {
+            write(root, &format!("a/filler{i:04}.rs"), "fn filler() {}");
+        }
+        let answer = "zz/y/x/answer.rs";
+        write(root, answer, "fn generate_invoice() {}");
+        let (files, coverage) = collect_files(root, DEFAULT_MAX_FILES);
+        assert!(
+            coverage.candidate_files > 2000,
+            "the fixture must outgrow the old default budget"
+        );
+        assert_eq!(coverage.candidate_files, 2002);
+        assert_eq!(files.len(), 2002);
+        assert_eq!(files.last().unwrap(), &root.join(answer), "sorted last");
+        assert!(!coverage.file_limit_reached && !coverage.degraded);
+        let result = ask_collected(
+            "invoice",
+            DEFAULT_LIMIT,
+            files,
+            coverage,
+            &mut MentionEmbedder { word: "invoice" },
+        )
+        .unwrap();
+        assert_eq!(result.hits[0].path, root.join(answer).display().to_string());
+        assert_eq!(result.coverage.searched_files, 2002);
+    }
+
+    /// A gitignored file is generated or private: it is never embedded, never
+    /// returned and never counted, even when it is the best textual match and
+    /// the tree has no git repository (`.gitignore` applies regardless).
+    #[test]
+    fn gitignored_files_are_never_candidates_nor_hits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, ".gitignore", "generated/\nsecret.rs\n");
+        write(
+            root,
+            "generated/invoice.rs",
+            "fn invoice() {} // invoice invoice",
+        );
+        write(root, "secret.rs", "fn invoice() {} // invoice invoice");
+        write(root, "src/nested/.gitignore", "local_invoice.rs\n");
+        write(root, "src/nested/local_invoice.rs", "fn invoice() {}");
+        write(root, "src/billing.rs", "fn invoice() {}");
+        let (files, coverage) = collect_files(root, DEFAULT_MAX_FILES);
+        assert_eq!(relative(root, &files), ["src/billing.rs"]);
+        assert_eq!(coverage.candidate_files, 1);
+        let result = ask_collected(
+            "invoice",
+            DEFAULT_LIMIT,
+            files,
+            coverage,
+            &mut MentionEmbedder { word: "invoice" },
+        )
+        .unwrap();
+        let hits: Vec<_> = result.hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(hits, [root.join("src/billing.rs").display().to_string()]);
+        assert_eq!(result.coverage.searched_files, 1);
+    }
+
+    /// `skip_dir` applies to every directory on the path, not only to the
+    /// top level, and names the walk policy does not prune (`tests`,
+    /// `assets`, `examples`) stay excluded; the root's own name never counts.
+    #[test]
+    fn excluded_directory_names_apply_at_any_depth_below_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tests");
+        for relative in [
+            "crates/app/src/lib.rs",
+            "crates/app/tests/it.rs",
+            "crates/app/assets/data.json",
+            "examples/demo.rs",
+            "crates/app/README",
+            "crates/app/logo.png",
+        ] {
+            write(&root, relative, "fn body() {}");
+        }
+        let (files, coverage) = collect_files(&root, DEFAULT_MAX_FILES);
+        assert_eq!(relative(&root, &files), ["crates/app/src/lib.rs"]);
+        assert_eq!(coverage.candidate_files, 1);
+    }
+
+    /// Shallow files first in the alphabet, as many deep ones last: a sample
+    /// of 20 must reach the deep directory (a walk cut at the budget took the
+    /// 20 root files), and it must be the same sample on every run and from
+    /// every checkout location, so a result can be reproduced.
+    #[test]
+    fn over_budget_sample_is_deterministic_and_spans_the_whole_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut samples = Vec::new();
+        for location in ["one", "elsewhere/two"] {
+            let root = dir.path().join(location);
+            for i in 0..100 {
+                write(&root, &format!("r{i:03}.rs"), "fn shallow() {}");
+                write(&root, &format!("z/y/x/w/d{i:03}.rs"), "fn deep() {}");
+            }
+            let (files, _) = collect_files(&root, 20);
+            assert_eq!(files, collect_files(&root, 20).0, "same run twice");
+            samples.push(relative(&root, &files));
+        }
+        assert_eq!(samples[0], samples[1], "independent of the checkout path");
+        let sample = &samples[0];
+        assert_eq!(sample.len(), 20);
+        let mut sorted = sample.clone();
+        sorted.sort();
+        assert_eq!(&sorted, sample, "returned in path order");
+        let deep = sample.iter().filter(|p| p.starts_with("z/y/x/w/")).count();
+        assert!(
+            (1..20).contains(&deep),
+            "both depths represented, got {deep} deep of 20: {sample:?}"
+        );
+    }
+
+    /// The hash sample depends on each path alone: removing a file the
+    /// sample did not keep leaves the sample unchanged, where a stride over
+    /// the sorted list would shift every pick after it.
+    #[test]
+    fn removing_an_unsampled_file_keeps_the_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..60 {
+            write(root, &format!("m{}/f{i:02}.rs", i % 6), "fn f() {}");
+        }
+        let (before, _) = collect_files(root, 15);
+        let dropped = (0..60)
+            .map(|i| root.join(format!("m{}/f{i:02}.rs", i % 6)))
+            .find(|path| !before.contains(path))
+            .unwrap();
+        std::fs::remove_file(&dropped).unwrap();
+        let (after, coverage) = collect_files(root, 15);
+        assert_eq!(after, before);
+        assert_eq!(coverage.candidate_files, 59);
+    }
+
+    /// Both regimes report exactly what was eligible, what was embedded and
+    /// the budget between them: under it, the universe is the search; over
+    /// it, the universe stays counted while only the sample is embedded.
+    #[test]
+    fn coverage_counts_are_exact_under_and_over_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..30 {
+            write(root, &format!("src/f{i:02}.rs"), "fn f() {}");
+        }
+        write(root, "notes.txt", "not code");
+        let embed = |max_files| {
+            let (files, coverage) = collect_files(root, max_files);
+            let searched = files.len();
+            let result = ask_collected(
+                "f",
+                DEFAULT_LIMIT,
+                files,
+                coverage,
+                &mut FixtureEmbedder { fail: false },
+            )
+            .unwrap();
+            (searched, result.coverage)
+        };
+        let (searched, under) = embed(30);
+        assert_eq!(searched, 30);
+        assert_eq!(
+            (under.candidate_files, under.searched_files, under.max_files),
+            (30, 30, 30)
+        );
+        assert!(!under.file_limit_reached && !under.degraded);
+        assert_eq!(under.sample_note(), None);
+        let (searched, over) = embed(12);
+        assert_eq!(searched, 12);
+        assert_eq!(
+            (over.candidate_files, over.searched_files, over.max_files),
+            (30, 12, 12)
+        );
+        assert!(over.file_limit_reached && over.degraded);
+        assert_eq!(
+            over.sample_note().as_deref(),
+            Some(
+                "searched a deterministic sample of 12 of 30 eligible files (--max-files 12); raise --max-files to search them all"
+            )
+        );
+    }
+
+    /// The CLI defaults: ten hits (what a recall@10 reads) and a budget that
+    /// covers a mid-size repository whole.
+    #[test]
+    fn defaults_are_ten_hits_and_six_thousand_files() {
+        assert_eq!(DEFAULT_LIMIT, 10);
+        assert_eq!(DEFAULT_MAX_FILES, 6000);
     }
 }

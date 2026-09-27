@@ -1,0 +1,1 @@
+**search:** `search-meaning` searches the gitignore-aware file set of the index walk, returns 10 hits by default (was 8) and embeds up to 6000 files (was 2000); a larger tree is searched through a deterministic sample spread across it instead of the first files a walk reached, and the text output says so. `coverage.candidate_files` counts every eligible file.
