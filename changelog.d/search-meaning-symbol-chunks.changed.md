@@ -1,0 +1,1 @@
+**search:** `search-meaning` cuts files along their tree-sitter symbols (functions, methods, classes, modules), each with its doc comment, packing small neighbours up to 400 bytes; unparsed files and oversize symbols keep 1 500-byte windows, and the text between symbols stays searchable. Cached vectors are re-embedded once. #325 benchmark: r@1 0.67 → 0.87, r@10 0.91 → 0.96.
