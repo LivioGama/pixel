@@ -1,1 +1,0 @@
-**graph:** the graph write path runs its statements from the connection's prepared-statement cache instead of parsing and planning the SQL again on every row. A cold `prepare-repo` on a clone of DataDog/dd-trace-rb goes from 2.6 s to 2.2 s, with the same graph rows.
