@@ -2856,6 +2856,10 @@ Prose naming `pixel status` is not a table row.
         );
         // Ellipsis placeholder syntax the normalizer doesn't understand.
         assert_eq!(normalize_rule_command("pixel search-content a…b"), None);
+        // Half a placeholder is not one: it stays unreadable rather than
+        // passing as a dummy value.
+        assert_eq!(normalize_rule_command("pixel impact <symbol"), None);
+        assert_eq!(normalize_rule_command("pixel impact symbol>"), None);
         // Not a pixel line at all.
         assert_eq!(normalize_rule_command("git status"), None);
     }
