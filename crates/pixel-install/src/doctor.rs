@@ -1732,8 +1732,14 @@ fn installed_rule_text(home: &Path) -> Option<(PathBuf, String)> {
 }
 
 /// Extract every `pixel …` command line from the fenced code blocks of a
-/// rule document. Trailing `# comments` are stripped; prose and non-pixel
-/// lines are ignored.
+/// rule document, and every backticked `` `pixel …` `` span of a table row.
+/// Trailing `# comments` are stripped from fenced lines and a table cell's
+/// `\|` escape becomes `|`; prose and non-pixel lines are ignored.
+///
+/// Table cells count because agents copy them as literally as the fenced
+/// lines: the REPLACEMENT MAP's `pixel new-branch name` had lost its
+/// required `--request-id`, and an agent that ran it saw the branch refused
+/// and committed on `main`.
 pub fn extract_rule_commands(rule_text: &str) -> Vec<String> {
     let mut in_fence = false;
     let mut out = Vec::new();
@@ -1744,6 +1750,9 @@ pub fn extract_rule_commands(rule_text: &str) -> Vec<String> {
             continue;
         }
         if !in_fence {
+            if trimmed.starts_with('|') {
+                out.extend(table_cell_commands(trimmed));
+            }
             continue;
         }
         // Strip a trailing shell comment (` # …`) — rule examples annotate
@@ -1757,6 +1766,17 @@ pub fn extract_rule_commands(rule_text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// The backticked `pixel …` spans of one Markdown table row, in order, with
+/// the `\|` a cell needs for a literal pipe unescaped.
+fn table_cell_commands(row: &str) -> Vec<String> {
+    row.split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|span| span.starts_with("pixel "))
+        .map(|span| span.replace("\\|", "|"))
+        .collect()
 }
 
 /// Normalize one documented `pixel …` line into a parseable argv:
@@ -1776,6 +1796,12 @@ pub fn extract_rule_commands(rule_text: &str) -> Vec<String> {
 /// per occurrence pushes it into the next positional (often a defaulted
 /// `PATH`), where a plain `x` would parse without a trace.
 pub const VARIADIC_SENTINEL: &str = "__pixel_variadic_second_value__";
+
+/// The value a `<placeholder>` stands for in [`normalize_rule_command`]: a
+/// number, because it is the one spelling both a text and an integer
+/// argument accept (`pixel sniper show <id>` failed on a letter, although
+/// an agent substituting a real id would not).
+pub const PLACEHOLDER_DUMMY: &str = "1";
 
 pub fn normalize_rule_command(line: &str) -> Option<Vec<String>> {
     // Unwrap bracketed optional groups: brackets may span several
@@ -1818,7 +1844,7 @@ pub fn normalize_rule_command(line: &str) -> Option<Vec<String>> {
         // Placeholder → dummy value. A quoted multi-word placeholder is one
         // token by now (`<what broke, in the user's words>`).
         let token = if token.starts_with('<') && token.ends_with('>') {
-            "x".to_string()
+            PLACEHOLDER_DUMMY.to_string()
         } else {
             token
         };
@@ -1926,12 +1952,12 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary, Remedy, Repair,
-        RepairOutcome, RepairStatus, VARIADIC_SENTINEL, age_secs, capped, catalogue_steps,
-        extract_rule_commands, fix_for, judge_repair, normalize_rule_command, one_line,
-        probe_daemon_epistemics, render_catalogue, render_repairs, repair_for, repair_plan,
-        rtk_backup_check, run_repair, scenario_mismatches, selected, shell_word, spec,
-        validate_selection,
+        CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary,
+        PLACEHOLDER_DUMMY, Remedy, Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL,
+        age_secs, capped, catalogue_steps, extract_rule_commands, fix_for, judge_repair,
+        normalize_rule_command, one_line, probe_daemon_epistemics, render_catalogue,
+        render_repairs, repair_for, repair_plan, rtk_backup_check, run_repair, scenario_mismatches,
+        selected, shell_word, spec, validate_selection,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
@@ -2695,6 +2721,30 @@ git clone https://example.com/repo.git
         );
     }
 
+    /// A table cell is copied as literally as a fenced line, so its
+    /// `pixel …` spans are extracted too — each span of a row, in order,
+    /// with the cell's `\|` unescaped — while a non-pixel span, a span in a
+    /// prose line and a `pixel-…` word stay out.
+    #[test]
+    fn extracts_every_pixel_span_of_a_table_row() {
+        let text = "\
+| Instead of | Run |
+| --- | --- |
+| `git checkout -b` / `git fetch` | `pixel new-branch <name> --request-id <id>` / `pixel fetch origin` |
+| roles | `pixel who-calls \"X\" --role callers\\|callees` |
+| wrapper | `pixel-dev` |
+Prose naming `pixel status` is not a table row.
+";
+        assert_eq!(
+            extract_rule_commands(text),
+            vec![
+                "pixel new-branch <name> --request-id <id>",
+                "pixel fetch origin",
+                "pixel who-calls \"X\" --role callers|callees",
+            ]
+        );
+    }
+
     #[test]
     fn normalizes_placeholders_brackets_and_alternations() {
         assert_eq!(
@@ -2704,7 +2754,7 @@ git clone https://example.com/repo.git
             Some(vec![
                 "pixel".into(),
                 "find-code".into(),
-                "x".into(),
+                PLACEHOLDER_DUMMY.into(),
                 ".".into(),
                 "--json".into(),
                 "--limit".into(),
@@ -2735,12 +2785,12 @@ git clone https://example.com/repo.git
                 "pixel".into(),
                 "commit".into(),
                 "--files".into(),
-                "x".into(),
+                PLACEHOLDER_DUMMY.into(),
                 VARIADIC_SENTINEL.into(),
                 "--message".into(),
-                "x".into(),
+                PLACEHOLDER_DUMMY.into(),
                 "--request-id".into(),
-                "x".into(),
+                PLACEHOLDER_DUMMY.into(),
                 ".".into(),
             ])
         );
@@ -2768,15 +2818,19 @@ git clone https://example.com/repo.git
                 "evaluate".into(),
                 "path".into(),
                 "--from".into(),
-                "x".into(),
+                PLACEHOLDER_DUMMY.into(),
                 "--to".into(),
-                "x".into(),
+                PLACEHOLDER_DUMMY.into(),
                 "--json".into(),
             ])
         );
         assert_eq!(
             normalize_rule_command("pixel plan-rollback \"<what broke, in the user's words>\""),
-            Some(vec!["pixel".into(), "plan-rollback".into(), "x".into()])
+            Some(vec![
+                "pixel".into(),
+                "plan-rollback".into(),
+                PLACEHOLDER_DUMMY.into()
+            ])
         );
         assert_eq!(
             normalize_rule_command("pixel impact 'it\"s' --json"),

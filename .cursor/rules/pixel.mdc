@@ -58,9 +58,12 @@ pixel commit --files <f1> --files <f2> -m "msg" --request-id "id"   # only when 
 | `pixel web-search "<term>"` | a term the index cannot know |
 | `pixel review-changes` | structured staged/unstaged diff |
 | `pixel recall …` | past agent sessions — see below |
-| `pixel replay-flow replay\|get "<name>"` / `pixel list-errors …` | saved UI flows / captured errors |
+| `pixel replay-flow replay\|get "<name>"` / `pixel list-errors last` | saved UI flows / captured errors |
 
-History and git ops — use instead of raw `git`:
+History and git ops — use instead of raw `git`. The ops that write
+(`commit`, `commit-and-push`, `new-branch`, `fast-forward`) require
+`--request-id`: any stable string naming the operation, passed unchanged on a
+retry so pixel replays its result instead of running it twice.
 
 | Instead of | Run |
 | --- | --- |
@@ -69,8 +72,8 @@ History and git ops — use instead of raw `git`:
 | "it worked before" | `pixel plan-rollback "<problem>"` — flags the breaking commit; writes nothing without `--apply` |
 | `git status` / `git diff` / `git log` | `pixel repo-state` / `pixel review-changes` / `pixel commit-history` |
 | `git branch -a -vv` | `pixel list-branches` |
-| `git add+commit[+push]` | `pixel commit --files <f1> --files <f2> -m "msg" --request-id "id"` / `pixel commit-and-push …` (push only when authorized) |
-| `git checkout -b` / `git fetch` / `git merge --ff-only` | `pixel new-branch name` / `pixel fetch` / `pixel fast-forward …` |
+| `git add+commit[+push]` | `pixel commit --files <f1> --files <f2> -m "msg" --request-id "id"` / `pixel commit-and-push --files <f1> -m "msg" origin <branch> --request-id "id"` (push only when authorized) |
+| `git checkout -b` / `git fetch` / `git merge --ff-only` | `pixel new-branch <name> --request-id "id"` / `pixel fetch origin` / `pixel fast-forward --expected-head <oid> --target-oid <oid> --request-id "id"` |
 
 ## Hard rules
 

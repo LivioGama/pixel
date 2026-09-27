@@ -1,0 +1,1 @@
+**install:** the agent prompt's REPLACEMENT MAP now spells `pixel new-branch`, `fetch`, `fast-forward` and `commit-and-push` as the CLI parses them (`new-branch` had lost its required `--request-id`), a test dry-runs every table cell as well as every fenced line, and a missing `--request-id` now ends on a `tip:` saying what value to give it.
