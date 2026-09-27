@@ -73,6 +73,13 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   demo in "Measured on whole agent tasks" plays once when it scrolls into
   view. Videos never autoplay under reduced motion: the poster shows the
   finished state and the controls are there.
+- Under the four "How it works" cards, the cold start figure: the time
+  from nothing to a full index of a large repository, beside a track of
+  one cell per 0.2 s of that run (the text index's share lit bright). It
+  restates the "Cold start on a large repository" table of
+  `content/benchmarks.md`: change the figure there first, then the value,
+  the legend and the `$indexCells` split in `layouts/index.html`. Current
+  times only, no before and after.
 - At rest until the first scroll: the scroll-driven effects (the
   `data-reveal` fades, the assembling titles, the counting numbers) prime
   only what is still below the fold when the visitor first scrolls
