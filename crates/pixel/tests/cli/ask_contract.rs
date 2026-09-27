@@ -50,6 +50,11 @@ fn ask_reports_cosine_ranking_coverage_and_honest_human_labels() {
     assert_eq!(hits[0]["lexical_matches"], 2);
     assert_eq!(value["coverage"]["searched_files"], 2);
     assert_eq!(value["coverage"]["degraded"], false);
+    // No index at the root: every chunk embedded, nothing written.
+    assert_eq!(value["coverage"]["vector_cache"], "no_index");
+    assert_eq!(value["coverage"]["embedded_chunks"], 2);
+    assert_eq!(value["coverage"]["cached_chunks"], 0);
+    assert!(!repo.join(".pixel/code-vectors").exists());
     let limited = run(&["--json", "--limit", "1"]);
     assert!(limited.status.success());
     let limited: serde_json::Value = serde_json::from_slice(&limited.stdout).unwrap();
@@ -92,6 +97,33 @@ fn ask_reports_cosine_ranking_coverage_and_honest_human_labels() {
         ),
         "{text}"
     );
+
+    // Once the root carries an index, the second question reads every
+    // chunk vector back from `.pixel/code-vectors` and embeds none.
+    let index = std::process::Command::new(env!("CARGO_BIN_EXE_pixel"))
+        .args(["build-index", "."])
+        .current_dir(&repo)
+        .env("PIXEL_DAEMON_AUTO_START", "0")
+        .env("PIXEL_METRICS", "0")
+        .output()
+        .unwrap();
+    assert!(
+        index.status.success(),
+        "{}",
+        String::from_utf8_lossy(&index.stderr)
+    );
+    let cold: serde_json::Value = serde_json::from_slice(&run(&["--json"]).stdout).unwrap();
+    assert_eq!(cold["coverage"]["vector_cache"], "persisted");
+    assert_eq!(cold["coverage"]["chunks"], 12);
+    assert_eq!(
+        cold["coverage"]["embedded_chunks"], 3,
+        "the ten identical extra files are one text, embedded once"
+    );
+    assert!(repo.join(".pixel/code-vectors/manifest.json").is_file());
+    let warm: serde_json::Value = serde_json::from_slice(&run(&["--json"]).stdout).unwrap();
+    assert_eq!(warm["coverage"]["embedded_chunks"], 0);
+    assert_eq!(warm["coverage"]["cached_chunks"], 12);
+    assert_eq!(warm["hits"], cold["hits"], "the cache changes no ranking");
     std::fs::remove_dir_all(&repo).unwrap();
 }
 

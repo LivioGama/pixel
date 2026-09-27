@@ -245,7 +245,9 @@ enum Command {
     /// Complements `search` (regex) and `resolve` (deterministic phrase→code);
     /// the answer is a ranked list, not a resolved certainty. First use
     /// downloads the embedding model into the shared recall model cache
-    /// (once; subsequent calls are offline).
+    /// (once; subsequent calls are offline). At a root carrying a pixel
+    /// index, chunk vectors persist in .pixel/code-vectors, so a repeated
+    /// question embeds only the code that changed.
     #[command(alias = "ask")]
     SearchMeaning {
         /// The natural-language question.
@@ -7964,10 +7966,16 @@ fn run_ask(
         );
         return Ok(());
     }
-    let sample_note = result.coverage.sample_note();
+    let notes: Vec<String> = [
+        result.coverage.sample_note(),
+        result.coverage.vector_cache_note(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     if hits.is_empty() {
         println!("no matches found for \"{question}\" in {}", root.display());
-        if let Some(note) = &sample_note {
+        for note in &notes {
             println!("note: {note}");
         }
         return Ok(());
@@ -7983,7 +7991,7 @@ fn run_ask(
             h.snippet
         );
     }
-    if let Some(note) = &sample_note {
+    for note in &notes {
         println!("note: {note}");
     }
     Ok(())

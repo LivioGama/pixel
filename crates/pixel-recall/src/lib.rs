@@ -8,6 +8,7 @@
 
 pub mod ask;
 pub mod code_search;
+pub mod code_vectors;
 pub mod embed;
 pub mod export;
 pub mod hybrid;
