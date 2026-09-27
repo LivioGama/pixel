@@ -1,1 +1,0 @@
-**index:** the shard builder's gram map uses each gram's xxh3 hash as its map hash instead of hashing it again with SipHash. `build-index` on a clone of ruby/ruby (11 297 files) goes from 690 ms to 546 ms, with the same shard bytes.
