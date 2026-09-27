@@ -17,7 +17,7 @@ orientation map than `pixel list-areas`. Both losses are reproducible with the
 committed scripts.
 
 WarpGrep, added on 2026-09-27, beats pixel on the first answer (r@1 0.69 vs
-0.47) and draws with it on the top-10 list (0.71 vs 0.69), at 2.5× the latency
+0.47) and edges it on the top-10 list (0.71 vs 0.69), at 2.3× the latency
 and with code sent to a remote model.
 
 ## These three tools are not substitutes
@@ -138,16 +138,16 @@ off unless `WARPGREP_SCRIPT` and `MORPH_API_KEY` are set.
 |---|---|---|---|---|---|---|---|
 | Rust (pixel) | semble | 0.67 | **1.00** | **1.00** | **553 ms** | 7 919 | 9.3 |
 | | pixel `search-meaning` | **0.80** | **1.00** | **1.00** | 844 ms | **2 042** | 8.0 |
-| | WarpGrep | 0.73 | 0.73 | 0.73 | 8 080 ms | 8 527 | 1.0 |
+| | WarpGrep | 0.73 | 0.73 | 0.73 | 7 598 ms | 8 527 | 1.0 |
 | TypeScript (GitNexus) | semble | **0.73** | **1.00** | **1.00** | **2 866 ms** | 10 730 | 9.5 |
 | | pixel `search-meaning` | 0.20 | 0.27 | 0.27 | 5 710 ms | **2 249** | 8.0 |
-| | WarpGrep | 0.53 | 0.60 | 0.60 | 7 541 ms | 7 979 | 1.3 |
+| | WarpGrep | 0.53 | 0.60 | 0.60 | 6 985 ms | 7 979 | 1.3 |
 | Ruby (dd-trace-rb) | semble | 0.53 | **0.87** | **1.00** | **1 268 ms** | 7 788 | 9.9 |
 | | pixel `search-meaning` | 0.40 | 0.80 | 0.80 | 2 374 ms | **2 159** | 8.0 |
-| | WarpGrep | **0.80** | 0.80 | 0.80 | 6 806 ms | 9 720 | 1.3 |
+| | WarpGrep | **0.80** | 0.80 | 0.80 | 5 932 ms | 9 720 | 1.3 |
 | **All** | **semble** | 0.64 | **0.96** | **1.00** | **1 562 ms** | 8 812 | 9.6 |
 | | **pixel `search-meaning`** | 0.47 | 0.69 | 0.69 | 2 976 ms | **2 150** | 8.0 |
-| | **WarpGrep** | **0.69** | 0.71 | 0.71 | 7 476 ms | 8 742 | 1.2 |
+| | **WarpGrep** | **0.69** | 0.71 | 0.71 | 6 838 ms | 8 742 | 1.2 |
 
 `find-code` is in the raw rows (r@10 0.04, as before). Bytes for WarpGrep are
 the code it hands the agent, not its own JSON; for the other two they are the
@@ -156,10 +156,10 @@ names.
 
 Readings:
 
-- **WarpGrep beats pixel on the first answer, and does not on the list.**
-  r@1 0.69 against 0.47: when it answers, it usually answers with the right
-  file. But it names 1.2 files, so r@10 barely moves above r@1; pixel's eight
-  candidates catch it up to 0.69 against 0.71. semble still leads the list by
+- **WarpGrep beats pixel clearly on the first answer, and narrowly on the
+  list.** r@1 0.69 against 0.47: when it answers, it usually answers with the
+  right file. But it names 1.2 files, so r@10 barely moves above r@1; pixel's
+  eight candidates bring it to 0.69 against WarpGrep's 0.71, one case in 45. semble still leads the list by
   a distance (1.00).
 - **By corpus it is two losses and a draw for pixel.** Ruby: 0.80 against
   0.40 at r@1, level at r@10. TypeScript: 0.60 against 0.27 at r@10 — the
@@ -169,10 +169,10 @@ Readings:
   query documenting `cfg/visitors/rust.ts`, returned `cfg/visitors/java.ts`:
   the benchmark strips the file's own name from the query, and a grep-driven
   agent has nothing else to tell siblings apart with.
-- **It is the slowest arm by 2.5×**, 7.5 s p50 against 3.0 s for pixel and
-  1.6 s for semble, spending 3.7 to 4.5 turns and 4.7 to 7.4 tool calls per
-  search. Morph quotes "under 6 seconds"; the Ruby median (6.8 s) is the
-  closest to it.
+- **It is the slowest arm**, 6.8 s p50 against 3.0 s for pixel (2.3×) and
+  1.6 s for semble (4.4×), spending 3.7 to 4.5 turns and 4.7 to 7.4 tool
+  calls per search. Morph quotes "under 6 seconds"; Ruby (5.9 s) meets it,
+  Rust (7.6 s) and TypeScript (7.0 s) do not.
 - **It is not deterministic.** Of the 19 cases that succeeded in both of
   this day's runs, 2 changed verdict (`excavate.rs` and `concept.rs`, found at
   rank 1 in the first run, missed in the second), and the harness scores the

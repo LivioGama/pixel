@@ -14,6 +14,12 @@ corpus (same commits and query sets as the 2026-09-21 run):
 
 reps: semble and pixel 3 timed after 1 discarded warm-up; warpgrep 2 timed, no
 warm-up (a paid remote call with no local cache). Scored on the last rep.
+p50 is statistics.median over the timed reps. The recorded run took
+times[n // 2], which for WarpGrep's two reps is the slower one; its
+warpgrep_ms_p50 fields were recomputed from the kept warpgrep_ms_reps
+(PR #325 review), nothing else changed. warpgrep_bytes of this run are
+JavaScript string lengths (UTF-16 units), equal to UTF-8 bytes for ASCII
+code; the script now counts UTF-8 bytes.
 warpgrep calls: 90, failures 0.
 
 run1-partial/: the first run. 26 of its 45 WarpGrep cases failed with

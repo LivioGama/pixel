@@ -29,8 +29,8 @@ const out = {
   ms: Math.round(performance.now() - t0),
   turns,
   tool_calls: toolCalls,
-  results: (r.contexts ?? []).map(c => ({ file_path: c.file, lines: c.lines ?? null, bytes: c.content.length })),
-  content_bytes: (r.contexts ?? []).reduce((n, c) => n + c.content.length, 0),
+  results: (r.contexts ?? []).map(c => ({ file_path: c.file, lines: c.lines ?? null, bytes: Buffer.byteLength(c.content, 'utf8') })),
+  content_bytes: (r.contexts ?? []).reduce((n, c) => n + Buffer.byteLength(c.content, 'utf8'), 0),
 };
 process.stdout.write(JSON.stringify(out));
 process.exit(r.success ? 0 : 1);

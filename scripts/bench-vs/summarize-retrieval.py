@@ -17,12 +17,12 @@ LABEL = {"semble": "semble", "pixel_search_meaning": "pixel search-meaning",
 def main():
     global ARMS
     per_corpus, allrows = [], []
-    for p in sys.argv[1:]:
-        rows = json.load(open(p))
-        # WarpGrep is an optional arm (bench-retrieval.py docstring); report it
-        # only when every file carries it, so all arms share one denominator.
-        if all("warpgrep_rank" in r for r in rows) and "warpgrep" not in ARMS:
-            ARMS = ARMS + ("warpgrep",)
+    loaded = [(p, json.load(open(p))) for p in sys.argv[1:]]
+    # WarpGrep is an optional arm (bench-retrieval.py docstring); report it only
+    # when every row of every file carries it, so all arms share one denominator.
+    if all("warpgrep_rank" in r for _, rows in loaded for r in rows):
+        ARMS = ARMS + ("warpgrep",)
+    for p, rows in loaded:
         failed = [(r["truth_file"], a) for r in rows for a in ARMS
                   if r.get(f"{a}_failed_reps")]
         if failed:

@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from statistics import median
 from pathlib import Path
 
 TOPK = 10
@@ -108,6 +109,15 @@ def rel(p, repo):
         return p
 
 
+# Each arm runs with the corpus as its working directory, so a relative
+# WARPGREP_SCRIPT or MORPH_SDK_DIR would resolve inside the corpus; pin both to
+# the directory the benchmark was launched from.
+WARPGREP_SCRIPT = (str(Path(os.environ["WARPGREP_SCRIPT"]).resolve())
+                   if os.environ.get("WARPGREP_SCRIPT") else None)
+if os.environ.get("MORPH_SDK_DIR"):
+    os.environ["MORPH_SDK_DIR"] = str(Path(os.environ["MORPH_SDK_DIR"]).resolve())
+
+
 def main():
     repo = Path(sys.argv[1]).resolve()
     cases = json.load(open(sys.argv[2]))
@@ -123,9 +133,9 @@ def main():
             ("pixel_find_code", ["pixel", "find-code", q, "--metrics", "off"],
              findcode_files),
         ]
-        if os.environ.get("WARPGREP_SCRIPT"):
-            arms.append(("warpgrep", ["node", os.environ["WARPGREP_SCRIPT"], q,
-                                      str(repo)], warpgrep_files))
+        if WARPGREP_SCRIPT:
+            arms.append(("warpgrep", ["node", WARPGREP_SCRIPT, q, str(repo)],
+                         warpgrep_files))
         # Rotate which arm goes first. A discarded warm-up does not cancel
         # order effects BETWEEN arms -- page cache, CPU clock and thermal state
         # all carry over from whichever ran before -- so a fixed order would
@@ -156,7 +166,6 @@ def main():
             # never had a chance to answer.
             failed = [r for r in rcs if r != 0]
             files = [] if failed else parse(out, repo)
-            times.sort()
             rank = files.index(truth) + 1 if truth in files else None
             row.update({
                 f"{tool}_failed_reps": len(failed),
@@ -165,7 +174,9 @@ def main():
                 f"{tool}_r1": int(rank == 1) if rank else 0,
                 f"{tool}_r5": int(bool(rank) and rank <= 5),
                 f"{tool}_r10": int(bool(rank) and rank <= TOPK),
-                f"{tool}_ms_p50": round(times[len(times) // 2], 1),
+                # median(), not times[n // 2]: WarpGrep's two reps would
+                # otherwise report the slower run as the median.
+                f"{tool}_ms_p50": round(median(times), 1),
                 f"{tool}_bytes": answer_bytes(tool, out),
                 f"{tool}_returned": len(files),
                 f"{tool}_rc": rc,
