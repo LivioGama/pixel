@@ -261,6 +261,13 @@ agent.
 ## Not measured
 
 - Agent-level task time for any tool.
+- Questions that are not doc comments. Every retrieval query here is the target
+  symbol's own doc comment, so a tool that keeps a symbol and its comment in one
+  chunk is rewarded beyond what an agent's free-form question would give it
+  (measured 2026-09-27 on pixel's symbol chunking, #330: detaching comments from
+  their symbols scores higher on this set and lower on the hand-labelled
+  `ndcg_relevance` qrels). Read the natural-language tables as "finds the code a
+  description was written for", not as general question answering.
 - semble's `find_related`; stacklit's `get_hints`, `get_hot_files`,
   `get_dependencies` and its HTML/Mermaid views.
 - Index build time and footprint for semble and stacklit.
