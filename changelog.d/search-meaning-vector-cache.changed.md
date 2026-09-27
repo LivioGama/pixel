@@ -1,0 +1,1 @@
+**search:** `search-meaning` keeps chunk vectors in `.pixel/code-vectors/` at an indexed repository root, so a repeated question embeds only the chunks whose text changed (yespark-rails 4.7 s → 1.2 s warm) and ranks exactly as before; `coverage` reports `embedded_chunks` and `cached_chunks`. Subtrees, `$HOME` and the daemon fallback write nothing.
