@@ -5158,10 +5158,36 @@ fn stale_prompt_note(stale: &[&str]) -> Option<String> {
     ))
 }
 
+/// What a missing `--request-id` means, for an agent that copied a command
+/// without it: clap's bare "required arguments were not provided" left one
+/// retrying the same line, or moving on as if the branch existed.
+const REQUEST_ID_TIP: &str = "mutation ops need --request-id <id>: any stable string naming this operation, passed unchanged on a retry so pixel replays its result instead of running it twice";
+
+/// `error` with [`REQUEST_ID_TIP`] as its `tip:` line when the argument it
+/// reports missing is `--request-id`; any other error is returned untouched.
+fn with_request_id_tip(mut error: clap::Error) -> clap::Error {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    let lacks_request_id = error.kind() == ErrorKind::MissingRequiredArgument
+        && matches!(
+            error.get(ContextKind::InvalidArg),
+            Some(ContextValue::Strings(missing))
+                if missing.iter().any(|arg| arg.starts_with("--request-id"))
+        );
+    if lacks_request_id {
+        error.insert(
+            ContextKind::Suggested,
+            ContextValue::StyledStrs(vec![REQUEST_ID_TIP.into()]),
+        );
+    }
+    error
+}
+
 fn run() -> Result<(), String> {
     let started = std::time::Instant::now();
     let argv: Vec<String> = std::env::args().collect();
-    let matches = Cli::command().get_matches();
+    let matches = Cli::command()
+        .try_get_matches()
+        .unwrap_or_else(|error| with_request_id_tip(error).exit());
     let command_label = matches.subcommand_name().unwrap_or("unknown").to_string();
     let path = operation_path(&matches).unwrap_or_else(|| PathBuf::from("."));
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
@@ -8129,16 +8155,28 @@ fn validate_cli_syntax(args: &[String]) -> Result<(), String> {
         .stack_size(4 * 1024 * 1024)
         .spawn(move || match Cli::try_parse_from(&args) {
             Ok(_) => variadic_sentinel_misfit(&args).map_or(Ok(()), Err),
-            Err(e) => Err(e
-                .to_string()
-                .lines()
-                .next()
-                .unwrap_or("parse error")
-                .to_string()),
+            Err(e) => Err(parse_error_summary(&e.to_string())),
         })
         .map_err(|e| e.to_string())?
         .join()
         .map_err(|_| "parse thread panicked".to_string())?
+}
+
+/// Clap's error paragraph on one line: the first line alone would say
+/// "the following required arguments were not provided:" without naming
+/// them, and the name is what a doctor report or a failing test needs.
+fn parse_error_summary(rendered: &str) -> String {
+    let summary = rendered
+        .lines()
+        .take_while(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if summary.is_empty() {
+        "parse error".to_string()
+    } else {
+        summary
+    }
 }
 
 /// A parsed argv whose `...` placeholder put its second value
@@ -9090,11 +9128,12 @@ mod tests {
     }
 }
 
-/// Every `pixel …` line in the fenced blocks of the two bundled prompt
-/// assets must parse against this binary's clap definition. `pixel doctor`'s
-/// `rule.parity` only covers the rule text installed on a machine; the
-/// assets themselves are what every wrapped `claude`, every Codex session and every
-/// print-mode sub-agent reads, so their drift has to fail the build.
+/// Every `pixel …` line in the fenced blocks and table cells of the two
+/// bundled prompt assets must parse against this binary's clap definition.
+/// `pixel doctor`'s `rule.parity` only covers the rule text installed on a
+/// machine; the assets themselves are what every wrapped `claude`, every
+/// Codex session and every print-mode sub-agent reads, so their drift has to
+/// fail the build.
 #[cfg(test)]
 mod prompt_asset_parity {
     use pixel_install::doctor::{extract_rule_commands, normalize_rule_command};
@@ -9110,31 +9149,125 @@ mod prompt_asset_parity {
         ),
     ];
 
+    /// Why an asset's command lines would mislead an agent, one entry per
+    /// line, and how many lines were dry-run parsed.
+    ///
+    /// Agents copy these lines word for word, so a line the parser rejects
+    /// is a command that fails in their hands (`pixel new-branch name`
+    /// without `--request-id` exited 2, and the agent's next `pixel commit`
+    /// landed on `main`). A line the normalizer cannot read is a failure
+    /// too, never a silent skip: that is how the table's shapes escaped
+    /// this test. The one exception is an elision, `pixel <command> …`,
+    /// which stands for "see the full form": it passes only when the same
+    /// asset spells that command out in a line that parses.
+    fn asset_failures(name: &str, text: &str) -> (usize, Vec<String>) {
+        let mut checked = 0;
+        let mut failures = Vec::new();
+        let mut parsed_commands = std::collections::BTreeSet::new();
+        let mut elided = Vec::new();
+        for line in extract_rule_commands(text) {
+            let command = line.split_whitespace().nth(1).unwrap_or("").to_string();
+            let Some(argv) = normalize_rule_command(&line) else {
+                if line.ends_with(" …") {
+                    elided.push((line, command));
+                } else {
+                    failures.push(format!(
+                        "{name}: `{line}` has placeholders the normalizer cannot read"
+                    ));
+                }
+                continue;
+            };
+            checked += 1;
+            match super::validate_cli_syntax(&argv) {
+                Ok(()) => {
+                    parsed_commands.insert(command);
+                }
+                Err(error) => failures.push(format!("{name}: `{line}` → {error}")),
+            }
+        }
+        for (line, command) in elided {
+            if !parsed_commands.contains(&command) {
+                failures.push(format!(
+                    "{name}: `{line}` elides its arguments, but no full `pixel {command} …` line in this asset parses"
+                ));
+            }
+        }
+        (checked, failures)
+    }
+
     #[test]
     fn every_documented_command_line_parses_against_the_cli() {
         let mut checked = 0;
         let mut failures = Vec::new();
         for (name, text) in ASSETS {
-            let commands = extract_rule_commands(text);
+            let (n, f) = asset_failures(name, text);
             assert!(
-                !commands.is_empty(),
-                "{name}: no fenced `pixel …` line found — the extractor or the asset changed shape"
+                n > 0,
+                "{name}: no `pixel …` line parsed — the extractor or the asset changed shape"
             );
-            for line in commands {
-                let Some(argv) = normalize_rule_command(&line) else {
-                    continue;
-                };
-                checked += 1;
-                if let Err(error) = super::validate_cli_syntax(&argv) {
-                    failures.push(format!("{name}: `{line}` → {error}"));
-                }
-            }
+            checked += n;
+            failures.extend(f);
         }
         assert!(checked > 0, "nothing was checked");
         assert!(
             failures.is_empty(),
             "documented command lines the CLI rejects:\n{}",
             failures.join("\n")
+        );
+    }
+
+    /// The REPLACEMENT MAP rows that shipped in 0.6.0 must go red, each
+    /// named with clap's reason, or the test above cannot catch their like.
+    #[test]
+    fn the_shipped_replacement_map_rows_are_rejected_by_name() {
+        let text = "\
+| Instead of | Run |
+| --- | --- |
+| `git checkout -b` / `git fetch` / `git merge --ff-only` | `pixel new-branch name` / `pixel fetch` / `pixel fast-forward …` |
+";
+        let (_, failures) = asset_failures("sample.md", text);
+        assert_eq!(failures.len(), 3, "{failures:#?}");
+        assert!(
+            failures[0].starts_with("sample.md: `pixel new-branch name` → ")
+                && failures[0].contains("--request-id"),
+            "{}",
+            failures[0]
+        );
+        assert!(
+            failures[1].starts_with("sample.md: `pixel fetch` → ")
+                && failures[1].contains("<REMOTE>"),
+            "{}",
+            failures[1]
+        );
+        assert_eq!(
+            failures[2],
+            "sample.md: `pixel fast-forward …` elides its arguments, but no full `pixel fast-forward …` line in this asset parses"
+        );
+    }
+
+    /// A placeholder for an integer argument is a correct line: the agent
+    /// substitutes a real id, so the dummy must not be what fails it.
+    #[test]
+    fn a_placeholder_for_an_integer_argument_parses() {
+        let text = "| a | `pixel list-errors show <id>` / `pixel list-errors since <cursor>` |\n";
+        assert_eq!(asset_failures("sample.md", text), (2, vec![]));
+    }
+
+    /// An elision is accepted once the asset spells the command out in a
+    /// line that parses, and a line with an unreadable placeholder is
+    /// reported, not skipped.
+    #[test]
+    fn an_elision_needs_a_full_form_and_an_unreadable_line_is_reported() {
+        let text = "\
+| a | `pixel recall …` |
+| b | `pixel recall search \"token\" --since 30d` |
+| c | `pixel impact a…b` |
+";
+        let (checked, failures) = asset_failures("sample.md", text);
+        assert_eq!(checked, 1);
+        assert_eq!(
+            failures,
+            vec!["sample.md: `pixel impact a…b` has placeholders the normalizer cannot read"]
         );
     }
 
@@ -9235,6 +9368,41 @@ mod renamed_command_tests {
             name(&["pixel", "hook", "session-start"]).as_deref(),
             Some("run-hook")
         );
+    }
+
+    /// A mutation op run without `--request-id` names the flag and says
+    /// what value to give it; an error about another argument, even one of
+    /// a mutation op, carries no such tip.
+    #[test]
+    fn a_missing_request_id_carries_the_tip_and_nothing_else_does() {
+        let rendered = |words: &'static [&'static str]| {
+            on_big_stack(move || {
+                let error = Cli::command().try_get_matches_from(words).unwrap_err();
+                super::with_request_id_tip(error).render().to_string()
+            })
+        };
+        let tip = format!("tip: {}", super::REQUEST_ID_TIP);
+        for words in [
+            &["pixel", "new-branch", "feat/x"][..],
+            &["pixel", "commit", "--files", "a", "-m", "msg"][..],
+            &[
+                "pixel",
+                "fast-forward",
+                "--expected-head",
+                "a",
+                "--target-oid",
+                "b",
+            ][..],
+        ] {
+            let text = rendered(words);
+            assert!(text.contains("--request-id <REQUEST_ID>"), "{text}");
+            assert!(text.contains(&tip), "{words:?}: {text}");
+        }
+        let fetch = rendered(&["pixel", "fetch"]);
+        assert!(fetch.contains("<REMOTE>"), "{fetch}");
+        assert!(!fetch.contains("tip:"), "{fetch}");
+        let unknown = rendered(&["pixel", "new-branch", "x", "--request-id", "r", "--nope"]);
+        assert!(!unknown.contains(super::REQUEST_ID_TIP), "{unknown}");
     }
 
     #[test]
