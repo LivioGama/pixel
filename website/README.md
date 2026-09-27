@@ -308,12 +308,14 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   the CLI version linking to its release, then three columns (Product,
   Guides, Community) and the legal lines, which end on the links to the two
   legal pages.
-- `content/about.md`: the `/about/` page (why Pixel exists, who makes it,
-  how the project runs, the contact channels; no form, since the site
+- `content/about.md`: the `/about/` page (a trust line up front, the
+  problem that started Pixel, what it does with the one figure a shortcode
+  prints, the two co-founders as equals, why to trust it on your code, a
+  first command to run, the contact channels; no form, since the site
   collects nothing). Its people come from `data/team.toml` through the
   `team` shortcode, and the home's JSON-LD reads the same file for its
   `Person` nodes, the `WebSite`'s `publisher` and the source code's
-  `creator` and `author`: a name is personal data, so an entry is added,
+  `creator` (every co-founder) and `author`: a name is personal data, so an entry is added,
   changed or kept only with that person's agreement, and there are no
   photos. Linked from the footer's Community column, the legal pages and
   `static/llms.txt`.
