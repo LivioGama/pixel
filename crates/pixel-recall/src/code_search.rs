@@ -2,7 +2,7 @@
 //!
 //! `ask(root, query, k, max_files)` answers open-ended questions like "how is
 //! authentication handled?" by embedding the question and every candidate code
-//! chunk, then fusing semantic ranks with a BM25 lexical rank (best chunk per
+//! chunk (a file cut along its symbols, [`crate::code_chunks`]), then fusing semantic ranks with a BM25 lexical rank (best chunk per
 //! file); tests, configuration, data and docs rank below code unless the
 //! question names them ([`FileKind`]).
 //! Reuses this crate's embedding seam
@@ -24,7 +24,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::code_vectors::{ChunkKey, Namespace, Store};
-use crate::embed::{EmbedKind, chunk_offsets};
+use rayon::prelude::*;
+
+use crate::code_chunks::code_chunks;
+use crate::embed::EmbedKind;
 
 /// One ranked hit: a file matched for the question, with a representative
 /// snippet (head of the best-matching chunk), cosine score and RRF ordering key.
@@ -71,9 +74,13 @@ pub const DEFAULT_LIMIT: usize = 10;
 /// it, with a line below, when the chunking or the text sent to the model for
 /// a chunk changes, and no vector of the old chunking is served again.
 ///
-/// History: 1 = [`chunk_offsets`] windows (`embed::CHUNK_MAX` bytes,
-/// `embed::CHUNK_OVERLAP` of overlap), each embedded verbatim.
-pub const CHUNKER_VERSION: u32 = 1;
+/// History: 1 = [`crate::embed::chunk_offsets`] windows (`embed::CHUNK_MAX`
+/// bytes, `embed::CHUNK_OVERLAP` of overlap), each embedded verbatim.
+/// 2 = symbol chunks ([`code_chunks`]): a file cut along its tree-sitter
+/// symbols with their doc comments, pieces packed up to
+/// [`crate::code_chunks::PACK_MAX`] bytes, windows only for unparsed files
+/// and oversize pieces.
+pub const CHUNKER_VERSION: u32 = 2;
 
 /// Whether a question's chunk vectors persist in `.pixel/code-vectors/`, and
 /// when they do not, why.
@@ -150,7 +157,8 @@ pub struct AskCoverage {
     pub result_limit_reached: bool,
     pub scope: &'static str,
     pub degraded: bool,
-    /// Chunks ranked, every searched file's windows.
+    /// Chunks ranked: every searched file's symbol chunks
+    /// ([`crate::code_chunks`]).
     pub chunks: usize,
     /// Chunks the model embedded for this question, each distinct text once.
     pub embedded_chunks: usize,
@@ -658,53 +666,27 @@ fn ask_collected(
     let mut file_paths: Vec<String> = Vec::new();
     // Every chunk's term counts, with the index of its file in `file_paths`.
     let mut lexical_chunks: Vec<(usize, pixel_rank::Bm25Doc)> = Vec::new();
-    for file in &files {
-        let Ok(bytes) = std::fs::read(file) else {
-            coverage.skipped_files += 1;
-            continue;
-        };
-        if bytes.len() > MAX_FILE_BYTES || bytes.contains(&0) {
-            coverage.skipped_files += 1;
-            continue;
-        }
-        let Ok(text) = String::from_utf8(bytes) else {
-            coverage.skipped_files += 1;
-            continue;
-        };
-        if text.trim().is_empty() {
-            coverage.empty_files += 1;
-            continue;
-        }
-        coverage.searched_files += 1;
-        let path = file
-            .strip_prefix(root)
-            .unwrap_or(file)
-            .to_string_lossy()
-            .into_owned();
-        // Filenames are evidence too, but directory names and language extensions
-        // must not add shared noise or change ranks when the repository moves.
-        // A filename can have compound extensions (`types.d.ts`): only the
-        // basename before its first dot counts, so suffix components cannot
-        // become lexical evidence.
-        let stem = file.file_name().map_or_else(String::new, |name| {
-            let basename = name.to_string_lossy();
-            basename.split('.').next().unwrap_or_default().to_string()
-        });
-        let (stem_freqs, stem_len) = term_counts(&stem, &terms);
-        let file_index = file_paths.len();
-        for (start, end) in chunk_offsets(&text) {
-            let chunk = text[start..end].to_string();
-            // Every chunk carries the filename stem's tokens, as if the name
-            // were written once at its top.
-            let (mut freqs, len) = term_counts(lexical_chunk(&text, start, end), &terms);
-            for (freq, stem_freq) in freqs.iter_mut().zip(&stem_freqs) {
-                *freq += stem_freq;
+    // Reading and parsing dominate a warm question: one file per task, the
+    // results folded back in the files' order.
+    let read: Vec<FileRead> = files
+        .par_iter()
+        .map(|file| read_file(root, file, &terms))
+        .collect();
+    for file in read {
+        let (path, chunks) = match file {
+            FileRead::Skipped => {
+                coverage.skipped_files += 1;
+                continue;
             }
-            let doc = pixel_rank::Bm25Doc {
-                path: String::new(),
-                term_freqs: freqs,
-                len: len + stem_len,
-            };
+            FileRead::Empty => {
+                coverage.empty_files += 1;
+                continue;
+            }
+            FileRead::Searched { path, chunks } => (path, chunks),
+        };
+        coverage.searched_files += 1;
+        let file_index = file_paths.len();
+        for (chunk, doc) in chunks {
             lexical_chunks.push((file_index, doc));
             corpus.push(CorpusEntry {
                 path: path.clone(),
@@ -816,6 +798,72 @@ fn chunk_vectors(
     Ok(vectors)
 }
 
+/// One file of a question's universe, read and cut.
+enum FileRead {
+    /// Unreadable, over [`MAX_FILE_BYTES`], binary or not UTF-8.
+    Skipped,
+    /// Blank.
+    Empty,
+    /// Its repository-relative path and its chunks ([`code_chunks`]), each
+    /// with its BM25 document over the question's terms.
+    Searched {
+        path: String,
+        chunks: Vec<(String, pixel_rank::Bm25Doc)>,
+    },
+}
+
+/// Read `file` (below `root`) and cut it into chunks, each counted over the
+/// sorted query `terms` for the lexical channel. The embedded text and the
+/// lexical document of a chunk are the same bytes, so the snippet shown for
+/// a file is a chunk the lexical channel scored too.
+fn read_file(root: &Path, file: &Path, terms: &[String]) -> FileRead {
+    let Ok(bytes) = std::fs::read(file) else {
+        return FileRead::Skipped;
+    };
+    if bytes.len() > MAX_FILE_BYTES || bytes.contains(&0) {
+        return FileRead::Skipped;
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return FileRead::Skipped;
+    };
+    if text.trim().is_empty() {
+        return FileRead::Empty;
+    }
+    let path = file
+        .strip_prefix(root)
+        .unwrap_or(file)
+        .to_string_lossy()
+        .into_owned();
+    // Filenames are evidence too, but directory names and language extensions
+    // must not add shared noise or change ranks when the repository moves.
+    // A filename can have compound extensions (`types.d.ts`): only the
+    // basename before its first dot counts, so suffix components cannot
+    // become lexical evidence.
+    let stem = file.file_name().map_or_else(String::new, |name| {
+        let basename = name.to_string_lossy();
+        basename.split('.').next().unwrap_or_default().to_string()
+    });
+    let (stem_freqs, stem_len) = term_counts(&stem, terms);
+    let chunks = code_chunks(&path, &text)
+        .into_iter()
+        .map(|(start, end)| {
+            // Every chunk carries the filename stem's tokens, as if the name
+            // were written once at its top.
+            let (mut freqs, len) = term_counts(lexical_chunk(&text, start, end), terms);
+            for (freq, stem_freq) in freqs.iter_mut().zip(&stem_freqs) {
+                *freq += stem_freq;
+            }
+            let doc = pixel_rank::Bm25Doc {
+                path: String::new(),
+                term_freqs: freqs,
+                len: len + stem_len,
+            };
+            (text[start..end].to_string(), doc)
+        })
+        .collect();
+    FileRead::Searched { path, chunks }
+}
+
 fn validate_vector(vector: &[f32], dims: usize) -> Result<(), String> {
     let norm: f64 = vector.iter().map(|x| f64::from(*x).powi(2)).sum();
     if dims == 0 || vector.len() != dims || !norm.is_finite() || norm <= 0.0 {
@@ -827,7 +875,9 @@ fn validate_vector(vector: &[f32], dims: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// Exclude identifier fragments created only by fixed byte-window boundaries.
+/// Exclude identifier fragments created only by fixed byte-window boundaries
+/// (the windows of an unparsed file or an oversize piece; symbol chunks end
+/// on line boundaries).
 fn lexical_chunk(text: &str, start: usize, end: usize) -> &str {
     let is_ident = |character: char| character.is_alphanumeric() || character == '_';
     let chunk = &text[start..end];
@@ -2504,6 +2554,130 @@ mod tests {
         text
     }
 
+    /// A function `bytes` long, padded with comment lines.
+    fn padded_function(name: &str, bytes: usize) -> String {
+        let mut text = format!("fn {name}() {{\n");
+        while text.len() + 40 < bytes {
+            text.push_str("    // ................................\n");
+        }
+        text.push_str("}\n");
+        text
+    }
+
+    /// The lexical channel and the embedder read the same symbol chunks:
+    /// code written between two functions (a macro call) is found, and a
+    /// minified bundle tree-sitter is not pointed at is still searched,
+    /// through its windows.
+    #[test]
+    fn text_between_symbols_and_unparsed_files_stay_searchable() {
+        let big = padded_function("first", 1_400);
+        let between = format!("{big}register_tollbooth!();\n{big}");
+        let bundle = format!("{}tollgate();", "var a=1;".repeat(9_000));
+        let hits = ask_tree(
+            &[
+                ("src/between.rs", &between),
+                ("src/other.rs", "fn unrelated() {}"),
+                ("dist_js/app.js", &bundle),
+            ],
+            "tollbooth tollgate",
+        );
+        assert_eq!(found(&hits, "src/between.rs").lexical_matches, 1);
+        assert_eq!(found(&hits, "dist_js/app.js").lexical_matches, 1);
+        assert_eq!(found(&hits, "src/other.rs").lexical_matches, 0);
+    }
+
+    /// A file of exactly [`MAX_FILE_BYTES`] is searched, one byte more is
+    /// skipped and counted.
+    #[test]
+    fn a_file_at_the_size_cap_is_searched_and_one_byte_more_skipped() {
+        let at_cap = format!("toll {}", "x".repeat(MAX_FILE_BYTES - 5));
+        let over = format!("{at_cap}x");
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "at_cap.md", &at_cap);
+        write(dir.path(), "over.md", &over);
+        let (files, coverage) = collect_files(dir.path(), None);
+        let result = ask_collected(
+            dir.path(),
+            "toll",
+            10,
+            files,
+            coverage,
+            &mut FixtureEmbedder { fail: false },
+            None,
+        )
+        .unwrap();
+        assert_eq!(at_cap.len(), MAX_FILE_BYTES);
+        assert_eq!(result.coverage.searched_files, 1);
+        assert_eq!(result.coverage.skipped_files, 1);
+        assert_eq!(result.hits[0].path, "at_cap.md");
+    }
+
+    /// The snippet is the best chunk's head, and the best chunk is the
+    /// function with its doc comment, not a window opening on whatever came
+    /// before it in the file.
+    #[test]
+    fn snippet_should_open_on_the_matching_function_and_its_doc_comment() {
+        let dir = indexed_tree();
+        let root = dir.path();
+        let text = format!(
+            "{}/// Issues the monthly invoice.\nfn issue() {{\n    send_invoice();\n}}\n",
+            padded_function("unrelated_setup", 1_200)
+        );
+        write(root, "src/billing.rs", &text);
+        let (result, _) = ask_counting(
+            root,
+            "monthly invoice",
+            VectorCache::Disabled,
+            "m",
+            invoice_vector,
+        );
+        assert_eq!(
+            result.hits[0].snippet,
+            "/// Issues the monthly invoice. fn issue() { send_invoice(); }"
+        );
+    }
+
+    /// Vectors of the window era (chunker 1) are never served once the
+    /// chunker changed, even for a chunk whose text is the same: the first
+    /// question after the upgrade embeds every chunk again.
+    #[test]
+    fn vectors_of_the_window_chunker_should_never_be_served() {
+        let dir = indexed_tree();
+        let root = dir.path();
+        write(root, "src/audit.rs", "fn invoice_audit() {}\n");
+        let text = "fn invoice_audit() {}\n";
+        let model = "m";
+        let revision = crate::embed::embedder_revision(model);
+        let windows = Namespace::new(model, revision, 1);
+        let key = windows.key(text);
+        let vectors = HashMap::from([(key, invoice_vector(text))]);
+        Store::at(&store_dir(root))
+            .save(&windows, 2, &[key], &vectors, 0, false)
+            .unwrap();
+        assert_ne!(
+            CHUNKER_VERSION, 1,
+            "the symbol chunker has its own namespace"
+        );
+
+        let (result, embedded) = ask_counting(
+            root,
+            "invoice",
+            vector_cache_for(root, None),
+            model,
+            invoice_vector,
+        );
+        assert_eq!(embedded, 1);
+        assert_eq!(result.coverage.cached_chunks, 0);
+        let (_, warm) = ask_counting(
+            root,
+            "invoice",
+            vector_cache_for(root, None),
+            model,
+            invoice_vector,
+        );
+        assert_eq!(warm, 0, "the new chunker's vectors are served");
+    }
+
     /// The point of the store: an unchanged tree asked twice pays the model
     /// once. The warm question embeds nothing, serves every chunk from
     /// `.pixel/code-vectors`, and answers exactly as the cold one did.
@@ -2594,9 +2768,9 @@ mod tests {
             (before.len() as u64, modified),
             "the edit is invisible to size and mtime"
         );
-        let changed = chunk_offsets(&before)
+        let changed = code_chunks("src/audit.rs", &before)
             .into_iter()
-            .zip(chunk_offsets(&after))
+            .zip(code_chunks("src/audit.rs", &after))
             .filter(|((b0, b1), (a0, a1))| before[*b0..*b1] != after[*a0..*a1])
             .count();
         assert_eq!(changed, 1, "only the last window holds the marker");
