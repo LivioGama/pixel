@@ -123,7 +123,7 @@ Three runs per cell, so these are directions, not decimals. The agents of that r
 
 ## Where a specialist wins
 
-- **Natural-language search:** semble finds the right file in its top 10 for 100% of 45 queries, Pixel for 69%.
+- **Natural-language search, the top 10:** on 45 plain-English queries, semble has the right file in its top 10 for 100%, Pixel 0.6.0 for 96%. Pixel puts it first more often: 87%, against 64% for semble and 69% for WarpGrep, Morph's search subagent, whose top 10 reaches 71%. Average answer time 0.7 s for Pixel, 1.6 s for semble, 6.8 s for WarpGrep. The queries are each repository's own doc comments, which favours Pixel's chunks, cut along symbols with their comments. WarpGrep's figures are from its one run on the same queries, with Pixel 0.5.2; it is paid per search and sends the lines it reads to Morph's API. [Method and every row](https://github.com/LivioGama/pixel/blob/main/docs/bench/vs-landscape.md#natural-language-retrieval--pixel-060-four-arms-45-queries)
 - **Compact repository map:** stacklit covers more directories for fewer tokens on 3 of 4 repositories.
 - **Context cost:** Pixel is 4.7× lighter than GitNexus, but heavier than semble (~980 tokens) and stacklit (~420).
 

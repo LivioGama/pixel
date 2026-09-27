@@ -21,10 +21,10 @@ OUT = ROOT / "docs/bench/charts"
 THEME = {
     "light": {"surface": "#fcfcfb", "ink": "#0b0b0b", "ink2": "#52514e",
               "muted": "#898781", "grid": "#e1e0d9", "axis": "#c3c2b7",
-              "s1": "#2a78d6", "s2": "#eb6834", "s3": "#1baf7a"},
+              "s1": "#2a78d6", "s2": "#eb6834", "s3": "#1baf7a", "s4": "#8a5cd1"},
     "dark": {"surface": "#1a1a19", "ink": "#ffffff", "ink2": "#c3c2b7",
              "muted": "#898781", "grid": "#2c2c2a", "axis": "#383835",
-             "s1": "#3987e5", "s2": "#d95926", "s3": "#199e70"},
+             "s1": "#3987e5", "s2": "#d95926", "s3": "#199e70", "s4": "#9a70e0"},
 }
 # Single quotes inside the stack: this string is interpolated into a
 # double-quoted XML attribute, and a double quote there ends it early.
@@ -205,13 +205,19 @@ def main():
     px = [round(mean(imp[k], "pixel_recall_d1"), 2) for _, k in order]
     gn = [round(mean(imp[k], "gitnexus_recall_d1"), 2) for _, k in order]
 
-    ret = {Path(f).stem.replace("retrieval-", ""): load(f"docs/bench/vs-tools/raw/{f}")
-           for f in ("retrieval-rust.json", "retrieval-typescript.json",
-                     "retrieval-ruby-ddtrace.json")}
+    # semble and pixel from the pixel 0.6.0 run; WarpGrep from its own run of
+    # the same queries on the same corpus commits (not re-run: paid per call).
+    rfiles = ("retrieval-rust.json", "retrieval-typescript.json",
+              "retrieval-ruby-ddtrace.json")
+    ret = {Path(f).stem.replace("retrieval-", ""): load(f"docs/bench/vs-tools/raw/v0.6.0/{f}")
+           for f in rfiles}
+    wgr = {Path(f).stem.replace("retrieval-", ""): load(f"docs/bench/vs-tools/raw/warpgrep/{f}")
+           for f in rfiles}
     rorder = [("Rust", "rust"), ("TypeScript", "typescript"), ("Ruby", "ruby-ddtrace")]
     sem = [round(mean(ret[k], "semble_r10"), 2) for _, k in rorder]
     sme = [round(mean(ret[k], "pixel_search_meaning_r10"), 2) for _, k in rorder]
     fic = [round(mean(ret[k], "pixel_find_code_r10"), 2) for _, k in rorder]
+    wgp = [round(mean(wgr[k], "warpgrep_r10"), 2) for _, k in rorder]
 
     maps = {r: load(f"docs/bench/vs-tools/raw/map-{r}.json")
             for r in ("pixel", "alonetone", "dd-trace-rb", "GitNexus")}
@@ -234,10 +240,10 @@ def main():
         "retrieval-recall": lambda t: bar_grouped(
             t, [r[0] for r in rorder],
             [("semble", "s1", sem), ("pixel search-meaning", "s2", sme),
-             ("pixel find-code", "s3", fic)],
+             ("pixel find-code", "s3", fic), ("WarpGrep", "s4", wgp)],
             "Natural-language search: right file in the top 10",
             "recall@10 on 45 queries built from each repo's own doc comments — higher is better",
-            "semble leads overall; Rust is a tie. find-code is a phrase index, reported rather than dropped."),
+            "pixel 0.6.0; WarpGrep from its 2026-09-27 run. semble leads on TypeScript and Ruby, ties on Rust. find-code: a phrase index."),
         "map-cost-coverage": lambda t: scatter(
             t,
             [("stacklit derive", "s1",

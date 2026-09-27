@@ -48,7 +48,7 @@ answer = [
 [[objection]]
 question = "Pixel or semble?"
 answer = [
-  '''Both, if you search in plain English a lot. semble puts the right file in its top 10 for 100% of 45 natural-language queries, Pixel for 69%. Pixel adds the call graph, blast radius, Git history and guarded Git writes. Together they cost about 5,100 tokens of context per turn. <a class="link" href="{bench}#where-a-specialist-wins">Where a specialist wins</a>''',
+  '''Both, if you search in plain English a lot. On 45 natural-language queries, semble has the right file in its top 10 for 100%, Pixel 0.6.0 for 96%; Pixel puts it first more often, 87% against 64%. Pixel adds the call graph, blast radius, Git history and guarded Git writes. Together they cost about 5,100 tokens of context per turn. <a class="link" href="{bench}#where-a-specialist-wins">Where a specialist wins</a>''',
 ]
 
 [[objection]]
