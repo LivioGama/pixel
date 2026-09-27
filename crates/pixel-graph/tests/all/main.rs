@@ -5,6 +5,7 @@ mod changes_suggested_tests;
 mod changes_uncovered;
 mod concept_engine1_audit;
 mod concept_tests;
+mod crux_lines;
 mod import_resolution;
 mod resolve_receiver_shadowing;
 mod ruby_bare_calls;
