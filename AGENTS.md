@@ -1,10 +1,13 @@
 # Project Rules
 
-Build, gates, PR format and the definition of done live in [CONTRIBUTING.md](CONTRIBUTING.md). Read it before the first edit; the loop below is the per-turn addendum to it.
+**Before the first edit of any kind, read [CONTRIBUTING.md](CONTRIBUTING.md).** It defines the build, gates, PR format and definition of done; the loop below is the per-turn addendum.
 
 ## Mutation Testing Loop
 
-Mutation testing runs in CI only: the `Mutants` workflow runs `cargo mutants --in-diff` against the PR's base and fails the pull request on any surviving mutant. Do not run `cargo mutants` locally on your own initiative; it holds the tree (`--in-place`) and a laptop for up to hours, which is what the workflow's runners are for. The local loop is: write the code in the shapes `.agents/rules/mutation-gate.md` describes, pass the fast gates (`cargo fmt`, `cargo test`, `cargo clippy`), push, open the PR, then read the `MISSED`/`TIMEOUT` lines: the `Mutants in diff` job summary lists every shard's survivors, and `gh run view --log` on a `Mutants shard k/n` job or the annotations give the detail. A local `cargo mutants … -F '<fn>'` on one or two functions, bounded to a few minutes, is acceptable only when explicitly asked for.
+- Mutation testing runs in CI only: the `Mutants` workflow runs `cargo mutants --in-diff` against the PR's base and fails the pull request on any surviving mutant.
+- Do not run `cargo mutants` locally on your own initiative; it holds the tree (`--in-place`) and a laptop for up to hours, which is what the workflow's runners are for.
+- The local loop is: write the code in the shapes `.agents/rules/mutation-gate.md` describes, pass the fast gates (`cargo fmt`, `cargo test`, `cargo clippy`), push, open the PR, then read the `MISSED`/`TIMEOUT` lines: the `Mutants in diff` job summary lists every shard's survivors, and `gh run view --log` on a `Mutants shard k/n` job or the annotations give the detail.
+- A local `cargo mutants … -F '<fn>'` on one or two functions, bounded to a few minutes, is acceptable only when explicitly asked for.
 
 Two habits keep that loop from being the bottleneck (from 2026-09-21 to 2026-09-26, 42 of 121 `Mutants` runs failed, each one a push-and-wait round trip of 5 to 10 minutes):
 
@@ -63,7 +66,7 @@ a rule disagree, the rule wins (and the `Cargo.toml` lint table wins over both).
 
 ## Reinstall and Reconfig After Each Implementation Turn
 
-After finishing any implementation turn in this repo (code edit + verify cycle):
+After every implementation turn—including tests, website behavior/assets, install/config, and other non-Rust code—complete this checklist before declaring done. Only the explicit skip cases below apply:
 
 1. **Rebuild and reinstall the pixel binary** so the installed CLI matches the working tree:
    ```bash
@@ -74,6 +77,8 @@ After finishing any implementation turn in this repo (code edit + verify cycle):
    - **Track A:** `pixel build-index --history .` — rebuild the facts/history index.
    - **Track B:** `pixel install` — reinstall hooks and managed blocks. Where `build-agent-config` is installed (it regenerates per-tool rule directories from `~/.agent-config`), run it first: `build-agent-config && pixel install`.
 3. **Run `pixel doctor . --fix --fail-on yellow`** and confirm it exits 0: `--fix` runs each repair command once and re-runs the checks (explicitly report each repair that did not end `fixed`, and each check left with a `fix:` line it cannot run by itself).
+
+Do not report the turn complete without evidence that self-update succeeded, both parallel tracks completed, and doctor exited 0. If a step cannot run, report the turn as incomplete and name the blocker rather than silently skipping it.
 
 Both commands target the account's login shell (from the user database, not `$SHELL`, which an agent's command tool overrides: Claude Code's runs under `/bin/zsh` on a fish machine): `install` removes the retired `claude()` wrapper from that shell's profile and `doctor` reports one that remains. If `doctor` still reports `install.legacy-wrappers` for the wrong profile, pass the shell a human launches `claude` from to both commands: `--shell fish`.
 
