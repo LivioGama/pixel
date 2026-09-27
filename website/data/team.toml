@@ -12,16 +12,18 @@
 #              list reads "Name: role.")
 #   publisher  true for the one person who publishes the site (the legal pages
 #              name them); the JSON-LD's WebSite `publisher`
-#   creator    true for who created the project; the JSON-LD's `creator`
+#   creator    true for each co-founder of the project; the JSON-LD's
+#              `creator` lists every one of them
 
 [[person]]
 name = "Navid Emad"
 github = "navidemad"
-role = "main contributor, and publisher of this site"
+role = "co-founder, main contributor, and publisher of this site"
+creator = true
 publisher = true
 
 [[person]]
 name = "Livio Gama"
 github = "LivioGama"
-role = "created Pixel, from the idea to its structure, and remains a major contributor"
+role = "co-founder, who started Pixel, from the idea to its structure, and remains a major contributor"
 creator = true

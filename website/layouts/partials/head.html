@@ -53,18 +53,18 @@
 {{ $home := .Permalink }}
 {{ $app := printf "%s#software" $home }}
 {{ $faq := slice }}
-{{/* The people of data/team.toml (the /about/ list): the site's publisher, the project's creator and the code's authors, each by @id. */}}
+{{/* The people of data/team.toml (the /about/ list): the site's publisher, the project's co-founders and the code's authors, each by @id. */}}
 {{ $people := slice }}
 {{ $authors := slice }}
 {{ $publisher := dict }}
-{{ $creator := dict }}
+{{ $creators := slice }}
 {{ range hugo.Data.team.person }}
   {{ $id := printf "%s#person-%s" $home (lower .github) }}
   {{ $gh := printf "https://github.com/%s" .github }}
   {{ $people = $people | append (dict "@type" "Person" "@id" $id "name" .name "url" $gh "sameAs" (slice $gh)) }}
   {{ $authors = $authors | append (dict "@id" $id) }}
   {{ if .publisher }}{{ $publisher = dict "@id" $id }}{{ end }}
-  {{ if .creator }}{{ $creator = dict "@id" $id }}{{ end }}
+  {{ if .creator }}{{ $creators = $creators | append (dict "@id" $id) }}{{ end }}
 {{ end }}
 {{ range partial "objections.html" (dict "abs" true) }}
   {{ $faq = $faq | append (dict "@type" "Question" "name" .question "acceptedAnswer" (dict "@type" "Answer" "text" .answer)) }}
@@ -110,7 +110,7 @@
     "codeRepository" site.Params.github_url
     "programmingLanguage" "Rust"
     "license" "https://opensource.org/licenses/MIT"
-    "creator" $creator
+    "creator" $creators
     "author" $authors
     "targetProduct" (dict "@id" $app))
   (dict
