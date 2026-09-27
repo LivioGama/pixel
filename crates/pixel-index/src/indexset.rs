@@ -322,7 +322,7 @@ where
         .iter()
         .map(|rel| format!("{commit_oid}:{rel}"))
         .collect();
-    let _ = read_batch(&specs, &mut |i, object| {
+    let batch = read_batch(&specs, &mut |i, object| {
         outcomes[i] = Some(match object {
             BatchObject::Blob(content) => extract_content(rels[i], content, extractor),
             BatchObject::Oversized(_) => BlobExtraction::Skipped,
@@ -330,6 +330,12 @@ where
             BatchObject::Missing => BlobExtraction::Unreadable,
         });
     });
+    if let Err(e) = batch {
+        let unanswered = outcomes.iter().filter(|outcome| outcome.is_none()).count();
+        eprintln!(
+            "pixel: warning: git cat-file --batch failed at {commit_oid} ({e}); reading the {unanswered} file(s) it did not answer one by one"
+        );
+    }
     outcomes
         .into_iter()
         .zip(rels)
@@ -1201,7 +1207,8 @@ mod tests {
 
     /// Reading through `cat-file --batch` keeps every blob under its own
     /// path across several batches, indexes a path the batch protocol
-    /// cannot carry (a newline in its name) through the per-file read,
+    /// cannot carry (a newline in its name, a trailing carriage return)
+    /// through the per-file read,
     /// skips an over-cap blob and counts a path the commit lacks as
     /// unreadable.
     #[test]
@@ -1220,6 +1227,12 @@ mod tests {
         contents.push((
             "odd\nname.rs".to_string(),
             "fn newline_needle() {}\n".to_string(),
+        ));
+        // Git strips a trailing carriage return from a batch request, so
+        // `f000.rs\r` must not be answered with `f000.rs`'s content.
+        contents.push((
+            "f000.rs\r".to_string(),
+            "fn carriage_return_needle() {}\n".to_string(),
         ));
         for (rel, text) in &contents {
             std::fs::write(dir.join(rel), text).unwrap();

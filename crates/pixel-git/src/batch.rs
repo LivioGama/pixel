@@ -12,9 +12,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::error::GitError;
@@ -41,7 +39,7 @@ pub enum BatchObject<'a> {
 #[derive(Debug, PartialEq, Eq)]
 enum Header {
     /// `<oid> <type> <size>`; `blob` is whether the type is `blob`.
-    Found { blob: bool, size: u64 },
+    Found { oid: String, blob: bool, size: u64 },
     /// `<spec> missing`, `<spec> ambiguous`, or anything unparseable.
     Missing,
 }
@@ -59,6 +57,7 @@ fn parse_header(line: &[u8]) -> Header {
     let is_oid = !oid.is_empty() && oid.bytes().all(|b| b.is_ascii_hexdigit());
     match size.parse::<u64>() {
         Ok(size) if is_oid => Header::Found {
+            oid: oid.to_string(),
             blob: kind == "blob",
             size,
         },
@@ -66,9 +65,152 @@ fn parse_header(line: &[u8]) -> Header {
     }
 }
 
-/// Whether `spec` can go on one line of `cat-file --batch`'s input.
+/// Whether `spec` can go on one line of `cat-file --batch`'s input. Git
+/// strips a carriage return before the newline, so a spec ending in one
+/// would be answered for the name without it: another file's content.
 fn sendable(spec: &str) -> bool {
-    !spec.is_empty() && !spec.contains('\n')
+    !spec.is_empty() && !spec.contains('\n') && !spec.ends_with('\r')
+}
+
+/// Split `specs` into the indexes that can be sent and the request bytes
+/// for them, one spec per line, answering every other index
+/// [`BatchObject::Unsendable`] through `visit`.
+pub(crate) fn requests<F>(specs: &[String], visit: &mut F) -> (Vec<usize>, Vec<u8>)
+where
+    F: FnMut(usize, BatchObject<'_>),
+{
+    let (sent, unsendable): (Vec<usize>, Vec<usize>) =
+        (0..specs.len()).partition(|&i| sendable(&specs[i]));
+    for i in unsendable {
+        visit(i, BatchObject::Unsendable);
+    }
+    let mut input = Vec::new();
+    for &i in &sent {
+        input.extend_from_slice(specs[i].as_bytes());
+        input.push(b'\n');
+    }
+    (sent, input)
+}
+
+/// Read a `cat-file --batch-check` answer, one header line per index of
+/// `sent`: a blob of at most `max_blob_bytes` is returned as `(index, oid)`
+/// to be read, anything else is answered through `visit` right away
+/// ([`BatchObject::Oversized`] or [`BatchObject::Missing`]). Sizes come
+/// first because `--batch` inflates and pipes every object it is asked
+/// for: an asset over the cap would cost its whole size only to be dropped.
+///
+/// # Errors
+///
+/// The answer does not hold exactly one line per sent spec.
+pub(crate) fn plan_reads<F>(
+    check: &[u8],
+    sent: &[usize],
+    max_blob_bytes: u64,
+    visit: &mut F,
+) -> std::io::Result<Vec<(usize, String)>>
+where
+    F: FnMut(usize, BatchObject<'_>),
+{
+    let Some(body) = check.strip_suffix(b"\n") else {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    };
+    let lines: Vec<&[u8]> = body.split(|&b| b == b'\n').collect();
+    if lines.len() != sent.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "cat-file --batch-check: not one answer per request",
+        ));
+    }
+    let mut reads = Vec::new();
+    for (&i, line) in sent.iter().zip(lines) {
+        match parse_header(line) {
+            Header::Found {
+                oid,
+                blob: true,
+                size,
+            } if size <= max_blob_bytes => reads.push((i, oid)),
+            Header::Found {
+                blob: true, size, ..
+            } => visit(i, BatchObject::Oversized(size)),
+            _ => visit(i, BatchObject::Missing),
+        }
+    }
+    Ok(reads)
+}
+
+/// One answer, owned so the reader thread can hand it to the caller's.
+enum Answer {
+    Blob(Vec<u8>),
+    Oversized(u64),
+    Missing,
+}
+
+impl Answer {
+    fn as_object(&self) -> BatchObject<'_> {
+        match self {
+            Self::Blob(content) => BatchObject::Blob(content),
+            Self::Oversized(size) => BatchObject::Oversized(*size),
+            Self::Missing => BatchObject::Missing,
+        }
+    }
+}
+
+/// Read one answer per index of `sent` from `stdout`, handing each to `tx`
+/// as soon as it is complete. Stops at the first I/O error, a truncated
+/// answer or a content not followed by its newline (a stream no longer
+/// aligned on headers), and quietly once the receiver is gone.
+fn read_answers(
+    stdout: impl Read,
+    sent: &[usize],
+    max_blob_bytes: u64,
+    tx: &mpsc::SyncSender<(usize, Answer)>,
+) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stdout);
+    let mut line = Vec::new();
+    for &i in sent {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 || line.pop() != Some(b'\n') {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        let answer = match parse_header(&line) {
+            Header::Found { blob, size, .. } => {
+                let answer = if blob && size <= max_blob_bytes {
+                    let mut content = Vec::new();
+                    (&mut reader).take(size).read_to_end(&mut content)?;
+                    if content.len() as u64 != size {
+                        return Err(std::io::ErrorKind::UnexpectedEof.into());
+                    }
+                    Answer::Blob(content)
+                } else {
+                    let skipped =
+                        std::io::copy(&mut (&mut reader).take(size), &mut std::io::sink())?;
+                    if skipped != size {
+                        return Err(std::io::ErrorKind::UnexpectedEof.into());
+                    }
+                    if blob {
+                        Answer::Oversized(size)
+                    } else {
+                        Answer::Missing
+                    }
+                };
+                // The content is followed by one newline of its own.
+                let mut lf = [0u8; 1];
+                reader.read_exact(&mut lf)?;
+                if lf != *b"\n" {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "cat-file --batch: no newline after an object's content",
+                    ));
+                }
+                answer
+            }
+            Header::Missing => Answer::Missing,
+        };
+        if tx.send((i, answer)).is_err() {
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 /// The protocol behind [`GitRunner::cat_file_blobs`], over any command that
@@ -85,11 +227,7 @@ where
     F: FnMut(usize, BatchObject<'_>),
 {
     let args = vec!["cat-file".to_string(), "--batch".to_string()];
-    let (sent, unsendable): (Vec<usize>, Vec<usize>) =
-        (0..specs.len()).partition(|&i| sendable(&specs[i]));
-    for i in unsendable {
-        visit(i, BatchObject::Unsendable);
-    }
+    let (sent, input) = requests(specs, &mut visit);
     if sent.is_empty() {
         return Ok(());
     }
@@ -98,16 +236,12 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
-    let mut input = Vec::new();
-    for &i in &sent {
-        input.extend_from_slice(specs[i].as_bytes());
-        input.push(b'\n');
-    }
     let mut stdin = child.stdin.take().expect("piped stdin");
-    // Written from its own thread: git answers while it reads, and a request
-    // list larger than the pipe buffer would otherwise deadlock against an
-    // unread answer.
-    let writer = std::thread::spawn(move || {
+    // Written from its own thread, and never joined: git answers while it
+    // reads, so a request list larger than the pipe buffer would otherwise
+    // deadlock against an unread answer, and a git that stops reading
+    // leaves the writer blocked until the kill below breaks the pipe.
+    std::thread::spawn(move || {
         let _ = stdin.write_all(&input);
     });
     let stdout = child.stdout.take().expect("piped stdout");
@@ -119,87 +253,40 @@ where
             .read_to_end(&mut buf);
         buf
     });
-    let child = Arc::new(Mutex::new(child));
-    let timed_out = Arc::new(AtomicBool::new(false));
-    let paused = Arc::new(AtomicBool::new(false));
-    let (progress, watchdog) = spawn_watchdog(&child, &timed_out, &paused, idle_timeout);
-
-    let mut reader = BufReader::new(stdout);
-    let mut line = Vec::new();
-    let mut content = Vec::new();
-    // Hands one answer to the caller with the idle clock stopped, then
-    // restarts it: a slow consumer is not a silent git.
-    let mut deliver = |i: usize, object: BatchObject<'_>| {
-        paused.store(true, Ordering::SeqCst);
-        visit(i, object);
-        // Progress before the unpause: a wait that expires in between then
-        // finds either the pause or the message, never neither.
-        let _ = progress.send(());
-        paused.store(false, Ordering::SeqCst);
-    };
-    let mut read = || -> std::io::Result<()> {
-        for &i in &sent {
-            line.clear();
-            if reader.read_until(b'\n', &mut line)? == 0 || line.pop() != Some(b'\n') {
-                return Err(std::io::ErrorKind::UnexpectedEof.into());
+    // The answers are read on their own thread and handed over one at a
+    // time. The wait for the next one is then the only place the caller
+    // blocks on git: the idle timeout bounds it even when a grandchild
+    // holds stdout open past git's death, and time spent in `visit` is
+    // never counted as git's silence.
+    let (tx, rx) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || read_answers(stdout, &sent, max_blob_bytes, &tx));
+    loop {
+        let next = match idle_timeout {
+            Some(timeout) => rx.recv_timeout(timeout),
+            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        match next {
+            Ok((i, answer)) => visit(i, answer.as_object()),
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // The reader and stderr threads are left to end on their
+                // own, as in `runner.rs`: a grandchild that inherited a pipe
+                // can hold it open past the deadline, and joining them would
+                // hand it the caller.
+                return Err(GitError::Timeout { args });
             }
-            match parse_header(&line) {
-                Header::Found { blob, size } if blob && size <= max_blob_bytes => {
-                    content.clear();
-                    (&mut reader).take(size).read_to_end(&mut content)?;
-                    if content.len() as u64 != size {
-                        return Err(std::io::ErrorKind::UnexpectedEof.into());
-                    }
-                    deliver(i, BatchObject::Blob(&content));
-                }
-                Header::Found { blob, size } => {
-                    let skipped =
-                        std::io::copy(&mut (&mut reader).take(size), &mut std::io::sink())?;
-                    if skipped != size {
-                        return Err(std::io::ErrorKind::UnexpectedEof.into());
-                    }
-                    deliver(
-                        i,
-                        if blob {
-                            BatchObject::Oversized(size)
-                        } else {
-                            BatchObject::Missing
-                        },
-                    );
-                }
-                Header::Missing => {
-                    deliver(i, BatchObject::Missing);
-                    continue;
-                }
-            }
-            // The content is followed by one newline of its own.
-            let mut lf = [0u8; 1];
-            reader.read_exact(&mut lf)?;
         }
-        Ok(())
-    };
-    let outcome = read();
-    // The writer is awaited while the watchdog still runs: a read that
-    // stopped early can leave it blocked on a stdin the process no longer
-    // drains, and only the kill on timeout breaks that pipe.
-    while !writer.is_finished() && !timed_out.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(5));
     }
-    drop(progress);
-    let _ = watchdog.join();
-    if timed_out.load(Ordering::SeqCst) {
-        if let Ok(mut child) = child.lock() {
-            let _ = child.wait();
-        }
-        // The writer and stderr threads are left to end on their own, as in
-        // `runner.rs`: a grandchild that inherited a pipe can hold it open
-        // past the deadline, and joining them would hand it the caller.
+    let outcome = reader
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("batch reader thread panicked")));
+    let Some(status) = wait_within(&mut child, idle_timeout)? else {
+        // Detached for the same reason as the timeout above.
         return Err(GitError::Timeout { args });
-    }
-    let _ = writer.join();
-    let status = wait_within(&child, idle_timeout);
+    };
     let stderr = stderr_reader.join().unwrap_or_default();
-    let status = status?;
     if !status.success() {
         return Err(GitError::NonZeroExit {
             args,
@@ -210,64 +297,22 @@ where
     outcome.map_err(GitError::Io)
 }
 
-/// Start the thread that kills `child` once `idle_timeout` passes without a
-/// message on the returned sender while `paused` is false; dropping the
-/// sender ends the thread. With no timeout, the thread only waits for the
-/// drop.
-fn spawn_watchdog(
-    child: &Arc<Mutex<Child>>,
-    timed_out: &Arc<AtomicBool>,
-    paused: &Arc<AtomicBool>,
-    idle_timeout: Option<Duration>,
-) -> (mpsc::Sender<()>, std::thread::JoinHandle<()>) {
-    let (tx, rx) = mpsc::channel::<()>();
-    let child = Arc::clone(child);
-    let timed_out = Arc::clone(timed_out);
-    let paused = Arc::clone(paused);
-    let handle = std::thread::spawn(move || {
-        loop {
-            let next = match idle_timeout {
-                Some(timeout) => rx.recv_timeout(timeout),
-                None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-            };
-            match next {
-                Ok(()) => {}
-                Err(RecvTimeoutError::Disconnected) => return,
-                // Time spent in the caller's `visit` is not git's silence, nor
-                // is an answer whose progress landed as the wait expired.
-                Err(RecvTimeoutError::Timeout)
-                    if paused.load(Ordering::SeqCst) || rx.try_recv().is_ok() => {}
-                Err(RecvTimeoutError::Timeout) => {
-                    timed_out.store(true, Ordering::SeqCst);
-                    if let Ok(mut child) = child.lock() {
-                        let _ = child.kill();
-                    }
-                    return;
-                }
-            }
-        }
-    });
-    (tx, handle)
-}
-
-/// Collect `child`'s exit status, killing it when it has not exited within
-/// `timeout`: git exits on the end of its input, and one that does not must
-/// not hold the caller.
+/// Collect `child`'s exit status, or `None` once it has been killed for not
+/// exiting within `timeout`: git exits on the end of its input, and one
+/// that does not must not hold the caller.
 fn wait_within(
-    child: &Arc<Mutex<Child>>,
+    child: &mut Child,
     timeout: Option<Duration>,
-) -> Result<std::process::ExitStatus, GitError> {
+) -> Result<Option<std::process::ExitStatus>, GitError> {
     let start = Instant::now();
-    let mut child = child
-        .lock()
-        .map_err(|_| GitError::Io(std::io::Error::other("git child lock poisoned")))?;
     loop {
         if let Some(status) = child.try_wait()? {
-            return Ok(status);
+            return Ok(Some(status));
         }
         if timeout.is_some_and(|t| start.elapsed() >= t) {
             let _ = child.kill();
-            return Ok(child.wait()?);
+            let _ = child.wait();
+            return Ok(None);
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -366,12 +411,15 @@ mod tests {
                 ));
             })
             .unwrap();
+        // Answers come in no particular order: sorted, the list shows every
+        // index answered exactly once.
+        seen.sort_by_key(|(i, _)| *i);
         seen
     }
 
-    /// Every answer lands on its own index, and one that is read past (a
-    /// tree, an oversized blob) or absent leaves the stream aligned: the
-    /// blob after it still reads as itself.
+    /// Every spec is answered once, on its own index: content for a blob
+    /// under the cap (the edge included), the size of one over it, missing
+    /// for a tree or an absent path, with the blobs around them intact.
     #[test]
     fn each_spec_gets_its_own_answer_and_skipped_content_keeps_the_stream_aligned() {
         let (dir, head) = fixture("answers");
@@ -407,7 +455,8 @@ mod tests {
 
     /// A spec the line protocol cannot carry is reported unsendable without
     /// shifting the others, and a list of only such specs spawns nothing
-    /// (the runner's root does not even exist).
+    /// (the runner's root does not even exist). A trailing carriage return
+    /// is one: git strips it and would answer `a.rs` for `a.rs\r`.
     #[test]
     fn unsendable_specs_are_reported_and_do_not_shift_the_rest() {
         let (dir, head) = fixture("unsendable");
@@ -415,15 +464,16 @@ mod tests {
             format!("{head}:a\nb.rs"),
             format!("{head}:a.rs"),
             String::new(),
+            format!("{head}:a.rs\r"),
         ];
-        let mut seen = collect(&runner(&dir), &specs, 1024);
-        seen.sort_by_key(|(i, _)| *i);
+        let seen = collect(&runner(&dir), &specs, 1024);
         assert_eq!(
             seen,
             vec![
                 (0, Owned::Unsendable),
                 (1, Owned::Blob(b"fn a() {}\n".to_vec())),
                 (2, Owned::Unsendable),
+                (3, Owned::Unsendable),
             ]
         );
         let nowhere = runner(dir.join("no-such-dir"));
@@ -630,7 +680,7 @@ mod tests {
             |_, _| blobs += 1,
         );
         assert!(
-            matches!(result, Err(GitError::NonZeroExit { code: None, .. })),
+            matches!(result, Err(GitError::Timeout { .. })),
             "{result:?}"
         );
         assert_eq!(blobs, 1);
@@ -641,12 +691,118 @@ mod tests {
         );
     }
 
+    /// A grandchild that inherited stdout keeps the pipe open after git is
+    /// killed; the caller is still released at the idle timeout instead of
+    /// reading until the grandchild exits.
+    #[test]
+    fn a_grandchild_holding_stdout_does_not_outlive_the_timeout() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 5 & exec sleep 5"]);
+        let start = Instant::now();
+        let result = batch_session(
+            cmd,
+            &["x".to_string()],
+            1024,
+            Some(Duration::from_millis(200)),
+            |_, _| {},
+        );
+        assert!(
+            matches!(result, Err(GitError::Timeout { .. })),
+            "{result:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    /// Content not followed by its newline means the stream is no longer
+    /// aligned on headers: the batch fails instead of reading the next
+    /// content as a header and answering the following specs from it.
+    #[test]
+    fn content_without_its_newline_is_an_error_not_a_shifted_stream() {
+        let mut cmd = Command::new("sh");
+        let oid = "f".repeat(40);
+        cmd.args([
+            "-c",
+            &format!("cat >/dev/null; printf '{oid} blob 1\\nzX{oid} blob 1\\nz\\n'"),
+        ]);
+        let mut seen = Vec::new();
+        let result = batch_session(
+            cmd,
+            &["x".to_string(), "y".to_string()],
+            1024,
+            TEST_IDLE,
+            |i, _| seen.push(i),
+        );
+        assert!(
+            matches!(&result, Err(GitError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData),
+            "{result:?}"
+        );
+        assert_eq!(seen, Vec::<usize>::new());
+    }
+
+    /// The size check sends only the blobs under the cap to be read, by the
+    /// oid it resolved, and answers the others itself: an oversized blob is
+    /// never asked of `--batch`, so git never inflates it.
+    #[test]
+    fn plan_reads_keeps_only_blobs_under_the_cap_for_the_content_pass() {
+        let small = "1".repeat(40);
+        let edge = "2".repeat(40);
+        let big = "3".repeat(40);
+        let tree = "4".repeat(40);
+        let check = [
+            format!("{small} blob 3"),
+            format!("{edge} blob 10"),
+            format!("{big} blob 11"),
+            format!("{tree} tree 30"),
+            "HEAD:ghost.rs missing".to_string(),
+            String::new(),
+        ]
+        .join("\n");
+        let mut answered = Vec::new();
+        let reads = plan_reads(check.as_bytes(), &[5, 6, 7, 8, 9], 10, &mut |i, obj| {
+            answered.push(format!("{i} {obj:?}"));
+        })
+        .unwrap();
+        assert_eq!(reads, vec![(5, small), (6, edge)]);
+        assert_eq!(answered, ["7 Oversized(11)", "8 Missing", "9 Missing"]);
+    }
+
+    /// A check that does not answer every request, or ends mid-line, is an
+    /// error: pairing its lines with the requests would shift every answer.
+    #[test]
+    fn plan_reads_refuses_a_check_that_does_not_answer_every_request() {
+        let oid = "5".repeat(40);
+        let mut visits = 0;
+        let mut visit = |_: usize, _: BatchObject<'_>| visits += 1;
+        let one = format!("{oid} blob 3\n");
+        let short = plan_reads(one.as_bytes(), &[0, 1], 10, &mut visit);
+        assert!(
+            matches!(&short, Err(e) if e.kind() == std::io::ErrorKind::InvalidData),
+            "{short:?}"
+        );
+        let long = plan_reads(format!("{one}{one}").as_bytes(), &[0], 10, &mut visit);
+        assert!(
+            matches!(&long, Err(e) if e.kind() == std::io::ErrorKind::InvalidData),
+            "{long:?}"
+        );
+        let cut = plan_reads(format!("{oid} blob 3").as_bytes(), &[0], 10, &mut visit);
+        assert!(
+            matches!(&cut, Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof),
+            "{cut:?}"
+        );
+        assert_eq!(visits, 0);
+    }
+
     #[test]
     fn a_header_is_found_only_as_hex_oid_type_and_size() {
         let oid = "0123456789abcdef0123456789abcdef01234567";
         assert_eq!(
             parse_header(format!("{oid} blob 12").as_bytes()),
             Header::Found {
+                oid: oid.to_string(),
                 blob: true,
                 size: 12
             }
@@ -654,6 +810,7 @@ mod tests {
         assert_eq!(
             parse_header(format!("{oid} tree 30").as_bytes()),
             Header::Found {
+                oid: oid.to_string(),
                 blob: false,
                 size: 30
             }

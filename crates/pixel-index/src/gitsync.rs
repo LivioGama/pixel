@@ -253,6 +253,8 @@ mod tests {
             seen.push(format!("{i} {object:?}"));
         })
         .unwrap();
+        // Answers come in no particular order.
+        seen.sort();
         assert_eq!(
             seen,
             [
