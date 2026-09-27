@@ -453,6 +453,37 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The stream itself, below the size check: a tree and an oversized blob
+    /// asked of `--batch` directly are read past to the byte, so every blob
+    /// after them still reads as itself (the check keeps them away from it
+    /// in production; the stream must not depend on that to stay aligned).
+    #[test]
+    fn the_stream_reads_past_trees_and_oversized_blobs_and_stays_aligned() {
+        let (dir, head) = fixture("stream");
+        let specs: Vec<String> = ["a.rs", "dir", "eleven.txt", "ten.txt", "dir/b.rs"]
+            .iter()
+            .map(|p| format!("{head}:{p}"))
+            .collect();
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(&dir).args(["cat-file", "--batch"]);
+        let mut seen = Vec::new();
+        batch_session(cmd, &specs, 10, TEST_IDLE, |i, obj| {
+            seen.push(format!("{i} {obj:?}"));
+        })
+        .unwrap();
+        assert_eq!(
+            seen,
+            [
+                format!("0 {:?}", BatchObject::Blob(b"fn a() {}\n")),
+                "1 Missing".to_string(),
+                "2 Oversized(11)".to_string(),
+                format!("3 {:?}", BatchObject::Blob(b"0123456789")),
+                format!("4 {:?}", BatchObject::Blob(b"fn b() {}\n")),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A spec the line protocol cannot carry is reported unsendable without
     /// shifting the others, and a list of only such specs spawns nothing
     /// (the runner's root does not even exist). A trailing carriage return
