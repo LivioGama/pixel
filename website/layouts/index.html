@@ -32,9 +32,9 @@
         {{ $rest := sub (len $agents) (len $named) }}
         <span>For {{ range $i, $a := $named }}{{ if $i }}, {{ end }}{{ $a.name }}{{ end }} and <a class="link" href="#agents" aria-label="{{ $rest }} more coding agents">{{ $rest }} more</a></span>
       </p>
-      <h1 class="hero__title"><span>Read less.</span> <span class="glow">Ship more.</span></h1>
-      {{/* The title promises the outcome and the lede proves it, from the "On whole agent tasks" section of content/benchmarks.md: wall time and API cost (both −30%) and "both sides named push.rs in every run" (the Proof ledger's "Same answer"). "Scoped", not "shipped": the measured task is a scoping task. Change the figures there first. */}}
-      <p class="hero__lede"><strong>Your coding agent reads whole files to find its way.</strong> Pixel is a local code index that hands it the map instead. On a real multi-file task, the same agent scoped the work 30% faster, for 30% less, and landed on the same answer.</p>
+      {{/* The title names the pain and the mechanism, and the lede carries one figure only: the kept files' median saving (partials/kept-rates.html), the number the wall beside it illustrates and the Tokens meter rounds. The task-level figures (−30% time and cost) wait for the numbers band and the Proof chapter, so the fold does not show three numbers for one idea. */}}
+      <h1 class="hero__title hero__title--long"><span>Your agent reads whole files.</span> <span class="glow">Pixel hands it the map.</span></h1>
+      <p class="hero__lede"><strong>Every session starts cold, so your coding agent opens file after file to find its way.</strong> Pixel is a local code index it asks instead: a median {{ lang.FormatNumber 1 $r.median }}% fewer tokens to learn what a large file holds, and nothing leaves your machine.</p>
       <div class="hero__cta">
         <div class="cmd">
           <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
@@ -44,10 +44,10 @@
         <button class="button button--ghost hero__agent" type="button" data-copy="{{ $agentPrompt }}" data-copy-next="hero-next-agent">Or let your agent install it</button>
       </div>
       {{/* Shown once a Copy above succeeds, one per button (the last copy wins): the step after the paste, so the copy moves the visitor forward instead of just confirming. */}}
-      <p class="hero__next" id="hero-next" hidden>Copied. Then run <code>pixel install</code> and restart your agent: the next session starts with the map.</p>
-      <p class="hero__next" id="hero-next-agent" hidden>Copied. Paste it into your agent: it installs Pixel, wires itself and tells you whether <code>pixel doctor .</code> is green.</p>
+      <p class="hero__next" id="hero-next" hidden>Copied. Then run <code>pixel install</code> and restart your agent: the next session starts with the map. In a repository of yours, <code>pixel audit</code> shows what its largest files cost your agent today.</p>
+      <p class="hero__next" id="hero-next-agent" hidden>Copied. Paste it into your agent: it installs Pixel, wires itself and tells you whether <code>pixel doctor .</code> is green. Then <code>pixel audit</code> shows what your largest files cost it.</p>
       {{/* Beside the one call to action, what a visitor checks before pasting it: the platforms the release builds (release.yml), the licence and the telemetry. No star button here: the nav links GitHub. */}}
-      <p class="hero__trust">Two commands &middot; macOS on Apple Silicon and Linux &middot; MIT &middot; no account, no telemetry</p>
+      <p class="hero__trust">Free and MIT &middot; macOS on Apple Silicon and Linux &middot; no account, no telemetry &middot; one <code>pixel uninstall</code> undoes the setup</p>
       </div>
 
       <figure class="wall" data-wall data-full="{{ $big.full }}" data-pixel="{{ $big.pixel }}" data-per="25">
@@ -66,9 +66,37 @@
           <button class="wall__replay" type="button" data-wall-replay hidden>Replay</button>
         </figcaption>
       </figure>
-      <a class="hero__down" href="#scope" aria-label="Scroll to an example">
+      <a class="hero__down" href="#problem" aria-label="Scroll to the problem">
         <svg viewBox="0 0 14 8" width="28" height="16" aria-hidden="true" fill="currentColor"><path d="M0 0h2v2H0zM2 2h2v2H2zM4 4h2v2H4zM6 6h2v2H6zM8 4h2v2H8zM10 2h2v2h-2zM12 0h2v2h-2z"/></svg>
       </a>
+    </section>
+
+    {{/* ---------- problem: the cost in the reader's words, before the category is named ---------- */}}
+    {{/* Three costs a visitor already pays, in coral (tokens wasted). The one figure is the wall's full read as a share of a context window (partials/context-share.html, which /benchmarks/ quotes under "Well-known files"); the other two cards carry no number on purpose. */}}
+    {{ $ctx := partial "context-share.html" . }}
+    <section class="section wrap" id="problem" aria-labelledby="problem-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Problem</span></p>
+      <header class="section__head" data-reveal>
+        <h2 id="problem-title">Every session starts <span class="glow">cold.</span></h2>
+        <p>Your agent does not remember your repository. So it searches, opens a match, reads the whole file, and pays for every line of it.</p>
+      </header>
+      <ul class="pains" data-reveal="stagger">
+        <li class="pains__card">
+          <p class="pains__tag">Context</p>
+          <h3>The window fills before the first edit.</h3>
+          <p>Read whole, {{ $big.owner }} <code>{{ path.Base $big.path }}</code> takes <strong>{{ $ctx.share }}%</strong> of a {{ lang.FormatNumberCustom 0 $ctx.window }}-token context window. A few of those and the agent compacts, and forgets what it just read.</p>
+        </li>
+        <li class="pains__card">
+          <p class="pains__tag">Bill</p>
+          <h3>You pay for lines it never needed.</h3>
+          <p>The question was one function. The agent read the file around it, and every token of it goes on the bill, in every session.</p>
+        </li>
+        <li class="pains__card">
+          <p class="pains__tag">Time</p>
+          <h3>You watch it search.</h3>
+          <p><code>grep</code>, open, scroll, open the next one. The agent spends its first turns finding its way, and you wait for it.</p>
+        </li>
+      </ul>
     </section>
 
     {{/* ---------- scope ---------- */}}
@@ -106,7 +134,7 @@
       {{/* Each meter draws the ratio its number states on a 20-square row: the baseline filled in dim cells, Pixel's in green. Every baseline is the same agent without Pixel, the one comparison a first-time visitor can read; the head-to-head with GitNexus lives in the Alternatives chapter. The outcome leads, as in the hero's lede, and the mechanism (Tokens, one large file) closes the row. Agent time, Context and API cost, kept together since the last two refer to the first one's task, are the "On whole agent tasks" table of content/benchmarks.md (60.7 s against 86.5 s, 10,655 against 17,268 tokens, $0.274 against $0.394): change them there first. */}}
       {{ $stats := slice
         (dict "tag" "Agent time" "value" "&minus;30%" "text" "for an agent to scope a multi-file task" "base" "no Pixel" "before" 20 "after" 14)
-        (dict "tag" "Context" "value" "&minus;38%" "text" "tokens read into context on that whole task" "base" "no Pixel" "before" 20 "after" 12)
+        (dict "tag" "Context" "value" "&minus;38%" "text" "tokens read into context on that same task" "base" "no Pixel" "before" 20 "after" 12)
         (dict "tag" "API cost" "value" "&minus;30%" "text" "billed for the same task, same model" "base" "no Pixel" "before" 20 "after" 14)
         (dict "tag" "Tokens" "value" "&minus;95%" "text" "to learn what a large file contains" "base" "full read" "before" 20 "after" 1)
       }}
@@ -124,15 +152,16 @@
         </li>
         {{ end }}
       </ul>
-      <p class="numbers__more" data-reveal><a class="link" href="{{ $bench }}">How we measured, and where Pixel loses</a></p>
+      {{/* A saving per task is cents; the estimate multiplies the per-read rate by the team's own numbers, so it sits beside the figures it scales. */}}
+      <p class="numbers__more" data-reveal><a class="link" href="{{ $bench }}">How we measured, and where Pixel loses</a> &middot; <a class="link" href="{{ "savings/" | relURL }}">Estimate it for your team</a></p>
     </section>
 
-    {{/* ---------- whole agent tasks ---------- */}}
+    {{/* ---------- a real agent task ---------- */}}
     <section class="section wrap" id="tasks" aria-labelledby="tasks-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Proof</span></p>
       <header class="section__head" data-reveal>
-        <h2 id="tasks-title">Measured on <span class="glow">whole agent tasks.</span></h2>
-        <p>Fast answers do not make a fast agent on their own. So we timed Claude Code on real tasks in this repository, with Pixel and against a vanilla agent with no rules or hooks.</p>
+        <h2 id="tasks-title">Measured on <span class="glow">a real agent task.</span></h2>
+        <p>Fast answers do not make a fast agent on their own. So we timed Claude Code scoping a real multi-file change in this repository, with Pixel and against a vanilla agent with no rules or hooks.</p>
       </header>
       <figure class="demo" data-reveal>
         {{/* Never starts on its own: the poster is the recording's first frame (both clocks at 0:00) and the button starts it. */}}
@@ -149,7 +178,7 @@
         <li class="ledger__win"><strong>&minus;30%</strong><span>Scoping a multi-file task: the median of 11 runs per side above, with 38% fewer tokens read. Two earlier designs agree: &minus;31% and &minus;29%.</span></li>
         <li class="ledger__win"><strong>Same answer</strong><span>Both sides named <code>push.rs</code>, the file the change starts in, among their first two in every one of the 22 runs. Pixel gets there sooner, not differently.</span></li>
       </ul>
-      <p class="ledger__fine" data-reveal>Where Pixel loses: a one-shot lookup runs about 1.5&nbsp;s slower, and recovering deleted code from history is still slower. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
+      <p class="ledger__fine" data-reveal>Where Pixel loses: a one-shot lookup runs about 1.5&nbsp;s slower, and recovering deleted code from history is still slower. The runs spread wider with Pixel too: 33 to 207&nbsp;s, against 57 to 148&nbsp;s without, so the slowest run of the 22 was a Pixel run. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
       {{/* Real users' words, from data/voices.toml: nothing renders until it holds an entry, and the file says what an entry needs. */}}
       {{ with hugo.Data.voices.voice }}
       <ul class="voices" data-reveal="stagger" aria-label="What people who run Pixel say">
@@ -162,17 +191,6 @@
         {{ end }}
       </ul>
       {{ end }}
-      {{/* The call for more voices, shown with or without quotes above it: a Show and tell discussion prefilled with what a quote needs (the numbers, the repository, the agent). A quote only moves to data/voices.toml with its author's written consent. */}}
-      {{ $title := "My pixel token-savings numbers" }}
-      {{ $body := "Repository (language, rough size):\nAgent:\nHow long I have run Pixel:\n\n```\n<paste the output of pixel token-savings>\n```\n\nOK to quote this on pixel-cli.dev under my name and role? (yes / no)" }}
-      {{ $share := printf "%s/discussions/new?category=show-and-tell&title=%s&body=%s" site.Params.github_url (replace (urlquery $title) "+" "%20") (replace (urlquery $body) "+" "%20") }}
-      <aside class="invite" data-reveal>
-        <div class="invite__text">
-          <h3>Running Pixel on your own code?</h3>
-          <p>Post what <code>pixel token-savings</code> reports, with your repository's language and size and the agent you run. With your permission, it can be quoted here under your name.</p>
-        </div>
-        <a class="button button--ghost invite__cta" href="{{ $share }}" target="_blank" rel="noopener">Share your numbers</a>
-      </aside>
     </section>
 
     {{/* ---------- your number: the proof on the visitor's own code ---------- */}}
@@ -295,7 +313,75 @@
     </section>
 
 
+    {{/* ---------- roles ---------- */}}
+    {{/* The kept files' range, for the developers' card. */}}
+    {{ $range := printf "%s to %s%%" (lang.FormatNumber 1 ($r.min)) (lang.FormatNumber 1 ($r.max)) }}
+    <section class="section wrap" id="teams" aria-labelledby="teams-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Teams</span></p>
+      <header class="section__head" data-reveal>
+        <h2 id="teams-title">Picked by developers, <span class="glow">signed off by the CTO.</span></h2>
+        <p>An agent tool stays in a team when every seat gets something from it. What Pixel gives each one, with the number behind it.</p>
+      </header>
+      {{/* Every figure is a benchmarks.md row (or the data files it reads); every command exists (docs_drift reads benchmarks.md, not this page: check with pixel <cmd> --help). */}}
+      <ul class="roles" data-reveal="stagger">
+        <li class="roles__card">
+          <p class="roles__who">{{ partial "icon.html" (dict "name" "laptop" "size" 16) }}Developers</p>
+          <h3>The agent stops opening whole files to find its way.</h3>
+          <ul>
+            <li><strong>{{ $range }} less</strong> read to learn what a large file holds, on {{ $r.count }} well-known files.</li>
+            <li>Callers of a symbol in a <strong>153&nbsp;ms</strong> median, and the files a task needs before the first edit.</li>
+            <li>Same agent, same prompts: <code>pixel install</code> once, and the agent calls Pixel from its own shell.</li>
+          </ul>
+        </li>
+        <li class="roles__card">
+          <p class="roles__who">{{ partial "icon.html" (dict "name" "user" "size" 16) }}Lead developers</p>
+          <h3>Agents that check the blast radius before they edit.</h3>
+          <ul>
+            <li><code>pixel impact</code> lists a symbol's callers and callees before the change; <code>pixel review-changes</code> shows the diff, structured.</li>
+            <li>Git writes that keep work: pushes go out leased, and <code>pixel plan-rollback</code> writes nothing until <code>--apply</code>.</li>
+            <li>One index for every agent the team runs, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files.</li>
+          </ul>
+        </li>
+        <li class="roles__card">
+          <p class="roles__who">{{ partial "icon.html" (dict "name" "robot" "size" 16) }}Harness engineers</p>
+          <h3>Deterministic index answers that state their own limits.</h3>
+          <ul>
+            <li>Every index and graph answer is marked <code>complete</code>, <code>capped</code> or <code>unresolved</code>, and a graph answer never claims it saw every caller. The one model-backed command, the optional <code>pixel classify</code>, says it is not deterministic.</li>
+            <li>A CLI plus hooks, not an MCP server: <strong>~4,160 tokens</strong> of context per turn, 4.7&times; less than GitNexus.</li>
+            <li>Not left to the model's goodwill: the protocol is injected at session start, and the agent called Pixel in <strong>11 of 11</strong> recorded runs.</li>
+          </ul>
+        </li>
+        <li class="roles__card">
+          <p class="roles__who">{{ partial "icon.html" (dict "name" "shield" "size" 16) }}CTOs</p>
+          <h3>Cheaper agent runs, no new vendor, no telemetry.</h3>
+          <ul>
+            <li><strong>&minus;30% API cost</strong> on the measured scoping task, the median of 11 runs per side.</li>
+            <li>No second model on the bill, no account, no telemetry: the index stays in <code>.pixel/</code>. The network sees only what you run: Git remotes, the optional <code>pixel classify</code> and <code>pixel web-search</code>, and a one-time embedding model download.</li>
+            <li>MIT licensed, and the same index serves {{ len $agents }} agents, so switching agents does not mean switching tools.</li>
+          </ul>
+          {{/* The estimate multiplies the well-known files' rate by the team's own numbers; the page says it is per large-file read, not per session. */}}
+          <a class="link roles__more" href="{{ "savings/" | relURL }}">Estimate it for your team</a>
+        </li>
+      </ul>
+    </section>
+
+    {{/* ---------- agents ---------- */}}
+    <section class="section wrap section--center" id="agents" aria-labelledby="agents-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Compatibility</span></p>
+      <header class="section__head" data-reveal>
+        <h2 id="agents-title">Plugs into the agent <span class="glow">you already use.</span></h2>
+      </header>
+      <ul class="agents" data-reveal="stagger">
+        {{/* Each mark opens its /for/<slug>/ page: what Pixel writes for that agent, the check, the removal. */}}
+        {{ range $agents }}
+        <li><a class="agents__item agents__item--{{ .logo }}" href="{{ printf "for/%s/" .slug | relURL }}">{{ (resources.Get (printf "logos/%s.svg" .logo)).Content | safeHTML }}<span>{{ .name }}</span></a></li>
+        {{ end }}
+      </ul>
+      <p class="agents__more"><a class="link" href="{{ "for/" | relURL }}">What Pixel writes for each agent, and how to check it</a></p>
+    </section>
+
     {{/* ---------- alternatives ---------- */}}
+    {{/* After Teams and Compatibility, before Objections: the matrix is the page's heaviest block, read by a visitor already weighing the choice, not one still learning what Pixel is. */}}
     <section class="section wrap" id="alternatives" aria-labelledby="alternatives-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Alternatives</span></p>
       <header class="section__head" data-reveal>
@@ -303,8 +389,6 @@
         <p>The code indexes a team weighs Pixel against, with the row where each one wins kept in. GitNexus was run against Pixel on the same cases and the same machine; the others are compared on how they work, with no figure until we measure them.</p>
       </header>
       {{/* The matrix is the tools marked `matrix` in data/alternatives.toml, in file order, beside Pixel's own `[pixel.traits]`; the cards below are the tools marked `home`. partials/alternatives.html fills both, the same entries the /vs/ pages render: change a figure on content/benchmarks.md first, then there. */}}
-      {{/* The kept files' range, for the Teams chapter below. */}}
-      {{ $range := printf "%s to %s%%" (lang.FormatNumber 1 ($r.min)) (lang.FormatNumber 1 ($r.max)) }}
       {{ $alts := partial "alternatives.html" (dict "abs" false) }}
       {{ $cols := where $alts "matrix" true }}
       {{ $pixel := hugo.Data.alternatives.pixel }}
@@ -382,71 +466,6 @@
       <p class="ledger__fine" data-reveal>Other ways to spend fewer tokens have a page each: <a class="link" href="{{ "vs/shunt/" | relURL }}">shunt</a>, which hands large reads to a second model, <a class="link" href="{{ "vs/jev/" | relURL }}">Jev</a>, a model for coding judgement calls, and <a class="link" href="{{ "vs/rtk/" | relURL }}">RTK</a>, which compresses command output and runs beside Pixel. Where a specialist beats Pixel at its one job (semble on a plain-English search's top 10, stacklit on a compact repository map), and how Pixel compares with <a class="link" href="{{ "vs/warpgrep/" | relURL }}">WarpGrep</a>, Morph's search subagent, the numbers are on the <a class="link" href="{{ $bench }}#where-a-specialist-wins">benchmarks page</a>, and <a class="link" href="{{ "vs/" | relURL }}">every comparison</a> is listed.</p>
     </section>
 
-    {{/* ---------- roles ---------- */}}
-    <section class="section wrap" id="teams" aria-labelledby="teams-title">
-      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Teams</span></p>
-      <header class="section__head" data-reveal>
-        <h2 id="teams-title">Picked by developers, <span class="glow">signed off by the CTO.</span></h2>
-        <p>An agent tool stays in a team when every seat gets something from it. What Pixel gives each one, with the number behind it.</p>
-      </header>
-      {{/* Every figure is a benchmarks.md row (or the data files it reads); every command exists (docs_drift reads benchmarks.md, not this page: check with pixel <cmd> --help). */}}
-      <ul class="roles" data-reveal="stagger">
-        <li class="roles__card">
-          <p class="roles__who">{{ partial "icon.html" (dict "name" "laptop" "size" 16) }}Developers</p>
-          <h3>The agent stops opening whole files to find its way.</h3>
-          <ul>
-            <li><strong>{{ $range }} less</strong> read to learn what a large file holds, on {{ $r.count }} well-known files.</li>
-            <li>Callers of a symbol in a <strong>153&nbsp;ms</strong> median, and the files a task needs before the first edit.</li>
-            <li>Same agent, same prompts: <code>pixel install</code> once, and the agent calls Pixel from its own shell.</li>
-          </ul>
-        </li>
-        <li class="roles__card">
-          <p class="roles__who">{{ partial "icon.html" (dict "name" "user" "size" 16) }}Lead developers</p>
-          <h3>Agents that check the blast radius before they edit.</h3>
-          <ul>
-            <li><code>pixel impact</code> lists a symbol's callers and callees before the change; <code>pixel review-changes</code> shows the diff, structured.</li>
-            <li>Git writes that keep work: pushes go out leased, and <code>pixel plan-rollback</code> writes nothing until <code>--apply</code>.</li>
-            <li>One index for every agent the team runs, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files.</li>
-          </ul>
-        </li>
-        <li class="roles__card">
-          <p class="roles__who">{{ partial "icon.html" (dict "name" "robot" "size" 16) }}Harness engineers</p>
-          <h3>Deterministic index answers that state their own limits.</h3>
-          <ul>
-            <li>Every index and graph answer is marked <code>complete</code>, <code>capped</code> or <code>unresolved</code>, and a graph answer never claims it saw every caller. The one model-backed command, the optional <code>pixel classify</code>, says it is not deterministic.</li>
-            <li>A CLI plus hooks, not an MCP server: <strong>~4,160 tokens</strong> of context per turn, 4.7&times; less than GitNexus.</li>
-            <li>Not left to the model's goodwill: the protocol is injected at session start, and the agent called Pixel in <strong>11 of 11</strong> recorded runs.</li>
-          </ul>
-        </li>
-        <li class="roles__card">
-          <p class="roles__who">{{ partial "icon.html" (dict "name" "shield" "size" 16) }}CTOs</p>
-          <h3>Cheaper agent runs, no new vendor, no telemetry.</h3>
-          <ul>
-            <li><strong>&minus;30% API cost</strong> on the measured scoping task, the median of 11 runs per side.</li>
-            <li>No second model on the bill, no account, no telemetry: the index stays in <code>.pixel/</code>. The network sees only what you run: Git remotes, the optional <code>pixel classify</code> and <code>pixel web-search</code>, and a one-time embedding model download.</li>
-            <li>MIT licensed, and the same index serves {{ len $agents }} agents, so switching agents does not mean switching tools.</li>
-          </ul>
-          {{/* The estimate multiplies the well-known files' rate by the team's own numbers; the page says it is per large-file read, not per session. */}}
-          <a class="link roles__more" href="{{ "savings/" | relURL }}">Estimate it for your team</a>
-        </li>
-      </ul>
-    </section>
-
-    {{/* ---------- agents ---------- */}}
-    <section class="section wrap section--center" id="agents" aria-labelledby="agents-title">
-      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Compatibility</span></p>
-      <header class="section__head" data-reveal>
-        <h2 id="agents-title">Plugs into the agent <span class="glow">you already use.</span></h2>
-      </header>
-      <ul class="agents" data-reveal="stagger">
-        {{/* Each mark opens its /for/<slug>/ page: what Pixel writes for that agent, the check, the removal. */}}
-        {{ range $agents }}
-        <li><a class="agents__item agents__item--{{ .logo }}" href="{{ printf "for/%s/" .slug | relURL }}">{{ (resources.Get (printf "logos/%s.svg" .logo)).Content | safeHTML }}<span>{{ .name }}</span></a></li>
-        {{ end }}
-      </ul>
-      <p class="agents__more"><a class="link" href="{{ "for/" | relURL }}">What Pixel writes for each agent, and how to check it</a></p>
-    </section>
-
     {{/* ---------- questions ---------- */}}
     <section class="section wrap section--center" id="faq" aria-labelledby="faq-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Objections</span></p>
@@ -495,6 +514,17 @@
           <p class="install__more install__ask">Questions, or stuck on setup? <a class="link" href="{{ site.Params.github_url }}/discussions" target="_blank" rel="noopener">Ask in GitHub Discussions</a>.</p>
         </div>
       </div>
+      {{/* The call for more voices, under the install it follows (the report needs a few sessions), not in the Proof chapter, where it drew attention to an empty list of quotes: a Show and tell discussion prefilled with what a quote needs (the numbers, the repository, the agent). A quote only moves to data/voices.toml with its author's written consent. */}}
+      {{ $title := "My pixel token-savings numbers" }}
+      {{ $body := "Repository (language, rough size):\nAgent:\nHow long I have run Pixel:\n\n```\n<paste the output of pixel token-savings>\n```\n\nOK to quote this on pixel-cli.dev under my name and role? (yes / no)" }}
+      {{ $share := printf "%s/discussions/new?category=show-and-tell&title=%s&body=%s" site.Params.github_url (replace (urlquery $title) "+" "%20") (replace (urlquery $body) "+" "%20") }}
+      <aside class="invite" data-reveal>
+        <div class="invite__text">
+          <h3>Running Pixel on your own code?</h3>
+          <p>Post what <code>pixel token-savings</code> reports, with your repository's language and size and the agent you run. With your permission, it can be quoted here under your name.</p>
+        </div>
+        <a class="button button--ghost invite__cta" href="{{ $share }}" target="_blank" rel="noopener">Share your numbers</a>
+      </aside>
       <ul class="badges" data-reveal="stagger">
         <li>{{ partial "icon.html" (dict "name" "laptop" "size" 18) }}Your index stays on your machine</li>
         <li>{{ partial "icon.html" (dict "name" "shield" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Zero telemetry</a></li>
@@ -507,15 +537,15 @@
     {{/* ---------- closing ---------- */}}
     <section class="closing wrap" aria-labelledby="closing-title">
       <h2 id="closing-title" class="closing__title" data-reveal>Give your agent <span class="glow">a map.</span></h2>
-      <p class="closing__lede" data-reveal>Every session starts cold. Give the next one a map before it opens its first file.</p>
+      <p class="closing__lede" data-reveal>Give the next session a map before it opens its first file, then check what it spared with <code>pixel token-savings</code>.</p>
       <div class="cmd closing__cmd" data-reveal>
         <code><span class="cmd__prompt" aria-hidden="true">$</span> {{ $brew }} && pixel install</code>
         <button class="cmd__copy" type="button" data-copy="{{ $brew }} && pixel install">Copy</button>
       </div>
-      <p class="hero__trust" data-reveal>Two commands &middot; MIT &middot; no telemetry &middot; restart your agent and it is live</p>
+      <p class="hero__trust" data-reveal>Free and MIT &middot; no account, no telemetry &middot; restart your agent and it is live &middot; one <code>pixel uninstall</code> undoes the setup</p>
+      {{/* One way onward, not three: the Install block right above already offers the script and the agent prompt, and the docs are in the nav. */}}
       <div class="closing__cta" data-reveal>
-        <a class="button button--ghost" href="#install">Other ways to install</a>
-        <a class="button button--ghost" href="{{ "docs/" | relURL }}">Read the docs</a>
+        <a class="button button--ghost" href="#your-number">Measure it on your code first</a>
       </div>
     </section>
   </main>

@@ -44,14 +44,18 @@ touched (Hugo 0.166; a plain `hugo` build is right).
 - `layouts/index.html`: the whole landing page, with its scripts inline at
   the bottom. The hero opens on who Pixel is for (four agent marks and the
   count of the rest, from `data/agents.toml`, which the Compatibility grid
-  also draws, each mark linking to its `/for/<slug>/` page), then states the problem in the reader's words before naming the
-  category. Under the call to action (the brew command, and beside it the
+  also draws, each mark linking to its `/for/<slug>/` page), then a title
+  that names the pain and the mechanism and a lede with one figure only,
+  the kept files' median saving: the task-level figures wait for the
+  numbers band, so the fold never shows three numbers for one idea. Under the call to action (the brew command, and beside it the
   root README's "Let your agent install it" prompt, `$agentPrompt`, which
   the Install terminal's "Your agent" tab copies too: keep the two texts in
   step; no star button, the nav links GitHub) a quiet line states what a
-  visitor checks before pasting it: the platforms `release.yml` builds, the
-  licence, no telemetry. A successful copy there unhides the next step
-  (`data-copy-next` in the footer's copy script names the hint's id). The token wall draws one square per 25 tokens of a full file
+  visitor checks before pasting it: free and MIT, the platforms
+  `release.yml` builds, no account or telemetry, and `pixel uninstall`. A
+  successful copy there unhides the next step, which ends on `pixel audit`
+  so the visitor's first run prints their own number (`data-copy-next` in
+  the footer's copy script names the hint's id). The token wall draws one square per 25 tokens of a full file
   read of a well-known file (`data/read_savings.toml`, the row marked
   `wall`) and burns down to what the same
   question costs through Pixel once it scrolls into view. A Without / With
@@ -60,23 +64,32 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   the kept files' range and median; the survivors
   gather into a P of exactly that many squares, built from the count by
   the script, so one square always means 25 tokens. The order after the
-  hero shows before it proves: the scope example comes first, then the
-  numbers band, then the chapters of proof (Proof, Verify, How it works
-  with the six daily jobs under it, Alternatives, Teams, Compatibility,
-  Objections, Install). Verify (`#your-number`) hands the proof to the
+  hero names the cost, then shows before it proves: the Problem chapter
+  (three costs the visitor already pays, in coral; its one figure is the
+  wall's full read as a share of a context window, from
+  `layouts/partials/context-share.html`, the only place the window size is
+  written, which `/benchmarks/` quotes through `{{% read-savings "window" %}}`),
+  the scope example, the numbers band (with the `/savings/` estimate beside
+  the figures it scales), then the chapters of proof (Proof, Verify, How it
+  works with the six daily jobs under it, Teams, Compatibility,
+  Alternatives, Objections, Install). The Alternatives matrix, the heaviest
+  block, sits after Compatibility, for a visitor already weighing the
+  choice. Verify (`#your-number`) hands the proof to the
   visitor: `pixel audit`, `pixel list-signatures` and `pixel token-savings`,
   each beside the figure it printed (the first two restate "Measure it on
   your own code" in `content/benchmarks.md`). Every figure in the band is measured against the same agent
   without Pixel, the only baseline a first-time visitor can read; the
   head-to-head with GitNexus stays in Alternatives. Proof pairs the time
   saved with the answer both sides reached (the same file in all 22 runs),
-  and keeps the losses to one line that links their runs. The optional
+  and keeps the losses to one line that links their runs, the wider spread
+  of the Pixel runs included. Its title says "a real agent task", not
+  "whole agent tasks": the measured run is one scoping task. The optional
   `pixel classify` and its JevBench score live on `/benchmarks/` and
   `/vs/jev/`, not on the home: an add-on that needs a model blurs the
   pitch of a tool that needs none. The scope board
   draws one pad per indexed file and routes a trace from each P0 pad to its
   file name. The job tabs load each video only when opened, and the agent
-  demo in "Measured on whole agent tasks" plays once when it scrolls into
+  demo in "Measured on a real agent task" plays once when it scrolls into
   view. Videos never autoplay under reduced motion: the poster shows the
   finished state and the controls are there.
 - Under the four "How it works" cards, the cold start figure: the time
@@ -171,7 +184,9 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   page or states another question than its `title`. Linked from the footer.
 - `data/voices.toml`: quotes from people who run Pixel, shown under the
   Proof chapter's ledger. Nothing renders while the file holds no entry.
-  Below them, with or without quotes, an invite links a "Show and tell"
+  The invite for more sits under the Install block instead (an empty
+  list of quotes should not be what the Proof chapter points at, and the
+  report needs a few sessions anyway): it links a "Show and tell"
   discussion prefilled with what a quote needs (repository, agent, the
   `pixel token-savings` report, consent to be quoted); a reply moves to
   this file only with its author's written yes.
