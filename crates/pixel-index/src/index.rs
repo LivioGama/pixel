@@ -282,16 +282,18 @@ pub fn build_with_budget(
     let started = std::time::Instant::now();
     let max_total_bytes = build_max_bytes_from_env();
 
-    // Pipelined walk + extraction: the walker pushes paths into a bounded
-    // channel while rayon workers pull and extract grams concurrently. This
-    // overlaps directory I/O with CPU work instead of waiting for the full
-    // walk to finish before starting extraction.
+    // The walk runs on its own thread and hands paths over a channel; this
+    // thread collects them all, sorts them (file ids follow path order), and
+    // only then extracts grams in parallel. Walking overlaps nothing but the
+    // collection: on ruby/ruby (11 343 files) a one-thread walk costs about
+    // 50 ms of a 550-700 ms `build-index`, which bounds what streaming paths
+    // into the extraction could save.
     let total_bytes = std::sync::atomic::AtomicU64::new(0);
     let budget_exceeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let file_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    // Bounded channel: 256 paths buffered, so the walker blocks if workers
-    // fall behind (backpressure instead of unbounded memory).
+    // Unbounded: every path ends up in `all_paths` anyway, so a bound would
+    // only make the walker wait.
     let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
 
     let walker_root = root.to_path_buf();
@@ -337,9 +339,7 @@ pub fn build_with_budget(
         let total_bytes = &total_bytes;
         let budget_exceeded = &budget_exceeded;
         let max_total_bytes = &max_total_bytes;
-        // Collect all paths from the channel first (walker is concurrent),
-        // then parallel-extract. This is a middle ground: the walk runs on
-        // its own thread while we drain the channel, then we rayon-extract.
+        // Collect every path first, then extract in parallel (see above).
         let mut all_paths: Vec<PathBuf> = Vec::new();
         loop {
             match rx
