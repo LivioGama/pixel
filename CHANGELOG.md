@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-27
+
+This release rebuilds `pixel search-meaning`, the plain-English code search. On the 45-query benchmark in `docs/bench/vs-landscape.md` it now puts the right file first for 87% of questions (0.5.2: 47%) and in its top 10 for 96% (0.5.2: 69%), ahead of semble and WarpGrep on the first answer (the queries are doc comments, a bias the page states), and answers a repeated question in about half a second on the benchmark repositories.
+
+### Highlights
+
+- **`search-meaning` sees the whole repository.** It walks the gitignore-aware file set and no longer stops at the first 2000 files a walk reached, which hid most of a large TypeScript tree.
+- **Better first answers.** The lexical channel ranks by BM25, tests, config and docs weigh below code unless the question names them, and files are cut along their functions with their doc comments.
+- **Warm questions are fast.** Chunk vectors are cached under `.pixel/code-vectors/` at an indexed repository root, so only changed code is embedded again. `--json` consumers: `coverage.max_files` is now `null` when no budget applied.
+
+### Added
+- **cli:** a command run at a terminal prints one yellow line, at most once a day, when a newer release is out, with the command that updates this install (`brew`, `mise` or `install.sh`); hooks, agents, MCP and `CI` never see it, and `PIXEL_NO_UPDATE_CHECK=1` turns it off ([#320](https://github.com/LivioGama/pixel/pull/320)).
+- **release:** each release archive and its `install.sh` carry a signed build-provenance attestation, checked with `gh attestation verify` (SECURITY.md, "Verifying a release"); the post-publish smoke job verifies both, and CI refuses any workflow `uses:` not pinned to a full commit SHA ([#322](https://github.com/LivioGama/pixel/pull/322)).
+- **docs:** `docs/bench/vs-landscape.md` measures WarpGrep, Morph's search subagent, on the same 45 plain-English queries: it beat 0.5.2's `pixel search-meaning` on the first answer (r@1 0.69 vs 0.47), edges it on the top 10 (0.71 vs 0.69) and takes 2.3x longer; semble still leads (1.00). `bench-retrieval.py` gains an optional WarpGrep arm ([#325](https://github.com/LivioGama/pixel/pull/325)).
+
+### Changed
+- **index:** a base or delta built from git sizes every blob with one `git cat-file --batch-check` and streams those under the cap through one `git cat-file --batch` per worker, instead of two git processes per file: a cold text index of about 19 000 files builds in about 2 s. ([#321](https://github.com/LivioGama/pixel/pull/321))
+- **search:** `search-meaning` searches the gitignore-aware file set of the index walk, returns 10 hits by default (was 8) and embeds up to 6000 files (was 2000); a larger tree is searched through a deterministic sample spread across it instead of the first files a walk reached, and the text output says so. `coverage.candidate_files` counts every eligible file. ([#326](https://github.com/LivioGama/pixel/pull/326))
+- **search:** `search-meaning` keeps chunk vectors in `.pixel/code-vectors/` at an indexed repository root, so a repeated question embeds only the chunks whose text changed (yespark-rails 4.7 s → 1.2 s warm) and ranks exactly as before; `coverage` reports `embedded_chunks` and `cached_chunks`. Subtrees, `$HOME` and the daemon fallback write nothing. ([#327](https://github.com/LivioGama/pixel/pull/327))
+- **search:** `search-meaning` searches every eligible file by default (was a 6000-file budget); `--max-files` is now an opt-in budget, and a safety ceiling of 50 000 files guards runaway trees such as a home directory. `coverage.max_files` is `null` when no limit applied and `coverage.file_budget` names it (`none`, `explicit`, `ceiling`). yespark-rails, 11 299 files: warm 2.2 s. ([#328](https://github.com/LivioGama/pixel/pull/328))
+- **search:** `search-meaning` ranks its lexical channel by BM25 (best chunk per file, IDF over the searched files) instead of counting distinct query terms, and weights tests, config/data and docs below code unless the question names them (`test`, `config`, `readme`…); JSON hits add `lexical_score` and `demoted`. #325 benchmark: r@1 0.58 → 0.67, r@10 unchanged at 0.91. ([#329](https://github.com/LivioGama/pixel/pull/329))
+- **search:** `search-meaning` cuts files along their tree-sitter symbols (functions, methods, classes, modules), each with its doc comment, packing small neighbours up to 400 bytes; unparsed files and oversize symbols keep 1 500-byte windows, and the text between symbols stays searchable. Cached vectors are re-embedded once. #325 benchmark: r@1 0.67 → 0.87, r@10 0.91 → 0.96. ([#330](https://github.com/LivioGama/pixel/pull/330))
+
+### Fixed
+- **graph:** a Rust call whose name several files define now links where the code says which one: a method on a local of stated type or on a constructor (`runner: &GitRunner`, `GitRunner::new(root).x()`), or a module path (`pixel_rank::signals::is_test_path`), at `probable`. `who-calls` found none of these; on pixel itself 458 calls leave `unresolved_calls`. The graph rebuilds once. ([#319](https://github.com/LivioGama/pixel/pull/319))
+
 ## [0.5.2] - 2026-09-26
 
 This release makes pixel lighter on disk and faster on large repositories: the history index is about 14 times smaller and bounded, and `prepare-repo` stops rebuilding a graph that still matches the tree.
