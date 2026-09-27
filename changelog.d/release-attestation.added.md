@@ -1,1 +1,0 @@
-**release:** each release archive and its `install.sh` carry a signed build-provenance attestation, checked with `gh attestation verify` (SECURITY.md, "Verifying a release"); the post-publish smoke job verifies both, and CI refuses any workflow `uses:` not pinned to a full commit SHA ([#PR](https://github.com/LivioGama/pixel/pull/PR)).
