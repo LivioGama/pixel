@@ -1,0 +1,1 @@
+**daemon:** a float in a daemon response now parses back to the exact value it was written from, so a command served by the daemon prints the same digits as the same command run in process. `list-areas` printed a cluster's cohesion as `0.4545454545454546` through the daemon and `0.45454545454545453` in process. ([#343](https://github.com/LivioGama/pixel/pull/343))
