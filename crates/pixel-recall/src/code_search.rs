@@ -8,6 +8,11 @@
 //! model downloads once into the shared recall model cache on first use and the
 //! ML dependency stays behind a feature.
 //!
+//! Chunk vectors persist between questions in `.pixel/code-vectors/` when the
+//! search root carries a pixel index ([`vector_cache_for`],
+//! [`crate::code_vectors`]): a warm question embeds only the chunks whose text
+//! changed, and ranks exactly as an uncached one.
+//!
 //! This is an AUGMENTATIVE channel, deliberately NOT a replacement for
 //! `resolve`/`search`: deterministic resolution keeps its contract; `ask`
 //! adds a semantic layer on top. NDCG is the gate (see
@@ -16,6 +21,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::code_vectors::{ChunkKey, Namespace, Store};
 use crate::embed::{EmbedKind, chunk_offsets};
 
 /// One ranked hit: a file matched for the question, with a representative
@@ -44,6 +50,52 @@ pub const DEFAULT_MAX_FILES: usize = 6000;
 /// recall@10 measurement reads the list a user actually gets.
 pub const DEFAULT_LIMIT: usize = 10;
 
+/// Version of how `search-meaning` cuts a file into the texts it embeds. Part
+/// of every persisted vector's key ([`crate::code_vectors::Namespace`]): bump
+/// it, with a line below, when the chunking or the text sent to the model for
+/// a chunk changes, and no vector of the old chunking is served again.
+///
+/// History: 1 = [`chunk_offsets`] windows (`embed::CHUNK_MAX` bytes,
+/// `embed::CHUNK_OVERLAP` of overlap), each embedded verbatim.
+pub const CHUNKER_VERSION: u32 = 1;
+
+/// Whether a question's chunk vectors persist in `.pixel/code-vectors/`, and
+/// when they do not, why.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorCache {
+    /// Not asked for: the daemon's semantic fallback embeds in memory only.
+    #[default]
+    Disabled,
+    /// The search root carries no pixel index (a subtree, an unindexed
+    /// tree): nothing is written there.
+    NoIndex,
+    /// The search root is the home directory, whose `.pixel` holds global
+    /// state: nothing is written there.
+    HomeDirectory,
+    /// Read from and written to `<root>/.pixel/code-vectors/`.
+    Persisted,
+}
+
+/// Where `root`'s question keeps its chunk vectors: persisted only when
+/// `root` itself carries a pixel index (`.pixel/base.shard`), so a subtree
+/// or an unindexed tree gets no `.pixel` written into it, and never when
+/// `root` is `home`, whatever it carries.
+pub fn vector_cache_for(root: &Path, home: Option<&Path>) -> VectorCache {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if home.is_some_and(|home| canonical(home) == canonical(root)) {
+        return VectorCache::HomeDirectory;
+    }
+    let index = root
+        .join(pixel_index::index::SHARD_DIR)
+        .join(pixel_index::index::SHARD_FILE);
+    if index.is_file() {
+        VectorCache::Persisted
+    } else {
+        VectorCache::NoIndex
+    }
+}
+
 /// What one question covered: the eligible universe, the part embedded, and
 /// every reason a file was left out.
 #[derive(Default, serde::Serialize)]
@@ -62,6 +114,17 @@ pub struct AskCoverage {
     pub result_limit_reached: bool,
     pub scope: &'static str,
     pub degraded: bool,
+    /// Chunks ranked, every searched file's windows.
+    pub chunks: usize,
+    /// Chunks the model embedded for this question, each distinct text once.
+    pub embedded_chunks: usize,
+    /// Chunks whose vector came from `.pixel/code-vectors/`.
+    pub cached_chunks: usize,
+    pub vector_cache: VectorCache,
+    /// Failures of the vector store (unreadable, missing or altered segment,
+    /// failed write). The chunks involved were embedded again, so the answer
+    /// is complete; only the saving was lost. Sets `degraded`.
+    pub vector_cache_errors: Vec<String>,
 }
 
 impl AskCoverage {
@@ -73,6 +136,17 @@ impl AskCoverage {
             format!(
                 "searched a deterministic sample of {} of {} eligible files (--max-files {}); raise --max-files to search them all",
                 self.searched_files, self.candidate_files, self.max_files
+            )
+        })
+    }
+
+    /// The line a human reader gets when the vector store failed, so a slow
+    /// or degraded answer carries its reason. `None` when it did not.
+    pub fn vector_cache_note(&self) -> Option<String> {
+        (!self.vector_cache_errors.is_empty()).then(|| {
+            format!(
+                "vector cache: {}; the affected chunks were embedded again",
+                self.vector_cache_errors.join("; ")
             )
         })
     }
@@ -274,6 +348,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 struct CorpusEntry {
     path: String,
     text: String,
+    key: ChunkKey,
 }
 
 /// Answer a natural-language question over a code tree.
@@ -372,7 +447,16 @@ pub fn semantic_fallback(root: &Path, query: &str, limit: usize) -> SemanticFall
             ..Default::default()
         };
     }
-    ask_with_embedder(root, query, limit, SEMANTIC_FALLBACK_MAX_FILES, false).map_or_else(
+    // In memory only: a daemon request must not write the store.
+    ask_with_embedder(
+        root,
+        query,
+        limit,
+        SEMANTIC_FALLBACK_MAX_FILES,
+        false,
+        VectorCache::Disabled,
+    )
+    .map_or_else(
         |_| SemanticFallback::default(),
         |result| fallback_from(root, result),
     )
@@ -402,24 +486,48 @@ fn fallback_from(root: &Path, result: AskResult) -> SemanticFallback {
     }
 }
 
+/// [`ask`] with its coverage. Chunk vectors persist between questions when
+/// [`vector_cache_for`] allows it for `root` (an indexed root that is not the
+/// home directory).
+#[cfg_attr(test, mutants::skip)] // adapter reading $HOME and the on-disk model; `ask_opening` and `vector_cache_for` hold the logic and are tested
 pub fn ask_with_metadata(
     root: &Path,
     query: &str,
     k: usize,
     max_files: usize,
 ) -> Result<AskResult, String> {
-    ask_with_embedder(root, query, k, max_files, true)
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let cache = vector_cache_for(root, home.as_deref());
+    ask_with_embedder(root, query, k, max_files, true, cache)
 }
 
 /// [`ask_with_metadata`], downloading the model only when `download`.
+#[cfg_attr(test, mutants::skip)] // adapter over the on-disk model; `ask_opening` holds the logic and is tested
 fn ask_with_embedder(
     root: &Path,
     query: &str,
     k: usize,
     max_files: usize,
     download: bool,
+    cache: VectorCache,
 ) -> Result<AskResult, String> {
-    let (files, coverage) = collect_files(root, max_files);
+    ask_opening(root, query, k, max_files, cache, || {
+        open_code_embedder(download)
+    })
+}
+
+/// The question over `root`, with the embedder `open` returns (opened only
+/// when a file is eligible) and the store `cache` names.
+fn ask_opening(
+    root: &Path,
+    query: &str,
+    k: usize,
+    max_files: usize,
+    cache: VectorCache,
+    open: impl FnOnce() -> Result<Box<dyn crate::embed::Embedder>, String>,
+) -> Result<AskResult, String> {
+    let (files, mut coverage) = collect_files(root, max_files);
+    coverage.vector_cache = cache;
     if files.is_empty() {
         return Ok(AskResult {
             hits: Vec::new(),
@@ -427,9 +535,16 @@ fn ask_with_embedder(
         });
     }
 
-    let mut embedder = open_code_embedder(download)?;
+    let mut embedder = open()?;
+    let store = (cache == VectorCache::Persisted).then(|| {
+        Store::at(
+            &root
+                .join(pixel_index::index::SHARD_DIR)
+                .join(crate::code_vectors::DIR),
+        )
+    });
 
-    let mut result = ask_collected(query, k, files, coverage, embedder.as_mut())?;
+    let mut result = ask_collected(query, k, files, coverage, embedder.as_mut(), store.as_ref())?;
     for hit in &mut result.hits {
         let path = Path::new(&hit.path);
         if let Ok(relative) = path.strip_prefix(root) {
@@ -443,17 +558,26 @@ fn open_code_embedder(download: bool) -> Result<Box<dyn crate::embed::Embedder>,
     crate::embed::open_embedder_with_potion_repo(download, Some("minishlab/potion-code-16M-v2"))
 }
 
+/// Rank `files` for `query`: chunk them, take each chunk's vector from
+/// `store` or the embedder ([`chunk_vectors`]), fuse semantic and lexical
+/// ranks.
 fn ask_collected(
     query: &str,
     k: usize,
     files: Vec<PathBuf>,
     mut coverage: AskCoverage,
     embedder: &mut dyn crate::embed::Embedder,
+    store: Option<&Store>,
 ) -> Result<AskResult, String> {
-    // Build the corpus (chunk every file) and embed the chunks in batches.
+    let model_id = embedder.model_id().to_string();
+    let namespace = Namespace::new(
+        &model_id,
+        crate::embed::embedder_revision(&model_id),
+        CHUNKER_VERSION,
+    );
+    // Build the corpus: chunk every file, key every chunk by its text.
     let mut corpus: Vec<CorpusEntry> = Vec::new();
     let mut lexical_coverage = HashMap::new();
-    let mut chunk_texts: Vec<String> = Vec::new();
     for file in &files {
         let Ok(bytes) = std::fs::read(file) else {
             coverage.skipped_files += 1;
@@ -496,9 +620,9 @@ fn ask_collected(
             best_coverage = best_coverage.max(chunk_coverage);
             corpus.push(CorpusEntry {
                 path: file.display().to_string(),
-                text: chunk.clone(),
+                key: namespace.key(&chunk),
+                text: chunk,
             });
-            chunk_texts.push(chunk);
         }
         lexical_coverage.insert(file.display().to_string(), best_coverage);
     }
@@ -517,20 +641,13 @@ fn ask_collected(
         .next()
         .ok_or("empty query embedding")?;
     validate_vector(&qvec, embedder.dims())?;
-    let refs: Vec<&str> = chunk_texts.iter().map(String::as_str).collect();
-    let cvecs = embedder.embed_batch(&refs, EmbedKind::Passage)?;
-    if cvecs.len() != corpus.len() {
-        return Err(format!(
-            "embedding count mismatch: {} chunks vs {} vectors",
-            corpus.len(),
-            cvecs.len()
-        ));
-    }
+    let vectors = chunk_vectors(&corpus, &namespace, embedder, store, &mut coverage)?;
 
     // Per-file best score across its chunks.
     let mut best: HashMap<String, f32> = HashMap::new();
     let mut snippet_of: HashMap<String, String> = HashMap::new();
-    for (entry, vec) in corpus.iter().zip(&cvecs) {
+    for entry in &corpus {
+        let vec = &vectors[&entry.key];
         validate_vector(vec, qvec.len())?;
         let s = cosine(&qvec, vec);
         if best.get(&entry.path).copied().unwrap_or(f32::MIN) < s {
@@ -545,6 +662,71 @@ fn ask_collected(
         coverage,
     })
 }
+
+/// The vector of every chunk of `corpus`, by key: the ones `store` holds, and
+/// the rest embedded in one batch, each distinct text once, then saved.
+///
+/// A store failure never fails the question: the chunks it could not serve
+/// are embedded like new ones, the failure is named in
+/// `coverage.vector_cache_errors` and marks the answer degraded, and the next
+/// save rebuilds the store. Counts go to `coverage.chunks`,
+/// `embedded_chunks` and `cached_chunks`.
+fn chunk_vectors(
+    corpus: &[CorpusEntry],
+    namespace: &Namespace,
+    embedder: &mut dyn crate::embed::Embedder,
+    store: Option<&Store>,
+    coverage: &mut AskCoverage,
+) -> Result<HashMap<ChunkKey, Vec<f32>>, String> {
+    let dims = embedder.dims();
+    let wanted: HashSet<ChunkKey> = corpus.iter().map(|entry| entry.key).collect();
+    let crate::code_vectors::Loaded {
+        mut vectors,
+        stored_rows,
+        errors,
+    } = store
+        .map(|store| store.load(namespace, dims, &wanted))
+        .unwrap_or_default();
+    let rebuild = !errors.is_empty();
+    coverage.vector_cache_errors.extend(errors);
+    let mut fresh = Vec::new();
+    let mut texts = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in corpus {
+        if !vectors.contains_key(&entry.key) && seen.insert(entry.key) {
+            fresh.push(entry.key);
+            texts.push(entry.text.as_str());
+        }
+    }
+    coverage.chunks = corpus.len();
+    coverage.cached_chunks = corpus
+        .iter()
+        .filter(|entry| vectors.contains_key(&entry.key))
+        .count();
+    coverage.embedded_chunks = texts.len();
+    if !texts.is_empty() {
+        let embedded = embedder.embed_batch(&texts, EmbedKind::Passage)?;
+        if embedded.len() != texts.len() {
+            return Err(format!(
+                "embedding count mismatch: {} chunks vs {} vectors",
+                texts.len(),
+                embedded.len()
+            ));
+        }
+        for (key, vector) in fresh.iter().zip(embedded) {
+            validate_vector(&vector, dims)?;
+            vectors.insert(*key, vector);
+        }
+    }
+    if let Some(store) = store
+        && let Err(error) = store.save(namespace, dims, &fresh, &vectors, stored_rows, rebuild)
+    {
+        coverage.vector_cache_errors.push(error);
+    }
+    coverage.degraded |= !coverage.vector_cache_errors.is_empty();
+    Ok(vectors)
+}
+
 fn validate_vector(vector: &[f32], dims: usize) -> Result<(), String> {
     let norm: f64 = vector.iter().map(|x| f64::from(*x).powi(2)).sum();
     if dims == 0 || vector.len() != dims || !norm.is_finite() || norm <= 0.0 {
@@ -934,6 +1116,7 @@ mod tests {
             files,
             coverage,
             &mut FixtureEmbedder { fail: false },
+            None,
         )
         .unwrap();
         assert_eq!(result.hits.len(), 1);
@@ -967,6 +1150,7 @@ mod tests {
             files,
             coverage,
             &mut FixtureEmbedder { fail: false },
+            None,
         )
         .unwrap();
         assert_eq!(result.hits[0].lexical_matches, 0);
@@ -992,6 +1176,7 @@ mod tests {
             files,
             coverage,
             &mut FixtureEmbedder { fail: false },
+            None,
         )
         .unwrap();
         let large = result
@@ -1024,6 +1209,7 @@ mod tests {
                 files,
                 coverage,
                 &mut FixtureEmbedder { fail: false },
+                None,
             )
             .unwrap();
             assert_eq!(
@@ -1047,6 +1233,7 @@ mod tests {
             files,
             coverage,
             &mut FixtureEmbedder { fail: false },
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1083,6 +1270,7 @@ mod tests {
                 files,
                 coverage,
                 &mut FixtureEmbedder { fail: false },
+                None,
             )
             .unwrap();
             assert_eq!(result.hits[0].lexical_matches, expected, "{filename}");
@@ -1116,6 +1304,7 @@ mod tests {
                 files,
                 coverage,
                 &mut InvalidEmbedder { vector },
+                None,
             );
             assert!(
                 result.is_err(),
@@ -1138,6 +1327,7 @@ mod tests {
             files,
             coverage,
             &mut FixtureEmbedder { fail: false },
+            None,
         )
         .unwrap();
         assert!(result.hits[0].path.ends_with("manual.md"));
@@ -1152,6 +1342,7 @@ mod tests {
             files,
             coverage,
             &mut FixtureEmbedder { fail: true },
+            None,
         );
         assert_eq!(err.err().unwrap(), "fixture model unavailable");
     }
@@ -1324,6 +1515,7 @@ mod tests {
             files,
             coverage,
             &mut MentionEmbedder { word: "invoice" },
+            None,
         )
         .unwrap();
         assert_eq!(result.hits[0].path, root.join(answer).display().to_string());
@@ -1356,6 +1548,7 @@ mod tests {
             files,
             coverage,
             &mut MentionEmbedder { word: "invoice" },
+            None,
         )
         .unwrap();
         let hits: Vec<_> = result.hits.iter().map(|h| h.path.as_str()).collect();
@@ -1457,6 +1650,7 @@ mod tests {
                 files,
                 coverage,
                 &mut FixtureEmbedder { fail: false },
+                None,
             )
             .unwrap();
             (searched, result.coverage)
@@ -1490,5 +1684,466 @@ mod tests {
     fn defaults_are_ten_hits_and_six_thousand_files() {
         assert_eq!(DEFAULT_LIMIT, 10);
         assert_eq!(DEFAULT_MAX_FILES, 6000);
+    }
+
+    /// Embeds with `vector` and counts the chunk texts it is handed (the
+    /// question is not counted), so a test can tell a vector read from the
+    /// store from one the model recomputed.
+    struct CountingEmbedder {
+        model: &'static str,
+        vector: fn(&str) -> Vec<f32>,
+        embedded: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl crate::embed::Embedder for CountingEmbedder {
+        fn model_id(&self) -> &str {
+            self.model
+        }
+        fn dims(&self) -> usize {
+            (self.vector)("").len()
+        }
+        fn embed_batch(
+            &mut self,
+            texts: &[&str],
+            kind: EmbedKind,
+        ) -> Result<Vec<Vec<f32>>, String> {
+            if matches!(kind, EmbedKind::Passage) {
+                self.embedded
+                    .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(texts.iter().map(|text| (self.vector)(text)).collect())
+        }
+    }
+
+    /// `[1, 0]` for a text naming an invoice, `[0, 1]` otherwise.
+    fn invoice_vector(text: &str) -> Vec<f32> {
+        if text.contains("invoice") {
+            vec![1.0, 0.0]
+        } else {
+            vec![0.0, 1.0]
+        }
+    }
+
+    /// The question over `root` through the production pipeline
+    /// ([`ask_opening`]) with a counting embedder: the result and the number
+    /// of chunk texts the model was asked to embed.
+    fn ask_counting(
+        root: &Path,
+        query: &str,
+        cache: VectorCache,
+        model: &'static str,
+        vector: fn(&str) -> Vec<f32>,
+    ) -> (AskResult, usize) {
+        let embedded = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&embedded);
+        let result = ask_opening(
+            root,
+            query,
+            DEFAULT_LIMIT,
+            DEFAULT_MAX_FILES,
+            cache,
+            move || {
+                Ok(Box::new(CountingEmbedder {
+                    model,
+                    vector,
+                    embedded: counter,
+                }) as Box<dyn crate::embed::Embedder>)
+            },
+        )
+        .unwrap();
+        let count = embedded.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            result.coverage.embedded_chunks, count,
+            "the coverage reports what the model did"
+        );
+        (result, count)
+    }
+
+    /// A tree carrying a pixel index at its root, as `pixel build-index`
+    /// leaves it.
+    fn indexed_tree() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            &format!(
+                "{}/{}",
+                pixel_index::index::SHARD_DIR,
+                pixel_index::index::SHARD_FILE
+            ),
+            "",
+        );
+        dir
+    }
+
+    fn store_dir(root: &Path) -> PathBuf {
+        root.join(pixel_index::index::SHARD_DIR)
+            .join(crate::code_vectors::DIR)
+    }
+
+    /// Every observable of a ranking, scores to the bit.
+    fn ranking(result: &AskResult) -> Vec<(String, u32, u64, usize, String)> {
+        result
+            .hits
+            .iter()
+            .map(|hit| {
+                (
+                    hit.path.clone(),
+                    hit.semantic_score.to_bits(),
+                    hit.ranking_score.to_bits(),
+                    hit.lexical_matches,
+                    hit.snippet.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// A 3 000-byte file (three windows) whose `marker` sits in the last
+    /// 200 bytes, which only the third window covers.
+    fn three_window_text(marker: &str) -> String {
+        let mut text = String::new();
+        let mut line = 0;
+        while text.len() < 2900 {
+            text.push_str(&format!("// filler line {line:04} of the ledger\n"));
+            line += 1;
+        }
+        text.push_str(&format!("fn {marker}() {{}}\n"));
+        text
+    }
+
+    /// The point of the store: an unchanged tree asked twice pays the model
+    /// once. The warm question embeds nothing, serves every chunk from
+    /// `.pixel/code-vectors`, and answers exactly as the cold one did.
+    #[test]
+    fn warm_question_should_embed_no_chunk_when_the_tree_is_unchanged() {
+        let dir = indexed_tree();
+        let root = dir.path();
+        write(root, "src/billing.rs", "fn invoice_total() {}");
+        write(root, "src/other.rs", "fn unrelated() {}");
+        write(root, "docs/ledger.md", &three_window_text("invoice_marker"));
+        let cache = vector_cache_for(root, None);
+        assert_eq!(cache, VectorCache::Persisted);
+
+        let (cold, cold_count) = ask_counting(root, "invoice", cache, "m", invoice_vector);
+        assert_eq!(cold.coverage.chunks, 5, "1 + 1 + 3 windows");
+        assert_eq!(cold_count, 5);
+        assert_eq!(cold.coverage.cached_chunks, 0);
+        assert!(store_dir(root).join("manifest.json").is_file());
+
+        let (warm, warm_count) = ask_counting(root, "invoice", cache, "m", invoice_vector);
+        assert_eq!(warm_count, 0, "a warm question embeds no chunk");
+        assert_eq!(warm.coverage.cached_chunks, 5);
+        assert_eq!(warm.coverage.chunks, 5);
+        assert_eq!(ranking(&warm), ranking(&cold));
+        assert_eq!(warm.hits[0].path, "docs/ledger.md");
+        assert!(
+            !warm.coverage.degraded,
+            "{:?}",
+            warm.coverage.vector_cache_errors
+        );
+        let json = serde_json::to_value(&warm.coverage).unwrap();
+        assert_eq!(json["vector_cache"], "persisted");
+        assert_eq!(json["embedded_chunks"], 0);
+        assert_eq!(json["cached_chunks"], 5);
+        assert_eq!(json["vector_cache_errors"], serde_json::json!([]));
+    }
+
+    /// No size or mtime shortcut: an edit that keeps the byte length and
+    /// has its mtime put back is still seen, because the key is the chunk
+    /// text. Exactly the windows whose text changed are embedded again, and
+    /// the new text is what the question finds.
+    #[test]
+    fn same_size_edit_with_restored_mtime_should_reembed_exactly_the_changed_chunks() {
+        let dir = indexed_tree();
+        let root = dir.path();
+        let before = three_window_text("alpha_marker");
+        write(root, "src/ledger.rs", &before);
+        write(root, "src/other.rs", "fn unrelated() {}");
+        let cache = vector_cache_for(root, None);
+        let omega = |text: &str| {
+            if text.contains("omega") {
+                vec![1.0, 0.0]
+            } else {
+                vec![0.0, 1.0]
+            }
+        };
+        let (cold, _) = ask_counting(root, "omega", cache, "m", omega);
+        assert_eq!(cold.hits[0].semantic_score, 0.0, "no omega yet");
+
+        let path = root.join("src/ledger.rs");
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let after = before.replace("alpha_marker", "omega_marker");
+        assert_eq!(after.len(), before.len());
+        std::fs::write(&path, &after).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            (metadata.len(), metadata.modified().unwrap()),
+            (before.len() as u64, modified),
+            "the edit is invisible to size and mtime"
+        );
+        let changed = chunk_offsets(&before)
+            .into_iter()
+            .zip(chunk_offsets(&after))
+            .filter(|((b0, b1), (a0, a1))| before[*b0..*b1] != after[*a0..*a1])
+            .count();
+        assert_eq!(changed, 1, "only the last window holds the marker");
+
+        let (edited, count) = ask_counting(root, "omega", cache, "m", omega);
+        assert_eq!(count, changed, "exactly the changed windows");
+        assert_eq!(
+            edited.coverage.cached_chunks,
+            edited.coverage.chunks - changed
+        );
+        assert_eq!(edited.hits[0].path, "src/ledger.rs");
+        assert_eq!(edited.hits[0].semantic_score, 1.0, "the new text is found");
+    }
+
+    /// A gitignored file is never read, so its text never reaches the store:
+    /// the rows on disk are exactly the searched files' chunks.
+    #[test]
+    fn gitignored_file_should_leave_no_row_on_disk() {
+        let dir = indexed_tree();
+        let root = dir.path();
+        write(root, ".gitignore", "secret.rs\n");
+        write(root, "secret.rs", "fn invoice_secret_token() {}");
+        write(root, "kept.rs", "fn invoice_kept() {}");
+        ask_counting(
+            root,
+            "invoice",
+            vector_cache_for(root, None),
+            "m",
+            invoice_vector,
+        );
+        let namespace = Namespace::new("m", crate::embed::embedder_revision("m"), CHUNKER_VERSION);
+        assert_eq!(
+            Store::at(&store_dir(root)).keys_on_disk(),
+            [namespace.key("fn invoice_kept() {}")]
+        );
+    }
+
+    /// The store is written only at an indexed root that is not the home
+    /// directory: a subtree (the NDCG bench asks `crates/pixel-graph/src`),
+    /// an unindexed tree, a `.pixel` holding only journals, the home
+    /// directory (whatever it carries) and the daemon's fallback write
+    /// nothing, and embed every chunk on every question.
+    #[test]
+    fn subtree_home_and_fallback_roots_should_write_nothing() {
+        let dir = indexed_tree();
+        let root = dir.path();
+        write(root, "src/billing.rs", "fn invoice_total() {}");
+        let subtree = root.join("src");
+        let plain = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(plain.path().join(pixel_index::index::SHARD_DIR)).unwrap();
+        write(plain.path(), "billing.rs", "fn invoice_total() {}");
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert_eq!(vector_cache_for(&subtree, None), VectorCache::NoIndex);
+        assert_eq!(vector_cache_for(plain.path(), None), VectorCache::NoIndex);
+        assert_eq!(
+            vector_cache_for(root, Some(root)),
+            VectorCache::HomeDirectory
+        );
+        assert_eq!(
+            vector_cache_for(root, Some(elsewhere.path())),
+            VectorCache::Persisted
+        );
+        #[cfg(unix)]
+        {
+            let link = elsewhere.path().join("home");
+            std::os::unix::fs::symlink(root, &link).unwrap();
+            assert_eq!(
+                vector_cache_for(root, Some(&link)),
+                VectorCache::HomeDirectory,
+                "the home directory reached through a symlink is still home"
+            );
+        }
+
+        for (tree, cache) in [
+            (subtree.as_path(), vector_cache_for(&subtree, None)),
+            (plain.path(), vector_cache_for(plain.path(), None)),
+            (root, vector_cache_for(root, Some(root))),
+            (root, VectorCache::Disabled),
+        ] {
+            for _ in 0..2 {
+                let (result, count) = ask_counting(tree, "invoice", cache, "m", invoice_vector);
+                assert_eq!(
+                    count, 1,
+                    "{cache:?}: nothing persisted, everything embedded"
+                );
+                assert_eq!(result.coverage.vector_cache, cache);
+                assert_eq!(result.hits[0].semantic_score, 1.0);
+            }
+            for written in [
+                store_dir(root),
+                store_dir(&subtree),
+                store_dir(plain.path()),
+            ] {
+                assert!(!written.exists(), "{cache:?} wrote {}", written.display());
+            }
+        }
+    }
+
+    /// Vectors of another model are never served: the key and the segment
+    /// namespace both carry the model id (and its revision, and the chunker
+    /// version: `namespace_should_change_every_key…` in `code_vectors`).
+    #[test]
+    fn model_change_should_never_serve_old_vectors() {
+        let dir = indexed_tree();
+        let root = dir.path();
+        write(root, "src/billing.rs", "fn invoice_total() {}");
+        write(root, "src/other.rs", "fn unrelated() {}");
+        let cache = vector_cache_for(root, None);
+        ask_counting(root, "invoice", cache, "model-a", invoice_vector);
+        let flipped = |text: &str| {
+            if text.contains("invoice") {
+                vec![0.0, 1.0]
+            } else {
+                vec![1.0, 0.0]
+            }
+        };
+        let (result, count) = ask_counting(root, "invoice", cache, "model-b", flipped);
+        assert_eq!(count, 2, "model-b embeds every chunk itself");
+        assert_eq!(result.coverage.cached_chunks, 0);
+        assert_eq!(result.hits[0].path, "src/billing.rs");
+        assert_eq!(
+            result.hits[0].semantic_score, 1.0,
+            "model-a's vector would score 0 against model-b's question"
+        );
+        let (_, again) = ask_counting(root, "invoice", cache, "model-b", flipped);
+        assert_eq!(again, 0, "model-b's own vectors are served");
+    }
+
+    /// A segment the manifest names but that is gone is an error the answer
+    /// carries (degraded, named in the coverage and the human note), never a
+    /// silent skip; the question still answers, identically, by embedding
+    /// again, and the store is rebuilt for the next one.
+    #[test]
+    fn missing_segment_should_surface_an_error_and_still_answer() {
+        let dir = indexed_tree();
+        let root = dir.path();
+        write(root, "src/billing.rs", "fn invoice_total() {}");
+        write(root, "src/other.rs", "fn unrelated() {}");
+        let cache = vector_cache_for(root, None);
+        let (cold, _) = ask_counting(root, "invoice", cache, "m", invoice_vector);
+        for entry in std::fs::read_dir(store_dir(root)).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "vec") {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        let (damaged, count) = ask_counting(root, "invoice", cache, "m", invoice_vector);
+        assert_eq!(count, 2, "every chunk embedded again");
+        assert_eq!(ranking(&damaged), ranking(&cold));
+        assert!(damaged.coverage.degraded);
+        let errors = &damaged.coverage.vector_cache_errors;
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("seg-") && errors[0].contains("unreadable"),
+            "{errors:?}"
+        );
+        let note = damaged.coverage.vector_cache_note().unwrap();
+        assert!(note.contains(&errors[0]), "{note}");
+
+        let (repaired, count) = ask_counting(root, "invoice", cache, "m", invoice_vector);
+        assert_eq!(count, 0, "the store was rebuilt");
+        assert!(repaired.coverage.vector_cache_errors.is_empty());
+        assert!(!repaired.coverage.degraded);
+        assert_eq!(repaired.coverage.vector_cache_note(), None);
+    }
+
+    #[test]
+    fn vector_cache_note_should_join_every_error() {
+        let mut coverage = AskCoverage::default();
+        assert_eq!(coverage.vector_cache_note(), None);
+        coverage.vector_cache_errors = vec!["a failed".into(), "b failed".into()];
+        assert_eq!(
+            coverage.vector_cache_note().as_deref(),
+            Some("vector cache: a failed; b failed; the affected chunks were embedded again")
+        );
+    }
+
+    /// Garbage collection by reachability: deleting files leaves their rows
+    /// until the unreachable ones pass a quarter of the live ones, then the
+    /// store is rewritten with the live rows only.
+    #[test]
+    fn deleted_files_should_leave_the_disk_once_unreachable_rows_pass_the_threshold() {
+        let dir = indexed_tree();
+        let root = dir.path();
+        for i in 0..8 {
+            write(root, &format!("src/f{i}.rs"), &format!("fn f{i}() {{}}"));
+        }
+        let cache = vector_cache_for(root, None);
+        let store = Store::at(&store_dir(root));
+        ask_counting(root, "invoice", cache, "m", invoice_vector);
+        assert_eq!(store.keys_on_disk().len(), 8);
+
+        std::fs::remove_file(root.join("src/f0.rs")).unwrap();
+        let (_, count) = ask_counting(root, "invoice", cache, "m", invoice_vector);
+        assert_eq!(count, 0);
+        assert_eq!(
+            store.keys_on_disk().len(),
+            8,
+            "1 unreachable row of 7 live is under the threshold: kept"
+        );
+
+        std::fs::remove_file(root.join("src/f1.rs")).unwrap();
+        let (_, count) = ask_counting(root, "invoice", cache, "m", invoice_vector);
+        assert_eq!(count, 0);
+        let namespace = Namespace::new("m", crate::embed::embedder_revision("m"), CHUNKER_VERSION);
+        let mut live: Vec<_> = (2..8)
+            .map(|i| namespace.key(&format!("fn f{i}() {{}}")))
+            .collect();
+        live.sort_unstable();
+        assert_eq!(store.keys_on_disk(), live, "2 of 6 passes it: compacted");
+    }
+
+    /// Cached vectors are the embedder's own `f32`s, so a cached question
+    /// ranks bit for bit like an uncached one, even where scores sit 1e-4
+    /// apart (search-meaning's real scores crowd into 0.33 to 0.39). A
+    /// quantized store (i8, f16) would flatten these ties into path order.
+    #[test]
+    fn cached_and_uncached_rankings_should_be_bit_identical_on_near_ties() {
+        fn near_tie(text: &str) -> Vec<f32> {
+            // `fn f<i>() {}`: a step per file, in an order that is not the
+            // files' (7 is coprime with 10).
+            if let Some(i) = text
+                .strip_prefix("fn f")
+                .and_then(|rest| rest.split('(').next())
+                .and_then(|digits| digits.parse::<u8>().ok())
+            {
+                let step = f32::from(i * 7 % 10);
+                vec![0.5 + step * 1e-4, 0.5, 0.0]
+            } else {
+                vec![1.0, 0.0, 0.0]
+            }
+        }
+        let indexed = indexed_tree();
+        let plain = tempfile::tempdir().unwrap();
+        for i in 0..10 {
+            for root in [indexed.path(), plain.path()] {
+                write(root, &format!("src/f{i}.rs"), &format!("fn f{i}() {{}}"));
+            }
+        }
+        let (uncached, _) = ask_counting(plain.path(), "zzz", VectorCache::NoIndex, "m", near_tie);
+        let cache = vector_cache_for(indexed.path(), None);
+        let (cold, _) = ask_counting(indexed.path(), "zzz", cache, "m", near_tie);
+        let (warm, count) = ask_counting(indexed.path(), "zzz", cache, "m", near_tie);
+        assert_eq!(count, 0);
+        assert_eq!(warm.coverage.cached_chunks, 10);
+        let scores: HashSet<u32> = uncached
+            .hits
+            .iter()
+            .map(|hit| hit.semantic_score.to_bits())
+            .collect();
+        assert_eq!(scores.len(), 10, "the fixture has no exact tie");
+        let paths: Vec<&str> = uncached.hits.iter().map(|hit| hit.path.as_str()).collect();
+        let mut sorted = paths.clone();
+        sorted.sort_unstable();
+        assert_ne!(paths, sorted, "the order is the scores', not the paths'");
+        assert_eq!(ranking(&cold), ranking(&uncached));
+        assert_eq!(ranking(&warm), ranking(&uncached));
     }
 }

@@ -19,10 +19,12 @@
 #          scripts/bench-vs (.gitnexus/, stacklit.*, DEPENDENCIES.md).
 #          Cost: one cargo build, one bun install.
 #   index  .pixel/ of every worktree: base and delta shards, graph.db,
-#          history.db, and the local action log with them. Cost: `pixel
-#          build-index --history .`, minutes on a repository of a few hundred
-#          commits. The daemon serves that index and writes to it, so each
-#          root's daemon is stopped first.
+#          history.db, the search-meaning vector cache (code-vectors/), and
+#          the local action log with them. Cost: `pixel build-index
+#          --history .`, minutes on a repository of a few hundred commits,
+#          plus one full embedding pass on the next `pixel search-meaning`.
+#          The daemon serves that index and writes to it, so each root's
+#          daemon is stopped first.
 #   cache  the base-shard cache shared by every worktree
 #          (`$XDG_CACHE_HOME`, else ~/.cache)/pixel/shards. It is
 #          content-addressed and refilled by the next index build, but it is
