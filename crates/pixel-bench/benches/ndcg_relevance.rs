@@ -271,8 +271,9 @@ fn run_ndcg_ask(root: &std::path::Path, qrels: &[(&'static str, Vec<String>)], k
         let rel_set: HashSet<String> = relevant.iter().cloned().collect();
         // `ask` embeds the raw query string. The qrels queries are keyword
         // endpoints; static embeddings handle keyword-ish text fine, and
-        // using the identical string keeps the A/B inputs matched.
-        let hits = pixel_recall::code_search::ask(&subtree, q, k.max(50), 2000)
+        // using the identical string keeps the A/B inputs matched. No file
+        // budget (`None`), as `pixel search-meaning` runs by default.
+        let hits = pixel_recall::code_search::ask(&subtree, q, k.max(50), None)
             .unwrap_or_else(|err| panic!("ask query {q:?} failed: {err}"));
         let order: Vec<String> = hits
             .iter()

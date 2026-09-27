@@ -257,10 +257,9 @@ enum Command {
         /// Number of ranked hits to return.
         #[arg(long, default_value_t = pixel_recall::code_search::DEFAULT_LIMIT)]
         limit: usize,
-        /// Most eligible files embedded; above it, a deterministic sample
-        /// spread across the whole tree is searched and the coverage says so.
-        #[arg(long, default_value_t = pixel_recall::code_search::DEFAULT_MAX_FILES)]
-        max_files: usize,
+        // Help text built from the ceiling constant: `max_files_help`.
+        #[arg(long, help = max_files_help())]
+        max_files: Option<usize>,
         #[arg(long)]
         json: bool,
     },
@@ -1481,6 +1480,18 @@ enum FlowCmd {
 }
 
 /// Parse a 1-based inclusive line range "a,b" for `provenance --lines`.
+/// `pixel search-meaning --max-files` help: an optional budget, and the
+/// ceiling that applies without one, spelled from its constant.
+fn max_files_help() -> String {
+    format!(
+        "Optional budget: most eligible files embedded; above it, a deterministic sample spread \
+         across the whole tree is searched and the coverage says so. Without it, every eligible \
+         file is searched, up to a safety ceiling of {} files for runaway trees (a home \
+         directory)",
+        pixel_recall::code_search::UNBUDGETED_FILE_CEILING
+    )
+}
+
 fn parse_line_range(s: &str) -> Result<(u32, u32), String> {
     let (a, b) = s
         .split_once(',')
@@ -7933,7 +7944,7 @@ fn run_ask(
     question: String,
     path: PathBuf,
     limit: usize,
-    max_files: usize,
+    max_files: Option<usize>,
     json: bool,
 ) -> Result<(), String> {
     let root = discover_root(&path)?;

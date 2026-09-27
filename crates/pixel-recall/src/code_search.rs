@@ -18,7 +18,7 @@
 //! adds a semantic layer on top. NDCG is the gate (see
 //! crates/pixel-bench/benches/ndcg_relevance.rs).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::code_vectors::{ChunkKey, Namespace, Store};
@@ -39,12 +39,20 @@ pub struct AskHit {
 
 const MAX_FILE_BYTES: usize = 512 * 1024;
 
-/// Default for `pixel search-meaning --max-files`: how many eligible files one
-/// question embeds. Sized to cover a mid-size repository whole (GitNexus has
-/// 4 806 eligible files, dd-trace-rb 2 306); a larger tree is sampled across
-/// its whole extent (see [`collect_files`]), never truncated to the files a
-/// walk happens to reach first.
-pub const DEFAULT_MAX_FILES: usize = 6000;
+/// Most files a question without a `--max-files` budget embeds: a guard
+/// against a runaway universe, not a budget. A question searches every
+/// eligible file by default (persisted vectors make a warm question pay only
+/// for the chunks that changed); above this ceiling it searches a
+/// deterministic sample of it ([`sample_across_tree`]) and says so
+/// ([`FileBudget::Ceiling`]). An explicit `--max-files` replaces it, above
+/// or below.
+///
+/// Sized from measurements (2026-09-27): yespark-rails, the largest
+/// repository at hand, has 11 299 eligible files, and 50 000 is the graph
+/// builder's own walk ceiling (`PIXEL_GRAPH_MAX_FILES`). A home directory
+/// has 347 611: uncapped, that is about 1.5 million chunks, some 1.5 GB of
+/// vectors held in memory and minutes of embedding, never persisted there.
+pub const UNBUDGETED_FILE_CEILING: usize = 50_000;
 
 /// Default for `pixel search-meaning --limit`: ranked hits returned. Ten, so a
 /// recall@10 measurement reads the list a user actually gets.
@@ -96,6 +104,21 @@ pub fn vector_cache_for(root: &Path, home: Option<&Path>) -> VectorCache {
     }
 }
 
+/// Which file limit a question ran under.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileBudget {
+    /// No `--max-files` and the universe within [`UNBUDGETED_FILE_CEILING`]:
+    /// every eligible file was in reach.
+    #[default]
+    None,
+    /// The caller's `--max-files` (or the semantic fallback's own budget).
+    Explicit,
+    /// No `--max-files`, and more eligible files than
+    /// [`UNBUDGETED_FILE_CEILING`]: a sample of that size was searched.
+    Ceiling,
+}
+
 /// What one question covered: the eligible universe, the part embedded, and
 /// every reason a file was left out.
 #[derive(Default, serde::Serialize)]
@@ -105,7 +128,12 @@ pub struct AskCoverage {
     pub candidate_files: usize,
     /// Files actually read, chunked and embedded.
     pub searched_files: usize,
-    pub max_files: usize,
+    /// The file limit in force: the explicit budget, or
+    /// [`UNBUDGETED_FILE_CEILING`] when an unbudgeted question outgrew it.
+    /// `None` (JSON `null`) when there was none: no `--max-files` and every
+    /// eligible file in reach. `file_budget` says which of the three.
+    pub max_files: Option<usize>,
+    pub file_budget: FileBudget,
     /// More than `max_files` files were eligible: only a sample was searched.
     pub file_limit_reached: bool,
     pub skipped_files: usize,
@@ -132,12 +160,23 @@ impl AskCoverage {
     /// a missing answer is never passed off as an absent one. `None` when the
     /// whole eligible universe was in reach.
     pub fn sample_note(&self) -> Option<String> {
-        self.file_limit_reached.then(|| {
-            format!(
-                "searched a deterministic sample of {} of {} eligible files (--max-files {}); raise --max-files to search them all",
-                self.searched_files, self.candidate_files, self.max_files
-            )
-        })
+        if !self.file_limit_reached {
+            return None;
+        }
+        let limit = self.max_files.unwrap_or_default();
+        let (why, remedy) = match self.file_budget {
+            FileBudget::Ceiling => (
+                format!("safety ceiling of {limit} files without --max-files"),
+                "pass a larger --max-files",
+            ),
+            FileBudget::Explicit | FileBudget::None => {
+                (format!("--max-files {limit}"), "raise --max-files")
+            }
+        };
+        Some(format!(
+            "searched a deterministic sample of {} of {} eligible files ({why}); {remedy} to search them all",
+            self.searched_files, self.candidate_files
+        ))
     }
 
     /// The line a human reader gets when the vector store failed, so a slow
@@ -170,13 +209,29 @@ pub struct AskResult {
 /// counted in `traversal_errors` instead of vanishing, and non-UTF-8 names
 /// keep their bytes.
 ///
-/// Over `max_files`, the files kept are a sample spread over the whole tree
-/// ([`sample_across_tree`]); `candidate_files` still counts every eligible
-/// file, and `file_limit_reached` and `degraded` say that the search was
-/// partial.
-fn collect_files(root: &Path, max_files: usize) -> (Vec<PathBuf>, AskCoverage) {
+/// `max_files` is the caller's budget; `None` searches every eligible file up
+/// to [`UNBUDGETED_FILE_CEILING`]. Over the limit in force, the files kept
+/// are a sample spread over the whole tree ([`sample_across_tree`]);
+/// `candidate_files` still counts every eligible file, and
+/// `file_limit_reached` and `degraded` say that the search was partial.
+fn collect_files(root: &Path, max_files: Option<usize>) -> (Vec<PathBuf>, AskCoverage) {
+    collect_files_within(root, max_files, UNBUDGETED_FILE_CEILING)
+}
+
+/// [`collect_files`] with the ceiling of an unbudgeted question as a
+/// parameter, so a test can reach it without 50 000 files.
+fn collect_files_within(
+    root: &Path,
+    max_files: Option<usize>,
+    ceiling: usize,
+) -> (Vec<PathBuf>, AskCoverage) {
     let mut coverage = AskCoverage {
         max_files,
+        file_budget: if max_files.is_some() {
+            FileBudget::Explicit
+        } else {
+            FileBudget::None
+        },
         scope: "eligible source/document extensions; gitignored files and excluded noise directories skipped; nested checkouts skipped; no symlinks; files <=512KiB; UTF-8 text only",
         ..Default::default()
     };
@@ -203,9 +258,14 @@ fn collect_files(root: &Path, max_files: usize) -> (Vec<PathBuf>, AskCoverage) {
         }
     }
     coverage.candidate_files = eligible.len();
-    coverage.file_limit_reached = eligible.len() > max_files;
+    let limit = max_files.unwrap_or(ceiling);
+    coverage.file_limit_reached = eligible.len() > limit;
+    if coverage.file_limit_reached && max_files.is_none() {
+        coverage.file_budget = FileBudget::Ceiling;
+        coverage.max_files = Some(ceiling);
+    }
     coverage.degraded = coverage.file_limit_reached || coverage.traversal_errors > 0;
-    let files = sample_across_tree(eligible, max_files)
+    let files = sample_across_tree(eligible, limit)
         .into_iter()
         .map(|relative| root.join(relative))
         .collect();
@@ -354,12 +414,20 @@ struct CorpusEntry {
 /// Answer a natural-language question over a code tree.
 ///
 /// Returns the top `k` files ranked by max chunk cosine similarity, each with
-/// a snippet from its best-matching chunk.
-pub fn ask(root: &Path, query: &str, k: usize, max_files: usize) -> Result<Vec<AskHit>, String> {
+/// a snippet from its best-matching chunk. `max_files` is an optional budget
+/// ([`collect_files`]): `None` searches every eligible file.
+pub fn ask(
+    root: &Path,
+    query: &str,
+    k: usize,
+    max_files: Option<usize>,
+) -> Result<Vec<AskHit>, String> {
     ask_with_metadata(root, query, k, max_files).map(|result| result.hits)
 }
 
-/// Most files the semantic fallback embeds inside a daemon request.
+/// Most files the semantic fallback embeds inside a daemon request. It keeps
+/// a budget where `pixel search-meaning` has none: it runs inside a request,
+/// in memory, and persists no vector, so every call pays for every file.
 pub const SEMANTIC_FALLBACK_MAX_FILES: usize = 2000;
 
 /// Semantic leads for a query no lexical tier answered, with what the scan
@@ -447,14 +515,25 @@ pub fn semantic_fallback(root: &Path, query: &str, limit: usize) -> SemanticFall
             ..Default::default()
         };
     }
-    // In memory only: a daemon request must not write the store.
-    ask_with_embedder(
+    fallback_opening(root, query, limit, || open_code_embedder(false))
+}
+
+/// The fallback over `root` with the embedder `open` returns: at most
+/// [`SEMANTIC_FALLBACK_MAX_FILES`] files, in memory only (a daemon request
+/// must not write the store), and an empty answer on any error.
+fn fallback_opening(
+    root: &Path,
+    query: &str,
+    limit: usize,
+    open: impl FnOnce() -> Result<Box<dyn crate::embed::Embedder>, String>,
+) -> SemanticFallback {
+    ask_opening(
         root,
         query,
         limit,
-        SEMANTIC_FALLBACK_MAX_FILES,
-        false,
+        Some(SEMANTIC_FALLBACK_MAX_FILES),
         VectorCache::Disabled,
+        open,
     )
     .map_or_else(
         |_| SemanticFallback::default(),
@@ -494,25 +573,12 @@ pub fn ask_with_metadata(
     root: &Path,
     query: &str,
     k: usize,
-    max_files: usize,
+    max_files: Option<usize>,
 ) -> Result<AskResult, String> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let cache = vector_cache_for(root, home.as_deref());
-    ask_with_embedder(root, query, k, max_files, true, cache)
-}
-
-/// [`ask_with_metadata`], downloading the model only when `download`.
-#[cfg_attr(test, mutants::skip)] // adapter over the on-disk model; `ask_opening` holds the logic and is tested
-fn ask_with_embedder(
-    root: &Path,
-    query: &str,
-    k: usize,
-    max_files: usize,
-    download: bool,
-    cache: VectorCache,
-) -> Result<AskResult, String> {
     ask_opening(root, query, k, max_files, cache, || {
-        open_code_embedder(download)
+        open_code_embedder(true)
     })
 }
 
@@ -522,7 +588,7 @@ fn ask_opening(
     root: &Path,
     query: &str,
     k: usize,
-    max_files: usize,
+    max_files: Option<usize>,
     cache: VectorCache,
     open: impl FnOnce() -> Result<Box<dyn crate::embed::Embedder>, String>,
 ) -> Result<AskResult, String> {
@@ -859,6 +925,7 @@ fn rank_files(
     k: usize,
 ) -> Vec<AskHit> {
     let terms = query_terms(query);
+    let lexical_ranks = competition_ranks(lexical_coverage.values().copied());
     let mut semantic: Vec<_> = best.into_iter().collect();
     semantic.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     let mut hits: Vec<_> = semantic
@@ -867,15 +934,13 @@ fn rank_files(
         .map(|(index, (path, score))| {
             let coverage = lexical_coverage.get(&path).copied().unwrap_or_default();
             // Competition ranks: equal coverage receives exactly equal evidence weight.
-            let lexical_rank = 1 + lexical_coverage
-                .values()
-                .filter(|candidate| **candidate > coverage)
-                .count();
             let ranking_score = 2.0 / (60.0 + (index + 1) as f64)
                 + if coverage == 0 {
                     0.0
                 } else {
-                    1.0 / (60.0 + lexical_rank as f64)
+                    lexical_ranks
+                        .get(&coverage)
+                        .map_or(0.0, |&rank| 1.0 / (60.0 + rank as f64))
                 };
             AskHit {
                 snippet: snippets.remove(&path).unwrap_or_default(),
@@ -895,6 +960,26 @@ fn rank_files(
     });
     hits.truncate(k);
     hits
+}
+
+/// The competition rank of every coverage value in `coverages`: one plus the
+/// number of values strictly greater, so equal values share a rank and the
+/// next value skips the tied ones (5, 3, 3, 1 rank 1, 2, 2, 4). One pass
+/// over a histogram of the values, which are few (at most the query's term
+/// count, plus zero): a scan of every file per ranked file cost 4 s at the
+/// 50 000-file ceiling.
+fn competition_ranks(coverages: impl Iterator<Item = usize>) -> HashMap<usize, usize> {
+    let mut counts = BTreeMap::new();
+    for coverage in coverages {
+        *counts.entry(coverage).or_insert(0usize) += 1;
+    }
+    let mut ranks = HashMap::with_capacity(counts.len());
+    let mut above = 0;
+    for (coverage, count) in counts.into_iter().rev() {
+        ranks.insert(coverage, 1 + above);
+        above += count;
+    }
+    ranks
 }
 
 fn make_snippet(text: &str) -> String {
@@ -936,6 +1021,43 @@ mod tests {
         rank_files(query, &lexical_coverage, best, HashMap::new(), usize::MAX)
     }
 
+    /// Competition ranking, exactly: ties share the rank of the first of
+    /// them and the next value skips past all of them, and a value's rank
+    /// counts files (not distinct values) above it.
+    #[test]
+    fn competition_ranks_share_ties_and_skip_past_them() {
+        let ranks = competition_ranks([3, 1, 3, 0, 2, 1, 3].into_iter());
+        let expected: HashMap<usize, usize> = [(3, 1), (2, 4), (1, 5), (0, 7)].into();
+        assert_eq!(ranks, expected);
+        assert!(competition_ranks(std::iter::empty()).is_empty());
+        assert_eq!(competition_ranks([4].into_iter()), [(4, 1)].into());
+    }
+
+    /// The lexical half of the fused score uses those ranks: two files
+    /// tied on coverage get the same lexical weight, the next one the rank
+    /// after both, and a file with no coverage none at all.
+    #[test]
+    fn rank_files_gives_tied_coverage_the_same_lexical_weight() {
+        let coverage: HashMap<String, usize> = [("a", 2), ("b", 2), ("c", 1), ("d", 0)]
+            .map(|(path, value)| (path.to_string(), value))
+            .into();
+        let best: HashMap<String, f32> = [("a", 0.9), ("b", 0.8), ("c", 0.7), ("d", 0.6)]
+            .map(|(path, score)| (path.to_string(), score))
+            .into();
+        let hits = rank_files("x y", &coverage, best, HashMap::new(), usize::MAX);
+        let score = |path: &str| {
+            hits.iter()
+                .find(|hit| hit.path == path)
+                .map(|hit| hit.ranking_score)
+                .unwrap()
+        };
+        let semantic = |position: f64| 2.0 / (60.0 + position);
+        assert_eq!(score("a").to_bits(), (semantic(1.0) + 1.0 / 61.0).to_bits());
+        assert_eq!(score("b").to_bits(), (semantic(2.0) + 1.0 / 61.0).to_bits());
+        assert_eq!(score("c").to_bits(), (semantic(3.0) + 1.0 / 63.0).to_bits());
+        assert_eq!(score("d").to_bits(), semantic(4.0).to_bits());
+    }
+
     #[test]
     fn collector_is_deterministic_capped_and_does_not_follow_symlinks() {
         let dir = tempfile::tempdir().unwrap();
@@ -946,26 +1068,26 @@ mod tests {
         std::fs::write(dir.path().join("target/ignored.rs"), "setup").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(dir.path(), dir.path().join("loop")).unwrap();
-        let (files, coverage) = collect_files(dir.path(), 2);
+        let (files, coverage) = collect_files(dir.path(), Some(2));
         assert_eq!(files.len(), 2);
         assert!(files[0] < files[1], "sorted by path: {files:?}");
         assert_eq!(
             files,
-            collect_files(dir.path(), 2).0,
+            collect_files(dir.path(), Some(2)).0,
             "same tree, same sample"
         );
         assert_eq!(coverage.candidate_files, 3, "the universe, not the sample");
         assert!(coverage.file_limit_reached && coverage.degraded);
-        let (files, coverage) = collect_files(dir.path(), 3);
+        let (files, coverage) = collect_files(dir.path(), Some(3));
         assert_eq!(
             files,
             ["a.rs", "b.rs", "c.rs"].map(|name| dir.path().join(name)),
             "exactly the budget: everything, nothing through the symlink"
         );
         assert!(!coverage.file_limit_reached && !coverage.degraded);
-        let (files, coverage) = collect_files(dir.path(), 0);
+        let (files, coverage) = collect_files(dir.path(), Some(0));
         assert!(files.is_empty() && coverage.file_limit_reached);
-        let (_, coverage) = collect_files(&dir.path().join("missing"), 3);
+        let (_, coverage) = collect_files(&dir.path().join("missing"), Some(3));
         assert_eq!(coverage.traversal_errors, 1);
         assert!(coverage.degraded);
     }
@@ -992,14 +1114,15 @@ mod tests {
         std::fs::create_dir_all(root.join(".claude/hooks")).unwrap();
         std::fs::write(root.join(".claude/hooks/guard.py"), "def guard(): pass").unwrap();
 
-        let (files, coverage) = collect_files(root, 10);
+        let (files, coverage) = collect_files(root, Some(10));
         let rel: Vec<_> = files
             .iter()
             .map(|f| f.strip_prefix(root).unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(rel, [".claude/hooks/guard.py", "src/lib.rs"]);
         assert_eq!(coverage.candidate_files, 2);
-        assert_eq!(coverage.max_files, 10);
+        assert_eq!(coverage.max_files, Some(10));
+        assert_eq!(coverage.file_budget, FileBudget::Explicit);
         // The coverage tells the caller what was left out of the search.
         assert!(
             coverage.scope.contains("nested checkouts skipped"),
@@ -1015,7 +1138,7 @@ mod tests {
         let before = std::env::var_os("PIXEL_RECALL_MODEL_REPO");
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("manual.md"), "manual setup").unwrap();
-        let error = ask_with_metadata(dir.path(), "manual setup", 8, 100)
+        let error = ask_with_metadata(dir.path(), "manual setup", 8, Some(100))
             .err()
             .unwrap();
         assert!(error.contains("feature"));
@@ -1036,7 +1159,7 @@ mod tests {
 
     #[test]
     fn fallback_from_makes_paths_repo_relative_and_keeps_the_coverage() {
-        let (_, mut coverage) = collect_files(Path::new("/nonexistent-root"), 3);
+        let (_, mut coverage) = collect_files(Path::new("/nonexistent-root"), Some(3));
         coverage.searched_files = 7;
         coverage.file_limit_reached = true;
         let result = AskResult {
@@ -1109,7 +1232,7 @@ mod tests {
         std::fs::write(dir.path().join("__init__.py"), "").unwrap();
         std::fs::write(dir.path().join("blank.rs"), " \n\t").unwrap();
         std::fs::write(dir.path().join("manual.md"), "manual setup").unwrap();
-        let (files, coverage) = collect_files(dir.path(), 10);
+        let (files, coverage) = collect_files(dir.path(), Some(10));
         let result = ask_collected(
             "manual setup",
             8,
@@ -1143,7 +1266,7 @@ mod tests {
             format!("{}manually", " ".repeat(1494)),
         )
         .unwrap();
-        let (files, coverage) = collect_files(dir.path(), 10);
+        let (files, coverage) = collect_files(dir.path(), Some(10));
         let result = ask_collected(
             "manual",
             8,
@@ -1169,7 +1292,7 @@ mod tests {
             "manual setup belongs together",
         )
         .unwrap();
-        let (files, coverage) = collect_files(dir.path(), 10);
+        let (files, coverage) = collect_files(dir.path(), Some(10));
         let result = ask_collected(
             "manual setup",
             8,
@@ -1202,7 +1325,7 @@ mod tests {
             let root = temporary.path().join(directory);
             std::fs::create_dir(&root).unwrap();
             std::fs::write(root.join("imports.rs"), "fn parse_items() {}").unwrap();
-            let (files, coverage) = collect_files(&root, 10);
+            let (files, coverage) = collect_files(&root, Some(10));
             let result = ask_collected(
                 "imports graph rs",
                 8,
@@ -1226,7 +1349,7 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path();
         std::fs::write(root.join("types.d.ts"), "unrelated body").unwrap();
-        let (files, coverage) = collect_files(root, 10);
+        let (files, coverage) = collect_files(root, Some(10));
         let result = ask_collected(
             "d",
             8,
@@ -1263,7 +1386,7 @@ mod tests {
             let root = temporary.path().join(filename);
             std::fs::create_dir(&root).unwrap();
             std::fs::write(root.join(filename), body).unwrap();
-            let (files, coverage) = collect_files(&root, 10);
+            let (files, coverage) = collect_files(&root, Some(10));
             let result = ask_collected(
                 query,
                 8,
@@ -1297,7 +1420,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("manual.md"), "manual setup").unwrap();
         for vector in [vec![], vec![0.0, 0.0], vec![f32::NAN, 1.0], vec![1.0]] {
-            let (files, coverage) = collect_files(dir.path(), 10);
+            let (files, coverage) = collect_files(dir.path(), Some(10));
             let result = ask_collected(
                 "manual setup",
                 8,
@@ -1320,7 +1443,7 @@ mod tests {
         std::fs::write(dir.path().join("noise.rs"), "manually setup").unwrap();
         std::fs::write(dir.path().join("invalid.rs"), [0xff]).unwrap();
         std::fs::write(dir.path().join("binary.rs"), [0]).unwrap();
-        let (files, coverage) = collect_files(dir.path(), 10);
+        let (files, coverage) = collect_files(dir.path(), Some(10));
         let result = ask_collected(
             "manual setup",
             1,
@@ -1335,7 +1458,7 @@ mod tests {
         assert_eq!(result.coverage.searched_files, 2);
         assert_eq!(result.coverage.skipped_files, 2);
         assert!(result.coverage.degraded && result.coverage.result_limit_reached);
-        let (files, coverage) = collect_files(dir.path(), 10);
+        let (files, coverage) = collect_files(dir.path(), Some(10));
         let err = ask_collected(
             "manual setup",
             1,
@@ -1486,40 +1609,127 @@ mod tests {
             .collect()
     }
 
-    /// The answer of a mid-size repository lives in its deepest,
-    /// alphabetically-last directory, behind more than 2 000 files: the old
-    /// default (2 000 files, walked breadth-first and cut at the budget)
-    /// stopped inside `a/` and never read it. The default budget covers the
-    /// whole tree and the question finds it first.
+    /// A question without `--max-files` searches every eligible file, however
+    /// many there are below the safety ceiling: here 6 002, more than the
+    /// previous default budget of 6 000 (and than the 2 000 before it), with
+    /// the answer in the deepest, alphabetically-last directory, which a
+    /// budget of 6 000 would have searched only by the luck of the sample.
+    /// Through the production pipeline ([`ask_opening`]), so the default the
+    /// CLI passes (`None`) is the one tested.
     #[test]
-    fn default_budget_reaches_the_deepest_last_directory_of_a_mid_size_tree() {
+    fn unbudgeted_question_searches_every_file_of_a_tree_over_the_old_budget() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        for i in 0..2001 {
+        for i in 0..6001 {
             write(root, &format!("a/filler{i:04}.rs"), "fn filler() {}");
         }
         let answer = "zz/y/x/answer.rs";
         write(root, answer, "fn generate_invoice() {}");
-        let (files, coverage) = collect_files(root, DEFAULT_MAX_FILES);
+        let (result, embedded) =
+            ask_counting(root, "invoice", VectorCache::NoIndex, "m", invoice_vector);
+        let coverage = &result.coverage;
         assert!(
-            coverage.candidate_files > 2000,
+            coverage.candidate_files > 6000,
             "the fixture must outgrow the old default budget"
         );
-        assert_eq!(coverage.candidate_files, 2002);
-        assert_eq!(files.len(), 2002);
-        assert_eq!(files.last().unwrap(), &root.join(answer), "sorted last");
+        assert_eq!(
+            (coverage.candidate_files, coverage.searched_files),
+            (6002, 6002)
+        );
+        assert_eq!(coverage.max_files, None);
+        assert_eq!(coverage.file_budget, FileBudget::None);
         assert!(!coverage.file_limit_reached && !coverage.degraded);
-        let result = ask_collected(
-            "invoice",
-            DEFAULT_LIMIT,
-            files,
-            coverage,
-            &mut MentionEmbedder { word: "invoice" },
-            None,
-        )
-        .unwrap();
-        assert_eq!(result.hits[0].path, root.join(answer).display().to_string());
-        assert_eq!(result.coverage.searched_files, 2002);
+        assert_eq!(coverage.sample_note(), None);
+        assert_eq!(coverage.chunks, 6002);
+        assert_eq!(embedded, 2, "the identical fillers are one text");
+        assert_eq!(result.hits[0].path, answer);
+    }
+
+    /// The ceiling only guards an unbudgeted question against a runaway
+    /// universe: at it, everything is searched and no limit is reported;
+    /// above it, the same deterministic sample an explicit budget of that
+    /// size takes, reported as the ceiling. An explicit `--max-files`
+    /// replaces the ceiling, above it as well as below.
+    #[test]
+    fn ceiling_samples_only_an_unbudgeted_question_that_outgrows_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..30 {
+            write(root, &format!("m{}/f{i:02}.rs", i % 4), "fn f() {}");
+        }
+
+        let (files, at) = collect_files_within(root, None, 30);
+        assert_eq!(files.len(), 30);
+        assert_eq!((at.max_files, at.file_budget), (None, FileBudget::None));
+        assert!(!at.file_limit_reached && !at.degraded);
+
+        let (files, over) = collect_files_within(root, None, 20);
+        assert_eq!(files, collect_files(root, Some(20)).0, "same sample");
+        assert_eq!(files.len(), 20);
+        assert_eq!(
+            (over.candidate_files, over.max_files, over.file_budget),
+            (30, Some(20), FileBudget::Ceiling)
+        );
+        assert!(over.file_limit_reached && over.degraded);
+        let mut searched = over;
+        searched.searched_files = 20;
+        assert_eq!(
+            searched.sample_note().as_deref(),
+            Some(
+                "searched a deterministic sample of 20 of 30 eligible files (safety ceiling of 20 files without --max-files); pass a larger --max-files to search them all"
+            )
+        );
+
+        let (files, explicit) = collect_files_within(root, Some(25), 20);
+        assert_eq!(files.len(), 25, "an explicit budget above the ceiling wins");
+        assert_eq!(
+            (explicit.max_files, explicit.file_budget),
+            (Some(25), FileBudget::Explicit)
+        );
+        assert!(explicit.file_limit_reached);
+        let (files, explicit) = collect_files_within(root, Some(30), 20);
+        assert_eq!(files.len(), 30);
+        assert_eq!(
+            (explicit.max_files, explicit.file_budget),
+            (Some(30), FileBudget::Explicit)
+        );
+        assert!(!explicit.file_limit_reached && !explicit.degraded);
+    }
+
+    /// The daemon's semantic fallback keeps its budget: it runs inside a
+    /// request and persists nothing, so an unbudgeted scan would re-embed a
+    /// whole large repository on every lexical miss. One file over the
+    /// budget: a sample of exactly the budget is embedded, the fallback says
+    /// so, and nothing is written even at an indexed root.
+    #[test]
+    fn semantic_fallback_stops_at_its_budget_and_writes_nothing() {
+        let dir = indexed_tree();
+        let root = dir.path();
+        for i in 0..=SEMANTIC_FALLBACK_MAX_FILES {
+            write(root, &format!("src/f{i:04}.rs"), "fn filler() {}");
+        }
+        let embedded = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&embedded);
+        let fallback = fallback_opening(root, "filler", 3, move || {
+            Ok(Box::new(CountingEmbedder {
+                model: "m",
+                vector: invoice_vector,
+                embedded: counter,
+            }) as Box<dyn crate::embed::Embedder>)
+        });
+        assert_eq!(fallback.searched_files, SEMANTIC_FALLBACK_MAX_FILES);
+        assert!(fallback.file_limit_reached && !fallback.disabled);
+        assert_eq!(fallback.hits.len(), 3);
+        assert!(
+            fallback
+                .hits
+                .iter()
+                .all(|(path, _)| path.starts_with("src/f")),
+            "{:?}",
+            fallback.hits
+        );
+        assert_eq!(embedded.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!store_dir(root).exists(), "the fallback persisted vectors");
     }
 
     /// A gitignored file is generated or private: it is never embedded, never
@@ -1539,7 +1749,7 @@ mod tests {
         write(root, "src/nested/.gitignore", "local_invoice.rs\n");
         write(root, "src/nested/local_invoice.rs", "fn invoice() {}");
         write(root, "src/billing.rs", "fn invoice() {}");
-        let (files, coverage) = collect_files(root, DEFAULT_MAX_FILES);
+        let (files, coverage) = collect_files(root, None);
         assert_eq!(relative(root, &files), ["src/billing.rs"]);
         assert_eq!(coverage.candidate_files, 1);
         let result = ask_collected(
@@ -1573,7 +1783,7 @@ mod tests {
         ] {
             write(&root, relative, "fn body() {}");
         }
-        let (files, coverage) = collect_files(&root, DEFAULT_MAX_FILES);
+        let (files, coverage) = collect_files(&root, None);
         assert_eq!(relative(&root, &files), ["crates/app/src/lib.rs"]);
         assert_eq!(coverage.candidate_files, 1);
     }
@@ -1592,8 +1802,8 @@ mod tests {
                 write(&root, &format!("r{i:03}.rs"), "fn shallow() {}");
                 write(&root, &format!("z/y/x/w/d{i:03}.rs"), "fn deep() {}");
             }
-            let (files, _) = collect_files(&root, 20);
-            assert_eq!(files, collect_files(&root, 20).0, "same run twice");
+            let (files, _) = collect_files(&root, Some(20));
+            assert_eq!(files, collect_files(&root, Some(20)).0, "same run twice");
             samples.push(relative(&root, &files));
         }
         assert_eq!(samples[0], samples[1], "independent of the checkout path");
@@ -1619,13 +1829,13 @@ mod tests {
         for i in 0..60 {
             write(root, &format!("m{}/f{i:02}.rs", i % 6), "fn f() {}");
         }
-        let (before, _) = collect_files(root, 15);
+        let (before, _) = collect_files(root, Some(15));
         let dropped = (0..60)
             .map(|i| root.join(format!("m{}/f{i:02}.rs", i % 6)))
             .find(|path| !before.contains(path))
             .unwrap();
         std::fs::remove_file(&dropped).unwrap();
-        let (after, coverage) = collect_files(root, 15);
+        let (after, coverage) = collect_files(root, Some(15));
         assert_eq!(after, before);
         assert_eq!(coverage.candidate_files, 59);
     }
@@ -1642,7 +1852,7 @@ mod tests {
         }
         write(root, "notes.txt", "not code");
         let embed = |max_files| {
-            let (files, coverage) = collect_files(root, max_files);
+            let (files, coverage) = collect_files(root, Some(max_files));
             let searched = files.len();
             let result = ask_collected(
                 "f",
@@ -1659,7 +1869,7 @@ mod tests {
         assert_eq!(searched, 30);
         assert_eq!(
             (under.candidate_files, under.searched_files, under.max_files),
-            (30, 30, 30)
+            (30, 30, Some(30))
         );
         assert!(!under.file_limit_reached && !under.degraded);
         assert_eq!(under.sample_note(), None);
@@ -1667,7 +1877,7 @@ mod tests {
         assert_eq!(searched, 12);
         assert_eq!(
             (over.candidate_files, over.searched_files, over.max_files),
-            (30, 12, 12)
+            (30, 12, Some(12))
         );
         assert!(over.file_limit_reached && over.degraded);
         assert_eq!(
@@ -1678,12 +1888,13 @@ mod tests {
         );
     }
 
-    /// The CLI defaults: ten hits (what a recall@10 reads) and a budget that
-    /// covers a mid-size repository whole.
+    /// The CLI defaults: ten hits (what a recall@10 reads), no file budget,
+    /// and a ceiling far above the largest repository measured (11 299
+    /// eligible files) that only a home directory or a monorepo reaches.
     #[test]
-    fn defaults_are_ten_hits_and_six_thousand_files() {
+    fn defaults_are_ten_hits_and_a_fifty_thousand_file_ceiling() {
         assert_eq!(DEFAULT_LIMIT, 10);
-        assert_eq!(DEFAULT_MAX_FILES, 6000);
+        assert_eq!(UNBUDGETED_FILE_CEILING, 50_000);
     }
 
     /// Embeds with `vector` and counts the chunk texts it is handed (the
@@ -1735,20 +1946,13 @@ mod tests {
     ) -> (AskResult, usize) {
         let embedded = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = std::sync::Arc::clone(&embedded);
-        let result = ask_opening(
-            root,
-            query,
-            DEFAULT_LIMIT,
-            DEFAULT_MAX_FILES,
-            cache,
-            move || {
-                Ok(Box::new(CountingEmbedder {
-                    model,
-                    vector,
-                    embedded: counter,
-                }) as Box<dyn crate::embed::Embedder>)
-            },
-        )
+        let result = ask_opening(root, query, DEFAULT_LIMIT, None, cache, move || {
+            Ok(Box::new(CountingEmbedder {
+                model,
+                vector,
+                embedded: counter,
+            }) as Box<dyn crate::embed::Embedder>)
+        })
         .unwrap();
         let count = embedded.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
