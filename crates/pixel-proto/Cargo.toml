@@ -9,4 +9,7 @@ workspace = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: a float the daemon writes must parse back to the same
+# bits in the client, or the daemon route prints other digits than the
+# in-process one (envelope::tests::floats_survive_the_wire_bit_for_bit).
+serde_json = { version = "1", features = ["float_roundtrip"] }
