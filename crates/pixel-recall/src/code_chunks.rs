@@ -197,41 +197,40 @@ fn comment_prefixes(lang: &str) -> &'static [&'static str] {
         "ruby" => &["#"],
         "elixir" => &["#", "@"],
         "lua" => &["--"],
-        "csharp" => &["//", "/*", "*", "["],
-        // TypeScript, JavaScript, Go, Java, PHP, C, Swift.
+        // TypeScript, JavaScript, Go, Java, C#, PHP, C, Swift. C#'s
+        // `[Attribute]` lines need no prefix: its grammar puts them inside
+        // the declaration, so they are already in the symbol's span.
         _ => &["//", "/*", "*", "@"],
     }
 }
 
 /// The byte ranges of `pieces` (line ranges in order) packed into chunks:
 /// consecutive pieces share a chunk while it stays within [`PACK_MAX`]
-/// bytes; a larger piece is a chunk of its own, and one larger than
-/// [`CHUNK_MAX`] is cut into [`chunk_offsets`] windows. Blank chunks are
-/// dropped.
+/// bytes; a larger piece is a chunk of its own, cut into [`chunk_offsets`]
+/// windows when it exceeds [`CHUNK_MAX`] (a packed chunk never does, since
+/// `PACK_MAX < CHUNK_MAX`). Blank chunks are dropped.
 fn pack(text: &str, lines: &Lines, pieces: &[(u32, u32)]) -> Vec<(usize, usize)> {
-    let mut chunks = Vec::new();
+    let mut packed = Vec::new();
     let mut open: Option<(usize, usize)> = None;
     for &(first, last) in pieces {
         let (start, end) = lines.bytes(first, last);
-        if end - start > CHUNK_MAX {
-            chunks.extend(open.take());
-            chunks.extend(
-                chunk_offsets(&text[start..end])
-                    .into_iter()
-                    .map(|(from, to)| (start + from, start + to)),
-            );
-            continue;
-        }
         match open {
             Some((chunk_start, _)) if end - chunk_start <= PACK_MAX => {
                 open = Some((chunk_start, end));
             }
-            _ => chunks.extend(open.replace((start, end))),
+            _ => packed.extend(open.replace((start, end))),
         }
     }
-    chunks.extend(open);
-    chunks.retain(|&(start, end)| !text[start..end].trim().is_empty());
-    chunks
+    packed.extend(open);
+    packed
+        .into_iter()
+        .flat_map(|(start, end)| {
+            chunk_offsets(&text[start..end])
+                .into_iter()
+                .map(move |(from, to)| (start + from, start + to))
+        })
+        .filter(|&(start, end)| !text[start..end].trim().is_empty())
+        .collect()
 }
 
 #[cfg(test)]
@@ -521,6 +520,19 @@ mod tests {
         assert_eq!(cut.len(), 4, "head, two methods, closing brace: {cut:?}");
     }
 
+    /// A small symbol with nested ones stays one piece wherever it sits:
+    /// the size compared with [`CHUNK_MAX`] is its own, not its offset.
+    #[test]
+    fn a_small_symbol_deep_in_a_file_is_not_cut_along_its_nested_ones() {
+        let head = function("pad", 1_600);
+        let text = format!("{head}mod meter {{\n    fn open() {{}}\n}}\n");
+        let first = u32::try_from(head.lines().count()).unwrap();
+        assert_eq!(
+            pieces("src/meter.rs", &text),
+            [(1, first), (first + 1, first + 3)]
+        );
+    }
+
     /// Imports, top-level statements and a class's fields are in chunks
     /// too: nothing between the symbols leaves the search.
     #[test]
@@ -560,9 +572,9 @@ mod tests {
         assert_covers("src/a.ts", &ts);
     }
 
-    /// Consecutive pieces share a chunk up to exactly [`PACK_MAX`] bytes; a
-    /// piece of exactly [`CHUNK_MAX`] bytes is one chunk, one byte more is
-    /// windows.
+    /// Consecutive pieces share a chunk up to exactly [`PACK_MAX`] bytes,
+    /// wherever they sit in the file; a piece of exactly [`CHUNK_MAX`] bytes
+    /// is one chunk, one byte more is windows.
     #[test]
     fn pack_should_merge_up_to_pack_max_and_window_above_chunk_max() {
         let line = |bytes: usize| format!("{}\n", "x".repeat(bytes - 1));
@@ -572,19 +584,26 @@ mod tests {
             line(2),
             line(CHUNK_MAX),
             line(CHUNK_MAX + 1),
+            line(150),
+            line(250),
         ]
         .concat();
         let lines = Lines::new(&text);
-        let chunks = pack(&text, &lines, &[(1, 1), (2, 2), (3, 3), (4, 4), (5, 5)]);
+        let pieces = [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 7)];
+        let chunks = pack(&text, &lines, &pieces);
         let big = 402 + CHUNK_MAX;
+        let tail = big + CHUNK_MAX + 1;
         let mut expected = vec![(0, 400), (400, 402), (402, big)];
         expected.extend(
-            chunk_offsets(&text[big..])
+            chunk_offsets(&text[big..tail])
                 .into_iter()
                 .map(|(start, end)| (big + start, big + end)),
         );
+        // Far from the top of the file, two small pieces still pack, up to
+        // exactly `PACK_MAX` bytes.
+        expected.push((tail, tail + 400));
         assert_eq!(chunks, expected);
-        assert_eq!(expected.len(), 5, "the oversize line is two windows");
+        assert_eq!(expected.len(), 6, "the oversize line is two windows");
     }
 
     #[test]
