@@ -11,13 +11,18 @@ from statistics import mean
 
 ARMS = ("semble", "pixel_search_meaning", "pixel_find_code")
 LABEL = {"semble": "semble", "pixel_search_meaning": "pixel search-meaning",
-         "pixel_find_code": "pixel find-code"}
+         "pixel_find_code": "pixel find-code", "warpgrep": "warpgrep"}
 
 
 def main():
+    global ARMS
     per_corpus, allrows = [], []
-    for p in sys.argv[1:]:
-        rows = json.load(open(p))
+    loaded = [(p, json.load(open(p))) for p in sys.argv[1:]]
+    # WarpGrep is an optional arm (bench-retrieval.py docstring); report it only
+    # when every row of every file carries it, so all arms share one denominator.
+    if all("warpgrep_rank" in r for _, rows in loaded for r in rows):
+        ARMS = ARMS + ("warpgrep",)
+    for p, rows in loaded:
         failed = [(r["truth_file"], a) for r in rows for a in ARMS
                   if r.get(f"{a}_failed_reps")]
         if failed:
@@ -30,7 +35,7 @@ def main():
         per_corpus.append((Path(p).stem.replace("retrieval-", ""), rows))
 
     hdr = (f"{'corpus':16s} {'arm':22s} {'n':>3s} {'r@1':>6s} {'r@5':>6s} "
-           f"{'r@10':>6s} {'p50 ms':>8s} {'bytes':>8s}")
+           f"{'r@10':>6s} {'p50 ms':>8s} {'bytes':>8s} {'files':>5s}")
     print(hdr)
     print("-" * len(hdr))
     for name, rows in per_corpus:
@@ -40,7 +45,8 @@ def main():
                   f"{mean(r[a+'_r5'] for r in rows):6.2f} "
                   f"{mean(r[a+'_r10'] for r in rows):6.2f} "
                   f"{mean(r[a+'_ms_p50'] for r in rows):8.0f} "
-                  f"{mean(r[a+'_bytes'] for r in rows):8.0f}")
+                  f"{mean(r[a+'_bytes'] for r in rows):8.0f} "
+                  f"{mean(r[a+'_returned'] for r in rows):5.1f}")
         print()
     print("-" * len(hdr))
     for a in ARMS:
@@ -49,7 +55,8 @@ def main():
               f"{mean(r[a+'_r5'] for r in allrows):6.2f} "
               f"{mean(r[a+'_r10'] for r in allrows):6.2f} "
               f"{mean(r[a+'_ms_p50'] for r in allrows):8.0f} "
-              f"{mean(r[a+'_bytes'] for r in allrows):8.0f}")
+              f"{mean(r[a+'_bytes'] for r in allrows):8.0f} "
+              f"{mean(r[a+'_returned'] for r in allrows):5.1f}")
 
     print("\nCases no arm found (query too generic to be answerable):")
     for r in allrows:
