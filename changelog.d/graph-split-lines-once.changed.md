@@ -1,0 +1,1 @@
+**graph:** a cold graph build no longer decodes and splits a source file once per symbol to cut each body's crux lines: once per file is enough. `prepare-repo` on a clone of ruby/ruby (11 297 files) goes from 14.2 s to 11.1 s, with the same graph rows.

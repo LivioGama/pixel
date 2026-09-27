@@ -453,6 +453,10 @@ fn build_graph_with(
         path_to_id.insert(e.rel.clone(), file_id);
         let mut ids = Vec::with_capacity(e.fx.symbols.len());
         let mut lines = Vec::with_capacity(e.fx.symbols.len());
+        // Decoded and split once per file, not once per symbol: the crux
+        // below slices every symbol's body out of the same lines.
+        let body_str = String::from_utf8_lossy(&e.content);
+        let all_lines: Vec<&str> = body_str.lines().collect();
         for s in &e.fx.symbols {
             let uid = format!("{}#{}#{}", e.rel, s.qualified, s.kind.as_str());
             let id = store.insert_symbol(
@@ -478,8 +482,6 @@ fn build_graph_with(
             // each symbol's body (guards, state mutations, early-returns) so
             // retrieval can surface them. Fingerprints are content-stable: they survive
             // a file that later shifts line numbers (re-anchoring by fingerprint).
-            let body_str = String::from_utf8_lossy(&e.content);
-            let all_lines: Vec<&str> = body_str.lines().collect();
             let start = (s.start_line.saturating_sub(1) as usize).min(all_lines.len());
             let end = (s.end_line.saturating_sub(1) as usize).min(all_lines.len());
             let body = if end > start {
@@ -1152,6 +1154,10 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
 
         let mut ids = Vec::with_capacity(fx.symbols.len());
         let mut lines = Vec::with_capacity(fx.symbols.len());
+        // Decoded and split once per file, not once per symbol: the crux
+        // below slices every symbol's body out of the same lines.
+        let body_str = String::from_utf8_lossy(&content);
+        let all_lines: Vec<&str> = body_str.lines().collect();
         for s in &fx.symbols {
             let uid = format!("{rel}#{}#{}", s.qualified, s.kind.as_str());
             let id = store.insert_symbol(
@@ -1174,8 +1180,6 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             lines.push((s.start_line, s.end_line));
 
             // P2·3: content-anchored crux for the incremental re-index path.
-            let body_str = String::from_utf8_lossy(&content);
-            let all_lines: Vec<&str> = body_str.lines().collect();
             let start = (s.start_line.saturating_sub(1) as usize).min(all_lines.len());
             let end = (s.end_line.saturating_sub(1) as usize).min(all_lines.len());
             let body = if end > start {
