@@ -8,7 +8,7 @@ use rusqlite::params;
 use serde::Serialize;
 
 use crate::impact::split_ident_words;
-use crate::store::{GraphStore, StoreError};
+use crate::store::{ExecCached, GraphStore, StoreError};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ClusterSummary {
@@ -230,13 +230,13 @@ pub fn compute(store: &mut GraphStore) -> Result<Vec<ClusterSummary>, StoreError
         };
         let keywords = top_keywords(&names, 5);
 
-        store.conn().execute(
+        store.conn().exec_cached(
             "INSERT INTO clusters (label, cohesion, keywords) VALUES (?1, ?2, ?3)",
             params![label, cohesion, keywords],
         )?;
         let cid = store.conn().last_insert_rowid();
         for &v in members {
-            store.conn().execute(
+            store.conn().exec_cached(
                 "INSERT INTO cluster_members (cluster_id, symbol_id) VALUES (?1, ?2)",
                 params![cid, g.ids[v]],
             )?;

@@ -459,6 +459,24 @@ pub struct GraphStore {
 /// batch; `idx_unresolved_file` is what keeps it off a full-table scan.
 const DELETE_FILE_UNRESOLVED_CALLS: &str = "DELETE FROM unresolved_calls WHERE file_id = ?1";
 
+/// Statements the write path keeps prepared: a cold build runs the same few
+/// dozen once per file, symbol, import and edge, so the connection's cache
+/// holds all of them (rusqlite keeps 16 by default).
+const STATEMENT_CACHE: usize = 64;
+
+/// `execute` through the connection's statement cache. The build loops run
+/// the same statements hundreds of thousands of times; `Connection::execute`
+/// parses and plans the SQL again on every call.
+pub(crate) trait ExecCached {
+    fn exec_cached<P: rusqlite::Params>(&self, sql: &str, params: P) -> Result<usize>;
+}
+
+impl ExecCached for Connection {
+    fn exec_cached<P: rusqlite::Params>(&self, sql: &str, params: P) -> Result<usize> {
+        Ok(self.prepare_cached(sql)?.execute(params)?)
+    }
+}
+
 impl GraphStore {
     pub fn open(path: &Path) -> Result<Self> {
         // NOFOLLOW rejects a path with ANY symlinked component (newer SQLite),
@@ -487,6 +505,7 @@ impl GraphStore {
         // connection; pinning the same budget pixel-facts uses keeps it
         // explicit and independent of that default.
         conn.pragma_update(None, "busy_timeout", 5000)?;
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
         Ok(Self { conn })
@@ -511,6 +530,7 @@ impl GraphStore {
 
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
         Ok(Self { conn })
@@ -557,34 +577,34 @@ impl GraphStore {
             })
             .optional()?;
         let id = if let Some(id) = existing {
-            tx.execute(
+            tx.exec_cached(
                 "DELETE FROM edges WHERE src_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
                 params![id],
             )?;
-            tx.execute(
+            tx.exec_cached(
                 "DELETE FROM edges WHERE dst_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
                 params![id],
             )?;
-            tx.execute(
+            tx.exec_cached(
                 "DELETE FROM symbol_crux WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
                 params![id],
             )?;
-            tx.execute("DELETE FROM symbols WHERE file_id = ?1", params![id])?;
-            tx.execute("DELETE FROM imports WHERE file_id = ?1", params![id])?;
-            tx.execute(DELETE_FILE_UNRESOLVED_CALLS, params![id])?;
-            tx.execute(
+            tx.exec_cached("DELETE FROM symbols WHERE file_id = ?1", params![id])?;
+            tx.exec_cached("DELETE FROM imports WHERE file_id = ?1", params![id])?;
+            tx.exec_cached(DELETE_FILE_UNRESOLVED_CALLS, params![id])?;
+            tx.exec_cached(
                 "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
                 params![id],
             )?;
-            tx.execute("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
-            tx.execute("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
-            tx.execute(
+            tx.exec_cached("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
+            tx.exec_cached("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
+            tx.exec_cached(
                 "UPDATE files SET blob_oid = ?2, lang = ?3 WHERE id = ?1",
                 params![id, blob_oid, lang],
             )?;
             id
         } else {
-            tx.execute(
+            tx.exec_cached(
                 "INSERT INTO files (path, blob_oid, lang) VALUES (?1, ?2, ?3)",
                 params![path, blob_oid, lang],
             )?;
@@ -602,25 +622,25 @@ impl GraphStore {
             })
             .optional()?
         {
-            tx.execute(
+            tx.exec_cached(
                 "DELETE FROM edges WHERE src_id IN (SELECT id FROM symbols WHERE file_id = ?1)
                    OR dst_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
                 params![id],
             )?;
-            tx.execute(
+            tx.exec_cached(
                 "DELETE FROM symbol_crux WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
                 params![id],
             )?;
-            tx.execute("DELETE FROM symbols WHERE file_id = ?1", params![id])?;
-            tx.execute("DELETE FROM imports WHERE file_id = ?1", params![id])?;
-            tx.execute(DELETE_FILE_UNRESOLVED_CALLS, params![id])?;
-            tx.execute(
+            tx.exec_cached("DELETE FROM symbols WHERE file_id = ?1", params![id])?;
+            tx.exec_cached("DELETE FROM imports WHERE file_id = ?1", params![id])?;
+            tx.exec_cached(DELETE_FILE_UNRESOLVED_CALLS, params![id])?;
+            tx.exec_cached(
                 "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
                 params![id],
             )?;
-            tx.execute("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
-            tx.execute("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
-            tx.execute("DELETE FROM files WHERE id = ?1", params![id])?;
+            tx.exec_cached("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
+            tx.exec_cached("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
+            tx.exec_cached("DELETE FROM files WHERE id = ?1", params![id])?;
         }
         tx.commit()?;
         Ok(())
@@ -629,7 +649,7 @@ impl GraphStore {
     /// Record that `symbol_id` implements a trait method: it is called
     /// through the trait, never by name, so dead-code findings skip it.
     pub fn mark_trait_impl(&self, symbol_id: i64) -> Result<()> {
-        self.conn.execute(
+        self.conn.exec_cached(
             "UPDATE symbols SET trait_impl = 1 WHERE id = ?1",
             params![symbol_id],
         )?;
@@ -640,7 +660,7 @@ impl GraphStore {
     /// it names another file rather than defining code in this one, so
     /// `targets::symbol_hits` must not grant its file the exact-name bonus.
     pub fn mark_module_decl(&self, symbol_id: i64) -> Result<()> {
-        self.conn.execute(
+        self.conn.exec_cached(
             "UPDATE symbols SET module_decl = 1 WHERE id = ?1",
             params![symbol_id],
         )?;
@@ -659,7 +679,7 @@ impl GraphStore {
         end_line: u32,
         sig: &str,
     ) -> Result<i64> {
-        self.conn.execute(
+        self.conn.exec_cached(
             "INSERT OR REPLACE INTO symbols
                (uid, file_id, name, qualified, kind, start_line, end_line, sig)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -688,12 +708,12 @@ impl GraphStore {
     /// Replace the crux lines for one symbol. Old crux for the symbol is
     /// dropped first; the new set is inserted in one statement batch.
     pub fn set_symbol_crux(&self, symbol_id: i64, crux: &[CruxLine]) -> Result<()> {
-        self.conn.execute(
+        self.conn.exec_cached(
             "DELETE FROM symbol_crux WHERE symbol_id = ?1",
             params![symbol_id],
         )?;
         for c in crux {
-            self.conn.execute(
+            self.conn.exec_cached(
                 "INSERT INTO symbol_crux (symbol_id, line, text, fingerprint) VALUES (?1, ?2, ?3, ?4)",
                 // Store the 64-bit FNV hash as its signed bit pattern so
                 // round-trips survive beyond i64::MAX on 32-bit rlims.
@@ -763,7 +783,7 @@ impl GraphStore {
         scope: &[(u32, u32)],
     ) -> Result<()> {
         let bindings_csv = encode_bindings(bindings);
-        self.conn.execute(
+        self.conn.exec_cached(
             "INSERT INTO imports (file_id, spec, path, resolved_file_id, bindings, scope)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -779,7 +799,7 @@ impl GraphStore {
     }
 
     pub fn insert_edge(&self, e: &EdgeRow) -> Result<()> {
-        self.conn.execute(
+        self.conn.exec_cached(
             "INSERT INTO edges (src_id, dst_id, kind, tier, site_line, receiver, callee)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
@@ -807,7 +827,7 @@ impl GraphStore {
         receiver: Option<&str>,
         kind: &str,
     ) -> Result<()> {
-        self.conn.execute(
+        self.conn.exec_cached(
             "INSERT INTO unresolved_calls (file_id, name, enclosing_symbol_id, site_line, receiver, kind)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![file_id, name, enclosing_symbol_id, site_line, receiver, kind],
@@ -824,7 +844,7 @@ impl GraphStore {
         start_line: u32,
         end_line: u32,
     ) -> Result<i64> {
-        self.conn.execute(
+        self.conn.exec_cached(
             "INSERT INTO jsx_elements (file_id, tag, has_handler, text_content, start_line, end_line)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -844,12 +864,12 @@ impl GraphStore {
     /// Delete every concept row (and its inverted words) for a file. Called
     /// inside the same transaction as symbol refresh.
     pub fn delete_concepts_for_file(&self, file_id: i64) -> Result<()> {
-        self.conn.execute(
+        self.conn.exec_cached(
             "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
             params![file_id],
         )?;
         self.conn
-            .execute("DELETE FROM concepts WHERE file_id = ?1", params![file_id])?;
+            .exec_cached("DELETE FROM concepts WHERE file_id = ?1", params![file_id])?;
         Ok(())
     }
 
@@ -867,7 +887,7 @@ impl GraphStore {
         end_line: u32,
         owner_symbol_id: Option<i64>,
     ) -> Result<i64> {
-        self.conn.execute(
+        self.conn.exec_cached(
             "INSERT INTO concepts
                (file_id, kind, raw, norm, detail, start_line, end_line, owner_symbol_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -884,7 +904,7 @@ impl GraphStore {
         )?;
         let id = self.conn.last_insert_rowid();
         for word in crate::concept::concept_words(norm) {
-            self.conn.execute(
+            self.conn.exec_cached(
                 "INSERT OR IGNORE INTO concept_words (word, concept_id) VALUES (?1, ?2)",
                 params![word, id],
             )?;
@@ -900,13 +920,13 @@ impl GraphStore {
         concepts: &[crate::concept::RawConcept],
     ) -> Result<()> {
         let tx = self.conn.savepoint()?;
-        tx.execute(
+        tx.exec_cached(
             "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
             params![file_id],
         )?;
-        tx.execute("DELETE FROM concepts WHERE file_id = ?1", params![file_id])?;
+        tx.exec_cached("DELETE FROM concepts WHERE file_id = ?1", params![file_id])?;
         for c in concepts {
-            tx.execute(
+            tx.exec_cached(
                 "INSERT INTO concepts
                    (file_id, kind, raw, norm, detail, start_line, end_line, owner_symbol_id)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -923,7 +943,7 @@ impl GraphStore {
             )?;
             let id = tx.last_insert_rowid();
             for word in crate::concept::concept_words(&c.norm) {
-                tx.execute(
+                tx.exec_cached(
                     "INSERT OR IGNORE INTO concept_words (word, concept_id) VALUES (?1, ?2)",
                     params![word, id],
                 )?;

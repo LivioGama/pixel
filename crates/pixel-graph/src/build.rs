@@ -20,7 +20,7 @@ use crate::resolve::{
     FileCalls, FileReferences, PendingCall, PendingReference, reconsider_resolved_calls,
     resolve_all, resolve_calls, resolve_references,
 };
-use crate::store::{EdgeKind, GraphStore, StoreError, extract_crux};
+use crate::store::{EdgeKind, ExecCached, GraphStore, StoreError, extract_crux};
 
 /// Extract concepts for a file and insert them, linking each to the smallest
 /// enclosing symbol (by line range) when one exists. `symbol_ids` are the ids
@@ -1278,7 +1278,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             if let Some(target) = resolve_import(&import_path, &importer, &all_paths)
                 .and_then(|p| path_to_id.get(&p).copied())
             {
-                store.conn().execute(
+                store.conn().exec_cached(
                     "UPDATE imports SET resolved_file_id = ?2 WHERE id = ?1",
                     rusqlite::params![import_id, target],
                 )?;

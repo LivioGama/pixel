@@ -53,7 +53,8 @@ use std::collections::{HashMap, HashSet};
 use rusqlite::params;
 
 use crate::store::{
-    EdgeKind, EdgeRow, GraphStore, StoreError, SymbolKind, Tier, decode_bindings, decode_scope,
+    EdgeKind, EdgeRow, ExecCached, GraphStore, StoreError, SymbolKind, Tier, decode_bindings,
+    decode_scope,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -1021,7 +1022,7 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
             receiver: row.receiver.clone(),
             callee: Some(row.name.clone()),
         })?;
-        store.conn().execute(
+        store.conn().exec_cached(
             "DELETE FROM unresolved_calls WHERE id = ?1",
             params![row.id],
         )?;
@@ -1074,7 +1075,7 @@ pub fn reconsider_resolved_calls(
             rows.collect::<Result<_, _>>()?
         };
         calls.extend(found);
-        store.conn().execute(
+        store.conn().exec_cached(
             "DELETE FROM edges
               WHERE kind IN ('calls', 'references')
                 AND dst_id IN (SELECT id FROM symbols WHERE name = ?1)",

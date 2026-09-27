@@ -7,7 +7,7 @@ use rusqlite::params;
 use serde::Serialize;
 
 use crate::impact::{file_path_by_id, split_ident_words, symbol_by_id};
-use crate::store::{EdgeKind, GraphStore, StoreError, Tier};
+use crate::store::{EdgeKind, ExecCached, GraphStore, StoreError, Tier};
 use crate::trace::TraceHop;
 
 #[derive(Debug, Clone, Serialize)]
@@ -172,13 +172,13 @@ pub fn discover(
             None => continue,
         };
         let label = humanize(&entry_sym.name);
-        store.conn().execute(
+        store.conn().exec_cached(
             "INSERT INTO processes (label, entry_symbol_id, step_count) VALUES (?1, ?2, ?3)",
             params![label, entry, steps.len() as i64],
         )?;
         let pid = store.conn().last_insert_rowid();
         for (i, (sid, _)) in steps.iter().enumerate() {
-            store.conn().execute(
+            store.conn().exec_cached(
                 "INSERT INTO process_steps (process_id, step, symbol_id) VALUES (?1, ?2, ?3)",
                 params![pid, i as i64, sid],
             )?;
