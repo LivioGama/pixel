@@ -332,7 +332,10 @@ impl Store {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let segment = name.starts_with("seg-") && name.ends_with(".vec");
+            let segment = name
+                .strip_prefix("seg-")
+                .and_then(|rest| rest.strip_suffix(".vec"))
+                .is_some();
             if (segment && !listed.contains(name.as_ref())) || name.ends_with(".tmp") {
                 let _ = fs::remove_file(entry.path());
             }
@@ -377,7 +380,8 @@ fn segment_file_name(bytes: &[u8]) -> String {
 
 /// Add the vectors of `wanted` keys held by the segment `entry` names to
 /// `out`, after checking the file is exactly the one the manifest names: its
-/// length, its header and the hash its name carries.
+/// header announces the entry's dim and rows, and its bytes hash to its name
+/// (so a truncated or altered file is refused, and the length follows).
 fn read_segment(
     dir: &Path,
     entry: &SegmentEntry,
@@ -390,12 +394,7 @@ fn read_segment(
             entry.file
         )
     })?;
-    let expected_len = entry
-        .rows
-        .checked_mul(row_len(entry.dim))
-        .and_then(|rows| rows.checked_add(HEADER_LEN));
-    if expected_len != Some(bytes.len())
-        || !bytes.starts_with(&segment_header(entry.dim, entry.rows))
+    if !bytes.starts_with(&segment_header(entry.dim, entry.rows))
         || segment_file_name(&bytes) != entry.file
     {
         return Err(format!(
@@ -704,6 +703,17 @@ mod tests {
             assert_eq!(repaired.vectors, vectors, "{label}");
             assert_eq!(store.keys_on_disk(), [1, 2, 3], "{label}");
         }
+    }
+
+    /// A manifest that exists but cannot be read is an error, not an empty
+    /// store.
+    #[test]
+    fn manifest_that_cannot_be_read_should_be_an_error_not_an_empty_store() {
+        let (_dir, store) = store();
+        fs::create_dir_all(store.dir.join(MANIFEST)).unwrap();
+        let loaded = store.load(&namespace(), 2, &all(&[1]));
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert!(loaded.errors[0].contains("manifest"), "{:?}", loaded.errors);
     }
 
     #[test]

@@ -1828,7 +1828,21 @@ mod tests {
         assert_eq!(cold.coverage.cached_chunks, 0);
         assert!(store_dir(root).join("manifest.json").is_file());
 
+        let snapshot = || {
+            let mut files: Vec<_> = std::fs::read_dir(store_dir(root))
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let modified = entry.metadata().unwrap().modified().unwrap();
+                    (entry.file_name(), modified)
+                })
+                .collect();
+            files.sort();
+            files
+        };
+        let before = snapshot();
         let (warm, warm_count) = ask_counting(root, "invoice", cache, "m", invoice_vector);
+        assert_eq!(snapshot(), before, "a warm question writes nothing");
         assert_eq!(warm_count, 0, "a warm question embeds no chunk");
         assert_eq!(warm.coverage.cached_chunks, 5);
         assert_eq!(warm.coverage.chunks, 5);
