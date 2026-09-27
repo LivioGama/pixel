@@ -33,7 +33,8 @@
         <span>For {{ range $i, $a := $named }}{{ if $i }}, {{ end }}{{ $a.name }}{{ end }} and <a class="link" href="#agents" aria-label="{{ $rest }} more coding agents">{{ $rest }} more</a></span>
       </p>
       <h1 class="hero__title"><span>Read less.</span> <span class="glow">Ship more.</span></h1>
-      <p class="hero__lede"><strong>Your coding agent reads whole files to find its way.</strong> Pixel is a local code index that hands it only the lines it needs. Same agent, same prompts, a fraction of the tokens.</p>
+      {{/* The title promises the outcome and the lede proves it, from the "On whole agent tasks" section of content/benchmarks.md: wall time and API cost (both −30%) and "both sides named push.rs in every run" (the Proof ledger's "Same answer"). "Scoped", not "shipped": the measured task is a scoping task. Change the figures there first. */}}
+      <p class="hero__lede"><strong>Your coding agent reads whole files to find its way.</strong> Pixel is a local code index that hands it the map instead. On a real multi-file task, the same agent scoped the work 30% faster, for 30% less, and landed on the same answer.</p>
       <div class="hero__cta">
         <div class="cmd">
           <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
@@ -46,7 +47,7 @@
       <p class="hero__next" id="hero-next" hidden>Copied. Then run <code>pixel install</code> and restart your agent: the next session starts with the map.</p>
       <p class="hero__next" id="hero-next-agent" hidden>Copied. Paste it into your agent: it installs Pixel, wires itself and tells you whether <code>pixel doctor .</code> is green.</p>
       {{/* Beside the one call to action, what a visitor checks before pasting it: the platforms the release builds (release.yml), the licence and the telemetry. No star button here: the nav links GitHub. */}}
-      <p class="hero__trust">macOS on Apple Silicon and Linux &middot; MIT &middot; no account, no telemetry</p>
+      <p class="hero__trust">Two commands &middot; macOS on Apple Silicon and Linux &middot; MIT &middot; no account, no telemetry</p>
       </div>
 
       <figure class="wall" data-wall data-full="{{ $big.full }}" data-pixel="{{ $big.pixel }}" data-per="25">
@@ -102,12 +103,12 @@
 
     {{/* ---------- numbers ---------- */}}
     <section class="numbers wrap" id="results" aria-label="Measured results">
-      {{/* Each meter draws the ratio its number states on a 20-square row: the baseline filled in dim cells, Pixel's in green. Every baseline is the same agent without Pixel, the one comparison a first-time visitor can read; the head-to-head with GitNexus lives in the Alternatives chapter. The last three are the "On whole agent tasks" table of content/benchmarks.md (60.7 s against 86.5 s, 10,655 against 17,268 tokens, $0.274 against $0.394): change them there first. */}}
+      {{/* Each meter draws the ratio its number states on a 20-square row: the baseline filled in dim cells, Pixel's in green. Every baseline is the same agent without Pixel, the one comparison a first-time visitor can read; the head-to-head with GitNexus lives in the Alternatives chapter. The outcome leads, as in the hero's lede, and the mechanism (Tokens, one large file) closes the row. Agent time, Context and API cost, kept together since the last two refer to the first one's task, are the "On whole agent tasks" table of content/benchmarks.md (60.7 s against 86.5 s, 10,655 against 17,268 tokens, $0.274 against $0.394): change them there first. */}}
       {{ $stats := slice
-        (dict "tag" "Tokens" "value" "&minus;95%" "text" "to learn what a large file contains" "base" "full read" "before" 20 "after" 1)
         (dict "tag" "Agent time" "value" "&minus;30%" "text" "for an agent to scope a multi-file task" "base" "no Pixel" "before" 20 "after" 14)
         (dict "tag" "Context" "value" "&minus;38%" "text" "tokens read into context on that whole task" "base" "no Pixel" "before" 20 "after" 12)
         (dict "tag" "API cost" "value" "&minus;30%" "text" "billed for the same task, same model" "base" "no Pixel" "before" 20 "after" 14)
+        (dict "tag" "Tokens" "value" "&minus;95%" "text" "to learn what a large file contains" "base" "full read" "before" 20 "after" 1)
       }}
       <ul class="numbers__list" data-reveal="stagger" data-count-up>
         {{ range $stats }}
