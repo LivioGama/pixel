@@ -96,7 +96,8 @@
 
   /* Copy buttons on every command block. The label comes back to what it
      was ("Copy", "Copy all"), and a refused clipboard (no secure context,
-     no permission) falls back to selecting the command so a plain Cmd-C works. */
+     no permission) falls back to selecting the command so a plain Cmd-C works.
+     A button with data-copy-next unhides the element of that id on success. */
   (function () {
     var write = function (text) {
       if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
@@ -109,6 +110,12 @@
         var text = btn.getAttribute('data-copy');
         write(text).then(function () {
           btn.textContent = 'Copied';
+          // data-copy-next names an element that says what to do after the paste.
+          var next = btn.dataset.copyNext && document.getElementById(btn.dataset.copyNext);
+          // Siblings of the same class are the other buttons' hints: only the last copy's shows.
+          if (next) {
+            [].forEach.call(next.parentNode.querySelectorAll('.' + next.classList[0]), function (el) { el.hidden = el !== next; });
+          }
         }, function () {
           var code = btn.parentNode.querySelector('code');
           if (code && window.getSelection) {
