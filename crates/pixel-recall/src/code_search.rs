@@ -1959,6 +1959,24 @@ mod tests {
         assert_eq!(position(&hits, "ledger/a.rs"), 1);
     }
 
+    /// The stem's tokens are part of every chunk's length as well as its
+    /// counts, the same unit as the body: `ledger.rs` is `fn`, `a` plus the
+    /// stem (3 tokens), `b.rs` is `fn`, `b`, `x`, `u8` plus its stem (5), so
+    /// avgdl is 4 and the only `ledger` (df 1 of 2) scores exactly
+    /// ln 2 * 2.2 / (1 + 1.2 * (0.25 + 0.75 * 3 / 4)).
+    #[test]
+    fn filename_stem_tokens_count_in_the_chunk_length() {
+        let hits = ask_tree(
+            &[("ledger.rs", "fn a() {}"), ("b.rs", "fn b(x: u8) {}")],
+            "ledger",
+        );
+        let norm = 1.0 - pixel_rank::BM25_B + pixel_rank::BM25_B * 3.0 / 4.0;
+        let expected =
+            2.0f64.ln() * (pixel_rank::BM25_K1 + 1.0) / (1.0 + pixel_rank::BM25_K1 * norm);
+        let score = found(&hits, "ledger.rs").lexical_score;
+        assert!((score - expected).abs() < 1e-12, "{score} vs {expected}");
+    }
+
     /// Which paths are tests, configuration/data or docs, test first.
     #[test]
     fn file_kinds_follow_directories_and_names() {
