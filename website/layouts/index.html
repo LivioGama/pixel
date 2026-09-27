@@ -15,6 +15,8 @@
   {{ $bench := "benchmarks/" | relURL }}
   {{/* The supported agents, shown by the hero's line and the Compatibility grid, from data/agents.toml (which also feeds /for/ and the /docs/ wiring table). Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
   {{ $agents := hugo.Data.agents.agent }}
+  {{/* The prompt a visitor pastes into their agent instead of a shell: the repository README's "Let your agent install it" block, shared by the hero, the Install terminal and the sticky bar. */}}
+  {{ $agentPrompt := "Install Pixel (https://github.com/LivioGama/pixel) for me: follow the \"For AI agents\" section of its README, then tell me what changed and whether `pixel doctor .` is green." }}
 
   {{/* Where the reader is: one square per chapter (each section's .chapter label), filled as it passes. Built by the script below. */}}
   <nav class="rail" aria-label="Sections" data-rail hidden></nav>
@@ -35,9 +37,14 @@
       <div class="hero__cta">
         <div class="cmd">
           <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
-          <button class="cmd__copy" type="button" data-copy="brew install LivioGama/tap/pixel">Copy</button>
+          <button class="cmd__copy" type="button" data-copy="brew install LivioGama/tap/pixel" data-copy-next="hero-next">Copy</button>
         </div>
+        {{/* The second way in, for a visitor already inside an agent: the README's "Let your agent install it" prompt (keep the two in step). */}}
+        <button class="button button--ghost hero__agent" type="button" data-copy="{{ $agentPrompt }}" data-copy-next="hero-next-agent">Or let your agent install it</button>
       </div>
+      {{/* Shown once a Copy above succeeds, one per button (the last copy wins): the step after the paste, so the copy moves the visitor forward instead of just confirming. */}}
+      <p class="hero__next" id="hero-next" hidden>Copied. Then run <code>pixel install</code> and restart your agent: the next session starts with the map.</p>
+      <p class="hero__next" id="hero-next-agent" hidden>Copied. Paste it into your agent: it installs Pixel, wires itself and tells you whether <code>pixel doctor .</code> is green.</p>
       {{/* Beside the one call to action, what a visitor checks before pasting it: the platforms the release builds (release.yml), the licence and the telemetry. No star button here: the nav links GitHub. */}}
       <p class="hero__trust">macOS on Apple Silicon and Linux &middot; MIT &middot; no account, no telemetry</p>
       </div>
@@ -165,6 +172,46 @@
         </div>
         <a class="button button--ghost invite__cta" href="{{ $share }}" target="_blank" rel="noopener">Share your numbers</a>
       </aside>
+    </section>
+
+    {{/* ---------- your number: the proof on the visitor's own code ---------- */}}
+    {{/* The first two figures restate "Measure it on your own code" in content/benchmarks.md (a fresh clone of psf/requests at 611c616): change them there first, then here. The third is the maintainer's own pixel token-savings report, moved here from the card that used to close the objections. */}}
+    <section class="section wrap" id="your-number" aria-labelledby="yours-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Verify</span></p>
+      <header class="section__head" data-reveal>
+        <h2 id="yours-title">Don't trust our numbers. <span class="glow">Get yours.</span></h2>
+        <p>Run inside a repository of yours, the first command prints what a full read of its largest files costs your agent and what the same answers cost through Pixel. No session, no account, and nothing leaves your machine.</p>
+      </header>
+      <ol class="yours" data-reveal="stagger">
+        <li class="yours__step">
+          <span class="yours__n" aria-hidden="true">1</span>
+          <h3>Your twenty largest files</h3>
+          <div class="cmd">
+            <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel audit</code>
+            <button class="cmd__copy" type="button" data-copy="pixel audit">Copy</button>
+          </div>
+          <p>On Requests, a first run on a fresh clone read <strong class="yours__waste">95,693 tokens</strong> for the twenty files whole against <strong class="yours__kept">11,447</strong> for their outlines: &minus;88%.</p>
+        </li>
+        <li class="yours__step">
+          <span class="yours__n" aria-hidden="true">2</span>
+          <h3>The one file your agent keeps opening</h3>
+          <div class="cmd">
+            <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel list-signatures &lt;file&gt;</code>
+            <button class="cmd__copy" type="button" data-copy="pixel list-signatures ">Copy</button>
+          </div>
+          <p>On Requests' <code>models.py</code> (1,184 lines): <code>full read 10365 tok, pixel answer 641 tok (-94%)</code>, in well under a second.</p>
+        </li>
+        <li class="yours__step">
+          <span class="yours__n" aria-hidden="true">3</span>
+          <h3>What it spared your agent</h3>
+          <div class="cmd">
+            <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel token-savings</code>
+            <button class="cmd__copy" type="button" data-copy="pixel token-savings">Copy</button>
+          </div>
+          <p>After a few sessions. On the maintainer's machine: 41 to 83% of what the agent would have read, across 798 operations.</p>
+        </li>
+      </ol>
+      <p class="numbers__more" data-reveal>Not installed yet? <a class="link" href="#install">Two commands</a>. The method behind the count: <a class="link" href="{{ $bench }}#measure-it-on-your-own-code">measure it on your own code</a>.</p>
     </section>
 
     {{/* ---------- how it works ---------- */}}
@@ -414,18 +461,6 @@
         </details>
         {{ end }}
       </div>
-      {{/* The last objection answered by the visitor's own numbers, before the install that follows. */}}
-      <aside class="yours" data-reveal>
-        <span class="yours__icon">{{ partial "icon.html" (dict "name" "chart" "size" 26) }}</span>
-        <div class="yours__text">
-          <h3>Don't take our numbers.</h3>
-          <p>After a few sessions, ask Pixel what it spared your own agent. On the maintainer's machine: 41 to 83% of what it would have read, across 798 operations.</p>
-        </div>
-        <div class="cmd">
-          <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel token-savings</code>
-          <button class="cmd__copy" type="button" data-copy="pixel token-savings">Copy</button>
-        </div>
-      </aside>
     </section>
 
     {{/* ---------- install ---------- */}}
@@ -438,19 +473,18 @@
       {{ $curl := "curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh" }}
       <div class="setup">
         <div class="setup__main" data-reveal>
-          {{/* One terminal, two ways to get the binary: the switch swaps the first line and what Copy all copies. */}}
+          {{/* One terminal, three ways in: Homebrew, the script, or the prompt for an agent to do it. The switch shows that variant's lines and sets what Copy all copies. */}}
           <div class="term" data-term>
             <div class="term__bar">
               <span class="term__dots" aria-hidden="true"><span></span><span></span><span></span></span>
               <div class="term__switch" role="group" aria-label="Install with">
                 <button type="button" aria-pressed="true" data-variant="brew" data-copy-all="{{ $brew }} && pixel install && pixel doctor .">Homebrew</button>
                 <button type="button" aria-pressed="false" data-variant="curl" data-copy-all="{{ $curl }} && pixel install && pixel doctor .">Script</button>
+                <button type="button" aria-pressed="false" data-variant="agent" data-copy-all="{{ $agentPrompt }}">Your agent</button>
               </div>
               <button class="cmd__copy term__copy" type="button" data-copy="{{ $brew }} && pixel install && pixel doctor .">Copy all</button>
             </div>
-            <pre class="term__body"><code><span data-line="brew"><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl" hidden><span class="term__p">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</span><span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span>
-<span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span>
-<span class="term__p">$</span> pixel list-signatures path/to/a/large/file.py  <span class="term__c"># first result, in your repo</span></code></pre>
+            <pre class="term__body"><code><span data-line="brew"><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl" hidden><span class="term__p">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</span><span data-line="brew curl"><span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span></span><span data-line="brew curl"><span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></span><span data-line="brew curl"><span class="term__p">$</span> pixel list-signatures path/to/a/large/file.py  <span class="term__c"># first result, in your repo</span></span><span data-line="agent" hidden><span class="term__c"># paste into Claude Code, Codex, Pi or any agent with a shell</span></span><span data-line="agent" hidden><span class="term__p">&gt;</span> {{ $agentPrompt }}</span></code></pre>
           </div>
           {{/* Measured on a fresh clone of psf/requests with the pixel of this commit; re-run it when the report line changes (crates/pixel-actionlog/src/metrics.rs, measured_read_section). */}}
           <p class="install__more">The last line needs no session: under the file's outline, Pixel's report compares it with reading the whole file. On Requests' <code>models.py</code>: <code>full read 10365 tok, pixel answer 641 tok (-94%)</code>.</p>
@@ -472,12 +506,30 @@
     {{/* ---------- closing ---------- */}}
     <section class="closing wrap" aria-labelledby="closing-title">
       <h2 id="closing-title" class="closing__title" data-reveal>Give your agent <span class="glow">a map.</span></h2>
+      <p class="closing__lede" data-reveal>Every session starts cold. Give the next one a map before it opens its first file.</p>
+      <div class="cmd closing__cmd" data-reveal>
+        <code><span class="cmd__prompt" aria-hidden="true">$</span> {{ $brew }} && pixel install</code>
+        <button class="cmd__copy" type="button" data-copy="{{ $brew }} && pixel install">Copy</button>
+      </div>
+      <p class="hero__trust" data-reveal>Two commands &middot; MIT &middot; no telemetry &middot; restart your agent and it is live</p>
       <div class="closing__cta" data-reveal>
-        <a class="button" href="#install">Install Pixel</a>
+        <a class="button button--ghost" href="#install">Other ways to install</a>
         <a class="button button--ghost" href="{{ "docs/" | relURL }}">Read the docs</a>
       </div>
     </section>
   </main>
+
+  {{/* The install command within reach once the hero has scrolled away; the script below hides it again over the Install and closing blocks, which carry the same command. Nothing is stored: it comes back on every visit. */}}
+  <aside class="dock" data-dock aria-label="Install Pixel" hidden>
+    <div class="dock__inner wrap">
+      <span class="dock__brand" aria-hidden="true"><span class="brand__pixel"></span></span>
+      <div class="cmd dock__cmd">
+        <code><span class="cmd__prompt" aria-hidden="true">$</span> {{ $brew }}</code>
+        <button class="cmd__copy" type="button" data-copy="{{ $brew }}">Copy</button>
+      </div>
+      <a class="link dock__more" href="#your-number">Measure it on your code</a>
+    </div>
+  </aside>
 
   {{ partial "footer.html" . }}
 
@@ -1129,8 +1181,9 @@
       demo.addEventListener('ended', function () { label.textContent = 'Replay video'; btn.hidden = false; });
     })();
 
-    /* Install: the Homebrew / Script switch swaps the terminal's first line
-       and what Copy all copies. */
+    /* Install: the Homebrew / Script / Your agent switch shows the lines of
+       that variant (a line names every variant it belongs to) and sets what
+       Copy all copies. */
     (function () {
       var term = document.querySelector('[data-term]');
       if (!term) return;
@@ -1139,10 +1192,31 @@
       buttons.forEach(function (b) {
         b.addEventListener('click', function () {
           buttons.forEach(function (o) { o.setAttribute('aria-pressed', o === b); });
-          [].forEach.call(term.querySelectorAll('[data-line]'), function (l) { l.hidden = l.dataset.line !== b.dataset.variant; });
+          [].forEach.call(term.querySelectorAll('[data-line]'), function (l) { l.hidden = l.dataset.line.split(' ').indexOf(b.dataset.variant) < 0; });
           copy.setAttribute('data-copy', b.dataset.copyAll);
         });
       });
+    })();
+
+    /* Dock: shown once the hero has left the viewport, hidden while the
+       Install or closing block (the same command, in full) is on screen. */
+    (function () {
+      var dock = document.querySelector('[data-dock]');
+      var hero = document.querySelector('.hero');
+      var covers = [document.getElementById('install'), document.querySelector('.closing')];
+      if (!dock || !hero || !('IntersectionObserver' in window)) return;
+      var seen = new Map();
+      var update = function () {
+        var show = !seen.get(hero) && !covers.some(function (c) { return seen.get(c); });
+        dock.hidden = false;
+        dock.classList.toggle('is-shown', show);
+        dock.inert = !show;
+      };
+      var io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) { seen.set(e.target, e.isIntersecting); });
+        update();
+      });
+      [hero].concat(covers).forEach(function (el) { if (el) { seen.set(el, false); io.observe(el); } });
     })();
 
     /* Jobs: a tab list; a recording loads only when its tab is opened. */

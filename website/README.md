@@ -45,10 +45,13 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   the bottom. The hero opens on who Pixel is for (four agent marks and the
   count of the rest, from `data/agents.toml`, which the Compatibility grid
   also draws, each mark linking to its `/for/<slug>/` page), then states the problem in the reader's words before naming the
-  category. Under the one call to action (the brew command; no star
-  button, the nav links GitHub) a quiet line states what a visitor checks
-  before pasting it: the platforms `release.yml` builds, the licence, no
-  telemetry. The token wall draws one square per 25 tokens of a full file
+  category. Under the call to action (the brew command, and beside it the
+  root README's "Let your agent install it" prompt, `$agentPrompt`, which
+  the Install terminal's "Your agent" tab copies too: keep the two texts in
+  step; no star button, the nav links GitHub) a quiet line states what a
+  visitor checks before pasting it: the platforms `release.yml` builds, the
+  licence, no telemetry. A successful copy there unhides the next step
+  (`data-copy-next` in the footer's copy script names the hint's id). The token wall draws one square per 25 tokens of a full file
   read of a well-known file (`data/read_savings.toml`, the row marked
   `wall`) and burns down to what the same
   question costs through Pixel once it scrolls into view. A Without / With
@@ -58,9 +61,12 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   gather into a P of exactly that many squares, built from the count by
   the script, so one square always means 25 tokens. The order after the
   hero shows before it proves: the scope example comes first, then the
-  numbers band, then the chapters of proof (Proof, How it works with the
-  six daily jobs under it, Alternatives, Teams, Compatibility, Objections,
-  Install). Every figure in the band is measured against the same agent
+  numbers band, then the chapters of proof (Proof, Verify, How it works
+  with the six daily jobs under it, Alternatives, Teams, Compatibility,
+  Objections, Install). Verify (`#your-number`) hands the proof to the
+  visitor: `pixel audit`, `pixel list-signatures` and `pixel token-savings`,
+  each beside the figure it printed (the first two restate "Measure it on
+  your own code" in `content/benchmarks.md`). Every figure in the band is measured against the same agent
   without Pixel, the only baseline a first-time visitor can read; the
   head-to-head with GitNexus stays in Alternatives. Proof pairs the time
   saved with the answer both sides reached (the same file in all 22 runs),
@@ -313,6 +319,11 @@ touched (Hugo 0.166; a plain `hugo` build is right).
 - The agent demo never starts on its own: its poster is
   `pixel-agent-demo-start.jpg`, the recording's first frame, which
   `docs/motion/scripts/render.sh` writes beside the last-frame poster.
+- The dock (`[data-dock]`, end of `layouts/index.html`): the brew command
+  pinned to the bottom of the viewport once the hero has scrolled away,
+  hidden again while the Install or closing block, which carry the same
+  command, is on screen. Nothing is stored, so it returns on every visit;
+  without JavaScript it never shows.
 - `layouts/partials/splash.html`: the home's splash (pixels landing into
   the brand square, then the wordmark), about two seconds, skippable.
   `partials/head.html` decides it before the first paint: home only, once
