@@ -1,0 +1,1 @@
+**docs:** `docs/bench/vs-landscape.md` and `docs/comparison.md` re-measure natural-language retrieval on pixel 0.6.0: `search-meaning` r@1 0.87 (semble 0.64, WarpGrep 0.69), r@10 0.96 (semble 1.00), with the 0.4.0 and 0.5.2 runs kept as history and the doc-comment bias stated beside the table. ([#332](https://github.com/LivioGama/pixel/pull/332))
