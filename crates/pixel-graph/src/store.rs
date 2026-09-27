@@ -1910,6 +1910,41 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
+    /// A file's refresh drops its old concepts and their search words, and
+    /// only its own: a word left behind would keep answering `find-code`
+    /// with a concept that no longer exists, and a neighbour's rows lost
+    /// would make it unfindable until its next edit.
+    #[test]
+    fn delete_concepts_for_file_drops_only_that_files_concepts_and_words() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let a = store.replace_file("a.rs", "oid-a", "rust").unwrap();
+        let b = store.replace_file("b.rs", "oid-b", "rust").unwrap();
+        let kind = crate::concept::ConceptKind::String;
+        let ca = store
+            .insert_concept(a, kind, "payment failed", "payment failed", "", 1, 1, None)
+            .unwrap();
+        let cb = store
+            .insert_concept(b, kind, "refund issued", "refund issued", "", 1, 1, None)
+            .unwrap();
+        let count = |sql: &str, id: i64| -> i64 {
+            store.conn().query_row(sql, [id], |r| r.get(0)).unwrap()
+        };
+        let concepts = "SELECT COUNT(*) FROM concepts WHERE file_id = ?1";
+        let words = "SELECT COUNT(*) FROM concept_words WHERE concept_id = ?1";
+        assert!(
+            count(words, ca) > 0 && count(words, cb) > 0,
+            "both concepts indexed words"
+        );
+        let b_words = count(words, cb);
+
+        store.delete_concepts_for_file(a).unwrap();
+
+        assert_eq!(count(concepts, a), 0, "a.rs's concept is gone");
+        assert_eq!(count(words, ca), 0, "and so are its words");
+        assert_eq!(count(concepts, b), 1, "b.rs keeps its concept");
+        assert_eq!(count(words, cb), b_words, "and all of its words");
+    }
+
     #[test]
     fn crux_extraction_and_fingerprint_roundtrip() {
         let body = "pub fn run(cfg: &Config) -> i32 {\n    if cfg.dry_run {\n        return 0;\n    }\n    let mut total = 0;\n    for x in cfg.items {\n        total += x.val;\n    }\n    // a pure comment\n    if total > 100 {\n        bail!(\"too big\");\n    }\n    total\n}";

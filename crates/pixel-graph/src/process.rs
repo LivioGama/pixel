@@ -258,3 +258,57 @@ pub fn list(
     }
     Ok((out, total))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{EdgeRow, SymbolKind};
+
+    /// `run → load → parse` in one file: `run` is the only symbol nothing
+    /// calls, so it seeds the one process `processes` answers with, and its
+    /// steps follow the calls in order.
+    #[test]
+    fn discover_persists_the_call_chain_from_an_uncalled_entry() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let file = store.replace_file("src/app.rs", "oid", "rust").unwrap();
+        let sym = |name: &str, line: u32| {
+            store
+                .insert_symbol(
+                    file,
+                    &format!("src/app.rs#{name}#function"),
+                    name,
+                    name,
+                    SymbolKind::Function,
+                    line,
+                    line + 2,
+                    "",
+                )
+                .unwrap()
+        };
+        let (run, load, parse) = (sym("run", 1), sym("load", 5), sym("parse", 9));
+        for (src, dst) in [(run, load), (load, parse)] {
+            store
+                .insert_edge(&EdgeRow {
+                    src_id: src,
+                    dst_id: dst,
+                    kind: EdgeKind::Calls,
+                    tier: Tier::Exact,
+                    site_line: 2,
+                    receiver: None,
+                    callee: None,
+                })
+                .unwrap();
+        }
+
+        let found = discover(&mut store, 6, 3, 3, 10).unwrap();
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].entry_uid, "src/app.rs#run#function");
+        assert_eq!(found[0].step_count, 3);
+        let names: Vec<&str> = found[0].steps.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, ["run", "load", "parse"]);
+        let (listed, total) = list(&store, 10, 10, 0).unwrap();
+        assert_eq!(total, 1, "the process is persisted, not only returned");
+        assert_eq!(listed[0].entry_uid, found[0].entry_uid);
+    }
+}
