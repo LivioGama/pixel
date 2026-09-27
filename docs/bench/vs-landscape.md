@@ -3,7 +3,9 @@
 Companion to [`vs-gitnexus.md`](vs-gitnexus.md), which covers the graph
 capabilities. This page covers the two tools that solve *different* problems:
 [semble](https://github.com/MinishLab/semble) (semantic code search) and
-[stacklit](https://github.com/glincker/stacklit) (a static repo map for agents).
+[stacklit](https://github.com/glincker/stacklit) (a static repo map for agents),
+plus a later retrieval run that adds [WarpGrep](https://www.morphllm.com/products/warpgrep)
+(an RL-trained search subagent).
 
 Measured 2026-09-21 on an Apple M2 / 16 GiB. Versions, corpus commits and the
 contamination control: [`vs-tools/raw/environment.txt`](vs-tools/raw/environment.txt).
@@ -13,6 +15,10 @@ Same house rule as the rest of `docs/bench/`: losses in the same voice as wins.
 better than either of pixel's search engines, and stacklit produces a far cheaper
 orientation map than `pixel list-areas`. Both losses are reproducible with the
 committed scripts.
+
+WarpGrep, added on 2026-09-27, beats pixel on the first answer (r@1 0.69 vs
+0.47) and draws with it on the top-10 list (0.71 vs 0.69), at 2.5× the latency
+and with code sent to a remote model.
 
 ## These three tools are not substitutes
 
@@ -116,6 +122,78 @@ Readings:
   files on nearly every query, almost never the right one — so this is a result,
   not a bug.
 
+## Natural-language retrieval — WarpGrep joins, same 45 queries
+
+[WarpGrep](https://www.morphllm.com/products/warpgrep) is Morph's search
+subagent: a model trained with reinforcement learning (`morph-warp-grep-v2.1`)
+that drives ripgrep, `ls`, glob and file reads on the local tree for up to six
+turns, several calls per turn, and returns the spans it judges relevant. It has
+no index. Measured 2026-09-27 with the same queries, corpora and scoring as the
+table above, all four arms re-run in one pass on pixel 0.5.2
+([`warpgrep/environment.txt`](vs-tools/raw/warpgrep/environment.txt)). The
+WarpGrep arm is [`warpgrep-search.mjs`](../../scripts/bench-vs/warpgrep-search.mjs),
+off unless `WARPGREP_SCRIPT` and `MORPH_API_KEY` are set.
+
+| Corpus | Arm | r@1 | r@5 | r@10 | p50 | bytes | files |
+|---|---|---|---|---|---|---|---|
+| Rust (pixel) | semble | 0.67 | **1.00** | **1.00** | **553 ms** | 7 919 | 9.3 |
+| | pixel `search-meaning` | **0.80** | **1.00** | **1.00** | 844 ms | **2 042** | 8.0 |
+| | WarpGrep | 0.73 | 0.73 | 0.73 | 8 080 ms | 8 527 | 1.0 |
+| TypeScript (GitNexus) | semble | **0.73** | **1.00** | **1.00** | **2 866 ms** | 10 730 | 9.5 |
+| | pixel `search-meaning` | 0.20 | 0.27 | 0.27 | 5 710 ms | **2 249** | 8.0 |
+| | WarpGrep | 0.53 | 0.60 | 0.60 | 7 541 ms | 7 979 | 1.3 |
+| Ruby (dd-trace-rb) | semble | 0.53 | **0.87** | **1.00** | **1 268 ms** | 7 788 | 9.9 |
+| | pixel `search-meaning` | 0.40 | 0.80 | 0.80 | 2 374 ms | **2 159** | 8.0 |
+| | WarpGrep | **0.80** | 0.80 | 0.80 | 6 806 ms | 9 720 | 1.3 |
+| **All** | **semble** | 0.64 | **0.96** | **1.00** | **1 562 ms** | 8 812 | 9.6 |
+| | **pixel `search-meaning`** | 0.47 | 0.69 | 0.69 | 2 976 ms | **2 150** | 8.0 |
+| | **WarpGrep** | **0.69** | 0.71 | 0.71 | 7 476 ms | 8 742 | 1.2 |
+
+`find-code` is in the raw rows (r@10 0.04, as before). Bytes for WarpGrep are
+the code it hands the agent, not its own JSON; for the other two they are the
+ranked list, paths and snippets. `files` is how many distinct files the answer
+names.
+
+Readings:
+
+- **WarpGrep beats pixel on the first answer, and does not on the list.**
+  r@1 0.69 against 0.47: when it answers, it usually answers with the right
+  file. But it names 1.2 files, so r@10 barely moves above r@1; pixel's eight
+  candidates catch it up to 0.69 against 0.71. semble still leads the list by
+  a distance (1.00).
+- **By corpus it is two losses and a draw for pixel.** Ruby: 0.80 against
+  0.40 at r@1, level at r@10. TypeScript: 0.60 against 0.27 at r@10 — the
+  corpus where pixel's search is broken (see below) and WarpGrep is merely
+  mediocre. Rust: pixel ahead, 0.80/1.00 against 0.73/0.73.
+- **A miss can be a neighbour.** The one TypeScript miss read by hand, the
+  query documenting `cfg/visitors/rust.ts`, returned `cfg/visitors/java.ts`:
+  the benchmark strips the file's own name from the query, and a grep-driven
+  agent has nothing else to tell siblings apart with.
+- **It is the slowest arm by 2.5×**, 7.5 s p50 against 3.0 s for pixel and
+  1.6 s for semble, spending 3.7 to 4.5 turns and 4.7 to 7.4 tool calls per
+  search. Morph quotes "under 6 seconds"; the Ruby median (6.8 s) is the
+  closest to it.
+- **It is not deterministic.** Of the 19 cases that succeeded in both of
+  this day's runs, 2 changed verdict (`excavate.rs` and `concept.rs`, found at
+  rank 1 in the first run, missed in the second), and the harness scores the
+  last repetition. Treat per-corpus figures as ±1 to 2 cases.
+- **Code leaves the machine.** The SDK runs the tools locally, but their
+  results — grep lines, reads of up to 800 lines — are the model's next input,
+  sent to Morph's API. Each search is also a paid call; the first run of this
+  benchmark stopped on `402 status code (no body)` when the account ran out of
+  credit, and its failed cases are not scored anywhere
+  ([`run1-partial/`](vs-tools/raw/warpgrep/run1-partial/)).
+
+pixel's own figures reproduce the 2026-09-21 run to ±0.07 on every cell (one
+case in 15), semble's exactly: the
+`search-meaning` fix of 2026-09-22 did not move TypeScript, which stays at
+r@10 0.27.
+
+What this does not measure is Morph's own claim, which is agent-level: on
+SWE-Bench Pro, a coding agent with WarpGrep solves more tasks with fewer input
+tokens. That is the "agent-level task time" line in *Not measured* below, for
+every tool on this page.
+
 ## Repo map — stacklit vs pixel, 4 repos
 
 Two axes, reported side by side and never collapsed: what the map costs, and how
@@ -205,3 +283,4 @@ rows below, so a chart cannot drift from the measurement it illustrates.
   codes and the arm order that case ran in
 - [`vs-tools/cases/`](vs-tools/cases/) — the query sets, regenerable
 - [`vs-tools/raw/environment.txt`](vs-tools/raw/environment.txt) — versions, commits, contamination control
+- [`vs-tools/raw/warpgrep/`](vs-tools/raw/warpgrep/) — the four-arm run of 2026-09-27, its summary and environment, and the cut-short first run
