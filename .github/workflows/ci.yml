@@ -9,7 +9,8 @@ on:
     # A pull request that only touches documentation no test reads -- prose
     # under docs/, the licence files, a Markdown file outside the list below
     # -- cannot change a test result, so it skips the two-and-a-half-minute
-    # run; the Hugo site under website/ has its own workflow, pages.yml.
+    # run; the Hugo site under website/ has its own workflow, pages.yml
+    # (which stays in: scripts/verify-action-pins.py reads every workflow).
     # Later patterns win: the negations drop the docs first, then the
     # re-includes put back what the suite actually reads:
     #   - crates/**: the bundled agent prompts, checked by the install tests;
@@ -36,7 +37,6 @@ on:
       - "!**.md"
       - "!docs/**"
       - "!website/**"
-      - "!.github/workflows/pages.yml"
       - "!LICENSE"
       - "!NOTICE"
       # A skill no test reads (pixel-retro's scripts, say) is documentation
@@ -112,6 +112,12 @@ jobs:
         with:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
+
+      # First, before anything is installed: a floating tag in release.yml
+      # would run unreviewed code next to the tap token and the signing
+      # identity. Contract in scripts/test-verify-action-pins.py below.
+      - name: Action pins (every uses on a full commit SHA)
+        run: python3 scripts/verify-action-pins.py
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -199,6 +205,9 @@ jobs:
 
       - name: Mutation gate config contract (no module silently excluded)
         run: python3 scripts/test-mutants-config.py
+
+      - name: Action pin check contract (tags, short SHAs, unparsed forms refused)
+        run: python3 scripts/test-verify-action-pins.py
 
       # clean.sh removes whole directories. The cases that matter are the ones
       # asserting what it leaves alone: a file git tracks, a tree behind a

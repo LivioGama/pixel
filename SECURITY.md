@@ -17,6 +17,22 @@ Please include:
 
 You will receive a response within 48 hours.
 
+## Verifying a release
+
+Every release archive and its `install.sh` carry a signed build-provenance
+attestation from `.github/workflows/release.yml`, run on the release tag on a
+GitHub-hosted runner. The `.sha256` file beside each archive only proves the
+download is intact; the attestation proves who built it. With the GitHub CLI:
+
+```bash
+gh attestation verify pixel-vX.Y.Z-aarch64-apple-darwin.tar.gz --repo LivioGama/pixel \
+  --signer-workflow LivioGama/pixel/.github/workflows/release.yml \
+  --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners
+```
+
+The same command verifies `install.sh` before you pipe it into `sh`.
+Releases before the first attested one have no attestation.
+
 ## Security model
 
 Pixel runs locally and processes repository data. Key security boundaries:

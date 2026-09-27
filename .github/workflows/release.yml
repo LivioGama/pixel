@@ -141,6 +141,11 @@ jobs:
     runs-on: ubuntu-26.04
     permissions:
       contents: write
+      # Provenance attestation: the OIDC token Sigstore exchanges for a
+      # short-lived signing certificate naming this workflow run, and the
+      # write that stores the signed attestation on the repository.
+      id-token: write
+      attestations: write
     env:
       # Fine-grained PAT with Contents: read/write on LivioGama/homebrew-tap.
       # When unset, the formula is still attached to the release but the tap
@@ -230,6 +235,21 @@ jobs:
             end
           end
           EOF
+
+      # SLSA build provenance for what a user downloads and runs: each
+      # archive, and install.sh, which the README pipes into sh. The
+      # .sha256 files ship beside the archives in the same release, so they
+      # prove the download was not corrupted, never who built it; an
+      # attestation is signed by this workflow on this tag and checked with
+      # `gh attestation verify` (SECURITY.md). Before the upload on purpose:
+      # a signing failure stops the release instead of publishing it
+      # unattested. The smoke job verifies both subjects after publication.
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            artifacts/pixel-*.tar.gz
+            scripts/install.sh
 
       # The release body is the tag's section of CHANGELOG.md (Keep a
       # Changelog: from "## [X.Y.Z]" to the next "## " heading).
@@ -343,6 +363,15 @@ jobs:
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --pattern "$ARCHIVE" --pattern "$ARCHIVE.sha256"
           shasum -a 256 -c "$ARCHIVE.sha256"
+          # Signed by release.yml on this tag, on a GitHub-hosted runner:
+          # the command SECURITY.md gives users, so a release whose
+          # attestation is missing or foreign fails here.
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern install.sh
+          for subject in "$ARCHIVE" install.sh; do
+            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "$GITHUB_REF" --deny-self-hosted-runners
+          done
           tar xzf "$ARCHIVE"
           "$RUNNER_TEMP/check-version.sh" "$DIR/pixel-${GITHUB_REF_NAME}-${{ matrix.target }}/bin/pixel" "release asset"
 
