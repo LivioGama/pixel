@@ -48,6 +48,12 @@ fn ask_reports_cosine_ranking_coverage_and_honest_human_labels() {
         assert!(hit["ranking_score"].as_f64().unwrap() > 0.0);
     }
     assert_eq!(hits[0]["lexical_matches"], 2);
+    // The question names no docs: the manual ranks first on its evidence,
+    // weighted down as documentation, and says so; code carries no weight.
+    assert_eq!(hits[0]["demoted"], "docs");
+    assert!(hits[0]["lexical_score"].as_f64().unwrap() > 0.0);
+    assert_eq!(hits[1]["demoted"], serde_json::Value::Null);
+    assert_eq!(hits[1]["lexical_score"], 0.0);
     assert_eq!(value["coverage"]["searched_files"], 2);
     assert_eq!(value["coverage"]["degraded"], false);
     // No index at the root: every chunk embedded, nothing written.
