@@ -212,6 +212,39 @@ mod tests {
     use crate::error::ErrorCode;
     use serde_json::json;
 
+    /// A response that crosses the daemon socket is printed from the parsed
+    /// copy, an in-process one from the value itself: the same query must
+    /// print the same bytes either way, so every float must parse back to
+    /// the bits it was written from. `list-areas` printed cohesion 5/11 as
+    /// `0.45454545454545453` in process and `0.4545454545454546` through
+    /// the daemon before serde_json's `float_roundtrip`.
+    #[test]
+    fn floats_survive_the_wire_bit_for_bit() {
+        let mut floats = vec![5.0 / 11.0, 18.0 / 41.0, 12.0 / 13.0, 26.0 / 27.0];
+        for den in 2..200u32 {
+            for num in 1..den {
+                floats.push(f64::from(num) / f64::from(den));
+            }
+        }
+        let sent = Envelope::success("clusters", json!({ "cohesion": floats }));
+        let line = serde_json::to_string(&sent).unwrap();
+        let back: Envelope<serde_json::Value> = serde_json::from_str(&line).unwrap();
+        let parsed: Vec<u64> = back.result.unwrap()["cohesion"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap().to_bits())
+            .collect();
+        let written: Vec<u64> = floats.iter().map(|f| f.to_bits()).collect();
+        let drifted = written.iter().zip(&parsed).filter(|(w, p)| w != p).count();
+        assert_eq!(
+            drifted,
+            0,
+            "{drifted} of {} floats changed on the wire",
+            floats.len()
+        );
+    }
+
     /// Golden snapshot (M0 gate from `PLAN.md`: "golden envelope snapshots
     /// frozen"). This is a literal `assert_eq!` against a hand-written JSON
     /// value, not a snapshot-testing crate, so any accidental field rename
