@@ -476,8 +476,9 @@ mod tests {
         assert_eq!(code_chunks("src/sync.rs", &text), expected);
     }
 
-    /// An `impl` larger than a chunk is cut along its methods: each method,
-    /// doc comment included, is exactly one chunk, never windows.
+    /// An `impl` larger than a chunk (the graph records its methods, not
+    /// the block) is cut along its methods: each method, doc comment
+    /// included, is exactly one chunk, never windows.
     #[test]
     fn an_oversize_impl_is_cut_along_its_methods() {
         let method = |name: &str| {
@@ -499,6 +500,25 @@ mod tests {
         }
         assert_eq!(cut.len(), 5, "the header, three methods, the closing brace");
         assert_covers("src/meter.rs", &text);
+    }
+
+    /// A symbol of exactly [`CHUNK_MAX`] bytes stays one piece, nested
+    /// symbols or not; one byte more and it is cut along them.
+    #[test]
+    fn a_symbol_is_cut_along_its_nested_ones_only_above_chunk_max() {
+        let module_of = |bytes: usize| {
+            let methods = format!("{}{}", function("open", 600), function("close", 600));
+            let head = "mod meter {\n";
+            let pad = bytes - head.len() - methods.len() - "}\n".len();
+            format!("{head}{}\n{methods}}}\n", "/".repeat(pad - 1))
+        };
+        let exact = module_of(CHUNK_MAX);
+        assert_eq!(exact.len(), CHUNK_MAX);
+        let lines = u32::try_from(exact.lines().count()).unwrap();
+        assert_eq!(pieces("src/meter.rs", &exact), [(1, lines)]);
+        let over = module_of(CHUNK_MAX + 1);
+        let cut = pieces("src/meter.rs", &over);
+        assert_eq!(cut.len(), 4, "head, two methods, closing brace: {cut:?}");
     }
 
     /// Imports, top-level statements and a class's fields are in chunks

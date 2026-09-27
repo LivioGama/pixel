@@ -2586,6 +2586,32 @@ mod tests {
         assert_eq!(found(&hits, "src/other.rs").lexical_matches, 0);
     }
 
+    /// A file of exactly [`MAX_FILE_BYTES`] is searched, one byte more is
+    /// skipped and counted.
+    #[test]
+    fn a_file_at_the_size_cap_is_searched_and_one_byte_more_skipped() {
+        let at_cap = format!("toll {}", "x".repeat(MAX_FILE_BYTES - 5));
+        let over = format!("{at_cap}x");
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "at_cap.md", &at_cap);
+        write(dir.path(), "over.md", &over);
+        let (files, coverage) = collect_files(dir.path(), None);
+        let result = ask_collected(
+            dir.path(),
+            "toll",
+            10,
+            files,
+            coverage,
+            &mut FixtureEmbedder { fail: false },
+            None,
+        )
+        .unwrap();
+        assert_eq!(at_cap.len(), MAX_FILE_BYTES);
+        assert_eq!(result.coverage.searched_files, 1);
+        assert_eq!(result.coverage.skipped_files, 1);
+        assert_eq!(result.hits[0].path, "at_cap.md");
+    }
+
     /// The snippet is the best chunk's head, and the best chunk is the
     /// function with its doc comment, not a window opening on whatever came
     /// before it in the file.
