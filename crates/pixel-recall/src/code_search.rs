@@ -1019,7 +1019,7 @@ struct Lexical {
 /// names the kind ([`FileKind::named_by`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileKind {
-    /// A test or spec: under `test/`, `__tests__/` or `spec/`, or named
+    /// A test or spec: under `test/`, `__tests__/`, `spec/` or `specs/`, or named
     /// `*_test.*`, `*.test.*`, `*.spec.*` or `*_spec.*`.
     Test,
     /// Configuration or data: `json`, `yaml`/`yml`, `toml`, or anything under
@@ -1039,7 +1039,7 @@ impl FileKind {
         let ext = name.rsplit_once('.').map_or("", |(_, ext)| ext);
         if dirs
             .clone()
-            .any(|dir| matches!(dir, "test" | "__tests__" | "spec"))
+            .any(|dir| matches!(dir, "test" | "__tests__" | "spec" | "specs"))
             || ["_test.", ".test.", ".spec.", "_spec."]
                 .iter()
                 .any(|marker| name.contains(marker))
@@ -1984,6 +1984,8 @@ mod tests {
             ("test/models/invoice_test.rb", Some(FileKind::Test)),
             ("lib/__tests__/a.ts", Some(FileKind::Test)),
             ("spec/fixtures/data.json", Some(FileKind::Test)),
+            ("specs/invoice.ts", Some(FileKind::Test)),
+            ("web/specs/fixtures/data.json", Some(FileKind::Test)),
             ("pkg/invoice_test.go", Some(FileKind::Test)),
             ("src/a.test.ts", Some(FileKind::Test)),
             ("src/a.spec.ts", Some(FileKind::Test)),
