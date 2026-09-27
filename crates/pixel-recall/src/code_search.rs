@@ -18,7 +18,7 @@
 //! adds a semantic layer on top. NDCG is the gate (see
 //! crates/pixel-bench/benches/ndcg_relevance.rs).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::code_vectors::{ChunkKey, Namespace, Store};
@@ -925,6 +925,7 @@ fn rank_files(
     k: usize,
 ) -> Vec<AskHit> {
     let terms = query_terms(query);
+    let lexical_ranks = competition_ranks(lexical_coverage.values().copied());
     let mut semantic: Vec<_> = best.into_iter().collect();
     semantic.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     let mut hits: Vec<_> = semantic
@@ -933,15 +934,13 @@ fn rank_files(
         .map(|(index, (path, score))| {
             let coverage = lexical_coverage.get(&path).copied().unwrap_or_default();
             // Competition ranks: equal coverage receives exactly equal evidence weight.
-            let lexical_rank = 1 + lexical_coverage
-                .values()
-                .filter(|candidate| **candidate > coverage)
-                .count();
             let ranking_score = 2.0 / (60.0 + (index + 1) as f64)
                 + if coverage == 0 {
                     0.0
                 } else {
-                    1.0 / (60.0 + lexical_rank as f64)
+                    lexical_ranks
+                        .get(&coverage)
+                        .map_or(0.0, |&rank| 1.0 / (60.0 + rank as f64))
                 };
             AskHit {
                 snippet: snippets.remove(&path).unwrap_or_default(),
@@ -961,6 +960,26 @@ fn rank_files(
     });
     hits.truncate(k);
     hits
+}
+
+/// The competition rank of every coverage value in `coverages`: one plus the
+/// number of values strictly greater, so equal values share a rank and the
+/// next value skips the tied ones (5, 3, 3, 1 rank 1, 2, 2, 4). One pass
+/// over a histogram of the values, which are few (at most the query's term
+/// count, plus zero): a scan of every file per ranked file cost 4 s at the
+/// 50 000-file ceiling.
+fn competition_ranks(coverages: impl Iterator<Item = usize>) -> HashMap<usize, usize> {
+    let mut counts = BTreeMap::new();
+    for coverage in coverages {
+        *counts.entry(coverage).or_insert(0usize) += 1;
+    }
+    let mut ranks = HashMap::with_capacity(counts.len());
+    let mut above = 0;
+    for (coverage, count) in counts.into_iter().rev() {
+        ranks.insert(coverage, 1 + above);
+        above += count;
+    }
+    ranks
 }
 
 fn make_snippet(text: &str) -> String {
@@ -1000,6 +1019,43 @@ mod tests {
             .map(|(path, _, score)| (path.to_string(), *score))
             .collect();
         rank_files(query, &lexical_coverage, best, HashMap::new(), usize::MAX)
+    }
+
+    /// Competition ranking, exactly: ties share the rank of the first of
+    /// them and the next value skips past all of them, and a value's rank
+    /// counts files (not distinct values) above it.
+    #[test]
+    fn competition_ranks_share_ties_and_skip_past_them() {
+        let ranks = competition_ranks([3, 1, 3, 0, 2, 1, 3].into_iter());
+        let expected: HashMap<usize, usize> = [(3, 1), (2, 4), (1, 5), (0, 7)].into();
+        assert_eq!(ranks, expected);
+        assert!(competition_ranks(std::iter::empty()).is_empty());
+        assert_eq!(competition_ranks([4].into_iter()), [(4, 1)].into());
+    }
+
+    /// The lexical half of the fused score uses those ranks: two files
+    /// tied on coverage get the same lexical weight, the next one the rank
+    /// after both, and a file with no coverage none at all.
+    #[test]
+    fn rank_files_gives_tied_coverage_the_same_lexical_weight() {
+        let coverage: HashMap<String, usize> = [("a", 2), ("b", 2), ("c", 1), ("d", 0)]
+            .map(|(path, value)| (path.to_string(), value))
+            .into();
+        let best: HashMap<String, f32> = [("a", 0.9), ("b", 0.8), ("c", 0.7), ("d", 0.6)]
+            .map(|(path, score)| (path.to_string(), score))
+            .into();
+        let hits = rank_files("x y", &coverage, best, HashMap::new(), usize::MAX);
+        let score = |path: &str| {
+            hits.iter()
+                .find(|hit| hit.path == path)
+                .map(|hit| hit.ranking_score)
+                .unwrap()
+        };
+        let semantic = |position: f64| 2.0 / (60.0 + position);
+        assert_eq!(score("a").to_bits(), (semantic(1.0) + 1.0 / 61.0).to_bits());
+        assert_eq!(score("b").to_bits(), (semantic(2.0) + 1.0 / 61.0).to_bits());
+        assert_eq!(score("c").to_bits(), (semantic(3.0) + 1.0 / 63.0).to_bits());
+        assert_eq!(score("d").to_bits(), semantic(4.0).to_bits());
     }
 
     #[test]
