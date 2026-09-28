@@ -141,6 +141,72 @@ fn write_metrics(path: &Path, on: bool) -> Result<(), String> {
     })
 }
 
+/// The stored classify engine preference: `local`, `remote`, or `auto`.
+pub fn classify_engine() -> Option<String> {
+    global_config_path()
+        .as_deref()
+        .and_then(read_config_doc)
+        .and_then(|doc| {
+            doc.get("classify")?
+                .get("engine")?
+                .as_str()
+                .map(str::to_string)
+        })
+}
+
+/// The provider selected by the interactive remote setup.
+pub fn classify_remote_preset() -> Option<crate::decide_remote::Preset> {
+    let doc = read_config_doc(&global_config_path()?)?;
+    crate::decide_remote::Preset::parse_name(doc.get("classify")?.get("remote_preset")?.as_str()?)
+}
+
+/// Store the remote engine and its provider together, preserving other settings.
+pub fn set_classify_remote(preset: crate::decide_remote::Preset) -> Result<(), String> {
+    let path = global_config_path().ok_or("no HOME for the global config")?;
+    write_doc(&path, |doc| {
+        if !doc.get("classify").is_some_and(Value::is_object) {
+            doc["classify"] = json!({});
+        }
+        doc["classify"]["engine"] = json!("remote");
+        doc["classify"]["remote_preset"] = json!(preset.display());
+    })
+}
+
+/// The recorded local Ollaya daemon launch (base, model name, env, argv).
+pub fn ollaya_launch() -> Option<Value> {
+    global_config_path()
+        .as_deref()
+        .and_then(read_config_doc)
+        .and_then(|doc| doc.get("classify")?.get("ollaya").cloned())
+}
+
+/// Persist the classify engine preference.
+pub fn set_classify_engine(value: &str) -> Result<(), String> {
+    let path = global_config_path().ok_or("no HOME for the global config")?;
+    write_doc(&path, |doc| {
+        if !doc.get("classify").is_some_and(Value::is_object) {
+            doc["classify"] = json!({});
+        }
+        doc["classify"]["engine"] = Value::String(value.to_string());
+    })
+}
+
+/// Persist the local Ollaya server launch record.
+pub fn set_ollaya_launch(launch: &Value) -> Result<(), String> {
+    let path = global_config_path().ok_or("no HOME for the global config")?;
+    write_doc(&path, |doc| {
+        if !doc.get("classify").is_some_and(Value::is_object) {
+            doc["classify"] = json!({});
+        }
+        doc["classify"]["ollaya"] = launch.clone();
+    })
+}
+
+fn read_config_doc(path: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 /// The stored API key for a remote decision preset, if the global config
 /// carries one. Keys live only in `~/.pixel/config.json` under
 /// `remote_keys` — never in the repo layer, never echoed back by the CLI.
@@ -514,5 +580,76 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "tmp cleaned up: {leftovers:?}");
+    }
+
+    #[test]
+    fn ollaya_launch_should_replace_malformed_classify_without_losing_other_settings() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        let path = home.0.join(".pixel/config.json");
+        write(&path, r#"{"metrics":"off","classify":"stale"}"#);
+        let launch = json!({"base": "http://127.0.0.1:11435", "argv": ["ollaya", "serve"]});
+        set_ollaya_launch(&launch).unwrap();
+        assert_eq!(ollaya_launch(), Some(launch));
+        let stored: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(stored["metrics"], "off");
+        restore_home(saved);
+    }
+
+    #[test]
+    fn classify_preferences_roundtrip_without_losing_sibling_settings() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+
+        let path = home.0.join(".pixel/config.json");
+        write(&path, r#"{"metrics":"off","classify":"stale"}"#);
+        set_classify_engine("local").unwrap();
+        assert_eq!(classify_engine().as_deref(), Some("local"));
+        write(&path, r#"{"metrics":"off","classify":"stale"}"#);
+        assert_eq!(classify_remote_preset(), None);
+        set_classify_remote(crate::decide_remote::Preset::Deepseek).unwrap();
+        assert_eq!(
+            classify_remote_preset(),
+            Some(crate::decide_remote::Preset::Deepseek)
+        );
+        assert_eq!(classify_engine().as_deref(), Some("remote"));
+        set_classify_engine("local").unwrap();
+        assert_eq!(classify_engine().as_deref(), Some("local"));
+        set_classify_remote(crate::decide_remote::Preset::OpencodeGo).unwrap();
+        assert_eq!(
+            classify_remote_preset(),
+            Some(crate::decide_remote::Preset::OpencodeGo)
+        );
+        set_classify_engine("local").unwrap();
+
+        let launch = json!({
+            "base": "http://127.0.0.1:11435",
+            "model": "winnow:e4b",
+            "argv": ["ollaya", "serve"],
+        });
+        set_ollaya_launch(&launch).unwrap();
+        assert_eq!(ollaya_launch(), Some(launch));
+        assert_eq!(classify_engine().as_deref(), Some("local"));
+        assert_eq!(
+            classify_remote_preset(),
+            Some(crate::decide_remote::Preset::OpencodeGo)
+        );
+        set_classify_remote(crate::decide_remote::Preset::OpencodeGo).unwrap();
+        set_classify_engine("local").unwrap();
+        assert_eq!(
+            classify_remote_preset(),
+            Some(crate::decide_remote::Preset::OpencodeGo)
+        );
+
+        let stored: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored["metrics"], "off");
+        assert_eq!(stored["classify"]["engine"], "local");
+        assert_eq!(stored["classify"]["ollaya"]["model"], "winnow:e4b");
+
+        restore_home(saved);
     }
 }

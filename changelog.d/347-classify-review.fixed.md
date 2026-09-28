@@ -1,0 +1,1 @@
+**classify:** Remember the remote provider chosen during setup, honor explicit provider overrides, and report local daemon startup failures before sending requests. ([#347](https://github.com/LivioGama/pixel/pull/347))

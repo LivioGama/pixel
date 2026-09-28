@@ -3,15 +3,16 @@
 use crate::support::pixel_command;
 
 #[test]
-fn classify_requires_labels_unless_jsonl() {
+fn classify_without_labels_needs_the_local_engine() {
     let out = pixel_command()
-        .args(["classify", "some state text"])
+        .args(["classify", "some state text", "--engine", "remote"])
+        .env("PIXEL_METRICS", "0")
         .output()
         .unwrap();
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("--label") || stderr.contains("required"),
+        stderr.contains("--label") && stderr.contains("ollaya"),
         "{stderr}"
     );
 }

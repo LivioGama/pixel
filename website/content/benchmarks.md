@@ -131,15 +131,16 @@ They combine: semble for search and Pixel for the graph, history and Git costs a
 
 ## Coding decisions
 
-`pixel classify` puts a bounded question to a model you configure (OpenRouter, Ollama Cloud or a local server) and returns one probability per label. On the 14 public coding items of JevBench:
+`pixel classify` answers a bounded question with a decision model you configure. It returns one probability per label. The local Ollaya engine uses decision-model outputs; the remote engine asks a chat model to generate probabilities.
 
-| Model, through `pixel classify` | Coding accuracy | Median per item |
-| --- | --- | --- |
-| deepseek-v4.1-flash | **1.00** (14 of 14) | 1.4 s |
-| gpt-oss:120b | **0.93** (13 of 14) | 2.0 s |
-| deepseek-v4-flash | **0.93** (13 of 14) | 2.0 s |
-| gpt-oss:20b | **0.93** (13 of 14) | 6.4 s |
-| nemotron-3-ultra | **0.86** (12 of 14) | 8.1 s |
-| Jev, published score | 0.839 (56 items) | |
+### Published decision-model measurements
 
-Read it with its limits: Jev's 0.839 is its own published score on 56 coding items, not re-measured here, and 14 items is a small sample. Answers come from a remote model and are not deterministic; every answer says so. No off-the-shelf local model up to 575M parameters passed 0.50 on the same items. [The bake-off](https://github.com/LivioGama/pixel/blob/main/docs/bench/decide-bakeoff.md)
+Source: [Ollaya’s published benchmark](https://ollaya.dev/), checked 2026-09-28. Ollaya describes the accuracy evaluation as the typed-decisions test split: 400 states and 2,000 questions, scored by argmax against the majority label. It reports its own model results and attributes Jev’s result to Winnow’s benchmark on the same questions. These are upstream reports, not a Pixel reproduction; no shared run artifact is archived here.
+
+| Model | Typed-decisions accuracy | Latency | Measurement |
+| --- | --- | --- | --- |
+| winnow:e4b on Ollaya | 0.722 | **89 ms** | RTX 4090, five questions end to end |
+| TypeSafe Jev | **0.738** | 236–276 ms | Hosted API, median request |
+| laya | — | about 10 ms | Runs well on a CPU |
+
+The latency figures use different environments and requests: local RTX 4090 inference versus a hosted API including network time. They do not establish a speed winner. The accuracy sample is separate from the five-question latency request. The laya latency is also an upstream measurement, not a CPU measurement by Pixel.
