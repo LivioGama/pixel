@@ -1,13 +1,14 @@
 // Focused policy test: node --experimental-strip-types scripts/test-pi-policy.mjs
 // Uses a fake Pixel process so every write operation is visible in a trace.
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const root = mkdtempSync(join(tmpdir(), "pi-policy-"));
 mkdirSync(join(root, ".pixel"));
+symlinkSync(tmpdir(), join(root, "outside-link"));
 const binary = join(root, "pixel");
 const trace = join(root, "calls.jsonl");
 writeFileSync(binary, `#!/usr/bin/env node
@@ -49,6 +50,22 @@ assert.equal(cat.input.command, "cat src/main.rs");
 const composite = {toolName:"bash", input:{command:"pixel status; cat src/main.rs"}};
 assert.equal((await guard(composite, user("inspect"))).block, true);
 assert.equal(composite.input.command, "pixel status; cat src/main.rs");
+for (const command of [
+  "cp src/main.rs /tmp/pixel-copy",
+  "cp -R . /tmp/pixel-copy",
+  "cp src/main.rs src/other.rs /tmp/pixel-copy",
+  "cp 'src/main.rs' '/tmp/pixel copy'",
+  "cp src/main.rs ~",
+  "cp src/main.rs outside-link/copy.rs",
+  "cp src/main.rs -t /tmp/pixel-copy src/other.rs",
+]) {
+  const copy = {toolName:"bash", input:{command}};
+  assert.equal((await guard(copy, user("inspect"))).block, true, command);
+  assert.equal(copy.input.command, command);
+}
+for (const command of ["cp src/main.rs src/copy.rs", "cp -R src src-copy", "cp /tmp/external src/copy.rs"]) {
+  assert.equal(await guard({toolName:"bash", input:{command}}, user("edit")), undefined, command);
+}
 const read = {toolName:"read", input:{path:"src/main.rs"}};
 assert.equal((await guard(read, user("inspect"))).block, true);
 

@@ -2,8 +2,8 @@
 // __MANAGED_BEGIN__
 // __MANAGED_END__
 import { spawnSync } from "node:child_process";
-import { appendFileSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { appendFileSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -177,6 +177,39 @@ function simpleTranslation(command: string, root: string, resolvedPaths: Set<str
   return null;
 }
 
+function safeCopy(command: string, root: string) {
+  const words: string[] = [];
+  const token = /\s*(?:'([^']*)'|"([^"]*)"|([^\s'"]+))/y;
+  for (let offset = 0; offset < command.length;) {
+    token.lastIndex = offset;
+    const match = token.exec(command);
+    if (!match) return false;
+    words.push(match[1] ?? match[2] ?? match[3]);
+    offset = token.lastIndex;
+  }
+  const paths: string[] = [];
+  let literalPaths = false;
+  for (const word of words.slice(1)) {
+    if (/[~*?\[\]{}]/.test(word)) return false;
+    if (!literalPaths && word === "--") { literalPaths = true; continue; }
+    if (!literalPaths && word.startsWith("-")) {
+      if (paths.length === 0 && /^-[RrHLPpfinvXc]+$/.test(word)) continue;
+      return false;
+    }
+    paths.push(word);
+  }
+  if (paths.length < 2) return false;
+  if (!paths.slice(0, -1).some((path) => inRepo(root, path))) return true;
+  let destination = resolve(root, paths.at(-1)!);
+  while (true) {
+    try { return inRepo(realpathSync(root), realpathSync(destination)); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || dirname(destination) === destination) return false;
+      destination = dirname(destination);
+    }
+  }
+}
+
 function classify(tool: string, input: any, root: string, resolvedPaths: Set<string>): { kind: string; reason: string; translation?: string[]; readLimit?: number } {
   if (tool === "pixel") return { kind: "tool", reason: "structured Pixel" };
   if (["edit", "write", "apply_patch", "todo", "web_search", "web_contents", "web_answer", "bg_wait"].includes(tool)) {
@@ -207,6 +240,9 @@ function classify(tool: string, input: any, root: string, resolvedPaths: Set<str
     if (translation) return { kind: "translated", reason: translation[0], translation };
     if (/\b(ls|tree|rg|grep|find|fd|cat|head|tail|git\s+(status|diff|log|blame|fetch)|python|python3|node|ruby|perl|awk|sed)\b/.test(command)) {
       return { kind: "blocked", reason: "Ambiguous repository read; call pixel with the full task goal" };
+    }
+    if (/^cp(?:\s|$)/.test(command) && !safeCopy(command, root)) {
+      return { kind: "blocked", reason: "Copying repository content outside the repository bypasses Pixel reads" };
     }
     if (/^(cargo|make|just|npm|pnpm|bun|pytest|go|mkdir|cp|mv|rm|touch|chmod|echo|printf|true|false)(?:\s|$)/.test(command)) {
       return { kind: "exception", reason: "build, test, edit, or execution command" };
