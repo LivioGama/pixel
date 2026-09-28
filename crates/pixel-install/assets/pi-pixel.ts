@@ -2,7 +2,7 @@
 // __MANAGED_BEGIN__
 // __MANAGED_END__
 import { spawnSync } from "node:child_process";
-import { appendFileSync, realpathSync } from "node:fs";
+import { appendFileSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -82,6 +82,7 @@ function health(root: string, action: Action) {
 
 function audit(root: string, kind: string, reason: string, extra: Record<string, unknown> = {}) {
   try {
+    mkdirSync(resolve(root, ".pixel"), { recursive: true });
     appendFileSync(resolve(root, ".pixel/pi-policy.jsonl"), JSON.stringify({
       time: new Date().toISOString(), kind, reason, ...extra,
     }) + "\n");
@@ -184,6 +185,7 @@ function safeCopy(command: string, root: string) {
     token.lastIndex = offset;
     const match = token.exec(command);
     if (!match) return false;
+    if (match[3]?.startsWith("#")) return false;
     words.push(match[1] ?? match[2] ?? match[3]);
     offset = token.lastIndex;
   }
