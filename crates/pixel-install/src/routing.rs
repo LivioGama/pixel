@@ -1940,7 +1940,8 @@ mod tests {
         )
         .unwrap();
 
-        install_project_codex_at(home.path(), &path, &real, false).unwrap();
+        let canonical = real.canonicalize().unwrap();
+        install_project_codex_at(home.path(), &path, &canonical, false).unwrap();
         let sidecar = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
         install_project_codex_at(home.path(), &path, &stable, false).unwrap();
 
