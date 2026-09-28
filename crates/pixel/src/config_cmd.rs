@@ -427,11 +427,7 @@ fn setup_with(
     else {
         return Ok(false);
     };
-    if !doc.get("classify").is_some_and(Value::is_object) {
-        doc["classify"] = json!({});
-    }
-    doc["classify"]["enabled"] = json!(enabled);
-    writeln!(output, "Review: metrics={}, daemon_auto_start={}, task_context={}, task_boundary={}, classify.enabled={}", doc["metrics"], doc["daemon_auto_start"], doc["task_context"], doc["task_boundary"], doc["classify"]["enabled"]).map_err(|e| e.to_string())?;
+    writeln!(output, "Review: metrics={}, daemon_auto_start={}, task_context={}, task_boundary={}, classify.enabled={}", doc["metrics"], doc["daemon_auto_start"], doc["task_context"], doc["task_boundary"], enabled).map_err(|e| e.to_string())?;
     if ask_bool(input, output, "Save these settings?", false)? != Some(true) {
         return Ok(false);
     }
