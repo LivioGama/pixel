@@ -761,6 +761,17 @@ mod pi_prompt_content_tests {
     }
 
     #[test]
+    fn a_fence_inside_the_managed_block_does_not_protect_an_outside_legacy_prompt() {
+        let managed = format!("{MANAGED_BEGIN}\n```\n{MANAGED_END}");
+        let existing = format!("{managed}\n{PRE_MARKER_PROMPT}After.\n");
+        assert_eq!(
+            super::strip_unmarked_pi_prompts(&existing),
+            format!("{managed}\nAfter.\n"),
+            "cleanup must preserve the entire managed block and scan outside it independently"
+        );
+    }
+
+    #[test]
     fn a_prompt_file_written_by_an_older_install_is_wrapped_in_place_not_duplicated() {
         let wrapped = managed_pi_content(AGENT_PROMPT_ASSET, PI_PROMPT_ASSET);
         assert!(wrapped.starts_with(MANAGED_BEGIN), "{wrapped}");
