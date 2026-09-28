@@ -779,11 +779,18 @@ pub(crate) fn install_project_codex_at(
     let mut value = install::read_settings(path)?;
     let expected_group = composed_codex_group(exe, &backup_path);
     let backup_exists = backup_path.is_file();
+    let legacy_group = composed_codex_group(
+        &exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf()),
+        &backup_path,
+    );
+    let mut migrate_executable_spelling = false;
+    let mut stored_pre_tool_use = None;
 
     if backup_exists {
         // Validate before changing the config. This also proves the runtime
         // input was created by this installer and remains private.
         let stored = read_composed_backup(&backup_path)?;
+        stored_pre_tool_use = stored["pre_tool_use"].as_array().cloned();
         let existing = value
             .get("hooks")
             .and_then(Value::as_object)
@@ -793,18 +800,29 @@ pub(crate) fn install_project_codex_at(
                 path: path.into(),
                 reason: "composed Codex install lost its PreToolUse group; refusing to overwrite user changes".into(),
             })?;
-        if existing.as_slice() != [expected_group.clone()] {
+        let existing_legacy =
+            existing.as_slice() == [legacy_group.clone()] && legacy_group != expected_group;
+        if !existing_legacy && existing.as_slice() != [expected_group.clone()] {
             return Err(InstallError::InvalidSettings {
                 path: path.into(),
                 reason: "composed Codex PreToolUse diverged from its managed contract; refusing to overwrite user changes".into(),
             });
         }
-        if stored["managed_pre_tool_use"] != json!([expected_group.clone()]) {
+        let stored_legacy = stored["managed_pre_tool_use"] == json!([legacy_group.clone()])
+            && legacy_group != expected_group;
+        if !stored_legacy && stored["managed_pre_tool_use"] != json!([expected_group.clone()]) {
             return Err(InstallError::InvalidSettings {
                 path: backup_path.clone(),
                 reason: "composed Codex backup managed contract diverged; refusing to execute or overwrite it".into(),
             });
         }
+        if existing_legacy != stored_legacy {
+            return Err(InstallError::InvalidSettings {
+                path: backup_path.clone(),
+                reason: "composed Codex config and backup disagree on the managed executable spelling; refusing to overwrite either".into(),
+            });
+        }
+        migrate_executable_spelling = existing_legacy;
     }
 
     // `configure` owns lifecycle cleanup/installation. Capture the original
@@ -840,12 +858,12 @@ pub(crate) fn install_project_codex_at(
         })?;
     hooks.insert("PreToolUse".into(), json!([expected_group.clone()]));
 
-    if !backup_exists {
+    if !backup_exists || migrate_executable_spelling {
         // Sidecar first: config publication cannot expose a command that lacks
         // its approved, atomically-written input.
         write_composed_backup(
             &backup_path,
-            &snapshot,
+            stored_pre_tool_use.as_deref().unwrap_or(&snapshot),
             json!([expected_group.clone()]),
             dry_run,
         )?;
@@ -1902,6 +1920,48 @@ mod tests {
         assert_eq!(
             read_composed_backup(&sidecar).unwrap()["pre_tool_use"],
             original
+        );
+    }
+
+    #[test]
+    fn project_codex_composition_migrates_a_canonical_executable_to_its_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let real = home.path().join("store/pixel");
+        let stable = home.path().join("bin/pixel");
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        fs::create_dir_all(stable.parent().unwrap()).unwrap();
+        fs::write(&real, "pixel").unwrap();
+        symlink(&real, &stable).unwrap();
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
+            false,
+        )
+        .unwrap();
+
+        let canonical = real.canonicalize().unwrap();
+        install_project_codex_at(home.path(), &path, &canonical, false).unwrap();
+        let sidecar = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
+        install_project_codex_at(home.path(), &path, &stable, false).unwrap();
+
+        let installed = install::read_settings(&path).unwrap();
+        let command = installed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            command.starts_with(&format!("'{}'", stable.display())),
+            "{command}"
+        );
+        assert_eq!(
+            read_composed_backup(&sidecar).unwrap()["managed_pre_tool_use"],
+            installed["hooks"]["PreToolUse"]
+        );
+        assert_eq!(
+            read_composed_backup(&sidecar).unwrap()["pre_tool_use"],
+            json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}])
         );
     }
 

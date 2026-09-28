@@ -253,9 +253,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         Some(p) => p.clone(),
         None => std::env::current_exe().map_err(InstallError::CurrentExe)?,
     };
-    let exe = executable_path
-        .canonicalize()
-        .unwrap_or_else(|_| executable_path.clone());
+    let exe = install::stable_exe_path(executable_path);
 
     let mut runner = Runner {
         only: &options.only,
