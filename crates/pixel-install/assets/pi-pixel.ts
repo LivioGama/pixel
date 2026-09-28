@@ -104,14 +104,23 @@ function relativeTarget(root: string, path: string) {
 function latestUserText(ctx: any) {
   const entries = ctx.sessionManager.getBranch();
   const last = [...entries].reverse().find((entry: any) => entry.type === "message" && entry.message?.role === "user");
-  return last?.message?.content?.filter((part: any) => part.type === "text").map((part: any) => part.text).join(" ") ?? "";
+  const content = last?.message?.content;
+  if (typeof content === "string") return content;
+  return Array.isArray(content)
+    ? content.filter((part: any) => part.type === "text").map((part: any) => part.text).join(" ")
+    : "";
 }
 
 function authorized(action: Action, ctx: any) {
   if (action !== "commit" && action !== "commit_and_push") return true;
-  const text = latestUserText(ctx).toLowerCase();
-  if (action === "commit") return /\b(commit|check in|ship it)\b/.test(text);
-  return /\b(commit\s+(and|&)\s+push|ship it|push\s+(the|this|my)?\s*commit)\b/.test(text);
+  const text = latestUserText(ctx).toLowerCase().trim();
+  if (/\b(?:do not|don't|never|without|no)\s+(?:\w+\s+){0,3}(?:commit|push|ship)\b/.test(text)) return false;
+  const instruction = /(?:^|[.!?;]\s*)(?:please\s+)?(commit(?:\s+(?:and|&)\s+push)?|ship it|push (?:the|this|my) commit)\b/;
+  const politeRequest = /\b(?:please|can you|could you|would you|i authorize you to|i approve you to)\s+(commit(?:\s+(?:and|&)\s+push)?|ship it|push (?:the|this|my) commit)\b/;
+  if (/\bcommit messages?\b/.test(text)) return false;
+  const request = text.match(instruction)?.[1] ?? text.match(politeRequest)?.[1] ?? "";
+  if (action === "commit") return /^(commit|ship it)/.test(request);
+  return /^(commit\s+(?:and|&)\s+push|ship it|push)/.test(request);
 }
 
 function commandFor(action: Action, p: any): string[][] {
@@ -187,6 +196,9 @@ function classify(tool: string, input: any, root: string, resolvedPaths: Set<str
   }
   if (tool === "bash" || tool === "run_command") {
     const command = String(input.command ?? input.cmd ?? "").trim();
+    if (/[|;&`$<>\\\n]/.test(command)) {
+      return { kind: "blocked", reason: "Shell composition can hide repository reads; call pixel with the full task goal" };
+    }
     if (/^pixel(?:-dev)? (build-index|prepare-repo|doctor|status)(?:\s|$)/.test(command)) {
       return { kind: "exception", reason: "explicit Pixel recovery or health check" };
     }
@@ -196,7 +208,7 @@ function classify(tool: string, input: any, root: string, resolvedPaths: Set<str
     if (/\b(ls|tree|rg|grep|find|fd|cat|head|tail|git\s+(status|diff|log|blame|fetch)|python|python3|node|ruby|perl|awk|sed)\b/.test(command)) {
       return { kind: "blocked", reason: "Ambiguous repository read; call pixel with the full task goal" };
     }
-    if (!/[|;&`$<>\\\n]/.test(command) && /^(cargo|make|just|npm|pnpm|bun|pytest|go|mkdir|cp|mv|rm|touch|chmod|echo|printf|true|false)(?:\s|$)/.test(command)) {
+    if (/^(cargo|make|just|npm|pnpm|bun|pytest|go|mkdir|cp|mv|rm|touch|chmod|echo|printf|true|false)(?:\s|$)/.test(command)) {
       return { kind: "exception", reason: "build, test, edit, or execution command" };
     }
     return { kind: "blocked", reason: "Unknown shell capability may read the repository; use pixel or a documented exception" };
