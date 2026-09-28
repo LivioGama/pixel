@@ -81,38 +81,6 @@ fn finish_create(path: &Path, result: std::io::Result<()>) -> Result<(), String>
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn creation_should_accept_a_concurrent_winner_but_propagate_write_failures() {
-        let path = Path::new("config.yaml");
-        assert_eq!(finish_create(path, Ok(())), Ok(()));
-        assert_eq!(
-            finish_create(path, Err(std::io::ErrorKind::AlreadyExists.into())),
-            Ok(())
-        );
-        for kind in [
-            std::io::ErrorKind::PermissionDenied,
-            std::io::ErrorKind::WriteZero,
-        ] {
-            assert!(
-                finish_create(path, Err(kind.into()))
-                    .unwrap_err()
-                    .contains("create config.yaml")
-            );
-        }
-    }
-
-    #[test]
-    fn rendering_should_not_treat_an_unreadable_path_as_an_empty_template() {
-        let error =
-            render(&std::env::temp_dir(), &json!({}), &json!({"metrics":"off"})).unwrap_err();
-        assert!(error.starts_with("read "));
-    }
-}
-
 pub fn create_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
@@ -189,4 +157,36 @@ fn patch_mapping(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn creation_should_accept_a_concurrent_winner_but_propagate_write_failures() {
+        let path = Path::new("config.yaml");
+        assert_eq!(finish_create(path, Ok(())), Ok(()));
+        assert_eq!(
+            finish_create(path, Err(std::io::ErrorKind::AlreadyExists.into())),
+            Ok(())
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::WriteZero,
+        ] {
+            assert!(
+                finish_create(path, Err(kind.into()))
+                    .unwrap_err()
+                    .contains("create config.yaml")
+            );
+        }
+    }
+
+    #[test]
+    fn rendering_should_not_treat_an_unreadable_path_as_an_empty_template() {
+        let error =
+            render(&std::env::temp_dir(), &json!({}), &json!({"metrics":"off"})).unwrap_err();
+        assert!(error.starts_with("read "));
+    }
 }
