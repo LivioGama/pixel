@@ -241,6 +241,11 @@ jobs:
           bun run test
           bun run typecheck
 
+      # The Pi extension guard ships as an install asset; its policy test was
+      # only runnable by hand. Bun handles the .ts import natively.
+      - name: Pi guard policy contract (pi-pixel.ts)
+        run: bun scripts/test-pi-policy.mjs
+
   msrv:
     name: MSRV (rust-version in Cargo.toml)
     needs: scope

@@ -1,7 +1,7 @@
 //! `gitpixel recall` — machine-wide transcript retrieval commands.
 
 use clap::Subcommand;
-use pixel_actionlog::{InProcessReason, ServeRoute, ServeStep};
+use pixel_actionlog::{InProcessReason, ServeRoute, ServeStep, now_ms};
 use pixel_recall::ingest::{ingest_recent, ingest_source};
 use pixel_recall::model::format_ms;
 use pixel_recall::search::{SearchFilters, search};
@@ -1147,12 +1147,6 @@ fn parse_time(spec: &str, now_ms: i64) -> Result<i64, String> {
     };
     pixel_recall::model::parse_iso_ms(&full)
         .ok_or_else(|| format!("cannot parse time '{spec}' (use 7d, 3w, 12h, or ISO date)"))
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64)
 }
 
 fn check_limit(limit: usize) -> Result<(), String> {

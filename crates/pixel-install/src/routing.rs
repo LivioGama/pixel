@@ -619,7 +619,7 @@ fn configure_scoped(
     Ok((enabled, adopted))
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // exercised by uninstall/routing tests
+#[cfg(test)]
 pub(crate) fn install_provider(
     home: &Path,
     exe: &Path,
@@ -856,7 +856,7 @@ pub(crate) fn install_project_codex_at(
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // exercised by uninstall/routing tests
+#[cfg(test)]
 pub(crate) fn install_at(
     home: &Path,
     path: &Path,
