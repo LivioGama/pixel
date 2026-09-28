@@ -339,6 +339,49 @@
           </li>
         </ul>
       </div>
+      {{/* One classify call, drawn the way the command answers: the caller names the labels, --criterion holds each definition, and the answer is one probability per label plus `predicted:` (the argmax). $lines is the single source — each token paints itself (k: command, f: flag, s: prose string, d: dim joiner) and also feeds $copy, the string Copy sends. The meter values are one real run of that command — remote probabilities are the model's own report, renormalized to sum to 1 — so the caption says what they are. Labels list alphabetically, as the command prints them. */}}
+      {{ $lines := slice
+        (slice (dict "t" "pixel classify " "c" "k") (dict "t" `"Review this Rust PR, find correctness bugs, and propose a safe patch."` "c" "s") (dict "t" ` \` "c" "d"))
+        (slice (dict "t" "    ") (dict "t" "--context " "c" "f") (dict "t" `"Choose the cheapest model that can reliably handle the request."` "c" "s") (dict "t" ` \` "c" "d"))
+        (slice (dict "t" "    ") (dict "t" "--label " "c" "f") (dict "t" `'claude-haiku-4.5_(fast)'` "c" "l") (dict "t" ` \` "c" "d"))
+        (slice (dict "t" "    ") (dict "t" "--label " "c" "f") (dict "t" `'claude-opus-5.5_(strong)'` "c" "l") (dict "t" ` \` "c" "d"))
+        (slice (dict "t" "    ") (dict "t" "--label " "c" "f") (dict "t" `'claude-fable-5.1_(reasoning)'` "c" "l") (dict "t" ` \` "c" "d"))
+        (slice (dict "t" "    ") (dict "t" "--criterion " "c" "f") (dict "t" `'claude-haiku-4.5_(fast)` "c" "l") (dict "t" `=Simple rewriting, extraction, or classification; no deep reasoning.'` "c" "s") (dict "t" ` \` "c" "d"))
+        (slice (dict "t" "    ") (dict "t" "--criterion " "c" "f") (dict "t" `'claude-opus-5.5_(strong)` "c" "l") (dict "t" `=Complex coding, multi-file review, or tool use; accuracy matters.'` "c" "s") (dict "t" ` \` "c" "d"))
+        (slice (dict "t" "    ") (dict "t" "--criterion " "c" "f") (dict "t" `'claude-fable-5.1_(reasoning)` "c" "l") (dict "t" `=Multi-step analysis, difficult debugging, or high uncertainty.'` "c" "s")) }}
+      {{ $copy := "" }}
+      {{ range $i, $line := $lines }}
+        {{ $texts := slice }}{{ range $tok := $line }}{{ $texts = $texts | append $tok.t }}{{ end }}
+        {{ $copy = print $copy (delimit $texts "") }}{{ if lt $i (sub (len $lines) 1) }}{{ $copy = print $copy "\n" }}{{ end }}
+      {{ end }}
+      <figure class="decisions__example" data-reveal>
+        <div class="term">
+          <div class="term__bar">
+            <span class="term__dots" aria-hidden="true"><span></span><span></span><span></span></span>
+            <button class="cmd__copy term__copy" type="button" data-copy="{{ $copy }}">Copy</button>
+          </div>
+          <pre class="term__body"><code>{{ range $i, $line := $lines }}<span data-line>{{ if eq $i 0 }}<span class="term__p">$</span> {{ end }}{{ range $tok := $line }}{{ if $tok.c }}<span class="tk-{{ $tok.c }}">{{ $tok.t }}</span>{{ else }}{{ $tok.t }}{{ end }}{{ end }}</span>{{ end }}</code></pre>
+          <ol class="classify" aria-label="Answer: one probability per label, then the argmax">
+            <li class="classify__row">
+              <span class="classify__name">claude-fable-5.1_(reasoning)</span>
+              <span class="classify__meter" aria-hidden="true"><i style="--p:0.192"></i></span>
+              <span class="classify__prob">0.192</span>
+            </li>
+            <li class="classify__row">
+              <span class="classify__name">claude-haiku-4.5_(fast)</span>
+              <span class="classify__meter" aria-hidden="true"><i style="--p:0.098"></i></span>
+              <span class="classify__prob">0.098</span>
+            </li>
+            <li class="classify__row classify__row--top">
+              <span class="classify__name">claude-opus-5.5_(strong)</span>
+              <span class="classify__meter" aria-hidden="true"><i style="--p:0.710"></i></span>
+              <span class="classify__prob">0.710</span>
+            </li>
+          </ol>
+          <p class="classify__verdict"><span class="term__c">predicted:</span> claude-opus-5.5_(strong)</p>
+        </div>
+        <figcaption class="decisions__caption">One real run of that command: a probability per label, <code>predicted:</code> the argmax. Remote probabilities are the model's own report, renormalized to sum to 1 — a decision aid, not a measurement.</figcaption>
+      </figure>
       <p class="decisions__more" data-reveal><a class="link" href="{{ $bench }}#coding-decisions">Benchmark source and method</a> <span>· typed-decisions accuracy, higher is better; latency, lower is better</span></p>
     </section>
 
