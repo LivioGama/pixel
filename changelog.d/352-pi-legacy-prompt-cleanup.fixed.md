@@ -1,0 +1,1 @@
+**install:** Remove all recognized pre-marker Pi prompts in one install while preserving surrounding user instructions and fenced examples, including fences spanning a managed block. ([#352](https://github.com/LivioGama/pixel/pull/352))

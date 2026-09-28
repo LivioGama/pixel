@@ -404,6 +404,9 @@ pub(crate) const PI_PROMPT_ASSET: &str = "Use the pixel tool for repository retr
 
 const LEGACY_PI_PROMPT_BEGIN: &str = "# Pixel Retrieval Layer\n";
 const LEGACY_PI_PROMPT_END: &str = "All commands accept `[PATH]`, default current directory.\n";
+const LEGACY_PI_PROMPT_BEGIN_V0_2: &str = "# Pixel Retrieval Layer — Mandatory Agent Protocol\n";
+const LEGACY_PI_PROMPT_END_V0_2: &str =
+    "All commands accept `[PATH]` (default: current directory).\n";
 
 /// The sub-agent prompt as bundled in the binary.
 pub(crate) const SUBAGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-subagent-prompt.md");
@@ -526,45 +529,128 @@ fn write_pi_prompt(path: &Path) -> Result<bool> {
 ///
 /// A copy of the prompt that is not inside the markers yet — what an install
 /// before the markers wrote verbatim, or a hand copy — is wrapped in place
-/// instead of appended a second time, and text the user keeps around it
-/// survives. Anything else follows the Markdown agent-config rules
-/// ([`config::apply_managed_markers`]).
-fn managed_pi_content(existing: &str, asset: &str) -> String {
+/// instead of appended a second time. Known historical copies beside an
+/// existing managed block are removed by their original boundaries; user
+/// text before and after survives. Anything else follows the Markdown
+/// agent-config rules ([`config::apply_managed_markers`]).
+pub(crate) fn managed_pi_content(existing: &str, asset: &str) -> String {
     if !existing.contains(config::MANAGED_BEGIN) {
         let (cleaned, removed) = config::strip_stale_blocks(existing);
         let source = if removed == 0 { existing } else { &cleaned };
         let legacy_range = source
             .find(AGENT_PROMPT_ASSET)
             .map(|start| (start, start + AGENT_PROMPT_ASSET.len()))
-            .or_else(|| legacy_pi_prompt_range(source));
+            .or_else(|| legacy_pi_prompt_range(source, ""));
         let replace_range =
             legacy_range.or_else(|| source.find(asset).map(|start| (start, start + asset.len())));
         if let Some((start, end)) = replace_range {
             let begin = config::MANAGED_BEGIN;
             let marker_end = config::MANAGED_END;
             let block = format!("{begin}\n{asset}\n{marker_end}\n");
-            return format!("{}{}{}", &source[..start], block, &source[end..]);
+            return strip_unmarked_pi_prompts(&format!(
+                "{}{}{}",
+                &source[..start],
+                block,
+                &source[end..]
+            ));
         }
     }
-    config::apply_managed_markers(existing, asset)
+    config::apply_managed_markers(&strip_unmarked_pi_prompts(existing), asset)
 }
 
-fn legacy_pi_prompt_range(source: &str) -> Option<(usize, usize)> {
-    for (start, _) in source.rmatch_indices(LEGACY_PI_PROMPT_BEGIN) {
-        if start > 0 && source.as_bytes()[start - 1] != b'\n' {
+fn legacy_pi_prompt_range(source: &str, preceding: &str) -> Option<(usize, usize)> {
+    [
+        (
+            LEGACY_PI_PROMPT_BEGIN,
+            LEGACY_PI_PROMPT_END,
+            "## MANDATORY WORKFLOW\n",
+            "## REPLACEMENT MAP\n",
+        ),
+        (
+            LEGACY_PI_PROMPT_BEGIN_V0_2,
+            LEGACY_PI_PROMPT_END_V0_2,
+            "## THE COMPLETE REPLACEMENT MAP\n",
+            "## ENVIRONMENT\n",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(begin, end, section_a, section_b)| {
+        source.rmatch_indices(begin).find_map(|(start, _)| {
+            if (start > 0 && source.as_bytes()[start - 1] != b'\n')
+                || inside_markdown_fence(preceding, &source[..start])
+            {
+                return None;
+            }
+            let after_start = &source[start..];
+            let end = after_start.find(end)? + end.len();
+            let section = &after_start[..end];
+            (section.contains(section_a) && section.contains(section_b))
+                .then_some((start, start + end))
+        })
+    })
+    .max_by_key(|(start, _)| *start)
+}
+
+/// Remove only known historical prompt bodies outside Pi's managed block.
+pub(crate) fn strip_unmarked_pi_prompts(text: &str) -> String {
+    let Some(marker_start) = text.find(config::MANAGED_BEGIN) else {
+        return strip_legacy_pi_prompts(text, "");
+    };
+    let managed_and_tail = &text[marker_start..];
+    let marker_end = managed_and_tail
+        .find(config::MANAGED_END)
+        .map_or(managed_and_tail.len(), |end| {
+            end + config::MANAGED_END.len()
+        });
+    let prefix = strip_legacy_pi_prompts(&text[..marker_start], "");
+    // User fences span the managed block; fences owned by that block do not
+    // affect the surrounding text.
+    let suffix = strip_legacy_pi_prompts(&managed_and_tail[marker_end..], &prefix);
+    format!("{}{}{}", prefix, &managed_and_tail[..marker_end], suffix)
+}
+
+fn strip_legacy_pi_prompts(text: &str, preceding: &str) -> String {
+    let mut cleaned = text.to_owned();
+    // Each removed prompt owns at least one line. Bound the scan even if a
+    // future range detector accidentally returns a zero-width match.
+    for _ in 0..text.lines().count() {
+        let Some((start, end)) = legacy_pi_prompt_range(&cleaned, preceding) else {
+            break;
+        };
+        cleaned.replace_range(start..end, "");
+    }
+    cleaned
+}
+
+/// A pasted prompt inside fenced user prose is not an installed prompt.
+fn inside_markdown_fence(preceding: &str, prefix: &str) -> bool {
+    let mut fence = None;
+    for line in preceding.lines().chain(prefix.lines()) {
+        let trimmed = line.trim_start_matches(' ');
+        if line.len() - trimmed.len() > 3 {
             continue;
         }
-        let after_start = &source[start..];
-        let Some(end) = after_start.find(LEGACY_PI_PROMPT_END) else {
+        let Some(marker @ (b'`' | b'~')) = trimmed.as_bytes().first().copied() else {
             continue;
         };
-        let end = end + LEGACY_PI_PROMPT_END.len();
-        let section = &after_start[..end];
-        if section.contains("## MANDATORY WORKFLOW\n") && section.contains("## REPLACEMENT MAP\n") {
-            return Some((start, start + end));
+        let width = trimmed.bytes().take_while(|byte| *byte == marker).count();
+        if width < 3 {
+            continue;
+        }
+        match fence {
+            None if marker == b'`' && trimmed[width..].contains('`') => {}
+            None => fence = Some((marker, width)),
+            Some((open_marker, open_width))
+                if marker == open_marker
+                    && width >= open_width
+                    && trimmed[width..].trim().is_empty() =>
+            {
+                fence = None;
+            }
+            Some(_) => {}
         }
     }
-    None
+    fence.is_some()
 }
 
 /// Replace `path` with `content` in one step: the bytes already there are
@@ -584,6 +670,169 @@ pub(crate) fn write_atomically(path: &Path, content: &str) -> Result<()> {
 mod pi_prompt_content_tests {
     use super::{AGENT_PROMPT_ASSET, PI_PROMPT_ASSET, managed_pi_content, write_pi_prompt};
     use crate::config::{MANAGED_BEGIN, MANAGED_END};
+
+    const PRE_MARKER_PROMPT: &str = "# Pixel Retrieval Layer — Mandatory Agent Protocol\n\n## THE COMPLETE REPLACEMENT MAP\npixel search \"term\"\n## ENVIRONMENT\nAll commands accept `[PATH]` (default: current directory).\n";
+
+    #[test]
+    fn a_known_pre_marker_prompt_is_replaced_in_place_without_consuming_user_sections() {
+        let existing = format!("Before.\n{PRE_MARKER_PROMPT}## My notes\nKeep this.\n");
+        let expected = format!(
+            "Before.\n{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n## My notes\nKeep this.\n"
+        );
+        assert_eq!(managed_pi_content(&existing, PI_PROMPT_ASSET), expected);
+    }
+
+    #[test]
+    fn a_pre_marker_prompt_above_a_managed_block_is_removed_but_user_sections_survive() {
+        let existing = format!(
+            "My Pi note.\n{PRE_MARKER_PROMPT}## My notes\nKeep this.\n{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\nAfter.\n"
+        );
+        let expected = format!(
+            "My Pi note.\n## My notes\nKeep this.\n{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\nAfter.\n"
+        );
+        let migrated = managed_pi_content(&existing, PI_PROMPT_ASSET);
+        assert_eq!(migrated, expected);
+        assert_eq!(managed_pi_content(&migrated, PI_PROMPT_ASSET), migrated);
+    }
+
+    #[test]
+    fn a_pasted_prompt_inside_a_code_fence_is_user_text() {
+        let user_text = format!("~~~markdown\n{PRE_MARKER_PROMPT}~~~\n");
+        let existing = format!("{user_text}{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n");
+        assert_eq!(managed_pi_content(&existing, PI_PROMPT_ASSET), existing);
+    }
+
+    #[test]
+    fn fence_boundaries_decide_whether_a_historical_prompt_is_user_text() {
+        let managed = format!("{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n");
+        for (prefix, is_fenced) in [
+            ("``\n", false),
+            ("   ```markdown\n", true),
+            ("    ```markdown\n", false),
+            ("```markdown\n", true),
+            ("```lang`note\n", false),
+            ("~~~lang`note\n", true),
+            ("~~~markdown\n", true),
+            ("~~~~markdown\n~~~\n", true),
+            ("~~~~markdown\n~~~~\n", false),
+            ("~~~markdown\n~~~ignored\n", true),
+            ("~~~markdown\n```\n", true),
+            ("```markdown\n```\n", false),
+            ("~~~markdown\n~~~  \n", false),
+        ] {
+            let existing = format!("{prefix}{PRE_MARKER_PROMPT}{managed}");
+            let expected = if is_fenced {
+                existing.clone()
+            } else {
+                format!("{prefix}{managed}")
+            };
+            assert_eq!(
+                managed_pi_content(&existing, PI_PROMPT_ASSET),
+                expected,
+                "prefix {prefix:?} must preserve user text only inside a fence"
+            );
+        }
+    }
+
+    #[test]
+    fn historical_prompt_recognition_needs_the_full_release_signature() {
+        for fragment in [
+            PRE_MARKER_PROMPT.replace("## ENVIRONMENT\n", ""),
+            PRE_MARKER_PROMPT.replace("## THE COMPLETE REPLACEMENT MAP\n", ""),
+            PRE_MARKER_PROMPT.replace(
+                "All commands accept `[PATH]` (default: current directory).\n",
+                "",
+            ),
+        ] {
+            let existing = format!("{fragment}{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n");
+            assert_eq!(
+                managed_pi_content(&existing, PI_PROMPT_ASSET),
+                existing,
+                "partial historical text may be the user's own note"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inline_historical_title_is_user_text_not_a_deployment() {
+        let note = format!("Quoted: {PRE_MARKER_PROMPT}");
+        let existing = format!("{note}{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n");
+        assert_eq!(managed_pi_content(&existing, PI_PROMPT_ASSET), existing);
+    }
+
+    #[test]
+    fn every_historical_copy_outside_the_managed_block_is_removed() {
+        let existing = format!(
+            "Before.\n{PRE_MARKER_PROMPT}{PRE_MARKER_PROMPT}{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n{PRE_MARKER_PROMPT}After.\n"
+        );
+        let expected =
+            format!("Before.\n{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\nAfter.\n");
+        assert_eq!(managed_pi_content(&existing, PI_PROMPT_ASSET), expected);
+    }
+
+    #[test]
+    fn first_install_should_remove_every_historical_copy_and_preserve_user_sections() {
+        let existing = format!("Before.\n{PRE_MARKER_PROMPT}Between.\n{PRE_MARKER_PROMPT}After.\n");
+        let expected = format!(
+            "Before.\nBetween.\n{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\nAfter.\n"
+        );
+        let migrated = managed_pi_content(&existing, PI_PROMPT_ASSET);
+        assert_eq!(migrated, expected);
+        assert_eq!(managed_pi_content(&migrated, PI_PROMPT_ASSET), migrated);
+    }
+
+    #[test]
+    fn cleanup_should_ignore_orphan_end_markers_before_a_managed_block() {
+        let prefix = format!("{MANAGED_END}\nBefore.\n");
+        let managed = format!("{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n");
+        let existing = format!("{prefix}{managed}{PRE_MARKER_PROMPT}After.\n");
+        let expected = format!("{prefix}{managed}After.\n");
+        assert_eq!(super::strip_unmarked_pi_prompts(&existing), expected);
+        assert_eq!(managed_pi_content(&existing, PI_PROMPT_ASSET), expected);
+
+        let unterminated = format!("{prefix}{MANAGED_BEGIN}\n{PRE_MARKER_PROMPT}");
+        assert_eq!(
+            super::strip_unmarked_pi_prompts(&unterminated),
+            unterminated
+        );
+        assert_eq!(
+            managed_pi_content(&unterminated, PI_PROMPT_ASSET),
+            format!("{prefix}{managed}")
+        );
+    }
+
+    #[test]
+    fn cleanup_should_preserve_a_user_fence_spanning_the_managed_block() {
+        let managed = format!("{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n");
+        for (opener, closer) in [("```markdown", "```"), ("~~~~markdown", "~~~~")] {
+            let protected = format!("{opener}\n{managed}{PRE_MARKER_PROMPT}{closer}\n");
+            let existing = format!("{protected}{PRE_MARKER_PROMPT}After.\n");
+            let expected = format!("{protected}After.\n");
+            assert_eq!(super::strip_unmarked_pi_prompts(&existing), expected);
+            assert_eq!(managed_pi_content(&existing, PI_PROMPT_ASSET), expected);
+        }
+    }
+
+    #[test]
+    fn first_install_should_remove_a_historical_copy_after_an_exact_asset_match() {
+        let existing =
+            format!("Before.\n{AGENT_PROMPT_ASSET}Between.\n{PRE_MARKER_PROMPT}After.\n");
+        let expected = format!(
+            "Before.\n{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\nBetween.\nAfter.\n"
+        );
+        assert_eq!(managed_pi_content(&existing, PI_PROMPT_ASSET), expected);
+    }
+
+    #[test]
+    fn a_fence_inside_the_managed_block_does_not_protect_an_outside_legacy_prompt() {
+        let managed = format!("{MANAGED_BEGIN}\n```\n{MANAGED_END}");
+        let existing = format!("{managed}\n{PRE_MARKER_PROMPT}After.\n");
+        assert_eq!(
+            super::strip_unmarked_pi_prompts(&existing),
+            format!("{managed}\nAfter.\n"),
+            "cleanup must preserve the entire managed block and scan outside it independently"
+        );
+    }
 
     #[test]
     fn a_prompt_file_written_by_an_older_install_is_wrapped_in_place_not_duplicated() {
