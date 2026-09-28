@@ -615,6 +615,15 @@ mod pi_prompt_content_tests {
     }
 
     #[test]
+    fn an_unmarked_current_pi_rule_is_wrapped_without_losing_following_user_text() {
+        let existing = format!("Before.\n{PI_PROMPT_ASSET}After.\n");
+        let wrapped = managed_pi_content(&existing, PI_PROMPT_ASSET);
+        let expected =
+            format!("Before.\n{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\nAfter.\n");
+        assert_eq!(wrapped, expected, "install owns only the existing Pi rule");
+    }
+
+    #[test]
     fn a_user_heading_alone_does_not_identify_a_legacy_prompt() {
         let existing = "# Pixel Retrieval Layer\nMy own note.\n";
         let wrapped = managed_pi_content(existing, PI_PROMPT_ASSET);
@@ -639,6 +648,10 @@ mod pi_prompt_content_tests {
         assert!(
             !wrapped.contains("This repo keeps Pixel ready"),
             "{wrapped}"
+        );
+        assert!(
+            !wrapped.contains(super::LEGACY_PI_PROMPT_END),
+            "the final legacy rule must be removed with the old section: {wrapped}"
         );
     }
 
