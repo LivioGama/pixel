@@ -75,7 +75,9 @@ agent prompt assistance, and whether to allow AI classification, then review
 and save. Enter keeps the shown value; `q` or Ctrl-D cancels before saving.
 JSON, piped, and repository-only installs never prompt.
 
-Disable classification with `pixel config classify off`, or set
+Classification is disabled by default to avoid API costs and classifier model
+downloads. Enable it explicitly with `pixel config classify on`
+or answer Yes during setup. Disable it again with `pixel config classify off`, or set
 `classify: {enabled: false}` in the global YAML file. This blocks every
 `pixel classify` invocation, including explicit engine flags, before input is
 read or a provider is contacted. Code search still works. Re-enable with
@@ -91,7 +93,7 @@ Installation and the editor create a commented template without overwriting
 existing YAML. Uncomment an example to change it. Settings include the metrics
 footer, repository daemon startup, automatic task-context suggestions,
 task-boundary detection, and global classification preferences and credentials.
-All existing defaults remain unchanged. Disabling daemon startup does not stop
+Other defaults remain unchanged. Disabling daemon startup does not stop
 an already running daemon. Remote classification requires explicit credentials.
 
 Repository settings override global settings; existing environment overrides

@@ -1,1 +1,1 @@
-**config:** Add guided terminal setup to `pixel config setup` and interactive global installs, explain YAML settings for new users, and support disabling all classify calls with `pixel config classify off`. ([#360](https://github.com/LivioGama/pixel/pull/360))
+**config:** Add guided terminal setup to `pixel config setup` and interactive global installs, explain YAML settings for new users, and make classification opt-in with `pixel config classify on|off`. ([#360](https://github.com/LivioGama/pixel/pull/360))

@@ -30,7 +30,8 @@
 # task_boundary: false
 
 # Optional AI classification — separate from code search. Global settings only.
-# enabled defaults to true, but classification runs only when requested.
+# Disabled by default to avoid API costs or classifier model downloads.
+# Enable only when you want AI classification: pixel config classify on
 # Disable ALL classify calls (including --engine overrides) with:
 #   pixel config classify off
 # Re-enable later with: pixel config classify on

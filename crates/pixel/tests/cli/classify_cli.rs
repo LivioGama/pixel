@@ -1,10 +1,18 @@
 //! `pixel classify` outer-routing errors exercised without opening the model.
 
-use crate::support::pixel_command;
+use crate::support::{Scratch, pixel_command};
 
 #[test]
 fn classify_without_labels_needs_the_local_engine() {
+    let home = Scratch::for_test("classify", "labels-enabled-home");
+    std::fs::create_dir_all(home.join(".pixel")).unwrap();
+    std::fs::write(
+        home.join(".pixel/config.yaml"),
+        "classify: {enabled: true}\n",
+    )
+    .unwrap();
     let out = pixel_command()
+        .env("HOME", &*home)
         .args(["classify", "some state text", "--engine", "remote"])
         .env("PIXEL_METRICS", "0")
         .output()
@@ -33,7 +41,15 @@ fn classify_rejects_command_context_in_jsonl_mode_without_opening_model() {
 
 #[test]
 fn classify_rejects_bad_criterion_after_outer_dispatch_without_opening_model() {
+    let home = Scratch::for_test("classify", "criterion-enabled-home");
+    std::fs::create_dir_all(home.join(".pixel")).unwrap();
+    std::fs::write(
+        home.join(".pixel/config.yaml"),
+        "classify: {enabled: true}\n",
+    )
+    .unwrap();
     let out = pixel_command()
+        .env("HOME", &*home)
         .args([
             "classify",
             "the state",

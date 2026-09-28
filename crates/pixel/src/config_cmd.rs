@@ -317,7 +317,7 @@ pub fn classify_enabled() -> Result<bool, String> {
 
 fn classify_enabled_in(doc: &Value) -> Result<bool, String> {
     match doc.get("classify").and_then(|c| c.get("enabled")) {
-        None => Ok(true),
+        None => Ok(false),
         Some(value) => value
             .as_bool()
             .ok_or_else(|| "classify.enabled must be true or false".into()),
@@ -684,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_should_save_enabled_defaults_for_a_new_user() {
+    fn setup_should_keep_classify_disabled_for_a_new_user() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
         let home = HomeGuard::set();
         let path = home.0.join("config.yaml");
@@ -700,7 +700,7 @@ mod tests {
             crate::config_file::load(&path).unwrap(),
             json!({
                 "metrics":"on", "daemon_auto_start":true, "task_context":true,
-                "task_boundary":true, "classify":{"enabled":true}
+                "task_boundary":true, "classify":{"enabled":false}
             })
         );
     }
@@ -732,9 +732,10 @@ mod tests {
     }
 
     #[test]
-    fn classify_switch_should_default_on_and_reject_non_boolean_values() {
+    fn classify_switch_should_default_off_and_reject_non_boolean_values() {
         for (doc, expected) in [
-            (json!({}), true),
+            (json!({}), false),
+            (json!({"classify":{"engine":"remote"}}), false),
             (json!({"classify":{"enabled":true}}), true),
             (json!({"classify":{"enabled":false}}), false),
         ] {

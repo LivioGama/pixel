@@ -255,3 +255,29 @@ fn classify_switch_should_create_config_and_repair_a_non_mapping_classify_sectio
         serde_json::json!({"classify":{"enabled":true},"metrics":"off"})
     );
 }
+
+#[test]
+fn classify_should_be_opt_in_even_when_an_engine_or_credentials_are_present() {
+    let home = Scratch::for_test("config", "classify-default-off-home");
+    for configuration in [
+        None,
+        Some("classify: {engine: remote}\nremote_keys: {openrouter: unused-test-key}\n"),
+    ] {
+        if let Some(config) = configuration {
+            fs::create_dir_all(home.join(".pixel")).unwrap();
+            fs::write(home.join(".pixel/config.yaml"), config).unwrap();
+        }
+        assert!(stdout(&run(&home, &home, &["config"])).contains("classify.enabled: false"));
+        for args in [
+            &["classify", "hello", "--engine", "remote"][..],
+            &["classify", "hello", "--engine", "ollaya"][..],
+            &["classify", "--jsonl"][..],
+        ] {
+            let out = run(&home, &home, args);
+            assert!(!out.status.success());
+            assert!(String::from_utf8_lossy(&out.stderr).contains("classify is disabled"));
+            assert!(out.stdout.is_empty());
+        }
+        assert!(!home.join(".local/share/pixel/ollaya").exists());
+    }
+}
