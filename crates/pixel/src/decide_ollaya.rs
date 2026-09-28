@@ -386,6 +386,32 @@ mod tests {
     }
 
     #[test]
+    fn default_battery_has_the_documented_typed_questions() {
+        let battery = default_battery();
+        assert_eq!(battery["intent"]["type"], "choice");
+        assert_eq!(
+            battery["intent"]["criteria"]["technical_help"],
+            "a bug, outage or integration problem"
+        );
+        assert_eq!(battery["is_urgent"]["type"], "noul");
+        assert_eq!(battery["frustration"]["type"], "score");
+        assert_eq!(battery["refund_requested"]["type"], "noul");
+        assert_eq!(battery["churn_risk"]["type"], "noul");
+    }
+
+    #[test]
+    fn model_id_reports_the_configured_model() {
+        let ollaya = Ollaya::with_post(
+            OllayaConfig {
+                base: "http://127.0.0.1:11435".to_string(),
+                model_name: "laya:en".to_string(),
+            },
+            |_config, _body| unreachable!("model_id does not call the transport"),
+        );
+        assert_eq!(ollaya.model_id(), "laya:en");
+    }
+
+    #[test]
     fn build_request_maps_model_state_instructions_and_criteria_verbatim() {
         let s = spec(
             "deploy now",
@@ -456,6 +482,10 @@ mod tests {
         assert!(e.contains("unknown label"), "{e}");
         let e = parse_answer(&answer(r#"{"yes": -1}"#, 0.5), &s.labels).unwrap_err();
         assert!(e.contains("finite"), "{e}");
+        // A negative value must be rejected even when the remaining mass
+        // leaves a positive total; otherwise it could be normalized through.
+        let e = parse_answer(&answer(r#"{"yes": -0.1, "no": 0.2}"#, 0.5), &s.labels).unwrap_err();
+        assert!(e.contains("finite"), "{e}");
         let e = parse_answer(&answer(r#"{"yes": 0.0, "no": 0.0}"#, 0.5), &s.labels).unwrap_err();
         assert!(e.contains("positive"), "{e}");
     }
@@ -503,5 +533,71 @@ mod tests {
         assert!((meta.confidence - 0.85).abs() < 1e-9);
         let snapshot = meta.snapshot();
         assert_eq!(snapshot["confidence"], json!(0.85));
+    }
+
+    /// A single loopback response server that records the first request
+    /// line. It has a deadline so an accidental missing connection fails.
+    fn http_once(status: &str, reply: String) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let status = status.to_string();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0; 1024];
+                let received = stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                )
+                .unwrap();
+                return String::from_utf8_lossy(&request[..received]).into_owned();
+            }
+            String::new()
+        });
+        (base, server)
+    }
+
+    #[test]
+    fn http_post_reads_systemone_and_explains_a_daemon_status_error() {
+        let reply = answer(r#"{"yes": 0.75, "no": 0.25}"#, 0.7).to_string();
+        let (base, server) = http_once("200 OK", reply.clone());
+        let config = OllayaConfig {
+            base: base.clone(),
+            model_name: "winnow:e4b".to_string(),
+        };
+        let response = http_post(&config, &json!({"model": "winnow:e4b"})).unwrap();
+        assert_eq!(response, serde_json::from_str::<Value>(&reply).unwrap());
+        assert!(
+            server
+                .join()
+                .unwrap()
+                .starts_with("POST /v1/systemone HTTP/1.1"),
+            "the Ollaya transport must target the TypeSafe endpoint"
+        );
+
+        let (base, server) = http_once("404 Not Found", "{}".to_string());
+        let config = OllayaConfig {
+            base: base.clone(),
+            model_name: "winnow:e4b".to_string(),
+        };
+        let error = http_post(&config, &json!({})).unwrap_err();
+        assert!(error.contains("HTTP 404"), "{error}");
+        assert!(
+            error.contains(&format!("is the ollaya daemon running at {base}?")),
+            "{error}"
+        );
+        server.join().unwrap();
     }
 }

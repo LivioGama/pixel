@@ -953,6 +953,42 @@ mod tests {
     }
 
     #[test]
+    fn production_engine_adapters_disclose_their_real_metadata() {
+        let remote = crate::decide_remote::Remote::open(
+            crate::decide_remote::resolve_config(
+                crate::decide_remote::Preset::Local,
+                Some("test-remote".to_string()),
+                None,
+            )
+            .unwrap(),
+        );
+        let spec = spec("state", "", &["yes", "no"], &[]);
+        let probabilities = BTreeMap::from([("yes".to_string(), 0.8), ("no".to_string(), 0.2)]);
+        let remote_document = document(&remote, &spec, &probabilities);
+        assert_eq!(remote_document["snapshot"]["model"], "test-remote");
+        assert_eq!(remote_document["snapshot"]["provider"], "local");
+        assert_eq!(remote_document["snapshot"]["deterministic"], false);
+        assert_eq!(remote_document["epistemics"]["basis"], REMOTE_BASIS);
+
+        let mut remote = remote;
+        assert!(remote.decide_battery("state").is_err());
+
+        let mut ollaya = crate::decide_ollaya::Ollaya::open(crate::decide_ollaya::OllayaConfig {
+            base: "http://127.0.0.1:9".to_string(),
+            model_name: "test-ollaya".to_string(),
+        });
+        let ollaya_document = battery_document(&ollaya, &json!({}), false);
+        assert_eq!(ollaya_document["snapshot"]["model"], "test-ollaya");
+        assert_eq!(ollaya_document["snapshot"]["provider"], "ollaya");
+        assert_eq!(ollaya_document["snapshot"]["deterministic"], false);
+        assert_eq!(
+            ollaya_document["epistemics"]["basis"],
+            crate::decide_ollaya::OLLAYA_BASIS
+        );
+        assert!(ollaya.decide_battery("state").is_err());
+    }
+
+    #[test]
     fn parse_criteria_requires_key_value_pairs() {
         assert!(parse_criteria(&["a=desc".to_string()]).is_ok());
         assert!(parse_criteria(&["missing-eq".to_string()]).is_err());

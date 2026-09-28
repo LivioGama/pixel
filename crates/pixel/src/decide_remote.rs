@@ -547,6 +547,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_name_accepts_normalized_preset_names_and_rejects_unknown_ones() {
+        assert_eq!(Preset::parse_name("OpenRouter"), Some(Preset::Openrouter));
+        assert_eq!(Preset::parse_name("opencode_go"), Some(Preset::OpencodeGo));
+        assert_eq!(Preset::parse_name("  DEEPSEEK  "), Some(Preset::Deepseek));
+        assert_eq!(Preset::parse_name("not-a-provider"), None);
+    }
+
+    #[test]
     fn the_session_id_is_stable_and_well_shaped() {
         let id = new_session_id(1_758_000_000_000, 4242);
         assert_eq!(id, "pixel-classify-4242-1758000000000");

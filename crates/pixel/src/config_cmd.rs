@@ -563,4 +563,32 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "tmp cleaned up: {leftovers:?}");
     }
+
+    #[test]
+    fn classify_preferences_roundtrip_without_losing_sibling_settings() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+
+        let path = home.0.join(".pixel/config.json");
+        write(&path, r#"{"metrics":"off","classify":"stale"}"#);
+        set_classify_engine("local").unwrap();
+        assert_eq!(classify_engine().as_deref(), Some("local"));
+
+        let launch = json!({
+            "base": "http://127.0.0.1:11435",
+            "model": "winnow:e4b",
+            "argv": ["ollaya", "serve"],
+        });
+        set_ollaya_launch(&launch).unwrap();
+        assert_eq!(ollaya_launch(), Some(launch));
+
+        let stored: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored["metrics"], "off");
+        assert_eq!(stored["classify"]["engine"], "local");
+        assert_eq!(stored["classify"]["ollaya"]["model"], "winnow:e4b");
+
+        restore_home(saved);
+    }
 }

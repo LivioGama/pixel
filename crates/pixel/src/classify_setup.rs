@@ -31,11 +31,13 @@ pub const REMOTE_LABEL: &str = "Remote — hosted LLM behind your key (DeepSeek-
 const OLLAYA_ROOT: &str = ".local/share/pixel/ollaya";
 
 /// The stored engine preference, if any: `local`, `remote`, or `auto`.
+#[cfg_attr(test, mutants::skip)] // Thin config adapter; policy is tested through injected settings.
 pub fn stored_engine() -> Option<String> {
     crate::config_cmd::classify_engine()
 }
 
 /// The recorded local-daemon launch, if a local install completed.
+#[cfg_attr(test, mutants::skip)] // Thin config adapter; launch validation is tested without user config.
 pub fn ollaya_launch() -> Option<Value> {
     crate::config_cmd::ollaya_launch()
 }
@@ -75,19 +77,40 @@ pub enum ResolvedEngine {
 /// launch is recorded there is nothing to start, so this returns `Ok`
 /// without polling — the caller's request then fails fast against the
 /// closed port rather than stalling for two minutes.
+#[cfg_attr(test, mutants::skip)] // Runtime adapter; bounded daemon-start policy is tested by `ensure_local_with`.
 pub fn ensure_local(base: &str) -> Result<(), String> {
-    if server_reachable(base) {
+    let mut reachable = || server_reachable(base);
+    let mut start = auto_start;
+    let mut sleep = std::thread::sleep;
+    ensure_local_with(
+        base,
+        &mut reachable,
+        &mut start,
+        &mut sleep,
+        240,
+        Duration::from_millis(500),
+    )
+}
+
+fn ensure_local_with(
+    base: &str,
+    reachable: &mut dyn FnMut() -> bool,
+    start: &mut dyn FnMut() -> Result<bool, String>,
+    sleep: &mut dyn FnMut(Duration),
+    attempts: usize,
+    delay: Duration,
+) -> Result<(), String> {
+    if reachable() {
         return Ok(());
     }
-    let started = auto_start()?;
-    if !started {
+    if !start()? {
         return Ok(());
     }
-    for _ in 0..240 {
-        if server_reachable(base) {
+    for _ in 0..attempts {
+        if reachable() {
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(500));
+        sleep(delay);
     }
     Err(format!(
         "the ollaya daemon at {base} did not come up within two minutes; check ~/.local/share/pixel/ollaya/server.log"
@@ -127,12 +150,35 @@ fn parse_choice(answer: &str) -> Option<&'static str> {
 /// The install-time step: propose, then dispatch to the chosen setup. When
 /// stdin is not a TTY the proposal is printed as a suggestion and nothing
 /// interactive happens.
+#[cfg_attr(test, mutants::skip)] // Runtime config adapter; interactive policy is tested by `install_step_with`.
 pub fn install_step(
     tty: bool,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
 ) -> Result<(), String> {
-    if let Some(engine) = stored_engine() {
+    install_step_with(
+        tty,
+        stdin,
+        stdout,
+        stored_engine(),
+        setup_local,
+        propose_remote_key,
+    )
+}
+
+fn install_step_with<FLocal, FRemote>(
+    tty: bool,
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+    stored: Option<String>,
+    setup_local: FLocal,
+    propose_remote_key: FRemote,
+) -> Result<(), String>
+where
+    FLocal: FnOnce(&mut dyn std::io::Write) -> Result<(), String>,
+    FRemote: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
+{
+    if let Some(engine) = stored {
         writeln!(stdout, "classify engine: already configured as {engine:?} (change with `pixel config classify-engine <local|remote|auto>`)")
             .map_err(|e| e.to_string())?;
         return Ok(());
@@ -222,8 +268,63 @@ fn propose_remote_key(
 /// binary into the pixel-managed prefix, pull the recommended model, and
 /// record a launch that `pixel classify` auto-starts. Long-running and
 /// network-bound; every step is echoed as it starts.
+#[cfg_attr(test, mutants::skip)] // System adapter; setup policy is tested against `LocalSetupRuntime`.
 pub fn setup_local(stdout: &mut dyn std::io::Write) -> Result<(), String> {
-    let root = local_root()?;
+    setup_local_with(&mut SystemLocalSetup, stdout)
+}
+
+trait LocalSetupRuntime {
+    fn local_root(&mut self) -> Result<PathBuf, String>;
+    fn exists(&self, path: &std::path::Path) -> bool;
+    fn run(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> Result<(), String>;
+    fn record_launch(&mut self, launch: &Value) -> Result<(), String>;
+    fn set_engine(&mut self) -> Result<(), String>;
+}
+
+struct SystemLocalSetup;
+
+impl LocalSetupRuntime for SystemLocalSetup {
+    fn local_root(&mut self) -> Result<PathBuf, String> {
+        local_root()
+    }
+
+    fn exists(&self, path: &std::path::Path) -> bool {
+        path.exists()
+    }
+
+    fn run(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> Result<(), String> {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let env: Vec<(&str, &str)> = env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        run_env(program, &args, &env)
+    }
+
+    fn record_launch(&mut self, launch: &Value) -> Result<(), String> {
+        crate::config_cmd::set_ollaya_launch(launch)
+    }
+
+    fn set_engine(&mut self) -> Result<(), String> {
+        crate::config_cmd::set_classify_engine("local")
+    }
+}
+
+fn setup_local_with(
+    runtime: &mut impl LocalSetupRuntime,
+    stdout: &mut dyn std::io::Write,
+) -> Result<(), String> {
+    let root = runtime.local_root()?;
     let root_str = root.to_string_lossy().into_owned();
     let bin = root.join("bin").join("ollaya");
     let models = root.join("models");
@@ -235,27 +336,28 @@ pub fn setup_local(stdout: &mut dyn std::io::Write) -> Result<(), String> {
         bin.display()
     )
     .map_err(|e| e.to_string())?;
-    if !bin.exists() {
+    if !runtime.exists(&bin) {
         let installer = root.join("install.sh");
         let installer_str = installer.to_string_lossy().into_owned();
-        run(
+        runtime.run(
             "curl",
             &[
-                "-fsSL",
-                "https://ollaya.dev/install.sh",
-                "-o",
-                &installer_str,
+                "-fsSL".to_string(),
+                "https://ollaya.dev/install.sh".to_string(),
+                "-o".to_string(),
+                installer_str.clone(),
             ],
+            &[],
         )?;
-        run_env(
+        runtime.run(
             "sh",
-            &[installer_str.as_str()],
+            &[installer_str],
             &[
-                ("OLLAYA_INSTALL_DIR", root_str.as_str()),
-                ("OLLAYA_NO_SERVICE", "1"),
+                ("OLLAYA_INSTALL_DIR".to_string(), root_str.clone()),
+                ("OLLAYA_NO_SERVICE".to_string(), "1".to_string()),
             ],
         )?;
-        if !bin.exists() {
+        if !runtime.exists(&bin) {
             return Err(format!(
                 "the ollaya installer finished but {} is missing",
                 bin.display()
@@ -270,10 +372,13 @@ pub fn setup_local(stdout: &mut dyn std::io::Write) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     let bin_str = bin.to_string_lossy().into_owned();
-    run_env(
+    runtime.run(
         &bin_str,
-        &["pull", crate::decide_ollaya::DEFAULT_MODEL],
-        &[("OLLAYA_MODELS", models_str.as_str())],
+        &[
+            "pull".to_string(),
+            crate::decide_ollaya::DEFAULT_MODEL.to_string(),
+        ],
+        &[("OLLAYA_MODELS".to_string(), models_str.clone())],
     )?;
 
     let launch = json!({
@@ -285,8 +390,8 @@ pub fn setup_local(stdout: &mut dyn std::io::Write) -> Result<(), String> {
             "OLLAYA_HOST": "127.0.0.1:11435",
         },
     });
-    crate::config_cmd::set_ollaya_launch(&launch)?;
-    crate::config_cmd::set_classify_engine("local")?;
+    runtime.record_launch(&launch)?;
+    runtime.set_engine()?;
     writeln!(
         stdout,
         "classify engine: local — `pixel classify` will auto-start the daemon on demand"
@@ -297,12 +402,41 @@ pub fn setup_local(stdout: &mut dyn std::io::Write) -> Result<(), String> {
 
 /// Spawn the recorded local daemon if it is not already answering. Returns
 /// whether a spawn happened (the caller polls for reachability itself).
+#[cfg_attr(test, mutants::skip)] // Runtime adapter; launch parsing and branching are tested by `auto_start_with`.
 pub fn auto_start() -> Result<bool, String> {
     let base = local_base();
-    if server_reachable(&base) {
+    auto_start_with(&base, server_reachable, ollaya_launch(), |argv, env| {
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(local_root()?.join("server.log"))
+            .map_err(|e| format!("open server log: {e}"))?;
+        let mut command = std::process::Command::new(&argv[0]);
+        command.args(&argv[1..]);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone().map_err(|e| e.to_string())?)
+            .stderr(log);
+        command
+            .spawn()
+            .map_err(|e| format!("start ollaya daemon: {e}"))?;
+        Ok(())
+    })
+}
+
+fn auto_start_with(
+    base: &str,
+    reachable: impl FnOnce(&str) -> bool,
+    launch: Option<Value>,
+    spawn: impl FnOnce(&[String], &[(String, String)]) -> Result<(), String>,
+) -> Result<bool, String> {
+    if reachable(base) {
         return Ok(false);
     }
-    let Some(launch) = ollaya_launch() else {
+    let Some(launch) = launch else {
         return Ok(false);
     };
     let argv: Vec<String> = launch
@@ -326,40 +460,32 @@ pub fn auto_start() -> Result<bool, String> {
                 .collect()
         })
         .unwrap_or_default();
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(local_root()?.join("server.log"))
-        .map_err(|e| format!("open server log: {e}"))?;
-    let mut command = std::process::Command::new(&argv[0]);
-    command
-        .args(&argv[1..])
-        .envs(env)
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone().map_err(|e| e.to_string())?)
-        .stderr(log);
-    command
-        .spawn()
-        .map_err(|e| format!("start ollaya daemon: {e}"))?;
+    spawn(&argv, &env)?;
     Ok(true)
 }
 
 /// The local daemon base: the recorded one, else the documented default.
+#[cfg_attr(test, mutants::skip)] // Thin config adapter; fallback selection is tested by `local_base_from`.
 pub fn local_base() -> String {
-    ollaya_launch()
+    local_base_from(ollaya_launch())
+}
+
+fn local_base_from(launch: Option<Value>) -> String {
+    launch
         .and_then(|l| l.get("base").and_then(Value::as_str).map(str::to_string))
         .unwrap_or_else(|| crate::decide_ollaya::DEFAULT_BASE.to_string())
 }
 
+#[cfg_attr(test, mutants::skip)] // Environment adapter; path construction is tested by `local_root_at`.
 fn local_root() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("no HOME")?;
-    let root = PathBuf::from(home).join(OLLAYA_ROOT);
-    std::fs::create_dir_all(&root).map_err(|e| format!("create {}: {e}", root.display()))?;
-    Ok(root)
+    local_root_at(&PathBuf::from(home))
 }
 
-fn run(program: &str, args: &[&str]) -> Result<(), String> {
-    run_env(program, args, &[])
+fn local_root_at(home: &std::path::Path) -> Result<PathBuf, String> {
+    let root = home.join(OLLAYA_ROOT);
+    std::fs::create_dir_all(&root).map_err(|e| format!("create {}: {e}", root.display()))?;
+    Ok(root)
 }
 
 fn run_env(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<(), String> {
@@ -383,6 +509,51 @@ use std::time::Duration;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type RunInvocation = (String, Vec<String>, Vec<(String, String)>);
+
+    struct FakeLocalSetup {
+        root: PathBuf,
+        binary_exists: bool,
+        installer_creates_binary: bool,
+        runs: Vec<RunInvocation>,
+        launch: Option<Value>,
+        engine_set: bool,
+    }
+
+    impl LocalSetupRuntime for FakeLocalSetup {
+        fn local_root(&mut self) -> Result<PathBuf, String> {
+            Ok(self.root.clone())
+        }
+
+        fn exists(&self, path: &std::path::Path) -> bool {
+            path == self.root.join("bin").join("ollaya") && self.binary_exists
+        }
+
+        fn run(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+        ) -> Result<(), String> {
+            self.runs
+                .push((program.to_string(), args.to_vec(), env.to_vec()));
+            if program == "sh" && self.installer_creates_binary {
+                self.binary_exists = true;
+            }
+            Ok(())
+        }
+
+        fn record_launch(&mut self, launch: &Value) -> Result<(), String> {
+            self.launch = Some(launch.clone());
+            Ok(())
+        }
+
+        fn set_engine(&mut self) -> Result<(), String> {
+            self.engine_set = true;
+            Ok(())
+        }
+    }
 
     #[test]
     fn the_choice_parser_accepts_exactly_one_and_two() {
@@ -449,5 +620,294 @@ mod tests {
                 .unwrap()
                 .contains("Provider [openrouter]>")
         );
+    }
+
+    #[test]
+    fn ensure_local_policy_starts_once_and_waits_only_until_reachable() {
+        let mut start_calls = 0;
+        let mut reachability_checks = 0;
+        let mut sleeps = 0;
+        let mut reachable = || {
+            reachability_checks += 1;
+            reachability_checks >= 3
+        };
+        let mut start = || {
+            start_calls += 1;
+            Ok(true)
+        };
+        let mut sleep = |_| sleeps += 1;
+
+        ensure_local_with(
+            "http://127.0.0.1:11435",
+            &mut reachable,
+            &mut start,
+            &mut sleep,
+            4,
+            Duration::from_millis(1),
+        )
+        .unwrap();
+
+        assert_eq!(start_calls, 1);
+        assert_eq!(sleeps, 1);
+    }
+
+    #[test]
+    fn ensure_local_policy_does_not_poll_without_a_recorded_launch() {
+        let mut reachable = || false;
+        let mut start = || Ok(false);
+        let mut sleeps = 0;
+        let mut sleep = |_| sleeps += 1;
+
+        ensure_local_with(
+            "http://127.0.0.1:11435",
+            &mut reachable,
+            &mut start,
+            &mut sleep,
+            1,
+            Duration::ZERO,
+        )
+        .unwrap();
+
+        assert_eq!(sleeps, 0);
+    }
+
+    #[test]
+    fn ensure_local_policy_reports_a_bounded_startup_failure() {
+        let mut reachable = || false;
+        let mut start = || Ok(true);
+        let mut sleeps = 0;
+        let mut sleep = |_| sleeps += 1;
+
+        let error = ensure_local_with(
+            "http://127.0.0.1:11435",
+            &mut reachable,
+            &mut start,
+            &mut sleep,
+            2,
+            Duration::ZERO,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("did not come up within two minutes"));
+        assert_eq!(sleeps, 2);
+    }
+
+    #[test]
+    fn auto_start_policy_only_spawns_a_valid_unreachable_launch() {
+        let launch = json!({
+            "argv": ["ollaya", "serve", 3],
+            "env": {"OLLAYA_HOST": "127.0.0.1:11435", "ignored": false},
+        });
+        let mut spawned = None;
+        let result = auto_start_with(
+            "http://127.0.0.1:11435",
+            |_| false,
+            Some(launch),
+            |argv, env| {
+                spawned = Some((argv.to_vec(), env.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(result);
+        assert_eq!(
+            spawned,
+            Some((
+                vec!["ollaya".to_string(), "serve".to_string()],
+                vec![("OLLAYA_HOST".to_string(), "127.0.0.1:11435".to_string())],
+            ))
+        );
+        assert!(
+            !auto_start_with(
+                "http://127.0.0.1:11435",
+                |_| true,
+                None,
+                |_, _| { panic!("reachable daemon must not be spawned") }
+            )
+            .unwrap()
+        );
+        assert!(
+            !auto_start_with(
+                "http://127.0.0.1:11435",
+                |_| false,
+                Some(json!({"argv": []})),
+                |_, _| panic!("empty argv must not be spawned"),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn install_step_policy_honors_stored_noninteractive_and_both_choices() {
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(Vec::new()),
+            &mut output,
+            Some("remote".to_string()),
+            |_| panic!("stored setting must not start local setup"),
+            |_, _| panic!("stored setting must not prompt for a key"),
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("already configured")
+        );
+
+        let mut output = Vec::new();
+        install_step_with(
+            false,
+            &mut std::io::Cursor::new(Vec::new()),
+            &mut output,
+            None,
+            |_| panic!("non-interactive install must not start local setup"),
+            |_, _| panic!("non-interactive install must not prompt for a key"),
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("non-interactive install")
+        );
+
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(b"1\n".to_vec()),
+            &mut output,
+            None,
+            |stdout| writeln!(stdout, "local setup ran").map_err(|e| e.to_string()),
+            |_, _| panic!("local choice must not prompt for a remote key"),
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("local setup ran")
+        );
+
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(b"2\nprovider input\n".to_vec()),
+            &mut output,
+            None,
+            |_| panic!("remote choice must not start local setup"),
+            |stdin, stdout| {
+                let mut provider = String::new();
+                stdin.read_line(&mut provider).map_err(|e| e.to_string())?;
+                writeln!(stdout, "remote key for {}", provider.trim()).map_err(|e| e.to_string())
+            },
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("remote key for provider input")
+        );
+    }
+
+    #[test]
+    fn local_base_and_root_keep_the_documented_layout() {
+        assert_eq!(
+            local_base_from(Some(json!({"base": "http://localhost:9988"}))),
+            "http://localhost:9988"
+        );
+        assert_eq!(
+            local_base_from(Some(json!({"base": 12}))),
+            crate::decide_ollaya::DEFAULT_BASE
+        );
+
+        let temp =
+            std::env::temp_dir().join(format!("pixel-classify-setup-{}", std::process::id()));
+        let root = local_root_at(&temp).unwrap();
+        assert_eq!(root, temp.join(OLLAYA_ROOT));
+        assert!(root.is_dir());
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn reachability_probe_accepts_a_listening_tcp_server() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(server_reachable(&format!("http://127.0.0.1:{port}/api")));
+    }
+
+    #[test]
+    fn process_runner_reports_a_nonzero_exit_status() {
+        run_env("true", &[], &[]).unwrap();
+        let error = run_env("false", &[], &[]).unwrap_err();
+        assert!(error.starts_with("false failed:"));
+    }
+
+    #[test]
+    fn local_setup_installs_missing_binary_pulls_model_and_records_launch() {
+        let root = PathBuf::from("/pixel-test/ollaya");
+        let mut runtime = FakeLocalSetup {
+            root: root.clone(),
+            binary_exists: false,
+            installer_creates_binary: true,
+            runs: Vec::new(),
+            launch: None,
+            engine_set: false,
+        };
+        let mut output = Vec::new();
+
+        setup_local_with(&mut runtime, &mut output).unwrap();
+
+        assert_eq!(runtime.runs.len(), 3);
+        assert_eq!(runtime.runs[0].0, "curl");
+        assert_eq!(runtime.runs[0].1[1], "https://ollaya.dev/install.sh");
+        assert_eq!(runtime.runs[1].0, "sh");
+        assert_eq!(
+            runtime.runs[1].2,
+            vec![
+                ("OLLAYA_INSTALL_DIR".to_string(), root.display().to_string()),
+                ("OLLAYA_NO_SERVICE".to_string(), "1".to_string()),
+            ]
+        );
+        assert_eq!(
+            runtime.runs[2].0,
+            root.join("bin/ollaya").display().to_string()
+        );
+        assert_eq!(
+            runtime.runs[2].1,
+            vec![
+                "pull".to_string(),
+                crate::decide_ollaya::DEFAULT_MODEL.to_string()
+            ]
+        );
+        let launch = runtime.launch.unwrap();
+        assert_eq!(
+            launch["argv"],
+            json!([root.join("bin/ollaya").display().to_string(), "serve"])
+        );
+        assert_eq!(
+            launch["env"]["OLLAYA_MODELS"],
+            json!(root.join("models").display().to_string())
+        );
+        assert!(runtime.engine_set);
+        assert!(String::from_utf8(output).unwrap().contains("auto-start"));
+    }
+
+    #[test]
+    fn local_setup_rejects_an_installer_that_does_not_create_the_binary() {
+        let mut runtime = FakeLocalSetup {
+            root: PathBuf::from("/pixel-test/ollaya"),
+            binary_exists: false,
+            installer_creates_binary: false,
+            runs: Vec::new(),
+            launch: None,
+            engine_set: false,
+        };
+
+        let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();
+
+        assert!(error.contains("installer finished"));
+        assert_eq!(runtime.runs.len(), 2);
+        assert!(runtime.launch.is_none());
+        assert!(!runtime.engine_set);
     }
 }

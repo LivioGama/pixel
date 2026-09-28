@@ -6718,8 +6718,8 @@ fn run_command(
             })
             .map_err(|e| e.to_string())?;
             // Interactive UX goes to stderr so `--json` stdout stays pure.
-            if is_global_install && !json {
-                let tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+            let tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+            if should_offer_classify_setup(is_global_install, json, tty) {
                 classify_setup::install_step(
                     tty,
                     &mut std::io::stdin().lock(),
@@ -7694,6 +7694,23 @@ fn run_command(
                 _ => print_data(&data, true),
             }
         }
+    }
+}
+
+fn should_offer_classify_setup(is_global_install: bool, json: bool, tty: bool) -> bool {
+    is_global_install && !json && tty
+}
+
+#[cfg(test)]
+mod classify_setup_prompt_tests {
+    use super::should_offer_classify_setup;
+
+    #[test]
+    fn prompt_runs_only_for_an_interactive_non_json_global_install() {
+        assert!(should_offer_classify_setup(true, false, true));
+        assert!(!should_offer_classify_setup(false, false, true));
+        assert!(!should_offer_classify_setup(true, true, true));
+        assert!(!should_offer_classify_setup(true, false, false));
     }
 }
 
