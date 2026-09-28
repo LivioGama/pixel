@@ -493,18 +493,20 @@ fn write_pi_prompt(path: &Path) -> Result<bool> {
 /// survives. Anything else follows the Markdown agent-config rules
 /// ([`config::apply_managed_markers`]).
 fn managed_pi_content(existing: &str, asset: &str) -> String {
-    if !existing.contains(config::MANAGED_BEGIN)
-        && (existing.contains(asset) || existing.contains(AGENT_PROMPT_ASSET))
-    {
-        let begin = config::MANAGED_BEGIN;
-        let end = config::MANAGED_END;
-        let block = format!("{begin}\n{asset}\n{end}\n");
-        let previous = if existing.contains(AGENT_PROMPT_ASSET) {
-            AGENT_PROMPT_ASSET
-        } else {
-            asset
-        };
-        return existing.replacen(previous, &block, 1);
+    if !existing.contains(config::MANAGED_BEGIN) {
+        let (cleaned, removed) = config::strip_stale_blocks(existing);
+        let source = if removed == 0 { existing } else { &cleaned };
+        if source.contains(asset) || source.contains(AGENT_PROMPT_ASSET) {
+            let begin = config::MANAGED_BEGIN;
+            let end = config::MANAGED_END;
+            let block = format!("{begin}\n{asset}\n{end}\n");
+            let previous = if source.contains(AGENT_PROMPT_ASSET) {
+                AGENT_PROMPT_ASSET
+            } else {
+                asset
+            };
+            return source.replacen(previous, &block, 1);
+        }
     }
     config::apply_managed_markers(existing, asset)
 }

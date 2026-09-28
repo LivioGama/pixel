@@ -24,8 +24,9 @@ The action names remain stable if Pixel's CLI spelling changes. The extension
 reports an explicit error if the installed executable lacks an operation.
 Responses include bounded evidence, truncation, index and graph state, and a
 next action when results are capped or Pixel is unavailable. The extension
-checks `pixel status` before invoking an action. If the index or graph is
-missing, run `pixel build-index --history .`, then retry. There is no native
+checks `pixel status` before invoking an action. If the index is missing, run
+`pixel build-index --history .`. If the graph is missing, run
+`pixel rebuild-graph .`. Then retry. There is no native
 discovery fallback. History facts can lag; their `fresh` field is returned.
 
 ## Native tool policy
