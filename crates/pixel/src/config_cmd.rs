@@ -619,6 +619,11 @@ mod tests {
         });
         set_ollaya_launch(&launch).unwrap();
         assert_eq!(ollaya_launch(), Some(launch));
+        assert_eq!(classify_engine().as_deref(), Some("local"));
+        assert_eq!(
+            classify_remote_preset(),
+            Some(crate::decide_remote::Preset::OpencodeGo)
+        );
         set_classify_remote(crate::decide_remote::Preset::OpencodeGo).unwrap();
         set_classify_engine("local").unwrap();
         assert_eq!(
