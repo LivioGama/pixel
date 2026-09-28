@@ -14,8 +14,9 @@ If `.pixel/` already exists in the repo root, skip straight to the commands.
 
 # Pixel Retrieval Layer
 
-This repo has Pixel installed and indexed — a deterministic code retrieval
-system.
+Pixel provides deterministic code retrieval when the current repository is
+indexed. Check `pixel status` if unsure; do not assume every directory has a
+Pixel index.
 
 - Hooks inject this file at session start and emit advisories after commands.
 - A PreToolUse guard exists only where the repo ran `pixel install --repo`.
@@ -25,14 +26,26 @@ system.
 
 ## MANDATORY WORKFLOW
 
+For read-only exploration, use `--no-manifest` when target suggestions help;
+the default `scope-task` writes `.pixel/targets.json` and affects later agents.
+
 ```bash
-pixel scope-task "<task>"        # first call on multi-file work: P0/P1/P2 targets
+pixel scope-task "<task>" --no-manifest  # optional read-only target suggestions
+```
+
+For implementation, activate a scope before multi-file edits. `--clear`
+deletes the whole manifest, so use it at task end only when no other active
+task shares that manifest:
+
+```bash
+pixel scope-task "<task>"        # before multi-file edits: P0/P1/P2 targets
 pixel find-code "<phrase>"       # before any free-text search for a name
 pixel impact "<symbol>"          # before editing any symbol — blast radius
 pixel plan-rollback "<problem>"  # the moment "it worked before"
 pixel sync-branch                # any branch sync, never git pull --rebase
 pixel what-changed               # before an edit batch — what already differs
 pixel review-changes             # the working tree, structured
+pixel scope-task --clear          # at task end, only if no other task shares it
 pixel commit --files <f1> --files <f2> -m "msg" --request-id "id"   # only when asked; one --files per file
 ```
 
