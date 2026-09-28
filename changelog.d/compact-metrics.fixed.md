@@ -1,1 +1,0 @@
-**metrics:** Show only command, duration and invocation ID when no native-workflow comparison policy exists, removing duplicate unavailable rows from commands such as install and doctor. Keep the reason in the action log.
