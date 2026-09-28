@@ -1921,6 +1921,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn project_codex_composition_migrates_a_canonical_executable_to_its_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let real = home.path().join("store/pixel");
+        let stable = home.path().join("bin/pixel");
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        fs::create_dir_all(stable.parent().unwrap()).unwrap();
+        fs::write(&real, "pixel").unwrap();
+        symlink(&real, &stable).unwrap();
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
+            false,
+        )
+        .unwrap();
+
+        install_project_codex_at(home.path(), &path, &real, false).unwrap();
+        let sidecar = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
+        install_project_codex_at(home.path(), &path, &stable, false).unwrap();
+
+        let installed = install::read_settings(&path).unwrap();
+        let command = installed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            command.starts_with(&format!("'{}'", stable.display())),
+            "{command}"
+        );
+        assert_eq!(
+            read_composed_backup(&sidecar).unwrap()["managed_pre_tool_use"],
+            installed["hooks"]["PreToolUse"]
+        );
+    }
+
     fn delegate_guard() -> Value {
         json!({"matcher":"Bash","hooks":[{"type":"command","command":"'/p/pixel' run-hook guard --provider claude --delegate-rtk"}]})
     }
