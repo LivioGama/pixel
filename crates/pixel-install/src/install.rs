@@ -616,7 +616,7 @@ fn strip_legacy_pi_prompts(text: &str) -> String {
 }
 
 /// A pasted prompt inside fenced user prose is not an installed prompt.
-fn inside_markdown_fence(prefix: &str) -> bool {
+pub(crate) fn inside_markdown_fence(prefix: &str) -> bool {
     let mut fence = None;
     for line in prefix.lines() {
         let trimmed = line.trim_start_matches(' ');
