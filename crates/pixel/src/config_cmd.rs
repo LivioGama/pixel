@@ -195,9 +195,7 @@ pub fn set_classify_engine(value: &str) -> Result<(), String> {
 pub fn set_ollaya_launch(launch: &Value) -> Result<(), String> {
     let path = global_config_path().ok_or("no HOME for the global config")?;
     write_doc(&path, |doc| {
-        if doc.get("classify").is_some_and(Value::is_object) {
-            // classify already an object; no action needed
-        } else {
+        if !doc.get("classify").is_some_and(Value::is_object) {
             doc["classify"] = json!({});
         }
         doc["classify"]["ollaya"] = launch.clone();
@@ -582,6 +580,22 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "tmp cleaned up: {leftovers:?}");
+    }
+
+    #[test]
+    fn ollaya_launch_should_replace_malformed_classify_without_losing_other_settings() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        let path = home.0.join(".pixel/config.json");
+        write(&path, r#"{"metrics":"off","classify":"stale"}"#);
+        let launch = json!({"base": "http://127.0.0.1:11435", "argv": ["ollaya", "serve"]});
+        set_ollaya_launch(&launch).unwrap();
+        assert_eq!(ollaya_launch(), Some(launch));
+        let stored: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(stored["metrics"], "off");
+        restore_home(saved);
     }
 
     #[test]
