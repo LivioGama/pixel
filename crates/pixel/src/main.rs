@@ -1582,6 +1582,13 @@ enum HookCmd {
 
 #[derive(Subcommand)]
 enum ConfigCmd {
+    /// Guided global setup in a terminal; also offered by pixel install.
+    Setup,
+    /// Enable or disable all classify calls, including explicit --engine flags.
+    Classify {
+        #[arg(value_parser = ["on", "off"])]
+        value: String,
+    },
     /// Open the global YAML configuration in $VISUAL or $EDITOR (default: vi).
     Edit {
         /// Edit repository overrides instead of global settings.
@@ -6730,13 +6737,10 @@ fn run_command(
             .map_err(|e| e.to_string())?;
             config_cmd::ensure_template(config_root.as_deref())?;
             // Interactive UX goes to stderr so `--json` stdout stays pure.
-            let tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+            let tty = std::io::IsTerminal::is_terminal(&std::io::stdin())
+                && std::io::IsTerminal::is_terminal(&std::io::stderr());
             if should_offer_classify_setup(is_global_install, json, tty) {
-                classify_setup::install_step(
-                    tty,
-                    &mut std::io::stdin().lock(),
-                    &mut std::io::stderr().lock(),
-                )?;
+                config_cmd::setup()?;
             }
             print_data(
                 &serde_json::to_value(&report).map_err(|e| e.to_string())?,
@@ -7141,6 +7145,8 @@ fn run_command(
         },
         Command::Config { cmd } => match cmd {
             None => config_cmd::overview(Path::new(".")),
+            Some(ConfigCmd::Setup) => config_cmd::setup(),
+            Some(ConfigCmd::Classify { value }) => config_cmd::set_classify_enabled(value == "on"),
             Some(ConfigCmd::Edit { repo, path }) => config_cmd::edit(&path, repo),
             Some(ConfigCmd::Metrics {
                 value,

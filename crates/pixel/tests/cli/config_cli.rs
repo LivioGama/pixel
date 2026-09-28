@@ -184,3 +184,74 @@ fn editor_should_fall_back_from_blank_visual_to_editor_then_vi() {
     let contents = fs::read_to_string(home.join(".pixel/config.yaml")).unwrap();
     assert_eq!(contents.matches("# fallback editor").count(), 2);
 }
+
+#[test]
+fn classify_off_should_block_every_engine_and_batch_before_reading_input() {
+    let home = Scratch::for_test("config", "classify-off-home");
+    fs::create_dir_all(home.join(".pixel")).unwrap();
+    fs::write(
+        home.join(".pixel/config.yaml"),
+        "classify: {engine: remote}\n",
+    )
+    .unwrap();
+    stdout(&run(&home, &home, &["config", "classify", "off"]));
+    assert!(stdout(&run(&home, &home, &["config"])).contains("classify.enabled: false"));
+    for args in [
+        vec!["classify", "hello"],
+        vec![
+            "classify", "hello", "--engine", "remote", "--label", "a", "--label", "b",
+        ],
+        vec!["classify", "hello", "--engine", "ollaya"],
+        vec!["classify", "--jsonl"],
+    ] {
+        let out = run(&home, &home, &args);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("classify is disabled"));
+        assert!(out.stdout.is_empty());
+    }
+    stdout(&run(&home, &home, &["config", "classify", "on"]));
+    assert!(stdout(&run(&home, &home, &["config"])).contains("classify.enabled: true"));
+    let doc: serde_json::Value =
+        serde_saphyr::from_str(&fs::read_to_string(home.join(".pixel/config.yaml")).unwrap())
+            .unwrap();
+    assert_eq!(doc["classify"]["engine"], "remote");
+    fs::write(
+        home.join(".pixel/config.yaml"),
+        "classify: {enabled: 'false'}\n",
+    )
+    .unwrap();
+    for args in [&["config"][..], &["classify", "hello"][..]] {
+        let out = run(&home, &home, args);
+        assert!(!out.status.success());
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("classify.enabled must be true or false")
+        );
+    }
+}
+
+#[test]
+fn setup_should_refuse_piped_input_without_writing_configuration() {
+    let home = Scratch::for_test("config", "setup-piped-home");
+    let out = run(&home, &home, &["config", "setup"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("setup needs a terminal"));
+    assert!(!home.join(".pixel/config.yaml").exists());
+}
+
+#[test]
+fn classify_switch_should_create_config_and_repair_a_non_mapping_classify_section() {
+    let home = Scratch::for_test("config", "classify-create-home");
+    stdout(&run(&home, &home, &["config", "classify", "off"]));
+    let path = home.join(".pixel/config.yaml");
+    let doc: serde_json::Value =
+        serde_saphyr::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(doc["classify"]["enabled"], false);
+    fs::write(&path, "classify: stale\nmetrics: 'off'\n").unwrap();
+    stdout(&run(&home, &home, &["config", "classify", "on"]));
+    let doc: serde_json::Value =
+        serde_saphyr::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        doc,
+        serde_json::json!({"classify":{"enabled":true},"metrics":"off"})
+    );
+}

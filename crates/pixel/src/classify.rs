@@ -668,6 +668,9 @@ fn resolve_remote_preset(
 
 #[cfg_attr(test, mutants::skip)] // thin environment adapter over model, stdin, and stdout
 pub fn run(opts: ClassifyOptions) -> Result<(), String> {
+    if !crate::config_cmd::classify_enabled()? {
+        return Err("classify is disabled; enable it with `pixel config classify on` or `pixel config setup`".into());
+    }
     let remote_preset = resolve_remote_preset(
         opts.remote_preset,
         crate::config_cmd::classify_remote_preset(),

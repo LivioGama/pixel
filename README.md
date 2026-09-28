@@ -69,6 +69,19 @@ Then use Pixel the way [`PIXEL.md`](PIXEL.md) describes: it is the complete agen
 
 ## Configuration
 
+Run `pixel config setup` for guided terminal setup. Interactive global
+`pixel install` offers the same flow: choose metrics, background startup,
+agent prompt assistance, and whether to allow AI classification, then review
+and save. Enter keeps the shown value; `q` or Ctrl-D cancels before saving.
+JSON, piped, and repository-only installs never prompt.
+
+Disable classification with `pixel config classify off`, or set
+`classify: {enabled: false}` in the global YAML file. This blocks every
+`pixel classify` invocation, including explicit engine flags, before input is
+read or a provider is contacted. Code search still works. Re-enable with
+`pixel config classify on`; engine preferences and credentials are retained.
+
+
 `pixel config` shows effective settings and their sources, including the global
 and repository file paths. `pixel config edit` opens `~/.pixel/config.yaml` in
 `$VISUAL`, then `$EDITOR` (falling back to `vi`). Use `pixel config edit --repo`
