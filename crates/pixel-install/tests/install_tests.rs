@@ -2674,6 +2674,67 @@ fn uninstall_reclaims_pre_marker_prompt_copies_without_erasing_user_text() {
 }
 
 #[test]
+fn first_install_should_remove_duplicate_prompts_and_leave_doctor_green() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let pi_path = pi_prompt_path(home);
+    fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+    fs::write(
+        &pi_path,
+        format!("Before.\n{PRE_MARKER_PI_PROMPT}Between.\n{PRE_MARKER_PI_PROMPT}After.\n"),
+    )
+    .unwrap();
+
+    install_for_shell(home, TEST_SHELL);
+    let report = doctor(&DoctorOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        check(&report, "install.pi-prompt").status,
+        CheckStatus::Green
+    );
+
+    uninstall_home(home);
+    assert_eq!(
+        fs::read_to_string(pi_path).unwrap(),
+        "Before.\nBetween.\nAfter.\n"
+    );
+}
+
+#[test]
+fn install_doctor_and_uninstall_should_preserve_a_fence_spanning_the_managed_block() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, TEST_SHELL);
+    let pi_path = pi_prompt_path(home);
+    let current = fs::read_to_string(&pi_path).unwrap();
+    let existing = format!("```markdown\n{current}{PRE_MARKER_PI_PROMPT}```\nAfter.\n");
+    fs::write(&pi_path, &existing).unwrap();
+
+    let report = doctor(&DoctorOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        check(&report, "install.pi-prompt").status,
+        CheckStatus::Green
+    );
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(fs::read_to_string(&pi_path).unwrap(), existing);
+
+    uninstall_home(home);
+    assert_eq!(
+        fs::read_to_string(pi_path).unwrap(),
+        format!("```markdown\n{PRE_MARKER_PI_PROMPT}```\nAfter.\n")
+    );
+}
+
+#[test]
 fn a_pi_prompt_written_by_an_earlier_install_is_wrapped_not_duplicated() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
