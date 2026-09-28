@@ -29,9 +29,11 @@ macro_rules! eprint {
 mod audit_cmd;
 mod call_guard;
 mod classify;
+mod classify_setup;
 mod claude_controller;
 mod config_cmd;
 mod coverage_cmd;
+mod decide_ollaya;
 mod decide_remote;
 mod evaluate_cmd;
 mod execution_brief;
@@ -1607,6 +1609,15 @@ enum ConfigCmd {
         /// Remove the stored key for this preset.
         #[arg(long)]
         clear: bool,
+    },
+    /// Which engine answers `pixel classify` when no `--engine` flag is
+    /// given: `local` (an installed Ollaya server), `remote` (a hosted LLM
+    /// behind a stored key), or `auto` (probe local, fall back to remote —
+    /// the default). `pixel install` sets this when you choose an engine.
+    ClassifyEngine {
+        /// The engine preference to store.
+        #[arg(value_parser = ["local", "remote", "auto"])]
+        value: String,
     },
 }
 
@@ -6699,12 +6710,22 @@ fn run_command(
         // M5/M6 — install / doctor / migrate / hook
         // -------------------------------------------------------------
         Command::Install { json, shell, repo } => {
+            let is_global_install = repo.is_none();
             let report = pixel_install::install::install(&pixel_install::install::InstallOptions {
                 shell,
                 repo,
                 ..Default::default()
             })
             .map_err(|e| e.to_string())?;
+            // Interactive UX goes to stderr so `--json` stdout stays pure.
+            if is_global_install && !json {
+                let tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+                classify_setup::install_step(
+                    tty,
+                    &mut std::io::stdin().lock(),
+                    &mut std::io::stderr().lock(),
+                )?;
+            }
             print_data(
                 &serde_json::to_value(&report).map_err(|e| e.to_string())?,
                 json,
@@ -7118,6 +7139,11 @@ fn run_command(
                 clear,
             } => config_cmd::key_from_arg(value, &mut std::io::stdin().lock())
                 .and_then(|key| config_cmd::run_remote_key(preset, key, clear)),
+            ConfigCmd::ClassifyEngine { value } => {
+                config_cmd::set_classify_engine(&value)?;
+                println!("classify engine: {value} stored");
+                Ok(())
+            }
         },
         Command::TaskState { cmd } => match cmd {
             TaskCmd::Begin {

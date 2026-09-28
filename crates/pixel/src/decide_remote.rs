@@ -97,6 +97,20 @@ impl Preset {
     fn wants_session_header(&self) -> bool {
         matches!(self, Preset::OpencodeGo)
     }
+
+    /// The preset behind its `display()` name (install prompts, config).
+    pub fn parse_name(name: &str) -> Option<Preset> {
+        let normalized = name.trim().to_ascii_lowercase().replace('_', "-");
+        [
+            Preset::Openrouter,
+            Preset::Ollama,
+            Preset::Local,
+            Preset::Deepseek,
+            Preset::OpencodeGo,
+        ]
+        .into_iter()
+        .find(|preset| preset.display() == normalized)
+    }
 }
 
 /// Resolved remote configuration: the values actually used, independent of
@@ -544,9 +558,12 @@ mod tests {
     #[test]
     fn only_the_go_preset_carries_a_session_header() {
         let go = resolve_config_from(Preset::OpencodeGo, None, key(), env_of(&[])).unwrap();
-        assert!(go.session_id.as_deref().is_some_and(|s| s.starts_with("pixel-classify-")));
-        let deepseek =
-            resolve_config_from(Preset::Deepseek, None, key(), env_of(&[])).unwrap();
+        assert!(
+            go.session_id
+                .as_deref()
+                .is_some_and(|s| s.starts_with("pixel-classify-"))
+        );
+        let deepseek = resolve_config_from(Preset::Deepseek, None, key(), env_of(&[])).unwrap();
         assert_eq!(deepseek.session_id, None);
     }
 

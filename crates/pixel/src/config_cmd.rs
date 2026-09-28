@@ -141,6 +141,54 @@ fn write_metrics(path: &Path, on: bool) -> Result<(), String> {
     })
 }
 
+/// The stored classify engine preference: `local`, `remote`, or `auto`.
+pub fn classify_engine() -> Option<String> {
+    global_config_path()
+        .as_deref()
+        .and_then(read_config_doc)
+        .and_then(|doc| {
+            doc.get("classify")?
+                .get("engine")?
+                .as_str()
+                .map(str::to_string)
+        })
+}
+
+/// The recorded local Ollaya daemon launch (base, model name, env, argv).
+pub fn ollaya_launch() -> Option<Value> {
+    global_config_path()
+        .as_deref()
+        .and_then(read_config_doc)
+        .and_then(|doc| doc.get("classify")?.get("ollaya").cloned())
+}
+
+/// Persist the classify engine preference.
+pub fn set_classify_engine(value: &str) -> Result<(), String> {
+    let path = global_config_path().ok_or("no HOME for the global config")?;
+    write_doc(&path, |doc| {
+        if !doc.get("classify").is_some_and(Value::is_object) {
+            doc["classify"] = json!({});
+        }
+        doc["classify"]["engine"] = Value::String(value.to_string());
+    })
+}
+
+/// Persist the local Ollaya server launch record.
+pub fn set_ollaya_launch(launch: &Value) -> Result<(), String> {
+    let path = global_config_path().ok_or("no HOME for the global config")?;
+    write_doc(&path, |doc| {
+        if !doc.get("classify").is_some_and(Value::is_object) {
+            doc["classify"] = json!({});
+        }
+        doc["classify"]["ollaya"] = launch.clone();
+    })
+}
+
+fn read_config_doc(path: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 /// The stored API key for a remote decision preset, if the global config
 /// carries one. Keys live only in `~/.pixel/config.json` under
 /// `remote_keys` — never in the repo layer, never echoed back by the CLI.
