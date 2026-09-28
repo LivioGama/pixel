@@ -34,9 +34,10 @@ Simple `ls`, `rg`, `grep`, and `git status`, `diff`, `log`, `blame`, or `fetch`
 shell commands are rewritten to Pixel calls before execution. `git fetch`
 rewrites only to `pixel fetch`. Ambiguous commands, pipelines, batches,
 indirect reads, and unknown shell capabilities are blocked with a structured
-redirect to the `pixel` tool. Pi's `read` tool can read an exact repository
-path with a limit of at most 200 lines; an unbounded read is blocked. A path
-outside the repository is exempt. Edit and write tools, builds, tests, and
+redirect to the `pixel` tool. Pi's `read` tool can read a repository path only
+after the Pixel tool has resolved it, with a limit of at most 200 lines. Reads
+of unresolved paths are blocked even with a limit. A path outside the
+repository is exempt. Edit and write tools, builds, tests, and
 execution commands remain available. `pixel build-index`, `prepare-repo`,
 `doctor`, and `status` are direct recovery and health exceptions.
 
