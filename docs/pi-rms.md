@@ -39,8 +39,8 @@ redirect to the `pixel` tool. Pi's `read` tool can read a repository path only
 after the Pixel tool has resolved it, with a limit of at most 200 lines. Reads
 of unresolved paths are blocked even with a limit. A path outside the
 repository is exempt. Edit and write tools, builds, tests, and
-execution commands remain available; copying repository content to an
-outside path is blocked. `pixel build-index`, `prepare-repo`,
+execution commands remain available; copying or moving repository content
+to an outside path is blocked. `pixel build-index`, `prepare-repo`,
 `doctor`, and `status` are direct recovery and health exceptions.
 
 The extension checks Pi tool calls, including read, bash, and named discovery
