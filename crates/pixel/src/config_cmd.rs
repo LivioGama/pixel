@@ -327,7 +327,11 @@ fn classify_enabled_in(doc: &Value) -> Result<bool, String> {
 /// Save a global classify switch while retaining engine and credential settings.
 pub fn set_classify_enabled(enabled: bool) -> Result<(), String> {
     let path = global_config_path().ok_or("no HOME for the global config")?;
-    write_doc(&path, |doc| {
+    set_classify_enabled_at(&path, enabled)
+}
+
+fn set_classify_enabled_at(path: &Path, enabled: bool) -> Result<(), String> {
+    write_doc(path, |doc| {
         if !doc.get("classify").is_some_and(Value::is_object) {
             doc["classify"] = json!({});
         }
@@ -347,8 +351,32 @@ pub fn setup() -> Result<(), String> {
     let path = ensure_template(None)?;
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stderr().lock();
-    if setup_with(&path, &mut input, &mut output)? && classify_enabled()? {
-        crate::classify_setup::install_step(true, &mut input, &mut output)?;
+    setup_with_install(&path, &mut input, &mut output, |input, output| {
+        crate::classify_setup::install_step(true, input, output)
+    })
+}
+
+/// Keep a failed first-time engine installation from enabling classification.
+fn setup_with_install(
+    path: &Path,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+    install: impl FnOnce(&mut dyn BufRead, &mut dyn Write) -> Result<(), String>,
+) -> Result<(), String> {
+    let was_enabled = classify_enabled_in(&crate::config_file::load(path)?)?;
+    if !setup_with(path, input, output)? {
+        return Ok(());
+    }
+    if !classify_enabled_in(&crate::config_file::load(path)?)? {
+        return Ok(());
+    }
+    if let Err(error) = install(input, output) {
+        if !was_enabled {
+            set_classify_enabled_at(path, false).map_err(|rollback| {
+                format!("{error}; could not disable classification: {rollback}")
+            })?;
+        }
+        return Err(error);
     }
     Ok(())
 }
@@ -614,6 +642,99 @@ pub fn run_metrics(path: &Path, global: bool, value: Option<bool>) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_install_should_only_revert_a_new_classify_opt_in() {
+        for (was_enabled, install_succeeds, expected_enabled) in [
+            (false, false, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            let home = HomeGuard::set();
+            let path = home.0.join("config.yaml");
+            write(
+                &path,
+                &json!({"metrics":"on", "classify":{"enabled":was_enabled}, "future":42})
+                    .to_string(),
+            );
+            let mut calls = 0;
+            let result = setup_with_install(
+                &path,
+                &mut std::io::Cursor::new("n\n\n\n\ny\ny\n"),
+                &mut Vec::new(),
+                |_, _| {
+                    calls += 1;
+                    // A partially completed install can already have written credentials.
+                    write_doc(&path, |doc| {
+                        doc["remote_keys"] = json!({"openrouter":"retained-secret"});
+                        doc["classify"]["engine"] = json!("remote");
+                    })?;
+                    if install_succeeds {
+                        Ok(())
+                    } else {
+                        Err("model download failed".into())
+                    }
+                },
+            );
+            assert_eq!(calls, 1);
+            assert_eq!(
+                result,
+                if install_succeeds {
+                    Ok(())
+                } else {
+                    Err("model download failed".into())
+                }
+            );
+            assert_eq!(
+                crate::config_file::load(&path).unwrap(),
+                json!({
+                    "metrics":"off", "daemon_auto_start":true, "task_context":true,
+                    "task_boundary":true, "classify":{"enabled":expected_enabled, "engine":"remote"},
+                    "future":42, "remote_keys":{"openrouter":"retained-secret"}
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn setup_should_not_install_after_cancellation_or_disabling_classify() {
+        for (answers, enabled, metrics) in
+            [("q\ny\n", true, "on"), ("n\n\n\n\nn\ny\n", false, "off")]
+        {
+            let home = HomeGuard::set();
+            let path = home.0.join("config.yaml");
+            write(&path, "metrics: 'on'\nclassify: {enabled: true}\n");
+            setup_with_install(
+                &path,
+                &mut std::io::Cursor::new(answers),
+                &mut Vec::new(),
+                |_, _| panic!("cancelled or disabled setup must never invoke an installer"),
+            )
+            .unwrap();
+            let doc = crate::config_file::load(&path).unwrap();
+            assert_eq!(doc["classify"]["enabled"], enabled);
+            assert_eq!(doc["metrics"], metrics);
+        }
+    }
+
+    #[test]
+    fn rollback_failure_should_report_both_the_install_and_storage_errors() {
+        let home = HomeGuard::set();
+        let path = home.0.join("config.yaml");
+        let error = setup_with_install(
+            &path,
+            &mut std::io::Cursor::new("\n\n\n\ny\ny\n"),
+            &mut Vec::new(),
+            |_, _| {
+                std::fs::remove_file(&path).unwrap();
+                std::fs::create_dir(&path).unwrap();
+                Err("model download failed".into())
+            },
+        )
+        .unwrap_err();
+        assert!(error.starts_with("model download failed; could not disable classification: cannot read configuration "), "{error}");
+    }
 
     #[test]
     fn setup_should_save_choices_preserve_secrets_and_allow_cancellation() {
