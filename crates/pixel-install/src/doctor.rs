@@ -374,7 +374,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             // The managed block, not the whole file: instructions the user
             // keeps outside the markers are theirs, but a missing, stale or
             // unterminated block is exactly what `pixel install` rewrites.
-            if content != config::apply_managed_markers(&content, install::AGENT_PROMPT_ASSET) {
+            if content != config::apply_managed_markers(&content, install::PI_PROMPT_ASSET) {
                 return Err(format!(
                     "{} is stale — run `pixel install` to update",
                     path.display()

@@ -314,7 +314,9 @@ envelope talks to the daemon socket directly.
 `pixel install` deliberately deploys the bundled `pixel-agent-prompt.md`, the
 short `pixel-subagent-prompt.md`, a managed shell function for Claude Code, a managed
 `developer_instructions` block for Codex and a managed block in Pi's
-`~/.pi/agent/APPEND_SYSTEM.md`. It
+`~/.pi/agent/APPEND_SYSTEM.md`. Pi receives a short Pixel rule; its
+repository extension registers the structured `pixel` tool and applies the
+[pre-execution Pi policy](docs/pi-rms.md) at `tool_call` time. It
 preserves agent settings and rule files, does not activate legacy provider
 hooks or routing, and separately registers the managed Codex `PostToolUse`
 metrics hook (`$CODEX_HOME/hooks.json`, default `~/.codex/hooks.json`). The shell functions pass the prompt on a subsequent launch

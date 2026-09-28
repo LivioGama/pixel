@@ -2635,9 +2635,10 @@ fn a_pi_prompt_written_by_an_earlier_install_is_wrapped_not_duplicated() {
     );
     assert_eq!(
         deployed.matches(asset.as_str()).count(),
-        1,
-        "the prompt must not appear twice after the upgrade"
+        0,
+        "the long legacy prompt is replaced by Pi's short rule"
     );
+    assert!(deployed.contains("Use the pixel tool for repository retrieval"));
 }
 
 #[test]

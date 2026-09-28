@@ -365,6 +365,9 @@ pub(crate) const SUBAGENT_PROMPT_FILE: &str = "subagent-prompt.md";
 /// The agent prompt as bundled in the binary.
 pub(crate) const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
 
+/// Pi keeps operational policy in its extension and exposes only this short rule.
+pub(crate) const PI_PROMPT_ASSET: &str = "Use the pixel tool for repository retrieval and repository Git workflows. Request the outcome through a stable action and goal. Native repository discovery is guarded.\n";
+
 /// The sub-agent prompt as bundled in the binary.
 pub(crate) const SUBAGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-subagent-prompt.md");
 
@@ -471,7 +474,7 @@ fn write_pi_prompt(path: &Path) -> Result<bool> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.into()),
     };
-    let wanted = managed_pi_content(&existing, AGENT_PROMPT_ASSET);
+    let wanted = managed_pi_content(&existing, PI_PROMPT_ASSET);
     if wanted == existing {
         return Ok(false);
     }
@@ -490,11 +493,18 @@ fn write_pi_prompt(path: &Path) -> Result<bool> {
 /// survives. Anything else follows the Markdown agent-config rules
 /// ([`config::apply_managed_markers`]).
 fn managed_pi_content(existing: &str, asset: &str) -> String {
-    if !existing.contains(config::MANAGED_BEGIN) && existing.contains(asset) {
+    if !existing.contains(config::MANAGED_BEGIN)
+        && (existing.contains(asset) || existing.contains(AGENT_PROMPT_ASSET))
+    {
         let begin = config::MANAGED_BEGIN;
         let end = config::MANAGED_END;
         let block = format!("{begin}\n{asset}\n{end}\n");
-        return existing.replacen(asset, &block, 1);
+        let previous = if existing.contains(AGENT_PROMPT_ASSET) {
+            AGENT_PROMPT_ASSET
+        } else {
+            asset
+        };
+        return existing.replacen(previous, &block, 1);
     }
     config::apply_managed_markers(existing, asset)
 }
@@ -514,27 +524,29 @@ pub(crate) fn write_atomically(path: &Path, content: &str) -> Result<()> {
 
 #[cfg(test)]
 mod pi_prompt_content_tests {
-    use super::{AGENT_PROMPT_ASSET, managed_pi_content, write_pi_prompt};
+    use super::{AGENT_PROMPT_ASSET, PI_PROMPT_ASSET, managed_pi_content, write_pi_prompt};
     use crate::config::{MANAGED_BEGIN, MANAGED_END};
 
     #[test]
     fn a_prompt_file_written_by_an_older_install_is_wrapped_in_place_not_duplicated() {
-        let wrapped = managed_pi_content(AGENT_PROMPT_ASSET, AGENT_PROMPT_ASSET);
+        let wrapped = managed_pi_content(AGENT_PROMPT_ASSET, PI_PROMPT_ASSET);
         assert!(wrapped.starts_with(MANAGED_BEGIN), "{wrapped}");
         assert!(wrapped.trim_end().ends_with(MANAGED_END), "{wrapped}");
         assert_eq!(
-            wrapped.matches(AGENT_PROMPT_ASSET).count(),
+            wrapped.matches(PI_PROMPT_ASSET).count(),
             1,
-            "the prompt must appear once, not once outside the markers and once inside"
+            "the short Pi rule must appear once"
         );
+        assert!(!wrapped.contains(AGENT_PROMPT_ASSET));
     }
 
     #[test]
     fn user_text_around_a_stale_copy_is_kept() {
         let existing = format!("My own pi note.\n{AGENT_PROMPT_ASSET}");
-        let wrapped = managed_pi_content(&existing, AGENT_PROMPT_ASSET);
+        let wrapped = managed_pi_content(&existing, PI_PROMPT_ASSET);
         assert!(wrapped.starts_with("My own pi note.\n"), "{wrapped}");
-        assert_eq!(wrapped.matches(AGENT_PROMPT_ASSET).count(), 1);
+        assert_eq!(wrapped.matches(PI_PROMPT_ASSET).count(), 1);
+        assert!(!wrapped.contains(AGENT_PROMPT_ASSET));
     }
 
     #[test]

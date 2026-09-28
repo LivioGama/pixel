@@ -52,7 +52,7 @@ Each agent's page under [For your agent](../for/) names the files, the check and
 
 Every one of those files except `.codex/config.toml` names this machine's `pixel` binary, so the install lists it in the clone's `.git/info/exclude` and a `git add -A` cannot publish it.
 
-The guard is advisory. It steers agents toward Pixel commands, for example with a notice before an untargeted read of a large source file, and never blocks a tool call. `pixel doctor <repo>` reports the global wiring and the per-repository guards as green, stale or missing.
+The Pi extension registers a structured `pixel` tool and blocks or translates repository discovery before Pi executes the native tool. Other agent guards retain their own policies. [Pi policy and exceptions](https://github.com/LivioGama/pixel/blob/main/docs/pi-rms.md) describe the Pi boundary. `pixel doctor <repo>` reports the global wiring and the per-repository guards as green, stale or missing.
 
 ## Updating
 
