@@ -96,9 +96,8 @@ pub const ZCODE_CONFIG_FILE: &str = ".zcode/cli/config.json";
 /// output path, only the payload-shape and matcher additions above.
 pub const CURSOR_HOOKS_FILE: &str = ".cursor/hooks.json";
 
-/// The pi config directory (relative to home). pi uses an extension API with
-/// lifecycle events only — no per-tool `PreToolUse` interception. pixel
-/// installs rules into pi's memory but cannot wire guard hooks.
+/// The pi config directory (relative to home). The repository extension uses
+/// pi's `tool_call` event to intercept native calls before execution.
 pub const PI_CONFIG_DIR: &str = ".pi/agent";
 /// The pi settings file (relative to home).
 pub const PI_SETTINGS_FILE: &str = ".pi/agent/settings.json";
@@ -116,7 +115,8 @@ pub const PI_SETTINGS_FILE: &str = ".pi/agent/settings.json";
 ///               edit_file, file_search (Cursor's composer-mode tools)
 /// Antigravity:  run_command (bash), view_file (read), replace_file_content (edit),
 ///               write_to_file (write), grep_search (grep), find_by_name (find), list_dir (ls)
-/// pi:           read, bash, edit, write, grep, find, ls (no PreToolUse hooks — rules only)
+/// pi:           read, bash, edit, write, grep, find, ls (handled by its own
+///               repository `tool_call` extension, not this hook matcher)
 pub const GUARD_MATCHER: &str = "Bash|Read|Grep|Glob|Edit|MultiEdit|NotebookEdit|Write|\
      exec|read|grep|find_file_by_name|glob|edit|write|notebook_read|notebook_edit|\
      bash|apply_patch|read_file|write_file|execute|run_shell_command|search|\

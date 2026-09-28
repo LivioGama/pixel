@@ -399,6 +399,12 @@ pub(crate) const SUBAGENT_PROMPT_FILE: &str = "subagent-prompt.md";
 /// The agent prompt as bundled in the binary.
 pub(crate) const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
 
+/// Pi keeps operational policy in its extension and exposes only this short rule.
+pub(crate) const PI_PROMPT_ASSET: &str = "Use the pixel tool for repository retrieval and repository Git workflows. Request the outcome through a stable action and goal. Native repository discovery is guarded.\n";
+
+const LEGACY_PI_PROMPT_BEGIN: &str = "# Pixel Retrieval Layer\n";
+const LEGACY_PI_PROMPT_END: &str = "All commands accept `[PATH]`, default current directory.\n";
+
 /// The sub-agent prompt as bundled in the binary.
 pub(crate) const SUBAGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-subagent-prompt.md");
 
@@ -429,7 +435,7 @@ pub fn stale_prompts(home: &Path) -> Vec<&'static str> {
 
 /// Copy the bundled Pixel agent system prompt to `~/.local/share/pixel/agent-prompt.md`,
 /// the sub-agent prompt to `~/.local/share/pixel/subagent-prompt.md`, and the
-/// prompt into Pi's system-prompt file (pi reads it automatically, no flag needed).
+/// short Pixel rule into Pi's system-prompt file (pi reads it automatically).
 /// The prompt instructs agents to use `pixel search-content`/`pixel find-code`/`pixel impact`
 /// instead of `grep`/`rg` for code discovery in indexed repositories.
 fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
@@ -505,7 +511,7 @@ fn write_pi_prompt(path: &Path) -> Result<bool> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.into()),
     };
-    let wanted = managed_pi_content(&existing, AGENT_PROMPT_ASSET);
+    let wanted = managed_pi_content(&existing, PI_PROMPT_ASSET);
     if wanted == existing {
         return Ok(false);
     }
@@ -524,13 +530,41 @@ fn write_pi_prompt(path: &Path) -> Result<bool> {
 /// survives. Anything else follows the Markdown agent-config rules
 /// ([`config::apply_managed_markers`]).
 fn managed_pi_content(existing: &str, asset: &str) -> String {
-    if !existing.contains(config::MANAGED_BEGIN) && existing.contains(asset) {
-        let begin = config::MANAGED_BEGIN;
-        let end = config::MANAGED_END;
-        let block = format!("{begin}\n{asset}\n{end}\n");
-        return existing.replacen(asset, &block, 1);
+    if !existing.contains(config::MANAGED_BEGIN) {
+        let (cleaned, removed) = config::strip_stale_blocks(existing);
+        let source = if removed == 0 { existing } else { &cleaned };
+        let legacy_range = source
+            .find(AGENT_PROMPT_ASSET)
+            .map(|start| (start, start + AGENT_PROMPT_ASSET.len()))
+            .or_else(|| legacy_pi_prompt_range(source));
+        let replace_range =
+            legacy_range.or_else(|| source.find(asset).map(|start| (start, start + asset.len())));
+        if let Some((start, end)) = replace_range {
+            let begin = config::MANAGED_BEGIN;
+            let marker_end = config::MANAGED_END;
+            let block = format!("{begin}\n{asset}\n{marker_end}\n");
+            return format!("{}{}{}", &source[..start], block, &source[end..]);
+        }
     }
     config::apply_managed_markers(existing, asset)
+}
+
+fn legacy_pi_prompt_range(source: &str) -> Option<(usize, usize)> {
+    for (start, _) in source.rmatch_indices(LEGACY_PI_PROMPT_BEGIN) {
+        if start > 0 && source.as_bytes()[start - 1] != b'\n' {
+            continue;
+        }
+        let after_start = &source[start..];
+        let Some(end) = after_start.find(LEGACY_PI_PROMPT_END) else {
+            continue;
+        };
+        let end = end + LEGACY_PI_PROMPT_END.len();
+        let section = &after_start[..end];
+        if section.contains("## MANDATORY WORKFLOW\n") && section.contains("## REPLACEMENT MAP\n") {
+            return Some((start, start + end));
+        }
+    }
+    None
 }
 
 /// Replace `path` with `content` in one step: the bytes already there are
@@ -548,27 +582,96 @@ pub(crate) fn write_atomically(path: &Path, content: &str) -> Result<()> {
 
 #[cfg(test)]
 mod pi_prompt_content_tests {
-    use super::{AGENT_PROMPT_ASSET, managed_pi_content, write_pi_prompt};
+    use super::{AGENT_PROMPT_ASSET, PI_PROMPT_ASSET, managed_pi_content, write_pi_prompt};
     use crate::config::{MANAGED_BEGIN, MANAGED_END};
 
     #[test]
     fn a_prompt_file_written_by_an_older_install_is_wrapped_in_place_not_duplicated() {
-        let wrapped = managed_pi_content(AGENT_PROMPT_ASSET, AGENT_PROMPT_ASSET);
+        let wrapped = managed_pi_content(AGENT_PROMPT_ASSET, PI_PROMPT_ASSET);
         assert!(wrapped.starts_with(MANAGED_BEGIN), "{wrapped}");
         assert!(wrapped.trim_end().ends_with(MANAGED_END), "{wrapped}");
         assert_eq!(
-            wrapped.matches(AGENT_PROMPT_ASSET).count(),
+            wrapped.matches(PI_PROMPT_ASSET).count(),
             1,
-            "the prompt must appear once, not once outside the markers and once inside"
+            "the short Pi rule must appear once"
         );
+        assert!(!wrapped.contains(AGENT_PROMPT_ASSET));
     }
 
     #[test]
     fn user_text_around_a_stale_copy_is_kept() {
         let existing = format!("My own pi note.\n{AGENT_PROMPT_ASSET}");
-        let wrapped = managed_pi_content(&existing, AGENT_PROMPT_ASSET);
+        let wrapped = managed_pi_content(&existing, PI_PROMPT_ASSET);
         assert!(wrapped.starts_with("My own pi note.\n"), "{wrapped}");
-        assert_eq!(wrapped.matches(AGENT_PROMPT_ASSET).count(), 1);
+        assert_eq!(wrapped.matches(PI_PROMPT_ASSET).count(), 1);
+        assert!(!wrapped.contains(AGENT_PROMPT_ASSET));
+    }
+
+    #[test]
+    fn migration_without_stale_sections_preserves_an_unterminated_user_tail() {
+        let existing = format!("{AGENT_PROMPT_ASSET}Keep this exact tail.");
+        let wrapped = managed_pi_content(&existing, PI_PROMPT_ASSET);
+        assert!(wrapped.ends_with("Keep this exact tail."), "{wrapped}");
+    }
+
+    #[test]
+    fn an_unmarked_current_pi_rule_is_wrapped_without_losing_following_user_text() {
+        let existing = format!("Before.\n{PI_PROMPT_ASSET}After.\n");
+        let wrapped = managed_pi_content(&existing, PI_PROMPT_ASSET);
+        let expected =
+            format!("Before.\n{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\nAfter.\n");
+        assert_eq!(wrapped, expected, "install owns only the existing Pi rule");
+    }
+
+    #[test]
+    fn a_user_heading_alone_does_not_identify_a_legacy_prompt() {
+        let existing = "# Pixel Retrieval Layer\nMy own note.\n";
+        let wrapped = managed_pi_content(existing, PI_PROMPT_ASSET);
+        assert!(wrapped.starts_with(existing), "{wrapped}");
+        assert_eq!(wrapped.matches(PI_PROMPT_ASSET).count(), 1);
+    }
+
+    #[test]
+    fn an_earlier_similar_heading_stays_outside_the_edited_legacy_prompt() {
+        let edited = AGENT_PROMPT_ASSET.replacen(
+            "This repo has Pixel installed and indexed",
+            "This repo keeps Pixel ready",
+            1,
+        );
+        let existing = format!("# Pixel Retrieval Layer\nMy own note.\n{edited}After.\n");
+        let wrapped = managed_pi_content(&existing, PI_PROMPT_ASSET);
+        assert!(
+            wrapped.starts_with("# Pixel Retrieval Layer\nMy own note.\n"),
+            "{wrapped}"
+        );
+        assert!(wrapped.ends_with("After.\n"), "{wrapped}");
+        assert!(
+            !wrapped.contains("This repo keeps Pixel ready"),
+            "{wrapped}"
+        );
+        assert!(
+            !wrapped.contains(super::LEGACY_PI_PROMPT_END),
+            "the final legacy rule must be removed with the old section: {wrapped}"
+        );
+    }
+
+    #[test]
+    fn a_partial_legacy_signature_does_not_replace_user_text() {
+        let existing = "# Pixel Retrieval Layer\nMy note.\n## MANDATORY WORKFLOW\nMy workflow.\nAll commands accept `[PATH]`, default current directory.\n";
+        let wrapped = managed_pi_content(existing, PI_PROMPT_ASSET);
+        assert!(wrapped.starts_with(existing), "{wrapped}");
+    }
+
+    #[test]
+    fn an_inline_legacy_heading_does_not_replace_quoted_user_text() {
+        let edited = AGENT_PROMPT_ASSET.replacen(
+            "This repo has Pixel installed and indexed",
+            "This repo keeps Pixel ready",
+            1,
+        );
+        let existing = format!("Quoted: {edited}After.");
+        let wrapped = managed_pi_content(&existing, PI_PROMPT_ASSET);
+        assert!(wrapped.starts_with(&existing), "{wrapped}");
     }
 
     #[test]

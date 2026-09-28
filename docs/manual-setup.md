@@ -172,8 +172,14 @@ Pi reads `~/.pi/agent/APPEND_SYSTEM.md` automatically — no flag needed:
 
 ```bash
 mkdir -p ~/.pi/agent
-cp crates/pixel-install/assets/pixel-agent-prompt.md ~/.pi/agent/APPEND_SYSTEM.md
+printf '%s\n' 'Use the pixel tool for repository retrieval and repository Git workflows. Request the outcome through a stable action and goal. Native repository discovery is guarded.' >> ~/.pi/agent/APPEND_SYSTEM.md
+pixel install --repo .
 ```
+
+The repository install writes `.pi/extensions/pixel-guard.ts`, which Pi loads
+after the project is trusted. The extension registers the structured `pixel`
+tool and enforces the [Pi policy](pi-rms.md) at `tool_call` time. Copying the
+short prompt alone does not install that boundary.
 
 ### Any other agent
 

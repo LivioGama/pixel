@@ -2635,8 +2635,86 @@ fn a_pi_prompt_written_by_an_earlier_install_is_wrapped_not_duplicated() {
     );
     assert_eq!(
         deployed.matches(asset.as_str()).count(),
+        0,
+        "the long legacy prompt is replaced by Pi's short rule"
+    );
+    assert!(deployed.contains("Use the pixel tool for repository retrieval"));
+}
+
+#[test]
+fn legacy_pi_prompt_migration_removes_stale_sections_and_stays_healthy() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, TEST_SHELL);
+    let asset = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md"))
+        .expect("deployed legacy prompt");
+    let pi_path = pi_prompt_path(home);
+    fs::write(
+        &pi_path,
+        format!("My Pi note.\n{asset}\n## GitNexus — Legacy\nStale instructions.\n## My notes\nKeep this.\n"),
+    )
+    .expect("legacy prompt fixture");
+
+    install_for_shell(home, TEST_SHELL);
+
+    let deployed = fs::read_to_string(&pi_path).expect("migrated Pi prompt");
+    assert!(deployed.starts_with("My Pi note.\n"), "{deployed}");
+    assert!(deployed.contains("## My notes\nKeep this.\n"), "{deployed}");
+    assert!(!deployed.contains("GitNexus"), "{deployed}");
+    assert!(!deployed.contains("Stale instructions."), "{deployed}");
+    assert!(!deployed.contains(&asset), "{deployed}");
+    assert_eq!(deployed.matches(MANAGED_BEGIN).count(), 1, "{deployed}");
+    let report = doctor(&DoctorOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        ..Default::default()
+    })
+    .expect("doctor");
+    assert_eq!(
+        check(&report, "install.pi-prompt").status,
+        CheckStatus::Green
+    );
+}
+
+#[test]
+fn edited_legacy_pi_prompt_is_replaced_without_consuming_following_user_text() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, TEST_SHELL);
+    let asset = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md"))
+        .expect("deployed legacy prompt");
+    let edited = asset.replacen(
+        "This repo has Pixel installed and indexed",
+        "This repo keeps Pixel ready",
         1,
-        "the prompt must not appear twice after the upgrade"
+    );
+    assert_ne!(edited, asset, "the legacy fixture must contain an edit");
+    let pi_path = pi_prompt_path(home);
+    fs::write(&pi_path, format!("Before.\n{edited}After.\n"))
+        .expect("edited legacy prompt fixture");
+
+    install_for_shell(home, TEST_SHELL);
+
+    let deployed = fs::read_to_string(&pi_path).expect("migrated Pi prompt");
+    assert!(deployed.starts_with("Before.\n"), "{deployed}");
+    assert!(deployed.ends_with("After.\n"), "{deployed}");
+    assert!(
+        !deployed.contains("This repo keeps Pixel ready"),
+        "{deployed}"
+    );
+    assert!(!deployed.contains("# Pixel Retrieval Layer"), "{deployed}");
+    assert_eq!(deployed.matches(MANAGED_BEGIN).count(), 1, "{deployed}");
+    let report = doctor(&DoctorOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        ..Default::default()
+    })
+    .expect("doctor");
+    assert_eq!(
+        check(&report, "install.pi-prompt").status,
+        CheckStatus::Green
     );
 }
 
