@@ -66,13 +66,6 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // Suppress stderr panics in hook mode so unexpected edge cases cleanly exit 0.
     std::panic::set_hook(Box::new(|_| {}));
 
-    // The two features have independent opt-outs.
-    let task_context = !crate::env_flag_off("PIXEL_TASK_CONTEXT");
-    let task_boundary = !crate::env_flag_off("PIXEL_TASK_BOUNDARY");
-    if !task_context && !task_boundary {
-        std::process::exit(0);
-    }
-
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
         std::process::exit(0);
@@ -90,6 +83,15 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         || std::env::current_dir().unwrap_or_default(),
         PathBuf::from,
     );
+
+    let root = crate::discover_root(&cwd).ok();
+    let task_context =
+        crate::config_cmd::feature_enabled(root.as_deref(), "task_context", "PIXEL_TASK_CONTEXT");
+    let task_boundary =
+        crate::config_cmd::feature_enabled(root.as_deref(), "task_boundary", "PIXEL_TASK_BOUNDARY");
+    if !task_context && !task_boundary {
+        std::process::exit(0);
+    }
 
     let event_name = payload
         .hook_event_name

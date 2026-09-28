@@ -121,7 +121,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel self-update` | Rebuild the binary, stop the daemon, copy the new binary to the install path, and optionally restart the daemon. |
 | `pixel doctor` | Health check: install state, daemon, index/graph/facts freshness |
 | `pixel run-hook` | Hook entrypoints (guard, session-start, metrics relay) invoked by agent hooks |
-| `pixel config` | Persistent layered settings — `metrics on|off` writes `<root>/.pixel/config.yaml` (`--global` → `~/.pixel/config.yaml`); bare reports the effective setting and its layer |
+| `pixel config` | Show effective settings and their sources; `edit [--repo]` opens commented YAML in `$VISUAL`/`$EDITOR`. Global `~/.pixel/config.yaml`, repository `.pixel/config.yaml`; legacy JSON remains supported. |
 | `pixel task-state` | Inspect or reset Claude Code's local Pixel task-runtime packet |
 | `pixel action-log` | Self-assessment: pixel's own action log (what ran, what went wrong). |
 | `pixel token-savings` | Token-savings report: for retrieval-shaped commands (search/query/ context/resolve) that recorded snippet-vs-pool volumes, aggregate the fraction of the candidate pool the agent did NOT have to read. |

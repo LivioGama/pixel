@@ -1127,10 +1127,10 @@ enum Command {
         #[command(subcommand)]
         cmd: HookCmd,
     },
-    /// Persistent layered settings (`metrics` today).
+    /// Show effective settings and paths, or edit persistent YAML configuration.
     Config {
         #[command(subcommand)]
-        cmd: ConfigCmd,
+        cmd: Option<ConfigCmd>,
     },
     /// Inspect or reset Claude Code's local Pixel task-runtime packet.
     #[command(alias = "task")]
@@ -1582,6 +1582,14 @@ enum HookCmd {
 
 #[derive(Subcommand)]
 enum ConfigCmd {
+    /// Open the global YAML configuration in $VISUAL or $EDITOR (default: vi).
+    Edit {
+        /// Edit repository overrides instead of global settings.
+        #[arg(long)]
+        repo: bool,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Live 🟩 metrics footer: `pixel config metrics` reports the effective
     /// setting and its layer; `on|off` persists it to `<root>/.pixel/
     /// config.yaml` — or `~/.pixel/config.yaml` with `--global` (legacy JSON supported).
@@ -1924,7 +1932,8 @@ fn auto_start_daemon(root: &Path, req: &Request) -> Result<Response, InProcessRe
         // background and retry once. This makes the fast path transparent —
         // no need for the user to run `pixel daemon start` manually.
         // `PIXEL_DAEMON_AUTO_START=0` disables auto-start.
-        if env_flag_off("PIXEL_DAEMON_AUTO_START") {
+        if !config_cmd::feature_enabled(Some(root), "daemon_auto_start", "PIXEL_DAEMON_AUTO_START")
+        {
             return Err(InProcessReason::AutoStartDisabled);
         }
         let exe = std::env::current_exe().map_err(|_| InProcessReason::StartFailed)?;
@@ -7131,18 +7140,20 @@ fn run_command(
             }
         },
         Command::Config { cmd } => match cmd {
-            ConfigCmd::Metrics {
+            None => config_cmd::overview(Path::new(".")),
+            Some(ConfigCmd::Edit { repo, path }) => config_cmd::edit(&path, repo),
+            Some(ConfigCmd::Metrics {
                 value,
                 global,
                 path,
-            } => config_cmd::run_metrics(&path, global, value.as_deref().map(|v| v == "on")),
-            ConfigCmd::RemoteKey {
+            }) => config_cmd::run_metrics(&path, global, value.as_deref().map(|v| v == "on")),
+            Some(ConfigCmd::RemoteKey {
                 preset,
                 value,
                 clear,
-            } => config_cmd::key_from_arg(value, &mut std::io::stdin().lock())
+            }) => config_cmd::key_from_arg(value, &mut std::io::stdin().lock())
                 .and_then(|key| config_cmd::run_remote_key(preset, key, clear)),
-            ConfigCmd::ClassifyEngine { value } => {
+            Some(ConfigCmd::ClassifyEngine { value }) => {
                 config_cmd::set_classify_engine(&value)?;
                 println!("classify engine: {value} stored");
                 Ok(())

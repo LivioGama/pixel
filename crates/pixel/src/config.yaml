@@ -1,8 +1,20 @@
 # Pixel user configuration. Uncomment an example to override its default.
 # Repository settings override global settings; environment overrides win.
+# pixel config shows effective settings and their sources.
+# pixel config edit opens this file; add --repo for repository settings.
 
 # Live metrics footer (default: on).
 # metrics: "off"
+
+# Background repository daemon startup (default: true).
+# Disabling startup does not stop an already running daemon.
+# daemon_auto_start: false
+
+# Automatic code entry-point suggestions on prompt submission (default: true).
+# task_context: false
+
+# Task-boundary detection on prompt submission (default: true).
+# task_boundary: false
 
 # Classification is used only when requested. Global settings only.
 # Engine: auto (default), local, or remote.
