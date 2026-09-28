@@ -325,7 +325,7 @@ fn stale_block_header_depth(line: &str) -> Option<usize> {
 
 /// If `line` is a Markdown header (one or more leading `#`, immediately
 /// followed by a space or end-of-line), return its depth. Otherwise `None`.
-fn header_depth(line: &str) -> Option<usize> {
+pub(crate) fn header_depth(line: &str) -> Option<usize> {
     let trimmed = line.trim_start();
     let hashes = trimmed.chars().take_while(|&c| c == '#').count();
     if hashes == 0 || hashes > 6 {

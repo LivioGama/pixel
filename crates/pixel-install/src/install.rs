@@ -487,16 +487,100 @@ fn write_pi_prompt(path: &Path) -> Result<bool> {
 /// A copy of the prompt that is not inside the markers yet — what an install
 /// before the markers wrote verbatim, or a hand copy — is wrapped in place
 /// instead of appended a second time, and text the user keeps around it
-/// survives. Anything else follows the Markdown agent-config rules
-/// ([`config::apply_managed_markers`]).
-fn managed_pi_content(existing: &str, asset: &str) -> String {
+/// survives. A verbatim deploy of an *earlier* release is a stale copy, not
+/// user text: [`strip_unmarked_prompt`] lifts it out before the managed
+/// block lands, so the old command map (`pixel search`, `pixel resolve`,
+/// `pixel ask`, …) cannot sit above the fresh block and keep teaching names
+/// the CLI no longer takes. Anything else follows the Markdown agent-config
+/// rules ([`config::apply_managed_markers`]).
+pub(crate) fn managed_pi_content(existing: &str, asset: &str) -> String {
     if !existing.contains(config::MANAGED_BEGIN) && existing.contains(asset) {
         let begin = config::MANAGED_BEGIN;
         let end = config::MANAGED_END;
         let block = format!("{begin}\n{asset}\n{end}\n");
         return existing.replacen(asset, &block, 1);
     }
-    config::apply_managed_markers(existing, asset)
+    config::apply_managed_markers(&strip_unmarked_prompt(existing), asset)
+}
+
+/// Whether `line` opens a known deployed agent-prompt top-level section.
+/// A `##`-or-deeper mention or a user-authored H1 is not a deploy.
+fn is_prompt_title(line: &str) -> bool {
+    if config::header_depth(line) != Some(1) {
+        return false;
+    }
+    matches!(
+        line.trim_start()[1..].trim_start(),
+        "Pixel Retrieval Layer" | "Pixel Retrieval Layer — Mandatory Agent Protocol"
+    )
+}
+
+/// Lift the agent prompt's top-level section out of `text`, leaving the
+/// managed block and everything else alone. Releases up to 0.2.x wrote the
+/// prompt to `APPEND_SYSTEM.md` verbatim, before the managed markers
+/// existed, and a hand copy pasted under its `# Pixel Retrieval Layer`
+/// header looks the same: the section runs from that header to the next H1,
+/// the managed block, or EOF. Bytes the section held survive in the write's
+/// backup.
+pub(crate) fn strip_unmarked_prompt(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_managed = false;
+    let mut in_prompt = false;
+    let mut fence = None;
+    for line in text.lines() {
+        if line.contains(config::MANAGED_BEGIN) {
+            in_managed = true;
+            in_prompt = false;
+        }
+        if in_managed {
+            out.push_str(line);
+            out.push('\n');
+            if line.contains(config::MANAGED_END) {
+                in_managed = false;
+            }
+            continue;
+        }
+        let leading_spaces = line.bytes().take_while(|byte| *byte == b' ').count();
+        let trimmed = &line[leading_spaces..];
+        let fence_char = (leading_spaces <= 3)
+            .then_some(trimmed)
+            .and_then(|trimmed| {
+                if trimmed.starts_with("```") {
+                    Some('`')
+                } else if trimmed.starts_with("~~~") {
+                    Some('~')
+                } else {
+                    None
+                }
+            });
+        if let Some(fence_char) = fence_char {
+            fence = if fence == Some(fence_char) {
+                None
+            } else if fence.is_none() {
+                Some(fence_char)
+            } else {
+                fence
+            };
+        }
+        if in_prompt {
+            // The stale section ends at the next H1 that is not the prompt's
+            // own title — a second verbatim copy is skipped the same way.
+            if fence.is_none() && config::header_depth(line) == Some(1) && !is_prompt_title(line) {
+                in_prompt = false;
+                out.push_str(line);
+                out.push('\n');
+            }
+            continue;
+        }
+        if fence.is_none() && is_prompt_title(line) {
+            in_prompt = true;
+            fence = None;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// Replace `path` with `content` in one step: the bytes already there are
@@ -514,8 +598,14 @@ pub(crate) fn write_atomically(path: &Path, content: &str) -> Result<()> {
 
 #[cfg(test)]
 mod pi_prompt_content_tests {
-    use super::{AGENT_PROMPT_ASSET, managed_pi_content, write_pi_prompt};
+    use super::{AGENT_PROMPT_ASSET, managed_pi_content, strip_unmarked_prompt, write_pi_prompt};
     use crate::config::{MANAGED_BEGIN, MANAGED_END};
+
+    /// What `pixel install` through 0.2.x wrote to `APPEND_SYSTEM.md`: the
+    /// prompt verbatim, no markers, under the `# Pixel Retrieval Layer`
+    /// title — and a command map (`pixel search`, `pixel resolve`,
+    /// `pixel ask`) the current CLI no longer parses.
+    const LEGACY_PROMPT: &str = "# Pixel Retrieval Layer — Mandatory Agent Protocol\n\n## MANDATORY WORKFLOW\n\npixel search \"re\"        # text search\npixel resolve \"name\"    # phrase to code\npixel ask \"question\"    # semantic search\n";
 
     #[test]
     fn a_prompt_file_written_by_an_older_install_is_wrapped_in_place_not_duplicated() {
@@ -535,6 +625,119 @@ mod pi_prompt_content_tests {
         let wrapped = managed_pi_content(&existing, AGENT_PROMPT_ASSET);
         assert!(wrapped.starts_with("My own pi note.\n"), "{wrapped}");
         assert_eq!(wrapped.matches(AGENT_PROMPT_ASSET).count(), 1);
+    }
+
+    #[test]
+    fn a_verbatim_prompt_from_a_pre_marker_release_is_replaced_not_kept() {
+        let managed = managed_pi_content(LEGACY_PROMPT, AGENT_PROMPT_ASSET);
+        assert!(managed.starts_with(MANAGED_BEGIN), "{managed}");
+        assert_eq!(
+            managed.matches("Pixel Retrieval Layer").count(),
+            1,
+            "only the bundled prompt's own title may remain:\n{managed}"
+        );
+        for dead in ["pixel search \"", "pixel resolve \"", "pixel ask \""] {
+            assert!(!managed.contains(dead), "{dead} survived:\n{managed}");
+        }
+    }
+
+    #[test]
+    fn a_stale_prompt_above_a_current_managed_block_is_lifted() {
+        // The state an upgrade left behind: the managed block appended under
+        // a verbatim deploy nothing could tell from user text.
+        let existing =
+            format!("{LEGACY_PROMPT}\n{MANAGED_BEGIN}\n{AGENT_PROMPT_ASSET}\n{MANAGED_END}\n");
+        let managed = managed_pi_content(&existing, AGENT_PROMPT_ASSET);
+        assert_eq!(
+            managed,
+            format!("{MANAGED_BEGIN}\n{AGENT_PROMPT_ASSET}\n{MANAGED_END}\n"),
+            "the stale deploy goes and the block alone stays:\n{managed}"
+        );
+    }
+
+    #[test]
+    fn user_sections_around_a_stale_prompt_survive() {
+        let existing = format!("my own pi note\n{LEGACY_PROMPT}# Mine\nbe terse\n");
+        let managed = managed_pi_content(&existing, AGENT_PROMPT_ASSET);
+        assert!(managed.starts_with("my own pi note\n"), "{managed}");
+        assert!(managed.contains("# Mine\nbe terse\n"), "{managed}");
+        assert!(!managed.contains("pixel resolve"), "{managed}");
+        assert_eq!(
+            managed_pi_content(&managed, AGENT_PROMPT_ASSET),
+            managed,
+            "the result is stable across installs"
+        );
+    }
+
+    #[test]
+    fn a_deeper_header_mentioning_the_prompt_title_is_prose_not_a_deploy() {
+        let existing = "## notes on the Pixel Retrieval Layer\nmine\n";
+        let managed = managed_pi_content(existing, AGENT_PROMPT_ASSET);
+        assert!(
+            managed.starts_with(existing),
+            "a `##` section is the user's text:\n{managed}"
+        );
+    }
+
+    #[test]
+    fn a_user_h1_with_a_similar_prompt_title_is_not_claimed() {
+        let existing = "# Pixel Retrieval Layer Notes\nmy own instructions\n";
+        let managed = managed_pi_content(existing, AGENT_PROMPT_ASSET);
+        assert!(
+            managed.starts_with(existing),
+            "user H1 was removed:\n{managed}"
+        );
+    }
+
+    #[test]
+    fn a_prompt_title_inside_a_fence_is_not_claimed() {
+        let existing = "~~~markdown\n# Pixel Retrieval Layer\nkeep this content\n~~~\n";
+        let managed = managed_pi_content(existing, AGENT_PROMPT_ASSET);
+        assert!(
+            managed.starts_with(existing),
+            "fenced user text was removed:\n{managed}"
+        );
+    }
+
+    #[test]
+    fn a_fenced_h1_does_not_end_legacy_prompt_removal() {
+        let existing = format!(
+            "{LEGACY_PROMPT}\n```bash\n# shell comment, not a section\npixel ask \\\"question\\\"\n```\n"
+        );
+        let managed = managed_pi_content(&existing, AGENT_PROMPT_ASSET);
+        for retired in ["pixel resolve", "pixel ask", "# shell comment"] {
+            assert!(!managed.contains(retired), "{retired} survived:\n{managed}");
+        }
+    }
+
+    #[test]
+    fn four_space_indented_fences_do_not_hide_a_following_user_h1() {
+        for fence in ["```", "~~~"] {
+            let existing = format!(
+                "{LEGACY_PROMPT}\n    {fence}markdown\n# Mine\nkeep this content\n    {fence}\n"
+            );
+            let managed = managed_pi_content(&existing, AGENT_PROMPT_ASSET);
+            assert!(
+                managed.contains("# Mine\nkeep this content\n"),
+                "{fence}:\n{managed}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_managed_block_body_is_never_scanned_for_the_prompt_title() {
+        // The bundled prompt itself opens on `# Pixel Retrieval Layer`;
+        // inside the markers it is the payload, not a stale copy.
+        let existing = format!("{MANAGED_BEGIN}\n{AGENT_PROMPT_ASSET}\n{MANAGED_END}\n");
+        assert_eq!(managed_pi_content(&existing, AGENT_PROMPT_ASSET), existing);
+    }
+
+    #[test]
+    fn strip_unmarked_prompt_leaves_plain_text_and_markers_untouched() {
+        let managed_only = format!("{MANAGED_BEGIN}\nbody\n{MANAGED_END}\n");
+        assert_eq!(strip_unmarked_prompt(&managed_only), managed_only);
+        assert_eq!(strip_unmarked_prompt("just notes\n"), "just notes\n");
+        assert_eq!(strip_unmarked_prompt(""), "");
     }
 
     #[test]

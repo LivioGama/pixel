@@ -2640,6 +2640,108 @@ fn a_pi_prompt_written_by_an_earlier_install_is_wrapped_not_duplicated() {
     );
 }
 
+/// The verbatim deploy a ≤0.2.x install wrote, before the managed markers
+/// existed: the whole prompt under its `# Pixel Retrieval Layer` title, with
+/// the retired `pixel search`/`resolve`/`ask` command map.
+const LEGACY_PI_PROMPT: &str = include_str!("../../pixel/tests/cli/fixtures/agent-prompt-0.2.4.md");
+
+#[test]
+fn a_pre_marker_pi_prompt_is_replaced_not_kept_above_the_block() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let pi_path = pi_prompt_path(home);
+    fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+    fs::write(&pi_path, LEGACY_PI_PROMPT).unwrap();
+    assert!(
+        LEGACY_PI_PROMPT.contains("pixel resolve \""),
+        "fixture sanity"
+    );
+
+    install_for_shell(home, TEST_SHELL);
+
+    let deployed = fs::read_to_string(&pi_path).expect("pi prompt deployed");
+    assert!(
+        deployed.starts_with(MANAGED_BEGIN),
+        "the stale deploy must be replaced by the managed block, not kept above it:\n{deployed}"
+    );
+    for dead in ["pixel search \"", "pixel resolve \"", "pixel ask \""] {
+        assert!(
+            !deployed.contains(dead),
+            "{dead} survived install — pi would still teach a dead command:\n{deployed}"
+        );
+    }
+}
+
+#[test]
+fn a_stale_prompt_above_the_managed_block_is_lifted_by_install() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, TEST_SHELL);
+    let pi_path = pi_prompt_path(home);
+    // What the upgrade left: a current managed block under the verbatim
+    // deploy nobody could tell from user text.
+    let with_block = fs::read_to_string(&pi_path).unwrap();
+    fs::write(&pi_path, format!("{LEGACY_PI_PROMPT}\n{with_block}")).unwrap();
+
+    install_for_shell(home, TEST_SHELL);
+
+    let deployed = fs::read_to_string(&pi_path).expect("pi prompt deployed");
+    assert!(
+        !deployed.contains("pixel resolve \""),
+        "the stale deploy must leave, not sit above the block:\n{deployed}"
+    );
+    assert_eq!(
+        deployed.matches(MANAGED_BEGIN).count(),
+        1,
+        "one managed block, once:\n{deployed}"
+    );
+}
+
+#[test]
+fn uninstall_removes_a_stale_verbatim_prompt_with_the_block() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, TEST_SHELL);
+    let pi_path = pi_prompt_path(home);
+    let with_block = fs::read_to_string(&pi_path).unwrap();
+    fs::write(&pi_path, format!("{LEGACY_PI_PROMPT}\n{with_block}")).unwrap();
+
+    uninstall_home(home);
+
+    assert!(
+        !pi_path.exists(),
+        "a file holding only pixel's prompt — markers or not — is pixel's to delete"
+    );
+}
+
+#[test]
+fn uninstall_keeps_user_text_and_drops_a_stale_verbatim_prompt() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, TEST_SHELL);
+    let pi_path = pi_prompt_path(home);
+    let with_block = fs::read_to_string(&pi_path).unwrap();
+    let user_text = "# Mine\nbe terse\n";
+    fs::write(
+        &pi_path,
+        format!("{LEGACY_PI_PROMPT}{user_text}\n{with_block}"),
+    )
+    .unwrap();
+
+    uninstall_home(home);
+
+    let after = fs::read_to_string(&pi_path).expect("user text survives uninstall");
+    assert!(
+        !after.contains("pixel resolve \"") && !after.contains(MANAGED_BEGIN),
+        "pixel's text is gone:\n{after}"
+    );
+    assert_eq!(
+        after,
+        format!("{user_text}\n"),
+        "only the user's own section stays"
+    );
+}
+
 #[test]
 fn uninstall_removes_the_pi_prompt_file_when_it_held_nothing_else() {
     let dir = TempDir::new().expect("tempdir");
@@ -2676,6 +2778,36 @@ fn uninstall_survives_a_missing_pi_prompt_file() {
         "the prompt is removed even when the pi file was never deployed"
     );
     assert!(!pi_prompt_path(home).exists());
+}
+
+#[test]
+fn uninstall_keeps_an_untouched_whitespace_only_pi_prompt_and_reports_it() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let pi_path = pi_prompt_path(home);
+    fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+    fs::write(&pi_path, " \n\t\n").unwrap();
+
+    let report = uninstall(&UninstallOptions {
+        repo: None,
+        home: Some(home.to_path_buf()),
+        binary_path: Some(home.join("pixel")),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .expect("uninstall");
+
+    assert_eq!(fs::read_to_string(&pi_path).unwrap(), " \n\t\n");
+    let step = report
+        .steps
+        .iter()
+        .find(|step| step.id == "agent-prompt")
+        .expect("agent prompt step");
+    assert_eq!(
+        step.summary,
+        "removed agent-prompt.md and subagent-prompt.md"
+    );
 }
 
 #[test]
@@ -2751,6 +2883,18 @@ fn doctor_pi_prompt_check_is_red_until_the_managed_block_is_current() {
         status(home),
         CheckStatus::Red,
         "a stale block must send the user back to pixel install"
+    );
+
+    // So is a verbatim deploy a pre-marker release left above a current
+    // block: its retired command map still reaches pi.
+    let current_asset =
+        fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
+    let fresh_block = format!("{MANAGED_BEGIN}\n{current_asset}\n{MANAGED_END}\n");
+    fs::write(&pi_path, format!("{LEGACY_PI_PROMPT}\n{fresh_block}")).unwrap();
+    assert_eq!(
+        status(home),
+        CheckStatus::Red,
+        "a stale verbatim deploy above the block must send the user back to pixel install"
     );
 
     // And the file must carry the block at all.
