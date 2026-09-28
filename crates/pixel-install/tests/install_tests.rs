@@ -2541,6 +2541,8 @@ fn pi_prompt_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".pi/agent/APPEND_SYSTEM.md")
 }
 
+const PRE_MARKER_PI_PROMPT: &str = "# Pixel Retrieval Layer — Mandatory Agent Protocol\n\n## THE COMPLETE REPLACEMENT MAP\npixel search \"term\"\n## ENVIRONMENT\nAll commands accept `[PATH]` (default: current directory).\n";
+
 /// Backup files `pixel install` wrote for the pi prompt, newest last.
 fn pi_backups(home: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut paths: Vec<std::path::PathBuf> = fs::read_dir(home.join(".pi/agent"))
@@ -2612,6 +2614,63 @@ fn install_and_uninstall_keep_the_users_own_text_in_pis_append_system_file() {
     let after = fs::read_to_string(&pi_path).expect("the user's file survives uninstall");
     assert_eq!(after, original, "uninstall removes the block, not the file");
     assert!(!after.contains(MANAGED_BEGIN), "{after}");
+}
+
+#[test]
+fn doctor_detects_a_pre_marker_prompt_above_the_managed_block_until_install_repairs_it() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, TEST_SHELL);
+    let pi_path = pi_prompt_path(home);
+    let current = fs::read_to_string(&pi_path).unwrap();
+    let stale = format!("My own note.\n{PRE_MARKER_PI_PROMPT}## My section\nKeep this.\n{current}");
+    fs::write(&pi_path, &stale).unwrap();
+    let doctor_opts = DoctorOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        ..Default::default()
+    };
+    let pi_status = || check(&doctor(&doctor_opts).expect("doctor"), "install.pi-prompt").status;
+    assert_eq!(
+        pi_status(),
+        CheckStatus::Red,
+        "the retired command map is still active"
+    );
+
+    install_for_shell(home, TEST_SHELL);
+    let repaired = fs::read_to_string(&pi_path).unwrap();
+    assert_eq!(
+        repaired,
+        format!("My own note.\n## My section\nKeep this.\n{current}"),
+        "install must remove only the recognized historical prompt"
+    );
+    assert_eq!(pi_status(), CheckStatus::Green);
+    assert_eq!(
+        fs::read_to_string(pi_backups(home).last().unwrap()).unwrap(),
+        stale
+    );
+}
+
+#[test]
+fn uninstall_reclaims_pre_marker_prompt_copies_without_erasing_user_text() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    install_for_shell(home, TEST_SHELL);
+    let pi_path = pi_prompt_path(home);
+    let current = fs::read_to_string(&pi_path).unwrap();
+    fs::write(
+        &pi_path,
+        format!("Before.\n{PRE_MARKER_PI_PROMPT}## My section\nKeep this.\n{current}After.\n"),
+    )
+    .unwrap();
+
+    uninstall_home(home);
+
+    assert_eq!(
+        fs::read_to_string(&pi_path).unwrap(),
+        "Before.\n## My section\nKeep this.\nAfter.\n"
+    );
 }
 
 #[test]

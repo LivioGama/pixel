@@ -1068,36 +1068,33 @@ fn remove_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
             detail: None,
         });
     }
-    // Pi's system-prompt file is shared: pixel owns the managed block inside
-    // it, not the file. Whatever the user keeps outside the markers survives,
-    // and the file is deleted only when the block was all it held.
+    // Pi's system-prompt file is shared: pixel owns its managed block and
+    // recognized pre-marker prompts, not the user's surrounding text. Remove
+    // the file only when nothing else remains.
     let pi_original = match fs::read_to_string(&pi_path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.into()),
     };
-    let pi_cleaned = pi_original
-        .contains(config::MANAGED_BEGIN)
-        .then(|| config::strip_managed_block(&pi_original));
-    let pi_removed = pi_cleaned
-        .as_deref()
-        .is_some_and(|cleaned| cleaned.trim().is_empty());
+    let pi_cleaned = config::strip_managed_block(&install::strip_unmarked_pi_prompts(&pi_original));
+    let pi_touched = pi_cleaned != pi_original;
+    let pi_removed = pi_touched && pi_cleaned.trim().is_empty();
     if !dry_run {
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&subagent_path);
-        if let Some(cleaned) = pi_cleaned.as_deref() {
-            if cleaned.trim().is_empty() {
-                let _ = config::backup_if_changing(&pi_path, cleaned.as_bytes())?;
+        if pi_touched {
+            if pi_cleaned.trim().is_empty() {
+                let _ = config::backup_if_changing(&pi_path, pi_cleaned.as_bytes())?;
                 fs::remove_file(&pi_path)?;
-            } else if cleaned != pi_original {
-                let _ = config::backup_if_changing(&pi_path, cleaned.as_bytes())?;
-                fs::write(&pi_path, cleaned)?;
+            } else {
+                let _ = config::backup_if_changing(&pi_path, pi_cleaned.as_bytes())?;
+                fs::write(&pi_path, &pi_cleaned)?;
             }
         }
     }
     let summary = if pi_removed {
         "removed agent-prompt.md, subagent-prompt.md and the pi prompt file"
-    } else if pi_cleaned.is_some() {
+    } else if pi_touched {
         "removed agent-prompt.md and subagent-prompt.md, kept the text around the pixel block in APPEND_SYSTEM.md"
     } else {
         "removed agent-prompt.md and subagent-prompt.md"
