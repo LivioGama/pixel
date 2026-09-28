@@ -28,82 +28,12 @@ pub(crate) const EXTENSION: &str = ".pi/extensions/pixel-guard.ts";
 /// (`AGENTS.md`).
 pub(crate) const LEGACY_DIR: &str = ".pi/agent";
 
-/// The guard extension's source for the pixel binary at `exe`. pi's
-/// `tool_call` event can rewrite a tool call by mutating `event.input`, so
-/// the extension shells out to `pixel run-hook guard` and applies any
-/// `updatedInput` the guard emits. A non-zero guard exit is advisory only —
-/// the tool call stays allowed.
+/// The repository extension with the installed Pixel executable embedded.
 pub(crate) fn extension_source(exe: &Path) -> String {
-    format!(
-        r#"// pixel-guard extension — managed by `pixel install`
-// {begin}
-// {end}
-import {{ spawnSync }} from "child_process";
-
-const PIXEL_BIN = {exe_path:?};
-const GUARD_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls", "sed", "awk", "perl", "ag", "ack", "egrep", "fgrep", "head", "tail", "cat", "xargs",
-  // Antigravity/Gemini tool names
-  "run_command", "view_file", "replace_file_content", "write_to_file", "grep_search", "find_by_name", "list_dir", "file_search", "edit_file"]);
-
-export default function activate(pi) {{
-  pi.on("tool_call", async (event, ctx) => {{
-    const toolName = event.toolName;
-    if (!GUARD_TOOLS.has(toolName)) return;
-
-    // Build the PreToolUse-compatible payload that `pixel run-hook guard`
-    // expects on stdin.
-    const cwd = ctx?.cwd ?? process.cwd();
-    const payload = {{
-      hook_event_name: "PreToolUse",
-      tool_name: toolName,
-      tool_input: event.input ?? {{}},
-      cwd,
-    }};
-
-    try {{
-      const result = spawnSync(PIXEL_BIN, ["run-hook", "guard"], {{
-        input: JSON.stringify(payload),
-        timeout: 5000,
-        encoding: "utf-8",
-      }});
-
-      // Keep the tool available even if a legacy guard path returns exit 2.
-      if (result.status === 2) {{
-        const reason = (result.stderr || "").trim() || "blocked by pixel guard";
-        console.warn(`[pixel] advisory: ${{reason}}`);
-        return;
-      }}
-
-      // exit 0 with stdout = possibly a rewrite (hookSpecificOutput.updatedInput).
-      // pi docs: "Mutations to event.input affect the actual tool execution"
-      // — mutate in place rather than returning a separate object.
-      if (result.status === 0 && result.stdout) {{
-        try {{
-          const parsed = JSON.parse(result.stdout);
-          const updated = parsed?.hookSpecificOutput?.updatedInput;
-          if (updated && typeof updated === "object") {{
-            Object.assign(event.input, updated);
-            return;
-          }}
-        }} catch {{
-          // stdout wasn't JSON — that's fine, the guard just allowed the call
-        }}
-      }}
-
-      // Any other exit (including crash/timeout) = allow, don't block the
-      // agent on a guard failure.
-      return;
-    }} catch {{
-      // spawn failure — allow, don't block the agent.
-      return;
-    }}
-  }});
-}}
-"#,
-        begin = config::MANAGED_BEGIN,
-        end = config::MANAGED_END,
-        exe_path = exe.display().to_string(),
-    )
+    include_str!("../assets/pi-pixel.ts")
+        .replace("__PIXEL_BIN__", &format!("{:?}", exe.display().to_string()))
+        .replace("__MANAGED_BEGIN__", config::MANAGED_BEGIN)
+        .replace("__MANAGED_END__", config::MANAGED_END)
 }
 
 /// Whether `path` is a guard extension pixel wrote: a file carrying the
@@ -279,9 +209,11 @@ mod tests {
         );
         assert!(source.contains(config::MANAGED_BEGIN), "{source}");
         assert!(source.contains(config::MANAGED_END), "{source}");
-        assert!(source.contains("[\"run-hook\", \"guard\"]"), "{source}");
+        assert!(source.contains("pi.registerTool({"), "{source}");
+        assert!(source.contains("pi.on(\"tool_call\""), "{source}");
+        assert!(source.contains("return { block: true"), "{source}");
         assert!(
-            source.contains("export default function activate(pi)"),
+            source.contains("export default function activate(pi: ExtensionAPI)"),
             "{source}"
         );
     }
