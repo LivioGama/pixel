@@ -1,13 +1,13 @@
 // Focused policy test: node --experimental-strip-types scripts/test-pi-policy.mjs
 // Uses a fake Pixel process so every write operation is visible in a trace.
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, chmodSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const root = mkdtempSync(join(tmpdir(), "pi-policy-"));
-mkdirSync(join(root, ".pixel"));
+symlinkSync(tmpdir(), join(root, "outside-link"));
 const binary = join(root, "pixel");
 const trace = join(root, "calls.jsonl");
 writeFileSync(binary, `#!/usr/bin/env node
@@ -36,6 +36,7 @@ let tool;
 let guard;
 activate({ registerTool: (value) => { tool = value; }, on: (name, handler) => { assert.equal(name, "tool_call"); guard = handler; } });
 const user = (text) => ({ cwd: root, sessionManager: { getBranch: () => [{type:"message", message:{role:"user", content:[{type:"text", text}]}}] } });
+const userString = (text) => ({ cwd: root, sessionManager: { getBranch: () => [{type:"message", message:{role:"user", content:text}}] } });
 const calls = () => readFileSync(trace, "utf8").trim().split("\n").map(JSON.parse);
 
 const ls = {toolName:"bash", input:{command:"ls src"}};
@@ -45,6 +46,27 @@ assert.doesNotMatch(ls.input.command, /^ls /);
 const cat = {toolName:"bash", input:{command:"cat src/main.rs"}};
 assert.equal((await guard(cat, user("inspect"))).block, true);
 assert.equal(cat.input.command, "cat src/main.rs");
+assert.match(readFileSync(join(root, ".pixel/pi-policy.jsonl"), "utf8"), /"kind":"blocked"/);
+const composite = {toolName:"bash", input:{command:"pixel status; cat src/main.rs"}};
+assert.equal((await guard(composite, user("inspect"))).block, true);
+assert.equal(composite.input.command, "pixel status; cat src/main.rs");
+for (const command of [
+  "cp src/main.rs /tmp/pixel-copy",
+  "cp -R . /tmp/pixel-copy",
+  "cp src/main.rs src/other.rs /tmp/pixel-copy",
+  "cp 'src/main.rs' '/tmp/pixel copy'",
+  "cp src/main.rs ~",
+  "cp src/main.rs outside-link/copy.rs",
+  "cp src/main.rs -t /tmp/pixel-copy src/other.rs",
+  "cp src/main.rs /tmp/pixel-copy # src/copy.rs",
+]) {
+  const copy = {toolName:"bash", input:{command}};
+  assert.equal((await guard(copy, user("inspect"))).block, true, command);
+  assert.equal(copy.input.command, command);
+}
+for (const command of ["cp src/main.rs src/copy.rs", "cp src/main.rs 'src/#copy.rs'", "cp -R src src-copy", "cp /tmp/external src/copy.rs"]) {
+  assert.equal(await guard({toolName:"bash", input:{command}}, user("edit")), undefined, command);
+}
 const read = {toolName:"read", input:{path:"src/main.rs"}};
 assert.equal((await guard(read, user("inspect"))).block, true);
 
@@ -60,7 +82,13 @@ assert.equal(calls().filter((args) => args[0] === "fetch").length, 1);
 const denied = await tool.execute("3", {action:"commit_and_push", files:["src/main.rs"], message:"test", request_id:"denied"}, null, null, user("fetch only"));
 assert.match(denied.content[0].text, /authorization.*absent/);
 assert.equal(calls().filter((args) => args[0] === "commit-and-push").length, 0);
+for (const text of ["do not commit and push", "don't commit yet", "commit messages look wrong"]) {
+  const result = await tool.execute("no", {action:"commit_and_push", files:["src/main.rs"], message:"test", request_id:"denied"}, null, null, userString(text));
+  assert.match(result.content[0].text, /authorization.*absent/, text);
+}
+assert.equal(calls().filter((args) => args[0] === "commit-and-push").length, 0);
 await tool.execute("4", {action:"commit_and_push", files:["src/main.rs"], message:"test", request_id:"allowed"}, null, null, user("commit and push this change"));
 assert.equal(calls().filter((args) => args[0] === "commit-and-push").length, 1);
-assert.equal(calls().filter((args) => args[0] === "commit").length, 0);
+await tool.execute("5", {action:"commit", files:["src/main.rs"], message:"test", request_id:"allowed-2"}, null, null, userString("Please commit this change"));
+assert.equal(calls().filter((args) => args[0] === "commit").length, 1);
 console.log("Pi policy: translation, pre-execution block, scoped read, fetch isolation, and write authorization passed");
