@@ -40,6 +40,8 @@ pub enum Preset {
     Openrouter,
     Ollama,
     Local,
+    Deepseek,
+    OpencodeGo,
 }
 
 impl Preset {
@@ -49,6 +51,8 @@ impl Preset {
             Preset::Openrouter => "https://openrouter.ai/api/v1",
             Preset::Ollama => "https://ollama.com/v1",
             Preset::Local => "http://localhost:11434/v1",
+            Preset::Deepseek => "https://api.deepseek.com/v1",
+            Preset::OpencodeGo => "https://opencode.ai/zen/go/v1",
         }
     }
 
@@ -59,6 +63,8 @@ impl Preset {
             Preset::Openrouter => Some("OPENROUTER_API_KEY"),
             Preset::Ollama => Some("OLLAMA_API_KEY"),
             Preset::Local => None,
+            Preset::Deepseek => Some("DEEPSEEK_API_KEY"),
+            Preset::OpencodeGo => Some("OPENCODE_API_KEY"),
         }
     }
 
@@ -69,6 +75,8 @@ impl Preset {
             Preset::Openrouter => "deepseek/deepseek-v4.1-flash",
             Preset::Ollama => "deepseek-v4.1-flash:cloud",
             Preset::Local => "qwen3.5:4b",
+            Preset::Deepseek => "deepseek-chat",
+            Preset::OpencodeGo => "deepseek-v4.1-flash",
         }
     }
 
@@ -79,7 +87,15 @@ impl Preset {
             Preset::Openrouter => "openrouter",
             Preset::Ollama => "ollama",
             Preset::Local => "local",
+            Preset::Deepseek => "deepseek",
+            Preset::OpencodeGo => "opencode-go",
         }
+    }
+
+    /// OpenCode Go requires each conversation to carry a stable session id
+    /// (`x-opencode-session`) and rejects generic SDK user agents.
+    fn wants_session_header(&self) -> bool {
+        matches!(self, Preset::OpencodeGo)
     }
 }
 
@@ -92,6 +108,9 @@ pub struct Config {
     pub model: String,
     /// The API key value, read once from an env var by name. Never logged.
     key: Option<String>,
+    /// Stable per-invocation session id for providers that require one
+    /// (`x-opencode-session` for OpenCode Go); `None` elsewhere.
+    pub session_id: Option<String>,
 }
 
 /// `Debug` masks the key — `Config` appears in error paths and a derived
@@ -104,6 +123,13 @@ impl std::fmt::Debug for Config {
             .field("model", &self.model)
             .finish_non_exhaustive()
     }
+}
+
+/// One stable session id per invocation: providers that require a session
+/// header get the same value on every request of this run. Pure so a test
+/// can pin the shape and the stability.
+fn new_session_id(now_millis: u128, pid: u32) -> String {
+    format!("pixel-classify-{pid}-{now_millis}")
 }
 
 /// The env var the key is read from: `PIXEL_REMOTE_KEY_ENV` when it names
@@ -161,11 +187,22 @@ fn resolve_config_from(
         .filter(|s| !s.is_empty())
         .or_else(|| set("PIXEL_REMOTE_MODEL"))
         .unwrap_or_else(|| preset.default_model().to_string());
+    let session_id = if preset.wants_session_header() {
+        Some(new_session_id(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
+            std::process::id(),
+        ))
+    } else {
+        None
+    };
     Ok(Config {
         preset,
         base,
         model,
         key,
+        session_id,
     })
 }
 
@@ -338,6 +375,9 @@ fn http_chat_within(
     if let Some(key) = &config.key {
         request = request.header("Authorization", &format!("Bearer {key}"));
     }
+    if let Some(session) = &config.session_id {
+        request = request.header("x-opencode-session", session);
+    }
     let mut response = request
         .send_json(body)
         .map_err(|e| format!("remote chat {url}: {e}"))?;
@@ -458,6 +498,20 @@ mod tests {
                 "local",
                 None,
             ),
+            (
+                Preset::Deepseek,
+                "https://api.deepseek.com/v1",
+                "deepseek-chat",
+                "deepseek",
+                Some("DEEPSEEK_API_KEY"),
+            ),
+            (
+                Preset::OpencodeGo,
+                "https://opencode.ai/zen/go/v1",
+                "deepseek-v4.1-flash",
+                "opencode-go",
+                Some("OPENCODE_API_KEY"),
+            ),
         ];
         for (preset, base, model, display, key_env) in table {
             assert_eq!(
@@ -471,6 +525,29 @@ mod tests {
                 "{preset:?}"
             );
         }
+        // OpenCode Go requires a per-conversation session header; nobody
+        // else sends one.
+        assert!(Preset::OpencodeGo.wants_session_header());
+        assert!(!Preset::Openrouter.wants_session_header());
+        assert!(!Preset::Local.wants_session_header());
+    }
+
+    #[test]
+    fn the_session_id_is_stable_and_well_shaped() {
+        let id = new_session_id(1_758_000_000_000, 4242);
+        assert_eq!(id, "pixel-classify-4242-1758000000000");
+        assert_eq!(id, new_session_id(1_758_000_000_000, 4242));
+        assert_ne!(new_session_id(1_758_000_000_001, 4242), id);
+        assert_ne!(new_session_id(1_758_000_000_000, 4243), id);
+    }
+
+    #[test]
+    fn only_the_go_preset_carries_a_session_header() {
+        let go = resolve_config_from(Preset::OpencodeGo, None, key(), env_of(&[])).unwrap();
+        assert!(go.session_id.as_deref().is_some_and(|s| s.starts_with("pixel-classify-")));
+        let deepseek =
+            resolve_config_from(Preset::Deepseek, None, key(), env_of(&[])).unwrap();
+        assert_eq!(deepseek.session_id, None);
     }
 
     fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
@@ -657,6 +734,7 @@ mod tests {
             base: base.to_string(),
             model: "m".to_string(),
             key: key.map(str::to_string),
+            session_id: None,
         }
     }
 
@@ -884,6 +962,7 @@ mod tests {
             base: "http://example.invalid/v1".to_string(),
             model: "m".to_string(),
             key: Some("topsecret".to_string()),
+            session_id: None,
         };
         let remote = Remote::with_chat(config, move |cfg, body| {
             *seen.lock().unwrap() = Some(body.clone());
@@ -905,6 +984,7 @@ mod tests {
             base: "https://example.invalid/v1".to_string(),
             model: "m".to_string(),
             key: Some("sekret".to_string()),
+            session_id: None,
         };
         assert!(!format!("{config:?}").contains("sekret"));
     }
