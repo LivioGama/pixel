@@ -54,6 +54,19 @@ fn overview_should_show_effective_layers_without_creating_files_or_printing_secr
     assert!(text.contains("remote_keys.deepseek: set"));
     assert!(!text.contains("secret"));
     assert!(!String::from_utf8_lossy(&out.stderr).contains("secret"));
+    for (env, expected) in [
+        ("0", "metrics: off (PIXEL_METRICS)"),
+        ("1", "metrics: on (Repo)"),
+    ] {
+        let out = pixel_command()
+            .env("HOME", &*home)
+            .env("PIXEL_METRICS", env)
+            .current_dir(&*repo)
+            .arg("config")
+            .output()
+            .unwrap();
+        assert!(stdout(&out).contains(expected));
+    }
 }
 
 #[cfg(unix)]

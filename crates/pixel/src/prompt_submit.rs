@@ -89,7 +89,7 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         crate::config_cmd::feature_enabled(root.as_deref(), "task_context", "PIXEL_TASK_CONTEXT");
     let task_boundary =
         crate::config_cmd::feature_enabled(root.as_deref(), "task_boundary", "PIXEL_TASK_BOUNDARY");
-    if !task_context && !task_boundary {
+    if prompt_features_disabled(task_context, task_boundary) {
         std::process::exit(0);
     }
 
@@ -143,6 +143,11 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         emit_context(&context, event_name);
     }
     std::process::exit(0);
+}
+
+/// Either feature can run independently; only disabling both suppresses the hook.
+fn prompt_features_disabled(context: bool, boundary: bool) -> bool {
+    !context && !boundary
 }
 
 /// Accept only a plainly imperative local coding request. Questions, planning,
@@ -769,6 +774,18 @@ pub(crate) fn emit_context(note: &str, event_name: &str) -> ! {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn prompt_features_should_run_when_either_feature_is_enabled() {
+        for (context, boundary, disabled) in [
+            (false, false, true),
+            (false, true, false),
+            (true, false, false),
+            (true, true, false),
+        ] {
+            assert_eq!(super::prompt_features_disabled(context, boundary), disabled);
+        }
+    }
     use super::*;
     use std::process::Command;
 
