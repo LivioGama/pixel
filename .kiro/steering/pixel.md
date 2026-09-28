@@ -54,6 +54,7 @@ pixel commit --files <f1> --files <f2> -m "msg" --request-id "id"   # only when 
 | `pixel review-changes` | structured staged/unstaged diff |
 | `pixel recall …` | past agent sessions — see below |
 | `pixel replay-flow replay\|get "<name>"` / `pixel list-errors last` | saved UI flows / captured errors |
+| `pixel classify "<text>" --label a --label b` | a bounded decision: probability per label + `predicted:` — see below |
 
 History and git ops — use instead of raw `git`. The ops that write
 (`commit`, `commit-and-push`, `new-branch`, `fast-forward`) require
@@ -69,6 +70,26 @@ retry so pixel replays its result instead of running it twice.
 | `git branch -a -vv` | `pixel list-branches` |
 | `git add+commit[+push]` | `pixel commit --files <f1> --files <f2> -m "msg" --request-id "id"` / `pixel commit-and-push --files <f1> -m "msg" origin <branch> --request-id "id"` (push only when authorized) |
 | `git checkout -b` / `git fetch` / `git merge --ff-only` | `pixel new-branch <name> --request-id "id"` / `pixel fetch origin` / `pixel fast-forward --expected-head <oid> --target-oid <oid> --request-id "id"` |
+
+## Classify — a bounded decision, not retrieval
+
+`pixel classify` answers "which of these labels fits this text" through a
+decision model. Use it for judgment calls — routing work to an area, a
+severity pick, a yes/no gate — never for search. It does not read `.pixel/`:
+an unindexed repo still classifies.
+
+```bash
+pixel classify "<text>" --label bug --label feature --context "what kind of change" [--criterion bug="what bug means"]
+pixel classify "<text>"    # no --label: the default question battery (intent/urgency/…), local engine only
+pixel classify --jsonl     # batch: one {"text","labels","criteria","context"} spec per stdin line
+```
+
+Output is a probability per label plus `predicted:` (the argmax). Engine:
+`--engine remote|ollaya` wins over the stored `pixel config classify-engine`
+preference; `auto` probes the local daemon and falls back to remote. Remote
+verbalizes probabilities (self-reported); `ollaya` reads calibrated head
+outputs and discloses `confidence`. Write labels that mean something to the
+model — `--criterion` is where the definition goes.
 
 ## Hard rules
 

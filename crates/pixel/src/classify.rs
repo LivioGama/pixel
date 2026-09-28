@@ -119,6 +119,16 @@ trait DecisionEngine {
     /// merged into the document's `snapshot` object when present.
     fn extra_snapshot(&self) -> Option<Value>;
     fn decide(&mut self, spec: &Spec) -> Result<BTreeMap<String, f64>, String>;
+    /// Answer a label-less typed battery over the state — the local Ollaya
+    /// engine's path when `--label` is absent. The remote engine has no
+    /// battery: its prompt is built from the caller's labels.
+    fn decide_battery(&mut self, _state: &str) -> Result<Value, String> {
+        Err(
+            "no --label given: bare classify needs the local Ollaya engine \
+             (`--engine ollaya` or `pixel config classify-engine local`)"
+                .to_string(),
+        )
+    }
 }
 
 impl DecisionEngine for crate::decide_remote::Remote {
@@ -173,6 +183,10 @@ impl DecisionEngine for crate::decide_ollaya::Ollaya {
 
     fn decide(&mut self, spec: &Spec) -> Result<BTreeMap<String, f64>, String> {
         crate::decide_ollaya::Ollaya::decide(self, spec)
+    }
+
+    fn decide_battery(&mut self, state: &str) -> Result<Value, String> {
+        self.ask(state, &crate::decide_ollaya::default_battery())
     }
 }
 
@@ -385,15 +399,13 @@ pub struct ClassifyOptions {
     /// It is replicated into each candidate rather than added to the state.
     #[arg(long, conflicts_with = "jsonl")]
     pub context: Option<String>,
-    /// Candidate labels (repeatable or comma-separated).
-    #[arg(
-        long = "label",
-        value_delimiter = ',',
-        required_unless_present = "jsonl"
-    )]
+    /// Candidate labels (repeatable or comma-separated). Omit to answer the
+    /// default question battery over the text instead — that path needs the
+    /// local Ollaya engine (`--engine ollaya` or stored `local`).
+    #[arg(long = "label", value_delimiter = ',')]
     pub labels: Vec<String>,
     /// Criterion text per label: --criterion label="description".
-    #[arg(long = "criterion")]
+    #[arg(long = "criterion", requires = "labels")]
     pub criteria: Vec<String>,
     /// Remote provider preset: `openrouter`, `ollama`, or `local`.
     /// Selects the base URL and the API-key env var; see `PIXEL_REMOTE_*`.
@@ -458,6 +470,73 @@ fn one_shot_spec(opts: &ClassifyOptions) -> Result<Spec, String> {
     )
 }
 
+/// One line per battery answer, `name: answer (evidence)`: a choice names
+/// the argmax with its probability, a score names value/levels plus the
+/// legend of the rounded level, a noul names yes/no with its probability.
+/// Unknown answer shapes print the raw JSON; `--json` always has it anyway.
+fn render_battery(answers: &Value) -> String {
+    let mut out = String::new();
+    let Some(map) = answers.as_object() else {
+        return out;
+    };
+    for (name, answer) in map {
+        let ty = answer.get("type").and_then(Value::as_str).unwrap_or("");
+        let line = match ty {
+            "choice" => {
+                let choice = answer.get("choice").and_then(Value::as_str).unwrap_or("?");
+                let p = answer
+                    .get("probabilities")
+                    .and_then(|m| m.get(choice))
+                    .and_then(Value::as_f64);
+                match p {
+                    Some(p) => format!("{name}: {choice} ({p:.3})"),
+                    None => format!("{name}: {choice}"),
+                }
+            }
+            "score" => {
+                let score = answer.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+                let legend = answer.get("legend").and_then(Value::as_object);
+                let max = legend.map_or(0, |l| l.len().saturating_sub(1));
+                let level = score.round().to_string();
+                let label = legend
+                    .and_then(|l| l.get(&level))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                format!("{name}: {score:.2}/{max} {label}")
+            }
+            "noul" => {
+                let p = answer.get("noul").and_then(Value::as_f64).unwrap_or(0.0);
+                format!("{name}: {} ({p:.3})", if p >= 0.5 { "yes" } else { "no" })
+            }
+            _ => format!("{name}: {answer}"),
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The JSON document for a battery answer — same disclosure envelope as a
+/// labeled decision, but `answers` carries the per-question typed answers.
+fn battery_document(engine: &dyn DecisionEngine, answers: &Value, clipped: bool) -> Value {
+    let marker = if clipped { "capped" } else { "complete" };
+    json!({
+        "marker": marker,
+        "answers": answers,
+        "epistemics": {
+            "closed_world": false,
+            "lower_bound": false,
+            "basis": engine.basis(),
+            "confidence": marker,
+        },
+        "snapshot": {
+            "model": engine.model_id(),
+            "provider": engine.provider(),
+            "deterministic": engine.deterministic(),
+        },
+    })
+}
+
 /// Render probabilities and disclose component clipping only when it occurred.
 fn render_probs(probs: &BTreeMap<String, f64>, spec: &Spec) -> String {
     let mut out = String::new();
@@ -487,6 +566,44 @@ fn run_with(
     if opts.jsonl {
         let mut engine = opener(resolve_engine_for(&opts))? as Box<dyn DecisionEngine>;
         return serve_jsonl(reader, engine.as_mut(), output);
+    }
+
+    // No labels, no bounded decision: answer the default question battery
+    // instead (what `ollaya run` does with no --questions). Context folds
+    // into the state — the battery's questions carry their own rubric.
+    if opts.labels.is_empty() {
+        let text = opts
+            .text
+            .as_deref()
+            .ok_or("classify needs a text argument (or --jsonl)")?;
+        let state = match opts.context.as_deref().filter(|c| !c.is_empty()) {
+            Some(context) => format!("{context}\n\n{text}"),
+            None => text.to_string(),
+        };
+        let (state, clipped) = clip_text(&state);
+        let resolved = resolve_engine_for(&opts);
+        if !matches!(
+            resolved,
+            crate::classify_setup::ResolvedEngine::Local { .. }
+        ) {
+            return Err(
+                "no --label given: bare classify needs the local Ollaya engine \
+                 (`--engine ollaya` or `pixel config classify-engine local`)"
+                    .to_string(),
+            );
+        }
+        let mut engine = opener(resolved)?;
+        let answers = engine.decide_battery(&state)?;
+        if opts.json {
+            return output.print_document(&battery_document(engine.as_ref(), &answers, clipped));
+        }
+        let mut out = render_battery(&answers);
+        if clipped {
+            out.push_str(&format!(
+                "warning: input capped at {TEXT_CAP_CHARS} characters; affected fields: state\n"
+            ));
+        }
+        return output.write_text(&out);
     }
 
     let spec = one_shot_spec(&opts)?;
@@ -569,6 +686,8 @@ mod tests {
     /// "no" wins on "beta"; `fail_next` turns the next decide into an error.
     struct FakeEngine {
         calls: Arc<Mutex<Vec<Spec>>>,
+        battery_calls: Arc<Mutex<Vec<String>>>,
+        battery_answer: Option<Value>,
         fail_next: bool,
         snapshot_extra: Option<Value>,
         custom_basis: Option<String>,
@@ -578,6 +697,8 @@ mod tests {
         fn new(calls: Arc<Mutex<Vec<Spec>>>) -> Self {
             FakeEngine {
                 calls,
+                battery_calls: Arc::new(Mutex::new(Vec::new())),
+                battery_answer: None,
                 fail_next: false,
                 snapshot_extra: None,
                 custom_basis: None,
@@ -629,6 +750,13 @@ mod tests {
                     (l.clone(), p)
                 })
                 .collect())
+        }
+
+        fn decide_battery(&mut self, state: &str) -> Result<Value, String> {
+            self.battery_calls.lock().unwrap().push(state.to_string());
+            self.battery_answer
+                .clone()
+                .ok_or_else(|| "no battery answer scripted".to_string())
         }
     }
 
@@ -1177,6 +1305,101 @@ mod tests {
     }
 
     #[test]
+    fn bare_classify_runs_the_default_battery_on_the_local_engine() {
+        let battery_calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&battery_calls);
+        let answers = json!({
+            "intent": {
+                "type": "choice",
+                "choice": "other",
+                "confidence": 0.8,
+                "probabilities": {"refund": 0.1, "other": 0.9}
+            },
+            "is_urgent": {"type": "noul", "noul": 0.9},
+            "frustration": {
+                "type": "score",
+                "score": 2.4,
+                "confidence": 0.7,
+                "legend": {"0": "calm", "1": "civil", "2": "annoyed", "3": "angry"},
+                "probabilities": {"0": 0.1, "1": 0.1, "2": 0.3, "3": 0.5}
+            }
+        });
+        let mut output = RecordingOutput::default();
+        run_with(
+            ClassifyOptions {
+                text: Some("refund me now".to_string()),
+                context: None,
+                labels: Vec::new(),
+                criteria: Vec::new(),
+                remote_preset: crate::decide_remote::Preset::Openrouter,
+                remote_model: None,
+                engine: Some(EngineChoice::Ollaya),
+                ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
+                jsonl: false,
+                json: false,
+            },
+            move |_resolved| {
+                let mut engine = FakeEngine::new(Arc::new(Mutex::new(Vec::new())));
+                engine.battery_calls = Arc::clone(&recorded);
+                engine.battery_answer = Some(answers.clone());
+                Ok(Box::new(engine) as _)
+            },
+            Cursor::new(Vec::<u8>::new()),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(battery_calls.lock().unwrap().as_slice(), &["refund me now"]);
+        assert!(
+            output.text.contains("intent: other (0.900)"),
+            "{}",
+            output.text
+        );
+        assert!(
+            output.text.contains("is_urgent: yes (0.900)"),
+            "{}",
+            output.text
+        );
+        assert!(
+            output.text.contains("frustration: 2.40/3 annoyed"),
+            "{}",
+            output.text
+        );
+    }
+
+    #[test]
+    fn bare_classify_on_the_remote_engine_errors_before_opening_it() {
+        let opens = Arc::new(Mutex::new(0usize));
+        let opened = Arc::clone(&opens);
+        let mut output = RecordingOutput::default();
+        let error = run_with(
+            ClassifyOptions {
+                text: Some("alpha".to_string()),
+                context: None,
+                labels: Vec::new(),
+                criteria: Vec::new(),
+                remote_preset: crate::decide_remote::Preset::Openrouter,
+                remote_model: None,
+                engine: Some(EngineChoice::Remote),
+                ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
+                jsonl: false,
+                json: false,
+            },
+            move |_resolved| {
+                *opened.lock().unwrap() += 1;
+                fake_engine(Arc::new(Mutex::new(Vec::new())))
+            },
+            Cursor::new(Vec::<u8>::new()),
+            &mut output,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("--label") && error.contains("Ollaya"),
+            "{error}"
+        );
+        assert_eq!(*opens.lock().unwrap(), 0);
+    }
+
+    #[test]
     fn jsonl_decide_error_is_a_line_error_and_next_request_continues() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let input = [
@@ -1187,6 +1410,8 @@ mod tests {
         let mut output = RecordingOutput::default();
         let mut engine = FakeEngine {
             calls,
+            battery_calls: Arc::new(Mutex::new(Vec::new())),
+            battery_answer: None,
             fail_next: true,
             snapshot_extra: None,
             custom_basis: None,
@@ -1328,12 +1553,17 @@ mod tests {
             json: false,
         };
         // A dead server address fails the decision with a transport error —
-        // proving the ollaya engine was opened and consulted.
+        // proving the ollaya engine was opened and consulted. The opened
+        // config pins the dead base: the test must not depend on whether a
+        // real daemon happens to answer the default address.
         let error = run_with(
             options,
             |_resolved| {
                 Ok(Box::new(crate::decide_ollaya::Ollaya::open(
-                    crate::decide_ollaya::OllayaConfig::default(),
+                    crate::decide_ollaya::OllayaConfig {
+                        base: "http://127.0.0.1:9".to_string(),
+                        ..Default::default()
+                    },
                 )) as _)
             },
             Cursor::new(Vec::<u8>::new()),

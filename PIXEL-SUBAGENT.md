@@ -21,6 +21,7 @@ pixel what-changed --base <merge-base> --tests --json # symbols changed on this 
 pixel review-changes . --json  # working-tree diff, structured
 pixel search-content "<regex>" [path] --json  # plain text search, indexed
 pixel plan "fix all clickable elements"  # deterministic todo list from AST + graph
+pixel classify "<text>" --label a --label b --json  # bounded decision: probability per label + predicted; omit --label for the default battery (local engine). Does not read .pixel/
 ```
 
 `pixel impact` reports `closed_world: false` always — static analysis

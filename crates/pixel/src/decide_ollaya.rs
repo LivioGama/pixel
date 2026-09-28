@@ -139,6 +139,65 @@ impl Ollaya {
         self.last_meta = Some(meta);
         Ok(probs)
     }
+
+    /// Ask an arbitrary typed battery (`choice`/`score`/`noul` questions)
+    /// and return the raw `answers` object — the label-less `classify`
+    /// path, where no single caller choice reduces the response.
+    pub fn ask(&mut self, state: &str, questions: &Value) -> Result<Value, String> {
+        let body = json!({
+            "model": self.config.model_name,
+            "state": state,
+            "questions": questions,
+        });
+        let response = (self.post)(&self.config, &body)?;
+        response
+            .get("answers")
+            .cloned()
+            .ok_or_else(|| "ollaya response missing answers".to_string())
+    }
+}
+
+/// The battery a label-less `classify` sends: Ollaya's own `triage` preset,
+/// verbatim — the same default `ollaya run` picks for a model that ships
+/// no built-in questions. `noul` answers are 0–1 "the statement holds"
+/// probabilities; `score` criteria are the ordered level descriptions.
+pub fn default_battery() -> Value {
+    json!({
+        "intent": {
+            "type": "choice",
+            "instructions": "What does the customer want in `message`?",
+            "criteria": {
+                "refund": "money returned or a duplicate charge reversed",
+                "technical_help": "a bug, outage or integration problem",
+                "billing_question": "a question about an invoice, plan or payment method",
+                "information": "general information, pricing or how-to",
+                "cancellation": "wants to cancel or downgrade",
+                "other": "none of the other options fits"
+            }
+        },
+        "is_urgent": {
+            "type": "noul",
+            "instructions": "Does `message` communicate time pressure or a deadline?"
+        },
+        "frustration": {
+            "type": "score",
+            "instructions": "How frustrated does the customer sound in `message`?",
+            "criteria": [
+                "calm and neutral",
+                "concerned but civil",
+                "clearly annoyed",
+                "very angry or using strong language"
+            ]
+        },
+        "refund_requested": {
+            "type": "noul",
+            "instructions": "Does the customer ask for money back?"
+        },
+        "churn_risk": {
+            "type": "noul",
+            "instructions": "Does `message` suggest the customer may leave for a competitor or cancel?"
+        }
+    })
 }
 
 /// The public request is TypeSafe's shape as Ollaya documents it: the spec's
@@ -294,6 +353,36 @@ mod tests {
             },
             "usage": {"input_tokens": 12, "output_tokens": 0}
         })
+    }
+
+    #[test]
+    fn ask_posts_the_questions_verbatim_and_returns_the_answers_object() {
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Value::Null));
+        let recorded = sent.clone();
+        let mut ollaya = Ollaya::with_post(OllayaConfig::default(), move |_config, body| {
+            *recorded.lock().unwrap() = body.clone();
+            Ok(json!({
+                "answers": {
+                    "is_urgent": {"type": "noul", "noul": 0.9}
+                }
+            }))
+        });
+        let questions = default_battery();
+        let answers = ollaya.ask("the state", &questions).unwrap();
+        let body = sent.lock().unwrap();
+        assert_eq!(body["model"], "winnow:e4b");
+        assert_eq!(body["state"], "the state");
+        assert_eq!(body["questions"], questions);
+        assert_eq!(answers["is_urgent"]["noul"], 0.9);
+    }
+
+    #[test]
+    fn ask_errors_when_the_response_has_no_answers() {
+        let mut ollaya = Ollaya::with_post(OllayaConfig::default(), |_config, _body| {
+            Ok(json!({"model": "winnow:e4b"}))
+        });
+        let error = ollaya.ask("state", &default_battery()).unwrap_err();
+        assert!(error.contains("answers"), "{error}");
     }
 
     #[test]
