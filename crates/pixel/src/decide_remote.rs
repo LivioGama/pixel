@@ -51,7 +51,7 @@ impl Preset {
             Preset::Openrouter => "https://openrouter.ai/api/v1",
             Preset::Ollama => "https://ollama.com/v1",
             Preset::Local => "http://localhost:11434/v1",
-            Preset::Deepseek => "https://api.deepseek.com/v1",
+            Preset::Deepseek => "https://api.deepseek.com",
             Preset::OpencodeGo => "https://opencode.ai/zen/go/v1",
         }
     }
@@ -75,7 +75,7 @@ impl Preset {
             Preset::Openrouter => "deepseek/deepseek-v4.1-flash",
             Preset::Ollama => "deepseek-v4.1-flash:cloud",
             Preset::Local => "qwen3.5:4b",
-            Preset::Deepseek => "deepseek-chat",
+            Preset::Deepseek => "deepseek-flash",
             Preset::OpencodeGo => "deepseek-v4.1-flash",
         }
     }
@@ -514,8 +514,8 @@ mod tests {
             ),
             (
                 Preset::Deepseek,
-                "https://api.deepseek.com/v1",
-                "deepseek-chat",
+                "https://api.deepseek.com",
+                "deepseek-flash",
                 "deepseek",
                 Some("DEEPSEEK_API_KEY"),
             ),

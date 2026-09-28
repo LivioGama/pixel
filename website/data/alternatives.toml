@@ -416,30 +416,30 @@ pitch = "A dedicated model for coding judgement calls."
 about = "A dedicated model for coding judgement calls, scored on its own benchmark, JevBench."
 measure = "published-figure"
 bench = "coding-decisions"
-answer = '''For a bounded coding decision, <code>pixel classify</code> asks a model you configure and returns one probability per label. With deepseek-v4.1-flash it answered all 14 public JevBench coding items right; Jev publishes 0.839 on its 56. The samples differ, so read it as a direction. The rest of Pixel needs no decision model.'''
-wins = "its score covers all 56 of its coding items, where Pixel's run covers only the 14 public ones."
+answer = '''For a bounded coding decision, <code>pixel classify</code> asks a model you configure and returns one probability per label. On an RTX 4090, winnow:e4b through Ollaya reaches 0.722 typed-decisions accuracy in 89 ms for five questions; TypeSafe Jev reaches 0.738 in a 236–276 ms hosted request. The rest of Pixel needs no decision model.'''
+wins = "its 0.738 typed-decisions accuracy is slightly higher than winnow:e4b's 0.722."
 note_label = "Read with care"
-note = "Jev's 83.9% is its published score on 56 items; Pixel's run covers the 14 public ones, and the rest of Pixel needs no decision model."
+note = "The latency measurements differ: winnow:e4b is five questions end to end on an RTX 4090; Jev is a hosted API's median request."
 more = "Every model, the method and its limits"
-checked = 2026-09-25
+checked = 2026-09-28
 
   [[tool.row]]
-  label = "JevBench coding items"
-  pixel = "14 of 14 with deepseek-v4.1-flash"
-  other = "83.9%"
+  label = "Typed-decisions accuracy"
+  pixel = "0.722"
+  other = "0.738"
+  win = "other"
+
+  [[tool.row]]
+  label = "Latency"
+  pixel = "89 ms for five questions (RTX 4090)"
+  other = "236–276 ms, hosted median request"
   win = "pixel"
 
   [[tool.row]]
   label = "Model"
-  pixel = "The one you choose (13 of 14 with gpt-oss)"
-  other = "Jev's own"
+  pixel = "winnow:e4b on Ollaya"
+  other = "TypeSafe Jev"
   win = "pixel"
-
-  [[tool.row]]
-  label = "Items scored"
-  pixel = "14, the public ones"
-  other = "56"
-  win = "other"
   page = true
 
 [[tool]]

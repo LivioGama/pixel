@@ -131,15 +131,16 @@ They combine: semble for search and Pixel for the graph, history and Git costs a
 
 ## Coding decisions
 
-`pixel classify` puts a bounded question to a model you configure (OpenRouter, Ollama Cloud or a local server) and returns one probability per label. On the 14 public coding items of JevBench:
+`pixel classify` answers a bounded question with a decision model you configure. It returns one probability per label in a single forward pass, with no token-by-token generation.
 
-| Model, through `pixel classify` | Coding accuracy | Median per item |
-| --- | --- | --- |
-| deepseek-v4.1-flash | **1.00** (14 of 14) | 1.4 s |
-| gpt-oss:120b | **0.93** (13 of 14) | 2.0 s |
-| deepseek-v4-flash | **0.93** (13 of 14) | 2.0 s |
-| gpt-oss:20b | **0.93** (13 of 14) | 6.4 s |
-| nemotron-3-ultra | **0.86** (12 of 14) | 8.1 s |
-| Jev, published score | 0.839 (56 items) | |
+### Accuracy and speed of every model
 
-Read it with its limits: Jev's 0.839 is its own published score on 56 coding items, not re-measured here, and 14 items is a small sample. Answers come from a remote model and are not deterministic; every answer says so. No off-the-shelf local model up to 575M parameters passed 0.50 on the same items. [The bake-off](https://github.com/LivioGama/pixel/blob/main/docs/bench/decide-bakeoff.md)
+Typed-decisions accuracy, higher is better; latency, lower is better.
+
+| Model | Typed-decisions accuracy | Latency | Measurement |
+| --- | --- | --- | --- |
+| winnow:e4b on Ollaya | 0.722 | **89 ms** | RTX 4090, five questions end to end |
+| TypeSafe Jev | **0.738** | 236–276 ms | Hosted API, median request |
+| laya | — | about 10 ms | Runs well on a CPU |
+
+winnow:e4b comes close to Jev's accuracy in under 100 ms. Smaller models such as laya answer in about 10 ms and run well on a CPU.

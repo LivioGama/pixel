@@ -313,6 +313,36 @@
     </section>
 
 
+    {{/* ---------- coding decisions ---------- */}}
+    {{/* The optional classify command's figures live in content/benchmarks.md#coding-decisions: update that page first, then this proof block. */}}
+    <section class="section wrap" id="decisions" aria-labelledby="decisions-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Decisions</span></p>
+      <header class="section__head" data-reveal>
+        <h2 id="decisions-title"><span class="glow">Fast and accurate.</span></h2>
+        <p>Close to Jev's accuracy, in under 100 ms.</p>
+      </header>
+      <div class="decisions" data-reveal>
+        <div class="decisions__intro">
+          <p>A decision model answers in a single forward pass, with no token-by-token generation. On an RTX 4090, winnow:e4b answers a five-question request in 89 ms end to end and scores 0.722 on typed decisions, against 0.738 for TypeSafe's hosted Jev.</p>
+          <p>Smaller models such as laya answer in about 10 ms and run well on a CPU.</p>
+        </div>
+        <ul class="decisions__metrics">
+          <li>
+            <strong>89ms</strong>
+            <span>winnow:e4b on Ollaya</span>
+            <small>RTX 4090, five questions · 0.722 accuracy</small>
+          </li>
+          <li>
+            <strong>236–276ms</strong>
+            <span>TypeSafe Jev</span>
+            <small>Hosted API, median request · 0.738 accuracy</small>
+          </li>
+        </ul>
+      </div>
+      <p class="decisions__more" data-reveal><a class="link" href="{{ $bench }}#coding-decisions">Accuracy and speed of every model</a> <span>· typed-decisions accuracy, higher is better; latency, lower is better</span></p>
+    </section>
+
+
     {{/* ---------- roles ---------- */}}
     {{/* The kept files' range, for the developers' card. */}}
     {{ $range := printf "%s to %s%%" (lang.FormatNumber 1 ($r.min)) (lang.FormatNumber 1 ($r.max)) }}

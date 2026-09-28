@@ -84,9 +84,9 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   and keeps the losses to one line that links their runs, the wider spread
   of the Pixel runs included. Its title says "a real agent task", not
   "whole agent tasks": the measured run is one scoping task. The optional
-  `pixel classify` and its JevBench score live on `/benchmarks/` and
-  `/vs/jev/`, not on the home: an add-on that needs a model blurs the
-  pitch of a tool that needs none. The scope board
+  `pixel classify` has a dedicated Decisions section on the home and its
+  fuller accuracy-and-latency comparison on `/benchmarks/`; it remains an
+  optional add-on, separate from the local index. The scope board
   draws one pad per indexed file and routes a trace from each P0 pad to its
   file name. The job tabs load each video only when opened, and the agent
   demo in "Measured on a real agent task" plays once when it scrolls into
