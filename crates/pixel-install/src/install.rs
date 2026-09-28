@@ -604,7 +604,15 @@ pub(crate) fn strip_unmarked_pi_prompts(text: &str) -> String {
 
 fn strip_legacy_pi_prompts(text: &str) -> String {
     let mut cleaned = text.to_owned();
-    while let Some((start, end)) = legacy_pi_prompt_range(&cleaned) {
+    // Each removed prompt owns at least one line. Bound the scan even if a
+    // future range detector accidentally returns a zero-width match.
+    for _ in 0..text.lines().count() {
+        let Some((start, end)) = legacy_pi_prompt_range(&cleaned) else {
+            break;
+        };
+        if end <= start || end > cleaned.len() {
+            break;
+        }
         cleaned.replace_range(start..end, "");
     }
     cleaned
@@ -687,6 +695,64 @@ mod pi_prompt_content_tests {
         let user_text = format!("~~~markdown\n{PRE_MARKER_PROMPT}~~~\n");
         let existing = format!("{user_text}{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n");
         assert_eq!(managed_pi_content(&existing, PI_PROMPT_ASSET), existing);
+    }
+
+    #[test]
+    fn fence_boundaries_decide_whether_a_historical_prompt_is_user_text() {
+        let managed = format!("{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n");
+        for (prefix, is_fenced) in [
+            ("``\n", false),
+            ("    ```markdown\n", false),
+            ("```markdown\n", true),
+            ("~~~markdown\n", true),
+            ("~~~~markdown\n~~~\n", true),
+            ("~~~~markdown\n~~~~\n", false),
+            ("~~~markdown\n~~~ignored\n", true),
+            ("~~~markdown\n```\n", true),
+            ("```markdown\n```\n", false),
+            ("~~~markdown\n~~~  \n", false),
+        ] {
+            let existing = format!("{prefix}{PRE_MARKER_PROMPT}{managed}");
+            let expected = if is_fenced {
+                existing.clone()
+            } else {
+                format!("{prefix}{managed}")
+            };
+            assert_eq!(
+                managed_pi_content(&existing, PI_PROMPT_ASSET),
+                expected,
+                "prefix {prefix:?} must preserve user text only inside a fence"
+            );
+        }
+    }
+
+    #[test]
+    fn historical_prompt_recognition_needs_the_full_release_signature() {
+        for fragment in [
+            PRE_MARKER_PROMPT.replace("## ENVIRONMENT\n", ""),
+            PRE_MARKER_PROMPT.replace("## THE COMPLETE REPLACEMENT MAP\n", ""),
+            PRE_MARKER_PROMPT.replace(
+                "All commands accept `[PATH]` (default: current directory).\n",
+                "",
+            ),
+        ] {
+            let existing = format!("{fragment}{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n");
+            assert_eq!(
+                managed_pi_content(&existing, PI_PROMPT_ASSET),
+                existing,
+                "partial historical text may be the user's own note"
+            );
+        }
+    }
+
+    #[test]
+    fn every_historical_copy_outside_the_managed_block_is_removed() {
+        let existing = format!(
+            "Before.\n{PRE_MARKER_PROMPT}{PRE_MARKER_PROMPT}{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n{PRE_MARKER_PROMPT}After.\n"
+        );
+        let expected =
+            format!("Before.\n{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\nAfter.\n");
+        assert_eq!(managed_pi_content(&existing, PI_PROMPT_ASSET), expected);
     }
 
     #[test]
