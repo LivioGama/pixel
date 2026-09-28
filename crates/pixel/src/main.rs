@@ -6737,9 +6737,9 @@ fn run_command(
             .map_err(|e| e.to_string())?;
             config_cmd::ensure_template(config_root.as_deref())?;
             // Interactive UX goes to stderr so `--json` stdout stays pure.
-            let tty = std::io::IsTerminal::is_terminal(&std::io::stdin())
-                && std::io::IsTerminal::is_terminal(&std::io::stderr());
-            if should_offer_classify_setup(is_global_install, json, tty) {
+            let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+            let stderr_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+            if should_offer_classify_setup(is_global_install, json, stdin_tty, stderr_tty) {
                 config_cmd::setup()?;
             }
             print_data(
@@ -7717,8 +7717,13 @@ fn run_command(
     }
 }
 
-fn should_offer_classify_setup(is_global_install: bool, json: bool, tty: bool) -> bool {
-    is_global_install && !json && tty
+fn should_offer_classify_setup(
+    is_global_install: bool,
+    json: bool,
+    stdin_tty: bool,
+    stderr_tty: bool,
+) -> bool {
+    is_global_install && !json && stdin_tty && stderr_tty
 }
 
 #[cfg(test)]
@@ -7727,10 +7732,11 @@ mod classify_setup_prompt_tests {
 
     #[test]
     fn prompt_runs_only_for_an_interactive_non_json_global_install() {
-        assert!(should_offer_classify_setup(true, false, true));
-        assert!(!should_offer_classify_setup(false, false, true));
-        assert!(!should_offer_classify_setup(true, true, true));
-        assert!(!should_offer_classify_setup(true, false, false));
+        assert!(should_offer_classify_setup(true, false, true, true));
+        assert!(!should_offer_classify_setup(false, false, true, true));
+        assert!(!should_offer_classify_setup(true, true, true, true));
+        assert!(!should_offer_classify_setup(true, false, false, true));
+        assert!(!should_offer_classify_setup(true, false, true, false));
     }
 }
 

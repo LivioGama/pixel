@@ -712,7 +712,7 @@ mod tests {
             ("\n", false, Some(false)),
             ("YES\n", false, Some(true)),
             ("no\n", true, Some(false)),
-            ("q\n", true, None),
+            ("q\ny\n", true, None),
             ("", true, None),
             ("invalid\nn\n", true, Some(false)),
         ] {
