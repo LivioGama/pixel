@@ -64,9 +64,14 @@ pub fn is_ignored_dir_name(name: &str) -> bool {
 /// included, default-ignored dirs are pruned, and `.gitignore`/`.ignore`
 /// files apply with `require_git(false)` so they are honored even in gitless
 /// trees (git-scoped rule sources like `.git/info/exclude` still need a
-/// repo, which is inherent to them). Every caller MUST go through this — a
-/// divergent walk policy makes freshness signatures disagree with shard
-/// contents.
+/// repo, which is inherent to them). The global excludes file
+/// (`core.excludesFile`, usually `~/.config/git/ignore`) is intentionally
+/// skipped: it lists files they want *out of their git commits* (`.DS_Store`,
+/// editor tempfiles, personal Claude settings), but the project may still
+/// hold a `.claude/` directory full of code that recall and the graph need
+/// to see. Project-level `.gitignore` rules stay in force. Every caller MUST
+/// go through this — a divergent walk policy makes freshness signatures
+/// disagree with shard contents.
 pub fn policy_walk(root: &Path) -> ignore::Walk {
     let prune_default = !matches!(
         std::env::var("PIXEL_INDEX_NO_DEFAULT_IGNORES").as_deref(),
@@ -75,6 +80,7 @@ pub fn policy_walk(root: &Path) -> ignore::Walk {
     ignore::WalkBuilder::new(root)
         .hidden(false)
         .require_git(false)
+        .git_global(false)
         .filter_entry(move |e| {
             let name = e.file_name().to_string_lossy();
             if name == ".git" || name == SHARD_DIR {
