@@ -435,7 +435,20 @@ fn setup_with(
     if ask_bool(input, output, "Save these settings?", false)? != Some(true) {
         return Ok(false);
     }
-    write_doc(path, |current| *current = doc)?;
+    write_doc(path, |current| {
+        for key in [
+            "metrics",
+            "daemon_auto_start",
+            "task_context",
+            "task_boundary",
+        ] {
+            current[key] = doc[key].clone();
+        }
+        if !current.get("classify").is_some_and(Value::is_object) {
+            current["classify"] = json!({});
+        }
+        current["classify"]["enabled"] = json!(enabled);
+    })?;
     writeln!(
         output,
         "Saved. Run pixel config to see effective settings or pixel config setup to change them."
@@ -734,6 +747,56 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.starts_with("model download failed; could not disable classification: cannot read configuration "), "{error}");
+    }
+
+    #[test]
+    fn setup_should_preserve_unrelated_changes_made_while_prompting() {
+        struct UpdatingOutput<'a> {
+            path: &'a Path,
+            updated: bool,
+        }
+        impl Write for UpdatingOutput<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if !self.updated {
+                    // The first prompt is printed after setup has loaded its draft.
+                    write_doc(self.path, |doc| {
+                        doc["remote_keys"] = json!({"openrouter":"new-secret"});
+                        doc["classify"] = json!({"engine":"remote", "enabled":true});
+                        doc["future"] = json!(42);
+                    })
+                    .map_err(std::io::Error::other)?;
+                    self.updated = true;
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let home = HomeGuard::set();
+        let path = home.0.join("config.yaml");
+        write(&path, "remote_keys: {openrouter: old-secret}\n");
+        let mut output = UpdatingOutput {
+            path: &path,
+            updated: false,
+        };
+        assert!(
+            setup_with(
+                &path,
+                &mut std::io::Cursor::new("n\nn\nn\nn\nn\ny\n"),
+                &mut output
+            )
+            .unwrap()
+        );
+        assert!(output.updated);
+        assert_eq!(
+            crate::config_file::load(&path).unwrap(),
+            json!({
+                "metrics":"off", "daemon_auto_start":false, "task_context":false,
+                "task_boundary":false, "classify":{"engine":"remote", "enabled":false},
+                "remote_keys":{"openrouter":"new-secret"}, "future":42
+            })
+        );
     }
 
     #[test]
