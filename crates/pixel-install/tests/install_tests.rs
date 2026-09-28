@@ -2735,6 +2735,49 @@ fn install_doctor_and_uninstall_should_preserve_a_fence_spanning_the_managed_blo
 }
 
 #[test]
+fn pi_lifecycle_should_preserve_an_orphan_end_marker_and_repair_the_real_block() {
+    for closing in ["", MANAGED_END] {
+        let dir = TempDir::new().expect("tempdir");
+        let home = dir.path();
+        install_for_shell(home, TEST_SHELL);
+        let pi_path = pi_prompt_path(home);
+        let current = fs::read_to_string(&pi_path).unwrap();
+        let prefix = format!("{MANAGED_END}\nBefore.\n");
+        let original = format!("{prefix}{MANAGED_BEGIN}\nstale\n{closing}");
+        fs::write(&pi_path, &original).unwrap();
+        assert_eq!(
+            pixel_install::config::strip_managed_block(&original),
+            if closing.is_empty() {
+                original.clone()
+            } else {
+                prefix.clone()
+            }
+        );
+
+        let opts = DoctorOptions {
+            home: Some(home.to_path_buf()),
+            shell: Some(TEST_SHELL.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            check(&doctor(&opts).unwrap(), "install.pi-prompt").status,
+            CheckStatus::Red
+        );
+        install_for_shell(home, TEST_SHELL);
+        assert_eq!(
+            fs::read_to_string(&pi_path).unwrap(),
+            format!("{prefix}{current}")
+        );
+        assert_eq!(
+            check(&doctor(&opts).unwrap(), "install.pi-prompt").status,
+            CheckStatus::Green
+        );
+        uninstall_home(home);
+        assert_eq!(fs::read_to_string(&pi_path).unwrap(), prefix);
+    }
+}
+
+#[test]
 fn a_pi_prompt_written_by_an_earlier_install_is_wrapped_not_duplicated() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();

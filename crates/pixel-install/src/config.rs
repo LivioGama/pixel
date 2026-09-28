@@ -240,9 +240,9 @@ pub fn apply_managed_markers(original: &str, managed: &str) -> String {
     let (cleaned, _) = strip_stale_blocks(original);
     if let Some(start) = cleaned.find(MANAGED_BEGIN) {
         let head = &cleaned[..start];
-        let tail = match cleaned.find(MANAGED_END) {
+        let tail = match cleaned[start..].find(MANAGED_END) {
             Some(end) => {
-                let after = &cleaned[end + MANAGED_END.len()..];
+                let after = &cleaned[start..][end + MANAGED_END.len()..];
                 // `block` already supplies exactly one trailing newline after
                 // MANAGED_END. The single newline immediately following the
                 // OLD end marker is that same canonical newline, not user
@@ -572,13 +572,14 @@ pub fn strip_managed_block(text: &str) -> String {
     let Some(start) = text.find(MANAGED_BEGIN) else {
         return text.to_string();
     };
-    let Some(end) = text.find(MANAGED_END) else {
+    let managed_and_tail = &text[start..];
+    let Some(end) = managed_and_tail.find(MANAGED_END) else {
         return text.to_string();
     };
     let end_pos = end + MANAGED_END.len();
-    let after = text[end_pos..]
+    let after = managed_and_tail[end_pos..]
         .strip_prefix('\n')
-        .unwrap_or(&text[end_pos..]);
+        .unwrap_or(&managed_and_tail[end_pos..]);
     let mut result = String::with_capacity(start + after.len());
     result.push_str(&text[..start]);
     result.push_str(after);

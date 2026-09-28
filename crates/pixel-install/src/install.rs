@@ -596,14 +596,17 @@ pub(crate) fn strip_unmarked_pi_prompts(text: &str) -> String {
     let Some(marker_start) = text.find(config::MANAGED_BEGIN) else {
         return strip_legacy_pi_prompts(text, "");
     };
-    let marker_end = text
+    let managed_and_tail = &text[marker_start..];
+    let marker_end = managed_and_tail
         .find(config::MANAGED_END)
-        .map_or(text.len(), |end| end + config::MANAGED_END.len());
+        .map_or(managed_and_tail.len(), |end| {
+            end + config::MANAGED_END.len()
+        });
     let prefix = strip_legacy_pi_prompts(&text[..marker_start], "");
     // User fences span the managed block; fences owned by that block do not
     // affect the surrounding text.
-    let suffix = strip_legacy_pi_prompts(&text[marker_end..], &prefix);
-    format!("{}{}{}", prefix, &text[marker_start..marker_end], suffix)
+    let suffix = strip_legacy_pi_prompts(&managed_and_tail[marker_end..], &prefix);
+    format!("{}{}{}", prefix, &managed_and_tail[..marker_end], suffix)
 }
 
 fn strip_legacy_pi_prompts(text: &str, preceding: &str) -> String {
@@ -635,6 +638,7 @@ fn inside_markdown_fence(preceding: &str, prefix: &str) -> bool {
             continue;
         }
         match fence {
+            None if marker == b'`' && trimmed[width..].contains('`') => {}
             None => fence = Some((marker, width)),
             Some((open_marker, open_width))
                 if marker == open_marker
@@ -706,6 +710,8 @@ mod pi_prompt_content_tests {
             ("   ```markdown\n", true),
             ("    ```markdown\n", false),
             ("```markdown\n", true),
+            ("```lang`note\n", false),
+            ("~~~lang`note\n", true),
             ("~~~markdown\n", true),
             ("~~~~markdown\n~~~\n", true),
             ("~~~~markdown\n~~~~\n", false),
@@ -773,6 +779,26 @@ mod pi_prompt_content_tests {
         let migrated = managed_pi_content(&existing, PI_PROMPT_ASSET);
         assert_eq!(migrated, expected);
         assert_eq!(managed_pi_content(&migrated, PI_PROMPT_ASSET), migrated);
+    }
+
+    #[test]
+    fn cleanup_should_ignore_orphan_end_markers_before_a_managed_block() {
+        let prefix = format!("{MANAGED_END}\nBefore.\n");
+        let managed = format!("{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n");
+        let existing = format!("{prefix}{managed}{PRE_MARKER_PROMPT}After.\n");
+        let expected = format!("{prefix}{managed}After.\n");
+        assert_eq!(super::strip_unmarked_pi_prompts(&existing), expected);
+        assert_eq!(managed_pi_content(&existing, PI_PROMPT_ASSET), expected);
+
+        let unterminated = format!("{prefix}{MANAGED_BEGIN}\n{PRE_MARKER_PROMPT}");
+        assert_eq!(
+            super::strip_unmarked_pi_prompts(&unterminated),
+            unterminated
+        );
+        assert_eq!(
+            managed_pi_content(&unterminated, PI_PROMPT_ASSET),
+            format!("{prefix}{managed}")
+        );
     }
 
     #[test]
