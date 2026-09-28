@@ -137,9 +137,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         Some(p) => p.clone(),
         None => std::env::current_exe().map_err(InstallError::CurrentExe)?,
     };
-    let exe = executable_path
-        .canonicalize()
-        .unwrap_or_else(|_| executable_path.clone());
+    let exe = stable_exe_path(executable_path);
 
     let dry_run = options.dry_run;
     if let Some(repo) = &options.repo {
@@ -283,6 +281,35 @@ fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Resul
 
 /// The Codex project hook file, relative to the repository.
 const CODEX_PROJECT_HOOKS: &str = ".codex/hooks.json";
+
+/// Resolve the path written into hook commands. Hook entries live for months,
+/// so they must survive package-manager upgrades: canonicalizing a stable
+/// symlink such as `/opt/homebrew/bin/pixel` bakes in a versioned store path
+/// (`Cellar/pixel/<ver>/bin/pixel`) that dangles after the next upgrade.
+/// Prefer the first PATH entry whose canonical form is this binary, keeping
+/// the symlink path itself; fall back to the canonicalized path when PATH has
+/// no match (uninstalled-location runs, custom `--executable-path`).
+pub(crate) fn stable_exe_path(executable_path: PathBuf) -> PathBuf {
+    let paths = std::env::var_os("PATH").unwrap_or_default();
+    stable_exe_path_in(executable_path, &paths)
+}
+
+fn stable_exe_path_in(executable_path: PathBuf, paths: &std::ffi::OsStr) -> PathBuf {
+    let canonical = executable_path
+        .canonicalize()
+        .unwrap_or_else(|_| executable_path.clone());
+    let Some(name) = executable_path.file_name() else {
+        return canonical;
+    };
+    let name = name.to_string_lossy();
+    std::env::split_paths(paths)
+        .map(|dir| dir.join(name.as_ref()))
+        .find(|candidate| {
+            candidate.is_file()
+                && candidate.canonicalize().ok().as_deref() == Some(canonical.as_path())
+        })
+        .unwrap_or(canonical)
+}
 
 /// A file `pixel install --repo` may write, relative to the repository.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1303,5 +1330,71 @@ mod path_tests {
         assert!(sh.ends_with("sh"), "{}", sh.display());
         assert!(sh.is_absolute(), "{}", sh.display());
         assert_eq!(find_on_path("pixel-definitely-not-installed-xyz"), None);
+    }
+}
+
+#[cfg(test)]
+mod stable_exe_path_tests {
+    use super::stable_exe_path_in;
+    use std::path::PathBuf;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cellar_binary_resolves_to_its_stable_path_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("Cellar/pixel/9.9.9/bin");
+        let bin = dir.path().join("homebrew/bin");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let real = store.join("pixel");
+        std::fs::write(&real, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = bin.join("pixel");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let paths = std::env::join_paths([&bin]).unwrap();
+        assert_eq!(
+            stable_exe_path_in(real, &paths),
+            link,
+            "hook commands must name the surviving symlink, not the store path"
+        );
+    }
+
+    #[test]
+    fn an_absent_path_match_keeps_the_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("pixel");
+        std::fs::write(&exe, b"x").unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let paths = std::env::join_paths([elsewhere.path()]).unwrap();
+        assert_eq!(
+            stable_exe_path_in(exe.clone(), &paths),
+            exe.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_path_hit_for_a_different_binary_is_not_substituted() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("mine").join("pixel");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"real").unwrap();
+        let other_dir = tempfile::tempdir().unwrap();
+        let impostor = other_dir.path().join("pixel");
+        std::fs::write(&impostor, b"other").unwrap();
+        let paths = std::env::join_paths([other_dir.path()]).unwrap();
+        assert_eq!(
+            stable_exe_path_in(exe.clone(), &paths),
+            exe.canonicalize().unwrap(),
+            "an unrelated PATH binary must not be written into hooks"
+        );
+    }
+
+    #[test]
+    fn a_nameless_exe_falls_back_to_canonical() {
+        assert_eq!(
+            stable_exe_path_in(PathBuf::new(), std::ffi::OsStr::new("")),
+            PathBuf::new()
+        );
     }
 }
