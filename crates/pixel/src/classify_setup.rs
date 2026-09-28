@@ -153,7 +153,7 @@ pub fn install_step(
         .map_err(|e| format!("read choice: {e}"))?;
     match parse_choice(&line) {
         Some("local") => setup_local(stdout),
-        Some("remote") => propose_remote_key(stdout),
+        Some("remote") => propose_remote_key(stdin, stdout),
         _ => {
             writeln!(stdout, "classify engine: skipped — run `pixel config classify-engine <local|remote>` to choose later")
                 .map_err(|e| e.to_string())?;
@@ -162,7 +162,10 @@ pub fn install_step(
     }
 }
 
-fn propose_remote_key(stdout: &mut dyn std::io::Write) -> Result<(), String> {
+fn propose_remote_key(
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+) -> Result<(), String> {
     writeln!(
         stdout,
         "Remote providers: openrouter / ollama / deepseek / opencode-go"
@@ -171,7 +174,7 @@ fn propose_remote_key(stdout: &mut dyn std::io::Write) -> Result<(), String> {
     write!(stdout, "Provider [openrouter]> ").map_err(|e| e.to_string())?;
     stdout.flush().map_err(|e| e.to_string())?;
     let mut line = String::new();
-    std::io::stdin()
+    stdin
         .read_line(&mut line)
         .map_err(|e| format!("read provider: {e}"))?;
     let provider = if line.trim().is_empty() {
@@ -196,7 +199,7 @@ fn propose_remote_key(stdout: &mut dyn std::io::Write) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     stdout.flush().map_err(|e| e.to_string())?;
     let mut key = String::new();
-    std::io::stdin()
+    stdin
         .read_line(&mut key)
         .map_err(|e| format!("read key: {e}"))?;
     let key = key.trim();
@@ -433,5 +436,18 @@ mod tests {
     fn reachability_probe_rejects_malformed_and_closed_bases() {
         assert!(!server_reachable("http://127.0.0.1:1"));
         assert!(!server_reachable("not a url"));
+    }
+
+    #[test]
+    fn remote_key_prompt_reads_the_provider_from_the_supplied_reader() {
+        let mut input = std::io::Cursor::new(b"unknown-provider\n".to_vec());
+        let mut output = Vec::new();
+        let error = propose_remote_key(&mut input, &mut output).unwrap_err();
+        assert!(error.contains("unknown provider \"unknown-provider\""));
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("Provider [openrouter]>")
+        );
     }
 }

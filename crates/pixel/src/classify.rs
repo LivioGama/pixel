@@ -557,6 +557,7 @@ fn render_probs(probs: &BTreeMap<String, f64>, spec: &Spec) -> String {
 
 fn run_with(
     opts: ClassifyOptions,
+    resolve: impl FnOnce(&ClassifyOptions) -> crate::classify_setup::ResolvedEngine,
     opener: impl FnOnce(
         crate::classify_setup::ResolvedEngine,
     ) -> Result<Box<dyn DecisionEngine>, String>,
@@ -564,7 +565,7 @@ fn run_with(
     output: &mut dyn ClassifyOutput,
 ) -> Result<(), String> {
     if opts.jsonl {
-        let mut engine = opener(resolve_engine_for(&opts))? as Box<dyn DecisionEngine>;
+        let mut engine = opener(resolve(&opts))? as Box<dyn DecisionEngine>;
         return serve_jsonl(reader, engine.as_mut(), output);
     }
 
@@ -581,7 +582,7 @@ fn run_with(
             None => text.to_string(),
         };
         let (state, clipped) = clip_text(&state);
-        let resolved = resolve_engine_for(&opts);
+        let resolved = resolve(&opts);
         if !matches!(
             resolved,
             crate::classify_setup::ResolvedEngine::Local { .. }
@@ -607,7 +608,7 @@ fn run_with(
     }
 
     let spec = one_shot_spec(&opts)?;
-    let mut engine = opener(resolve_engine_for(&opts))?;
+    let mut engine = opener(resolve(&opts))?;
     let probs = engine.decide(&spec)?;
     if opts.json {
         output.print_document(&document(engine.as_ref(), &spec, &probs))
@@ -659,6 +660,7 @@ pub fn run(opts: ClassifyOptions) -> Result<(), String> {
     let mut output = ProductionOutput;
     run_with(
         opts,
+        resolve_engine_for,
         move |resolved| match resolved {
             crate::classify_setup::ResolvedEngine::Remote => {
                 open_engine(remote_preset, remote_model).map(|e| Box::new(e) as _)
@@ -804,6 +806,10 @@ mod tests {
 
     fn fake_engine(calls: Arc<Mutex<Vec<Spec>>>) -> Result<Box<dyn DecisionEngine>, String> {
         Ok(Box::new(FakeEngine::new(calls)))
+    }
+
+    fn test_resolve(opts: &ClassifyOptions) -> crate::classify_setup::ResolvedEngine {
+        crate::classify_setup::resolve_engine(opts.engine, opts.ollaya_url.clone(), None, false)
     }
 
     fn parse_classify(args: &[&str]) -> ClassifyOptions {
@@ -1125,6 +1131,7 @@ mod tests {
         let mut output = RecordingOutput::default();
         run_with(
             options,
+            test_resolve,
             move |_resolved| fake_engine(recorded),
             Cursor::new(Vec::<u8>::new()),
             &mut output,
@@ -1213,6 +1220,7 @@ mod tests {
         let mut output = RecordingOutput::default();
         let error = run_with(
             invalid,
+            test_resolve,
             move |_resolved| {
                 *opened.lock().unwrap() += 1;
                 fake_engine(Arc::new(Mutex::new(Vec::new())))
@@ -1240,6 +1248,7 @@ mod tests {
         };
         run_with(
             options,
+            test_resolve,
             |_resolved| fake_engine(Arc::new(Mutex::new(Vec::new()))),
             Cursor::new(Vec::<u8>::new()),
             &mut output,
@@ -1278,6 +1287,7 @@ mod tests {
         let mut output = RecordingOutput::default();
         run_with(
             options,
+            test_resolve,
             move |_resolved| {
                 *opened.lock().unwrap() += 1;
                 fake_engine(recorded)
@@ -1338,6 +1348,7 @@ mod tests {
                 jsonl: false,
                 json: false,
             },
+            test_resolve,
             move |_resolved| {
                 let mut engine = FakeEngine::new(Arc::new(Mutex::new(Vec::new())));
                 engine.battery_calls = Arc::clone(&recorded);
@@ -1367,6 +1378,39 @@ mod tests {
     }
 
     #[test]
+    fn run_with_uses_the_injected_resolver_for_the_bare_battery() {
+        let mut output = RecordingOutput::default();
+        run_with(
+            ClassifyOptions {
+                text: Some("refund me now".to_string()),
+                context: None,
+                labels: Vec::new(),
+                criteria: Vec::new(),
+                remote_preset: crate::decide_remote::Preset::Openrouter,
+                remote_model: None,
+                engine: Some(EngineChoice::Remote),
+                ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
+                jsonl: false,
+                json: false,
+            },
+            |_| crate::classify_setup::ResolvedEngine::Local {
+                base: "http://127.0.0.1:11435".to_string(),
+            },
+            |_resolved| {
+                let mut engine = FakeEngine::new(Arc::new(Mutex::new(Vec::new())));
+                engine.battery_answer = Some(json!({
+                    "intent": {"type": "choice", "choice": "other", "confidence": 0.9}
+                }));
+                Ok(Box::new(engine) as _)
+            },
+            Cursor::new(Vec::<u8>::new()),
+            &mut output,
+        )
+        .unwrap();
+        assert!(output.text.contains("intent: other"));
+    }
+
+    #[test]
     fn bare_classify_on_the_remote_engine_errors_before_opening_it() {
         let opens = Arc::new(Mutex::new(0usize));
         let opened = Arc::clone(&opens);
@@ -1384,6 +1428,7 @@ mod tests {
                 jsonl: false,
                 json: false,
             },
+            test_resolve,
             move |_resolved| {
                 *opened.lock().unwrap() += 1;
                 fake_engine(Arc::new(Mutex::new(Vec::new())))
@@ -1446,6 +1491,7 @@ mod tests {
         let mut output = RecordingOutput::default();
         let error = run_with(
             jsonl_options(),
+            test_resolve,
             |_resolved| Err("open failed".to_string()),
             Cursor::new(Vec::<u8>::new()),
             &mut output,
@@ -1455,6 +1501,7 @@ mod tests {
 
         let error = run_with(
             jsonl_options(),
+            test_resolve,
             |_resolved| fake_engine(Arc::new(Mutex::new(Vec::new()))),
             FailingReader,
             &mut output,
@@ -1467,6 +1514,7 @@ mod tests {
             r#"{"text":"alpha","labels":["yes","no"],"criteria":{"yes":"alpha","no":"beta"}}"#;
         let error = run_with(
             jsonl_options(),
+            test_resolve,
             |_resolved| fake_engine(Arc::new(Mutex::new(Vec::new()))),
             Cursor::new(line),
             &mut output,
@@ -1491,6 +1539,7 @@ mod tests {
                 jsonl: false,
                 json: true,
             },
+            test_resolve,
             |_resolved| fake_engine(Arc::new(Mutex::new(Vec::new()))),
             Cursor::new(Vec::<u8>::new()),
             &mut output,
@@ -1558,6 +1607,7 @@ mod tests {
         // real daemon happens to answer the default address.
         let error = run_with(
             options,
+            test_resolve,
             |_resolved| {
                 Ok(Box::new(crate::decide_ollaya::Ollaya::open(
                     crate::decide_ollaya::OllayaConfig {

@@ -1,1 +1,0 @@
-**classify:** add an opt-in local Ollaya engine (`--engine ollaya --ollaya-url …`) — native typed-choice probabilities from the local Ollaya decision daemon (TypeSafe-compatible `/v1/systemone`), with calibrated confidence disclosed in the snapshot; remote stays the default.
