@@ -743,6 +743,13 @@ mod pi_prompt_content_tests {
     }
 
     #[test]
+    fn an_inline_historical_title_is_user_text_not_a_deployment() {
+        let note = format!("Quoted: {PRE_MARKER_PROMPT}");
+        let existing = format!("{note}{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n");
+        assert_eq!(managed_pi_content(&existing, PI_PROMPT_ASSET), existing);
+    }
+
+    #[test]
     fn every_historical_copy_outside_the_managed_block_is_removed() {
         let existing = format!(
             "Before.\n{PRE_MARKER_PROMPT}{PRE_MARKER_PROMPT}{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n{PRE_MARKER_PROMPT}After.\n"
