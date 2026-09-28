@@ -368,6 +368,9 @@ pub(crate) const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-
 /// Pi keeps operational policy in its extension and exposes only this short rule.
 pub(crate) const PI_PROMPT_ASSET: &str = "Use the pixel tool for repository retrieval and repository Git workflows. Request the outcome through a stable action and goal. Native repository discovery is guarded.\n";
 
+const LEGACY_PI_PROMPT_BEGIN: &str = "# Pixel Retrieval Layer\n";
+const LEGACY_PI_PROMPT_END: &str = "All commands accept `[PATH]`, default current directory.\n";
+
 /// The sub-agent prompt as bundled in the binary.
 pub(crate) const SUBAGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-subagent-prompt.md");
 
@@ -496,19 +499,38 @@ fn managed_pi_content(existing: &str, asset: &str) -> String {
     if !existing.contains(config::MANAGED_BEGIN) {
         let (cleaned, removed) = config::strip_stale_blocks(existing);
         let source = if removed == 0 { existing } else { &cleaned };
-        if source.contains(asset) || source.contains(AGENT_PROMPT_ASSET) {
+        let legacy_range = source
+            .find(AGENT_PROMPT_ASSET)
+            .map(|start| (start, start + AGENT_PROMPT_ASSET.len()))
+            .or_else(|| legacy_pi_prompt_range(source));
+        let replace_range =
+            legacy_range.or_else(|| source.find(asset).map(|start| (start, start + asset.len())));
+        if let Some((start, end)) = replace_range {
             let begin = config::MANAGED_BEGIN;
-            let end = config::MANAGED_END;
-            let block = format!("{begin}\n{asset}\n{end}\n");
-            let previous = if source.contains(AGENT_PROMPT_ASSET) {
-                AGENT_PROMPT_ASSET
-            } else {
-                asset
-            };
-            return source.replacen(previous, &block, 1);
+            let marker_end = config::MANAGED_END;
+            let block = format!("{begin}\n{asset}\n{marker_end}\n");
+            return format!("{}{}{}", &source[..start], block, &source[end..]);
         }
     }
     config::apply_managed_markers(existing, asset)
+}
+
+fn legacy_pi_prompt_range(source: &str) -> Option<(usize, usize)> {
+    for (start, _) in source.rmatch_indices(LEGACY_PI_PROMPT_BEGIN) {
+        if start > 0 && source.as_bytes()[start - 1] != b'\n' {
+            continue;
+        }
+        let after_start = &source[start..];
+        let Some(end) = after_start.find(LEGACY_PI_PROMPT_END) else {
+            continue;
+        };
+        let end = end + LEGACY_PI_PROMPT_END.len();
+        let section = &after_start[..end];
+        if section.contains("## MANDATORY WORKFLOW\n") && section.contains("## REPLACEMENT MAP\n") {
+            return Some((start, start + end));
+        }
+    }
+    None
 }
 
 /// Replace `path` with `content` in one step: the bytes already there are
@@ -556,6 +578,34 @@ mod pi_prompt_content_tests {
         let existing = format!("{AGENT_PROMPT_ASSET}Keep this exact tail.");
         let wrapped = managed_pi_content(&existing, PI_PROMPT_ASSET);
         assert!(wrapped.ends_with("Keep this exact tail."), "{wrapped}");
+    }
+
+    #[test]
+    fn a_user_heading_alone_does_not_identify_a_legacy_prompt() {
+        let existing = "# Pixel Retrieval Layer\nMy own note.\n";
+        let wrapped = managed_pi_content(existing, PI_PROMPT_ASSET);
+        assert!(wrapped.starts_with(existing), "{wrapped}");
+        assert_eq!(wrapped.matches(PI_PROMPT_ASSET).count(), 1);
+    }
+
+    #[test]
+    fn an_earlier_similar_heading_stays_outside_the_edited_legacy_prompt() {
+        let edited = AGENT_PROMPT_ASSET.replacen(
+            "This repo has Pixel installed and indexed",
+            "This repo keeps Pixel ready",
+            1,
+        );
+        let existing = format!("# Pixel Retrieval Layer\nMy own note.\n{edited}After.\n");
+        let wrapped = managed_pi_content(&existing, PI_PROMPT_ASSET);
+        assert!(
+            wrapped.starts_with("# Pixel Retrieval Layer\nMy own note.\n"),
+            "{wrapped}"
+        );
+        assert!(wrapped.ends_with("After.\n"), "{wrapped}");
+        assert!(
+            !wrapped.contains("This repo keeps Pixel ready"),
+            "{wrapped}"
+        );
     }
 
     #[test]
