@@ -784,11 +784,13 @@ pub(crate) fn install_project_codex_at(
         &backup_path,
     );
     let mut migrate_executable_spelling = false;
+    let mut stored_pre_tool_use = None;
 
     if backup_exists {
         // Validate before changing the config. This also proves the runtime
         // input was created by this installer and remains private.
         let stored = read_composed_backup(&backup_path)?;
+        stored_pre_tool_use = stored["pre_tool_use"].as_array().cloned();
         let existing = value
             .get("hooks")
             .and_then(Value::as_object)
@@ -861,7 +863,7 @@ pub(crate) fn install_project_codex_at(
         // its approved, atomically-written input.
         write_composed_backup(
             &backup_path,
-            &snapshot,
+            stored_pre_tool_use.as_deref().unwrap_or(&snapshot),
             json!([expected_group.clone()]),
             dry_run,
         )?;
@@ -1956,6 +1958,10 @@ mod tests {
         assert_eq!(
             read_composed_backup(&sidecar).unwrap()["managed_pre_tool_use"],
             installed["hooks"]["PreToolUse"]
+        );
+        assert_eq!(
+            read_composed_backup(&sidecar).unwrap()["pre_tool_use"],
+            json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}])
         );
     }
 
