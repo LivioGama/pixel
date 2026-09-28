@@ -629,37 +629,6 @@ pub(crate) fn install_provider(
     install_at(home, &provider.path(home), exe, provider, dry_run)
 }
 
-/// Verify the installed transform, including matchers, executable, shell
-/// overlap and saved delegation. Merely finding a command string is not proof.
-#[allow(dead_code)]
-pub(crate) fn configuration_status(
-    home: &Path,
-    exe: &Path,
-    provider: Provider,
-) -> crate::Result<bool> {
-    let path = provider.path(home);
-    let original = install::read_settings(&path)?;
-    let mut expected = original.clone();
-    let saved = if provider == Provider::Claude {
-        load_rtk_backup(home)?
-    } else {
-        Vec::new()
-    };
-    let (enabled, _) = configure(&mut expected, provider, exe, &saved).map_err(|reason| {
-        InstallError::InvalidSettings {
-            path: path.clone(),
-            reason,
-        }
-    })?;
-    if expected != original {
-        return Err(InstallError::InvalidSettings {
-            path,
-            reason: "provider hook configuration differs from the supported event/matcher/command contract; run pixel install".into(),
-        });
-    }
-    Ok(enabled)
-}
-
 fn composed_backup_path(config_path: &Path) -> Result<PathBuf, String> {
     config_path
         .parent()
