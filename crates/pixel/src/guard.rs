@@ -4743,7 +4743,8 @@ mod tests {
             metrics_hook_line(&fixture.payload(serde_json::json!("pixel impact src/login.rs")))
                 .expect("the seeded record must relay");
         assert!(line.starts_with("🟩 pixel impact ❀"), "{line}");
-        assert!(line.contains("unavailable"), "{line}");
+        assert_eq!(line.lines().count(), 1, "{line}");
+        assert!(!line.contains("unavailable"), "{line}");
     }
 
     #[test]

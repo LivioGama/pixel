@@ -1202,10 +1202,8 @@ fn closed_stdout_pipe_is_success_not_a_panic() {
     );
 }
 
-/// The live line is the only place a reader learns why a comparison is
-/// missing; a silent omission is indistinguishable from accounting dropping
-/// the op. Pin the reason rows for a command with no policy baseline, a
-/// one-step baseline, and evidence the render cap refused to count.
+/// No-policy commands keep a compact identity line and a recorded gap.
+/// Applicable comparisons still explain a one-step baseline or capped evidence.
 #[test]
 fn live_blocks_state_every_absent_comparison_and_keep_json_stdout_clean() {
     let fixture = Fixture::new();
@@ -1215,14 +1213,9 @@ fn live_blocks_state_every_absent_comparison_and_keep_json_stdout_clean() {
     serde_json::from_slice::<Value>(&status.stdout).unwrap();
     assert!(!String::from_utf8_lossy(&status.stdout).contains("🟩 pixel "));
     let block = &metric_lines(&status)[0];
-    assert!(
-        block.contains("├─ ⏱ unavailable: no native-workflow baseline is defined for this command"),
-        "{block}"
-    );
-    assert!(
-        block.contains("├─ § unavailable: no native-workflow baseline is defined for this command"),
-        "{block}"
-    );
+    assert_eq!(block.lines().count(), 1, "{block}");
+    assert!(block.starts_with("🟩 pixel status ❀ "), "{block}");
+    assert!(!block.contains("unavailable"), "{block}");
     let event = fixture.events("status").pop().unwrap();
     assert_eq!(event["metrics"]["comparison_gap"], "no_policy");
     assert!(event["metrics"]["native_workflow_bytes"].is_null());

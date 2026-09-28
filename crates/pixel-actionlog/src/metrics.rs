@@ -294,6 +294,12 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
     // Line 1: identity header.
     let header = format!("🟩 pixel {command} ❀ {duration_ms:.1}ms ❀ #{short_id}");
 
+    // Commands without a comparison policy only need identity and duration.
+    // Keep the gap in the record, and let actual evidence take precedence.
+    if metrics.evidence.is_none() && metrics.comparison_gap == Some(ComparisonGap::NoPolicy) {
+        return Some(header);
+    }
+
     let partial_tag = if metrics.partial() { ", partial" } else { "" };
     let unavailable = format!("unavailable: {}", comparison_gap_reason(metrics));
 
@@ -1038,25 +1044,47 @@ mod tests {
     }
 
     #[test]
-    fn no_policy_gap_renders_both_unavailable_rows_and_no_saving() {
+    fn metrics_should_render_only_identity_when_no_policy_applies() {
         let metrics = OperationMetrics::new(Duration::from_millis(3), 100, None)
             .with_comparison_gap(ComparisonGap::NoPolicy);
-        let event = ActionEvent::new("status", ".").with_metrics(metrics);
+        let mut event = ActionEvent::new("install", ".").with_metrics(metrics);
+        event.invocation_id = Some("test-abcdef".to_owned());
+        let line = event.finalize_metrics_line().unwrap();
+        assert_eq!(line, "🟩 pixel install ❀ 3.0ms ❀ #abcdef");
+        assert_eq!(
+            event.metrics.as_ref().unwrap().reporting_bytes,
+            line.len() as u64 + 2
+        );
+        assert_eq!(event.finalize_metrics_line().unwrap(), line);
+        assert_eq!(
+            serde_json::to_value(&event).unwrap()["metrics"]["comparison_gap"],
+            "no_policy"
+        );
+    }
+
+    #[test]
+    fn metrics_should_keep_comparisons_when_evidence_overrides_no_policy() {
+        let metrics = OperationMetrics::new(
+            Duration::from_millis(3),
+            100,
+            Some(WorkflowEvidence {
+                native_commands: 2,
+                ..Default::default()
+            }),
+        )
+        .with_comparison_gap(ComparisonGap::NoPolicy);
+        let event = ActionEvent::new("search", ".").with_metrics(metrics);
         let line = format_metrics_line(&event).unwrap();
         assert!(
-            line.contains(
-                "  ├─ ⏱ unavailable: no native-workflow baseline is defined for this command"
-            ),
+            line.contains("├─ ⏱ 100% faster, 3.0ms against ~2000ms estimated"),
             "{line}"
         );
         assert!(
             line.contains(
-                "  ├─ § unavailable: no native-workflow baseline is defined for this command"
+                "├─ § estimated LLM context saved: ~487 tok (95%) against ~512 tok estimated"
             ),
             "{line}"
         );
-        assert!(!line.contains("faster"), "{line}");
-        assert!(!line.contains("context saved"), "{line}");
     }
 
     #[test]
