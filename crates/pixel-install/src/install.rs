@@ -398,7 +398,7 @@ pub fn stale_prompts(home: &Path) -> Vec<&'static str> {
 
 /// Copy the bundled Pixel agent system prompt to `~/.local/share/pixel/agent-prompt.md`,
 /// the sub-agent prompt to `~/.local/share/pixel/subagent-prompt.md`, and the
-/// prompt into Pi's system-prompt file (pi reads it automatically, no flag needed).
+/// short Pixel rule into Pi's system-prompt file (pi reads it automatically).
 /// The prompt instructs agents to use `pixel search-content`/`pixel find-code`/`pixel impact`
 /// instead of `grep`/`rg` for code discovery in indexed repositories.
 fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
