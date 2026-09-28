@@ -23,6 +23,18 @@ Pixel provides deterministic code retrieval when the current repository is
 indexed. Check `pixel status` if unsure; do not assume every directory has a
 Pixel index.
 
+## Choose the first retrieval command
+
+For a known identifier or a request for every call site, start with
+`pixel search-content -F '<identifier>'`. Its default output includes the path,
+line, and matching text. Use `-l` only when file names alone answer the request.
+Read matching files to distinguish definitions, imports, and actual calls.
+For code described by behavior when the name is unknown, start with
+`pixel find-code '<concept>'`. If the question asks where or when that behavior
+occurs, search the resolved function name with `pixel search-content -F` and
+inspect its callers; the definition alone cannot answer that question. Answer
+once the source provides enough evidence instead of repeating the search.
+
 - Hooks inject this file at session start and emit advisories after commands.
 - A PreToolUse guard exists only where the repo ran `pixel install --repo`.
 - Where it exists, it rewrites `grep`/`rg` calls to `pixel search-content`; a rewritten command is expected, not an error.
