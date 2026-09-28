@@ -552,6 +552,13 @@ mod pi_prompt_content_tests {
     }
 
     #[test]
+    fn migration_without_stale_sections_preserves_an_unterminated_user_tail() {
+        let existing = format!("{AGENT_PROMPT_ASSET}Keep this exact tail.");
+        let wrapped = managed_pi_content(&existing, PI_PROMPT_ASSET);
+        assert!(wrapped.ends_with("Keep this exact tail."), "{wrapped}");
+    }
+
+    #[test]
     fn a_file_pixel_never_wrote_keeps_its_text_and_gets_one_block() {
         let existing = "answer in French.\n";
         let wanted = managed_pi_content(existing, AGENT_PROMPT_ASSET);
