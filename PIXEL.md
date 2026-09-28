@@ -47,7 +47,8 @@ pixel scope-task "<task>" --no-manifest  # optional read-only target suggestions
 
 For implementation, activate a scope before multi-file edits. `--clear`
 deletes the whole manifest, so use it at task end only when no other active
-task shares that manifest:
+task shares that manifest. When tasks share a repository, run default
+`scope-task` activations serially: concurrent writes can lose a task's entry.
 
 ```bash
 pixel scope-task "<task>"        # before multi-file edits: P0/P1/P2 targets
