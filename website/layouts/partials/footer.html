@@ -117,11 +117,23 @@
             [].forEach.call(next.parentNode.querySelectorAll('.' + next.classList[0]), function (el) { el.hidden = el !== next; });
           }
         }, function () {
-          var code = btn.parentNode.querySelector('code');
-          if (code && window.getSelection) {
+          /* A refused clipboard falls back to selecting the command text in a
+             ghost <pre>, so a plain Cmd-C copies it. The button's own block is
+             no safe source: .term keeps its button in a bar above the <code>,
+             and the install term's hidden variant lines would come along. */
+          if (window.getSelection) {
+            var ghost = document.createElement('pre');
+            ghost.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none;';
+            ghost.textContent = text;
+            document.body.appendChild(ghost);
             var range = document.createRange();
-            range.selectNodeContents(code);
+            range.selectNodeContents(ghost);
             var sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+            var drop = function () { ghost.remove(); };
+            /* A copy reads the selection after its handlers run: drop the
+               ghost once it completes, or on the next click if none happens. */
+            document.addEventListener('copy', function () { setTimeout(drop, 0); }, { once: true });
+            document.addEventListener('pointerdown', drop, { once: true });
           }
           btn.textContent = 'Select and copy';
         }).then(function () {
