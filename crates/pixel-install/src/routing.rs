@@ -779,6 +779,11 @@ pub(crate) fn install_project_codex_at(
     let mut value = install::read_settings(path)?;
     let expected_group = composed_codex_group(exe, &backup_path);
     let backup_exists = backup_path.is_file();
+    let legacy_group = composed_codex_group(
+        &exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf()),
+        &backup_path,
+    );
+    let mut migrate_executable_spelling = false;
 
     if backup_exists {
         // Validate before changing the config. This also proves the runtime
@@ -793,18 +798,29 @@ pub(crate) fn install_project_codex_at(
                 path: path.into(),
                 reason: "composed Codex install lost its PreToolUse group; refusing to overwrite user changes".into(),
             })?;
-        if existing.as_slice() != [expected_group.clone()] {
+        let existing_legacy =
+            existing.as_slice() == [legacy_group.clone()] && legacy_group != expected_group;
+        if !existing_legacy && existing.as_slice() != [expected_group.clone()] {
             return Err(InstallError::InvalidSettings {
                 path: path.into(),
                 reason: "composed Codex PreToolUse diverged from its managed contract; refusing to overwrite user changes".into(),
             });
         }
-        if stored["managed_pre_tool_use"] != json!([expected_group.clone()]) {
+        let stored_legacy = stored["managed_pre_tool_use"] == json!([legacy_group.clone()])
+            && legacy_group != expected_group;
+        if !stored_legacy && stored["managed_pre_tool_use"] != json!([expected_group.clone()]) {
             return Err(InstallError::InvalidSettings {
                 path: backup_path.clone(),
                 reason: "composed Codex backup managed contract diverged; refusing to execute or overwrite it".into(),
             });
         }
+        if existing_legacy != stored_legacy {
+            return Err(InstallError::InvalidSettings {
+                path: backup_path.clone(),
+                reason: "composed Codex config and backup disagree on the managed executable spelling; refusing to overwrite either".into(),
+            });
+        }
+        migrate_executable_spelling = existing_legacy;
     }
 
     // `configure` owns lifecycle cleanup/installation. Capture the original
@@ -840,7 +856,7 @@ pub(crate) fn install_project_codex_at(
         })?;
     hooks.insert("PreToolUse".into(), json!([expected_group.clone()]));
 
-    if !backup_exists {
+    if !backup_exists || migrate_executable_spelling {
         // Sidecar first: config publication cannot expose a command that lacks
         // its approved, atomically-written input.
         write_composed_backup(

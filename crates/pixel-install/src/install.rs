@@ -303,7 +303,14 @@ fn stable_exe_path_in(executable_path: PathBuf, paths: &std::ffi::OsStr) -> Path
     };
     let name = name.to_string_lossy();
     std::env::split_paths(paths)
-        .map(|dir| dir.join(name.as_ref()))
+        .map(|dir| {
+            let dir = if dir.is_absolute() {
+                dir
+            } else {
+                std::env::current_dir().map_or(dir.clone(), |cwd| cwd.join(dir))
+            };
+            dir.join(name.as_ref())
+        })
         .find(|candidate| {
             candidate.is_file()
                 && candidate.canonicalize().ok().as_deref() == Some(canonical.as_path())
