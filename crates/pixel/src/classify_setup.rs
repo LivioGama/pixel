@@ -80,7 +80,7 @@ pub enum ResolvedEngine {
 #[cfg_attr(test, mutants::skip)] // Runtime adapter; bounded daemon-start policy is tested by `ensure_local_with`.
 pub fn ensure_local(base: &str) -> Result<(), String> {
     let mut reachable = || server_reachable(base);
-    let mut start = auto_start;
+    let mut start = || auto_start(base);
     let mut sleep = std::thread::sleep;
     ensure_local_with(
         base,
@@ -208,9 +208,23 @@ where
     }
 }
 
+#[cfg_attr(test, mutants::skip)] // Config adapter; prompt and persistence dispatch are tested with injected storage.
 fn propose_remote_key(
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
+) -> Result<(), String> {
+    propose_remote_key_with(stdin, stdout, |preset, key| {
+        if let Some(key) = key {
+            crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
+        }
+        crate::config_cmd::set_classify_remote(preset)
+    })
+}
+
+fn propose_remote_key_with(
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+    store: impl FnOnce(crate::decide_remote::Preset, Option<&str>) -> Result<(), String>,
 ) -> Result<(), String> {
     writeln!(
         stdout,
@@ -249,11 +263,11 @@ fn propose_remote_key(
         .read_line(&mut key)
         .map_err(|e| format!("read key: {e}"))?;
     let key = key.trim();
+    store(preset, if key.is_empty() { None } else { Some(key) })?;
     if key.is_empty() {
         writeln!(stdout, "classify engine: remote selected, no key stored — set {var} or run `pixel config remote-key {} -` before classifying", preset.display())
             .map_err(|e| e.to_string())?;
     } else {
-        crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
         writeln!(
             stdout,
             "classify engine: remote ({}) — key stored",
@@ -261,7 +275,7 @@ fn propose_remote_key(
         )
         .map_err(|e| e.to_string())?;
     }
-    crate::config_cmd::set_classify_engine("remote")
+    Ok(())
 }
 
 /// The local auto-setup: download the installer, install the `ollaya`
@@ -289,14 +303,17 @@ trait LocalSetupRuntime {
 struct SystemLocalSetup;
 
 impl LocalSetupRuntime for SystemLocalSetup {
+    #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
     fn local_root(&mut self) -> Result<PathBuf, String> {
         local_root()
     }
 
+    #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
     fn exists(&self, path: &std::path::Path) -> bool {
         path.exists()
     }
 
+    #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
     fn run(
         &mut self,
         program: &str,
@@ -311,10 +328,12 @@ impl LocalSetupRuntime for SystemLocalSetup {
         run_env(program, &args, &env)
     }
 
+    #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
     fn record_launch(&mut self, launch: &Value) -> Result<(), String> {
         crate::config_cmd::set_ollaya_launch(launch)
     }
 
+    #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
     fn set_engine(&mut self) -> Result<(), String> {
         crate::config_cmd::set_classify_engine("local")
     }
@@ -403,9 +422,8 @@ fn setup_local_with(
 /// Spawn the recorded local daemon if it is not already answering. Returns
 /// whether a spawn happened (the caller polls for reachability itself).
 #[cfg_attr(test, mutants::skip)] // Runtime adapter; launch parsing and branching are tested by `auto_start_with`.
-pub fn auto_start() -> Result<bool, String> {
-    let base = local_base();
-    auto_start_with(&base, server_reachable, ollaya_launch(), |argv, env| {
+pub fn auto_start(base: &str) -> Result<bool, String> {
+    auto_start_with(base, server_reachable, ollaya_launch(), |argv, env| {
         let log = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -439,6 +457,14 @@ fn auto_start_with(
     let Some(launch) = launch else {
         return Ok(false);
     };
+    let recorded_base = launch
+        .get("base")
+        .and_then(Value::as_str)
+        .unwrap_or(crate::decide_ollaya::DEFAULT_BASE);
+    if base != recorded_base {
+        return Ok(false);
+    }
+
     let argv: Vec<String> = launch
         .get("argv")
         .and_then(Value::as_array)
@@ -613,13 +639,47 @@ mod tests {
     fn remote_key_prompt_reads_the_provider_from_the_supplied_reader() {
         let mut input = std::io::Cursor::new(b"unknown-provider\n".to_vec());
         let mut output = Vec::new();
-        let error = propose_remote_key(&mut input, &mut output).unwrap_err();
+        let error = propose_remote_key_with(&mut input, &mut output, |_, _| {
+            panic!("invalid provider must not be stored")
+        })
+        .unwrap_err();
         assert!(error.contains("unknown provider \"unknown-provider\""));
         assert!(
             String::from_utf8(output)
                 .unwrap()
                 .contains("Provider [openrouter]>")
         );
+    }
+
+    #[test]
+    fn remote_setup_should_persist_the_selected_provider_even_without_a_key() {
+        for (input, expected, key) in [
+            (
+                "deepseek\n test-secret \n",
+                crate::decide_remote::Preset::Deepseek,
+                Some("test-secret"),
+            ),
+            (
+                "opencode-go\n\n",
+                crate::decide_remote::Preset::OpencodeGo,
+                None,
+            ),
+            ("\n\n", crate::decide_remote::Preset::Openrouter, None),
+        ] {
+            let mut stored = None;
+            let mut output = Vec::new();
+            propose_remote_key_with(
+                &mut std::io::Cursor::new(input),
+                &mut output,
+                |preset, value| {
+                    stored = Some((preset, value.map(str::to_string)));
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(stored, Some((expected, key.map(str::to_string))));
+            assert!(!String::from_utf8(output).unwrap().contains("test-secret"));
+        }
     }
 
     #[test]
@@ -690,6 +750,28 @@ mod tests {
 
         assert!(error.contains("did not come up within two minutes"));
         assert_eq!(sleeps, 2);
+    }
+
+    #[test]
+    fn auto_start_should_not_spawn_a_recorded_daemon_for_another_endpoint() {
+        assert!(
+            !auto_start_with(
+                "http://127.0.0.1:9999",
+                |_| false,
+                Some(json!({"base": "http://127.0.0.1:11435", "argv": ["ollaya", "serve"]})),
+                |_, _| panic!("a custom URL must not start the unrelated managed daemon"),
+            )
+            .unwrap()
+        );
+        assert!(
+            auto_start_with(
+                "http://127.0.0.1:9999",
+                |_| false,
+                Some(json!({"base": "http://127.0.0.1:9999", "argv": ["ollaya", "serve"]})),
+                |_, _| Ok(()),
+            )
+            .unwrap()
+        );
     }
 
     #[test]

@@ -131,11 +131,11 @@ They combine: semble for search and Pixel for the graph, history and Git costs a
 
 ## Coding decisions
 
-`pixel classify` answers a bounded question with a decision model you configure. It returns one probability per label in a single forward pass, with no token-by-token generation.
+`pixel classify` answers a bounded question with a decision model you configure. It returns one probability per label. The local Ollaya engine uses decision-model outputs; the remote engine asks a chat model to generate probabilities.
 
-### Accuracy and speed of every model
+### Published decision-model measurements
 
-Typed-decisions accuracy, higher is better; latency, lower is better.
+Source: [Ollaya’s published benchmark](https://ollaya.dev/), checked 2026-09-28. Ollaya describes the accuracy evaluation as the typed-decisions test split: 400 states and 2,000 questions, scored by argmax against the majority label. It reports its own model results and attributes Jev’s result to Winnow’s benchmark on the same questions. These are upstream reports, not a Pixel reproduction; no shared run artifact is archived here.
 
 | Model | Typed-decisions accuracy | Latency | Measurement |
 | --- | --- | --- | --- |
@@ -143,4 +143,4 @@ Typed-decisions accuracy, higher is better; latency, lower is better.
 | TypeSafe Jev | **0.738** | 236–276 ms | Hosted API, median request |
 | laya | — | about 10 ms | Runs well on a CPU |
 
-winnow:e4b comes close to Jev's accuracy in under 100 ms. Smaller models such as laya answer in about 10 ms and run well on a CPU.
+The latency figures use different environments and requests: local RTX 4090 inference versus a hosted API including network time. They do not establish a speed winner. The accuracy sample is separate from the five-question latency request. The laya latency is also an upstream measurement, not a CPU measurement by Pixel.

@@ -407,10 +407,10 @@ pub struct ClassifyOptions {
     /// Criterion text per label: --criterion label="description".
     #[arg(long = "criterion", requires = "labels")]
     pub criteria: Vec<String>,
-    /// Remote provider preset: `openrouter`, `ollama`, or `local`.
+    /// Remote provider preset (overrides the stored choice; defaults to `openrouter`).
     /// Selects the base URL and the API-key env var; see `PIXEL_REMOTE_*`.
-    #[arg(long, value_enum, default_value_t = crate::decide_remote::Preset::Openrouter)]
-    pub remote_preset: crate::decide_remote::Preset,
+    #[arg(long, value_enum)]
+    pub remote_preset: Option<crate::decide_remote::Preset>,
     /// Remote model id (overrides the preset default and `PIXEL_REMOTE_MODEL`).
     #[arg(long)]
     pub remote_model: Option<String>,
@@ -557,7 +557,7 @@ fn render_probs(probs: &BTreeMap<String, f64>, spec: &Spec) -> String {
 
 fn run_with(
     opts: ClassifyOptions,
-    resolve: impl FnOnce(&ClassifyOptions) -> crate::classify_setup::ResolvedEngine,
+    resolve: impl FnOnce(&ClassifyOptions) -> Result<crate::classify_setup::ResolvedEngine, String>,
     opener: impl FnOnce(
         crate::classify_setup::ResolvedEngine,
     ) -> Result<Box<dyn DecisionEngine>, String>,
@@ -565,7 +565,7 @@ fn run_with(
     output: &mut dyn ClassifyOutput,
 ) -> Result<(), String> {
     if opts.jsonl {
-        let mut engine = opener(resolve(&opts))? as Box<dyn DecisionEngine>;
+        let mut engine = opener(resolve(&opts)?)? as Box<dyn DecisionEngine>;
         return serve_jsonl(reader, engine.as_mut(), output);
     }
 
@@ -582,7 +582,7 @@ fn run_with(
             None => text.to_string(),
         };
         let (state, clipped) = clip_text(&state);
-        let resolved = resolve(&opts);
+        let resolved = resolve(&opts)?;
         if !matches!(
             resolved,
             crate::classify_setup::ResolvedEngine::Local { .. }
@@ -608,7 +608,7 @@ fn run_with(
     }
 
     let spec = one_shot_spec(&opts)?;
-    let mut engine = opener(resolve(&opts))?;
+    let mut engine = opener(resolve(&opts)?)?;
     let probs = engine.decide(&spec)?;
     if opts.json {
         output.print_document(&document(engine.as_ref(), &spec, &probs))
@@ -620,16 +620,28 @@ fn run_with(
 /// The engine for this invocation: the explicit flag wins, then the stored
 /// preference, then a reachability probe of the local daemon. A resolved
 /// local engine that is not yet answering gets one auto-start chance.
-fn resolve_engine_for(opts: &ClassifyOptions) -> crate::classify_setup::ResolvedEngine {
-    let stored = crate::config_cmd::classify_engine();
-    // Probe the local daemon only when the result can hinge on it: no
-    // explicit flag and the stored preference is `auto` or absent. A stored
-    // `local` resolves to Local regardless (the caller auto-starts it); a
-    // stored `remote` or an explicit flag never needs a probe.
+#[cfg_attr(test, mutants::skip)] // Environment adapter; resolution and startup are tested with injected I/O.
+fn resolve_engine_for(
+    opts: &ClassifyOptions,
+) -> Result<crate::classify_setup::ResolvedEngine, String> {
+    resolve_engine_with(
+        opts,
+        crate::config_cmd::classify_engine(),
+        crate::classify_setup::server_reachable,
+        crate::classify_setup::ensure_local,
+    )
+}
+
+fn resolve_engine_with(
+    opts: &ClassifyOptions,
+    stored: Option<String>,
+    mut reachable: impl FnMut(&str) -> bool,
+    ensure: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<crate::classify_setup::ResolvedEngine, String> {
     let needs_probe =
         opts.engine.is_none() && !matches!(stored.as_deref(), Some("local") | Some("remote"));
-    let reachable = if needs_probe {
-        crate::classify_setup::server_reachable(&crate::classify_setup::local_base())
+    let available = if needs_probe {
+        reachable(&crate::classify_setup::local_base())
     } else {
         false
     };
@@ -637,24 +649,29 @@ fn resolve_engine_for(opts: &ClassifyOptions) -> crate::classify_setup::Resolved
         opts.engine,
         opts.ollaya_url.clone(),
         stored,
-        reachable,
+        available,
     );
-    // A resolved local engine that is not answering yet gets one auto-start
-    // chance (recorded launch), then the caller's request proceeds against
-    // the polled daemon — or fails with the logged reason. `auto`/absent
-    // fell back to remote when no daemon answered, so this only fires for
-    // an explicit `--engine ollaya` or a stored `local`.
     if let crate::classify_setup::ResolvedEngine::Local { base } = &resolved
-        && !crate::classify_setup::server_reachable(base)
+        && !reachable(base)
     {
-        let _ = crate::classify_setup::ensure_local(base);
+        ensure(base)?;
     }
-    resolved
+    Ok(resolved)
+}
+
+fn resolve_remote_preset(
+    flag: Option<crate::decide_remote::Preset>,
+    stored: Option<crate::decide_remote::Preset>,
+) -> crate::decide_remote::Preset {
+    flag.or(stored).unwrap_or_default()
 }
 
 #[cfg_attr(test, mutants::skip)] // thin environment adapter over model, stdin, and stdout
 pub fn run(opts: ClassifyOptions) -> Result<(), String> {
-    let remote_preset = opts.remote_preset;
+    let remote_preset = resolve_remote_preset(
+        opts.remote_preset,
+        crate::config_cmd::classify_remote_preset(),
+    );
     let remote_model = opts.remote_model.clone();
     let stdin = std::io::stdin();
     let mut output = ProductionOutput;
@@ -808,8 +825,15 @@ mod tests {
         Ok(Box::new(FakeEngine::new(calls)))
     }
 
-    fn test_resolve(opts: &ClassifyOptions) -> crate::classify_setup::ResolvedEngine {
-        crate::classify_setup::resolve_engine(opts.engine, opts.ollaya_url.clone(), None, false)
+    fn test_resolve(
+        opts: &ClassifyOptions,
+    ) -> Result<crate::classify_setup::ResolvedEngine, String> {
+        Ok(crate::classify_setup::resolve_engine(
+            opts.engine,
+            opts.ollaya_url.clone(),
+            None,
+            false,
+        ))
     }
 
     fn parse_classify(args: &[&str]) -> ClassifyOptions {
@@ -953,6 +977,118 @@ mod tests {
     }
 
     #[test]
+    fn remote_provider_should_use_stored_choice_unless_explicitly_overridden() {
+        use crate::decide_remote::Preset;
+        assert_eq!(resolve_remote_preset(None, None), Preset::Openrouter);
+        assert_eq!(
+            resolve_remote_preset(None, Some(Preset::Deepseek)),
+            Preset::Deepseek
+        );
+        let opts = parse_classify(&[
+            "pixel",
+            "classify",
+            "state",
+            "--remote-preset",
+            "openrouter",
+        ]);
+        assert_eq!(
+            resolve_remote_preset(opts.remote_preset, Some(Preset::Deepseek)),
+            Preset::Openrouter
+        );
+        let opts = parse_classify(&["pixel", "classify", "state"]);
+        assert_eq!(
+            resolve_remote_preset(opts.remote_preset, Some(Preset::OpencodeGo)),
+            Preset::OpencodeGo
+        );
+    }
+
+    #[test]
+    fn ollaya_document_should_disclose_confidence_after_a_real_adapter_decision() {
+        let mut engine = crate::decide_ollaya::Ollaya::with_post(
+            crate::decide_ollaya::OllayaConfig::default(),
+            |_, _| {
+                Ok(json!({"answers": {"q1": {
+                    "probabilities": {"yes": 0.8, "no": 0.2}, "confidence": 0.6
+                }}}))
+            },
+        );
+        assert_eq!(engine.extra_snapshot(), None);
+        let spec = spec("state", "", &["yes", "no"], &[]);
+        let probabilities = DecisionEngine::decide(&mut engine, &spec).unwrap();
+        let doc = document(&engine, &spec, &probabilities);
+        assert_eq!(doc["snapshot"]["confidence"], 0.6);
+        assert_eq!(doc["probs"]["yes"], 0.8);
+    }
+
+    #[test]
+    fn resolution_should_probe_only_when_selection_or_startup_needs_it() {
+        use crate::classify_setup::ResolvedEngine;
+        for (flag, stored, live, local, expected_probes, expected_starts) in [
+            (Some(EngineChoice::Remote), None, true, false, 0, 0),
+            (Some(EngineChoice::Remote), Some("local"), true, false, 0, 0),
+            (None, Some("remote"), true, false, 0, 0),
+            (None, Some("local"), true, true, 1, 0),
+            (None, Some("local"), false, true, 1, 1),
+            (None, None, false, false, 1, 0),
+            (None, Some("auto"), true, true, 2, 0),
+            (Some(EngineChoice::Ollaya), Some("remote"), true, true, 1, 0),
+            (Some(EngineChoice::Ollaya), None, false, true, 1, 1),
+        ] {
+            let mut opts = parse_classify(&["pixel", "classify", "state"]);
+            opts.engine = flag;
+            let mut probes = 0;
+            let mut starts = 0;
+            let resolved = resolve_engine_with(
+                &opts,
+                stored.map(str::to_string),
+                |_| {
+                    probes += 1;
+                    live
+                },
+                |_| {
+                    starts += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(matches!(resolved, ResolvedEngine::Local { .. }), local);
+            assert_eq!(probes, expected_probes, "flag={flag:?}, stored={stored:?}");
+            assert_eq!(starts, expected_starts, "flag={flag:?}, stored={stored:?}");
+        }
+    }
+
+    #[test]
+    fn classify_should_return_startup_failure_before_opening_the_engine() {
+        for args in [
+            &["pixel", "classify", "state", "--engine", "ollaya"][..],
+            &[
+                "pixel", "classify", "state", "--engine", "ollaya", "--label", "yes,no",
+            ],
+            &["pixel", "classify", "--jsonl", "--engine", "ollaya"],
+        ] {
+            let opts = parse_classify(args);
+            let mut output = RecordingOutput::default();
+            let error = run_with(
+                opts,
+                |opts| {
+                    resolve_engine_with(
+                        opts,
+                        None,
+                        |_| false,
+                        |_| Err("cannot open server log".to_string()),
+                    )
+                },
+                |_| panic!("startup failure must prevent opening the engine"),
+                Cursor::new(Vec::<u8>::new()),
+                &mut output,
+            )
+            .unwrap_err();
+            assert_eq!(error, "cannot open server log");
+            assert!(output.text.is_empty());
+        }
+    }
+
+    #[test]
     fn production_engine_adapters_disclose_their_real_metadata() {
         let remote = crate::decide_remote::Remote::open(
             crate::decide_remote::resolve_config(
@@ -965,6 +1101,7 @@ mod tests {
         let spec = spec("state", "", &["yes", "no"], &[]);
         let probabilities = BTreeMap::from([("yes".to_string(), 0.8), ("no".to_string(), 0.2)]);
         let remote_document = document(&remote, &spec, &probabilities);
+        assert_eq!(remote.extra_snapshot(), None);
         assert_eq!(remote_document["snapshot"]["model"], "test-remote");
         assert_eq!(remote_document["snapshot"]["provider"], "local");
         assert_eq!(remote_document["snapshot"]["deterministic"], false);
@@ -1026,7 +1163,7 @@ mod tests {
             context: Some("the rubric".to_string()),
             labels: labels.iter().map(ToString::to_string).collect(),
             criteria: criteria.iter().map(ToString::to_string).collect(),
-            remote_preset: crate::decide_remote::Preset::Openrouter,
+            remote_preset: Some(crate::decide_remote::Preset::Openrouter),
             remote_model: None,
             engine: Some(EngineChoice::Remote),
             ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
@@ -1246,7 +1383,7 @@ mod tests {
             context: None,
             labels: vec!["yes".to_string(), "no".to_string()],
             criteria: Vec::new(),
-            remote_preset: crate::decide_remote::Preset::Openrouter,
+            remote_preset: Some(crate::decide_remote::Preset::Openrouter),
             remote_model: None,
             engine: Some(EngineChoice::Remote),
             ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
@@ -1275,7 +1412,7 @@ mod tests {
             context: None,
             labels: vec!["yes".to_string(), "no".to_string()],
             criteria: vec!["yes=alpha".to_string(), "no=beta".to_string()],
-            remote_preset: crate::decide_remote::Preset::Openrouter,
+            remote_preset: Some(crate::decide_remote::Preset::Openrouter),
             remote_model: None,
             engine: Some(EngineChoice::Remote),
             ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
@@ -1313,7 +1450,7 @@ mod tests {
             context: None,
             labels: Vec::new(),
             criteria: Vec::new(),
-            remote_preset: crate::decide_remote::Preset::Openrouter,
+            remote_preset: Some(crate::decide_remote::Preset::Openrouter),
             remote_model: None,
             engine: Some(EngineChoice::Remote),
             ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
@@ -1374,10 +1511,10 @@ mod tests {
         run_with(
             ClassifyOptions {
                 text: Some("refund me now".to_string()),
-                context: None,
+                context: Some("customer message".to_string()),
                 labels: Vec::new(),
                 criteria: Vec::new(),
-                remote_preset: crate::decide_remote::Preset::Openrouter,
+                remote_preset: Some(crate::decide_remote::Preset::Openrouter),
                 remote_model: None,
                 engine: Some(EngineChoice::Ollaya),
                 ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
@@ -1395,7 +1532,10 @@ mod tests {
             &mut output,
         )
         .unwrap();
-        assert_eq!(battery_calls.lock().unwrap().as_slice(), &["refund me now"]);
+        assert_eq!(
+            battery_calls.lock().unwrap().as_slice(),
+            &["customer message\n\nrefund me now"]
+        );
         assert!(
             output.text.contains("intent: other (0.900)"),
             "{}",
@@ -1422,15 +1562,17 @@ mod tests {
                 context: None,
                 labels: Vec::new(),
                 criteria: Vec::new(),
-                remote_preset: crate::decide_remote::Preset::Openrouter,
+                remote_preset: Some(crate::decide_remote::Preset::Openrouter),
                 remote_model: None,
                 engine: Some(EngineChoice::Remote),
                 ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
                 jsonl: false,
                 json: false,
             },
-            |_| crate::classify_setup::ResolvedEngine::Local {
-                base: "http://127.0.0.1:11435".to_string(),
+            |_| {
+                Ok(crate::classify_setup::ResolvedEngine::Local {
+                    base: "http://127.0.0.1:11435".to_string(),
+                })
             },
             |_resolved| {
                 let mut engine = FakeEngine::new(Arc::new(Mutex::new(Vec::new())));
@@ -1457,7 +1599,7 @@ mod tests {
                 context: None,
                 labels: Vec::new(),
                 criteria: Vec::new(),
-                remote_preset: crate::decide_remote::Preset::Openrouter,
+                remote_preset: Some(crate::decide_remote::Preset::Openrouter),
                 remote_model: None,
                 engine: Some(EngineChoice::Remote),
                 ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
@@ -1517,7 +1659,7 @@ mod tests {
             context: None,
             labels: Vec::new(),
             criteria: Vec::new(),
-            remote_preset: crate::decide_remote::Preset::Openrouter,
+            remote_preset: Some(crate::decide_remote::Preset::Openrouter),
             remote_model: None,
             engine: Some(EngineChoice::Remote),
             ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
@@ -1568,7 +1710,7 @@ mod tests {
                 context: None,
                 labels: vec!["yes".to_string(), "no".to_string()],
                 criteria: vec!["yes=alpha".to_string(), "no=beta".to_string()],
-                remote_preset: crate::decide_remote::Preset::Openrouter,
+                remote_preset: Some(crate::decide_remote::Preset::Openrouter),
                 remote_model: None,
                 engine: Some(EngineChoice::Remote),
                 ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
@@ -1630,7 +1772,7 @@ mod tests {
             context: None,
             labels: vec!["yes".to_string(), "no".to_string()],
             criteria: Vec::new(),
-            remote_preset: crate::decide_remote::Preset::Openrouter,
+            remote_preset: Some(crate::decide_remote::Preset::Openrouter),
             remote_model: None,
             engine: Some(EngineChoice::Ollaya),
             ollaya_url: "http://127.0.0.1:9".to_string(),

@@ -112,7 +112,7 @@ impl Ollaya {
     }
 
     #[cfg(test)]
-    fn with_post(
+    pub(crate) fn with_post(
         config: OllayaConfig,
         post: impl Fn(&OllayaConfig, &Value) -> Result<Value, String> + 'static,
     ) -> Ollaya {
@@ -152,8 +152,9 @@ impl Ollaya {
         let response = (self.post)(&self.config, &body)?;
         response
             .get("answers")
+            .filter(|answers| answers.is_object())
             .cloned()
-            .ok_or_else(|| "ollaya response missing answers".to_string())
+            .ok_or_else(|| "ollaya response answers must be an object".to_string())
     }
 }
 
@@ -383,6 +384,19 @@ mod tests {
         });
         let error = ollaya.ask("state", &default_battery()).unwrap_err();
         assert!(error.contains("answers"), "{error}");
+    }
+
+    #[test]
+    fn ask_should_reject_non_object_answers_instead_of_printing_an_empty_success() {
+        for answers in [Value::Null, json!([]), json!("unavailable")] {
+            let mut ollaya = Ollaya::with_post(OllayaConfig::default(), move |_, _| {
+                Ok(json!({"answers": answers}))
+            });
+            assert_eq!(
+                ollaya.ask("state", &default_battery()).unwrap_err(),
+                "ollaya response answers must be an object"
+            );
+        }
     }
 
     #[test]

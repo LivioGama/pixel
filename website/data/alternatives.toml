@@ -416,10 +416,10 @@ pitch = "A dedicated model for coding judgement calls."
 about = "A dedicated model for coding judgement calls, scored on its own benchmark, JevBench."
 measure = "published-figure"
 bench = "coding-decisions"
-answer = '''For a bounded coding decision, <code>pixel classify</code> asks a model you configure and returns one probability per label. On an RTX 4090, winnow:e4b through Ollaya reaches 0.722 typed-decisions accuracy in 89 ms for five questions; TypeSafe Jev reaches 0.738 in a 236–276 ms hosted request. The rest of Pixel needs no decision model.'''
+answer = '''For a bounded coding decision, <code>pixel classify</code> asks a model you configure and returns one probability per label. Ollaya reports typed-decisions accuracy of 0.722 for winnow:e4b and 0.738 for Jev. Separately, it reports 89 ms for five local questions on an RTX 4090 and 236–276 ms for a hosted Jev request. These latency setups are not comparable. The rest of Pixel needs no decision model.'''
 wins = "its 0.738 typed-decisions accuracy is slightly higher than winnow:e4b's 0.722."
 note_label = "Read with care"
-note = "The latency measurements differ: winnow:e4b is five questions end to end on an RTX 4090; Jev is a hosted API's median request."
+note = "Upstream figures, not a Pixel reproduction. Accuracy: 2,000 typed-decisions questions, argmax against the majority label, according to Ollaya. Latency setups differ: local RTX 4090 versus hosted API; neither is marked as the winner."
 more = "Every model, the method and its limits"
 checked = 2026-09-28
 
@@ -433,7 +433,7 @@ checked = 2026-09-28
   label = "Latency"
   pixel = "89 ms for five questions (RTX 4090)"
   other = "236–276 ms, hosted median request"
-  win = "pixel"
+  win = ""
 
   [[tool.row]]
   label = "Model"
