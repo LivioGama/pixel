@@ -21,13 +21,13 @@ const FEATURES: &[(&str, &str)] = &[
     ("task_boundary", "PIXEL_TASK_BOUNDARY"),
 ];
 
-fn resolved(root: Option<&Path>, key: &str) -> (Option<Value>, String) {
+fn resolved(root: Option<&Path>, key: &str) -> (Option<bool>, String) {
     let paths = root
         .map(repo_config_path)
         .into_iter()
         .chain(global_config_path());
     for path in paths {
-        if let Some(value) = read_config_doc(&path).and_then(|doc| doc.get(key).cloned()) {
+        if let Some(value) = read_config_doc(&path).and_then(|doc| doc.get(key)?.as_bool()) {
             return (Some(value), path.display().to_string());
         }
     }
@@ -44,7 +44,7 @@ fn feature_resolution(root: Option<&Path>, key: &str, env: &str) -> (bool, Strin
         return (!matches!(value.as_str(), "0" | "false" | "off"), env.into());
     }
     let (value, source) = resolved(root, key);
-    (value.and_then(|v| v.as_bool()).unwrap_or(true), source)
+    (value.unwrap_or(true), source)
 }
 
 pub fn ensure_template(root: Option<&Path>) -> Result<PathBuf, String> {
@@ -900,6 +900,36 @@ mod tests {
             assert!(!err.contains("secret-invalid"));
             assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
         }
+    }
+
+    #[test]
+    fn invalid_feature_values_should_fall_through_without_claiming_their_source() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        let repo = home.0.join("repo");
+        let global = home.0.join(".pixel/config.yaml");
+        let local = repo.join(".pixel/config.yaml");
+        let env = format!("PIXEL_TEST_INVALID_FEATURE_{}", std::process::id());
+        for (key, _) in FEATURES {
+            for invalid in ["'off'", "'no'", "0", "null", "{}"] {
+                write(&global, &format!("{key}: false\n"));
+                write(&local, &format!("{key}: {invalid}\n"));
+                assert_eq!(
+                    feature_resolution(Some(&repo), key, &env),
+                    (false, global.display().to_string()),
+                    "invalid repository {key}={invalid} must not hide the global opt-out"
+                );
+                write(&global, &format!("{key}: {invalid}\n"));
+                assert_eq!(
+                    feature_resolution(Some(&repo), key, &env),
+                    (true, "default".into()),
+                    "invalid values at both layers must leave the default as the source"
+                );
+            }
+        }
+        restore_home(saved);
     }
 
     #[test]
