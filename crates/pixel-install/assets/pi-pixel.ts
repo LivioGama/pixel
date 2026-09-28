@@ -178,7 +178,7 @@ function simpleTranslation(command: string, root: string, resolvedPaths: Set<str
   return null;
 }
 
-function safeCopy(command: string, root: string) {
+function safeTransfer(command: string, root: string) {
   const words: string[] = [];
   const token = /\s*(?:'([^']*)'|"([^"]*)"|([^\s'"]+))/y;
   for (let offset = 0; offset < command.length;) {
@@ -243,8 +243,8 @@ function classify(tool: string, input: any, root: string, resolvedPaths: Set<str
     if (/\b(ls|tree|rg|grep|find|fd|cat|head|tail|git\s+(status|diff|log|blame|fetch)|python|python3|node|ruby|perl|awk|sed)\b/.test(command)) {
       return { kind: "blocked", reason: "Ambiguous repository read; call pixel with the full task goal" };
     }
-    if (/^cp(?:\s|$)/.test(command) && !safeCopy(command, root)) {
-      return { kind: "blocked", reason: "Copying repository content outside the repository bypasses Pixel reads" };
+    if (/^(?:cp|mv)(?:\s|$)/.test(command) && !safeTransfer(command, root)) {
+      return { kind: "blocked", reason: "Copying or moving repository content outside the repository bypasses Pixel reads" };
     }
     if (/^(cargo|make|just|npm|pnpm|bun|pytest|go|mkdir|cp|mv|rm|touch|chmod|echo|printf|true|false)(?:\s|$)/.test(command)) {
       return { kind: "exception", reason: "build, test, edit, or execution command" };

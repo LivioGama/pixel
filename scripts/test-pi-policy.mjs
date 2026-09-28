@@ -67,6 +67,16 @@ for (const command of [
 for (const command of ["cp src/main.rs src/copy.rs", "cp src/main.rs 'src/#copy.rs'", "cp -R src src-copy", "cp /tmp/external src/copy.rs"]) {
   assert.equal(await guard({toolName:"bash", input:{command}}, user("edit")), undefined, command);
 }
+for (const toolName of ["bash", "run_command"]) {
+  for (const command of ["mv src/main.rs /tmp/pixel-move", "mv -n src/main.rs /tmp/pixel-move", "mv src/main.rs outside-link/moved.rs"]) {
+    const move = {toolName, input:{command}};
+    assert.equal((await guard(move, user("edit"))).block, true, `${toolName}: ${command}`);
+    assert.equal(move.input.command, command);
+  }
+  for (const command of ["mv src/main.rs src/renamed.rs", "mv /tmp/external src/renamed.rs"]) {
+    assert.equal(await guard({toolName, input:{command}}, user("edit")), undefined, `${toolName}: ${command}`);
+  }
+}
 const read = {toolName:"read", input:{path:"src/main.rs"}};
 assert.equal((await guard(read, user("inspect"))).block, true);
 
