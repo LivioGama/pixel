@@ -32,6 +32,7 @@ mod classify;
 mod classify_setup;
 mod claude_controller;
 mod config_cmd;
+mod config_file;
 mod coverage_cmd;
 mod decide_ollaya;
 mod decide_remote;
@@ -1583,19 +1584,19 @@ enum HookCmd {
 enum ConfigCmd {
     /// Live 🟩 metrics footer: `pixel config metrics` reports the effective
     /// setting and its layer; `on|off` persists it to `<root>/.pixel/
-    /// config.json` — or `~/.pixel/config.json` with `--global`.
+    /// config.yaml` — or `~/.pixel/config.yaml` with `--global` (legacy JSON supported).
     Metrics {
         /// New value; omit to report the effective setting.
         #[arg(value_parser = ["on", "off"])]
         value: Option<String>,
-        /// Write to the machine-wide `~/.pixel/config.json`.
+        /// Write to the machine-wide configuration.
         #[arg(long)]
         global: bool,
         #[arg(default_value = ".")]
         path: PathBuf,
     },
     /// API key for a `pixel classify` remote preset: `pixel config
-    /// remote-key ollama <key>` stores it in `~/.pixel/config.json`
+    /// remote-key ollama <key>` stores it in the global configuration
     /// (never the repo config, never printed back). The provider env var
     /// (`OLLAMA_API_KEY`, `OPENROUTER_API_KEY`) still wins when set.
     RemoteKey {
@@ -6711,12 +6712,14 @@ fn run_command(
         // -------------------------------------------------------------
         Command::Install { json, shell, repo } => {
             let is_global_install = repo.is_none();
+            let config_root = repo.clone();
             let report = pixel_install::install::install(&pixel_install::install::InstallOptions {
                 shell,
                 repo,
                 ..Default::default()
             })
             .map_err(|e| e.to_string())?;
+            config_cmd::ensure_template(config_root.as_deref())?;
             // Interactive UX goes to stderr so `--json` stdout stays pure.
             let tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
             if should_offer_classify_setup(is_global_install, json, tty) {

@@ -254,7 +254,7 @@ fn propose_remote_key_with(
     };
     write!(
         stdout,
-        "API key (stored in ~/.pixel/config.json, never printed)> "
+        "API key (stored in the global Pixel config, never printed)> "
     )
     .map_err(|e| e.to_string())?;
     stdout.flush().map_err(|e| e.to_string())?;

@@ -1,0 +1,17 @@
+# Pixel user configuration. Uncomment an example to override its default.
+# Repository settings override global settings; environment overrides win.
+
+# Live metrics footer (default: on).
+# metrics: "off"
+
+# Classification is used only when requested. Global settings only.
+# Engine: auto (default), local, or remote.
+# Remote use requires your provider credentials; it may incur API charges.
+# classify:
+#   engine: remote
+#   remote_preset: openrouter
+
+# Global credentials only. Environment credentials take precedence.
+# Prefer: pixel config remote-key openrouter -  (reads a key from stdin).
+# remote_keys:
+#   openrouter: "<your-api-key>"

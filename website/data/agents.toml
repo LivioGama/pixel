@@ -37,7 +37,7 @@
 # Written by every `pixel install`, whichever agents are present: the agent
 # prompt Claude Code's SessionStart hook injects, and the short prompt for
 # its sub-agents.
-shared = ["~/.local/share/pixel/agent-prompt.md", "~/.local/share/pixel/subagent-prompt.md"]
+shared = ["~/.local/share/pixel/agent-prompt.md", "~/.local/share/pixel/subagent-prompt.md", "~/.pixel/config.yaml"]
 
 [[agent]]
 slug = "claude-code"
