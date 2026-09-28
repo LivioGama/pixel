@@ -66,10 +66,50 @@ pub fn ensure(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    match create_private(path, format!("{TEMPLATE}\n{values}").as_bytes()) {
+    finish_create(
+        path,
+        create_private(path, format!("{TEMPLATE}\n{values}").as_bytes()),
+    )
+}
+
+/// A concurrent creator wins without clobbering; every other write error remains an error.
+fn finish_create(path: &Path, result: std::io::Result<()>) -> Result<(), String> {
+    match result {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(format!("create {}: {e}", path.display())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn creation_should_accept_a_concurrent_winner_but_propagate_write_failures() {
+        let path = Path::new("config.yaml");
+        assert_eq!(finish_create(path, Ok(())), Ok(()));
+        assert_eq!(
+            finish_create(path, Err(std::io::ErrorKind::AlreadyExists.into())),
+            Ok(())
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::WriteZero,
+        ] {
+            assert!(
+                finish_create(path, Err(kind.into()))
+                    .unwrap_err()
+                    .contains("create config.yaml")
+            );
+        }
+    }
+
+    #[test]
+    fn rendering_should_not_treat_an_unreadable_path_as_an_empty_template() {
+        let error =
+            render(&std::env::temp_dir(), &json!({}), &json!({"metrics":"off"})).unwrap_err();
+        assert!(error.starts_with("read "));
     }
 }
 
