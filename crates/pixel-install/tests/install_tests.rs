@@ -3126,7 +3126,8 @@ fn repo_install_writes_all_five_artifacts() {
     // extensions from; nothing under .pi/agent/, which pi reads only in ~.
     let ext = fs::read_to_string(repo.join(".pi/extensions/pixel-guard.ts")).unwrap();
     assert!(ext.contains(MANAGED_BEGIN), "{ext}");
-    assert!(ext.contains("[\"run-hook\", \"guard\"]"), "{ext}");
+    assert!(ext.contains("pi.registerTool({"), "{ext}");
+    assert!(ext.contains("pi.on(\"tool_call\""), "{ext}");
     assert!(!repo.join(".pi/agent").exists());
 
     // Nothing global was touched.
