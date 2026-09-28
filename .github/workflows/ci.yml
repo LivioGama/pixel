@@ -58,7 +58,6 @@ on:
       # scripts/test-prepare.py and pixel-release's tests read prepare.sh:
       - ".agents/skills/release/**"
       - "scripts/README.md"
-      - "js/sniper/README.md"
       # gen-plugin-assets.sh --check:
       - "PIXEL.md"
       - "PIXEL-SUBAGENT.md"
@@ -228,18 +227,6 @@ jobs:
         run: |
           curl -fsSL https://bun.sh/install | bash
           echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-
-      - name: Install TypeScript integration dependencies
-        working-directory: js/sniper
-        run: bun install --frozen-lockfile
-
-      # The test helper builds and identifies this checkout's native binary
-      # before sending real Vite and golden-envelope payloads across the CLI.
-      - name: TypeScript integration and types
-        working-directory: js/sniper
-        run: |
-          bun run test
-          bun run typecheck
 
       # The Pi extension guard ships as an install asset; its policy test was
       # only runnable by hand. Bun handles the .ts import natively.
