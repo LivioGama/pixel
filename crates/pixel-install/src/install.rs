@@ -609,6 +609,25 @@ mod pi_prompt_content_tests {
     }
 
     #[test]
+    fn a_partial_legacy_signature_does_not_replace_user_text() {
+        let existing = "# Pixel Retrieval Layer\nMy note.\n## MANDATORY WORKFLOW\nMy workflow.\nAll commands accept `[PATH]`, default current directory.\n";
+        let wrapped = managed_pi_content(existing, PI_PROMPT_ASSET);
+        assert!(wrapped.starts_with(existing), "{wrapped}");
+    }
+
+    #[test]
+    fn an_inline_legacy_heading_does_not_replace_quoted_user_text() {
+        let edited = AGENT_PROMPT_ASSET.replacen(
+            "This repo has Pixel installed and indexed",
+            "This repo keeps Pixel ready",
+            1,
+        );
+        let existing = format!("Quoted: {edited}After.");
+        let wrapped = managed_pi_content(&existing, PI_PROMPT_ASSET);
+        assert!(wrapped.starts_with(&existing), "{wrapped}");
+    }
+
+    #[test]
     fn a_file_pixel_never_wrote_keeps_its_text_and_gets_one_block() {
         let existing = "answer in French.\n";
         let wanted = managed_pi_content(existing, AGENT_PROMPT_ASSET);
