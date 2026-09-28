@@ -699,6 +699,7 @@ mod pi_prompt_content_tests {
         let managed = format!("{MANAGED_BEGIN}\n{PI_PROMPT_ASSET}\n{MANAGED_END}\n");
         for (prefix, is_fenced) in [
             ("``\n", false),
+            ("   ```markdown\n", true),
             ("    ```markdown\n", false),
             ("```markdown\n", true),
             ("~~~markdown\n", true),
