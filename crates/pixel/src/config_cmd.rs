@@ -195,7 +195,9 @@ pub fn set_classify_engine(value: &str) -> Result<(), String> {
 pub fn set_ollaya_launch(launch: &Value) -> Result<(), String> {
     let path = global_config_path().ok_or("no HOME for the global config")?;
     write_doc(&path, |doc| {
-        if !doc.get("classify").is_some_and(Value::is_object) {
+        if doc.get("classify").is_some_and(Value::is_object) {
+            // classify already an object; no action needed
+        } else {
             doc["classify"] = json!({});
         }
         doc["classify"]["ollaya"] = launch.clone();
