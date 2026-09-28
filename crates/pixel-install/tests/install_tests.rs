@@ -2685,7 +2685,7 @@ fn edited_legacy_pi_prompt_is_replaced_without_consuming_following_user_text() {
     let asset = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md"))
         .expect("deployed legacy prompt");
     let edited = asset.replacen(
-        "This repo has Pixel installed and indexed",
+        "Pixel provides deterministic code retrieval",
         "This repo keeps Pixel ready",
         1,
     );
