@@ -2806,13 +2806,28 @@ fn uninstall_survives_a_missing_pi_prompt_file() {
     fs::create_dir_all(&prompts).unwrap();
     fs::write(prompts.join("agent-prompt.md"), "deployed prompt\n").unwrap();
 
-    uninstall_home(home);
+    let report = uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        binary_path: Some(home.join("pixel")),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .expect("uninstall");
 
     assert!(
         !prompts.join("agent-prompt.md").exists(),
         "the prompt is removed even when the pi file was never deployed"
     );
     assert!(!pi_prompt_path(home).exists());
+    let prompt_step = report
+        .steps
+        .iter()
+        .find(|step| step.id == "agent-prompt")
+        .unwrap();
+    assert_eq!(
+        prompt_step.summary, "removed agent-prompt.md and subagent-prompt.md",
+        "an absent Pi file must not be reported as removed"
+    );
 }
 
 #[test]

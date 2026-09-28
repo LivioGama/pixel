@@ -610,9 +610,6 @@ fn strip_legacy_pi_prompts(text: &str) -> String {
         let Some((start, end)) = legacy_pi_prompt_range(&cleaned) else {
             break;
         };
-        if end <= start || end > cleaned.len() {
-            break;
-        }
         cleaned.replace_range(start..end, "");
     }
     cleaned
