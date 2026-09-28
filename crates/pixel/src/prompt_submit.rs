@@ -765,27 +765,6 @@ pub(crate) fn emit_context(note: &str, event_name: &str) -> ! {
     std::process::exit(0);
 }
 
-/// Write the boundary event to `~/.pixel/inbox/task-boundary.json` for
-/// downstream consumers (daemons, other tools).
-#[allow(dead_code)]
-fn write_boundary_file(event: &BoundaryEvent) {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let inbox = PathBuf::from(&home).join(".pixel").join("inbox");
-    let _ = std::fs::create_dir_all(&inbox);
-    let path = inbox.join("task-boundary.json");
-    let ts = pixel_actionlog::now_ms();
-    let json = serde_json::json!({
-        "ts_ms": ts,
-        "similarity": event.similarity,
-        "completion_signal": event.completion_signal,
-        "context_summary": event.context_summary,
-    });
-    let _ = std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&json).unwrap_or_default(),
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

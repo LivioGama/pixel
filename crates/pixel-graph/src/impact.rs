@@ -1,7 +1,7 @@
 //! Impact analysis — BFS over `calls` edges, depth-bucketed blast radius with
 //! an epistemic envelope so "0 callers" is distinguishable from "resolver gave up".
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::str::FromStr;
 
 use rusqlite::params;
@@ -399,17 +399,6 @@ pub fn split_ident_words(name: &str) -> Vec<String> {
         }
     }
     words
-}
-
-#[allow(dead_code)]
-pub(crate) fn word_counts<'a, I: Iterator<Item = &'a str>>(names: I) -> HashMap<String, u64> {
-    let mut m = HashMap::new();
-    for n in names {
-        for w in split_ident_words(n) {
-            *m.entry(w).or_insert(0) += 1;
-        }
-    }
-    m
 }
 
 #[cfg(test)]
