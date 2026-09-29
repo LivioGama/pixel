@@ -382,8 +382,10 @@ function sedEditsInPlace(args: string[]): boolean {
 /// hit. Never denied; the path must be shape-valid (canonical containment
 /// is enforced elsewhere).
 function isBoundedSedRead(args: string[]): boolean {
-  if (args[0] !== "sed" || args[1] !== "-n") return false;
-  const range = args[2];
+  // Expect: ['-n', 'A,Bp', 'file']
+  if (args[0] !== "-n") return false;
+  if (args.length !== 3) return false;
+  const range = args[1];
   if (!range || !range.endsWith("p")) return false;
   const inside = range.slice(0, -1);
   const parts = inside.split(",");
@@ -392,7 +394,7 @@ function isBoundedSedRead(args: string[]): boolean {
   const end = Number(parts[1]);
   if (!Number.isInteger(start) || !Number.isInteger(end)) return false;
   if (start < 1 || end < start || end - start > 199) return false;
-  const path = args[3];
+  const path = args[2];
   if (!path || path.startsWith("-")) return false;
   if (CREDENTIAL_PATH.test(path)) return false;
   return true;

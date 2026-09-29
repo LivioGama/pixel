@@ -176,6 +176,8 @@ switch (args[0]) {
     assert.equal(await why("head src/main.rs"), "repository read: use pixel search-content or pixel pack-context <uid>");
     assert.equal(await why("awk '{print}' src/main.rs"), "repository read: use pixel search-content or pixel pack-context <uid>");
     assert.equal(await why("sed 's/a/b/' src/main.rs"), "repository read: use pixel search-content or pixel pack-context <uid>");
+    // bounded sed read: should be ALLOWED (not blocked), so returns undefined
+    assert.equal(await h.emit("tool_call", native("sed -n '1,20p' src/main.rs")), undefined);
     assert.equal(await why("cp src/main.rs /tmp/x"), "repository read: use pixel search-content or pixel pack-context <uid>");
     assert.equal(await why("rg error src"), "repository search: use pixel search-content");
     assert.equal(await why("grep error src"), "repository search: use pixel search-content");
