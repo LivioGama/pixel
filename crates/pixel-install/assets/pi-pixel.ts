@@ -475,14 +475,14 @@ function enforceLeaf(segment: string, words: string[], piped: boolean, root: str
         break;
       }
       if (i !== effectiveArgs.length || !sub) return undefined;
-      let alternative: string;
+      // Spelled out so every reason the audit log carries appears verbatim
+      // in the source, as the other reason constants do.
       switch (sub) {
-        case "status": alternative = "repo-state"; break;
-        case "diff": alternative = "review-changes"; break;
-        case "log": alternative = "commit-history"; break;
+        case "status": return { reason: "repository inspection: use pixel repo-state", operation: "repo-state" };
+        case "diff": return { reason: "repository inspection: use pixel review-changes", operation: "review-changes" };
+        case "log": return { reason: "repository inspection: use pixel commit-history", operation: "commit-history" };
         default: return undefined;
       }
-      return { reason: `repository inspection: use pixel ${alternative}`, operation: alternative };
     }
     case "cat":
     case "head":
