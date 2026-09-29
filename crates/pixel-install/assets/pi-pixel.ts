@@ -480,9 +480,9 @@ function enforceLeaf(segment: string, words: string[], piped: boolean, root: str
     }
     case "sed": {
       if (sedEditsInPlace(effectiveArgs)) return undefined;
-      if (isBoundedSedRead(effectiveArgs)) return undefined;
       const paths = nonFlagPaths(1);
       for (const p of paths) if (credentialPath(p)) return { reason: CREDENTIAL_REASON };
+      if (isBoundedSedRead(effectiveArgs)) return undefined;
       if (!paths.some((p) => argReadsRepo(root, p))) return undefined;
       return { reason: REPO_READ_REASON, operation: "search-content" };
     }
