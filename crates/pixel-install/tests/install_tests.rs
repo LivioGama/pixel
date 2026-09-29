@@ -4307,6 +4307,74 @@ fn doctor_repo_checks_should_stay_green_on_a_project_with_its_own_configs() {
     }
 }
 
+/// Record `[projects."<repo>"] trust_level = "<level>"` in the global Codex
+/// config, the way Codex itself does. The whole file is rewritten: Codex keeps
+/// one table per project, and appending a second one for the same key makes the
+/// document a duplicate-key error rather than a trust level.
+fn set_codex_trust(home: &std::path::Path, repo: &std::path::Path, level: &str) {
+    let path = home.join(".codex/config.toml");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"{level}\"\n",
+            repo.display()
+        ),
+    )
+    .unwrap();
+}
+
+/// An installed repo-local Codex guard is byte-correct, but Codex composes the
+/// project-scoped `.codex/` layer only for a trusted project. The check stays
+/// green and its summary says which of the two it is, so an untrusted checkout
+/// is not reported as a guard that fires.
+#[test]
+#[cfg(unix)]
+fn doctor_repo_codex_hooks_summary_reports_codex_project_trust() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+    let report = install(&repo_install_options(&repo, &home)).unwrap();
+    assert!(report.ok, "{report:?}");
+    let doctor_options = DoctorOptions {
+        home: Some(home.clone()),
+        repo_root: Some(repo.clone()),
+        ..Default::default()
+    };
+
+    // Unspecified: the install is correct, the project is simply not listed.
+    let doctor_report = doctor(&doctor_options).unwrap();
+    let c = check(&doctor_report, "repo.codex-hooks");
+    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
+    assert!(c.summary.contains("will not load until it does"), "{c:?}");
+    assert!(!c.summary.contains("codex trusts this project"), "{c:?}");
+
+    // Untrusted: an explicit refusal reads the same way.
+    set_codex_trust(&home, &repo, "untrusted");
+    let doctor_report = doctor(&doctor_options).unwrap();
+    let c = check(&doctor_report, "repo.codex-hooks");
+    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
+    assert!(c.summary.contains("will not load until it does"), "{c:?}");
+    assert!(!c.summary.contains("codex trusts this project"), "{c:?}");
+
+    // Trusted: the guard loads, and the summary says so.
+    set_codex_trust(&home, &repo, "trusted");
+    let doctor_report = doctor(&doctor_options).unwrap();
+    let c = check(&doctor_report, "repo.codex-hooks");
+    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
+    assert!(c.summary.contains("codex trusts this project"), "{c:?}");
+    assert!(!c.summary.contains("will not load"), "{c:?}");
+
+    // A trust file that does not parse degrades to "unknown", green as ever.
+    fs::write(home.join(".codex/config.toml"), "not toml = = =\n").unwrap();
+    let doctor_report = doctor(&doctor_options).unwrap();
+    let c = check(&doctor_report, "repo.codex-hooks");
+    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
+    assert!(c.summary.contains("codex trust unknown"), "{c:?}");
+}
+
 /// Evidence of a Pixel install that is broken stays red: a Pixel hook without
 /// the guard, an RTK backup without the guard, a Pixel block gone stale, a
 /// Pixel hook without its composed-guard sidecar, or a guard sitting in the
