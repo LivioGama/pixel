@@ -28,6 +28,12 @@ const FEATURES: &[(&str, &str)] = &[
     ("task_boundary", "PIXEL_TASK_BOUNDARY"),
 ];
 
+/// Opt-in switches: an unset layer means off. `auto_handoff` lets the Claude
+/// prompt hook hand an imperative coding prompt to a background worker and
+/// reject the foreground prompt, which a user who never asked for it reads as
+/// Claude refusing to work.
+const OPT_IN_FEATURES: &[(&str, &str)] = &[("auto_handoff", "PIXEL_AUTO_HANDOFF")];
+
 /// Configuration layers nearest first: the repository file, then the global one.
 fn layers(root: Option<&Path>) -> impl Iterator<Item = PathBuf> {
     root.map(repo_config_path)
@@ -49,12 +55,29 @@ pub fn feature_enabled(root: Option<&Path>, key: &str, env: &str) -> bool {
     feature_resolution(root, key, env).0
 }
 
+/// An `OPT_IN_FEATURES` switch: on only when the environment or a layer says so.
+pub fn opt_in_enabled(root: Option<&Path>, key: &str, env: &str) -> bool {
+    switch_resolution(root, key, env, false).0
+}
+
 fn feature_resolution(root: Option<&Path>, key: &str, env: &str) -> (bool, String) {
+    switch_resolution(root, key, env, true)
+}
+
+/// The environment wins, then the nearest layer, then `default`. An
+/// environment value that is neither an explicit on nor an explicit off keeps
+/// the default, so a stray `PIXEL_AUTO_HANDOFF=` never turns an opt-in on.
+fn switch_resolution(root: Option<&Path>, key: &str, env: &str, default: bool) -> (bool, String) {
     if let Ok(value) = std::env::var(env) {
-        return (!matches!(value.as_str(), "0" | "false" | "off"), env.into());
+        let enabled = match value.as_str() {
+            "0" | "false" | "off" => false,
+            "1" | "true" | "on" => true,
+            _ => default,
+        };
+        return (enabled, env.into());
     }
     let (value, source) = resolved(root, key);
-    (value.unwrap_or(true), source)
+    (value.unwrap_or(default), source)
 }
 
 /// What the guard does when a coding agent reaches for native retrieval
@@ -244,7 +267,7 @@ pub fn edit(path: &Path, repo: bool) -> Result<(), String> {
 
 fn validate(path: &Path) -> Result<(), String> {
     let doc = crate::config_file::load(path)?;
-    for (key, _) in FEATURES {
+    for (key, _) in FEATURES.iter().chain(OPT_IN_FEATURES) {
         if doc.get(key).is_some_and(|v| !v.is_boolean()) {
             return Err(format!("{}: {key} must be true or false", path.display()));
         }
@@ -314,6 +337,10 @@ pub fn overview(path: &Path) -> Result<(), String> {
     }
     for (key, env) in FEATURES {
         let (enabled, source) = feature_resolution(root.as_deref(), key, env);
+        println!("{key}: {enabled} ({source})");
+    }
+    for (key, env) in OPT_IN_FEATURES {
+        let (enabled, source) = switch_resolution(root.as_deref(), key, env, false);
         println!("{key}: {enabled} ({source})");
     }
     let policy = policy_resolution(root.as_deref());
@@ -1730,6 +1757,82 @@ mod tests {
                 );
                 assert_eq!(feature_enabled(Some(&repo), key, &env), enabled);
             }
+            // SAFETY: same lock and unique variable as above.
+            unsafe {
+                std::env::remove_var(&env);
+            }
+        }
+        restore_home(saved);
+    }
+
+    #[test]
+    fn opt_in_features_should_default_off_and_turn_on_only_when_asked() {
+        // `auto_handoff` rejects the foreground prompt: an install that never
+        // asked for it must never get it, including through a stray env value.
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        let repo = home.0.join("repo");
+        let global = home.0.join(".pixel/config.yaml");
+        let local = repo.join(".pixel/config.yaml");
+        let env = format!("PIXEL_TEST_OPT_IN_{}", std::process::id());
+        for (key, _) in OPT_IN_FEATURES {
+            write(&global, "{}");
+            write(&local, "{}");
+            assert_eq!(
+                switch_resolution(Some(&repo), key, &env, false),
+                (false, "default".into())
+            );
+            assert!(!opt_in_enabled(Some(&repo), key, &env));
+            write(&global, &format!("{key}: true\n"));
+            assert_eq!(
+                switch_resolution(Some(&repo), key, &env, false),
+                (true, global.display().to_string())
+            );
+            assert!(opt_in_enabled(Some(&repo), key, &env));
+            write(&local, &format!("{key}: false\n"));
+            assert!(
+                !opt_in_enabled(Some(&repo), key, &env),
+                "the repository opt-out wins over a global opt-in"
+            );
+            write(&local, &format!("{key}: 'yes'\n"));
+            assert_eq!(
+                validate(&local).unwrap_err(),
+                format!("{}: {key} must be true or false", local.display())
+            );
+            write(&global, "{}");
+            write(&local, "{}");
+            for (value, enabled) in [
+                ("1", true),
+                ("true", true),
+                ("on", true),
+                ("0", false),
+                ("off", false),
+                ("false", false),
+                ("", false),
+                ("no", false),
+            ] {
+                // SAFETY: this test owns the unique environment name under ENV_LOCK.
+                unsafe {
+                    std::env::set_var(&env, value);
+                }
+                assert_eq!(
+                    switch_resolution(Some(&repo), key, &env, false),
+                    (enabled, env.clone()),
+                    "{env}={value:?}"
+                );
+                assert_eq!(opt_in_enabled(Some(&repo), key, &env), enabled);
+            }
+            // SAFETY: same lock and unique variable as above.
+            unsafe {
+                std::env::set_var(&env, "0");
+            }
+            write(&local, &format!("{key}: true\n"));
+            assert!(
+                !opt_in_enabled(Some(&repo), key, &env),
+                "an explicit environment off vetoes a repository opt-in"
+            );
             // SAFETY: same lock and unique variable as above.
             unsafe {
                 std::env::remove_var(&env);

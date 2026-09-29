@@ -6,11 +6,13 @@ use std::str::FromStr;
 use serde_json::{Value, json};
 
 pub const FILE_NAME: &str = "config.yaml";
+/// The JSON file read until an install or an edit writes the YAML one.
+pub const LEGACY_FILE_NAME: &str = "config.json";
 const TEMPLATE: &str = include_str!("config.yaml");
 
 pub fn preferred_path(directory: &Path) -> PathBuf {
     let yaml = directory.join(FILE_NAME);
-    let legacy = directory.join("config.json");
+    let legacy = directory.join(LEGACY_FILE_NAME);
     if !yaml.exists() && legacy.exists() {
         legacy
     } else {
