@@ -470,22 +470,25 @@ function enforceLeaf(segment: string, words: string[], piped: boolean, root: str
     case "tail": {
       const paths = nonFlagPaths(0);
       for (const p of paths) if (credentialPath(p)) return { reason: CREDENTIAL_REASON };
-      if (!paths.some((p) => argReadsRepo(root, p))) return undefined;
+      if (!paths.length) return { reason: "No target file specified for read" };
+      if (!paths.some((p) => argReadsRepo(root, p))) return { reason: "Target path is outside the repository" };
       return { reason: REPO_READ_REASON, operation: "search-content" };
     }
     case "awk": {
       if (awkMayWrite(effectiveArgs)) return undefined;
       const paths = nonFlagPaths(1);
       for (const p of paths) if (credentialPath(p)) return { reason: CREDENTIAL_REASON };
-      if (!paths.some((p) => argReadsRepo(root, p))) return undefined;
+      if (!paths.length) return { reason: "No target file specified for awk" };
+      if (!paths.some((p) => argReadsRepo(root, p))) return { reason: "Target path is outside the repository" };
       return { reason: REPO_READ_REASON, operation: "search-content" };
     }
     case "sed": {
       if (sedEditsInPlace(effectiveArgs)) return undefined;
       const paths = nonFlagPaths(1);
       for (const p of paths) if (credentialPath(p)) return { reason: CREDENTIAL_REASON };
+      if (!paths.length) return { reason: "No target file specified for sed" };
       if (isBoundedSedRead(effectiveArgs)) return undefined;
-      if (!paths.some((p) => argReadsRepo(root, p))) return undefined;
+      if (!paths.some((p) => argReadsRepo(root, p))) return { reason: "Target path is outside the repository" };
       return { reason: REPO_READ_REASON, operation: "search-content" };
     }
     case "read": {
@@ -515,10 +518,11 @@ function enforceLeaf(segment: string, words: string[], piped: boolean, root: str
     }
     case "cp": {
       const operands = effectiveArgs.filter((arg) => !arg.startsWith("-"));
-      if (operands.length < 2) return undefined;
+      if (operands.length < 2) return { reason: "Insufficient operands for cp" };
       const sources = operands.slice(0, -1);
       for (const p of sources) if (credentialPath(p)) return { reason: CREDENTIAL_REASON };
-      if (!sources.some((p) => argReadsRepo(root, p))) return undefined;
+      if (!sources.length) return { reason: "No source files specified for cp" };
+      if (!sources.some((p) => argReadsRepo(root, p))) return { reason: "Target path is outside the repository" };
       return { reason: REPO_READ_REASON };
     }
     case "ls":
@@ -527,16 +531,17 @@ function enforceLeaf(segment: string, words: string[], piped: boolean, root: str
       for (const arg of effectiveArgs) {
         if (arg.startsWith("-") && !allowedFlags.has(arg)) return undefined;
       }
-      const path = [...effectiveArgs].reverse().find((arg) => !arg.startsWith("-")) ?? ".";
+      const path = [...effectiveArgs].reverse().find((arg) => !arg.startsWith("-"));
+      if (!path) return { reason: "No target directory specified for ls/tree" };
       if (credentialPath(path)) return { reason: CREDENTIAL_REASON };
-      if (!argReadsRepo(root, path)) return undefined;
+      if (!argReadsRepo(root, path)) return { reason: "Target path is outside the repository" };
       return { reason: LS_REASON, operation: "list-areas" };
     }
     case "find": {
       const path = effectiveArgs[0];
-      if (!path) return undefined;
+      if (!path) return { reason: "No target directory specified for find" };
       if (credentialPath(path)) return { reason: CREDENTIAL_REASON };
-      if (!argReadsRepo(root, path)) return undefined;
+      if (!argReadsRepo(root, path)) return { reason: "Target path is outside the repository" };
       return { reason: FIND_REASON, operation: "find-code" };
     }
     default:
