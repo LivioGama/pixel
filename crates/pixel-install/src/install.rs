@@ -1113,7 +1113,7 @@ pub(crate) fn resolve_shell_from(
 /// macOS (`dscl . -read /Users/<user> UserShell`), the passwd database
 /// elsewhere (`getent passwd <user>`, then `/etc/passwd`). `None` when the
 /// user name is unknown or nothing answers.
-#[cfg_attr(test, mutants::skip)] // process spawns and /etc reads over the tested parsers
+#[cfg_attr(test, mutants::skip)] // process spawns and /etc reads over the tested parsers; reason: mutation cannot affect observable contract, all inner parsing helpers are tested
 fn account_login_shell() -> Option<String> {
     let user = std::env::var("USER")
         .ok()
