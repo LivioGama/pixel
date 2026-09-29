@@ -15,15 +15,7 @@
 //! local classifier's task-intent verdict when its daemon is already warm
 //! (`prompt_intent`). The workers share a 750ms deadline; one slow worker does
 //! not discard useful context from the others.
-//!
-//! The automatic handoff is opt-in (`auto_handoff: true`, or
-//! `PIXEL_AUTO_HANDOFF=1`): it rejects the foreground prompt, so a default
-//! install must never do it. The intent verdict never gates it: that decision
-//! runs before the workers start, on the opt-in and
-//! `is_explicit_local_coding_prompt` alone, so waiting for a verdict would add
-//! its latency to every handoff-eligible prompt.
 
-use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -119,12 +111,6 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         .unwrap_or("UserPromptSubmit");
 
     let is_claude_runtime = matches!(provider, Some(crate::guard::Provider::Claude));
-    if is_claude_runtime
-        && let Some(handoff) = start_claude_handoff(&payload, &cwd, worker_config())
-    {
-        emit_handoff(&handoff);
-    }
-
     // Run independently: a missing embedding model must not prevent retrieval.
     let (tx, rx) = std::sync::mpsc::channel();
     let deadline = Instant::now() + HOOK_DEADLINE;
@@ -225,184 +211,6 @@ fn spawn_note(
             .flatten();
         let _ = tx.send((kind, note));
     });
-}
-
-/// Accept only a plainly imperative local coding request. Questions, planning,
-/// review/research work, and ambiguous conversation remain in the normal
-/// foreground path. An acceptance failure is intentionally indistinguishable
-/// from ineligibility to the user prompt: both fail open.
-struct ClaudeHandoff {
-    task_id: String,
-    candidate_id: String,
-    worker_id: u32,
-}
-
-/// Accept, isolate, and start the one conservative automatic worker before
-/// rejecting Claude's foreground prompt, only in a repository that opted in
-/// to `auto_handoff`: without it nothing is written and the prompt stays in
-/// the foreground. Devin CLI runs the hooks of `.claude/settings.json` too
-/// (`read_config_from.claude`, on by default), so a `--provider claude` hook
-/// can fire inside Devin; there the worker would be a Claude session the Devin
-/// user never started, so a hook with `DEVIN_PROJECT_DIR` set never hands off.
-/// A task ledger row alone is not a
-/// handoff: every failure after acceptance marks the task as launch-failed,
-/// removes the task-owned sandbox when possible, and lets the foreground path
-/// continue normally.
-fn start_claude_handoff(
-    payload: &PromptSubmitPayload,
-    cwd: &Path,
-    config: crate::task_scheduler::WorkerConfig,
-) -> Option<ClaudeHandoff> {
-    if !is_explicit_local_coding_prompt(&payload.prompt)
-        || std::env::var_os("DEVIN_PROJECT_DIR").is_some()
-    {
-        return None;
-    }
-    let session_id = payload.session_id.as_deref()?;
-    let root = crate::discover_root(cwd).ok()?;
-    if !crate::config_cmd::opt_in_enabled(Some(&root), "auto_handoff", "PIXEL_AUTO_HANDOFF") {
-        return None;
-    }
-    let request = crate::claude_controller::TaskAcceptanceRequest {
-        provider: "claude",
-        session_id: session_id.to_string(),
-        objective: payload.prompt.trim().to_string(),
-        repository: root.clone(),
-    };
-    let task_id = match crate::claude_controller::decide_handoff(
-        &crate::claude_controller::LedgerAcceptor,
-        &request,
-    ) {
-        crate::claude_controller::HandoffDecision::Handoff { task_id, .. } => task_id,
-        crate::claude_controller::HandoffDecision::Foreground { .. } => return None,
-    };
-    let candidate_id = "initial";
-    let result = (|| {
-        // A target ranking is advisory and can never be a write boundary. The
-        // first automatic lane owns the complete tracked snapshot; later
-        // WorkPlan fanout can narrow this only after deterministic validation.
-        let owned_paths = tracked_paths(&root)?;
-        crate::task_sandbox::create(&root, &task_id, candidate_id, owned_paths)?;
-        let worker = crate::task_scheduler::start(&root, &task_id, candidate_id, &config)?;
-        Ok::<_, String>(ClaudeHandoff {
-            task_id: task_id.clone(),
-            candidate_id: candidate_id.to_string(),
-            worker_id: worker.pid,
-        })
-    })();
-    match result {
-        Ok(handoff) => Some(handoff),
-        Err(_) => {
-            let _ = crate::task_runtime::transition(
-                &root,
-                &task_id,
-                "launch_failed",
-                "worker_launch_failed",
-            );
-            let _ = crate::task_sandbox::cleanup(&root, &task_id, candidate_id);
-            None
-        }
-    }
-}
-
-/// Read the exact tracked snapshot from Git. We intentionally make no claim
-/// about untracked files: the sandbox layer independently refuses unsafe WIP.
-fn tracked_paths(root: &Path) -> Result<Vec<String>, String> {
-    let paths = pixel_git::GitRunner::new(root)
-        .ls_files_or_err()
-        .map_err(|error| format!("git ls-files failed: {error}"))?;
-    if paths.is_empty() {
-        return Err("automatic handoff requires at least one tracked path".to_string());
-    }
-    Ok(paths)
-}
-
-/// The worker configuration from the process environment.
-#[cfg_attr(test, mutants::skip)] // three `var_os` reads over `worker_config_from`, which is tested
-fn worker_config() -> crate::task_scheduler::WorkerConfig {
-    worker_config_from(
-        std::env::var_os("PIXEL_CLAUDE_EXECUTABLE"),
-        std::env::var_os("PIXEL_WORKER_SYSTEM_PROMPT_FILE"),
-        std::env::var_os("HOME"),
-    )
-}
-
-/// Build the worker configuration from the three variables that shape it.
-/// An empty variable counts as unset. Without an explicit prompt file the
-/// worker uses the one `pixel install` deploys under `home`, when present,
-/// so workers are Pixel-aware without any env-var configuration.
-fn worker_config_from(
-    executable: Option<OsString>,
-    prompt_file: Option<OsString>,
-    home: Option<OsString>,
-) -> crate::task_scheduler::WorkerConfig {
-    let executable = executable
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| PathBuf::from("claude"), PathBuf::from);
-    let system_prompt_file = prompt_file
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            let default = PathBuf::from(home?).join(".local/share/pixel/agent-prompt.md");
-            default.is_file().then_some(default)
-        });
-    crate::task_scheduler::WorkerConfig {
-        executable,
-        system_prompt_file,
-        ..Default::default()
-    }
-}
-
-/// Stable, deliberately conservative classifier. This is not an attempt to
-/// understand intent; it only recognizes an explicit imperative request to
-/// change local code. Everything else stays with the foreground agent.
-fn is_explicit_local_coding_prompt(prompt: &str) -> bool {
-    let normalized = prompt.trim().to_ascii_lowercase();
-    if normalized.is_empty()
-        || normalized.contains('?')
-        || [
-            "plan ",
-            "explain ",
-            "review ",
-            "research ",
-            "audit ",
-            "compare ",
-            "what ",
-            "why ",
-            "how ",
-            "can you",
-            "could you",
-            "should ",
-        ]
-        .iter()
-        .any(|prefix| normalized.starts_with(prefix))
-    {
-        return false;
-    }
-    [
-        "implement ",
-        "fix ",
-        "add ",
-        "update ",
-        "refactor ",
-        "write ",
-        "change ",
-        "remove ",
-    ]
-    .iter()
-    .any(|prefix| normalized.starts_with(prefix))
-}
-
-/// Claude documents exit status 2 for rejecting UserPromptSubmit. Stderr is
-/// the user-visible rejection reason. This is emitted only after the ledger
-/// acceptance record and event exist, so the foreground agent cannot race a
-/// future controller worker on the primary checkout.
-fn emit_handoff(handoff: &ClaudeHandoff) -> ! {
-    eprintln!(
-        "Pixel started task {} candidate {} worker {} (running); foreground prompt handed off.",
-        handoff.task_id, handoff.candidate_id, handoff.worker_id,
-    );
-    std::process::exit(2);
 }
 
 enum PromptNote {
@@ -1009,30 +817,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn hard_handoff_classifier_accepts_only_explicit_imperative_coding() {
-        for prompt in [
-            "implement the approved runtime plan",
-            "fix the login bug in src/auth.rs",
-            "add a validation test",
-            "refactor the parser",
-            "remove dead code from the worker",
-        ] {
-            assert!(is_explicit_local_coding_prompt(prompt), "{prompt}");
-        }
-        for prompt in [
-            "plan the runtime",
-            "review the diff",
-            "can you implement the runtime",
-            "what files would change?",
-            "how should we fix this?",
-            "implement?",
-            "continue",
-        ] {
-            assert!(!is_explicit_local_coding_prompt(prompt), "{prompt}");
-        }
-    }
-
     const TASK_NOTIFICATION: &str = "<task-notification>\n<task-id>b1f0c2</task-id>\n<status>completed</status>\n<summary>Agent \"fix auth\" completed</summary>\n</task-notification>";
 
     #[test]
@@ -1051,7 +835,6 @@ mod tests {
         ] {
             assert!(is_harness_envelope(prompt), "{prompt}");
             assert!(is_trivial_continuation(prompt), "{prompt}");
-            assert!(!is_explicit_local_coding_prompt(prompt), "{prompt}");
         }
     }
 
@@ -1067,9 +850,6 @@ mod tests {
             assert!(!is_harness_envelope(prompt), "{prompt}");
             assert!(!is_trivial_continuation(prompt), "{prompt}");
         }
-        assert!(is_explicit_local_coding_prompt(
-            "fix the hook: a <task-notification> prompt overwrites the task"
-        ));
     }
 
     #[test]
@@ -1270,55 +1050,12 @@ mod tests {
         assert!(!cwd_matches(Path::new("/tmp/foo"), Path::new("/tmp/baz")));
     }
 
-    #[test]
-    fn tracked_paths_reads_the_git_index_and_refuses_empty_or_absent_repos() {
-        let root = fixture_repo("tracked-paths");
-        assert_eq!(
-            tracked_paths(&root).unwrap(),
-            vec!["tracked.rs".to_string()]
-        );
-
-        // An untracked file is not a tracked path.
-        std::fs::write(root.join("loose.rs"), "// not added\n").unwrap();
-        assert_eq!(
-            tracked_paths(&root).unwrap(),
-            vec!["tracked.rs".to_string()]
-        );
-
-        let empty =
-            std::env::temp_dir().join(format!("pixel-handoff-empty-{}", std::process::id()));
-        std::fs::create_dir_all(&empty).unwrap();
-        let status = Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&empty)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let err = tracked_paths(&empty).unwrap_err();
-        assert!(
-            err.contains("at least one tracked path"),
-            "empty repo is refused with its own message: {err}"
-        );
-
-        let outside =
-            std::env::temp_dir().join(format!("pixel-handoff-outside-{}", std::process::id()));
-        std::fs::create_dir_all(&outside).unwrap();
-        let err = tracked_paths(&outside).unwrap_err();
-        assert!(
-            err.starts_with("git ls-files failed:"),
-            "outside a repo the git failure is reported: {err}"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_dir_all(&empty);
-        let _ = std::fs::remove_dir_all(&outside);
-    }
-
     fn fixture_repo(label: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("pixel-handoff-{label}-{nonce}"));
+        let root = std::env::temp_dir().join(format!("pixel-prompt-{label}-{nonce}"));
         std::fs::create_dir_all(&root).unwrap();
         for args in [
             vec!["init"],
@@ -1354,150 +1091,8 @@ mod tests {
             cwd: None,
             hook_event_name: None,
             hook_event_name_camel: None,
-            session_id: Some("session-handoff".to_string()),
+            session_id: Some("session-packet".to_string()),
         }
-    }
-
-    fn opt_in(root: &Path) {
-        std::fs::create_dir_all(root.join(".pixel")).unwrap();
-        std::fs::write(root.join(".pixel/config.yaml"), "auto_handoff: true\n").unwrap();
-    }
-
-    #[test]
-    fn handoff_should_stay_off_until_the_repository_opts_in() {
-        // A fresh install with the Claude hook: an English imperative prompt
-        // ("Add the story feature") used to start a hidden worker and reject
-        // the prompt. Without the opt-in the prompt stays in the foreground
-        // and the repository gains no task, sandbox or worker.
-        let _lock = crate::ENV_LOCK.lock().unwrap();
-        let root = fixture_repo("default-off");
-        let home = root.with_extension("home");
-        std::fs::create_dir_all(&home).unwrap();
-        let saved_home = std::env::var_os("HOME");
-        let saved_env = std::env::var_os("PIXEL_AUTO_HANDOFF");
-        // SAFETY: HOME and PIXEL_AUTO_HANDOFF are only changed under ENV_LOCK.
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::remove_var("PIXEL_AUTO_HANDOFF");
-        }
-        let config = crate::task_scheduler::WorkerConfig {
-            executable: PathBuf::from("/usr/bin/true"),
-            ..Default::default()
-        };
-        let mut payload = coding_payload();
-        payload.prompt = "Add the \"story\" feature".to_string();
-        let handoff = start_claude_handoff(&payload, &root, config);
-        // SAFETY: same lock as above.
-        unsafe {
-            match saved_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            if let Some(value) = saved_env {
-                std::env::set_var("PIXEL_AUTO_HANDOFF", value);
-            }
-        }
-        assert!(handoff.is_none(), "no opt-in, no handoff");
-        assert!(!root.join(".pixel/tasks").exists(), "no task was accepted");
-        let sandboxes = root
-            .parent()
-            .unwrap()
-            .join(".pixel-sandboxes")
-            .join(root.file_name().unwrap());
-        assert!(!sandboxes.exists(), "no sandbox was created");
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn failed_worker_launch_falls_through_and_cleans_its_sandbox() {
-        let _lock = crate::ENV_LOCK.lock().unwrap();
-        let root = fixture_repo("failed");
-        opt_in(&root);
-        let config = crate::task_scheduler::WorkerConfig {
-            executable: root.join("missing-claude"),
-            ..Default::default()
-        };
-        assert!(start_claude_handoff(&coding_payload(), &root, config).is_none());
-        let tasks = root.join(".pixel/tasks");
-        let task_ids: Vec<_> = std::fs::read_dir(&tasks)
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(task_ids.len(), 1);
-        let task = crate::task_runtime::status(&root, &task_ids[0]).unwrap();
-        assert_eq!(task.status, "launch_failed");
-        assert!(
-            crate::task_sandbox::load(&root, &task_ids[0], "initial")
-                .unwrap()
-                .is_none()
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn devin_running_the_claude_hook_should_never_hand_off() {
-        // Devin loads `.claude/settings.json` hooks by default, so the
-        // Claude-qualified hook fires there too: "Prompt blocked: Pixel
-        // started task …" in Devin, with a `claude` worker behind it. Even an
-        // opted-in repository keeps the Devin prompt in the foreground.
-        let _lock = crate::ENV_LOCK.lock().unwrap();
-        let root = fixture_repo("devin");
-        opt_in(&root);
-        let saved = std::env::var_os("DEVIN_PROJECT_DIR");
-        // SAFETY: DEVIN_PROJECT_DIR is only changed under ENV_LOCK.
-        unsafe { std::env::set_var("DEVIN_PROJECT_DIR", &root) };
-        let config = crate::task_scheduler::WorkerConfig {
-            executable: PathBuf::from("/usr/bin/true"),
-            ..Default::default()
-        };
-        let handoff = start_claude_handoff(&coding_payload(), &root, config);
-        // SAFETY: same lock as above.
-        unsafe {
-            match saved {
-                Some(value) => std::env::set_var("DEVIN_PROJECT_DIR", value),
-                None => std::env::remove_var("DEVIN_PROJECT_DIR"),
-            }
-        }
-        assert!(handoff.is_none(), "no handoff under Devin");
-        assert!(!root.join(".pixel/tasks").exists(), "no task was accepted");
-        let sandboxes = root
-            .parent()
-            .unwrap()
-            .join(".pixel-sandboxes")
-            .join(root.file_name().unwrap());
-        assert!(!sandboxes.exists(), "no sandbox was created");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn successful_fake_worker_creates_task_candidate_and_worker_record() {
-        let _lock = crate::ENV_LOCK.lock().unwrap();
-        let root = fixture_repo("success");
-        opt_in(&root);
-        let config = crate::task_scheduler::WorkerConfig {
-            executable: PathBuf::from("/usr/bin/true"),
-            ..Default::default()
-        };
-        let handoff = start_claude_handoff(&coding_payload(), &root, config).unwrap();
-        assert_eq!(handoff.candidate_id, "initial");
-        assert!(handoff.worker_id > 0);
-        let candidate = crate::task_sandbox::load(&root, &handoff.task_id, "initial")
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            candidate.owned_paths,
-            std::collections::BTreeSet::from(["tracked.rs".to_string()])
-        );
-        assert!(
-            crate::task_scheduler::load(&root, &handoff.task_id, "initial")
-                .unwrap()
-                .is_some()
-        );
-        let _ = crate::task_scheduler::stop(&root, &handoff.task_id, "initial");
-        let _ = crate::task_sandbox::cleanup(&root, &handoff.task_id, "initial");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn claude_intent(label: &str, p: f64) -> crate::task_runtime::Intent {
@@ -1590,7 +1185,7 @@ mod tests {
             .unwrap()
             .as_secs();
         let stored =
-            crate::task_runtime::read_claude_packet(&root, "session-handoff", &head, now).unwrap();
+            crate::task_runtime::read_claude_packet(&root, "session-packet", &head, now).unwrap();
         assert_eq!(stored.intent, Some(claude_intent("bugfix", 0.82)));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1638,45 +1233,6 @@ mod tests {
         dir
     }
 
-    fn os(s: &str) -> Option<OsString> {
-        Some(OsString::from(s))
-    }
-
-    /// The executable falls back to `claude` on PATH only when the variable
-    /// is unset or empty; the prompt file falls back to the installed one
-    /// only when it exists, so a worker never gets a dangling path.
-    #[test]
-    fn worker_config_reads_the_variables_and_falls_back_to_the_installed_prompt() {
-        let home = scratch("worker-config");
-        let installed = home.join(".local/share/pixel/agent-prompt.md");
-
-        let cfg = worker_config_from(None, None, Some(home.clone().into()));
-        assert_eq!(cfg.executable, PathBuf::from("claude"));
-        assert_eq!(cfg.system_prompt_file, None, "no installed prompt yet");
-
-        let cfg = worker_config_from(os(""), os(""), None);
-        assert_eq!(cfg.executable, PathBuf::from("claude"), "empty is unset");
-        assert_eq!(cfg.system_prompt_file, None, "no HOME, no fallback");
-
-        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
-        std::fs::write(&installed, "# prompt\n").unwrap();
-        let cfg = worker_config_from(None, None, Some(home.clone().into()));
-        assert_eq!(cfg.system_prompt_file, Some(installed.clone()));
-
-        let cfg = worker_config_from(
-            os("/opt/claude/bin/claude"),
-            os("/etc/pixel/worker.md"),
-            Some(home.clone().into()),
-        );
-        assert_eq!(cfg.executable, PathBuf::from("/opt/claude/bin/claude"));
-        assert_eq!(
-            cfg.system_prompt_file,
-            Some(PathBuf::from("/etc/pixel/worker.md")),
-            "an explicit file wins over the installed one"
-        );
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
     fn action_log(dir: &Path, lines: &[String]) -> std::fs::File {
         let path = dir.join("actions.jsonl");
         std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
@@ -1690,7 +1246,7 @@ mod tests {
 
     /// A completion signal is a successful publish/ship/push/commit in this
     /// project inside the lookback window; anything else must not suppress
-    /// the handoff.
+    /// the boundary notice.
     #[test]
     fn action_log_signals_only_a_recent_successful_completion_in_this_project() {
         let dir = scratch("action-log");

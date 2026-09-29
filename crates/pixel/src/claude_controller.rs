@@ -1,87 +1,11 @@
 //! Provider adapter contracts for isolated Claude Code task workers.
 //!
-//! This module intentionally contains no process spawning and no hook wiring.
-//! The ledger owns durable acceptance; the hook/controller integration may only
-//! hand off after that acceptance succeeds. Keeping the decision and argv
-//! construction pure makes failure fail open to the foreground provider.
+//! This module intentionally contains no process spawning: it only builds
+//! the argv of one print-mode worker, so a bad launch fails before anything
+//! runs.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-
-/// A request for durable ownership by the task ledger.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TaskAcceptanceRequest {
-    pub(crate) provider: &'static str,
-    pub(crate) session_id: String,
-    pub(crate) objective: String,
-    pub(crate) repository: PathBuf,
-}
-
-/// The only acceptance result that permits a foreground handoff.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TaskAcceptance {
-    pub(crate) task_id: String,
-    pub(crate) status: String,
-}
-
-/// Durable task acceptance boundary. Implementations must not report
-/// `accepted` until the task record is transactionally visible to the ledger.
-pub(crate) trait TaskAcceptor {
-    fn accept(&self, request: &TaskAcceptanceRequest) -> Result<TaskAcceptance, String>;
-}
-
-/// Production bridge to Pixel's durable task ledger.
-pub(crate) struct LedgerAcceptor;
-
-impl TaskAcceptor for LedgerAcceptor {
-    fn accept(&self, request: &TaskAcceptanceRequest) -> Result<TaskAcceptance, String> {
-        let record = crate::task_runtime::accept_task(
-            &request.repository,
-            &request.objective,
-            request.provider,
-            Some(&request.session_id),
-        )?;
-        Ok(TaskAcceptance {
-            task_id: record.task_id,
-            status: record.status,
-        })
-    }
-}
-
-/// The hook's deterministic choice after asking the durable ledger.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum HandoffDecision {
-    /// The normal provider handles the prompt; no background write was started.
-    Foreground { reason: String },
-    /// A ledger-owned task is durable and can be handed to the controller.
-    Handoff { task_id: String, status: String },
-}
-
-/// Convert ledger evidence into an unambiguous handoff decision.
-///
-/// A bad/empty acceptance is deliberately treated exactly like a rejected or
-/// unavailable ledger: the foreground prompt proceeds and no duplicate worker
-/// is started.
-pub(crate) fn decide_handoff(
-    acceptor: &dyn TaskAcceptor,
-    request: &TaskAcceptanceRequest,
-) -> HandoffDecision {
-    match acceptor.accept(request) {
-        Ok(accepted) if !accepted.task_id.trim().is_empty() && accepted.status == "accepted" => {
-            HandoffDecision::Handoff {
-                task_id: accepted.task_id,
-                status: accepted.status,
-            }
-        }
-        Ok(accepted) => HandoffDecision::Foreground {
-            reason: format!("ledger_not_accepted:{}", accepted.status),
-        },
-        Err(_) => HandoffDecision::Foreground {
-            // Error details are intentionally not injected into hook output.
-            reason: "ledger_unavailable".to_string(),
-        },
-    }
-}
 
 /// Immutable inputs required to construct one isolated Claude worker.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -207,54 +131,6 @@ Objective:\n{}",
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct Accepted;
-
-    impl TaskAcceptor for Accepted {
-        fn accept(&self, _: &TaskAcceptanceRequest) -> Result<TaskAcceptance, String> {
-            Ok(TaskAcceptance {
-                task_id: "task-42".to_string(),
-                status: "accepted".to_string(),
-            })
-        }
-    }
-
-    struct Rejected;
-
-    impl TaskAcceptor for Rejected {
-        fn accept(&self, _: &TaskAcceptanceRequest) -> Result<TaskAcceptance, String> {
-            Ok(TaskAcceptance {
-                task_id: String::new(),
-                status: "rejected_overlap".to_string(),
-            })
-        }
-    }
-
-    fn request() -> TaskAcceptanceRequest {
-        TaskAcceptanceRequest {
-            provider: "claude",
-            session_id: "session-1".to_string(),
-            objective: "Change greeting behavior".to_string(),
-            repository: PathBuf::from("/repo"),
-        }
-    }
-
-    #[test]
-    fn only_durable_accepted_task_can_handoff() {
-        assert_eq!(
-            decide_handoff(&Accepted, &request()),
-            HandoffDecision::Handoff {
-                task_id: "task-42".to_string(),
-                status: "accepted".to_string(),
-            }
-        );
-        assert_eq!(
-            decide_handoff(&Rejected, &request()),
-            HandoffDecision::Foreground {
-                reason: "ledger_not_accepted:rejected_overlap".to_string(),
-            }
-        );
-    }
 
     #[test]
     fn worker_command_uses_normal_oauth_stream_json_mode() {
@@ -522,39 +398,5 @@ mod tests {
             }
         };
         assert!(build_worker_command_with_options(&missing, &opts).is_err());
-    }
-
-    #[test]
-    fn ledger_adapter_returns_handoff_only_after_durable_acceptance() {
-        let root = std::env::temp_dir().join(format!(
-            "pixel-controller-ledger-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let mut request = request();
-        request.repository = root.clone();
-
-        let HandoffDecision::Handoff { task_id, status } =
-            decide_handoff(&LedgerAcceptor, &request)
-        else {
-            panic!("durable ledger acceptance must hand off");
-        };
-        assert_eq!(status, "accepted");
-        assert_eq!(
-            crate::task_runtime::status(&root, &task_id)
-                .expect("accepted record must be visible")
-                .status,
-            "accepted"
-        );
-        assert!(
-            crate::task_runtime::events(&root, &task_id)
-                .iter()
-                .any(|event| event["event"] == "accepted")
-        );
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

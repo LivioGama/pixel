@@ -29,12 +29,6 @@
 # Environment override: PIXEL_TASK_BOUNDARY=0
 # task_boundary: false
 
-# Hand an imperative coding prompt ("add ...", "fix ...") to a background
-# Claude worker in its own worktree, and reject the prompt in the session you
-# typed it in (default: false). Claude Code only.
-# Environment override: PIXEL_AUTO_HANDOFF=1
-# auto_handoff: true
-
 # Retrieval policy for coding agents: what Pixel does when an agent reaches
 # for native search instead of Pixel (default: advisory).
 # Environment override: PIXEL_POLICY
