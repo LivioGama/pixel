@@ -428,12 +428,12 @@ mod tests {
             );
         write(
             &dir.path().join("ext.ts"),
-            &format!("{source}\nexport {{ classify, commandFor, run, activate }};\n"),
+            &format!("{source}\nexport {{ classify, commandFor, run, metricsBox, activate }};\n"),
         );
         write(
             &dir.path().join("t.ts"),
             &format!(
-                "import {{ classify, commandFor, run, activate }} from \"./ext.ts\";\n{script}\n"
+                "import {{ classify, commandFor, run, metricsBox, activate }} from \"./ext.ts\";\n{script}\n"
             ),
         );
         let out = std::process::Command::new("bun")
@@ -465,7 +465,7 @@ console.log(JSON.stringify([before.kind, after.kind, after.reason, outside.kind]
         };
         assert_eq!(
             out.trim(),
-            r#"["blocked","exception","bounded Pixel-resolved target read","exception"]"#
+            r#"["blocked","exception","bounded read after a Pixel call","exception"]"#
         );
     }
 
@@ -512,6 +512,48 @@ console.log(JSON.stringify([
     }
 
     #[test]
+    fn run_box_should_return_only_the_box_lines_of_stderr_unless_quiet() {
+        let script = r#"
+const box = "warn: diag\n🟩 pixel x\n  │\n  └───\nafter";
+console.log(JSON.stringify([metricsBox(box), metricsBox("only diag"), metricsBox("🟩 pixel y\n  │\n\nnext")]));
+"#;
+        let Some(out) = run_in_bun(script) else {
+            return;
+        };
+        assert_eq!(
+            out.trim(),
+            r#"["🟩 pixel x\n  │\n  └───","","🟩 pixel y\n  │"]"#
+        );
+    }
+
+    #[test]
+    fn classify_should_name_why_a_read_is_blocked_and_unlock_on_a_pixel_call_alone() {
+        let script = r#"
+const s = (pixelCalled: boolean) => ({ pixelHealthy: true, pixelCalled });
+const why = (input: any, called: boolean) => classify("read", input, "/repo", new Set(), s(called));
+console.log(JSON.stringify([
+  why({ path: "a.rs", limit: 5 }, false).reason,
+  why({ path: "a.rs" }, true).reason,
+  why({ path: "a.rs", limit: 201 }, true).reason,
+  why({ path: ".env.local", limit: 5 }, true).reason,
+  why({ path: "a.rs", limit: 200 }, true).kind,
+]));
+"#;
+        let Some(out) = run_in_bun(script) else {
+            return;
+        };
+        let tail = ". Call pixel first, then read with a limit of at most 200 lines";
+        let want = [
+            format!("Read blocked: path not resolved by pixel yet{tail}"),
+            format!("Read blocked: no limit given{tail}"),
+            format!("Read blocked: limit 201 exceeds 200{tail}"),
+            format!("Read blocked: credential path{tail}"),
+            "exception".to_string(),
+        ];
+        assert_eq!(out.trim(), serde_json::to_string(&want).unwrap());
+    }
+
+    #[test]
     fn command_for_should_reject_an_empty_search_query_even_with_a_symbol() {
         let script = r#"
 const attempt = (action: any, p: any) => { try { return commandFor(action, p); } catch (e) { return String(e); } };
@@ -543,7 +585,7 @@ console.log(JSON.stringify([
             "the global pixel tool must mark pixel as called"
         );
         assert!(
-            source.contains("state.pixelCalled && resolvedPaths.has(target)"),
+            source.contains("!state.pixelCalled ? \"path not resolved by pixel yet\""),
             "bootstrap paths must not unlock reads before a pixel call"
         );
     }

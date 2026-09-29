@@ -12,6 +12,7 @@ const MAX_OUTPUT = 16000;
 const READ_LIMIT = 200;
 const BOOTSTRAP_BUDGET = 2400;
 const MIN_PROMPT_LEN = 12;
+const CREDENTIAL_PATH = /(?:^|\/)(?:\.env(?:\.[^/]*)?|\.ssh|\.aws|\.npmrc|\.netrc|id_(?:rsa|ed25519|ecdsa|dsa)[^/]*|[^/]*\.(?:pem|key|p12|pfx)|[^/]*(?:credentials|secrets?)[^/]*)(?:\/|$)/i;
 const EDIT_TOOLS = new Set(["edit", "write", "apply_patch", "edit_file", "replace_file_content", "write_to_file"]);
 const ACTIONS = ["scope_task", "list_areas", "search_content", "find_code", "impact", "pack_context", "what_changed", "review_changes", "fetch", "commit", "commit_and_push"] as const;
 type Action = (typeof ACTIONS)[number];
@@ -64,6 +65,24 @@ function capabilities() {
 // saved; `quiet` is for the extension's own probes (health, bootstrap, the
 // post-edit snapshot), which must not add boxes or count as usage.
 function run(root: string, args: string[], quiet = false) {
+  return runBox(root, args, quiet).stdout;
+}
+
+// Pixel prints its metrics box on stderr; only the box lines (from the
+// "🟩 pixel" header to the closing "└" rule) are kept, never diagnostics.
+function metricsBox(stderr: string) {
+  const lines = String(stderr ?? "").split("\n");
+  const start = lines.findIndex((line) => line.includes("🟩"));
+  if (start < 0) return "";
+  const rest = lines.slice(start);
+  const closing = rest.findIndex((line) => line.trimStart().startsWith("└"));
+  const blank = rest.findIndex((line) => !line.trim());
+  const end = closing >= 0 ? closing + 1 : blank >= 0 ? blank : rest.length;
+  const box = rest.slice(0, end);
+  return box.join("\n").trim();
+}
+
+function runBox(root: string, args: string[], quiet = false) {
   const operation = resolveOperation(args[0]);
   const result = spawnSync(PIXEL_BIN, [operation, ...args.slice(1), ...(quiet ? ["--metrics", "off"] : [])], {
     cwd: root, encoding: "utf8", timeout: 15000, maxBuffer: 2_000_000,
@@ -71,7 +90,7 @@ function run(root: string, args: string[], quiet = false) {
   if (result.error || result.status !== 0) {
     throw new Error(result.error?.message ?? result.stderr?.trim() ?? `Pixel exited ${result.status}`);
   }
-  return result.stdout;
+  return { stdout: result.stdout as string, box: quiet ? "" : metricsBox(result.stderr) };
 }
 
 function resolveOperation(name: string) {
@@ -223,12 +242,18 @@ function classify(tool: string, input: any, root: string, resolvedPaths: Set<str
     const path = String(input.path ?? input.file_path ?? "");
     if (path && !inRepo(root, path)) return { kind: "exception", reason: "outside repository" };
     const target = path ? relativeTarget(root, path) : "";
-    // Paths injected by the bootstrap are not evidence of a Pixel call: the
-    // bounded read unlocks only after the model itself called a Pixel tool.
-    if (path && state.pixelCalled && resolvedPaths.has(target) && Number(input.limit) > 0 && Number(input.limit) <= READ_LIMIT) {
-      return { kind: "exception", reason: "bounded Pixel-resolved target read" };
-    }
-    return { kind: "blocked", reason: "Use pixel with a task goal, or specify a target and a read limit of at most 200 lines" };
+    // Bootstrap-injected paths are not evidence of a Pixel call: a bounded
+    // in-repo read unlocks only after the model itself called pixel or
+    // pixel_project (the global tool never fills resolvedPaths, so the call,
+    // not the path, is the signal). Credential files stay blocked.
+    const limit = Number(input.limit);
+    const problem = !(limit > 0) ? "no limit given"
+      : limit > READ_LIMIT ? `limit ${limit} exceeds ${READ_LIMIT}`
+      : CREDENTIAL_PATH.test(target) ? "credential path"
+      : !state.pixelCalled ? "path not resolved by pixel yet"
+      : "";
+    if (path && !problem) return { kind: "exception", reason: "bounded read after a Pixel call" };
+    return { kind: "blocked", reason: `Read blocked: ${problem || "no path given"}. Call pixel first, then read with a limit of at most ${READ_LIMIT} lines` };
   }
   if (tool === "bash" || tool === "run_command") {
     const command = String(input.command ?? input.cmd ?? "").trim();
@@ -311,8 +336,10 @@ export default function activate(pi: ExtensionAPI) {
         }
         const index = health(root, action);
         const steps = commandFor(action, p);
+        const boxes: string[] = [];
         const evidence = steps.map((args) => {
-          const output = run(root, args);
+          const { stdout: output, box } = runBox(root, args);
+          if (box) boxes.push(box);
           rememberPaths(parseEvidence(output), resolvedPaths, root);
           return { operation: args[0], output: parseEvidence(output.slice(0, MAX_OUTPUT)), truncated: output.length > MAX_OUTPUT };
         });
@@ -323,7 +350,8 @@ export default function activate(pi: ExtensionAPI) {
             const match = matches[0];
             const uid = `${match.path}#${match.owner ? `${match.owner}::` : ""}${match.raw}#${match.symbol_kind}`;
             for (const args of [["impact", uid, "--json"], ["pack-context", uid, "--json", "--budget", "1200"]]) {
-              const output = run(root, args);
+              const { stdout: output, box } = runBox(root, args);
+              if (box) boxes.push(box);
               rememberPaths(parseEvidence(output), resolvedPaths, root);
               evidence.push({ operation: args[0], output: parseEvidence(output.slice(0, MAX_OUTPUT)), truncated: output.length > MAX_OUTPUT });
             }
@@ -339,7 +367,8 @@ export default function activate(pi: ExtensionAPI) {
         state.pixelHealthy = true;
         state.pixelCalled = true;
         audit(root, "tool", action, { index_health: "present", graph_present: index.graph?.present, facts_fresh: index.facts?.fresh, truncated });
-        return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+        const content = [{ type: "text", text: JSON.stringify(result) }, ...(boxes.length ? [{ type: "text", text: boxes.join("\n") }] : [])];
+        return { content, details: result };
       } catch (error) {
         state.pixelHealthy = false;
         installed = undefined;

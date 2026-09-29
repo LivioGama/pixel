@@ -1038,29 +1038,6 @@ fn policy_response(
 
 /// Approve only standalone Pixel retrieval commands in supported permission hooks.
 fn retrieval_permission_response(provider: Provider, payload: &Value) -> Option<Value> {
-    const RETRIEVAL_COMMANDS: &[&str] = &[
-        "search-content",
-        "search-like-rg",
-        "find-code",
-        "find-symbol",
-        "search-meaning",
-        "pack-context",
-        "impact",
-        "who-calls",
-        "evaluate",
-        "list-areas",
-        "list-flows",
-        "status",
-        "search-history",
-        "dig-history",
-        "file-history",
-        "who-wrote",
-        "commit-history",
-        "repo-state",
-        "review-changes",
-        "list-branches",
-    ];
-
     if payload.get("hook_event_name")?.as_str()? != "PermissionRequest"
         || !match provider {
             Provider::Devin => payload.get("tool_name")?.as_str()? == "exec",
@@ -1072,6 +1049,14 @@ fn retrieval_permission_response(provider: Provider, payload: &Value) -> Option<
     }
     let tool_input = payload.get("tool_input")?;
     let command = tool_input.get("command")?.as_str()?;
+    // The shell splits words on space and tab only; any other whitespace
+    // could hide a redirect or a word boundary from the parsers below.
+    if command
+        .chars()
+        .any(|c| c.is_whitespace() && !matches!(c, ' ' | '\t'))
+    {
+        return None;
+    }
     let cwd = provider_cwd(payload, tool_input);
     let mut has_pixel_retrieval = false;
     let mut has_bounded_sed = false;
@@ -1101,19 +1086,9 @@ fn retrieval_permission_response(provider: Provider, payload: &Value) -> Option<
                 has_bounded_sed = true;
                 continue;
             }
-            let argv = crate::search_compat::shell_argv(stage)?;
-            let (program, subcommand) = match argv.as_slice() {
-                [wrapper, program, subcommand, ..]
-                    if wrapper == "rtk" && matches!(program.as_str(), "pixel" | "pixel-dev") =>
-                {
-                    (program.as_str(), subcommand.as_str())
-                }
-                [program, subcommand, ..] => (program.as_str(), subcommand.as_str()),
-                _ => return None,
-            };
-            let executable = std::path::Path::new(program).file_name()?.to_str()?;
-            if !matches!(executable, "pixel" | "pixel-dev")
-                || !RETRIEVAL_COMMANDS.contains(&subcommand)
+            if !cwd
+                .as_deref()
+                .is_some_and(|cwd| is_pixel_retrieval_stage(stage, cwd))
             {
                 return None;
             }
@@ -1137,7 +1112,8 @@ fn retrieval_permission_response(provider: Provider, payload: &Value) -> Option<
     })
 }
 
-/// Splits only sequential shell chains; conditional fallbacks stay unapproved.
+/// Splits a chain at `;`, `&&` and `||`. Each part is judged on its own by
+/// the caller, so a fallback is approved only when every segment is safe.
 fn split_safe_command_chain(command: &str) -> Option<Vec<&str>> {
     let mut parts =
         Vec::with_capacity(command.matches(';').count() + command.matches("&&").count() + 1);
@@ -1194,13 +1170,8 @@ fn is_static_echo(command: &str) -> bool {
     }) {
         return false;
     }
-    crate::search_compat::shell_argv(command).is_some_and(|argv| {
-        argv.first().is_some_and(|program| {
-            std::path::Path::new(program)
-                .file_name()
-                .is_some_and(|name| name == "echo")
-        })
-    })
+    crate::search_compat::shell_argv(command)
+        .is_some_and(|argv| argv.first().is_some_and(|program| program == "echo"))
 }
 
 /// The `(start, end, path)` of a literal `[rtk] sed -n 'A,Bp' path` whose
@@ -1223,11 +1194,7 @@ fn bounded_sed_shape(command: &str) -> Option<(usize, usize, String)> {
     let [program, flag, range, path] = argv.as_slice() else {
         return None;
     };
-    if std::path::Path::new(program).file_name() != Some(std::ffi::OsStr::new("sed"))
-        || flag != "-n"
-        || path.starts_with('-')
-        || credential_shaped(path)
-    {
+    if program != "sed" || flag != "-n" || path.starts_with('-') || credential_shaped(path) {
         return None;
     }
     let (start, end) = range
@@ -1286,6 +1253,13 @@ fn credential_shaped(path: &str) -> bool {
                 | "token.json"
                 | "tokens.json"
                 | "serviceaccountkey.json"
+                | ".git-credentials"
+                | ".htpasswd"
+                | ".dockercfg"
+                | ".boto"
+                | ".s3cfg"
+                | "application_default_credentials.json"
+                | "kubeconfig"
         )
         || name.ends_with("-credentials.json")
         || (name == "config"
@@ -1306,6 +1280,7 @@ fn credential_shaped(path: &str) -> bool {
             ".jks",
             ".keystore",
             ".truststore",
+            ".kdbx",
             "_rsa",
             "_dsa",
             "_ecdsa",
@@ -1315,17 +1290,330 @@ fn credential_shaped(path: &str) -> bool {
         .any(|suffix| name.ends_with(suffix))
 }
 
+/// What one auto-approvable Pixel subcommand accepts. Closed lists: a flag
+/// that is not named here (`--fetch`, `--workspace`, a global `--repo`)
+/// leaves the decision to the user, as does every subcommand without a spec.
+struct PixelSpec {
+    bools: &'static [&'static str],
+    values: &'static [&'static str],
+    /// Value flags whose value is a path (or repository-relative path).
+    path_values: &'static [&'static str],
+    /// Inclusive positional indices that are paths; the rest are patterns.
+    path_positions: Option<(usize, usize)>,
+    max_positionals: usize,
+}
+
+/// Audit of the read-only subcommands (flags read from each `--help`).
+/// Dropped: `search-like-rg` (unsupported inputs run the original rg/grep,
+/// `--pre` is a program hook) and `evaluate` (runs benchmark commands).
+/// Refused flags: `list-branches --fetch` (runs `git fetch`), `impact` and
+/// `who-calls --workspace` (reads other repositories). Every other listed
+/// command is judged by its own flag list below and by the path boundary.
+fn pixel_spec(subcommand: &str) -> Option<PixelSpec> {
+    const NONE: &[&str] = &[];
+    let spec = |bools, values, path_values, path_positions, max_positionals| PixelSpec {
+        bools,
+        values,
+        path_values,
+        path_positions,
+        max_positionals,
+    };
+    Some(match subcommand {
+        "search-content" => spec(
+            &[
+                "--json",
+                "--stats",
+                "--no-daemon",
+                "-i",
+                "--ignore-case",
+                "-l",
+                "--files-with-matches",
+                "-F",
+                "--fixed-strings",
+                "-n",
+                "--line-number",
+            ],
+            &[
+                "--metrics",
+                "--limit",
+                "--offset",
+                "--scope",
+                "--context",
+                "-g",
+                "--glob",
+                "-t",
+                "--type",
+            ],
+            NONE,
+            Some((1, usize::MAX)),
+            usize::MAX,
+        ),
+        "find-code" => spec(
+            &["--json"],
+            &["--metrics", "--limit"],
+            NONE,
+            Some((1, 1)),
+            2,
+        ),
+        "find-symbol" => spec(&["--json"], &["--metrics"], NONE, Some((1, 1)), 2),
+        "search-meaning" => spec(
+            &["--json"],
+            &["--metrics", "--limit", "--max-files"],
+            NONE,
+            Some((1, 1)),
+            2,
+        ),
+        "pack-context" => spec(
+            &["--json"],
+            &["--metrics", "--budget"],
+            NONE,
+            Some((1, 1)),
+            2,
+        ),
+        "impact" => spec(
+            &["--json"],
+            &["--metrics", "--direction", "--depth"],
+            NONE,
+            Some((1, 1)),
+            2,
+        ),
+        "who-calls" => spec(
+            &["--json"],
+            &["--metrics", "--role", "--offset"],
+            NONE,
+            Some((1, 1)),
+            2,
+        ),
+        "list-areas" | "list-flows" => spec(
+            &["--json"],
+            &["--metrics", "--offset"],
+            NONE,
+            Some((0, 0)),
+            1,
+        ),
+        "status" => spec(
+            &["--json", "--statusline"],
+            &["--metrics"],
+            NONE,
+            Some((0, 0)),
+            1,
+        ),
+        "search-history" => spec(
+            &["--json"],
+            &["--metrics", "--facet", "--limit"],
+            NONE,
+            Some((1, 1)),
+            2,
+        ),
+        "dig-history" => spec(
+            &["--json", "--parent"],
+            &[
+                "--metrics",
+                "--phrase",
+                "--file",
+                "--from",
+                "--to",
+                "--limit",
+                "--show",
+            ],
+            &["--file"],
+            Some((0, 0)),
+            1,
+        ),
+        "file-history" => spec(
+            &["--json"],
+            &["--metrics", "--file", "--token"],
+            &["--file"],
+            Some((0, 0)),
+            1,
+        ),
+        "who-wrote" => spec(
+            &["--json"],
+            &["--metrics", "--lines", "--author", "--limit-regions"],
+            NONE,
+            Some((0, 1)),
+            2,
+        ),
+        "commit-history" => spec(
+            &["--json"],
+            &[
+                "--metrics",
+                "--ref",
+                "--limit",
+                "--detail",
+                "--cursor",
+                "--byte-cap",
+            ],
+            NONE,
+            Some((0, 0)),
+            1,
+        ),
+        "repo-state" => spec(
+            &["--json", "--include-clean"],
+            &["--metrics", "--files"],
+            &["--files"],
+            Some((0, 0)),
+            1,
+        ),
+        "review-changes" => spec(
+            &["--json"],
+            &["--metrics", "--cursor", "--byte-cap"],
+            NONE,
+            Some((0, 0)),
+            1,
+        ),
+        "list-branches" => spec(
+            &["--json"],
+            &["--metrics", "--remote", "--stale-days"],
+            NONE,
+            Some((0, 0)),
+            1,
+        ),
+        _ => return None,
+    })
+}
+
+/// The running executable, canonical: the only path spelling of `pixel`
+/// that earns approval.
+fn running_pixel() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.canonicalize().ok()
+}
+
+/// `pixel` / `pixel-dev` as a bare word, or an absolute path that is this
+/// very executable. Any other spelling with a `/` is some other program.
+fn is_pixel_program(program: &str) -> bool {
+    if program.contains('/') {
+        return Path::new(program).is_absolute()
+            && Path::new(program)
+                .canonicalize()
+                .ok()
+                .is_some_and(|path| Some(path) == running_pixel());
+    }
+    matches!(program, "pixel" | "pixel-dev")
+}
+
+/// One `[rtk] pixel <retrieval> …` stage: a known read-only subcommand, only
+/// its listed flags, and every path-like word resolving inside the indexed
+/// repository around `cwd`.
+fn is_pixel_retrieval_stage(stage: &str, cwd: &Path) -> bool {
+    let Some(argv) = crate::search_compat::shell_argv(stage) else {
+        return false;
+    };
+    let argv = match argv.as_slice() {
+        [wrapper, rest @ ..] if wrapper == "rtk" => rest,
+        all => all,
+    };
+    let [program, subcommand, args @ ..] = argv else {
+        return false;
+    };
+    if !is_pixel_program(program) {
+        return false;
+    }
+    let Some(spec) = pixel_spec(subcommand) else {
+        return false;
+    };
+    let Ok(root) = crate::discover_root(cwd) else {
+        return false;
+    };
+    if !root.join(".pixel").is_dir() {
+        return false;
+    }
+    let mut positionals = 0;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if !arg.starts_with('-') || arg == "-" {
+            let in_paths = spec
+                .path_positions
+                .is_some_and(|(from, to)| (from..=to).contains(&positionals));
+            positionals += 1;
+            if positionals > spec.max_positionals || !word_stays_in_repo(arg, in_paths, cwd, &root)
+            {
+                return false;
+            }
+            continue;
+        }
+        let (name, inline) = match arg.split_once('=') {
+            Some((name, value)) if arg.starts_with("--") => (name, Some(value)),
+            _ => (arg.as_str(), None),
+        };
+        if spec.bools.contains(&name) {
+            if inline.is_some() {
+                return false;
+            }
+            continue;
+        }
+        if !spec.values.contains(&name) {
+            // A cluster of boolean short flags (`-Fi`).
+            let cluster = arg.strip_prefix('-').filter(|flags| {
+                !arg.starts_with("--")
+                    && !flags.is_empty()
+                    && flags
+                        .chars()
+                        .all(|c| spec.bools.contains(&format!("-{c}").as_str()))
+            });
+            if cluster.is_none() {
+                return false;
+            }
+            continue;
+        }
+        let Some(value) = inline.or_else(|| rest.next().map(String::as_str)) else {
+            return false;
+        };
+        if value.starts_with('-')
+            || !word_stays_in_repo(value, spec.path_values.contains(&name), cwd, &root)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// A word that names a path (absolute, `~`, a `..` component, something that
+/// exists, or any word in a path role) must stay inside the repository:
+/// canonical location under the root, outside `.git` and `.pixel`, and not
+/// credential-shaped by the typed or the canonical name. A missing relative
+/// path in a path role (a file deleted from the working tree, read from
+/// history) passes on its typed name. Plain patterns are not paths.
+fn word_stays_in_repo(word: &str, path_role: bool, cwd: &Path, root: &Path) -> bool {
+    let dotdot = Path::new(word)
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir));
+    let joined = cwd.join(word);
+    let exists = std::fs::symlink_metadata(&joined).is_ok();
+    let path_like = word.starts_with('/') || word.starts_with('~') || dotdot || exists;
+    if !path_like && !path_role {
+        return true;
+    }
+    if word.starts_with('~') || credential_shaped(word) {
+        return false;
+    }
+    match joined.canonicalize() {
+        Ok(absolute) => absolute
+            .strip_prefix(canonical(root))
+            .ok()
+            .is_some_and(|relative| {
+                !relative.starts_with(".git")
+                    && !relative.starts_with(".pixel")
+                    && relative
+                        .to_str()
+                        .is_some_and(|name| !credential_shaped(name))
+            }),
+        Err(_) => !word.starts_with('/') && !dotdot,
+    }
+}
+
 /// Drop trailing `2>/dev/null` / `2>&1` redirects, the only ones a stage of
 /// an approved chain may carry. Anything else stays in the text and makes
 /// the stage fail its argv parse (`>`, `<`, `&` are outside its grammar).
 fn strip_safe_redirects(stage: &str) -> &str {
-    let mut stage = stage.trim();
+    let blank = [' ', '\t'];
+    let mut stage = stage.trim_matches(blank);
     while let Some(rest) = ["2>/dev/null", "2>&1"]
         .iter()
         .find_map(|redirect| stage.strip_suffix(redirect))
-        .filter(|rest| rest.ends_with(char::is_whitespace))
+        .filter(|rest| rest.ends_with(blank))
     {
-        stage = rest.trim_end();
+        stage = rest.trim_end_matches(blank);
     }
     stage
 }
@@ -7046,6 +7334,278 @@ mod tests {
             "docker/config.json",
         ] {
             assert!(!credential_shaped(path), "{path}");
+        }
+    }
+
+    /// A repository with an outside sibling holding a planted credential,
+    /// for the permission-path tests below.
+    fn permission_fixture(name: &str) -> (PathBuf, PathBuf) {
+        let outer = scratch_repo(name);
+        let repo = outer.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".pixel")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(repo.join("README.md"), "text\n").unwrap();
+        std::fs::write(repo.join(".env"), "K=v\n").unwrap();
+        std::fs::create_dir_all(outer.join("outside")).unwrap();
+        std::fs::write(outer.join("outside/credentials"), "AWS_SECRET=abc123\n").unwrap();
+        (canonical(&repo), canonical(&outer.join("outside")))
+    }
+
+    fn permission(provider: Provider, repo: &Path, command: &str) -> Option<Value> {
+        let tool = if provider == Provider::Devin {
+            "exec"
+        } else {
+            "Bash"
+        };
+        retrieval_permission_response(
+            provider,
+            &serde_json::json!({
+                "hook_event_name": "PermissionRequest",
+                "tool_name": tool,
+                "tool_input": {"command": command},
+                "cwd": repo,
+            }),
+        )
+    }
+
+    /// Fix 1: `search-like-rg` executes the original rg/grep (`--pre` runs a
+    /// script) and `evaluate` runs benchmark commands: neither is approved.
+    /// Refused flags: `--fetch` runs `git fetch`; `--workspace` reads other
+    /// repositories; a flag outside a command's list is unknown, so refused.
+    #[test]
+    fn permission_drops_executing_subcommands_and_refuses_unlisted_flags() {
+        let (repo, _) = permission_fixture("perm-fix1");
+        for command in [
+            "pixel search-like-rg rg -- --pre /tmp/pre.sh Cargo README.md",
+            "pixel search-like-rg grep -- -r x src",
+            "pixel search-like-rg rg --pre=/x -- Cargo README.md",
+            "pixel evaluate run",
+            "pixel list-branches --fetch",
+            "pixel list-branches --fetch=1",
+            "pixel impact Foo --workspace",
+            "pixel who-calls Foo --workspace",
+            "pixel search-content --pre /x needle",
+            "pixel search-content -F needle --no-such-flag",
+            "pixel search-content -F needle --",
+            "pixel --repo /etc status",
+            "pixel status --repo /etc",
+            "pixel find-code x --limit -1",
+            "pixel status --json=1",
+            "pixel status a b",
+            "pixel find-code x y z",
+        ] {
+            for provider in [Provider::Devin, Provider::Zcode] {
+                assert_eq!(permission(provider, &repo, command), None, "{command}");
+            }
+        }
+        let approve = Some(serde_json::json!({"decision": "approve"}));
+        for command in [
+            "pixel find-code 'x'",
+            "pixel search-content -F x",
+            "pixel search-content -F x src/",
+            "rtk pixel search-content -F x src",
+            "pixel list-branches --remote origin --stale-days 30",
+            "pixel status --statusline",
+            "pixel search-content -Fi x -g '*.rs' --limit 5 --context=2",
+            "pixel who-wrote src/lib.rs --lines 1,5",
+            "pixel commit-history --limit 5 --detail compact",
+            "pixel repo-state --include-clean",
+            "pixel impact Foo --direction downstream --depth 2",
+        ] {
+            assert_eq!(
+                permission(Provider::Devin, &repo, command),
+                approve,
+                "{command}"
+            );
+        }
+    }
+
+    /// Fix 2: the program is the bare word, or (pixel only) the absolute
+    /// path of the running executable; every other spelling with a `/`
+    /// is some other program.
+    #[test]
+    fn permission_requires_the_bare_program_word() {
+        let (repo, _) = permission_fixture("perm-fix2");
+        let me = running_pixel().unwrap();
+        let me = me.to_str().unwrap();
+        assert!(is_pixel_program("pixel") && is_pixel_program("pixel-dev"));
+        assert!(is_pixel_program(me));
+        for program in [
+            "./pixel",
+            "/tmp/evil/pixel",
+            "sub/pixel",
+            "../pixel",
+            "/usr/bin/pixel",
+            "pixels",
+            "Pixel",
+            "",
+        ] {
+            assert!(!is_pixel_program(program), "{program}");
+        }
+        for command in [
+            "./pixel search-content x",
+            "/tmp/evil/pixel status",
+            "sub/pixel status",
+            "./sed -n '1,5p' README.md",
+            "/tmp/sed -n '1,5p' README.md",
+            "/bin/sed -n '1,5p' README.md",
+            "./echo hi; pixel status",
+            "/bin/echo hi; pixel status",
+            "rtk ./pixel status",
+            "rtk /bin/sed -n '1,5p' README.md",
+        ] {
+            assert_eq!(
+                permission(Provider::Devin, &repo, command),
+                None,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            permission(Provider::Devin, &repo, &format!("{me} status")),
+            Some(serde_json::json!({"decision": "approve"}))
+        );
+        assert_eq!(
+            permission(Provider::Devin, &repo, "sed -n '1,5p' README.md"),
+            Some(serde_json::json!({"decision": "approve"}))
+        );
+        assert_eq!(
+            permission(Provider::Devin, &repo, &format!("{me} status; echo ---")),
+            Some(serde_json::json!({"decision": "approve"}))
+        );
+    }
+
+    /// Fix 3: every path-like word of a pixel stage stays inside the
+    /// repository; plain patterns are not paths.
+    #[test]
+    fn permission_pixel_paths_stay_inside_the_repository() {
+        let (repo, outside) = permission_fixture("perm-fix3");
+        let outside = outside.to_str().unwrap();
+        std::os::unix::fs::symlink(repo.join(".env"), repo.join("notes.txt")).unwrap();
+        std::os::unix::fs::symlink(outside, repo.join("out-link")).unwrap();
+        let refused = [
+            format!("pixel search-content -F AWS_SECRET {outside}"),
+            "pixel search-content -F root /Users/livio/.aws".to_string(),
+            "pixel search-content -F root ~/.ssh".to_string(),
+            "pixel search-content -F root /etc".to_string(),
+            "pixel search-content -F root ../outside".to_string(),
+            "pixel search-content -F x src ../outside".to_string(),
+            "pixel search-content -F x out-link".to_string(),
+            "pixel search-content -F x notes.txt".to_string(),
+            "pixel search-content -F x .env".to_string(),
+            "pixel search-content -F x .git".to_string(),
+            "pixel search-content -F x .pixel".to_string(),
+            "pixel status /etc".to_string(),
+            "pixel status ..".to_string(),
+            "pixel status --repo /etc".to_string(),
+            "pixel dig-history --show abc123 --file .env".to_string(),
+            "pixel dig-history --show abc123 --file /etc/passwd".to_string(),
+            "pixel dig-history --show abc123 --file=../x".to_string(),
+            "pixel dig-history --show abc123 --file id_rsa".to_string(),
+            "pixel file-history --file .git-credentials".to_string(),
+            "pixel who-wrote .env".to_string(),
+            "pixel who-wrote credentials".to_string(),
+            "pixel repo-state --files .htpasswd".to_string(),
+            format!("pixel find-code x {outside}"),
+            format!("pixel find-code {outside} src"),
+            "pixel find-code x ~".to_string(),
+            // A pattern that names an existing credential file is a path.
+            "pixel search-content -F .env src".to_string(),
+        ];
+        for command in &refused {
+            for provider in [Provider::Devin, Provider::Zcode] {
+                assert_eq!(permission(provider, &repo, command), None, "{command}");
+            }
+        }
+        let approve = Some(serde_json::json!({"decision": "approve"}));
+        for command in [
+            "pixel search-content -F 'foo/bar'",
+            "pixel search-content -F credentials",
+            "pixel search-content -F x src/lib.rs README.md",
+            "pixel search-content -F x .",
+            "pixel status .",
+            "pixel status src",
+            "pixel dig-history --show abc123 --file src/deleted.rs",
+            "pixel file-history --file src/lib.rs",
+            "pixel who-wrote src/lib.rs",
+            "pixel find-code 'a/b c' src",
+        ] {
+            assert_eq!(
+                permission(Provider::Devin, &repo, command),
+                approve,
+                "{command}"
+            );
+        }
+        assert!(word_stays_in_repo("foo/bar", false, &repo, &repo));
+        assert!(word_stays_in_repo("foo/bar", true, &repo, &repo));
+        assert!(!word_stays_in_repo("../x", false, &repo, &repo));
+        assert!(!word_stays_in_repo("../x", true, &repo, &repo));
+        assert!(!word_stays_in_repo("/x/y", true, &repo, &repo));
+    }
+
+    /// Fix 4: more secret-bearing names.
+    #[test]
+    fn credential_shaped_refuses_more_dotfiles_and_stores() {
+        for path in [
+            ".git-credentials",
+            "home/.git-credentials",
+            ".htpasswd",
+            ".dockercfg",
+            ".boto",
+            ".s3cfg",
+            "application_default_credentials.json",
+            "kubeconfig",
+            "vault.kdbx",
+            "store.p12",
+            "cert.pfx",
+            "trust.jks",
+            "app.keystore",
+            "Kubeconfig",
+        ] {
+            assert!(credential_shaped(path), "{path}");
+        }
+        for path in ["kubeconfig.md", "src/boto.rs", "htpasswd.md", "notes.txt"] {
+            assert!(!credential_shaped(path), "{path}");
+        }
+    }
+
+    /// Fix 5: only space and tab separate words; a Unicode space could hide
+    /// a redirect from the parsers, so the whole command is refused.
+    #[test]
+    fn permission_refuses_unicode_whitespace_and_keeps_ascii_blanks() {
+        let (repo, _) = permission_fixture("perm-fix5");
+        assert_eq!(
+            strip_safe_redirects("pixel x\u{a0}2>&1"),
+            "pixel x\u{a0}2>&1"
+        );
+        assert_eq!(strip_safe_redirects("pixel x\t2>&1"), "pixel x");
+        for command in [
+            "pixel status\u{a0}2>&1",
+            "pixel status 2>&1\u{a0}",
+            "pixel status\u{2003}| head",
+            "pixel status |\u{a0}head",
+            "pixel status\u{a0}",
+            "pixel status\u{85}",
+        ] {
+            assert_eq!(
+                permission(Provider::Devin, &repo, command),
+                None,
+                "{command:?}"
+            );
+        }
+        let approve = Some(serde_json::json!({"decision": "approve"}));
+        for command in [
+            "pixel status\t2>&1",
+            "pixel status | head -+5",
+            "pixel status | head -n +5",
+            "pixel status | tail -n 5",
+        ] {
+            assert_eq!(
+                permission(Provider::Devin, &repo, command),
+                approve,
+                "{command:?}"
+            );
         }
     }
 

@@ -28,6 +28,8 @@ const settings = JSON.parse(readFileSync(${JSON.stringify(settingsPath)}, "utf8"
 appendFileSync(${JSON.stringify(trace)}, JSON.stringify(args) + "\\n");
 if (settings.fail?.includes(args[0])) { console.error("fixture Pixel unavailable: " + args[0]); process.exit(1); }
 const operations = ["status", "scope-task", "repo-state", "find-code", "fetch", "commit", "commit-and-push", "list-areas", "search-content", "impact", "pack-context", "what-changed"];
+const box = "warning: diagnostic line\\n\u{1F7E9} pixel " + args[0] + " \u2740 1.0ms\\n  \u2502\\n  \u2514\u2500\u2500\u2500\\n";
+if (!args.includes("off") && !["--version", "--help"].includes(args[0])) process.stderr.write(box);
 switch (args[0]) {
   case "--version": console.log("pixel 0.6.0"); break;
   case "--help": console.log("Commands:\\n" + operations.filter(op => !settings.missing?.includes(op)).map(op => "  " + op + "  Operation").join("\\n")); break;
@@ -253,6 +255,36 @@ switch (args[0]) {
     await h.emit("tool_result", pixelResult(false, "pixel_project"));
     assert.equal(await h.emit("tool_call", read("src/main.rs", 100)), undefined, "allowed after a successful result");
     assert.equal((await h.emit("tool_call", read("src/main.rs", 201))).block, true, "the read limit still applies");
+  });
+
+  await check("a successful tool result carries the metrics box as its own content item", async () => {
+    const h = await host("enforce");
+    await h.boot();
+    const result = await h.tool.execute("find", { action: "find_code", goal: "main" }, null, null, user());
+    assert.equal(result.content.length, 2);
+    assert.match(result.content[0].text, /^\{/);
+    assert.equal(result.content[1].text, "\u{1F7E9} pixel find-code \u2740 1.0ms\n  \u2502\n  \u2514\u2500\u2500\u2500");
+    assert.doesNotMatch(result.content[0].text + result.content[1].text, /warning: diagnostic/);
+    const quiet = calls().filter(([name]) => ["status", "scope-task", "repo-state"].includes(name));
+    assert.ok(quiet.length > 0 && quiet.every((args) => args.slice(-2).join(" ") === "--metrics off"), "probes stay silent");
+    const shown = calls().filter(([name]) => name === "find-code");
+    assert.ok(shown.length > 0 && shown.every((args) => !args.includes("off")), "tool runs keep metrics");
+  });
+
+  await check("blocked reads say what was wrong and a Pixel call alone unlocks in-repo reads", async () => {
+    const h = await host("enforce");
+    await h.boot();
+    const why = async (event) => JSON.parse((await h.emit("tool_call", event)).reason).redirect;
+    const tail = ". Call pixel first, then read with a limit of at most 200 lines";
+    assert.equal(await why(read("src/other.rs", 100)), "Read blocked: path not resolved by pixel yet" + tail);
+    assert.equal(await why(read("src/other.rs")), "Read blocked: no limit given" + tail);
+    assert.equal(await why(read("src/other.rs", 300)), "Read blocked: limit 300 exceeds 200" + tail);
+    await h.emit("tool_result", pixelResult());
+    assert.equal(await h.emit("tool_call", read("src/never-resolved.rs", 200)), undefined, "global pixel result unlocks any in-repo path");
+    assert.equal(await why(read("src/other.rs", 300)), "Read blocked: limit 300 exceeds 200" + tail);
+    assert.equal(await why(read(".env", 10)), "Read blocked: credential path" + tail);
+    assert.equal(await why(read("keys/id_rsa", 10)), "Read blocked: credential path" + tail);
+    assert.equal(await h.emit("tool_call", read("/etc/hosts", 10)), undefined, "outside the repository stays native");
   });
 
   await check("short prompts and session changes never retain stale edit or path state", async () => {

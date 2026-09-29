@@ -587,11 +587,13 @@ fn devin_should_auto_approve_only_safe_pixel_retrieval_commands() {
     std::fs::create_dir_all(dir.join("crates/pixel/src")).unwrap();
     std::fs::write(dir.join("crates/pixel/src/guard.rs"), "fn guard() {}\n").unwrap();
     for command in [
-        "pixel search-like-rg grep -- '-r' 'needle' 'src'",
         "pixel search-content -F needle src",
+        "pixel search-content -F needle src/",
+        "pixel search-content -F 'foo/bar'",
+        "pixel search-content -Fi needle src --limit 5 -g '*.rs'",
         "pixel find-code 'authentication flow'",
         "rtk pixel find-symbol Provider",
-        "/opt/homebrew/bin/pixel-dev who-calls Provider",
+        "pixel-dev who-calls Provider",
         "pixel search-content -F 'permissionDecision|permission_response'",
         "rtk pixel search-content -F 'permissionDecision' -g '*.rs'; rtk pixel search-content -F 'permission_response' -g '*.rs'",
         "pixel search-content -F permissionDecision && echo --- && pixel search-content -F permission_response",
@@ -1119,6 +1121,92 @@ fn pathless_read_tools_stay_native_under_enforce() {
             "devin {tool}"
         );
     }
+}
+
+/// Reviewer-confirmed approvals, now refused for Devin and Zcode: programs
+/// that execute (`search-like-rg --pre`), spellings that are not the bare
+/// word, pixel paths outside the repository, and Unicode whitespace.
+/// Repository-local retrieval stays approved.
+#[test]
+fn permission_approval_is_closed_list_bare_program_and_repo_bound() {
+    let dir = indexed_dir("permission-closed");
+    let outside = Scratch::for_test("pixel-guard-policy", "permission-outside");
+    std::fs::write(outside.join("credentials"), "AWS_SECRET=abc123\n").unwrap();
+    let outside = outside.canonicalize().unwrap();
+    let outside = outside.to_str().unwrap();
+    std::fs::write(dir.join("README.md"), "text\n").unwrap();
+    std::fs::write(dir.join(".env"), "K=v\n").unwrap();
+    std::os::unix::fs::symlink(dir.join(".env"), dir.join("notes.txt")).unwrap();
+    let refused = [
+        // 1. executing / network subcommands and flags
+        "pixel search-like-rg rg -- --pre /tmp/pre.sh Cargo README.md".to_string(),
+        "pixel search-like-rg rg --pre=/x -- Cargo README.md".to_string(),
+        "pixel search-like-rg grep -- -r x src".to_string(),
+        "pixel list-branches --fetch".to_string(),
+        "pixel impact Foo --workspace".to_string(),
+        // 2. program identity
+        "./pixel search-content x".to_string(),
+        "/tmp/evil/pixel status".to_string(),
+        "sub/pixel status".to_string(),
+        "./sed -n '1,5p' README.md".to_string(),
+        "/tmp/sed -n '1,5p' README.md".to_string(),
+        "./echo hi; pixel status".to_string(),
+        // 3. paths outside the repository
+        format!("pixel search-content -F AWS_SECRET {outside}"),
+        "pixel search-content -F root /Users/livio/.aws".to_string(),
+        "pixel search-content -F root ~/.ssh".to_string(),
+        "pixel status --repo /etc".to_string(),
+        "pixel dig-history --show abc123 --file .env".to_string(),
+        "pixel search-content -F x notes.txt".to_string(),
+        "pixel search-content -F x ../outside".to_string(),
+        // 5. Unicode whitespace hides a redirect
+        "pixel status\u{a0}2>&1".to_string(),
+        "pixel status |\u{a0}head".to_string(),
+    ];
+    let approve = json!({"decision":"approve"});
+    let allow = json!({"hookSpecificOutput":{
+        "hookEventName":"PermissionRequest",
+        "decision":{"behavior":"allow"}
+    }});
+    for command in &refused {
+        assert_eq!(
+            guard("devin", &devin_permission_request(command, &dir), &[]),
+            Value::Null,
+            "devin: {command:?}"
+        );
+        assert_eq!(
+            guard("zcode", &zcode_permission_request(command, &dir), &[]),
+            Value::Null,
+            "zcode: {command:?}"
+        );
+    }
+    let me = env!("CARGO_BIN_EXE_pixel");
+    for command in [
+        "pixel find-code 'x'".to_string(),
+        "pixel search-content -F x".to_string(),
+        "pixel search-content -F x src/".to_string(),
+        "rtk pixel search-content -F x src".to_string(),
+        "pixel search-content -F 'foo/bar'".to_string(),
+        "pixel find-code 'x' && pixel search-content -F y | head -5".to_string(),
+        "pixel search-content -F x 2>/dev/null | head -40; sed -n '1,40p' README.md".to_string(),
+        format!("{me} status"),
+    ] {
+        assert_eq!(
+            guard("devin", &devin_permission_request(&command, &dir), &[]),
+            approve,
+            "devin: {command}"
+        );
+        assert_eq!(
+            guard("zcode", &zcode_permission_request(&command, &dir), &[]),
+            allow,
+            "zcode: {command}"
+        );
+    }
+    // Rewrites and enforcement are a different path and did not move.
+    assert_eq!(
+        guard("devin", &devin_exec("grep -r needle src", &dir), &[]),
+        json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"command":"pixel search-like-rg grep -- '-r' 'needle' 'src'"}}})
+    );
 }
 
 #[test]
