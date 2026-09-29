@@ -39,6 +39,8 @@ pub const HOOKS_FILE: &str = "hooks.json";
 
 /// Substring unique to the installed metrics-relay command, used for
 /// idempotent merge and uninstall removal.
+///
+/// The relay surfaces the pixel operation summary (🟩 line) in the Codex UI after every tool call, even if Codex drops or loses the stderr stream. Most users will see pixel metrics automatically; the relay is a fallback for reliability.
 pub const METRICS_HOOK_MARKER: &str = "run-hook metrics";
 
 /// The agent prompt as bundled in the binary.

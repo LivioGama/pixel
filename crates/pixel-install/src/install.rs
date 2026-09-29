@@ -125,9 +125,7 @@ fn find_in_paths(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
 /// and, when OpenCode is present, a managed block in its global
 /// `~/.config/opencode/AGENTS.md`. Codex also gets the metrics relay:
 /// Codex's exec layer already merges the invocation's stderr into the
-/// tool result it records and shows, so the relay's dedupe drops the
-/// duplicate and a PostToolUse entry only re-emits the 🟩 line for the
-/// rare host whose tool result drops stderr. No managed blocks in the
+/// tool result it records and shows, so Codex users normally see metrics without extra steps. The relay's dedupe removes any duplicate, and a PostToolUse entry is only needed to re-emit the 🟩 "pixel" summary line for the rare Codex hosts whose tool result drops or fails to surface the merged stderr. No managed blocks in the
 /// home-level CLAUDE.md/AGENTS.md files; PreToolUse enforcement is
 /// repo-local (`pixel install --repo`).
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {
