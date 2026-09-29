@@ -27,7 +27,7 @@ const args = process.argv.slice(2);
 const settings = JSON.parse(readFileSync(${JSON.stringify(settingsPath)}, "utf8"));
 appendFileSync(${JSON.stringify(trace)}, JSON.stringify(args) + "\\n");
 if (settings.fail?.includes(args[0])) { console.error("fixture Pixel unavailable: " + args[0]); process.exit(1); }
-const operations = ["status", "scope-task", "repo-state", "find-code", "fetch", "commit", "commit-and-push", "list-areas", "search-content", "impact", "pack-context", "what-changed"];
+const operations = ["status", "scope-task", "repo-state", "find-code", "fetch", "commit", "commit-and-push", "list-areas", "search-content", "impact", "pack-context", "what-changed", "classify"];
 const box = "warning: diagnostic line\\n\u{1F7E9} pixel " + args[0] + " \u2740 1.0ms\\n  \u2502\\n  \u2514\u2500\u2500\u2500\\n";
 if (!args.includes("off") && !["--version", "--help"].includes(args[0])) process.stderr.write(box);
 switch (args[0]) {
@@ -38,6 +38,15 @@ switch (args[0]) {
   case "scope-task": console.log(JSON.stringify({padding: "x".repeat(settings.scopePadding ?? 0), targets:[{path:"src/main.rs"}]})); break;
   case "repo-state": console.log(JSON.stringify({branch:"fixture"})); break;
   case "find-code": console.log(JSON.stringify(settings.findAmbiguous ? {confidence:"ranked",matches:[{path:"src/a.rs",raw:"main",symbol_kind:"function"},{path:"src/b.rs",raw:"main",symbol_kind:"function"}]} : {padding: "x".repeat(settings.findPadding ?? 0), confidence:"resolved",matches:[{path:"src/found.rs",raw:"main",symbol_kind:"function"}]})); break;
+  case "classify": {
+    // No verdict configured is a cold engine: --if-warm exits 1, stdout empty.
+    const verdict = settings.classify;
+    if (!verdict) { console.error("not warm"); process.exit(1); }
+    if (verdict.delay) await new Promise((done) => setTimeout(done, verdict.delay));
+    appendFileSync(${JSON.stringify(trace)}, JSON.stringify(["classify-finished"]) + "\\n");
+    console.log(verdict.raw ?? JSON.stringify({predicted: verdict.label, probs: {[verdict.label]: verdict.p, question: 1 - verdict.p}, snapshot: {model: "winnow:e4b", temperature: 0}, next_ops: verdict.ops}));
+    process.exit(verdict.exit ?? 0);
+  }
   case "what-changed": console.log(JSON.stringify({changed_files:1,risk:"LOW",symbols:[{change:"modified",name:readFileSync(${JSON.stringify(editedPath)}, "utf8"),path:"src/main.rs"}],suggested_tests:["main_tests"]})); break;
   default: console.log(JSON.stringify({ok:true,op:args[0]}));
 }
@@ -353,6 +362,70 @@ switch (args[0]) {
     assert.ok(packCalls.at(-1).includes('"main"') || packCalls.at(-1).includes("main"), JSON.stringify(packCalls.at(-1)));
   });
 
+  const bugfix = { label: "bugfix", p: 0.8765, ops: ["pixel plan-rollback \"<problem>\"", "pixel impact \"<symbol>\""] };
+  const intentLine = /^Intent \(classifier verdict, not fact\)/m;
+
+  await check("a warm task-intent verdict adds one classifier line to the bootstrap", async () => {
+    const h = await host();
+    configure({ classify: bugfix });
+    const content = (await h.boot()).message.content;
+    assert.match(content, /^PIXEL TASK CONTEXT/);
+    assert.equal(content.split("\n").filter((line) => intentLine.test(line)).length, 1);
+    assert.ok(content.endsWith('\n\nIntent (classifier verdict, not fact): bugfix p=0.88 (winnow:e4b) → start with: pixel plan-rollback "<problem>", pixel impact "<symbol>"'), content);
+    const call = calls().findLast(([name]) => name === "classify");
+    assert.deepEqual(call, ["classify", "--task-intent", "--if-warm", "--json", "--metrics", "off", "--", "inspect the implementation"]);
+  });
+
+  await check("no intent line when the classifier exits nonzero, is unsure, unparsable or malformed", async () => {
+    for (const settings of [
+      {},
+      { classify: { ...bugfix, exit: 1 } },
+      { classify: { ...bugfix, p: 0.49 } },
+      { classify: { ...bugfix, raw: "not json" } },
+      { classify: { ...bugfix, ops: [] } },
+      { classify: { ...bugfix, ops: [null] } },
+      { classify: { ...bugfix, ops: [""] } },
+      { classify: { ...bugfix, ops: ["   "] } },
+      { classify: { ...bugfix, ops: [bugfix.ops[0], null] } },
+      { classify: bugfix, missing: ["classify"] },
+    ]) {
+      const h = await host();
+      configure(settings);
+      const content = (await h.boot()).message.content;
+      assert.match(content, /^PIXEL TASK CONTEXT/, JSON.stringify(settings));
+      assert.doesNotMatch(content, /Intent|classifier/, JSON.stringify(settings));
+    }
+  });
+
+  await check("a slow classifier is killed at the deadline and the bootstrap still arrives", async () => {
+    const h = await host();
+    configure({ classify: { ...bugfix, delay: 700 } });
+    const before = count("classify-finished");
+    const started = Date.now();
+    const content = (await h.boot()).message.content;
+    const elapsed = Date.now() - started;
+    assert.match(content, /^PIXEL TASK CONTEXT/);
+    assert.doesNotMatch(content, /Intent|classifier/);
+    // The fixture's own termination evidence for the deadline: its classifier
+    // needs 700 ms, past the 500 ms kill, so a bootstrap that returned with no
+    // completion marker cannot have waited for it.
+    assert.equal(count("classify-finished"), before, "the bootstrap returned before the classifier answered");
+    // The marker is still absent once the full delay has elapsed: the child
+    // was killed rather than left running.
+    await new Promise((done) => setTimeout(done, 1200));
+    assert.equal(count("classify-finished"), before, "the timed-out classifier was killed before it answered");
+    // A separate, loose hang bound for the whole bootstrap: slow health checks
+    // or context collection must not read as a missed deadline.
+    assert.ok(elapsed < 5000, `bootstrap waited ${elapsed} ms`);
+  });
+
+  await check("short prompts never spawn the classifier", async () => {
+    const h = await host();
+    configure({ classify: bugfix });
+    const before = count("classify");
+    assert.equal(await h.emit("before_agent_start", { prompt: "fix" }), undefined);
+    assert.equal(count("classify"), before);
+  });
   console.log(`Pi extension: ${passed} event-handler contract groups passed`);
 } finally {
   restore("PIXEL_POLICY", originalEnv[0]);

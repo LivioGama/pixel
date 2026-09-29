@@ -1,7 +1,7 @@
 // Pixel extension for Pi — managed by `pixel install --repo`.
 // __MANAGED_BEGIN__
 // __MANAGED_END__
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
@@ -13,6 +13,11 @@ const READ_LIMIT = 200;
 const BOOTSTRAP_BUDGET = 2400;
 const MIN_PROMPT_LEN = 12;
 const CREDENTIAL_PATH = /(?:^|\/)(?:\.env(?:\.[^/]*)?|\.ssh|\.aws|\.npmrc|\.netrc|id_(?:rsa|ed25519|ecdsa|dsa)[^/]*|[^/]*\.(?:pem|key|p12|pfx)|[^/]*(?:credentials|secrets?)[^/]*)(?:\/|$)/i;
+// The task-intent verdict is a best-effort extra of the bootstrap: a warm
+// local classifier answers in about 0.1 s, a cold one takes seconds and is
+// dropped. Under one half, the label is not more likely than the others.
+const INTENT_TIMEOUT_MS = 500;
+const MIN_INTENT_P = 0.5;
 const EDIT_TOOLS = new Set(["edit", "write", "apply_patch", "edit_file", "replace_file_content", "write_to_file"]);
 const ACTIONS = ["scope_task", "list_areas", "search_content", "find_code", "impact", "pack_context", "what_changed", "review_changes", "fetch", "commit", "commit_and_push"] as const;
 type Action = (typeof ACTIONS)[number];
@@ -91,6 +96,69 @@ function runBox(root: string, args: string[], quiet = false) {
     throw new Error(result.error?.message ?? result.stderr?.trim() ?? `Pixel exited ${result.status}`);
   }
   return { stdout: result.stdout as string, box: quiet ? "" : metricsBox(result.stderr) };
+}
+
+// The asynchronous twin of `run`, so the bootstrap's calls share the wait.
+function runAsync(root: string, args: string[]): Promise<string> {
+  const operation = resolveOperation(args[0]);
+  return collect(root, [operation, ...args.slice(1), "--metrics", "off"], 15000)
+    .then(({ code, stdout, stderr }) => {
+      if (code !== 0) throw new Error(stderr.trim() || `Pixel exited ${code}`);
+      return stdout;
+    });
+}
+
+// Spawn Pixel and gather its output; past `timeout` the child is killed and
+// the call settles with code null.
+function collect(root: string, args: string[], timeout: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((done) => {
+    let stdout = "", stderr = "", settled = false;
+    const finish = (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      done({ code, stdout, stderr });
+    };
+    const child = spawn(PIXEL_BIN, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+    const timer = setTimeout(() => { child.kill("SIGKILL"); stderr ||= `Pixel timed out after ${timeout} ms`; finish(null); }, timeout);
+    child.stdout?.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr?.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    child.on("error", (error) => { stderr ||= error.message; finish(null); });
+    child.on("close", (code) => finish(code));
+  });
+}
+
+// The bootstrap's task-intent line, worded as the Claude prompt hook words it
+// (`prompt_intent::render_line`): a classifier claim, never a repository fact.
+// A Pixel without `classify`, a cold or remote engine (`--if-warm` exits 1), a
+// slow answer, unparsable output or p < 0.5 all leave the prompt without it.
+async function classifyIntent(root: string, prompt: string): Promise<string | null> {
+  try {
+    const operation = resolveOperation("classify");
+    const { code, stdout } = await collect(root,
+      [operation, "--task-intent", "--if-warm", "--json", "--metrics", "off", "--", prompt], INTENT_TIMEOUT_MS);
+    return code === 0 ? intentLine(stdout) : null;
+  } catch {
+    return null;
+  }
+}
+
+function intentLine(stdout: string): string | null {
+  try {
+    const verdict = JSON.parse(stdout);
+    const label = verdict?.predicted;
+    const p = verdict?.probs?.[label];
+    const model = verdict?.snapshot?.model;
+    const ops = verdict?.next_ops;
+    if (typeof label !== "string" || typeof p !== "number" || !(p >= MIN_INTENT_P)) return null;
+    // `next_ops` is only usable when every entry names an operation: a null,
+    // an empty or a whitespace-only entry would leave the line without one.
+    if (typeof model !== "string" || !Array.isArray(ops) || ops.length === 0
+        || !ops.every((op) => typeof op === "string" && op.trim().length > 0)) return null;
+    return `Intent (classifier verdict, not fact): ${label} p=${p.toFixed(2)} (${model}) → start with: ${ops.join(", ")}`;
+  } catch {
+    return null;
+  }
 }
 
 function resolveOperation(name: string) {
@@ -436,8 +504,15 @@ export default function activate(pi: ExtensionAPI) {
     if (prompt.trim().length < MIN_PROMPT_LEN) return;
     try {
       const index = health(root, "scope_task");
-      const scope = run(root, ["scope-task", prompt, "--json", "--no-manifest", "--max-tier", "P1", "--limit", "15"], true).trim();
-      const repo = run(root, ["repo-state", "--json"], true).trim();
+      // Started first and awaited last: the classifier runs beside the two
+      // context calls and never fails the bootstrap. Both are quiet probes
+      // (`runAsync` passes `--metrics off`), like main's other bootstrap reads.
+      const intent = classifyIntent(root, prompt);
+      const [scope, repo] = (await Promise.all([
+        runAsync(root, ["scope-task", prompt, "--json", "--no-manifest", "--max-tier", "P1", "--limit", "15"]),
+        runAsync(root, ["repo-state", "--json"]),
+      ])).map((text) => text.trim());
+      const intentText = await intent;
       for (const text of [scope, repo]) rememberPaths(parseEvidence(text), resolvedPaths, root);
       state.pixelHealthy = true;
       audit(root, "bootstrap", "scope-task and repo-state injected", { graph_present: index.graph?.present });
@@ -447,7 +522,7 @@ export default function activate(pi: ExtensionAPI) {
       return {
         message: {
           customType: "pixel-bootstrap", display: false,
-          content: `PIXEL TASK CONTEXT (deterministic, from pixel scope-task + repo-state):\n\n${scope.slice(0, BOOTSTRAP_BUDGET)}${scope.length > BOOTSTRAP_BUDGET ? "\n…(truncated)" : ""}\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}\n\n${guidance}`,
+          content: `PIXEL TASK CONTEXT (deterministic, from pixel scope-task + repo-state):\n\n${scope.slice(0, BOOTSTRAP_BUDGET)}${scope.length > BOOTSTRAP_BUDGET ? "\n…(truncated)" : ""}\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}\n\n${guidance}${intentText ? `\n\n${intentText}` : ""}`,
         },
       };
     } catch (error) {
