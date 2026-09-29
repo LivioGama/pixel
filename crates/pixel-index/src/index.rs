@@ -89,7 +89,9 @@ pub fn credential_path(path: &Path) -> bool {
     name.starts_with(".env")
         || name.ends_with(".env")
         || name.starts_with("credentials.")
-        || (name.contains("secret") && name.contains('.'))
+        // Extensionless too: `secret_token` or `client_secret` holds the
+        // value itself as often as `app_secret.yaml` does.
+        || name.contains("secret")
         || name == "serviceaccountkey.json"
         || name.ends_with("-credentials.json")
         || [
@@ -760,8 +762,8 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    /// `credential_path` is the single predicate the daemon filter, the
-    /// search-compat guard, and the task sandbox all share. Every name
+    /// `credential_path` is the single predicate the daemon filter and the
+    /// search-compat guard share. Every name
     /// listed here must have a sibling test that would FAIL if the
     /// predicate silently grew a typo or lost a suffix — a positive answer
     /// here decides whether an `.env` byte reaches the caller's stdout.
@@ -790,6 +792,11 @@ mod tests {
             "id_ecdsa",
             "id_ed25519",
             "deploy_key_rsa",
+            "config/app_secret.yaml",
+            // Extensionless secret-named files carry the value itself.
+            "secret_token",
+            "deploy/client_secret",
+            "SECRET",
         ];
         for path in positives {
             assert!(
