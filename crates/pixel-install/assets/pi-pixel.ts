@@ -407,6 +407,7 @@ const LS_REASON = "repository discovery: use pixel list-areas or find-code";
 const FIND_REASON = "repository discovery: use pixel find-code or list-areas";
 const CREDENTIAL_REASON = "credential path";
 
+// ======= BEGIN BASH FENCE (Ports Rust enforce_leaf) =======
 /// Port of `enforce_leaf` (`crates/pixel/src/guard.rs`). One Bash leaf at a
 /// time: the first matching rule returns `{reason, operation?}`. Returning
 /// `undefined` keeps the command native.
