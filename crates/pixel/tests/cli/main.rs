@@ -14,6 +14,7 @@ mod execution_brief;
 mod flow_cli;
 mod guard_deny;
 mod guard_enforce;
+mod install_exit;
 mod json_contract;
 mod list_errors_cli;
 mod metrics_cli;
