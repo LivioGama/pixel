@@ -289,7 +289,7 @@ const CODEX_PROJECT_HOOKS: &str = ".codex/hooks.json";
 /// Prefer the first PATH entry whose canonical form is this binary, keeping
 /// the symlink path itself; fall back to the canonicalized path when PATH has
 /// no match (uninstalled-location runs, custom `--executable-path`).
-pub(crate) fn stable_exe_path(executable_path: PathBuf) -> PathBuf {
+pub fn stable_exe_path(executable_path: PathBuf) -> PathBuf {
     let paths = std::env::var_os("PATH").unwrap_or_default();
     stable_exe_path_in(executable_path, &paths)
 }

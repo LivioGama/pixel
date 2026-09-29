@@ -339,13 +339,17 @@ pub(crate) fn relaunch(exe: &Path, args: &[String]) -> ! {
 
 /// What the finished command hands the update close: the notice already on
 /// stderr, the exit code a command owns (never asked when set), the label
-/// and stdin state the prompt gates on, the upgrade command for the
-/// running binary, and the invocation to continue it with.
+/// and stdin state the prompt gates on, whether the command may re-run
+/// (the relaunch executes it again), the upgrade command for the running
+/// binary, its stable executable path — one that survives the upgrade, a
+/// PATH symlink, not a versioned store path — and the invocation to
+/// continue it with.
 pub(crate) struct Close<'a> {
     pub(crate) notice: Option<&'a str>,
     pub(crate) owned_exit: Option<i32>,
     pub(crate) command_label: &'a str,
     pub(crate) stdin_is_terminal: bool,
+    pub(crate) read_only: bool,
     pub(crate) hint: Option<String>,
     pub(crate) exe: Option<PathBuf>,
     pub(crate) args: &'a [String],
@@ -353,9 +357,10 @@ pub(crate) struct Close<'a> {
 
 /// The close of a command that saw an update notice: re-check every gate
 /// (`offer`'s question must never fire for a hook, an agent, CI, the
-/// updater itself, or a command that owns its exit code), ask it, run the
-/// upgrade on a yes, and hand `start` the binary to launch. On a taken
-/// update `start` never returns; everything else comes back to main.
+/// updater itself, a command that owns its exit code, or a command whose
+/// re-run would mutate state), ask it, run the upgrade on a yes, and hand
+/// `start` the binary to launch. On a taken update `start` never returns;
+/// everything else comes back to main.
 pub(crate) fn close_with_update(
     close: Close,
     env: impl Fn(&str) -> Option<OsString>,
@@ -365,6 +370,7 @@ pub(crate) fn close_with_update(
 ) {
     if close.notice.is_none()
         || close.owned_exit.is_some()
+        || !close.read_only
         || !prompt_enabled(close.command_label, close.stdin_is_terminal, &env)
     {
         return;
@@ -372,7 +378,6 @@ pub(crate) fn close_with_update(
     if offer(close.hint, env!("CARGO_PKG_VERSION"), ask, run) == Outcome::Relaunch
         && let Some(exe) = close.exe
     {
-        let exe = exe.canonicalize().unwrap_or(exe);
         start(&exe, close.args);
     }
 }
@@ -789,11 +794,13 @@ mod tests {
 
     /// Drive `close_with_update` with a fixed hint/exe and a `start` that
     /// records its arguments; returns the notice state (asked, started).
+    #[allow(clippy::too_many_arguments)]
     fn closed(
         update_line: Option<&str>,
         owned_exit: Option<i32>,
         label: &str,
         tty: bool,
+        read_only: bool,
         env: impl Fn(&str) -> Option<OsString>,
         answers: Vec<Result<&str, std::io::Error>>,
         upgrade_ok: bool,
@@ -812,6 +819,7 @@ mod tests {
                 owned_exit,
                 command_label: label,
                 stdin_is_terminal: tty,
+                read_only,
                 hint: Some("brew up".into()),
                 exe: Some(PathBuf::from("/tmp/px-close-none/bin/pixel")),
                 args: &["doctor".to_string()],
@@ -831,6 +839,7 @@ mod tests {
             None,
             "search",
             true,
+            true,
             env_of(&[]),
             vec![Ok("y\n")],
             true,
@@ -846,20 +855,41 @@ mod tests {
     fn close_should_return_without_asking_when_any_gate_holds() {
         // No notice, an owned exit code, a pipe on stdin, the updater
         // itself, and the opt-out each keep the question unasked.
-        for (update_line, owned_exit, label, tty, env) in [
-            (None, None, "search", true, env_of(&[])),
-            (Some("pixel 9"), Some(3), "search", true, env_of(&[])),
-            (Some("pixel 9"), None, "search", false, env_of(&[])),
-            (Some("pixel 9"), None, "self-update", true, env_of(&[])),
+        // No notice, an owned exit code, a mutating command, a pipe on
+        // stdin, the updater itself, and the opt-out each keep the
+        // question unasked.
+        for (update_line, owned_exit, label, tty, read_only, env) in [
+            (None, None, "search", true, true, env_of(&[])),
+            (Some("pixel 9"), Some(3), "search", true, true, env_of(&[])),
+            (Some("pixel 9"), None, "search", true, false, env_of(&[])),
+            (Some("pixel 9"), None, "search", false, true, env_of(&[])),
+            (
+                Some("pixel 9"),
+                None,
+                "self-update",
+                true,
+                true,
+                env_of(&[]),
+            ),
             (
                 Some("pixel 9"),
                 None,
                 "search",
                 true,
+                true,
                 env_of(&[(PROMPT_OPT_OUT_VAR, "1")]),
             ),
         ] {
-            let (asked, started) = closed(update_line, owned_exit, label, tty, env, vec![], true);
+            let (asked, started) = closed(
+                update_line,
+                owned_exit,
+                label,
+                tty,
+                read_only,
+                env,
+                vec![],
+                true,
+            );
             assert_eq!((asked, started), (0, vec![]), "{label} {tty:?}");
         }
     }
@@ -871,6 +901,7 @@ mod tests {
             None,
             "search",
             true,
+            true,
             env_of(&[]),
             vec![Ok("n\n")],
             true,
@@ -880,6 +911,7 @@ mod tests {
             Some("pixel 9"),
             None,
             "search",
+            true,
             true,
             env_of(&[]),
             vec![Ok("y\n")],
@@ -898,6 +930,7 @@ mod tests {
                 owned_exit: None,
                 command_label: "search",
                 stdin_is_terminal: true,
+                read_only: true,
                 hint: Some("brew up".into()),
                 exe: None,
                 args: &[],

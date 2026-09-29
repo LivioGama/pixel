@@ -5167,6 +5167,108 @@ fn checks_deployed_prompts(command_label: &str, protected: bool) -> bool {
     !protected && !matches!(command_label, "install" | "doctor" | "uninstall")
 }
 
+/// The command labels the update close may relaunch. The relaunch executes
+/// the command again, so only the read-only surface — retrieval, graph
+/// queries, git and pixel reporting — is ever offered; a mutating command
+/// (`push`, `install`, `scope-task --clear`, ...) finishes and stays
+/// finished, and its notice stays informative without a prompt. Labels are
+/// clap's kebab-case subcommand names, the same strings
+/// `matches.subcommand_name()` reports.
+const READ_ONLY_COMMANDS: &[&str] = &[
+    "search-content",
+    "search-like-rg",
+    "search-meaning",
+    "find-code",
+    "find-symbol",
+    "list-signatures",
+    "call-path",
+    "who-calls",
+    "impact",
+    "repo-map",
+    "pack-context",
+    "execution-brief",
+    "evidence",
+    "list-flows",
+    "list-areas",
+    "what-changed",
+    "status",
+    "coverage",
+    "audit",
+    "index-stats",
+    "recall",
+    "list-errors",
+    "repo-state",
+    "review-changes",
+    "commit-history",
+    "diff",
+    "file-history",
+    "search-history",
+    "dig-history",
+    "who-wrote",
+    "list-branches",
+    "token-savings",
+];
+
+/// Whether the command that just ran may be executed again by the relaunch.
+fn read_only_command(command_label: &str) -> bool {
+    READ_ONLY_COMMANDS.contains(&command_label)
+}
+
+#[cfg(test)]
+mod update_close_tests {
+    use super::{Cli, READ_ONLY_COMMANDS, read_only_command};
+    use clap::CommandFactory;
+
+    #[test]
+    fn every_read_only_label_is_a_real_command() {
+        // Building the full clap command overflows a test thread's default
+        // 2 MiB stack; give the builder room.
+        let check = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let cli = Cli::command();
+                let real: Vec<&str> = cli.get_subcommands().map(clap::Command::get_name).collect();
+                for label in READ_ONLY_COMMANDS {
+                    assert!(
+                        real.contains(label),
+                        "{label} is not a subcommand name; the allow-list entry is dead"
+                    );
+                }
+            })
+            .unwrap();
+        check.join().unwrap();
+    }
+
+    #[test]
+    fn read_only_should_accept_retrieval_and_refuse_state_changers() {
+        assert!(read_only_command("search-content"));
+        assert!(read_only_command("impact"));
+        assert!(read_only_command("diff"));
+        // Every one of these re-run would mutate state: the gate must keep
+        // the update question away from them.
+        for label in [
+            "push",
+            "commit",
+            "commit-and-push",
+            "install",
+            "uninstall",
+            "config",
+            "scope-task",
+            "build-index",
+            "doctor",
+            "self-update",
+            "run-hook",
+            "rename",
+            "plan-rollback",
+            "sync-branch",
+            "squash-branch",
+            "edit-env",
+        ] {
+            assert!(!read_only_command(label), "{label} must not relaunch");
+        }
+    }
+}
+
 /// One stderr line naming the deployed prompts that differ from this
 /// binary's copies. Nothing outside `pixel doctor` said so, and every agent kept the
 /// old command map after an upgrade until someone reran the install.
@@ -5394,8 +5496,13 @@ fn run() -> Result<(), String> {
             owned_exit,
             command_label: &command_label,
             stdin_is_terminal: std::io::IsTerminal::is_terminal(&std::io::stdin()),
+            read_only: read_only_command(&command_label),
             hint: release_upgrade_hint(),
-            exe: std::env::current_exe().ok(),
+            // A path that survives the upgrade: the stable PATH entry, not
+            // the versioned store path `current_exe` resolves to.
+            exe: std::env::current_exe()
+                .ok()
+                .map(pixel_install::install::stable_exe_path),
             args: &argv[1..],
         },
         |name| std::env::var_os(name),
