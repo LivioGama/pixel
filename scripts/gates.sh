@@ -100,6 +100,7 @@ step "release prepare contract" python3 scripts/test-prepare.py
 step "gate runner contract" python3 scripts/test-gates.py
 step "mutants config contract" python3 scripts/test-mutants-config.py
 step "clean contract" python3 scripts/test-clean.py
+step "harness recorder contract" python3 scripts/test-harness-recorder.py
 
 if [ "$FORCE" -eq 0 ] && [ -z "${CI:-}" ] && [ "$(gate_decision)" = skip ]; then
     echo

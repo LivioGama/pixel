@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+# harness-recorder.sh — record a harness run (Claude Code, Codex) with
+# asciinema so a pull request can show the run as a terminal video.
+#
+#   scripts/harness-recorder.sh --provider claude --scenario scope
+#   scripts/harness-recorder.sh --provider codex --scenario rns --gif
+#
+# What it does:
+#   1. builds the natural-prompt scenario (same four prompts as
+#      scripts/pixel-demo.sh, plus `rns` = run the repo's harness smoke test),
+#   2. runs the harness under `asciinema rec` in a fresh PTY,
+#   3. pretty-prints the machine event stream live, so the recording is a
+#      readable video instead of a wall of JSONL,
+#   4. writes harness-<provider>-<scenario>.cast (asciicast v3), .txt (plain
+#      transcript) and, with --gif, .gif (agg), plus meta.json.
+#
+# Reporting (--post PR):
+#   posts one PR comment with the stats table and the transcript in a
+#   <details> block, and attaches the .cast as a secret gist so reviewers can
+#   replay it (`agg <url>` or the asciinema player). --upload instead uploads
+#   to an asciinema server you are already authenticated against
+#   (`asciinema auth`) and embeds that URL.
+#
+# Exit codes: 0 recorded, 1 harness ran (or recording) but produced no events,
+# 2 argument/precondition error.
+
+set -u
+
+OUTDIR="${HARNESS_OUTDIR:-/tmp/pixel-harness-recording}"
+PROVIDER=""
+REPO=""
+SCENARIO="${SCENARIO:-scope}"
+MAKE_GIF=0
+POST_PR=""
+UPLOAD=0
+PROMPT_FILE=""
+IDLE_LIMIT="2.0"
+
+usage() {
+    sed -n '/^# harness-recorder.sh/,/^# Exit codes/p' "$0" | sed 's/^# \{0,1\}//'
+}
+die() {
+    echo "harness-recorder: $*" >&2
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --provider) PROVIDER="${2:-}"; shift 2 ;;
+        --provider=*) PROVIDER="${1#*=}"; shift ;;
+        --repo) REPO="${2:-}"; shift 2 ;;
+        --repo=*) REPO="${1#*=}"; shift ;;
+        --scenario) SCENARIO="${2:-}"; shift 2 ;;
+        --scenario=*) SCENARIO="${1#*=}"; shift ;;
+        --gif) MAKE_GIF=1; shift ;;
+        --post) POST_PR="${2:-}"; shift 2 ;;
+        --post=*) POST_PR="${1#*=}"; shift ;;
+        --upload) UPLOAD=1; shift ;;
+        --prompt-file) PROMPT_FILE="${2:-}"; shift 2 ;;
+        --prompt-file=*) PROMPT_FILE="${1#*=}"; shift ;;
+        --out) OUTDIR="${2:-}"; shift 2 ;;
+        --out=*) OUTDIR="${1#*=}"; shift ;;
+        --idle-time-limit) IDLE_LIMIT="${2:-}"; shift 2 ;;
+        --help | -h) usage; exit 0 ;;
+        *) die "unknown flag: $1 (see --help)" ;;
+    esac
+done
+
+[ -n "$PROVIDER" ] || die "--provider is required (claude|codex)"
+[ -n "$REPO" ] || REPO="$(pwd)"
+case "$PROVIDER" in
+    claude | codex) ;;
+    *) die "--provider must be claude or codex, got '$PROVIDER'" ;;
+esac
+REPO=$(cd "$REPO" 2>/dev/null && pwd) || die "repo not found: $REPO"
+[ -d "$REPO/.git" ] || [ -f "$REPO/.git" ] || die "$REPO is not a git repository"
+command -v asciinema >/dev/null 2>&1 || die "asciinema not found: brew install asciinema"
+command -v python3 >/dev/null 2>&1 || die "python3 not found"
+[ "$MAKE_GIF" -eq 1 ] && ! command -v agg >/dev/null 2>&1 && die "--gif: agg not found: brew install agg"
+case "$SCENARIO" in
+    locate | scope | sync | recover | rns) ;;
+    *) die "unknown scenario: $SCENARIO (locate|scope|sync|recover|rns)" ;;
+esac
+
+if [ -d "$OUTDIR" ] || mkdir -p "$OUTDIR" 2>/dev/null; then
+    :
+else
+    die "cannot create output dir: $OUTDIR (parent missing?)"
+fi
+OUTDIR=$(cd "$OUTDIR" && pwd) || die "cannot enter output dir: $OUTDIR"
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BASE="${PROVIDER}-${SCENARIO}"
+CAST="$OUTDIR/harness-$BASE.cast"
+TXT="$OUTDIR/harness-$BASE.txt"
+GIF="$OUTDIR/harness-$BASE.gif"
+LOG="$OUTDIR/$BASE.jsonl"
+
+# ── Prompt ────────────────────────────────────────────────────────────────
+if [ -z "$PROMPT_FILE" ]; then
+    PROMPT_FILE="$OUTDIR/prompt-$BASE.txt"
+fi
+mkdir -p "$(dirname "$PROMPT_FILE")"
+if [ -n "${HARNESS_PROMPT_FULL:-}" ]; then
+    printf '%s\n' "$HARNESS_PROMPT_FULL" > "$PROMPT_FILE"
+else
+    case "$SCENARIO" in
+        locate)
+            cat > "$PROMPT_FILE" << 'PROMPT'
+You are working in the repository REPO_PLACEHOLDER (a Rust CLI tool).
+
+Find where GUARD_MATCHER is defined and show its full definition with surrounding context. Report the file path, line number, and the full definition.
+PROMPT
+            ;;
+        scope)
+            cat > "$PROMPT_FILE" << 'PROMPT'
+You are working in the repository REPO_PLACEHOLDER (a Rust CLI tool).
+
+I want to add a new agent tool called "foobar" to the guard matcher. Find ALL files that would need to be modified for this change. List every file and why it needs changes.
+PROMPT
+            ;;
+        sync)
+            cat > "$PROMPT_FILE" << 'PROMPT'
+You are working in the repository REPO_PLACEHOLDER (a Rust CLI tool).
+
+Sync this branch with origin/main. Report what happened.
+PROMPT
+            ;;
+        recover)
+            cat > "$PROMPT_FILE" << 'PROMPT'
+You are working in the repository REPO_PLACEHOLDER (a Rust CLI tool).
+
+Find the deleted function register_mcp_server that was removed from the codebase. Show the commit that removed it, the file it was in, and the full original implementation.
+PROMPT
+            ;;
+        rns)
+            cat > "$PROMPT_FILE" << 'PROMPT'
+You are working in the repository REPO_PLACEHOLDER (a Punkt CLI for averting memory-first hold on repo code),
+where the pixel CLI is installed. This is a retrieval smoke run (the "RNS" checklist).
+
+Do the following in order, reporting each step as you go:
+1. Find where the guard matcher decides to rewrite a grep command into a pixel command. Use pixel to locate it (pixel find-code or pixel search-content), NOT plain grep.
+2. Show the impact of changing that guard decision: which call sites and tests reference it (pixel impact).
+3. Find the last commit that touched that region in git history (pixel excavate or pixel changes).
+4. Report how many pixel commands you used instead of raw grep/sed.
+PROMPT
+            ;;
+    esac
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        sed -i '' "s|REPO_PLACEHOLDER|$REPO|g" "$PROMPT_FILE"
+    else
+        sed -i "s|REPO_PLACEHOLDER|$REPO|g" "$PROMPT_FILE"
+    fi
+fi
+[ -s "$PROMPT_FILE" ] || die "prompt file is empty: $PROMPT_FILE"
+
+# ── The harness command. Its stdout goes to the video; the machine format
+#    also lands in $LOG (stdout for claude) for pixel-call counting.
+FILTER='
+import json, re, sys, time
+pixel_pat = re.compile(r"(^|[\s/;&|\"])pixel\s+(search|resolve|targets|reconcile|excavate|rescue|impact|uses|changes|context|symbol|inspect|history|publish|push|ship|branch|update|sync|diff|review|ask|recall|find-code|search-content|scope-task)")
+calls = 0
+tools = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        evt = json.loads(line)
+    except json.JSONDecodeError:
+        print(line[:200]); continue
+    t = evt.get("type")
+    if t == "assistant":
+        msg = evt.get("message") or {}
+        for block in (msg.get("content") or []):
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                inp = json.dumps(block.get("input", {}))
+                if pixel_pat.search(inp):
+                    calls += 1
+                tools.append(block.get("name", "?"))
+                print("  \u25b8 %s %s" % (block.get("name", "?"), inp[:120].replace("\n", " ")))
+    elif t == "result":
+        dur = evt.get("duration_ms"); txt = str(evt.get("result", ""))[:160].replace("\n", " ")
+        print("  \u2713 result (%sms): %s" % (dur, txt))
+        seen = {}
+        for name in tools:
+            seen[name] = seen.get(name, 0) + 1
+        summary = ", ".join("%s×%d" % (k, v) for k, v in sorted(seen.items(), key=lambda kv: -kv[1]))
+        with open(sys.argv[1] if len(sys.argv) > 1 else "/dev/null", "w") as f:
+            f.write("%d\t%s" % (calls, summary or "none"))
+'
+
+# ── Harness command, shell-quoted token by token (the generated runner script
+#    replays this string; %q keeps paths and prompts safe).
+q() { printf '%q ' "$@"; }
+PROMPT_TEXT="$(cat "$PROMPT_FILE")"
+case "$PROVIDER" in
+    claude)
+        # The user's real settings (pixel hooks installed) the way
+        # pixel-demo.sh builds its pixel arm: deployed agent prompt + subagent
+        # prompt, --verbose so stream-json emits tool events.
+        AGENT_PROMPT="${AGENT_PROMPT:-$HOME/.local/share/pixel/agent-prompt.md}"
+        [ -s "$AGENT_PROMPT" ] || AGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-agent-prompt.md"
+        SUBAGENT_PROMPT="${SUBAGENT_PROMPT:-$HOME/.local/share/pixel/subagent-prompt.md}"
+        [ -s "$SUBAGENT_PROMPT" ] || SUBAGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-subagent-prompt.md"
+        [ -s "$AGENT_PROMPT" ] || die "agent prompt missing (run: pixel install)"
+        command -v claude >/dev/null 2>&1 || die "claude not on PATH"
+        RUNNER_CMD="$(q claude -p --dangerously-skip-permissions \
+            --output-format stream-json --verbose \
+            --append-system-prompt-file "$AGENT_PROMPT" \
+            --append-subagent-system-prompt-file "$SUBAGENT_PROMPT") < $(printf '%q' "$PROMPT_FILE")"
+        ;;
+    codex)
+        command -v codex >/dev/null 2>&1 || die "codex not on PATH"
+        RUNNER_CMD="$(q codex exec --dangerously-bypass-approvals-and-sandbox \
+            --skip-git-repo-check -C "$REPO" "$PROMPT_TEXT")"
+        ;;
+esac
+
+# The recorded command is a generated script (not an inline bash -c string):
+# the raw harness stream is teed to $LOG for counting, piped through the
+# pretty-printer the video shows, and stderr is mirrored to a file without
+# polluting the machine stream the filter has to parse.
+RUNNER_SCRIPT="$OUTDIR/runner-$BASE.sh"
+{
+    printf '#!/usr/bin/env bash\n'
+    printf '# generated by scripts/harness-recorder.sh — the recorded harness command\n'
+    printf 'set -u\n'
+    printf 'stty rows %d cols %d 2> /dev/null || true\n' "${AGG_ROWS:-36}" "${AGG_COLS:-112}"
+    printf 'exec 2> >(tee %q >&2)\n' "$OUTDIR/$BASE.stderr.log"
+    printf '%s | tee %q | python3 -c %q %q\n' \
+        "$RUNNER_CMD" "$LOG" "$FILTER" "$OUTDIR/$BASE.counts"
+    printf 'exit "${PIPESTATUS[0]}"\n'
+} > "$RUNNER_SCRIPT"
+chmod +x "$RUNNER_SCRIPT"
+
+echo "harness-recorder: provider=$PROVIDER scenario=$SCENARIO repo=$REPO" >&2
+echo "  cast: $CAST  (transcript will be $TXT)" >&2
+[ "$MAKE_GIF" -eq 1 ] && echo "  gif:  yes (agg)" >&2
+
+START_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
+
+# ── Record. PTY is fresh (worse case: it inherits the caller's COLUMNS/
+#    LINES, which is what makes a terminal-sized recording feel natural).
+rm -f "$CAST"
+asciinema rec \
+    --command "bash \"$RUNNER_SCRIPT\"" \
+    --output-format asciicast-v3 \
+    --idle-time-limit "$IDLE_LIMIT" \
+    --overwrite \
+    --quiet \
+    "$CAST" || true
+
+[ -s "$CAST" ] || die "asciinema produced an empty recording: $CAST"
+
+END_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
+WALL_MS=$((END_MS - START_MS))
+
+# ── Plain transcript for the PR comment: colors off, control noise dropped.
+# (asciinema 3's `cat` wants two or more files; `convert -f txt` is the
+# single-file path.)
+asciinema convert "$CAST" -f txt - 2>/dev/null | tr -d '\000' > "$TXT" ||
+    { asciinema cat "$CAST" "$CAST" 2>/dev/null | tr -d '\000' > "$TXT"; }
+[ -s "$TXT" ] || die "empty transcript from $CAST"
+
+# ── Pixel-call count. claude's filter wrote "$BASE.counts"; codex's text log
+#    is greppable directly; both fall back to the raw stream + stderr mirror.
+COUNTS="$OUTDIR/$BASE.counts"
+PIXEL_CALLS=0
+TOOLS_USED="none"
+if [ -f "$COUNTS" ]; then
+    read -r PIXEL_CALLS TOOLS_USED < "$COUNTS"
+fi
+if [ "$PIXEL_CALLS" -eq 0 ]; then
+    PIXEL_CALLS=$(grep -h -c -E '(^|[[:space:]/;&|"])pixel (search|find-code|search-content|resolve|targets|impact|changes|excavate|rescue|scope-task|inspect|recall)' \
+        "$LOG" "$OUTDIR/$BASE.stderr.log" 2>/dev/null | awk -F: '{s+=$1} END {print s+0}')
+    TOOLS_USED=$(grep -h -oE '"name":"[A-Za-z]+|pixel [a-z-]+' "$LOG" "$OUTDIR/$BASE.stderr.log" 2>/dev/null | sed 's/"name":"//' | sort | uniq -c | sort -rn | awk '{printf "%s×%s, ", $2, $1}' | sed 's/, $//')
+    [ -n "$TOOLS_USED" ] || TOOLS_USED="none"
+fi
+
+# ── meta.json
+python3 - "$OUTDIR/meta-$BASE.json" \
+    "$PROVIDER" "$SCENARIO" "$REPO" "$WALL_MS" "$PIXEL_CALLS" \
+    "$(python3 -c 'import time; print(time.strftime("%Y-%m-%dT%H:%M:%S%z"))')" << 'PY'
+import json, sys
+path = sys.argv[1]
+fields = sys.argv[2:8]
+meta = {
+    "provider": fields[0],
+    "scenario": fields[1],
+    "repo": fields[2],
+    "wall_ms": int(fields[3]),
+    "pixel_calls": int(fields[4]),
+    "recorded_at": fields[5],
+}
+with open(path, "w") as f:
+    json.dump(meta, f, indent=2)
+PY
+
+if [ "$MAKE_GIF" -eq 1 ]; then
+    agg "$CAST" "$GIF" \
+        --speed 2 \
+        --font-size 14 \
+        --theme asciinema \
+        --cols "${AGG_COLS:-100}" --rows "${AGG_ROWS:-30}" \
+        || die "agg failed on $CAST"
+fi
+
+echo "harness-recorder: done in ${WALL_MS}ms ($PIXEL_CALLS pixel calls)" >&2
+echo "  cast: $CAST" >&2
+echo "  txt:  $TXT" >&2
+[ "$MAKE_GIF" -eq 1 ] && echo "  gif:  $GIF" >&2
+
+# ── Report ────────────────────────────────────────────────────────────────
+body_file="$OUTDIR/comment-$BASE.md"
+{
+    echo "## 🎥 Harness recording — $PROVIDER / $SCENARIO"
+    echo
+    echo "| | |"
+    echo "| --- | --- |"
+    echo "| Provider | \`$PROVIDER\` |"
+    echo "| Scenario | \`$SCENARIO\` |"
+    echo "| Wall clock | ${WALL_MS}ms |"
+    echo "| Pixel invocations | $PIXEL_CALLS |"
+    echo "| Tools used | $TOOLS_USED |"
+    echo
+    if [ "$UPLOAD" -eq 1 ]; then
+        if URL=$(asciinema upload "$CAST" 2>/dev/null | grep -oE 'https://[^[:space:]]+'); then
+            echo "**Watch:** re-watching at $URL — asciinema player embeds directly in GitHub comments:"
+            echo "<video src='$URL' style='display:none'></video>"
+        fi
+    fi
+    if [ -n "$POST_PR" ]; then
+        echo "(this post is generated by scripts/harness-recorder.sh; replay with \`agg harness-*.cast\` after downloading the gist)"
+    fi
+    echo
+    echo "<details><summary>Full transcript</summary>"
+    echo
+    echo '```'
+    cat "$TXT"
+    echo '```'
+    echo
+    echo "</details>"
+} > "$body_file"
+
+if [ -n "$POST_PR" ]; then
+    command -v gh >/dev/null 2>&1 || die "--post: gh not on PATH"
+    if [ "$UPLOAD" -eq 1 ]; then
+        # an asciinema-server link that reviewers can open — plus the gist
+        # holding the raw .cast for offline replay.
+        GIST_URL=$(gh gist create "$CAST" -d "$PROVIDER/$SCENARIO" 2>/dev/null | tail -1) || true
+        [ -n "$GIST_URL" ] && {
+            echo
+            echo "**Replay offline:** $GIST_URL"
+        } >> "$body_file"
+    fi
+    gh pr comment "$POST_PR" --body-file "$body_file"
+    echo "harness-recorder: posted comment on PR #$POST_PR" >&2
+else
+    echo "harness-recorder: comment body at $body_file (use --post <pr> to publish)" >&2
+fi
+
+exit 0

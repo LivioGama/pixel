@@ -28,7 +28,7 @@ class GatesContract(unittest.TestCase):
         # them and honours their exit code, not what the real ones check.
         self.prepare_log = self.root / "contracts.log"
         for name in ("test-prepare.py", "test-gates.py", "test-mutants-config.py",
-                     "test-clean.py"):
+                     "test-clean.py", "test-harness-recorder.py"):
             (self.repo / "scripts" / name).write_text(
                 "import os, sys\n"
                 f"open(os.environ['CONTRACT_LOG'], 'a').write('{name}\\n')\n"
@@ -111,7 +111,7 @@ class GatesContract(unittest.TestCase):
         self.assertEqual(
             self.contracts(),
             ["test-prepare.py", "test-gates.py", "test-mutants-config.py",
-             "test-clean.py"],
+             "test-clean.py", "test-harness-recorder.py"],
         )
         self.assertEqual(self.invocations(), [])
 
