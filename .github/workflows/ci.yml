@@ -189,6 +189,17 @@ jobs:
     needs: [scope, changes]
     if: needs.scope.outputs.release-prepare != 'true'
     runs-on: ubuntu-26.04
+    # Line tables instead of full debug info for the dev and test profiles:
+    # a failing test's backtrace keeps its file:line, and the compiler and
+    # linker skip the type and variable info no one reads in CI (the build
+    # was 58 s of the Test step and the cache 1 524 MB, restored in 27 s, on
+    # main run 36584496012). Job-level, not step-level: rust-cache hashes
+    # the job's CARGO_* variables into its key, and every Mutants shard
+    # restores this job's `linux-debug` entry, so mutants.yml sets the same
+    # value the same way; the two drifting apart would give the shards a
+    # key the Test job never writes. Local builds keep full debug info.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
