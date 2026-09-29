@@ -687,8 +687,12 @@ fn cwd_matches(a: &Path, b: &Path) -> bool {
     a == b || a.starts_with(b) || b.starts_with(a)
 }
 
-/// Trivial continuations that are almost certainly not new tasks.
+/// Trivial continuations that are almost certainly not new tasks, and
+/// harness envelopes (see [`is_harness_envelope`]), which are not the user's.
 fn is_trivial_continuation(prompt: &str) -> bool {
+    if is_harness_envelope(prompt) {
+        return true;
+    }
     let trimmed = prompt
         .trim()
         .trim_end_matches(['.', '!', '?'])
@@ -745,6 +749,29 @@ fn is_trivial_continuation(prompt: &str) -> bool {
         }
     }
     false
+}
+
+const SYSTEM_REMINDER_OPEN: &str = "<system-reminder>";
+const SYSTEM_REMINDER_CLOSE: &str = "</system-reminder>";
+
+/// A prompt the harness submitted on the user's behalf: a background-task
+/// `<task-notification>`, a slash-command or local-command wrapper, or
+/// nothing but `<system-reminder>` blocks. It must neither rewrite the task
+/// packet nor open a boundary. Only the opening counts (after any leading
+/// reminders), so a human prompt that quotes an envelope mid-text is still a
+/// prompt; the prefixes are recall's, so both classifiers agree.
+fn is_harness_envelope(prompt: &str) -> bool {
+    let mut rest = prompt.trim_start();
+    while let Some(after) = rest.strip_prefix(SYSTEM_REMINDER_OPEN) {
+        let Some(end) = after.find(SYSTEM_REMINDER_CLOSE) else {
+            return true;
+        };
+        rest = after[end + SYSTEM_REMINDER_CLOSE.len()..].trim_start();
+    }
+    rest.is_empty()
+        || pixel_recall::intent::ORCHESTRATOR_PREFIXES
+            .iter()
+            .any(|prefix| rest.starts_with(prefix))
 }
 
 /// Cosine similarity between two vectors.
@@ -906,6 +933,45 @@ mod tests {
         ] {
             assert!(!is_explicit_local_coding_prompt(prompt), "{prompt}");
         }
+    }
+
+    const TASK_NOTIFICATION: &str = "<task-notification>\n<task-id>b1f0c2</task-id>\n<status>completed</status>\n<summary>Agent \"fix auth\" completed</summary>\n</task-notification>";
+
+    #[test]
+    fn harness_envelopes_are_continuations() {
+        for prompt in [
+            TASK_NOTIFICATION,
+            "  <task-notification><task-id>x</task-id></task-notification>",
+            "<system-reminder>ctx</system-reminder>",
+            "<system-reminder>a</system-reminder>\n<system-reminder>b</system-reminder>\n",
+            "<system-reminder>unterminated",
+            "<system-reminder>ctx</system-reminder><task-notification>done</task-notification>",
+            "<command-name>/clear</command-name>",
+            "<command-message>review</command-message>",
+            "<local-command-caveat>Caveat: generated locally</local-command-caveat>",
+            "<local-command-stdout>ok</local-command-stdout>",
+        ] {
+            assert!(is_harness_envelope(prompt), "{prompt}");
+            assert!(is_trivial_continuation(prompt), "{prompt}");
+            assert!(!is_explicit_local_coding_prompt(prompt), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn prompts_that_quote_an_envelope_are_still_prompts() {
+        for prompt in [
+            "fix the hook: a <task-notification> prompt overwrites the task",
+            "why does task-notification reach the packet",
+            "<system-reminder>ctx</system-reminder>\nfix the login bug",
+            "<system-reminder>ctx</system-reminder>fix auth",
+            "implement <command-name> parsing",
+        ] {
+            assert!(!is_harness_envelope(prompt), "{prompt}");
+            assert!(!is_trivial_continuation(prompt), "{prompt}");
+        }
+        assert!(is_explicit_local_coding_prompt(
+            "fix the hook: a <task-notification> prompt overwrites the task"
+        ));
     }
 
     #[test]
