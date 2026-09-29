@@ -562,22 +562,23 @@ fn classify_default_in(doc: &Value) -> Result<bool, String> {
     }
 }
 
-/// The classify explanation the setup question is asked under. Java is
-/// named on purpose: the command works on any text, and the concrete
-/// example is what stops a reader from scrolling past it.
+/// The classify explanation the setup question is asked under. Jev is
+/// named on purpose: this is Pixel's local answer to TypeSafe's Jev, and
+/// the reader who knows Jev should not scroll past it.
 fn classify_blurb(color: bool) -> String {
     format!(
-        "{} is optional AI classification, separate from code search. Ask it a\n\
-         bounded question about any text — a prompt, a diff, a Java method — and\n\
-         it returns one probability per label you name:\n\n{}\n{}\n\n\
+        "{} is optional AI classification, separate from code search — Pixel's\n\
+         local answer to TypeSafe's Jev. Ask it a bounded question about any\n\
+         text — a prompt, a diff, a method — and it returns one probability\n\
+         per label you name:\n\n{}\n{}\n\n\
          The local engine runs offline after a one-time model download and\n\
-         costs nothing per call; remote providers receive your input and may\n\
-         charge per call.",
+         costs nothing per call (0.722 typed-decisions accuracy vs Jev's\n\
+         0.738); remote providers receive your input and may charge.",
         paint(color, "1", "Classify"),
         paint(
             color,
             "2",
-            "  pixel classify \"Which of these Java methods handles null safely?\" \\"
+            "  pixel classify \"Which of these two methods handles null safely?\" \\"
         ),
         paint(
             color,
@@ -1245,7 +1246,7 @@ mod tests {
     }
 
     #[test]
-    fn the_classify_explanation_names_java_and_the_default_shows_yes() {
+    fn the_classify_explanation_names_jev_and_the_default_shows_yes() {
         let home = HomeGuard::set();
         let path = home.0.join("config.yaml");
         // Five noes answer the five questions before classify; q then
@@ -1259,7 +1260,8 @@ mod tests {
         )
         .unwrap();
         let rendered = String::from_utf8(output).unwrap();
-        assert!(rendered.contains("Java"), "{rendered}");
+        assert!(rendered.contains("TypeSafe's Jev"), "{rendered}");
+        assert!(rendered.contains("0.738"), "{rendered}");
         assert!(rendered.contains("pixel classify"), "{rendered}");
         assert!(rendered.contains("\x1b[1;36mPixel setup"), "{rendered}");
         assert!(
