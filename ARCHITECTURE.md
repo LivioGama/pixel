@@ -161,16 +161,8 @@ Per repository, under `.pixel/` (git-ignored):
 
 The prompt-submit hook emits a `[PIXEL:TASK_BOUNDARY]` notice and reads
 `.pixel/actions.jsonl`, then `~/.pixel/actions.jsonl`, to spot a task that
-just ended. On Claude Code it also writes the task-runtime packet above, and,
-only where `auto_handoff` is on (`auto_handoff: true` in a config layer, or
-`PIXEL_AUTO_HANDOFF=1`; off by default) and never under Devin CLI (which runs
-`.claude/settings.json` hooks too, and sets `DEVIN_PROJECT_DIR`), the handoff
-of an imperative coding prompt: the task under `tasks/<id>/` (`candidates/<candidate>.json`,
-`workers/<candidate>.json`) and its worktree in
-`<parent of the checkout>/.pixel-sandboxes/<repo>/<id>/<candidate>/`, then
-rejects the foreground prompt with exit status 2. `.pixel/config.yaml` and
-the other Pixel-owned files under `.pixel/` do not count as the untracked
-work that refuses a sandbox.
+just ended. On Claude Code it also writes the task-runtime packet above. It
+never rejects a prompt: every failure path exits 0 and the prompt proceeds.
 
 Machine-wide:
 
@@ -422,7 +414,7 @@ The hook entry points, all under `pixel run-hook` (alias `hook`), and where
 | Hook event | Command | Effect |
 | --- | --- | --- |
 | `SessionStart` | `pixel run-hook session-start` | Injects the agent prompt and the capability block from the op registry. Global for Claude Code. |
-| `UserPromptSubmit` | `pixel run-hook prompt-submit` | Task context/boundary detection and the task-intent verdict; the automatic worker handoff only where `auto_handoff` is on (off by default). Global for Claude Code. |
+| `UserPromptSubmit` | `pixel run-hook prompt-submit` | Task context/boundary detection and the task-intent verdict. Never rejects a prompt. Global for Claude Code. |
 | `SessionStart` matcher `compact` (`PostCompaction` on Devin) | `pixel run-hook post-compaction` | Re-injects the active task evidence as additional context. |
 | `PreToolUse` | `pixel run-hook guard` | Bounded compatible command routing; native fallback and host permissions remain authoritative. Repo-local (`--repo`) for Claude Code and Devin; global for Antigravity and zcode. |
 | `PostToolUse` (Claude `Edit`) | `pixel run-hook post-tool-use` | After an edit, emits the dependants of what was just changed. |
