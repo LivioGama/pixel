@@ -12,6 +12,7 @@ fn run(home: &Path, cwd: &Path, args: &[&str]) -> Output {
         .env_remove("PIXEL_DAEMON_AUTO_START")
         .env_remove("PIXEL_TASK_CONTEXT")
         .env_remove("PIXEL_TASK_BOUNDARY")
+        .env_remove("PIXEL_AUTO_HANDOFF")
         .current_dir(cwd)
         .args(args)
         .output()
@@ -35,6 +36,7 @@ fn overview_should_show_effective_layers_without_creating_files_or_printing_secr
     assert!(empty.contains("config.yaml"));
     assert!(empty.contains("metrics: on"));
     assert!(empty.contains("daemon_auto_start: true (default)"));
+    assert!(empty.contains("auto_handoff: false (default)"), "{empty}");
     assert!(!home.join(".pixel/config.yaml").exists());
     fs::create_dir_all(home.join(".pixel")).unwrap();
     fs::create_dir_all(repo.join(".pixel")).unwrap();
@@ -154,6 +156,91 @@ fn disabled_prompt_features_should_leave_no_handoff_or_context() {
     assert_eq!(stdout(&out), "");
     assert_eq!(out.stderr, b"");
     assert!(!repo.join(".pixel/tasks").exists());
+}
+
+/// Runs the Claude prompt hook on `prompt` with `/usr/bin/true` as the worker,
+/// so a handoff, if one starts, exits at once instead of spending a session.
+fn claude_prompt_hook(home: &Path, repo: &Path, prompt: &str) -> Output {
+    let mut child = pixel_command()
+        .env("HOME", home)
+        .env_remove("PIXEL_TASK_CONTEXT")
+        .env_remove("PIXEL_TASK_BOUNDARY")
+        .env_remove("PIXEL_AUTO_HANDOFF")
+        .env_remove("DEVIN_PROJECT_DIR")
+        .env("PIXEL_CLAUDE_EXECUTABLE", "/usr/bin/true")
+        .current_dir(repo)
+        .args(["run-hook", "prompt-submit", "--provider", "claude"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let payload = serde_json::json!({"cwd": repo.to_str().unwrap(), "prompt": prompt, "session_id": "handoff-opt-in"});
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_prompt_hook_should_hand_off_only_in_a_repository_that_opted_in() {
+    // A fresh `pixel install` on a Linux box: "Add the \"story\" feature" was
+    // rejected twice with "foreground prompt handed off" while two hidden
+    // workers ran. The default install must keep the prompt in Claude.
+    let home = Scratch::for_test("config", "handoff-home");
+    let repo = Scratch::for_test("config", "handoff-repo");
+    fs::write(repo.join("lib.rs"), "pub fn seed() {}\n").unwrap();
+    crate::support::git(&repo, &["init", "-q"]);
+    crate::support::git(&repo, &["add", "."]);
+    crate::support::git(&repo, &["commit", "-q", "-m", "seed"]);
+    let sandboxes = repo
+        .parent()
+        .unwrap()
+        .join(".pixel-sandboxes")
+        .join(repo.file_name().unwrap());
+    let prompt = "Add the \"story\" feature";
+
+    let out = claude_prompt_hook(&home, &repo, prompt);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(!stderr.contains("handed off"), "{stderr}");
+    assert!(!sandboxes.exists(), "no sandbox without the opt-in");
+
+    fs::create_dir_all(repo.join(".pixel")).unwrap();
+    fs::write(repo.join(".pixel/config.yaml"), "auto_handoff: true\n").unwrap();
+    let out = claude_prompt_hook(&home, &repo, prompt);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("foreground prompt handed off"), "{stderr}");
+    let task_id = stderr
+        .split_once("Pixel started task ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("no task id in {stderr}"))
+        .to_string();
+    let candidate = sandboxes.join(&task_id).join("initial");
+    assert!(candidate.is_dir(), "the opted-in handoff owns a sandbox");
+    // The worker runs asynchronously: stop it before its worktree goes, and
+    // let the sandbox lifecycle remove the worktree and its git registration.
+    for op in ["worker-stop", "sandbox-cleanup"] {
+        let out = pixel_command()
+            .env("HOME", &*home)
+            .current_dir(&*repo)
+            .args(["task-state", op, &task_id, "initial"])
+            .arg(&*repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{op}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(!candidate.exists(), "sandbox-cleanup removed the worktree");
+    let _ = fs::remove_dir_all(&sandboxes);
 }
 
 #[cfg(unix)]

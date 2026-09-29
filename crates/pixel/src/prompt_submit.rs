@@ -16,10 +16,12 @@
 //! (`prompt_intent`). The workers share a 750ms deadline; one slow worker does
 //! not discard useful context from the others.
 //!
-//! The intent verdict never gates the automatic handoff: that decision runs
-//! before the workers start, on `is_explicit_local_coding_prompt` alone, so
-//! waiting for a verdict would add its latency to every handoff-eligible
-//! prompt.
+//! The automatic handoff is opt-in (`auto_handoff: true`, or
+//! `PIXEL_AUTO_HANDOFF=1`): it rejects the foreground prompt, so a default
+//! install must never do it. The intent verdict never gates it: that decision
+//! runs before the workers start, on the opt-in and
+//! `is_explicit_local_coding_prompt` alone, so waiting for a verdict would add
+//! its latency to every handoff-eligible prompt.
 
 use std::ffi::OsString;
 use std::io::Read;
@@ -236,7 +238,13 @@ struct ClaudeHandoff {
 }
 
 /// Accept, isolate, and start the one conservative automatic worker before
-/// rejecting Claude's foreground prompt. A task ledger row alone is not a
+/// rejecting Claude's foreground prompt, only in a repository that opted in
+/// to `auto_handoff`: without it nothing is written and the prompt stays in
+/// the foreground. Devin CLI runs the hooks of `.claude/settings.json` too
+/// (`read_config_from.claude`, on by default), so a `--provider claude` hook
+/// can fire inside Devin; there the worker would be a Claude session the Devin
+/// user never started, so a hook with `DEVIN_PROJECT_DIR` set never hands off.
+/// A task ledger row alone is not a
 /// handoff: every failure after acceptance marks the task as launch-failed,
 /// removes the task-owned sandbox when possible, and lets the foreground path
 /// continue normally.
@@ -245,11 +253,16 @@ fn start_claude_handoff(
     cwd: &Path,
     config: crate::task_scheduler::WorkerConfig,
 ) -> Option<ClaudeHandoff> {
-    if !is_explicit_local_coding_prompt(&payload.prompt) {
+    if !is_explicit_local_coding_prompt(&payload.prompt)
+        || std::env::var_os("DEVIN_PROJECT_DIR").is_some()
+    {
         return None;
     }
     let session_id = payload.session_id.as_deref()?;
     let root = crate::discover_root(cwd).ok()?;
+    if !crate::config_cmd::opt_in_enabled(Some(&root), "auto_handoff", "PIXEL_AUTO_HANDOFF") {
+        return None;
+    }
     let request = crate::claude_controller::TaskAcceptanceRequest {
         provider: "claude",
         session_id: session_id.to_string(),
@@ -1345,9 +1358,62 @@ mod tests {
         }
     }
 
+    fn opt_in(root: &Path) {
+        std::fs::create_dir_all(root.join(".pixel")).unwrap();
+        std::fs::write(root.join(".pixel/config.yaml"), "auto_handoff: true\n").unwrap();
+    }
+
+    #[test]
+    fn handoff_should_stay_off_until_the_repository_opts_in() {
+        // A fresh install with the Claude hook: an English imperative prompt
+        // ("Add the story feature") used to start a hidden worker and reject
+        // the prompt. Without the opt-in the prompt stays in the foreground
+        // and the repository gains no task, sandbox or worker.
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let root = fixture_repo("default-off");
+        let home = root.with_extension("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let saved_home = std::env::var_os("HOME");
+        let saved_env = std::env::var_os("PIXEL_AUTO_HANDOFF");
+        // SAFETY: HOME and PIXEL_AUTO_HANDOFF are only changed under ENV_LOCK.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("PIXEL_AUTO_HANDOFF");
+        }
+        let config = crate::task_scheduler::WorkerConfig {
+            executable: PathBuf::from("/usr/bin/true"),
+            ..Default::default()
+        };
+        let mut payload = coding_payload();
+        payload.prompt = "Add the \"story\" feature".to_string();
+        let handoff = start_claude_handoff(&payload, &root, config);
+        // SAFETY: same lock as above.
+        unsafe {
+            match saved_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            if let Some(value) = saved_env {
+                std::env::set_var("PIXEL_AUTO_HANDOFF", value);
+            }
+        }
+        assert!(handoff.is_none(), "no opt-in, no handoff");
+        assert!(!root.join(".pixel/tasks").exists(), "no task was accepted");
+        let sandboxes = root
+            .parent()
+            .unwrap()
+            .join(".pixel-sandboxes")
+            .join(root.file_name().unwrap());
+        assert!(!sandboxes.exists(), "no sandbox was created");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn failed_worker_launch_falls_through_and_cleans_its_sandbox() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
         let root = fixture_repo("failed");
+        opt_in(&root);
         let config = crate::task_scheduler::WorkerConfig {
             executable: root.join("missing-claude"),
             ..Default::default()
@@ -1371,8 +1437,45 @@ mod tests {
     }
 
     #[test]
+    fn devin_running_the_claude_hook_should_never_hand_off() {
+        // Devin loads `.claude/settings.json` hooks by default, so the
+        // Claude-qualified hook fires there too: "Prompt blocked: Pixel
+        // started task …" in Devin, with a `claude` worker behind it. Even an
+        // opted-in repository keeps the Devin prompt in the foreground.
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let root = fixture_repo("devin");
+        opt_in(&root);
+        let saved = std::env::var_os("DEVIN_PROJECT_DIR");
+        // SAFETY: DEVIN_PROJECT_DIR is only changed under ENV_LOCK.
+        unsafe { std::env::set_var("DEVIN_PROJECT_DIR", &root) };
+        let config = crate::task_scheduler::WorkerConfig {
+            executable: PathBuf::from("/usr/bin/true"),
+            ..Default::default()
+        };
+        let handoff = start_claude_handoff(&coding_payload(), &root, config);
+        // SAFETY: same lock as above.
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("DEVIN_PROJECT_DIR", value),
+                None => std::env::remove_var("DEVIN_PROJECT_DIR"),
+            }
+        }
+        assert!(handoff.is_none(), "no handoff under Devin");
+        assert!(!root.join(".pixel/tasks").exists(), "no task was accepted");
+        let sandboxes = root
+            .parent()
+            .unwrap()
+            .join(".pixel-sandboxes")
+            .join(root.file_name().unwrap());
+        assert!(!sandboxes.exists(), "no sandbox was created");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn successful_fake_worker_creates_task_candidate_and_worker_record() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
         let root = fixture_repo("success");
+        opt_in(&root);
         let config = crate::task_scheduler::WorkerConfig {
             executable: PathBuf::from("/usr/bin/true"),
             ..Default::default()

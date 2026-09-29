@@ -515,11 +515,17 @@ fn capture_dirty_overlay(
 
 /// Pixel creates these facts while accepting and scheduling a task. They are
 /// neither user WIP nor candidate input, so refusing them would make the first
-/// real task command poison its own subsequent sandbox creation. Keep this an
-/// exact allowlist: arbitrary files under `.pixel/` still block handoff.
+/// real task command poison its own subsequent sandbox creation. The
+/// repository's Pixel configuration is the same kind of fact: it is where a
+/// repository opts in to `auto_handoff`, so refusing it would make the opt-in
+/// block the handoff it enables. Keep this an exact allowlist: arbitrary files
+/// under `.pixel/` still block handoff.
 fn is_pixel_runtime_artifact(path: &str) -> bool {
     matches!(path, ".pixel/actions.jsonl" | ".pixel/task-runtime.json")
         || path.starts_with(".pixel/tasks/")
+        || path.strip_prefix(".pixel/").is_some_and(|name| {
+            name == crate::config_file::FILE_NAME || name == crate::config_file::LEGACY_FILE_NAME
+        })
 }
 
 fn baseline_tree(root: &Path) -> Result<String, String> {
@@ -818,6 +824,46 @@ mod tests {
                 .unwrap_err()
                 .starts_with("dirty_untracked_unsupported:scratch.txt")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pixel_runtime_artifacts_should_be_an_exact_allowlist_that_includes_the_repo_config() {
+        // The repository config is where `auto_handoff` is switched on: if it
+        // counted as user WIP, opting in would block every handoff.
+        for path in [
+            ".pixel/actions.jsonl",
+            ".pixel/task-runtime.json",
+            ".pixel/tasks/task-1/task.json",
+            ".pixel/config.yaml",
+            ".pixel/config.json",
+        ] {
+            assert!(is_pixel_runtime_artifact(path), "{path} is Pixel-owned");
+        }
+        for path in [
+            ".pixel/targets.json",
+            ".pixel/config.yaml.bak",
+            ".pixel/nested/config.yaml",
+            "config.yaml",
+            "sub/.pixel/config.yaml",
+            "scratch.txt",
+        ] {
+            assert!(!is_pixel_runtime_artifact(path), "{path} is user WIP");
+        }
+    }
+
+    #[test]
+    fn repo_config_should_not_poison_a_task_sandbox() {
+        let root = fixture("repo-config");
+        fs::create_dir_all(root.join(".pixel")).unwrap();
+        fs::write(root.join(".pixel/config.yaml"), "auto_handoff: true\n").unwrap();
+        let candidate = create(&root, "task1", "candidate1", ["owned.txt".to_string()])
+            .expect("the opt-in file must not block the handoff it enables");
+        assert!(
+            !candidate.sandbox_root.join(".pixel/config.yaml").exists(),
+            "the config is a Pixel fact, not candidate input"
+        );
+        cleanup(&root, "task1", "candidate1").unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
