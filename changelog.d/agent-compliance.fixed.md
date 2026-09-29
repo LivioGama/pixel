@@ -1,1 +1,0 @@
-**install:** the `🟩` metrics box now reaches Claude Code (`PostToolUse` on `Bash`, as a `systemMessage`) and Devin (`exec`), pi's tool calls keep it and read only after a Pixel call, the Devin guard catches `rtk read`/`head`/`tail`/`awk` and approves a lone bounded `sed`, and overview questions point at `README.md` instead of matching the word "repo".
