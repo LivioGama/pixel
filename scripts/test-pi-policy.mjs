@@ -1,7 +1,7 @@
 // Executable extension contract: bun scripts/test-pi-policy.mjs
 // The real extension handles events; only its host and Pixel process are fixtures.
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -178,6 +178,7 @@ switch (args[0]) {
     assert.equal(await why("sed 's/a/b/' src/main.rs"), "repository read: use pixel search-content or pixel pack-context <uid>");
     // bounded sed read: should be ALLOWED (not blocked), so returns undefined
     assert.equal(await h.emit("tool_call", native("sed -n '1,20p' src/main.rs")), undefined);
+    assert.equal(await h.emit("tool_call", native("rtk sed -n '1,20p' src/main.rs")), undefined);
     assert.equal(await why("cp src/main.rs /tmp/x"), "repository read: use pixel search-content or pixel pack-context <uid>");
     assert.equal(await why("rg error src"), "repository search: use pixel search-content");
     assert.equal(await why("grep error src"), "repository search: use pixel search-content");
@@ -192,12 +193,41 @@ switch (args[0]) {
     const h = await host("enforce");
     await h.boot();
     writeFileSync(join(root, ".env"), "K=v\n");
-    for (const command of ["cat .env", "head .env", "rg -n needle .env", "cp .env /tmp/pixel-leaf-dest"]) {
+    for (const command of ["cat .env", "head .env", "rg -n needle .env", "cp .env /tmp/pixel-leaf-dest", "sed -n '1,20p' .env"]) {
       const event = native(command);
       const result = await h.emit("tool_call", event);
       assert.equal(result.block, true, command);
       assert.equal(JSON.parse(result.reason).redirect, "credential path", command);
       assert.equal(event.input.command, command);
+    }
+  });
+
+  await check("a bounded sed read is exempt only for a readable repository file", async () => {
+    const h = await host("enforce");
+    await h.boot();
+    const why = async (command) => {
+      const event = native(command);
+      const result = await h.emit("tool_call", event);
+      return result ? JSON.parse(result.reason).redirect : undefined;
+    };
+    // A regular file inside the repository is what `is_bounded_sed_read`
+    // grants the exemption to; a directory, a path under `.git`/`.pixel`, an
+    // in-repo symlink to a credential and an out-of-window range are reads
+    // the Rust guard still refuses.
+    symlinkSync(join(root, ".env"), join(root, "notes.txt"));
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(join(root, ".git/config"), "[core]\n");
+    writeFileSync(join(root, ".pixel/notes.txt"), "notes\n");
+    for (const command of [
+      "sed -n '1,20p' src", "sed -n '1,20p' notes.txt", "rtk sed -n '1,20p' notes.txt",
+      "sed -n '1,20p' .pixel/notes.txt", "sed -n '1,20p' .git/config", "sed -n '1,201p' src/main.rs",
+    ]) {
+      assert.equal(await why(command), "repository read: use pixel search-content or pixel pack-context <uid>", command);
+    }
+    // Missing paths, paths outside the repository and in-place edits keep
+    // their native handling, as they do in the guard.
+    for (const command of ["sed -n '1,20p' missing.rs", "sed -n '1,20p' /tmp/external.txt", "sed -i 's/a/b/' src/main.rs"]) {
+      assert.equal(await h.emit("tool_call", native(command)), undefined, command);
     }
   });
 

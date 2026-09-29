@@ -2,7 +2,7 @@
 // __MANAGED_BEGIN__
 // __MANAGED_END__
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, realpathSync } from "node:fs";
+import { appendFileSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -378,10 +378,31 @@ function sedEditsInPlace(args: string[]): boolean {
   });
 }
 
+/// The canonical path of a readable repository file: a regular file inside
+/// the root, never under `.git`/`.pixel` and not credential-shaped where it
+/// really lives, so an in-repo symlink to `.env` is refused. Port of
+/// `readable_repo_file` (`crates/pixel/src/guard.rs`).
+function readableRepoFile(root: string, path: string): boolean {
+  if (!path || path === "-") return false;
+  let canonical: string;
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = realpathSync(root);
+    canonical = realpathSync(isAbsolute(path) ? path : resolve(root, path));
+  } catch { return false; }
+  const rel = relative(canonicalRoot, canonical);
+  if (!rel || rel === ".." || rel.startsWith("../") || isAbsolute(rel)) return false;
+  const head = rel.split(sep)[0];
+  if (head === ".git" || head === ".pixel") return false;
+  if (CREDENTIAL_PATH.test(rel)) return false;
+  try { return statSync(canonical).isFile(); }
+  catch { return false; }
+}
+
 /// `sed -n 'A,Bp' F` with a bounded line window: the follow-up to a Pixel
-/// hit. Never denied; the path must be shape-valid (canonical containment
-/// is enforced elsewhere).
-function isBoundedSedRead(args: string[]): boolean {
+/// hit. Never denied; the path must name a readable repository file, the
+/// whole-segment test `is_bounded_sed_read` applies in the Rust guard.
+function isBoundedSedRead(root: string, args: string[]): boolean {
   // Expect: ['-n', 'A,Bp', 'file']
   if (args[0] !== "-n") return false;
   if (args.length !== 3) return false;
@@ -397,7 +418,7 @@ function isBoundedSedRead(args: string[]): boolean {
   const path = args[2];
   if (!path || path.startsWith("-")) return false;
   if (CREDENTIAL_PATH.test(path)) return false;
-  return true;
+  return readableRepoFile(root, path);
 }
 
 const REPO_READ_REASON = "repository read: use pixel search-content or pixel pack-context <uid>";
@@ -480,7 +501,7 @@ function enforceLeaf(segment: string, words: string[], piped: boolean, root: str
     }
     case "sed": {
       if (sedEditsInPlace(effectiveArgs)) return undefined;
-      if (isBoundedSedRead(effectiveArgs)) return undefined;
+      if (isBoundedSedRead(root, effectiveArgs)) return undefined;
       const paths = nonFlagPaths(1);
       for (const p of paths) if (credentialPath(p)) return { reason: CREDENTIAL_REASON };
       if (!paths.some((p) => argReadsRepo(root, p))) return undefined;

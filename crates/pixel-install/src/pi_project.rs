@@ -601,6 +601,7 @@ console.log(JSON.stringify([
             "function splitShellSegments",
             "function tokenizeShell",
             "function argReadsRepo",
+            "function readableRepoFile",
             "function enforceLeaf",
             "function enforceLeafDecision",
             "\"repository read: use pixel search-content or pixel pack-context <uid>\"",
