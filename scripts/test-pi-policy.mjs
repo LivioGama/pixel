@@ -33,7 +33,7 @@ const args = process.argv.slice(2);
 const settings = JSON.parse(readFileSync(${JSON.stringify(settingsPath)}, "utf8"));
 appendFileSync(${JSON.stringify(trace)}, JSON.stringify(args) + "\\n");
 if (settings.fail?.includes(args[0])) { console.error("fixture Pixel unavailable: " + args[0]); process.exit(1); }
-const operations = ["status", "scope-task", "repo-state", "find-code", "fetch", "commit", "commit-and-push", "list-areas", "search-content", "impact", "pack-context", "what-changed", "classify"];
+const operations = ["status", "scope-task", "repo-state", "review-changes", "commit-history", "find-code", "fetch", "commit", "commit-and-push", "list-areas", "search-content", "impact", "pack-context", "what-changed", "classify"];
 const box = "warning: diagnostic line\\n\u{1F7E9} pixel " + args[0] + " \u2740 1.0ms\\n  \u2502\\n  \u2514\u2500\u2500\u2500\\n";
 if (!args.includes("off") && !["--version", "--help"].includes(args[0])) process.stderr.write(box);
 switch (args[0]) {
@@ -152,7 +152,8 @@ switch (args[0]) {
       read("src/unknown.rs", 100), edit(),
     ]) {
       const before = structuredClone(event);
-      assert.equal((await h.emit("tool_call", event)).block, true, before.input.command ?? before.toolName);
+      const decision = await h.emit("tool_call", event);
+      assert.equal(decision?.block, true, before.input.command ?? before.toolName);
       assert.deepEqual(event, before);
     }
     const result = await h.tool.execute("find", { action: "find_code", goal: "main" }, null, null, user());
