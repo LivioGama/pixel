@@ -117,16 +117,18 @@ fn classify_if_warm_should_fail_fast_with_empty_stdout_when_no_local_engine_list
 }
 
 /// A local daemon that completes the TCP handshake and drains the request,
-/// then answers only after `delay`: warm to the connect probe, slow to
-/// answer, which is the daemon still loading its model. The accept loop is
-/// nonblocking with a deadline so a mutant that never connects fails an
-/// assertion instead of hanging the test.
+/// then answers only after `delay` with a verdict a classifying CLI would
+/// use: warm to the connect probe, slow to answer, which is the daemon still
+/// loading its model. The accept loop is nonblocking with a deadline so a
+/// mutant that never connects fails an assertion instead of hanging the
+/// test.
 fn stalled_daemon(delay: std::time::Duration) -> String {
+    let body = r#"{"answers":{"q1":{"type":"choice","choice":"bugfix","probabilities":{"bugfix":0.9,"feature":0.02,"refactor":0.02,"investigate":0.02,"question":0.02,"review":0.01,"ops":0.01},"confidence":0.9}}}"#;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while std::time::Instant::now() < deadline {
             let Ok((mut stream, _)) = listener.accept() else {
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -140,9 +142,11 @@ fn stalled_daemon(delay: std::time::Duration) -> String {
                 continue; // the reachability probe connects, then closes
             }
             std::thread::sleep(delay);
-            let _ = stream.write_all(
-                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
             );
+            let _ = stream.write_all(response.as_bytes());
         }
     });
     base
@@ -152,9 +156,10 @@ fn stalled_daemon(delay: std::time::Duration) -> String {
 fn classify_if_warm_should_give_up_when_the_daemon_accepts_but_still_loads_the_model() {
     let home = Scratch::for_test("classify", "if-warm-slow-home");
     std::fs::create_dir_all(home.join(".pixel")).unwrap();
-    // Answers at 3 s, far past the 300 ms warm cap but inside the connect
-    // probe: without a bounded timeout `--if-warm` would wait for it.
-    let base = stalled_daemon(std::time::Duration::from_secs(3));
+    // Answers at 5 s with a usable verdict, far past the 300 ms warm cap but
+    // inside the connect probe: without that cap the call succeeds and
+    // prints the verdict instead of exiting empty-handed.
+    let base = stalled_daemon(std::time::Duration::from_secs(5));
     std::fs::write(
         home.join(".pixel/config.yaml"),
         format!(
@@ -162,7 +167,6 @@ fn classify_if_warm_should_give_up_when_the_daemon_accepts_but_still_loads_the_m
         ),
     )
     .unwrap();
-    let started = std::time::Instant::now();
     let out = pixel_command()
         .env("HOME", &*home)
         .args([
@@ -174,14 +178,9 @@ fn classify_if_warm_should_give_up_when_the_daemon_accepts_but_still_loads_the_m
         .env("PIXEL_METRICS", "0")
         .output()
         .unwrap();
-    let elapsed = started.elapsed();
     assert!(
         !out.status.success(),
-        "--if-warm exits rather than wait for the model: {out:?}"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "--if-warm answers at once or exits: {elapsed:?}"
+        "--if-warm gives up instead of waiting for the model: {out:?}"
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
     let stderr = String::from_utf8_lossy(&out.stderr);
