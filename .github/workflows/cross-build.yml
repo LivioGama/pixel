@@ -48,13 +48,35 @@ jobs:
     uses: ./.github/workflows/release-prepare-scope.yml
 
   cross-build:
-    name: Cross-build ${{ matrix.target }}
+    name: Cross-build ${{ matrix.target }} (${{ matrix.profile }})
     needs: scope
     if: needs.scope.outputs.release-prepare != 'true'
     runs-on: ${{ matrix.os }}
+    # A pull request into main builds `dev-release` (release without thin LTO
+    # and with 16 codegen units): the lane still has to link against musl
+    # with the release feature set and a --locked Cargo.lock, which is what
+    # this job exists to prove, but the 16 workspace crates no longer go
+    # through LTO. On PR runs every dependency already came from the cache
+    # and those crates were the whole build: 2 min 21 s to 3 min 53 s in
+    # `release` (runs 36576912510, 36579443968). The push to main keeps
+    # building `release` exactly as release.yml does, and the release skill
+    # tags only once that run is green, so an LTO-only failure still stops a
+    # release before its tag. A maintenance pull request into `release/x.y`
+    # keeps `release`: no push run covers that branch.
+    #
+    # The push to main runs both profiles, each as its own job with its own
+    # cache key, so each saves the entry its readers restore: `release-<t>`
+    # for the tag's build in release.yml, `dev-release-<t>` for the pull
+    # requests. One key cannot hold both: an entry is immutable, and a push
+    # whose key already exists saves nothing ("Cache up-to-date"), so a
+    # dev-release build added to the release job would never reach the
+    # entry pull requests restore, and they would compile every dependency
+    # (280 to 328 crates, 3 min 21 s to 6 min 37 s on run 36599714619).
     strategy:
       fail-fast: true
       matrix:
+        profile: ${{ fromJSON(github.event_name == 'push' && '["release", "dev-release"]' || (github.event_name == 'pull_request' && github.base_ref == 'main') && '["dev-release"]' || '["release"]') }}
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl, aarch64-apple-darwin]
         # The three release targets, on the runners release.yml builds them
         # on. aarch64-apple-darwin is here so a push to main proves the macOS
         # lane before a tag does, and saves the cache the tag's build restores.
@@ -91,7 +113,9 @@ jobs:
           # or poison them. A failed build still saves what it compiled.
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-          shared-key: release-${{ matrix.target }}
+          # `release-<target>` for the release profile, the name release.yml
+          # restores; `dev-release-<target>` for the pull requests' profile.
+          shared-key: ${{ matrix.profile }}-${{ matrix.target }}
 
       # Prebuilt binary instead of `cargo install cross` (~40 s per run).
       # cross compiles inside its own Docker image, which carries the musl
@@ -102,14 +126,16 @@ jobs:
         with:
           tool: cross
 
-      # Must match release.yml exactly: fastembed (ONNX) has no musl build,
-      # but model2vec is pure Rust and ships in the Linux release. Building
-      # without it here would leave the released feature set untested.
+      # Must match release.yml exactly, but for the profile (see the
+      # job comment): fastembed (ONNX) has no musl build, but model2vec is pure
+      # Rust and ships in the Linux release. Building without it here would
+      # leave the released feature set untested.
       - name: Cross-build (model2vec only — ort-sys has no musl prebuilts)
         if: runner.os == 'Linux'
-        run: cross build --release --locked --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
+        run: cross build --profile ${{ matrix.profile }} --locked --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
 
-      # Must match release.yml's macOS step exactly: default features, native.
+      # Must match release.yml's macOS step exactly, but for the profile:
+      # default features, native.
       - name: Build (macOS native)
         if: runner.os == 'macOS'
-        run: cargo build --release --locked --target ${{ matrix.target }} -p pixel-cli
+        run: cargo build --profile ${{ matrix.profile }} --locked --target ${{ matrix.target }} -p pixel-cli
