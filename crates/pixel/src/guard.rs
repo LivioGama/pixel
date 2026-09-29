@@ -8516,9 +8516,9 @@ mod tests {
         let f = repo.join("notes.txt");
         std::fs::write(&f, "plain text\n").unwrap();
 
+        let prev_read = std::env::var("PIXEL_GUARD_READ").ok();
         // SAFETY: same race semantics as the other tests; the mutex above
         // serializes every test that touches PIXEL_GUARD_* in this binary.
-        let prev_read = std::env::var("PIXEL_GUARD_READ").ok();
         unsafe {
             std::env::remove_var("PIXEL_GUARD_READ");
         }
@@ -8563,9 +8563,9 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let repo = scratch_repo("read-scoping-unresolved");
+        let prev_read = std::env::var("PIXEL_GUARD_READ").ok();
         // SAFETY: same race semantics as the other tests; the mutex above
         // serializes every test that touches PIXEL_GUARD_* in this binary.
-        let prev_read = std::env::var("PIXEL_GUARD_READ").ok();
         unsafe {
             std::env::remove_var("PIXEL_GUARD_READ");
         }
