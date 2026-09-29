@@ -1,7 +1,7 @@
 // Executable extension contract: bun scripts/test-pi-policy.mjs
 // The real extension handles events; only its host and Pixel process are fixtures.
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -21,13 +21,19 @@ try {
   configure();
   writeFileSync(trace, "");
   writeFileSync(editedPath, "before");
+  // The bash fence's canonical containment check requires an existing
+  // repository tree. Read fixtures stay lexical, so an empty `src/`
+  // directory is enough for `ls src`, `rg error src` and `cat src/main.rs`
+  // to exercise `arg_reads_repo`.
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src/main.rs"), "fn main() {}\n");
   writeFileSync(binary, `#!${process.execPath}
 import { appendFileSync, readFileSync } from "node:fs";
 const args = process.argv.slice(2);
 const settings = JSON.parse(readFileSync(${JSON.stringify(settingsPath)}, "utf8"));
 appendFileSync(${JSON.stringify(trace)}, JSON.stringify(args) + "\\n");
 if (settings.fail?.includes(args[0])) { console.error("fixture Pixel unavailable: " + args[0]); process.exit(1); }
-const operations = ["status", "scope-task", "repo-state", "find-code", "fetch", "commit", "commit-and-push", "list-areas", "search-content", "impact", "pack-context", "what-changed", "classify"];
+const operations = ["status", "scope-task", "repo-state", "review-changes", "commit-history", "find-code", "fetch", "commit", "commit-and-push", "list-areas", "search-content", "impact", "pack-context", "what-changed", "classify"];
 const box = "warning: diagnostic line\\n\u{1F7E9} pixel " + args[0] + " \u2740 1.0ms\\n  \u2502\\n  \u2514\u2500\u2500\u2500\\n";
 if (!args.includes("off") && !["--version", "--help"].includes(args[0])) process.stderr.write(box);
 switch (args[0]) {
@@ -67,6 +73,10 @@ switch (args[0]) {
     cwd = projectRoot;
     restore("PIXEL_POLICY", mode);
     delete process.env.PIXEL_TARGETS_GUARD;
+    // Every host (including fresh sub-projects in the policy loop) needs an
+    // existing `src/` so the bash fence's canonical containment check has a
+    // directory to canonicalize. The read tool stays lexical.
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
     const handlers = new Map();
     let tool;
     // A restored session can come back without the project's tools selected.
@@ -132,9 +142,18 @@ switch (args[0]) {
   await check("enforcement blocks supported simple retrieval and gates edits explicitly", async () => {
     const h = await host("enforce");
     await h.boot();
-    for (const event of [native("ls src"), native("rg error src"), read("src/unknown.rs", 100), edit()]) {
+    for (const event of [
+      native("ls src"), native("ls -l src"), native("ls -la src"),
+      native("rg error src"), native("rg -n error src"), native("rg -m 1 error src"),
+      native("cat src/main.rs"), native("head src/main.rs"), native("tail src/main.rs"),
+      native("git status"), native("git -C . log"), native("git --no-pager diff"),
+      native("find src"), native("find src -name '*.rs'"),
+      native("cp src/main.rs /tmp/pixel-leaf-dest"),
+      read("src/unknown.rs", 100), edit(),
+    ]) {
       const before = structuredClone(event);
-      assert.equal((await h.emit("tool_call", event)).block, true);
+      const decision = await h.emit("tool_call", event);
+      assert.equal(decision?.block, true, before.input.command ?? before.toolName);
       assert.deepEqual(event, before);
     }
     const result = await h.tool.execute("find", { action: "find_code", goal: "main" }, null, null, user());
@@ -145,17 +164,86 @@ switch (args[0]) {
     assert.equal((await h.emit("tool_call", read("src/found.rs"))).block, true);
   });
 
+  await check("enforcement aligns bash reasons with the rust leaf table", async () => {
+    const h = await host("enforce");
+    await h.boot();
+    const why = async (command) => {
+      const event = native(command);
+      const result = await h.emit("tool_call", event);
+      return result ? JSON.parse(result.reason).redirect : undefined;
+    };
+    assert.equal(await why("cat src/main.rs"), "repository read: use pixel search-content or pixel pack-context <uid>");
+    assert.equal(await why("head src/main.rs"), "repository read: use pixel search-content or pixel pack-context <uid>");
+    assert.equal(await why("awk '{print}' src/main.rs"), "repository read: use pixel search-content or pixel pack-context <uid>");
+    assert.equal(await why("sed 's/a/b/' src/main.rs"), "repository read: use pixel search-content or pixel pack-context <uid>");
+    // bounded sed read: should be ALLOWED (not blocked), so returns undefined
+    assert.equal(await h.emit("tool_call", native("sed -n '1,20p' src/main.rs")), undefined);
+    assert.equal(await h.emit("tool_call", native("rtk sed -n '1,20p' src/main.rs")), undefined);
+    assert.equal(await why("cp src/main.rs /tmp/x"), "repository read: use pixel search-content or pixel pack-context <uid>");
+    assert.equal(await why("rg error src"), "repository search: use pixel search-content");
+    assert.equal(await why("grep error src"), "repository search: use pixel search-content");
+    assert.equal(await why("ls src"), "repository discovery: use pixel list-areas or find-code");
+    assert.equal(await why("find src"), "repository discovery: use pixel find-code or list-areas");
+    assert.equal(await why("git status"), "repository inspection: use pixel repo-state");
+    assert.equal(await why("git diff"), "repository inspection: use pixel review-changes");
+    assert.equal(await why("git log"), "repository inspection: use pixel commit-history");
+  });
+
+  await check("bash leaf operands honor the credential path regex", async () => {
+    const h = await host("enforce");
+    await h.boot();
+    writeFileSync(join(root, ".env"), "K=v\n");
+    for (const command of ["cat .env", "head .env", "rg -n needle .env", "cp .env /tmp/pixel-leaf-dest", "sed -n '1,20p' .env"]) {
+      const event = native(command);
+      const result = await h.emit("tool_call", event);
+      assert.equal(result.block, true, command);
+      assert.equal(JSON.parse(result.reason).redirect, "credential path", command);
+      assert.equal(event.input.command, command);
+    }
+  });
+
+  await check("a bounded sed read is exempt only for a readable repository file", async () => {
+    const h = await host("enforce");
+    await h.boot();
+    const why = async (command) => {
+      const event = native(command);
+      const result = await h.emit("tool_call", event);
+      return result ? JSON.parse(result.reason).redirect : undefined;
+    };
+    // A regular file inside the repository is what `is_bounded_sed_read`
+    // grants the exemption to; a directory, a path under `.git`/`.pixel`, an
+    // in-repo symlink to a credential and an out-of-window range are reads
+    // the Rust guard still refuses.
+    symlinkSync(join(root, ".env"), join(root, "notes.txt"));
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(join(root, ".git/config"), "[core]\n");
+    writeFileSync(join(root, ".pixel/notes.txt"), "notes\n");
+    for (const command of [
+      "sed -n '1,20p' src", "sed -n '1,20p' notes.txt", "rtk sed -n '1,20p' notes.txt",
+      "sed -n '1,20p' .pixel/notes.txt", "sed -n '1,20p' .git/config", "sed -n '1,201p' src/main.rs",
+    ]) {
+      assert.equal(await why(command), "repository read: use pixel search-content or pixel pack-context <uid>", command);
+    }
+    // Missing paths, paths outside the repository and in-place edits keep
+    // their native handling, as they do in the guard.
+    for (const command of ["sed -n '1,20p' missing.rs", "sed -n '1,20p' /tmp/external.txt", "sed -i 's/a/b/' src/main.rs"]) {
+      assert.equal(await h.emit("tool_call", native(command)), undefined, command);
+    }
+  });
+
   await check("enforcement preserves compositions, quoted punctuation and unknown capabilities", async () => {
     const h = await host("enforce");
     await h.boot();
     for (const toolName of ["bash", "run_command"]) {
       for (const command of [
         "cargo test | tail -20", "cargo test | rg error", "pixel repo-state --json | jq .branch",
-        "cargo test > output.log", "cargo test && rg error output.log", "pixel status; cat src/main.rs",
-        "echo 'cat src/main.rs'", "printf 'a|b;$(literal)'", "rg 'a|b' src", "cat src/a\\ b.rs",
-        "rg -m 1 error src", "git fetch origin", "pixel find-code main", "python3 inspect.py", "lsfoo src",
-        "cp src/main.rs /tmp/pixel-copy", "mv src/main.rs /tmp/pixel-move", "cat /tmp/external.txt",
+        "cargo test > output.log", "cargo test && rg error output.log",
+        "echo 'cat src/main.rs'", "printf 'a|b;$(literal)'", "cat src/a\\ b.rs",
+        "git fetch origin", "pixel find-code main", "python3 inspect.py", "lsfoo src",
+        "mv src/main.rs /tmp/pixel-move", "cat /tmp/external.txt",
         "lsof", "lsblk", "catapult", "ls /tmp", "grep needle /tmp/external.txt",
+        "cd src && ls src", "command ls src", "builtin echo src",
+        "find /tmp -name 'x'", "rg -m 1 needle /etc/hosts",
       ]) {
         const event = native(command, toolName);
         assert.equal(await h.emit("tool_call", event), undefined, command);
