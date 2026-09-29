@@ -500,6 +500,11 @@ mod tests {
     use crate::gram::SparseGramExtractor;
     use crate::weights::Crc32Weigher;
 
+    /// `GIT_CONFIG_GLOBAL` is process-global: the one test that points it at a
+    /// private git config holds this lock, and the `ignore` crate only reads
+    /// the variable while that test's walk runs.
+    static GIT_CONFIG_GLOBAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn end_to_end_build_and_search() {
         let dir = std::env::temp_dir().join(format!("gpx-index-{}", std::process::id()));
@@ -615,5 +620,93 @@ mod tests {
             "a budget trip must never leave a partial shard"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Points `GIT_CONFIG_GLOBAL` at a private git config for the test's
+    /// lifetime, so the walk reads a `core.excludesFile` this test wrote
+    /// rather than the developer's own `~/.gitconfig`. The `ignore` crate
+    /// resolves `core.excludesFile` through that variable (git 2.32+).
+    struct GlobalGitConfigEnv {
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl GlobalGitConfigEnv {
+        fn point_at(config: &Path) -> Self {
+            let lock = GIT_CONFIG_GLOBAL_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous = std::env::var_os("GIT_CONFIG_GLOBAL");
+            // SAFETY: every test that sets GIT_CONFIG_GLOBAL holds the lock
+            // taken above; nothing else writes it.
+            unsafe {
+                std::env::set_var("GIT_CONFIG_GLOBAL", config);
+            }
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for GlobalGitConfigEnv {
+        fn drop(&mut self) {
+            // SAFETY: the lock is still held; fields drop after this body.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("GIT_CONFIG_GLOBAL", value),
+                    None => std::env::remove_var("GIT_CONFIG_GLOBAL"),
+                }
+            }
+        }
+    }
+
+    /// `policy_walk` must not let the user's global excludes file hide project
+    /// files: a `.claude/` tree is code the graph and recall need (git only
+    /// keeps it out of the user's commits), while a project `.gitignore` stays
+    /// in force. The global excludes is supplied through `GIT_CONFIG_GLOBAL`,
+    /// so the case runs even where the developer has no global exclude, and it
+    /// fails if `git_global(false)` is dropped.
+    #[test]
+    fn policy_walk_ignores_the_global_excludes_file_but_keeps_project_gitignore() {
+        let base =
+            std::env::temp_dir().join(format!("gpx-index-global-ignore-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let root = base.join("tree");
+        std::fs::create_dir_all(root.join(".claude/hooks")).unwrap();
+        std::fs::write(root.join(".claude/hooks/guard.py"), "def guard(): pass\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "project-ignored.txt\n").unwrap();
+        std::fs::write(root.join("project-ignored.txt"), "ignored\n").unwrap();
+        std::fs::write(root.join("keep.rs"), "fn keep() {}\n").unwrap();
+
+        let excludes = base.join("global-ignore");
+        std::fs::write(&excludes, ".claude/\n").unwrap();
+        let config = base.join("global.gitconfig");
+        std::fs::write(
+            &config,
+            format!("[core]\n\texcludesFile = {}\n", excludes.display()),
+        )
+        .unwrap();
+        let _env = GlobalGitConfigEnv::point_at(&config);
+
+        let mut walked: Vec<String> = policy_walk(&root)
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+            .filter_map(|entry| {
+                entry
+                    .path()
+                    .strip_prefix(&root)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            })
+            .collect();
+        walked.sort();
+        assert_eq!(
+            walked,
+            [".claude/hooks/guard.py", ".gitignore", "keep.rs"],
+            "the global excludes file must not hide .claude/, and the project .gitignore must stay in force"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }
