@@ -124,10 +124,12 @@ fn find_in_paths(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
 /// invocation includes the Pixel retrieval protocol —
 /// and, when OpenCode is present, a managed block in its global
 /// `~/.config/opencode/AGENTS.md`. Codex also gets the metrics relay:
-/// Codex's exec layer already merges the invocation's stderr into the
-/// tool result it records and shows, so Codex users normally see metrics automatically without extra steps. Metrics relay is a fallback: most Codex users see Pixel metrics automatically via merged stderr. The relay only emits the summary when the main tool result drops or loses the Pixel panel. No managed blocks in the
-/// home-level CLAUDE.md/AGENTS.md files; PreToolUse enforcement is
-/// repo-local (`pixel install --repo`).
+/// its exec layer already merges the invocation's stderr into the tool
+/// result it records and shows, so the relay's dedupe drops the duplicate
+/// and a PostToolUse entry only re-emits the 🟩 line for the rare host
+/// whose tool result drops or fails to surface the merged stderr. No
+/// managed blocks in the home-level CLAUDE.md/AGENTS.md files; PreToolUse
+/// enforcement is repo-local (`pixel install --repo`).
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     let home = options
         .home
@@ -165,7 +167,6 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         // and would now double-inject alongside SessionStart — strip it.
         remove_legacy_wrappers(&home, options.shell.as_deref(), dry_run)?,
         crate::codex_config::install_developer_instructions(&codex_home, dry_run)?,
-        // Metrics relay is a fallback: most Codex users see Pixel metrics automatically via merged stderr. The relay only emits the summary when the main tool result drops or loses the Pixel panel.
         crate::codex_config::install_metrics_hook(&codex_home, &exe, dry_run)?,
     ];
     let opencode_dir = crate::opencode_config::opencode_config_dir(&home, options.home.is_some());
@@ -250,7 +251,6 @@ fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Resul
             detail: Some(codex_hooks.display().to_string()),
         }
     } else {
-        // Metrics relay is a fallback: most Codex users see Pixel metrics automatically via merged stderr. The relay only emits the summary when the main tool result drops or loses the Pixel panel.
         crate::routing::install_project_codex_at(home, &codex_hooks, exe, dry_run)?
     };
     let steps = vec![

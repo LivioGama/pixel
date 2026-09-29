@@ -127,8 +127,14 @@ model — `--criterion` is where the definition goes.
 ## LIVE OPERATION METRICS
 
 After a Pixel call, a `🟩 Pixel · …` line appears in stderr of the
-same tool-call result. Codex normally merges this panel into the tool-call
-result automatically. The PostToolUse metrics relay is a fallback: it emits the panel as `additionalContext` only if Codex drops or loses it (rare on hosts that do not display stderr). Do **not** re-emit or invent the panel. Never echo it as a separate message if it is already in the tool-call result.
+same tool-call result. Codex's exec layer merges that stderr into the tool
+result it records and shows, so a Codex user normally sees the panel without
+extra steps; the metrics relay (a `PostToolUse` hook) only re-emits it as
+`additionalContext` for the rare host whose tool result drops it, and its
+dedupe drops the duplicate. Relay that exact line once per invocation;
+correlate by the invocation, never a global latest operation. The panel is
+already relayed by the host when it is already in the tool-call result you can
+see — do not echo it as a separate message.
 
 - **Do not invent** the line, recompute its values, or run a command just to
   get it. `--metrics=off` / `PIXEL_METRICS=0` opt out — then relay nothing.

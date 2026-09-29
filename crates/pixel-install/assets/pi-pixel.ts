@@ -1,8 +1,5 @@
 // Pixel extension for Pi — managed by `pixel install --repo`.
 // __MANAGED_BEGIN__
-//
-// Most Codex users see the Pixel metrics panel (stderr) automatically, merged into the tool result by Codex’s exec layer. The PostToolUse relay is only a fallback for rare hosts that drop or lose stderr: it emits the panel as additionalContext only when missing. Never re-emit or echo the panel if it is already present in the tool-call result.
-//
 // __MANAGED_END__
 import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "node:fs";
