@@ -7,7 +7,9 @@
 
 use crate::model::IntentSource;
 
-const ORCHESTRATOR_PREFIXES: &[&str] = &[
+/// Openings of a turn the harness wrote, not the human. Public so the
+/// prompt-submit hook recognizes the same envelopes as recall does.
+pub const ORCHESTRATOR_PREFIXES: &[&str] = &[
     "<system-reminder>",
     "<task-notification>",
     "<command-name>",
