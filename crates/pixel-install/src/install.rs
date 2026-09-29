@@ -123,11 +123,13 @@ fn find_in_paths(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
 /// and sets up the Codex `developer_instructions` config key so every
 /// invocation includes the Pixel retrieval protocol —
 /// and, when OpenCode is present, a managed block in its global
-/// `~/.config/opencode/AGENTS.md`. Codex also gets the metrics relay: its
-/// tool results never surface stderr, so a PostToolUse entry re-emits the
-/// finalized 🟩 line as context. No managed blocks in the home-level
-/// CLAUDE.md/AGENTS.md files; PreToolUse enforcement is repo-local
-/// (`pixel install --repo`).
+/// `~/.config/opencode/AGENTS.md`. Codex also gets the metrics relay:
+/// its exec layer already merges the invocation's stderr into the tool
+/// result it records and shows, so the relay's dedupe drops the duplicate
+/// and a PostToolUse entry only re-emits the 🟩 line for the rare host
+/// whose tool result drops or fails to surface the merged stderr. No
+/// managed blocks in the home-level CLAUDE.md/AGENTS.md files; PreToolUse
+/// enforcement is repo-local (`pixel install --repo`).
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     let home = options
         .home

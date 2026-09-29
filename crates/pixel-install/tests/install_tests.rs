@@ -80,7 +80,10 @@ fn installed_metrics_guidance_reaches_wrapped_agents_without_rewriting_streams()
         "tool-call result",
         "exact line once",
         "never a global latest",
-        "already relayed",
+        // A panel already in the tool-call result is treated as relayed;
+        // the model must not echo it as a separate message.
+        "already in the tool-call result",
+        "already relayed by the host",
         "PIXEL_METRICS=0",
         "PIXEL_METRICS_ROUND_TRIP_MS",
         "sequential-v1",
@@ -1479,9 +1482,12 @@ fn routing_isolated_provider_child() {
     };
     // Claude gets the lifecycle hooks (the SessionStart prompt injection is
     // how the doctrine reaches every `claude` process); Codex gets the
-    // metrics PostToolUse relay (its tool results never surface stderr, so
-    // the 🟩 line is re-emitted). Devin's config passes through untouched,
-    // and no hooks directory or hook scripts are created.
+    // metrics PostToolUse relay (Codex's exec layer merges the invocation's
+    // stderr into the tool result it records and shows, so the relay's
+    // dedupe drops the duplicate and a PostToolUse entry only re-emits the
+    // 🟩 line for the rare host whose tool result drops it). Devin's config
+    // passes through untouched, and no hooks directory or hook scripts are
+    // created.
     install(&opts).unwrap();
     let first = fs::read(&config).unwrap();
     install(&opts).unwrap();

@@ -1578,10 +1578,12 @@ enum HookCmd {
         #[arg(long, value_enum)]
         provider: Option<guard::Provider>,
     },
-    /// `pixel hook metrics` — PostToolUse relay for hosts whose tool results
-    /// do not surface stderr (Codex). Reads the payload, matches the pixel
-    /// invocation to its finalized action record, and emits that record's
-    /// 🟩 metrics line as `additionalContext`. Honors `pixel config metrics`.
+    /// `pixel hook metrics` — PostToolUse relay for the rare host whose tool
+    /// result drops the merged stderr Codex's exec layer normally carries.
+    /// Reads the payload, matches the pixel invocation to its finalized
+    /// action record, and emits that record's 🟩 metrics line as
+    /// `additionalContext` (the dedupe drops a 🟩 block already in the tool
+    /// result). Honors `pixel config metrics`.
     Metrics {
         /// Provider whose hook-response contract to emit under.
         #[arg(long, value_enum)]

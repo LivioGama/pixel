@@ -2824,12 +2824,16 @@ const METRICS_SHELL_TOOLS: &[&str] = &[
     "functions.shell",
 ];
 
-/// `pixel run-hook metrics` — PostToolUse relay for hosts whose tool results
-/// never surface stderr (Codex). The invocation's 🟩 block went to stderr and
-/// its finalized record went to the action log before the process exited, so
-/// this hook replays that record's line as `additionalContext` — same bytes
-/// the stderr path would have shown. Any miss is a silent exit: the relay is
-/// advisory and must never turn a tool call into a failure.
+/// `pixel run-hook metrics` — PostToolUse relay whose dedupe drops a 🟩
+/// block already in the tool result. Codex's exec layer merges the
+/// invocation's stderr into the tool result it records and shows, so the
+/// relay is the fallback for the rare host whose tool result drops it,
+/// not the primary path: the 🟩 line reaches a Codex user once via the
+/// tool result and the relay no-ops on its dedupe. The hook reads the
+/// payload, matches the invocation to its finalized action record, and
+/// replays that record's line as `additionalContext`. Any miss is a
+/// silent exit: the relay is advisory and must never turn a tool call
+/// into a failure.
 #[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; every decision lives in `metrics_hook_line`
 pub fn run_metrics_hook(provider: Option<Provider>) -> ! {
     let mut input = String::new();
