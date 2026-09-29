@@ -338,7 +338,11 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
         .as_ref()
         .and_then(WorkflowEvidence::measured_file_read)
         .zip(metrics.answer_bytes);
-    let token_section = if let Some((file_bytes, answer_bytes)) = measured_read {
+    let token_section = if metrics.answer_bytes == Some(0) {
+        // Nothing reached stdout, so there is no answer to have saved context
+        // on: a baseline minus an empty payload is not a saving.
+        format!("no estimated context saving (empty output){partial_tag}")
+    } else if let Some((file_bytes, answer_bytes)) = measured_read {
         format!(
             "{}{partial_tag}",
             measured_read_section(file_bytes, answer_bytes)
@@ -1355,5 +1359,37 @@ mod tests {
             ),
             "{line}"
         );
+    }
+
+    /// An empty stdout has no answer to have saved context on. The baseline of
+    /// a search that matched nothing is still a few kilobytes, so the estimate
+    /// used to claim "~225 tok (88%)" for a command that printed nothing.
+    #[test]
+    fn an_empty_answer_claims_no_context_saving() {
+        let evidence = WorkflowEvidence {
+            distinct_files: 1,
+            native_commands: 1,
+            ..Default::default()
+        };
+        let build = |answer: Option<u64>, partial: bool| {
+            let mut evidence = evidence.clone();
+            evidence.partial = partial;
+            let mut metrics = OperationMetrics::new(Duration::from_millis(3), 40, Some(evidence));
+            metrics.answer_bytes = answer;
+            format_metrics_line(&ActionEvent::new("search-content", "x").with_metrics(metrics))
+                .unwrap()
+        };
+        let empty = build(Some(0), false);
+        assert!(
+            empty.contains("  ├─ § no estimated context saving (empty output)\n"),
+            "{empty}"
+        );
+        assert!(!empty.contains("estimated LLM context saved"), "{empty}");
+        assert!(build(Some(0), true).contains("(empty output), partial\n"));
+        // One byte of answer, or an unrecorded answer size, keeps the estimate.
+        for answer in [Some(1), None] {
+            let line = build(answer, false);
+            assert!(line.contains("estimated LLM context saved"), "{line}");
+        }
     }
 }

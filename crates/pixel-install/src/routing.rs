@@ -162,6 +162,8 @@ pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a st
                 "post-compaction --provider claude",
                 "post-tool-use",
                 "post-tool-use --provider claude",
+                "metrics --provider claude",
+                "metrics --provider devin",
             ]
             .contains(verb)
                 || verb
@@ -378,6 +380,41 @@ fn passive_gitnexus_claude_hook(group: &Value, provider: Provider) -> bool {
             .get("command")
             .and_then(Value::as_str)
             .is_some_and(|command| command.ends_with("/.claude/hooks/gitnexus/gitnexus-hook.cjs\""))
+}
+
+/// The PostToolUse group that relays the finalized 🟩 metrics line as hook
+/// output (`systemMessage` for the user, `additionalContext` for the model)
+/// after a shell call. When the tool result already carries the box, Codex
+/// and Devin stay silent while Claude still gets the line as `systemMessage`
+/// only (its Bash result surfaces stderr the user never sees), so a host that
+/// shows stderr does not print it twice for the model. Codex's own entry
+/// lives in `codex_config`.
+fn metrics_relay_group(exe: &Path, provider: Provider) -> Value {
+    hook_group(
+        format!(
+            "{} run-hook metrics --provider {}",
+            quoted_executable(exe),
+            provider.name()
+        ),
+        Some(provider.shell()),
+    )
+}
+
+/// Whether `value` registers Pixel's metrics relay for `provider` under
+/// PostToolUse with that provider's shell matcher.
+pub(crate) fn has_pixel_metrics_relay(value: &Value, provider: Provider, exe: &Path) -> bool {
+    let verb = format!("run-hook metrics --provider {}", provider.name());
+    value
+        .get("hooks")
+        .and_then(|hooks| hooks.get("PostToolUse"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|group| group.get("matcher").and_then(Value::as_str) == Some(provider.shell()))
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+        .any(|command| is_pixel_hook(command, exe) && command.contains(&verb))
 }
 
 fn hook_group(command: String, matcher: Option<&str>) -> Value {
@@ -630,6 +667,14 @@ fn configure_scoped(
             matcher,
         ));
     }
+    if provider == Provider::Claude {
+        hooks
+            .entry("PostToolUse")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or("PostToolUse is not an array")?
+            .push(metrics_relay_group(exe, provider));
+    }
     Ok((enabled, adopted))
 }
 
@@ -769,43 +814,46 @@ pub(crate) fn install_project_codex_at(
     let mut migrate_executable_spelling = false;
     let mut stored_pre_tool_use = None;
 
+    let settings_file_exists = path.is_file();
     if backup_exists {
         // Validate before changing the config. This also proves the runtime
         // input was created by this installer and remains private.
         let stored = read_composed_backup(&backup_path)?;
         stored_pre_tool_use = stored["pre_tool_use"].as_array().cloned();
-        let existing = value
-            .get("hooks")
-            .and_then(Value::as_object)
-            .and_then(|hooks| hooks.get("PreToolUse"))
-            .and_then(Value::as_array)
-            .ok_or_else(|| InstallError::InvalidSettings {
-                path: path.into(),
-                reason: "composed Codex install lost its PreToolUse group; refusing to overwrite user changes".into(),
-            })?;
-        let existing_legacy =
-            existing.as_slice() == [legacy_group.clone()] && legacy_group != expected_group;
-        if !existing_legacy && existing.as_slice() != [expected_group.clone()] {
-            return Err(InstallError::InvalidSettings {
-                path: path.into(),
-                reason: "composed Codex PreToolUse diverged from its managed contract; refusing to overwrite user changes".into(),
-            });
+        if settings_file_exists {
+            let existing = value
+                .get("hooks")
+                .and_then(Value::as_object)
+                .and_then(|hooks| hooks.get("PreToolUse"))
+                .and_then(Value::as_array)
+                .ok_or_else(|| InstallError::InvalidSettings {
+                    path: path.into(),
+                    reason: "composed Codex install lost its PreToolUse group; refusing to overwrite user changes".into(),
+                })?;
+            let existing_legacy =
+                existing.as_slice() == [legacy_group.clone()] && legacy_group != expected_group;
+            if !existing_legacy && existing.as_slice() != [expected_group.clone()] {
+                return Err(InstallError::InvalidSettings {
+                    path: path.into(),
+                    reason: "composed Codex PreToolUse diverged from its managed contract; refusing to overwrite user changes".into(),
+                });
+            }
+            let stored_legacy = stored["managed_pre_tool_use"] == json!([legacy_group.clone()])
+                && legacy_group != expected_group;
+            if !stored_legacy && stored["managed_pre_tool_use"] != json!([expected_group.clone()]) {
+                return Err(InstallError::InvalidSettings {
+                    path: backup_path.clone(),
+                    reason: "composed Codex backup managed contract diverged; refusing to execute or overwrite it".into(),
+                });
+            }
+            if existing_legacy != stored_legacy {
+                return Err(InstallError::InvalidSettings {
+                    path: backup_path.clone(),
+                    reason: "composed Codex config and backup disagree on the managed executable spelling; refusing to overwrite either".into(),
+                });
+            }
+            migrate_executable_spelling = existing_legacy;
         }
-        let stored_legacy = stored["managed_pre_tool_use"] == json!([legacy_group.clone()])
-            && legacy_group != expected_group;
-        if !stored_legacy && stored["managed_pre_tool_use"] != json!([expected_group.clone()]) {
-            return Err(InstallError::InvalidSettings {
-                path: backup_path.clone(),
-                reason: "composed Codex backup managed contract diverged; refusing to execute or overwrite it".into(),
-            });
-        }
-        if existing_legacy != stored_legacy {
-            return Err(InstallError::InvalidSettings {
-                path: backup_path.clone(),
-                reason: "composed Codex config and backup disagree on the managed executable spelling; refusing to overwrite either".into(),
-            });
-        }
-        migrate_executable_spelling = existing_legacy;
     }
 
     // `configure` owns lifecycle cleanup/installation. Capture the original
@@ -841,7 +889,7 @@ pub(crate) fn install_project_codex_at(
         })?;
     hooks.insert("PreToolUse".into(), json!([expected_group.clone()]));
 
-    if !backup_exists || migrate_executable_spelling {
+    if !backup_exists || migrate_executable_spelling || !settings_file_exists {
         // Sidecar first: config publication cannot expose a command that lacks
         // its approved, atomically-written input.
         write_composed_backup(
@@ -1400,15 +1448,22 @@ pub(crate) fn install_project_devin_at(
         "run-hook guard --provider devin",
         permission_group,
     );
+    let merged_metrics = config::merge_hook_entry(
+        hooks.get("PostToolUse"),
+        "run-hook metrics --provider devin",
+        metrics_relay_group(exe, Provider::Devin),
+    );
     let unchanged = hooks.get("PreToolUse") == Some(&merged)
         && hooks.get("UserPromptSubmit") == Some(&merged_prompt)
-        && hooks.get("PermissionRequest") == Some(&merged_permission);
+        && hooks.get("PermissionRequest") == Some(&merged_permission)
+        && hooks.get("PostToolUse") == Some(&merged_metrics);
     let backup = if unchanged {
         None
     } else {
         hooks.insert("PreToolUse".into(), merged);
         hooks.insert("UserPromptSubmit".into(), merged_prompt);
         hooks.insert("PermissionRequest".into(), merged_permission);
+        hooks.insert("PostToolUse".into(), merged_metrics);
         install::write_settings(path, &value, dry_run)?
     };
     Ok(install::InstallStep {

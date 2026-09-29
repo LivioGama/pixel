@@ -15,6 +15,9 @@ For code described by behavior when the name is unknown, start with
 occurs, search the resolved function name with `pixel search-content -F` and
 inspect its callers; the definition alone cannot answer that question. Answer
 once the source provides enough evidence instead of repeating the search.
+A question about the project as a whole ("what does this repo do") has no name
+or concept to search: read `README.md`, then `ARCHITECTURE.md` or `Cargo.toml`
+first, and never search for the word "repo".
 
 - Hooks inject this file at session start and emit advisories after commands.
 - A PreToolUse guard exists only where the repo ran `pixel install --repo`.

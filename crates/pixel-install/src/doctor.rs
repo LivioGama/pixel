@@ -515,6 +515,13 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             if !has_compact {
                 missing.push("SessionStart(compact)→post-compaction");
             }
+            if !crate::routing::has_pixel_metrics_relay(
+                &value,
+                crate::routing::Provider::Claude,
+                &exe,
+            ) {
+                missing.push("PostToolUse(Bash)→metrics");
+            }
             if !missing.is_empty() {
                 return Err(format!(
                     "missing pixel lifecycle hooks in {}: {} — run `pixel install`",
@@ -835,6 +842,16 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             if !crate::routing::has_pixel_permission_approval(&value, &exe) {
                 return Err(format!(
                     "Pixel Devin guard in {} has no narrow PermissionRequest approval hook — run `pixel install --repo`",
+                    path.display()
+                ));
+            }
+            if !crate::routing::has_pixel_metrics_relay(
+                &value,
+                crate::routing::Provider::Devin,
+                &exe,
+            ) {
+                return Err(format!(
+                    "Pixel Devin guard in {} has no PostToolUse metrics relay on exec — run `pixel install --repo`",
                     path.display()
                 ));
             }

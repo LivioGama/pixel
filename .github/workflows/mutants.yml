@@ -159,6 +159,11 @@ jobs:
     if: needs.plan.outputs.mutants != '0'
     runs-on: ubuntu-26.04
     timeout-minutes: 90
+    # The Test job's value (ci.yml), at the same job level: rust-cache hashes
+    # it into the `linux-debug` key, so a shard without it would restore
+    # nothing. Every mutant's rebuild and link then skips full debug info.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     strategy:
       # Every shard runs to the end even when another one has a survivor:
       # the author needs the whole list of MISSED lines from one push.
@@ -214,9 +219,16 @@ jobs:
           save-if: false
 
       - name: Install system dependencies
+        # Vendored OpenSSL needs perl and make. The GitHub Ubuntu images ship
+        # both ("already the newest version" in every log), so the ~7 s of
+        # apt-get update runs only on an image that lacks one of them.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y perl make
+          if command -v perl >/dev/null && command -v make >/dev/null; then
+            echo "perl and make already installed"
+          else
+            sudo apt-get update
+            sudo apt-get install -y perl make
+          fi
 
       - name: Install cargo-mutants
         uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
