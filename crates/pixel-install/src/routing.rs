@@ -769,12 +769,14 @@ pub(crate) fn install_project_codex_at(
     let mut migrate_executable_spelling = false;
     let mut stored_pre_tool_use = None;
 
+    let settings_file_exists = path.is_file();
     if backup_exists {
         // Validate before changing the config. This also proves the runtime
         // input was created by this installer and remains private.
         let stored = read_composed_backup(&backup_path)?;
         stored_pre_tool_use = stored["pre_tool_use"].as_array().cloned();
-        let existing = value
+        if settings_file_exists {
+            let existing = value
             .get("hooks")
             .and_then(Value::as_object)
             .and_then(|hooks| hooks.get("PreToolUse"))
@@ -783,29 +785,30 @@ pub(crate) fn install_project_codex_at(
                 path: path.into(),
                 reason: "composed Codex install lost its PreToolUse group; refusing to overwrite user changes".into(),
             })?;
-        let existing_legacy =
-            existing.as_slice() == [legacy_group.clone()] && legacy_group != expected_group;
-        if !existing_legacy && existing.as_slice() != [expected_group.clone()] {
-            return Err(InstallError::InvalidSettings {
+            let existing_legacy =
+                existing.as_slice() == [legacy_group.clone()] && legacy_group != expected_group;
+            if !existing_legacy && existing.as_slice() != [expected_group.clone()] {
+                return Err(InstallError::InvalidSettings {
                 path: path.into(),
                 reason: "composed Codex PreToolUse diverged from its managed contract; refusing to overwrite user changes".into(),
             });
-        }
-        let stored_legacy = stored["managed_pre_tool_use"] == json!([legacy_group.clone()])
-            && legacy_group != expected_group;
-        if !stored_legacy && stored["managed_pre_tool_use"] != json!([expected_group.clone()]) {
-            return Err(InstallError::InvalidSettings {
+            }
+            let stored_legacy = stored["managed_pre_tool_use"] == json!([legacy_group.clone()])
+                && legacy_group != expected_group;
+            if !stored_legacy && stored["managed_pre_tool_use"] != json!([expected_group.clone()]) {
+                return Err(InstallError::InvalidSettings {
                 path: backup_path.clone(),
                 reason: "composed Codex backup managed contract diverged; refusing to execute or overwrite it".into(),
             });
-        }
-        if existing_legacy != stored_legacy {
-            return Err(InstallError::InvalidSettings {
+            }
+            if existing_legacy != stored_legacy {
+                return Err(InstallError::InvalidSettings {
                 path: backup_path.clone(),
                 reason: "composed Codex config and backup disagree on the managed executable spelling; refusing to overwrite either".into(),
             });
+            }
+            migrate_executable_spelling = existing_legacy;
         }
-        migrate_executable_spelling = existing_legacy;
     }
 
     // `configure` owns lifecycle cleanup/installation. Capture the original
@@ -841,7 +844,7 @@ pub(crate) fn install_project_codex_at(
         })?;
     hooks.insert("PreToolUse".into(), json!([expected_group.clone()]));
 
-    if !backup_exists || migrate_executable_spelling {
+    if !backup_exists || migrate_executable_spelling || !settings_file_exists {
         // Sidecar first: config publication cannot expose a command that lacks
         // its approved, atomically-written input.
         write_composed_backup(
