@@ -140,8 +140,9 @@ jobs:
         shell: bash
         env:
           CARGO_INCREMENTAL: 1
+          SHARD: ${{ matrix.shard }}
         run: >
-          cargo mutants -vV --no-shuffle --in-place --shard ${{ matrix.shard }}
+          cargo mutants -vV --no-shuffle --in-place --shard "$SHARD"
           --sharding round-robin 2>&1 | tee results.txt
 
       - name: Disk after the mutants
