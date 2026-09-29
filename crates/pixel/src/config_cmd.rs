@@ -518,24 +518,29 @@ pub fn setup() -> Result<(), String> {
     let path = ensure_template(None)?;
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stderr().lock();
-    setup_with_install(&path, &mut input, &mut output, |input, output| {
+    let saved = setup_with_install(&path, &mut input, &mut output, |input, output| {
         crate::classify_setup::install_step(true, input, output)
-    })
+    })?;
+    let root = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::discover_root(&cwd).ok());
+    note_repo_override(&mut output, saved, read_metrics(&path), root.as_deref())
 }
 
 /// Keep a failed first-time engine installation from enabling classification.
+/// Returns whether the settings were saved.
 fn setup_with_install(
     path: &Path,
     input: &mut dyn BufRead,
     output: &mut dyn Write,
     install: impl FnOnce(&mut dyn BufRead, &mut dyn Write) -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let was_enabled = classify_enabled_in(&crate::config_file::load(path)?)?;
     if !setup_with(path, input, output)? {
-        return Ok(());
+        return Ok(false);
     }
     if !classify_enabled_in(&crate::config_file::load(path)?)? {
-        return Ok(());
+        return Ok(true);
     }
     if let Err(error) = install(input, output) {
         if !was_enabled {
@@ -545,7 +550,41 @@ fn setup_with_install(
         }
         return Err(error);
     }
-    Ok(())
+    Ok(true)
+}
+
+/// Setup and `config metrics on --global` write the global layer only, and a
+/// repo-level `metrics` still wins in its repository; without this note a
+/// stale legacy repo `config.json` defeats the answer the user just gave and
+/// the footer stays hidden. Best effort: no repository, no saved answer, or a
+/// repo layer that agrees means no note.
+fn note_repo_override(
+    output: &mut dyn Write,
+    saved: bool,
+    saved_on: Option<bool>,
+    root: Option<&Path>,
+) -> Result<(), String> {
+    let Some(saved_on) = saved_on.filter(|_| saved) else {
+        return Ok(());
+    };
+    let Some(root) = root else {
+        return Ok(());
+    };
+    let path = repo_config_path(root);
+    let Some(repo_on) = read_metrics(&path) else {
+        return Ok(());
+    };
+    if repo_on == saved_on {
+        return Ok(());
+    }
+    writeln!(
+        output,
+        "note: {} sets metrics: {} and wins in this repository — run `pixel config metrics {}` here to apply this answer",
+        path.display(),
+        if repo_on { "on" } else { "off" },
+        if saved_on { "on" } else { "off" },
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn setup_with(
@@ -785,6 +824,16 @@ pub fn run_remote_key(
 /// effective setting and the layer that set it; with a value, persist it to
 /// the chosen layer.
 pub fn run_metrics(path: &Path, global: bool, value: Option<bool>) -> Result<(), String> {
+    let mut output = std::io::stdout().lock();
+    run_metrics_with(&mut output, path, global, value)
+}
+
+fn run_metrics_with(
+    output: &mut dyn Write,
+    path: &Path,
+    global: bool,
+    value: Option<bool>,
+) -> Result<(), String> {
     let root = crate::discover_root(path).ok();
     match value {
         None => {
@@ -804,24 +853,38 @@ pub fn run_metrics(path: &Path, global: bool, value: Option<bool>) -> Result<(),
                 ),
                 Source::Default => "default (no config sets it)".to_string(),
             };
-            println!("metrics: {} — {layer}", if on { "on" } else { "off" });
-            Ok(())
+            writeln!(
+                output,
+                "metrics: {} — {layer}",
+                if on { "on" } else { "off" }
+            )
+            .map_err(|e| e.to_string())
         }
         Some(on) => {
-            let target = if global {
-                global_config_path().ok_or("no HOME for the global config")?
-            } else {
-                repo_config_path(
-                    &root.ok_or("no repository root here — pass --global or run inside a repo")?,
+            if global {
+                let target = global_config_path().ok_or("no HOME for the global config")?;
+                write_metrics(&target, on)?;
+                writeln!(
+                    output,
+                    "metrics: {} — wrote {}",
+                    if on { "on" } else { "off" },
+                    target.display()
                 )
-            };
-            write_metrics(&target, on)?;
-            println!(
-                "metrics: {} — wrote {}",
-                if on { "on" } else { "off" },
-                target.display()
-            );
-            Ok(())
+                .map_err(|e| e.to_string())?;
+                note_repo_override(output, true, Some(on), root.as_deref())
+            } else {
+                let target = repo_config_path(
+                    &root.ok_or("no repository root here — pass --global or run inside a repo")?,
+                );
+                write_metrics(&target, on)?;
+                writeln!(
+                    output,
+                    "metrics: {} — wrote {}",
+                    if on { "on" } else { "off" },
+                    target.display()
+                )
+                .map_err(|e| e.to_string())
+            }
         }
     }
 }
@@ -920,7 +983,7 @@ mod tests {
             assert_eq!(
                 result,
                 if install_succeeds {
-                    Ok(())
+                    Ok(true)
                 } else {
                     Err("model download failed".into())
                 }
@@ -939,19 +1002,21 @@ mod tests {
 
     #[test]
     fn setup_should_not_install_after_cancellation_or_disabling_classify() {
-        for (answers, enabled, metrics) in
-            [("q\ny\n", true, "on"), ("n\n\n\n\n\nn\ny\n", false, "off")]
-        {
+        for (answers, enabled, metrics, saved_expected) in [
+            ("q\ny\n", true, "on", false),
+            ("n\n\n\n\n\nn\ny\n", false, "off", true),
+        ] {
             let home = HomeGuard::set();
             let path = home.0.join("config.yaml");
             write(&path, "metrics: 'on'\nclassify: {enabled: true}\n");
-            setup_with_install(
+            let saved = setup_with_install(
                 &path,
                 &mut std::io::Cursor::new(answers),
                 &mut Vec::new(),
                 |_, _| panic!("cancelled or disabled setup must never invoke an installer"),
             )
             .unwrap();
+            assert_eq!(saved, saved_expected, "answers: {answers}");
             let doc = crate::config_file::load(&path).unwrap();
             assert_eq!(doc["classify"]["enabled"], enabled);
             assert_eq!(doc["metrics"], metrics);
@@ -974,6 +1039,122 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.starts_with("model download failed; could not disable classification: cannot read configuration "), "{error}");
+    }
+
+    /// The 0.6.1 bug report: setup saved `metrics: "on"` globally while a
+    /// legacy repo `config.json` still carried `metrics: "off"`, so every
+    /// launch in that repository hid the footer and the answer looked ignored.
+    #[test]
+    fn repo_override_note_should_name_the_winning_repo_layer() {
+        let home = HomeGuard::set();
+        let repo = home.0.join("repo");
+        let legacy = repo.join(".pixel").join("config.json");
+        write(&legacy, &json!({"metrics":"off"}).to_string());
+        let mut out = Vec::new();
+        note_repo_override(&mut out, true, Some(true), Some(&repo)).unwrap();
+        let note = String::from_utf8(out).unwrap();
+        assert_eq!(
+            note,
+            format!(
+                "note: {} sets metrics: off and wins in this repository — \
+                 run `pixel config metrics on` here to apply this answer\n",
+                legacy.display()
+            )
+        );
+    }
+
+    #[test]
+    fn repo_override_note_should_stay_silent_unless_a_repo_layer_contradicts() {
+        let home = HomeGuard::set();
+        let repo = home.0.join("repo");
+        let mut out = Vec::new();
+
+        // No repository under the working directory.
+        note_repo_override(&mut out, true, Some(true), None).unwrap();
+        assert!(out.is_empty());
+
+        // No repo-level metrics setting.
+        write(
+            &repo.join(".pixel").join("config.yaml"),
+            "policy: enforce\n",
+        );
+        note_repo_override(&mut out, true, Some(true), Some(&repo)).unwrap();
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+
+        // The repo layer agrees with the saved answer.
+        write(
+            &repo.join(".pixel").join("config.yaml"),
+            "metrics: \"on\"\n",
+        );
+        note_repo_override(&mut out, true, Some(true), Some(&repo)).unwrap();
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+
+        // The settings were never saved (cancelled setup).
+        write(
+            &repo.join(".pixel").join("config.yaml"),
+            "metrics: \"off\"\n",
+        );
+        note_repo_override(&mut out, false, Some(true), Some(&repo)).unwrap();
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+
+        // The global layer does not pronounce itself.
+        note_repo_override(&mut out, true, None, Some(&repo)).unwrap();
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+    }
+
+    #[test]
+    fn config_metrics_on_global_should_flag_a_contradicting_repo_layer() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved_home = home_env();
+        point_home(&home.0);
+        let repo = home.0.join("repo");
+        write(
+            &repo.join(".pixel").join("config.json"),
+            &json!({"metrics":"off"}).to_string(),
+        );
+
+        let mut out = Vec::new();
+        run_metrics_with(&mut out, &repo, true, Some(true)).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("metrics: on — wrote"), "{text}");
+        assert!(
+            text.contains("sets metrics: off and wins in this repository"),
+            "{text}"
+        );
+
+        // The repo layer itself was left untouched: the note only reports.
+        assert_eq!(
+            crate::config_file::load(&repo.join(".pixel").join("config.json")).unwrap(),
+            json!({"metrics":"off"})
+        );
+        restore_home(saved_home);
+    }
+
+    #[test]
+    fn config_metrics_on_repo_should_not_flag_the_layer_it_just_wrote() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved_home = home_env();
+        point_home(&home.0);
+        let repo = home.0.join("repo");
+        write(
+            &repo.join(".pixel").join("config.json"),
+            &json!({"metrics":"off"}).to_string(),
+        );
+
+        let mut out = Vec::new();
+        run_metrics_with(&mut out, &repo, false, Some(true)).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("metrics: on — wrote"), "{text}");
+        assert!(!text.contains("wins in this repository"), "{text}");
+        // The repo write targets the legacy json when no yaml exists, and no
+        // note is printed: the layer just written agrees by construction.
+        assert_eq!(
+            crate::config_file::load(&repo.join(".pixel").join("config.json")).unwrap(),
+            json!({"metrics":"on"})
+        );
+        restore_home(saved_home);
     }
 
     #[test]
