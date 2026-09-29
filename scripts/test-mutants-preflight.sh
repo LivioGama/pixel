@@ -7,13 +7,19 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/pixel-mutants-preflight-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 fixture="$tmp/repo"
-mkdir -p "$fixture/scripts" "$fixture/crates/demo/src" "$tmp/bin"
-cp "$repo/scripts/mutants-preflight.sh" "$fixture/scripts/"
+mkdir -p "$fixture/scripts" "$fixture/crates/demo/src" "$fixture/.github/workflows" "$tmp/bin"
+cp "$repo/scripts/mutants-preflight.sh" "$repo/scripts/mutants-version-check.sh" "$fixture/scripts/"
+printf '      - uses: taiki-e/install-action@x\n        with:\n          tool: cargo-mutants@27.1.0\n' \
+    > "$fixture/.github/workflows/mutants.yml"
 
 cat > "$tmp/bin/cargo" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$CARGO_LOG"
 case "$*" in
+    "mutants --version")
+        echo "cargo-mutants ${CARGO_MUTANTS_VERSION:-27.1.0}"
+        exit 0
+        ;;
     "mutants --list"*)
         if [ "${CARGO_FAIL:-0}" = 1 ]; then
             echo "fake cargo failure" >&2
@@ -99,7 +105,22 @@ grep -q 'cargo mutants --list failed' "$tmp/cargo-failure.out"
 (cd "$fixture" && run --run > "$tmp/run.out")
 grep -q 'local run caught every listed mutant' "$tmp/run.out"
 grep -q '^mutants -vV --no-shuffle --in-place --in-diff ' "$tmp/cargo.log"
-grep -q -- '-- --all-targets' "$tmp/cargo.log"
+# .cargo/mutants.toml owns --all-targets and --locked for every lane.
+if grep -Eq -- '--all-targets|--locked' "$tmp/cargo.log"; then
+    echo "expected the local run to leave --all-targets and --locked to .cargo/mutants.toml" >&2
+    exit 1
+fi
+
+: > "$tmp/cargo.log"
+if (cd "$fixture" && CARGO_MUTANTS_VERSION=26.0.0 run --run > "$tmp/run-version.out" 2>&1); then
+    echo "expected a cargo-mutants other than CI's pin to block the local run" >&2
+    exit 1
+fi
+grep -q "local cargo-mutants is '26.0.0', CI runs 27.1.0" "$tmp/run-version.out"
+if grep -q '^mutants -vV' "$tmp/cargo.log"; then
+    echo "expected the version check to stop before any mutant ran" >&2
+    exit 1
+fi
 
 : > "$tmp/cargo.log"
 (cd "$fixture" && run --run 'changed|other' > "$tmp/run-filter.out")

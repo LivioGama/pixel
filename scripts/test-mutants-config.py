@@ -138,6 +138,92 @@ class MutantsConfigContract(unittest.TestCase):
         self.assertFalse(to_regex("crates/pixel-bench/**").match("crates/pixel/a.rs"))
 
 
+#: Every file that runs `cargo mutants` (not only lists them).
+LANES = [
+    ".github/workflows/mutants.yml",
+    "scripts/mutants-preflight.sh",
+    "scripts/gates.sh",
+]
+
+#: Arguments that change which mutants compile, which tests judge them or
+#: when one times out. A lane that passes one alone runs another program
+#: than the others (find-my-files#204 measured 40 mutants unviable locally
+#: and built by CI for one such flag), so they belong in .cargo/mutants.toml
+#: or nowhere.
+LANE_ONLY_FORBIDDEN = [
+    "--all-targets", "--locked", "-C", "--cargo-arg", "--cargo-test-arg",
+    "--test-tool", "--test-workspace", "--timeout", "--timeout-multiplier",
+    "--minimum-test-timeout", "--build-timeout", "--features",
+    "--all-features", "--no-default-features", "--profile", "--baseline",
+]
+
+
+def cargo_mutants_runs(text: str) -> list[str]:
+    """Each `cargo mutants` invocation that runs mutants, continuation lines
+    joined. `--list` and `--version` invocations build nothing and are left
+    out."""
+    joined = re.sub(r"\\\n\s*", " ", text)
+    # A folded YAML scalar (`run: >`) continues on the next indented line.
+    joined = re.sub(r"(cargo mutants[^\n]*)\n\s+(--[^\n]*)", r"\1 \2", joined)
+    runs = []
+    for line in joined.splitlines():
+        code = line.split(" #", 1)[0]
+        if "cargo mutants" not in code or code.lstrip().startswith("#"):
+            continue
+        tail = code.split("cargo mutants", 1)[1]
+        if "--list" in tail or "--version" in tail:
+            continue
+        runs.append(tail)
+    return runs
+
+
+class OneProgramForEveryLane(unittest.TestCase):
+    """CI's shards and the local lanes must run one program on a mutant."""
+
+    def config(self) -> str:
+        return CONFIG.read_text()
+
+    def test_the_config_carries_the_arguments_every_lane_shares(self):
+        text = self.config()
+        self.assertRegex(text, r'(?m)^additional_cargo_args = \["--locked"\]$')
+        self.assertRegex(text, r'(?m)^additional_cargo_test_args = \["--all-targets"\]$')
+
+    def test_every_lane_is_found(self):
+        for lane in LANES:
+            with self.subTest(lane=lane):
+                self.assertTrue(cargo_mutants_runs((REPO / lane).read_text()),
+                                f"{lane} no longer runs cargo mutants; update LANES")
+
+    def test_no_lane_passes_an_argument_that_changes_the_program(self):
+        for lane in LANES:
+            for run in cargo_mutants_runs((REPO / lane).read_text()):
+                words = set(re.findall(r"(?<![\w-])-{1,2}[\w-]+", run))
+                with self.subTest(lane=lane, run=run.strip()):
+                    self.assertEqual(sorted(words & set(LANE_ONLY_FORBIDDEN)), [])
+
+    def test_the_forbidden_list_catches_the_arguments_ci_used_to_pass(self):
+        before = "cargo mutants -vV -C --locked --no-shuffle --in-place --in-diff pr.diff \\\n  --shard 0/2 -- --all-targets\n"
+        runs = cargo_mutants_runs(before)
+        self.assertEqual(len(runs), 1)
+        words = set(re.findall(r"(?<![\w-])-{1,2}[\w-]+", runs[0]))
+        self.assertEqual(sorted(words & set(LANE_ONLY_FORBIDDEN)), ["--all-targets", "--locked", "-C"])
+
+    def test_a_listing_is_not_a_run(self):
+        self.assertEqual(cargo_mutants_runs('cargo mutants --list --in-diff "$d" > out\ncargo mutants --version\n'), [])
+
+    def test_the_local_lanes_check_the_pinned_version_before_running(self):
+        for lane in ("scripts/mutants-preflight.sh", "scripts/gates.sh"):
+            text = (REPO / lane).read_text()
+            with self.subTest(lane=lane):
+                check = text.find("mutants-version-check.sh")
+                self.assertNotEqual(check, -1)
+                self.assertLess(check, text.find("cargo mutants -", check) if "cargo mutants -" in text[check:] else len(text))
+
+    def test_every_job_pins_the_same_cargo_mutants(self):
+        pins = set(re.findall(r"tool: cargo-mutants@(\S+)", (REPO / ".github/workflows/mutants.yml").read_text()))
+        self.assertEqual(len(pins), 1, pins)
+
+
 class MutantsGateReport(unittest.TestCase):
     """Contract of scripts/mutants-gate.py.
 

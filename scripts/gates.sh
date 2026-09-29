@@ -3,7 +3,7 @@
 #
 #   scripts/gates.sh            # skip when nothing Rust-affecting changed
 #   scripts/gates.sh --force    # run even when nothing changed
-#   scripts/gates.sh --mutants  # also run cargo-mutants on the diff against main
+#   scripts/gates.sh --mutants  # also run cargo-mutants on the diff against origin/main
 #
 # Why a script instead of three commands:
 # - Skip-if-untouched: outside CI, when neither the diff against `main` nor
@@ -119,9 +119,15 @@ else
 fi
 
 if [ "$MUTANTS" -eq 1 ]; then
+    # What a CI shard runs, without --shard and --in-place: the same diff
+    # (the merge base with origin/main, as the workflow and
+    # scripts/mutants-preflight.sh take it; a stale local `main` would add
+    # or drop mutants), the same order, the cargo arguments of
+    # .cargo/mutants.toml and the pinned cargo-mutants version.
+    sh "$REPO/scripts/mutants-version-check.sh" "$REPO"
     diff_file="$(mktemp)"
-    git diff main...HEAD > "$diff_file"
-    step "cargo mutants (in diff)" cargo mutants --in-diff "$diff_file"
+    git diff "${PIXEL_MUTANTS_BASE:-origin/main}...HEAD" > "$diff_file"
+    step "cargo mutants (in diff)" cargo mutants --no-shuffle --in-diff "$diff_file"
     rm -f "$diff_file"
 fi
 
