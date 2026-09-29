@@ -357,8 +357,11 @@ function enforceLeaf(segment: string, words: string[], piped: boolean, root: str
       const nonFlag = effectiveArgs.filter((arg) => !arg.startsWith("-"));
       const explicitPath = nonFlag.length === 2;
       if (piped && !explicitPath) return undefined;
-      if (!explicitPath) return undefined;
-      const path = nonFlag[1];
+      // A value-taking flag (`rg -m 1 needle src`) makes the operand count
+      // three, so the path is the last non-flag word, not the second — the
+      // same fallback as `enforce_leaf`. With no operand at all the search
+      // runs over the cwd, which is the repo.
+      const path = nonFlag.at(-1) ?? ".";
       if (credentialPath(path)) return { reason: CREDENTIAL_REASON };
       if (!argReadsRepo(root, path)) return undefined;
       return { reason: REPO_SEARCH_REASON, operation: "search-content" };
