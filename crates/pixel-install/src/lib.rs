@@ -20,6 +20,7 @@ pub mod doctor;
 pub mod install;
 pub mod opencode_config;
 mod pi_project;
+mod pixel_first;
 mod repo_git;
 mod routing;
 pub mod uninstall;
