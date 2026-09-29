@@ -85,6 +85,9 @@ if [ "$mode" = --ack ]; then
 fi
 
 if [ "$mode" = --run ]; then
+    # The CI shard's command without `--shard`: the cargo arguments come
+    # from .cargo/mutants.toml for both, and so must the cargo-mutants version.
+    sh "$repo/scripts/mutants-version-check.sh" "$repo"
     worktree="$tmp_dir/tree"
     git worktree add --detach "$worktree" "$head_oid" >/dev/null
     run_status=0
@@ -92,10 +95,9 @@ if [ "$mode" = --run ]; then
         cd "$worktree" || exit 2
         if [ -n "$filter" ]; then
             exec cargo mutants -vV --no-shuffle --in-place --in-diff "$diff_file" \
-                -F "$filter" -- --all-targets
+                -F "$filter"
         else
-            exec cargo mutants -vV --no-shuffle --in-place --in-diff "$diff_file" \
-                -- --all-targets
+            exec cargo mutants -vV --no-shuffle --in-place --in-diff "$diff_file"
         fi
     ) || run_status=$?
     outcomes="$worktree/mutants.out/mutants.out"

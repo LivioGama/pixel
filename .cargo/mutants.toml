@@ -22,3 +22,14 @@ exclude_re = ["impl Debug"]
 # CLI contract tests in crates/pixel exercise the built binary, so a mutant
 # in a library crate is judged by that crate's unit and `tests/all` suite.
 test_workspace = false
+
+# The cargo arguments every lane shares: CI's shards, scripts/mutants-preflight.sh
+# --run, scripts/gates.sh --mutants and a hand-typed `cargo mutants -F ...`
+# all read this file, so none of them may pass these on its command line.
+# A lane that adds one alone runs a different program: --all-targets decides
+# which targets are built (a mutant that breaks only an example or a bench
+# is unviable with it and invisible without it) and drops the doctests from
+# every mutant's run; --locked refuses a Cargo.lock another resolution would
+# rewrite. scripts/test-mutants-config.py holds both halves of that line.
+additional_cargo_args = ["--locked"]
+additional_cargo_test_args = ["--all-targets"]
