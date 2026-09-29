@@ -192,7 +192,15 @@ jobs:
     name: Test + Format
     needs: [scope, changes]
     if: needs.scope.outputs.release-prepare != 'true'
-    runs-on: ubuntu-26.04
+    # GitHub's image by default. PIXEL_RUNNER_LABELS moves the jobs that compile
+    # Rust to a self-hosted runner without a second edit: set it to a JSON array of
+    # labels, e.g. ["self-hosted","linux","arm64","pixel-local"], and a push or a
+    # manual run goes there; delete the variable and it goes back to GitHub. Pull
+    # requests never do: their code is not reviewed yet, and a persistent host is
+    # not isolated by `contents: read` and `persist-credentials: false`. Declared
+    # only when the variable is set, so a stopped runner cannot leave the job
+    # queueing forever.
+    runs-on: ${{ github.event_name != 'pull_request' && vars.PIXEL_RUNNER_LABELS && fromJSON(vars.PIXEL_RUNNER_LABELS) || 'ubuntu-26.04' }}
     # Line tables instead of full debug info for the dev and test profiles:
     # a failing test's backtrace keeps its file:line, and the compiler and
     # linker skip the type and variable info no one reads in CI (the build
@@ -352,7 +360,9 @@ jobs:
     name: MSRV (rust-version in Cargo.toml)
     needs: [scope, changes]
     if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.cargo == 'true'
-    runs-on: ubuntu-26.04
+    # Compiles Rust, so it follows the test job's self-hosted switch (pull
+    # requests stay on GitHub's image, as there).
+    runs-on: ${{ github.event_name != 'pull_request' && vars.PIXEL_RUNNER_LABELS && fromJSON(vars.PIXEL_RUNNER_LABELS) || 'ubuntu-26.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -409,7 +419,9 @@ jobs:
     name: Ranking gates (NDCG@10)
     needs: [scope, changes]
     if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.cargo == 'true'
-    runs-on: ubuntu-26.04
+    # Compiles Rust, so it follows the test job's self-hosted switch (pull
+    # requests stay on GitHub's image, as there).
+    runs-on: ${{ github.event_name != 'pull_request' && vars.PIXEL_RUNNER_LABELS && fromJSON(vars.PIXEL_RUNNER_LABELS) || 'ubuntu-26.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
