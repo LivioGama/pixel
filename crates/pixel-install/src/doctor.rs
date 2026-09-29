@@ -790,17 +790,37 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                             hooks_path.display()
                         ));
                     }
+                    // Codex ignores a project-scoped `.codex/` layer unless
+                    // it trusts the project, so a byte-correct guard can sit
+                    // dormant. The install is right either way: the summary
+                    // carries the trust state instead of turning the check
+                    // yellow, which no non-interactive Codex command could
+                    // clear here.
+                    let trust = match crate::codex_config::project_trust(&codex_home, root) {
+                        Ok(crate::codex_config::ProjectTrust::Trusted) => {
+                            "codex trusts this project".to_string()
+                        }
+                        Ok(crate::codex_config::ProjectTrust::Untrusted)
+                        | Ok(crate::codex_config::ProjectTrust::Unspecified) => {
+                            "codex has not trusted this project — the guard will not load until it does"
+                                .to_string()
+                        }
+                        Err(e) => {
+                            format!("codex trust unknown ({e}) — the guard may not load")
+                        }
+                    };
                     Ok((
                         CheckStatus::Green,
                         DoctorCheckDetail {
                             summary: format!(
-                                "composed codex guard configured in {} (backup={})",
+                                "composed codex guard configured in {} (backup={}) — {trust}",
                                 hooks_path.display(),
                                 sidecar.display()
                             ),
                             detail: Some(serde_json::json!({
                                 "hooks": hooks_path.display().to_string(),
                                 "backup": sidecar.display().to_string(),
+                                "trust": trust,
                             })),
                         },
                     ))

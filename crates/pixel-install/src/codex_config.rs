@@ -441,6 +441,67 @@ pub(crate) fn carries_pixel_block(codex_home: &Path) -> std::result::Result<bool
     Ok(current_value(&doc)?.is_some_and(|value| value.contains(MANAGED_BEGIN)))
 }
 
+/// The table Codex keeps its per-project settings in.
+const PROJECTS_TABLE: &str = "projects";
+
+/// The per-project key naming the trust state.
+const TRUST_LEVEL_KEY: &str = "trust_level";
+
+/// A project's trust state in Codex's own config, from
+/// `[projects."<path>"] trust_level`. Codex composes a project-scoped
+/// `.codex/` layer — the repo-local hooks `pixel install --repo` writes —
+/// only for a project it trusts, so an installed guard stays dormant while
+/// the entry is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectTrust {
+    /// `trust_level = "trusted"`.
+    Trusted,
+    /// `trust_level = "untrusted"`: an explicit refusal.
+    Untrusted,
+    /// No entry for this project, or one that does not set the key.
+    Unspecified,
+}
+
+/// How Codex's config records `project`'s trust. `project` must be spelled
+/// the way Codex keys the entry — the canonical path `pixel doctor` is
+/// handed as its repo root — or the entry it looks for is another project's
+/// and the answer is [`ProjectTrust::Unspecified`].
+///
+/// # Errors
+///
+/// The file cannot be read or parsed, or the entry's `trust_level` is not a
+/// string.
+pub(crate) fn project_trust(
+    codex_home: &Path,
+    project: &Path,
+) -> std::result::Result<ProjectTrust, String> {
+    let doc = read_document(&codex_home.join(CODEX_CONFIG_FILE))?;
+    let key = project.to_string_lossy();
+    let Some(entry) = doc
+        .get(PROJECTS_TABLE)
+        .and_then(Item::as_table_like)
+        .and_then(|projects| projects.get(key.as_ref()))
+    else {
+        return Ok(ProjectTrust::Unspecified);
+    };
+    let Some(level) = entry
+        .as_table_like()
+        .and_then(|entry| entry.get(TRUST_LEVEL_KEY))
+    else {
+        return Ok(ProjectTrust::Unspecified);
+    };
+    let Some(level) = level.as_str() else {
+        return Err(format!(
+            "`{TRUST_LEVEL_KEY}` for {} in config.toml is not a string",
+            project.display()
+        ));
+    };
+    Ok(match level {
+        "trusted" => ProjectTrust::Trusted,
+        _ => ProjectTrust::Untrusted,
+    })
+}
+
 pub(crate) fn check_developer_instructions(
     codex_home: &Path,
 ) -> std::result::Result<(String, serde_json::Value), String> {
@@ -657,6 +718,72 @@ mod tests {
         )
         .unwrap();
         assert!(check_metrics_hook(&home).is_ok());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    // ---- project trust ---------------------------------------------------
+
+    fn write_config(home: &Path, body: &str) {
+        fs::write(home.join(CODEX_CONFIG_FILE), body).unwrap();
+    }
+
+    #[test]
+    fn project_trust_reads_every_state_and_degrades_on_a_bad_value() {
+        let home = scratch_codex_home("trust");
+        let project = Path::new("/work/repo");
+
+        // No config.toml at all: Codex has no entry for the project.
+        assert_eq!(
+            project_trust(&home, project).unwrap(),
+            ProjectTrust::Unspecified
+        );
+
+        // Another project's entry does not answer for this one.
+        write_config(
+            &home,
+            "[projects.\"/work/other\"]\ntrust_level = \"trusted\"\n",
+        );
+        assert_eq!(
+            project_trust(&home, project).unwrap(),
+            ProjectTrust::Unspecified,
+            "a key that is not this path says nothing about this project"
+        );
+
+        write_config(
+            &home,
+            "[projects.\"/work/repo\"]\ntrust_level = \"trusted\"\n",
+        );
+        assert_eq!(
+            project_trust(&home, project).unwrap(),
+            ProjectTrust::Trusted
+        );
+
+        write_config(
+            &home,
+            "[projects.\"/work/repo\"]\ntrust_level = \"untrusted\"\n",
+        );
+        assert_eq!(
+            project_trust(&home, project).unwrap(),
+            ProjectTrust::Untrusted,
+            "an explicit refusal is its own state, not unspecified"
+        );
+
+        // An entry that never sets the key leaves the project unspecified.
+        write_config(&home, "[projects.\"/work/repo\"]\n");
+        assert_eq!(
+            project_trust(&home, project).unwrap(),
+            ProjectTrust::Unspecified
+        );
+
+        // A wrong-typed value is an error, as for any value in this file.
+        write_config(&home, "[projects.\"/work/repo\"]\ntrust_level = true\n");
+        let err = project_trust(&home, project).unwrap_err();
+        assert!(err.contains("not a string"), "{err}");
+
+        // A file that does not parse is an error too, never a panic.
+        write_config(&home, "this is not toml = = =\n");
+        assert!(project_trust(&home, project).is_err());
+
         let _ = fs::remove_dir_all(&home);
     }
 }
