@@ -397,13 +397,22 @@ fn tracked_dotenv_with_matching_token_is_hidden_from_search_content() {
         String::from_utf8_lossy(&human.stderr)
     );
     let human_stdout = String::from_utf8_lossy(&human.stdout);
+    // Only the credential-shaped paths must be hidden. The non-credential
+    // `src/safe.rs` carries the same synthetic token and is allowed to
+    // match; the contract is "drop matches from credential-shaped files,
+    // not every line that happens to contain the token".
     assert!(
         !human_stdout.contains(".env"),
         "human stdout must not name the .env path: {human_stdout:?}"
     );
     assert!(
-        !human_stdout.contains(token),
-        "human stdout must not echo the token: {human_stdout:?}"
+        !human_stdout.contains("secrets/"),
+        "human stdout must not name the secrets/ path: {human_stdout:?}"
+    );
+    // The synthetic non-credential match is the positive case: it shows.
+    assert!(
+        human_stdout.contains("src/safe.rs"),
+        "human stdout must still show the safe match: {human_stdout:?}"
     );
 
     // NDJSON: every match line carries a `path`; the page metadata line is
@@ -420,9 +429,17 @@ fn tracked_dotenv_with_matching_token_is_hidden_from_search_content() {
         String::from_utf8_lossy(&json.stderr)
     );
     let json_stdout = String::from_utf8_lossy(&json.stdout);
+    // The synthetic non-credential match is the positive case: it appears.
     assert!(
-        !json_stdout.contains(token),
-        "json stdout must not echo the token: {json_stdout:?}"
+        json_stdout.contains("src/safe.rs"),
+        "json stdout must still carry the safe match: {json_stdout:?}"
+    );
+    // The hidden-match basis names the count: 2 (.env + secrets/real.pem).
+    assert!(
+        json_stdout.contains(
+            "\"basis\":\"text index; caps: 2 match(es) in credential-shaped files hidden"
+        ),
+        "json trailer must name the hidden count: {json_stdout:?}"
     );
     let docs: Vec<serde_json::Value> = json_stdout
         .lines()
