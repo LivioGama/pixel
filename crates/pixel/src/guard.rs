@@ -1754,11 +1754,7 @@ fn run_provider_guard(provider: Provider, delegate_rtk: bool, raw: &str) -> ! {
                 let idx_root = find_up(&anchor, ".pixel");
                 let manifest_root = find_up(&anchor, Path::new(".pixel").join("targets.json"));
                 let (manifest, manifest_expired) =
-                    match manifest_root.as_deref().map(load_manifest_state) {
-                        Some(ManifestState::Active(m)) => (Some(m), false),
-                        Some(ManifestState::Expired) => (None, true),
-                        _ => (None, false),
-                    };
+                    manifest_pair(manifest_root.as_deref().map(load_manifest_state));
                 non_shell_advisory(
                     tool,
                     tool_input,
@@ -2445,11 +2441,8 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     }
 
     let manifest_root = find_up(&anchor, Path::new(".pixel").join("targets.json"));
-    let (manifest, manifest_expired) = match manifest_root.as_deref().map(load_manifest_state) {
-        Some(ManifestState::Active(m)) => (Some(m), false),
-        Some(ManifestState::Expired) => (None, true),
-        _ => (None, false),
-    };
+    let (manifest, manifest_expired) =
+        manifest_pair(manifest_root.as_deref().map(load_manifest_state));
 
     if tool == "Bash" || tool == "exec" || tool == "bash" || tool == "run_shell_command"
         || tool == "execute" || tool == "Shell"
@@ -3146,6 +3139,18 @@ fn load_manifest_state(root: &Path) -> ManifestState {
         root: root.to_path_buf(),
         tasks,
     })
+}
+
+/// The `(manifest, manifest_expired)` pair every guard branch reads: an
+/// active manifest scopes the call, an expired one suppresses the advisories
+/// that would suggest re-scoping, and no manifest (absent or unreadable)
+/// leaves both off.
+fn manifest_pair(state: Option<ManifestState>) -> (Option<Manifest>, bool) {
+    match state {
+        Some(ManifestState::Active(m)) => (Some(m), false),
+        Some(ManifestState::Expired) => (None, true),
+        Some(ManifestState::Absent) | None => (None, false),
+    }
 }
 
 /// Compatibility shim over `load_manifest_state` for tests that only care
@@ -6728,6 +6733,11 @@ mod tests {
 
     #[test]
     fn read_advisory_min_lines_defaults_to_shunt_threshold() {
+        // The boundary test removes and restores PIXEL_GUARD_READ_LINES;
+        // hold the same lock so both reads below see one value.
+        let _env_guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Env-free default only — PIXEL_GUARD_READ_LINES is user-controlled
         // and may be set in the host environment, so this asserts the
         // fallback is either 350 or the configured override parses.
@@ -8280,7 +8290,7 @@ mod tests {
         m
     }
 
-    /// `idx_root.is_some() && is_grep_tool(...)` (guard.rs:3501). Drop
+    /// `idx_root.is_some() && is_grep_tool(...)`. Drop
     /// `idx_root` and the redirect must NOT fire — the helper guards both
     /// sides; `&&` is the only connective that makes both required.
     #[test]
@@ -8300,24 +8310,16 @@ mod tests {
         );
     }
 
-    /// `!manifest_expired` (guard.rs:3521) — an expired manifest must
+    /// `!manifest_expired` — an expired manifest must
     /// suppress the retrieval advisory; the helper is the seam.
     #[test]
     fn should_retrieval_advisory_is_suppressed_by_expired_manifest() {
         let _env_guard = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // The kill-switch test toggles PIXEL_GUARD_RETRIEVAL; tests run in
-        // parallel, so clear it here and restore on exit. The helper
-        // tolerates a stale value (it only acts on "0"/"false"/"off"), so
-        // an interleaved set/unset either suppresses the advisory (correct
-        // here) or leaves it active — both consistent with this test's
-        // expectation.
         let prev_retrieval = std::env::var("PIXEL_GUARD_RETRIEVAL").ok();
-        // SAFETY: env::remove_var races with other threads reading the
-        // variable. The mutex above serializes every test that touches
-        // PIXEL_GUARD_* in this binary, so this remove is the only writer.
-        // The restore in the trailing block mirrors this safety story.
+        // SAFETY: ENV_LOCK (held above) serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so no other thread reads or writes it.
         unsafe {
             std::env::remove_var("PIXEL_GUARD_RETRIEVAL");
         }
@@ -8335,7 +8337,7 @@ mod tests {
         // Non-retrieval tool → must NOT fire
         assert!(!should_retrieval_advisory(None, false, "Read"));
 
-        // SAFETY: restore the prior value; same race semantics as above.
+        // SAFETY: still under ENV_LOCK; restore the prior value.
         unsafe {
             match prev_retrieval {
                 Some(v) => {
@@ -8348,23 +8350,16 @@ mod tests {
         }
     }
 
-    /// `!env_flag_off("PIXEL_GUARD_RETRIEVAL")` (guard.rs:3523). With the
+    /// `!env_flag_off("PIXEL_GUARD_RETRIEVAL")`. With the
     /// env set to "0", the helper must return false.
     #[test]
     fn should_retrieval_advisory_respects_the_kill_switch() {
         let _env_guard = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // SAFETY: setting an env var in a test races with other tests that
-        // read it; the helper is the only consumer of PIXEL_GUARD_RETRIEVAL
-        // in this crate and the assertion holds either way.
         let prev = std::env::var("PIXEL_GUARD_RETRIEVAL").ok();
-        // SAFETY: setting an env var races with other tests in this binary.
-        // The helper is the only consumer of PIXEL_GUARD_RETRIEVAL in this
-        // crate, and the assertion holds either way; we set, observe, and
-        // restore in the same test so any interleaving is bounded by the
-        // process. The guard helper ignores unknown env values that are
-        // not 0/false/off, so a stale value at worst keeps the tier active.
+        // SAFETY: ENV_LOCK (held above) serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so no other thread reads or writes it.
         unsafe {
             std::env::set_var("PIXEL_GUARD_RETRIEVAL", "0");
         }
@@ -8372,10 +8367,7 @@ mod tests {
             !should_retrieval_advisory(None, false, "Grep"),
             "PIXEL_GUARD_RETRIEVAL=0 must suppress the retrieval advisory"
         );
-        // Restore the prior state (or unset, if there was none).
-        // SAFETY: see the SAFETY comment on the `set_var` call above; the
-        // same race applies to the restore, and the helper tolerates a
-        // stale value.
+        // SAFETY: still under ENV_LOCK; restore the prior value.
         unsafe {
             match prev {
                 Some(v) => {
@@ -8388,8 +8380,8 @@ mod tests {
         }
     }
 
-    /// `!manifest_expired` and `!read_is_targeted(tool_input)` (guard.rs:3538
-    /// and :3540). Both negations gate the read-scoping branch.
+    /// `manifest.is_none()`, `!manifest_expired` and `!read_is_targeted(tool_input)`
+    /// each gate the read-scoping branch on their own.
     #[test]
     fn should_read_scoping_advisory_is_gated_by_negations_and_path() {
         let _env_guard = crate::ENV_LOCK
@@ -8402,18 +8394,9 @@ mod tests {
         std::fs::create_dir_all(repo.join("src")).unwrap();
         std::fs::write(&f, "fn main() {}\n").unwrap();
 
-        // `should_read_scoping_advisory_respects_the_kill_switch` toggles
-        // `PIXEL_GUARD_READ`; tests in the same binary run in parallel, so
-        // clear it for the duration of this assertion and restore on exit.
-        // The helper tolerates a stale value (it only acts on
-        // "0"/"false"/"off"), so an interleaved set/unset either
-        // suppresses the advisory (correct here) or leaves it active —
-        // both consistent with this test's expectation.
         let prev_read = std::env::var("PIXEL_GUARD_READ").ok();
-        // SAFETY: env::remove_var races with other threads reading the
-        // variable. The mutex above serializes every test that touches
-        // PIXEL_GUARD_* in this binary, so this remove is the only writer.
-        // The restore in the trailing block mirrors this safety story.
+        // SAFETY: ENV_LOCK (held above) serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so no other thread reads or writes it.
         unsafe {
             std::env::remove_var("PIXEL_GUARD_READ");
         }
@@ -8433,10 +8416,12 @@ mod tests {
             "untargeted read of a source file in an indexed repo must trigger scoping"
         );
 
-        // expired manifest → false (the !manifest_expired gate)
+        // Expired manifest → false (the !manifest_expired gate). `load_manifest_state`
+        // reports an expired manifest as (None, true), so the manifest slot is
+        // empty here: only the expiry flag can suppress the advisory.
         assert!(
             !should_read_scoping_advisory(
-                some_manifest_empty().as_ref(),
+                None,
                 true,
                 "Read",
                 &untargeted,
@@ -8445,6 +8430,21 @@ mod tests {
                 &repo
             ),
             "expired manifest must suppress scoping"
+        );
+
+        // Active manifest → false (the manifest.is_none() gate): the agent
+        // already scoped the task.
+        assert!(
+            !should_read_scoping_advisory(
+                some_manifest_empty().as_ref(),
+                false,
+                "Read",
+                &untargeted,
+                "src/foo.rs",
+                &repo,
+                &repo
+            ),
+            "active manifest must suppress scoping"
         );
 
         // Targeted read (offset/limit set) → false (the !read_is_targeted gate)
@@ -8477,8 +8477,7 @@ mod tests {
             "non-read tool must not trigger read-scoping"
         );
 
-        // SAFETY: same race semantics as the unset above; restore the
-        // prior value so other tests in the binary see what they expect.
+        // SAFETY: still under ENV_LOCK; restore the prior value.
         unsafe {
             match prev_read {
                 Some(v) => {
@@ -8494,7 +8493,7 @@ mod tests {
     }
 
     /// `should_read_scoping_advisory` returns false for non-source files —
-    /// the closure at guard.rs:3608 has three conjuncts (file exists, is a
+    /// the `is_some_and` closure has three conjuncts (file exists, is a
     /// source file, is not exempt) joined by `&&`. A `&&` → `||` mutant on
     /// either inner conjunct would let a non-source path trigger the
     /// advisory; a non-source file in the scratch repo kills both
@@ -8509,8 +8508,8 @@ mod tests {
         std::fs::write(&f, "plain text\n").unwrap();
 
         let prev_read = std::env::var("PIXEL_GUARD_READ").ok();
-        // SAFETY: same race semantics as the other tests; the mutex above
-        // serializes every test that touches PIXEL_GUARD_* in this binary.
+        // SAFETY: ENV_LOCK (held above) serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so no other thread reads or writes it.
         unsafe {
             std::env::remove_var("PIXEL_GUARD_READ");
         }
@@ -8529,7 +8528,7 @@ mod tests {
             "non-source file must not trigger read-scoping"
         );
 
-        // SAFETY: restore prior value so other tests see what they expect.
+        // SAFETY: still under ENV_LOCK; restore the prior value.
         unsafe {
             match prev_read {
                 Some(v) => {
@@ -8545,7 +8544,7 @@ mod tests {
     }
 
     /// `should_read_scoping_advisory` returns false for files that do not
-    /// resolve (the closure at guard.rs:3608 short-circuits on
+    /// resolve (the `is_some_and` closure short-circuits on
     /// `resolve(...).is_some_and(...)`). A `&&` → `||` mutant that drops
     /// the file-exists conjunct would let an unresolved path trigger the
     /// advisory; a path outside the scratch repo kills that mutation.
@@ -8556,8 +8555,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let repo = scratch_repo("read-scoping-unresolved");
         let prev_read = std::env::var("PIXEL_GUARD_READ").ok();
-        // SAFETY: same race semantics as the other tests; the mutex above
-        // serializes every test that touches PIXEL_GUARD_* in this binary.
+        // SAFETY: ENV_LOCK (held above) serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so no other thread reads or writes it.
         unsafe {
             std::env::remove_var("PIXEL_GUARD_READ");
         }
@@ -8576,7 +8575,7 @@ mod tests {
             "unresolved path must not trigger read-scoping"
         );
 
-        // SAFETY: restore prior value so other tests see what they expect.
+        // SAFETY: still under ENV_LOCK; restore the prior value.
         unsafe {
             match prev_read {
                 Some(v) => {
@@ -8598,7 +8597,7 @@ mod tests {
         })
     }
 
-    /// `!env_flag_off("PIXEL_GUARD_READ")` (guard.rs:3545). Kill switch
+    /// `!env_flag_off("PIXEL_GUARD_READ")`. Kill switch
     /// suppresses the read-scoping advisory.
     #[test]
     fn should_read_scoping_advisory_respects_the_kill_switch() {
@@ -8612,12 +8611,8 @@ mod tests {
         let untargeted = empty_tool_input();
 
         let prev = std::env::var("PIXEL_GUARD_READ").ok();
-        // SAFETY: setting an env var races with other tests in this binary.
-        // The helper is the only consumer of PIXEL_GUARD_READ in this
-        // crate, and the assertion holds either way; we set, observe, and
-        // restore in the same test so any interleaving is bounded by the
-        // process. The guard helper ignores unknown env values that are
-        // not 0/false/off, so a stale value at worst keeps the tier active.
+        // SAFETY: ENV_LOCK (held above) serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so no other thread reads or writes it.
         unsafe {
             std::env::set_var("PIXEL_GUARD_READ", "0");
         }
@@ -8633,9 +8628,7 @@ mod tests {
             ),
             "PIXEL_GUARD_READ=0 must suppress the read-scoping advisory"
         );
-        // SAFETY: see the SAFETY comment on the `set_var` call above; the
-        // same race applies to the restore, and the helper tolerates a
-        // stale value.
+        // SAFETY: still under ENV_LOCK; restore the prior value.
         unsafe {
             match prev {
                 Some(v) => {
@@ -8650,7 +8643,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
-    /// `lines > read_advisory_min_lines()` (guard.rs:3546). At exactly the
+    /// `lines > read_advisory_min_lines()`. At exactly the
     /// threshold, the helper must return false; `>=` would change that.
     /// Below the threshold, also false; one line above, true. This pins the
     /// boundary against the `>`, `>=`, `==` and `<` mutants.
@@ -8659,22 +8652,20 @@ mod tests {
         let _env_guard = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let min = read_advisory_min_lines();
-        // Reset PIXEL_GUARD_READ_LINES for this test so the override path
-        // is exercised deterministically. The helper tolerates a stale
-        // value (it only acts on parseable positive integers), so an
-        // interleaved set/unset either lowers the threshold (would only
-        // widen our boundary tests) or leaves it at 350 (correct here).
+        // Clear any host override so the boundary sits on the default
+        // threshold; the value is restored at the end.
         let prev_lines = std::env::var("PIXEL_GUARD_READ_LINES").ok();
-        // SAFETY: env::remove_var races with other threads reading the
-        // variable. The mutex above serializes every test that touches
-        // PIXEL_GUARD_* in this binary, so this remove is the only writer.
-        // The restore in the trailing block mirrors this safety story.
+        // SAFETY: the mutex above serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so no other thread reads or writes
+        // the variable meanwhile.
         unsafe {
             std::env::remove_var("PIXEL_GUARD_READ_LINES");
         }
         let baseline_min = read_advisory_min_lines();
-        assert_eq!(min, baseline_min, "min line threshold is stable in a test");
+        assert_eq!(
+            baseline_min, 350,
+            "the default threshold applies once unset"
+        );
 
         // At exactly the threshold, the advisory is suppressed.
         assert!(
@@ -8692,7 +8683,7 @@ mod tests {
             "below threshold ({baseline_min}) → no advisory"
         );
 
-        // SAFETY: restore prior value of PIXEL_GUARD_READ_LINES.
+        // SAFETY: still under ENV_LOCK; restore the prior value.
         unsafe {
             match prev_lines {
                 Some(v) => {
@@ -8705,61 +8696,32 @@ mod tests {
         }
     }
 
-    /// The manifest-scoping arm's `delete match arm Active(m)/Expired` mutants
-    /// (guard.rs:1758, :1759) live in `run_provider_guard`, the function that
-    /// builds `(manifest, manifest_expired)` and forwards them. The semantics
-    /// pinned here: Active is paired with `expired=false`; Expired is paired
-    /// with `expired=true`; every other state pairs with `expired=false` and
-    /// `manifest=None`. The function under test (`non_shell_advisory`) reads
-    /// that pair; if the wrong arm is taken, every downstream predicate
-    /// misfires. The `should_*` helpers above are the downstream that
-    /// asserts the pair is wired correctly.
+    /// `manifest_pair` is the one place the guard turns a manifest state into
+    /// the `(manifest, manifest_expired)` pair that `run_provider_guard` and
+    /// `run_guard` forward. An expired manifest must read as `(None, true)`:
+    /// read as absent, it would re-enable the scope-task advisories the agent
+    /// already followed; an active one must keep its tasks so edits stay scoped.
     #[test]
-    fn manifest_state_pairing_is_consistent_with_helpers() {
-        let _env_guard = crate::ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // The kill-switch test toggles PIXEL_GUARD_RETRIEVAL; clear it for
-        // the duration of this test. The helper tolerates a stale value (it
-        // only acts on "0"/"false"/"off"), so an interleaved set/unset
-        // either suppresses the advisory (correct here) or leaves it
-        // active — both consistent with this test's expectation.
-        let prev_retrieval = std::env::var("PIXEL_GUARD_RETRIEVAL").ok();
-        // SAFETY: env::remove_var races with other threads reading the
-        // variable. The mutex above serializes every test that touches
-        // PIXEL_GUARD_* in this binary, so this remove is the only writer.
-        // The restore in the trailing block mirrors this safety story.
-        unsafe {
-            std::env::remove_var("PIXEL_GUARD_RETRIEVAL");
-        }
+    fn manifest_pair_keeps_active_tasks_and_flags_only_expiry() {
+        let (active, active_expired) = manifest_pair(Some(ManifestState::Active(Manifest {
+            root: PathBuf::from("/tmp/pixel-manifest-pair"),
+            tasks: vec![],
+        })));
+        assert_eq!(
+            active.map(|m| m.root),
+            Some(PathBuf::from("/tmp/pixel-manifest-pair")),
+            "an active manifest is forwarded as is"
+        );
+        assert!(!active_expired, "an active manifest is not expired");
 
-        // Expired → must read as (None, true) regardless of branch order
-        assert!(
-            !should_retrieval_advisory(None, true, "Grep"),
-            "Expired → (None, true) → suppression"
-        );
-        // Active → caller must pass (Some, false); helpers respect the pair
-        let m = some_manifest_empty();
-        assert!(
-            !should_retrieval_advisory(m.as_ref(), false, "Grep"),
-            "Active → (Some, false) → suppression (an active manifest gates the advisory off)"
-        );
-        // Absent → (None, false) → retrieval fires
-        assert!(
-            should_retrieval_advisory(None, false, "Grep"),
-            "Absent → (None, false) → retrieval fires"
-        );
+        let (expired, expired_flag) = manifest_pair(Some(ManifestState::Expired));
+        assert!(expired.is_none(), "an expired manifest scopes nothing");
+        assert!(expired_flag, "an expired manifest raises the expiry flag");
 
-        // SAFETY: restore prior value, matching the SAFETY comment above.
-        unsafe {
-            match prev_retrieval {
-                Some(v) => {
-                    std::env::set_var("PIXEL_GUARD_RETRIEVAL", v);
-                }
-                None => {
-                    std::env::remove_var("PIXEL_GUARD_RETRIEVAL");
-                }
-            }
+        for state in [Some(ManifestState::Absent), None] {
+            let (absent, absent_expired) = manifest_pair(state);
+            assert!(absent.is_none(), "no manifest scopes nothing");
+            assert!(!absent_expired, "no manifest is not an expired one");
         }
     }
 }
