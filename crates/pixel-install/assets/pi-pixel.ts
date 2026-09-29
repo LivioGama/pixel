@@ -335,6 +335,9 @@ const REPO_SEARCH_REASON = "repository search: use pixel search-content";
 const LS_REASON = "repository discovery: use pixel list-areas or find-code";
 const FIND_REASON = "repository discovery: use pixel find-code or list-areas";
 const CREDENTIAL_REASON = "credential path";
+const REPO_STATE_REASON = "repository inspection: use pixel repo-state";
+const REVIEW_CHANGES_REASON = "repository inspection: use pixel review-changes";
+const COMMIT_HISTORY_REASON = "repository inspection: use pixel commit-history";
 
 /// Port of `enforce_leaf` (`crates/pixel/src/guard.rs`). One Bash leaf at a
 /// time: the first matching rule returns `{reason, operation?}`. Returning
@@ -385,13 +388,14 @@ function enforceLeaf(segment: string, words: string[], piped: boolean, root: str
       }
       if (i !== effectiveArgs.length || !sub) return undefined;
       let alternative: string;
+      let inspectionReason: string;
       switch (sub) {
-        case "status": alternative = "repo-state"; break;
-        case "diff": alternative = "review-changes"; break;
-        case "log": alternative = "commit-history"; break;
+        case "status": alternative = "repo-state"; inspectionReason = REPO_STATE_REASON; break;
+        case "diff": alternative = "review-changes"; inspectionReason = REVIEW_CHANGES_REASON; break;
+        case "log": alternative = "commit-history"; inspectionReason = COMMIT_HISTORY_REASON; break;
         default: return undefined;
       }
-      return { reason: `repository inspection: use pixel ${alternative}`, operation: alternative };
+      return { reason: inspectionReason, operation: alternative };
     }
     case "cat":
     case "head":
