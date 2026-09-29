@@ -30,3 +30,9 @@ below beside the ordinary one.
 - **Global and repo-local state stay apart.** A repo-local adoption (a
   delegate guard, an RTK backup) is recorded under the repository, never in
   a `~/.claude/` file that every other repository reads.
+- **Claude hooks also run under Devin.** Devin CLI loads the hooks of
+  `.claude/settings*.json` by default (`read_config_from.claude`), so every
+  `--provider claude` entry `pixel install` writes also fires inside Devin,
+  with `DEVIN_PROJECT_DIR` set; an exit 2 blocks the Devin prompt too. A
+  Claude-only side effect checks that variable (verified 2026-09: the
+  handoff removed in #397 blocked `Add the "story" feature` in both hosts).
