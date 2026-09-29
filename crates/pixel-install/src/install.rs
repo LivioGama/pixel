@@ -652,13 +652,15 @@ fn inside_markdown_fence(preceding: &str, prefix: &str) -> bool {
         if width < 3 {
             continue;
         }
+        // Avoid out-of-bounds access:
+        let after_fence = if trimmed.len() > width { &trimmed[width..] } else { "" };
         match fence {
-            None if marker == b'`' && trimmed[width..].contains('`') => {}
+            None if marker == b'`' && after_fence.contains('`') => {}
             None => fence = Some((marker, width)),
             Some((open_marker, open_width))
                 if marker == open_marker
                     && width >= open_width
-                    && trimmed[width..].trim().is_empty() =>
+                    && after_fence.trim().is_empty() =>
             {
                 fence = None;
             }
