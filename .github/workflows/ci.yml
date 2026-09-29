@@ -232,7 +232,7 @@ jobs:
           # The SHA pin no longer names the toolchain through the ref, so
           # it is passed explicitly (same channel as before).
           toolchain: stable
-          components: rustfmt, clippy
+          components: rustfmt
 
       - name: Cache Rust build
         if: ${{ needs.changes.outputs.cargo == 'true' }}
@@ -336,16 +336,6 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-clean.py
 
-      - name: Warnings-denied Clippy
-        if: ${{ needs.changes.outputs.cargo == 'true' }}
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Supported CLI feature lanes
-        if: ${{ needs.changes.outputs.cargo == 'true' }}
-        run: |
-          cargo check -p pixel-cli --no-default-features
-          cargo check -p pixel-cli --no-default-features --features model2vec
-
       - name: Install Bun
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: |
@@ -355,6 +345,56 @@ jobs:
       - name: Pi extension policy and event contracts
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: bun scripts/test-pi-policy.mjs
+
+  # Clippy and the reduced feature lanes, beside the Test job instead of
+  # after it: they read no test result and took 35 s of its critical path
+  # (clippy 17.6 s, the two `cargo check` lanes 8.7 s and 8.1 s, main run
+  # 36584496012). Their check-only artifacts (rmeta, no codegen) live under
+  # a key of their own, so the linux-debug entry the Test job and every
+  # Mutants shard restore holds only what those build.
+  lint:
+    name: Lint (Clippy + feature lanes)
+    needs: [scope, changes]
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.cargo == 'true'
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: linux-lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      - name: Install system dependencies
+        # Vendored OpenSSL needs perl and make. The GitHub Ubuntu images ship
+        # both ("already the newest version" in every log), so the ~7 s of
+        # apt-get update runs only on an image that lacks one of them.
+        run: |
+          if command -v perl >/dev/null && command -v make >/dev/null; then
+            echo "perl and make already installed"
+          else
+            sudo apt-get update
+            sudo apt-get install -y perl make
+          fi
+
+      - name: Warnings-denied Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Supported CLI feature lanes
+        run: |
+          cargo check -p pixel-cli --no-default-features
+          cargo check -p pixel-cli --no-default-features --features model2vec
 
   msrv:
     name: MSRV (rust-version in Cargo.toml)
@@ -403,7 +443,7 @@ jobs:
           test "$declared" = "1.91" || { echo "Cargo.toml says rust-version $declared, this job installs 1.91"; exit 1; }
 
       # A check, not clippy: lint names are added by newer toolchains and
-      # the lint gate runs on stable in the Test job.
+      # the lint gate runs on stable in the Lint job.
       - name: cargo check on the minimum toolchain
         run: cargo check --workspace --all-targets --locked
 
