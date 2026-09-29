@@ -32,6 +32,8 @@ Livio started Pixel and gave it its shape. The first commit, on 29 August 2026, 
 
 Everyone else who has contributed code is on the repository's [contributors page](https://github.com/LivioGama/pixel/graphs/contributors).
 
+Our continuous integration runs on [RunsOn](https://runs-on.com), which gives open-source projects a free license.
+
 ## Why you can trust it on your code
 
 - **We use it before you do.** Pixel is built with coding agents that run Pixel. Its hooks are active in every session we open on its repository, so a regression hits us first.
