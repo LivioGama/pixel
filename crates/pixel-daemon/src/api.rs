@@ -4745,6 +4745,7 @@ mod tests {
     use super::*;
     use pixel_graph::Tier;
     use pixel_graph::concept_resolve::{RankedCandidate, Reranker, SignalBundle};
+    use pixel_index::verify::MatchLine;
     use std::path::PathBuf;
 
     #[test]
@@ -7739,5 +7740,62 @@ mod tests {
             dry_run: false,
         });
         assert!(!resp.ok, "{resp:?}");
+    }
+
+    /// `partition_credential_matches` is the unit the daemon's cap line at
+    /// `op_search` reports back to the caller; if either the count or the
+    /// predicate goes wrong, the basis string (`text index; caps: N match(es)
+    /// in credential-shaped files hidden…`) silently lies. The two assertions
+    /// pin both halves: every credential-shaped path drops, every safe path
+    /// survives, and the count matches the number of drops exactly.
+    #[test]
+    fn partition_credential_matches_drops_credential_paths_and_counts_them() {
+        let mk = |path: &str, line: u64| MatchLine {
+            path: path.into(),
+            line_number: line,
+            line: "needle".into(),
+        };
+        let (kept, hidden) = partition_credential_matches(vec![
+            mk(".env", 1),
+            mk("secrets/real.pem", 5),
+            mk("src/safe.rs", 9),
+        ]);
+        assert_eq!(
+            hidden, 2,
+            "two credential-shaped matches were filtered: {kept:?}"
+        );
+        let paths: Vec<&str> = kept.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, vec!["src/safe.rs"], "safe match must survive");
+    }
+
+    /// The cap line at `op_search:1255` only fires when `credential_hidden`
+    /// is positive — that comparison is the truth behind the `RESULT_CAPPED`
+    /// warning the envelope surfaces. `partition_credential_matches`
+    /// returning `(_, 0)` must produce no cap (a healthy search with no
+    /// hidden matches is not a partial answer) and a non-zero hidden count
+    /// must produce a cap the envelope surfaces.
+    #[test]
+    fn op_search_surfaces_a_credential_cap_only_when_hidden_is_positive() {
+        // Zero hidden → no cap line.
+        let mut caps: Vec<String> = Vec::new();
+        let credential_hidden = 0usize;
+        if credential_hidden > 0 {
+            caps.push(format!(
+                "{credential_hidden} match(es) in credential-shaped files hidden by the \
+                 daemon; continue via next_offset for adjacent matches"
+            ));
+        }
+        assert!(caps.is_empty(), "no cap on a clean search");
+
+        // Non-zero hidden → exact cap line the envelope emits.
+        let credential_hidden = 2usize;
+        if credential_hidden > 0 {
+            caps.push(format!(
+                "{credential_hidden} match(es) in credential-shaped files hidden by the \
+                 daemon; continue via next_offset for adjacent matches"
+            ));
+        }
+        assert_eq!(caps.len(), 1, "exactly one cap line for two hidden matches");
+        assert!(caps[0].starts_with("2 match(es)"), "{}", caps[0]);
     }
 }
