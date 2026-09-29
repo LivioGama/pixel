@@ -231,9 +231,9 @@ An agent runs these only when asked, and then only the `-F` form (see
 are for a human who chooses to spend the time.
 
 ```bash
-cargo install --locked cargo-mutants        # or: cargo binstall cargo-mutants
+cargo install --locked cargo-mutants --version 27.1.0   # the version mutants.yml pins
 
-git diff main...HEAD > target/pr.diff                # the branch's diff (commit first)
+git diff origin/main...HEAD > target/pr.diff         # the branch's diff, as CI takes it (commit first)
 cargo mutants --in-diff target/pr.diff -F '<fn>'     # one finding from the CI job
 cargo mutants -p pixel-proto                         # one crate, full sweep (about a minute)
 cargo mutants --in-diff target/pr.diff               # what CI runs; hours on a laptop for a big PR
@@ -241,6 +241,13 @@ cargo mutants --in-diff target/pr.diff               # what CI runs; hours on a 
 
 The diff goes through a file rather than `<(git diff …)` so the same lines
 run in bash, zsh and fish, which has no `<(…)` process substitution.
+
+Every one of these runs the program a CI shard runs: the cargo arguments
+that decide it (`--locked`, `--all-targets`) live in `.cargo/mutants.toml`,
+never on a command line, and `scripts/mutants-preflight.sh --run` and
+`scripts/gates.sh --mutants` refuse a cargo-mutants other than the pinned
+one (`scripts/mutants-version-check.sh`). A lane with a flag of its own
+judges different mutants: `scripts/test-mutants-config.py` fails on one.
 
 Read the summary line and `mutants.out/missed.txt`:
 
