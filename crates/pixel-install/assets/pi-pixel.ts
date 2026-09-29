@@ -225,6 +225,29 @@ function simpleTranslation(command: string, root: string) {
   return null;
 }
 
+/// `find-code` matches carry the pieces of a uid; pack-context and impact
+/// accept only that form, so a bare symbol name resolves through find-code
+/// first instead of erroring inside the operation.
+function matchUid(match: any): string | undefined {
+  if (!match?.path || !match?.symbol_kind) return undefined;
+  const name = match.raw ?? match.name;
+  if (!name) return undefined;
+  return `${match.path}#${match.owner ? `${match.owner}::` : ""}${name}#${match.symbol_kind}`;
+}
+
+function resolveSymbolUid(root: string, wanted: string, path?: string): { uid?: string; candidates: string[] } {
+  try {
+    const output = run(root, ["find-code", wanted, ...(path ? [path] : []), "--json", "--limit", "5"]);
+    const found = parseEvidence(output) as any;
+    const candidates = (Array.isArray(found?.matches) ? found.matches : [])
+      .map(matchUid)
+      .filter((uid): uid is string => Boolean(uid));
+    return { uid: found?.confidence === "resolved" ? candidates[0] : undefined, candidates };
+  } catch {
+    return { candidates: [] };
+  }
+}
+
 function classify(tool: string, input: any, root: string, resolvedPaths: Set<string>, state: { pixelHealthy?: boolean; pixelCalled: boolean }): { kind: string; reason: string; operation?: string } {
   if (tool === "pixel") return { kind: "tool", reason: "structured Pixel" };
   if (EDIT_TOOLS.has(tool)) {
@@ -247,8 +270,9 @@ function classify(tool: string, input: any, root: string, resolvedPaths: Set<str
     const target = path ? relativeTarget(root, path) : "";
     // Bootstrap-injected paths are not evidence of a Pixel call: a bounded
     // in-repo read unlocks only after the model itself called pixel or
-    // pixel_project (the global tool never fills resolvedPaths, so the call,
-    // not the path, is the signal). Credential files stay blocked.
+    // pixel_project. Both tools' results reach tool_result, so the call, not
+    // a harvested path, is the signal; their paths are still recorded.
+    // Credential files stay blocked.
     const limit = Number(input.limit);
     const problem = !(limit > 0) ? "no limit given"
       : limit > READ_LIMIT ? `limit ${limit} exceeds ${READ_LIMIT}`
@@ -338,6 +362,15 @@ export default function activate(pi: ExtensionAPI) {
           return { content: [{ type: "text", text: JSON.stringify(result) }], details: result, isError: true };
         }
         const index = health(root, action);
+        let ambiguousCandidates: string[] = [];
+        if ((action === "impact" || action === "pack_context")) {
+          const wanted = String(p.symbol ?? p.query ?? p.goal ?? "").trim();
+          if (wanted && !wanted.includes("#")) {
+            const resolved = resolveSymbolUid(root, wanted, p.path ? String(p.path) : undefined);
+            if (resolved.uid) p = { ...p, symbol: resolved.uid };
+            else if (action === "pack_context") ambiguousCandidates = resolved.candidates;
+          }
+        }
         const steps = commandFor(action, p);
         const boxes: string[] = [];
         const evidence = steps.map((args) => {
@@ -351,7 +384,7 @@ export default function activate(pi: ExtensionAPI) {
           const matches = found?.matches;
           if (found?.confidence === "resolved" && Array.isArray(matches) && matches.length === 1 && matches[0].symbol_kind) {
             const match = matches[0];
-            const uid = `${match.path}#${match.owner ? `${match.owner}::` : ""}${match.raw}#${match.symbol_kind}`;
+            const uid = matchUid(match)!;
             for (const args of [["impact", uid, "--json"], ["pack-context", uid, "--json", "--budget", "1200"]]) {
               const { stdout: output, box } = runBox(root, args);
               if (box) boxes.push(box);
@@ -363,6 +396,7 @@ export default function activate(pi: ExtensionAPI) {
         const truncated = evidence.some((item) => item.truncated);
         const first = evidence[0].output as any;
         const next_action = truncated ? "Narrow the scope or query"
+          : ambiguousCandidates.length ? `Ambiguous symbol; call find_code to pick the target, then retry pack_context with a path#name#kind uid: ${ambiguousCandidates.join(", ")}`
           : action === "find_code" && first?.confidence !== "resolved" ? "Try search_content with a concrete token"
           : action === "search_content" && Array.isArray(first) && first.length === 0 ? "Broaden the query or check index coverage"
           : undefined;
@@ -451,6 +485,7 @@ export default function activate(pi: ExtensionAPI) {
   // A tool_result replacement must carry forward the original result. Only
   // successful edits have a post-edit snapshot; failures retain diagnostics.
   pi.on("tool_result", async (event, ctx) => {
+    const root = ctx?.cwd ?? process.cwd();
     // The global `pixel` tool never runs pixel_project.execute; its result is
     // the only signal that the model consulted Pixel. Pi reports a tool's
     // returned `isError` as false unless it throws, so an error-shaped
@@ -459,9 +494,14 @@ export default function activate(pi: ExtensionAPI) {
       const details = event.details as { error?: unknown } | undefined;
       if (event.isError || Boolean(details?.error)) return { isError: true };
       state.pixelCalled = true;
+      // Paths the global `pixel` tool (or this one) surfaced count as
+      // resolved: the guard should see every Pixel answer, not only this
+      // extension's own calls.
+      for (const part of event.content ?? []) {
+        if (part?.type === "text") rememberPaths(parseEvidence(String(part.text)), resolvedPaths, root);
+      }
     }
     if (!EDIT_TOOLS.has(event.toolName) || event.isError) return;
-    const root = ctx?.cwd ?? process.cwd();
     const raw = pixelText(root, ["what-changed", "--json", "--tests"]);
     if (!raw) {
       state.pixelHealthy = false;
