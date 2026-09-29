@@ -399,16 +399,24 @@ switch (args[0]) {
 
   await check("a slow classifier is killed at the deadline and the bootstrap still arrives", async () => {
     const h = await host();
-    configure({ classify: { ...bugfix, delay: 1500 } });
+    configure({ classify: { ...bugfix, delay: 700 } });
+    const before = count("classify-finished");
     const started = Date.now();
     const content = (await h.boot()).message.content;
     const elapsed = Date.now() - started;
     assert.match(content, /^PIXEL TASK CONTEXT/);
     assert.doesNotMatch(content, /Intent|classifier/);
-    assert.ok(elapsed < 1400, `bootstrap waited ${elapsed} ms`);
-    const finished = count("classify-finished");
-    await new Promise((done) => setTimeout(done, 1600));
-    assert.equal(count("classify-finished"), finished, "the timed-out classifier was killed before it answered");
+    // The fixture's own termination evidence for the deadline: its classifier
+    // needs 700 ms, past the 500 ms kill, so a bootstrap that returned with no
+    // completion marker cannot have waited for it.
+    assert.equal(count("classify-finished"), before, "the bootstrap returned before the classifier answered");
+    // The marker is still absent once the full delay has elapsed: the child
+    // was killed rather than left running.
+    await new Promise((done) => setTimeout(done, 1200));
+    assert.equal(count("classify-finished"), before, "the timed-out classifier was killed before it answered");
+    // A separate, loose hang bound for the whole bootstrap: slow health checks
+    // or context collection must not read as a missed deadline.
+    assert.ok(elapsed < 5000, `bootstrap waited ${elapsed} ms`);
   });
 
   await check("short prompts never spawn the classifier", async () => {
