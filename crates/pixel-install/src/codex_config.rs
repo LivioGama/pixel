@@ -224,8 +224,9 @@ pub(crate) fn install_developer_instructions(
 
 /// The PostToolUse entry `pixel install` merges into `hooks.json`: Codex
 /// runs it after every tool call; `pixel run-hook metrics` self-filters to
-/// shell calls that invoked `pixel` and re-emits the finalized 🟩 line —
-/// the relay Codex's stderr-less tool results cannot show.
+/// shell calls that invoked `pixel` and re-emits the finalized 🟩 line as
+/// `additionalContext` — a fallback for the rare host whose tool result
+/// drops the merged stderr Codex's exec layer normally carries.
 fn metrics_hook_entry(exe: &Path) -> serde_json::Value {
     serde_json::json!({
         "hooks": [{
