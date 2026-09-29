@@ -40,7 +40,7 @@ pub const HOOKS_FILE: &str = "hooks.json";
 /// Substring unique to the installed metrics-relay command, used for
 /// idempotent merge and uninstall removal.
 ///
-/// Most Codex users see the Pixel metrics panel (stderr) automatically, merged into the tool result by Codex's exec layer. The PostToolUse relay is only a fallback for rare hosts that drop or lose stderr: it emits the panel as additionalContext only when missing. Never re-emit or echo the panel if it is already present in the tool-call result.
+/// Most Codex users see the Pixel metrics panel (stderr) automatically, merged into the tool result by Codex’s exec layer. The PostToolUse relay is only a fallback for rare hosts that drop or lose stderr: it emits the panel as additionalContext only when missing. Never re-emit or echo the panel if it is already present in the tool-call result.
 pub const METRICS_HOOK_MARKER: &str = "run-hook metrics";
 
 /// The agent prompt as bundled in the binary.
