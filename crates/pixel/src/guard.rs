@@ -6117,11 +6117,15 @@ mod tests {
     /// `Bash`) as a shell and leave every other tool native.
     #[test]
     fn provider_rewrite_devin_rewrites_exec_and_bash_only() {
+        let repo = scratch_repo("devin-rewrite");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".pixel")).unwrap();
         let payload = |tool: &str| {
             serde_json::json!({
                 "hook_event_name": "PreToolUse",
                 "tool_name": tool,
                 "tool_input": {"command": "rg needle src"},
+                "cwd": repo,
             })
         };
         assert!(provider_rewrite(Provider::Devin, &payload("exec")).is_some());
