@@ -1754,11 +1754,7 @@ fn run_provider_guard(provider: Provider, delegate_rtk: bool, raw: &str) -> ! {
                 let idx_root = find_up(&anchor, ".pixel");
                 let manifest_root = find_up(&anchor, Path::new(".pixel").join("targets.json"));
                 let (manifest, manifest_expired) =
-                    match manifest_root.as_deref().map(load_manifest_state) {
-                        Some(ManifestState::Active(m)) => (Some(m), false),
-                        Some(ManifestState::Expired) => (None, true),
-                        _ => (None, false),
-                    };
+                    manifest_pair(manifest_root.as_deref().map(load_manifest_state));
                 non_shell_advisory(
                     tool,
                     tool_input,
@@ -2445,11 +2441,8 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     }
 
     let manifest_root = find_up(&anchor, Path::new(".pixel").join("targets.json"));
-    let (manifest, manifest_expired) = match manifest_root.as_deref().map(load_manifest_state) {
-        Some(ManifestState::Active(m)) => (Some(m), false),
-        Some(ManifestState::Expired) => (None, true),
-        _ => (None, false),
-    };
+    let (manifest, manifest_expired) =
+        manifest_pair(manifest_root.as_deref().map(load_manifest_state));
 
     if tool == "Bash" || tool == "exec" || tool == "bash" || tool == "run_shell_command"
         || tool == "execute" || tool == "Shell"
@@ -3148,6 +3141,18 @@ fn load_manifest_state(root: &Path) -> ManifestState {
     })
 }
 
+/// The `(manifest, manifest_expired)` pair every guard branch reads: an
+/// active manifest scopes the call, an expired one suppresses the advisories
+/// that would suggest re-scoping, and no manifest (absent or unreadable)
+/// leaves both off.
+fn manifest_pair(state: Option<ManifestState>) -> (Option<Manifest>, bool) {
+    match state {
+        Some(ManifestState::Active(m)) => (Some(m), false),
+        Some(ManifestState::Expired) => (None, true),
+        Some(ManifestState::Absent) | None => (None, false),
+    }
+}
+
 /// Compatibility shim over `load_manifest_state` for tests that only care
 /// about an active manifest.
 #[cfg(test)]
@@ -3502,7 +3507,7 @@ fn non_shell_advisory(
     // In indexed repos, recommend pixel search-content for Grep tool calls.
     // The hook cannot change the tool type (Grep→Bash), so this is an
     // advisory and the original Grep call proceeds.
-    if idx_root.is_some() && is_grep_tool(tool, tool_input) {
+    if should_grep_redirect(idx_root, tool, tool_input) {
         let pattern = tool_input
             .get("pattern")
             .and_then(Value::as_str)
@@ -3521,10 +3526,7 @@ fn non_shell_advisory(
     // file is a source file — suggesting `pixel scope-task` first.
     // `PIXEL_GUARD_RETRIEVAL=0` disables this tier.
     if let Some(idx) = idx_root
-        && manifest.is_none()
-        && !manifest_expired
-        && is_retrieval_tool(tool)
-        && !env_flag_off("PIXEL_GUARD_RETRIEVAL")
+        && should_retrieval_advisory(manifest, manifest_expired, tool)
     {
         retrieval_guard_advisory(cwd, idx);
     }
@@ -3538,18 +3540,19 @@ fn non_shell_advisory(
     // the agent is already doing the cheap thing, so advising would be
     // noise. Only a whole-file read of a large source file gets the nudge.
     if let Some(idx) = idx_root
-        && manifest.is_none()
-        && !manifest_expired
-        && is_read_tool(tool)
-        && !read_is_targeted(tool_input)
-        && let Some(p) = resolve(raw_path, cwd)
-        && p.is_file()
-        && is_source_file(&p)
-        && !is_exempt(&p, idx)
-        && !env_flag_off("PIXEL_GUARD_READ")
+        && should_read_scoping_advisory(
+            manifest,
+            manifest_expired,
+            tool,
+            tool_input,
+            raw_path,
+            cwd,
+            idx,
+        )
     {
+        let p = resolve(raw_path, cwd).expect("checked by helper");
         let lines = file_line_count(&p);
-        if lines > read_advisory_min_lines() {
+        if read_scoping_advisory_size(lines) {
             read_scoping_advisory(&p, lines, idx);
         }
     }
@@ -3561,6 +3564,62 @@ fn non_shell_advisory(
             scoping_advisory(&p, m);
         }
     }
+}
+
+/// Whether the Grep redirect advisory should fire. The hook is in an indexed
+/// repo (`idx_root.is_some()`) **and** the tool is a grep-style retrieval.
+fn should_grep_redirect(
+    idx_root: Option<&Path>,
+    tool: &str,
+    tool_input: &serde_json::Map<String, Value>,
+) -> bool {
+    idx_root.is_some() && is_grep_tool(tool, tool_input)
+}
+
+/// Whether the `pixel scope-task` retrieval advisory should fire for the
+/// current non-shell tool call. All four conditions must hold:
+/// - no active targets manifest;
+/// - the manifest is not just expired (a stale list still gates us off);
+/// - the tool is a retrieval tool (Grep/Glob/find);
+/// - the user has not killed this tier with `PIXEL_GUARD_RETRIEVAL=0`.
+fn should_retrieval_advisory(
+    manifest: Option<&Manifest>,
+    manifest_expired: bool,
+    tool: &str,
+) -> bool {
+    manifest.is_none()
+        && !manifest_expired
+        && is_retrieval_tool(tool)
+        && !env_flag_off("PIXEL_GUARD_RETRIEVAL")
+}
+
+/// Whether the read-scoping advisory should fire. Mirrors `should_retrieval_advisory`
+/// for the Read branch, then adds: the read is untargeted, the path resolves to
+/// a source file, the file is not exempt, and the user has not killed the tier.
+fn should_read_scoping_advisory(
+    manifest: Option<&Manifest>,
+    manifest_expired: bool,
+    tool: &str,
+    tool_input: &serde_json::Map<String, Value>,
+    raw_path: &str,
+    cwd: &Path,
+    idx: &Path,
+) -> bool {
+    manifest.is_none()
+        && !manifest_expired
+        && is_read_tool(tool)
+        && !read_is_targeted(tool_input)
+        && resolve(raw_path, cwd)
+            .is_some_and(|p| p.is_file() && is_source_file(&p) && !is_exempt(&p, idx))
+        && !env_flag_off("PIXEL_GUARD_READ")
+}
+
+/// Size gate for the read-scoping advisory: a source file must have MORE
+/// than the configured line threshold for the advisory to fire. At exactly
+/// the threshold the read is allowed through silently — the agent is doing
+/// the cheap thing already, so advising would be noise.
+fn read_scoping_advisory_size(lines: usize) -> bool {
+    lines > read_advisory_min_lines()
 }
 
 /// Advisory for edits to existing files in an indexed repo with no active
@@ -6674,6 +6733,11 @@ mod tests {
 
     #[test]
     fn read_advisory_min_lines_defaults_to_shunt_threshold() {
+        // The boundary test removes and restores PIXEL_GUARD_READ_LINES;
+        // hold the same lock so both reads below see one value.
+        let _env_guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Env-free default only — PIXEL_GUARD_READ_LINES is user-controlled
         // and may be set in the host environment, so this asserts the
         // fallback is either 350 or the configured override parses.
@@ -8206,5 +8270,458 @@ mod tests {
         );
         assert_eq!(antigravity_search_pattern("tag note"), Some("note".into()));
         assert_eq!(antigravity_search_pattern("tag"), None);
+    }
+
+    // Each test below pins one of the seven MISSED mutants the gate reported
+    // on the original `non_shell_advisory` body before extraction. The
+    // helpers `should_*` now carry the branching that used to live inline;
+    // a test that drives the helper with the boundary value kills the
+    // operator (`!`, `>`, `&&`, `||`) the mutant flips. Every test must
+    // run in the same crate (test_workspace = false) — that is why each
+    // assertion lives in `pixel`'s own test module.
+
+    fn empty_tool_input() -> serde_json::Map<String, Value> {
+        serde_json::Map::new()
+    }
+
+    fn grep_input(pattern: &str) -> serde_json::Map<String, Value> {
+        let mut m = serde_json::Map::new();
+        m.insert("pattern".into(), Value::String(pattern.into()));
+        m
+    }
+
+    /// `idx_root.is_some() && is_grep_tool(...)`. Drop
+    /// `idx_root` and the redirect must NOT fire — the helper guards both
+    /// sides; `&&` is the only connective that makes both required.
+    #[test]
+    fn should_grep_redirect_requires_an_indexed_repo() {
+        let idx = Path::new("/tmp/does/not/matter");
+        assert!(
+            should_grep_redirect(Some(idx), "Grep", &grep_input("needle")),
+            "indexed repo + grep tool = redirect"
+        );
+        assert!(
+            !should_grep_redirect(None, "Grep", &grep_input("needle")),
+            "no idx_root means no redirect (the &&, not ||)"
+        );
+        assert!(
+            !should_grep_redirect(Some(idx), "Read", &empty_tool_input()),
+            "non-grep tool suppresses the redirect"
+        );
+    }
+
+    /// `!manifest_expired` — an expired manifest must
+    /// suppress the retrieval advisory; the helper is the seam.
+    #[test]
+    fn should_retrieval_advisory_is_suppressed_by_expired_manifest() {
+        let _env_guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev_retrieval = std::env::var("PIXEL_GUARD_RETRIEVAL").ok();
+        // SAFETY: ENV_LOCK (held above) serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so no other thread reads or writes it.
+        unsafe {
+            std::env::remove_var("PIXEL_GUARD_RETRIEVAL");
+        }
+
+        // manifest = None, expired = false, retrieval tool → fires
+        assert!(should_retrieval_advisory(None, false, "Grep"));
+        // expired = true → must NOT fire, even with no manifest
+        assert!(!should_retrieval_advisory(None, true, "Grep"));
+        // Some(manifest) → must NOT fire, even with no expiry
+        let m = Manifest {
+            root: PathBuf::from("/tmp"),
+            tasks: vec![],
+        };
+        assert!(!should_retrieval_advisory(Some(&m), false, "Grep"));
+        // Non-retrieval tool → must NOT fire
+        assert!(!should_retrieval_advisory(None, false, "Read"));
+
+        // SAFETY: still under ENV_LOCK; restore the prior value.
+        unsafe {
+            match prev_retrieval {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_RETRIEVAL", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_RETRIEVAL");
+                }
+            }
+        }
+    }
+
+    /// `!env_flag_off("PIXEL_GUARD_RETRIEVAL")`. With the
+    /// env set to "0", the helper must return false.
+    #[test]
+    fn should_retrieval_advisory_respects_the_kill_switch() {
+        let _env_guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev = std::env::var("PIXEL_GUARD_RETRIEVAL").ok();
+        // SAFETY: ENV_LOCK (held above) serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so no other thread reads or writes it.
+        unsafe {
+            std::env::set_var("PIXEL_GUARD_RETRIEVAL", "0");
+        }
+        assert!(
+            !should_retrieval_advisory(None, false, "Grep"),
+            "PIXEL_GUARD_RETRIEVAL=0 must suppress the retrieval advisory"
+        );
+        // SAFETY: still under ENV_LOCK; restore the prior value.
+        unsafe {
+            match prev {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_RETRIEVAL", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_RETRIEVAL");
+                }
+            }
+        }
+    }
+
+    /// `manifest.is_none()`, `!manifest_expired` and `!read_is_targeted(tool_input)`
+    /// each gate the read-scoping branch on their own.
+    #[test]
+    fn should_read_scoping_advisory_is_gated_by_negations_and_path() {
+        let _env_guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Build a real source file in a scratch repo so the path resolves
+        // and the file extension trips `is_source_file`.
+        let repo = scratch_repo("read-scoping-predicate");
+        let f = repo.join("src/foo.rs");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(&f, "fn main() {}\n").unwrap();
+
+        let prev_read = std::env::var("PIXEL_GUARD_READ").ok();
+        // SAFETY: ENV_LOCK (held above) serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so no other thread reads or writes it.
+        unsafe {
+            std::env::remove_var("PIXEL_GUARD_READ");
+        }
+
+        // Baseline: no manifest, no expiry, untargeted Read on a source file → true
+        let untargeted = empty_tool_input();
+        assert!(
+            should_read_scoping_advisory(
+                None,
+                false,
+                "Read",
+                &untargeted,
+                "src/foo.rs",
+                &repo,
+                &repo
+            ),
+            "untargeted read of a source file in an indexed repo must trigger scoping"
+        );
+
+        // Expired manifest → false (the !manifest_expired gate). `load_manifest_state`
+        // reports an expired manifest as (None, true), so the manifest slot is
+        // empty here: only the expiry flag can suppress the advisory.
+        assert!(
+            !should_read_scoping_advisory(
+                None,
+                true,
+                "Read",
+                &untargeted,
+                "src/foo.rs",
+                &repo,
+                &repo
+            ),
+            "expired manifest must suppress scoping"
+        );
+
+        // Active manifest → false (the manifest.is_none() gate): the agent
+        // already scoped the task.
+        assert!(
+            !should_read_scoping_advisory(
+                some_manifest_empty().as_ref(),
+                false,
+                "Read",
+                &untargeted,
+                "src/foo.rs",
+                &repo,
+                &repo
+            ),
+            "active manifest must suppress scoping"
+        );
+
+        // Targeted read (offset/limit set) → false (the !read_is_targeted gate)
+        let mut targeted = serde_json::Map::new();
+        targeted.insert("offset".into(), Value::Number(1.into()));
+        assert!(
+            !should_read_scoping_advisory(
+                None,
+                false,
+                "Read",
+                &targeted,
+                "src/foo.rs",
+                &repo,
+                &repo
+            ),
+            "targeted read must pass silently"
+        );
+
+        // Non-Read tool → false
+        assert!(
+            !should_read_scoping_advisory(
+                None,
+                false,
+                "Grep",
+                &untargeted,
+                "src/foo.rs",
+                &repo,
+                &repo
+            ),
+            "non-read tool must not trigger read-scoping"
+        );
+
+        // SAFETY: still under ENV_LOCK; restore the prior value.
+        unsafe {
+            match prev_read {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_READ", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_READ");
+                }
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// `should_read_scoping_advisory` returns false for non-source files —
+    /// the `is_some_and` closure has three conjuncts (file exists, is a
+    /// source file, is not exempt) joined by `&&`. A `&&` → `||` mutant on
+    /// either inner conjunct would let a non-source path trigger the
+    /// advisory; a non-source file in the scratch repo kills both
+    /// mutations in one assertion.
+    #[test]
+    fn should_read_scoping_advisory_rejects_non_source_files() {
+        let _env_guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let repo = scratch_repo("read-scoping-non-source");
+        let f = repo.join("notes.txt");
+        std::fs::write(&f, "plain text\n").unwrap();
+
+        let prev_read = std::env::var("PIXEL_GUARD_READ").ok();
+        // SAFETY: ENV_LOCK (held above) serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so no other thread reads or writes it.
+        unsafe {
+            std::env::remove_var("PIXEL_GUARD_READ");
+        }
+
+        let untargeted = empty_tool_input();
+        assert!(
+            !should_read_scoping_advisory(
+                None,
+                false,
+                "Read",
+                &untargeted,
+                "notes.txt",
+                &repo,
+                &repo
+            ),
+            "non-source file must not trigger read-scoping"
+        );
+
+        // SAFETY: still under ENV_LOCK; restore the prior value.
+        unsafe {
+            match prev_read {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_READ", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_READ");
+                }
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// `should_read_scoping_advisory` returns false for files that do not
+    /// resolve (the `is_some_and` closure short-circuits on
+    /// `resolve(...).is_some_and(...)`). A `&&` → `||` mutant that drops
+    /// the file-exists conjunct would let an unresolved path trigger the
+    /// advisory; a path outside the scratch repo kills that mutation.
+    #[test]
+    fn should_read_scoping_advisory_rejects_unresolved_paths() {
+        let _env_guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let repo = scratch_repo("read-scoping-unresolved");
+        let prev_read = std::env::var("PIXEL_GUARD_READ").ok();
+        // SAFETY: ENV_LOCK (held above) serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so no other thread reads or writes it.
+        unsafe {
+            std::env::remove_var("PIXEL_GUARD_READ");
+        }
+
+        let untargeted = empty_tool_input();
+        assert!(
+            !should_read_scoping_advisory(
+                None,
+                false,
+                "Read",
+                &untargeted,
+                "does-not-exist.rs",
+                &repo,
+                &repo
+            ),
+            "unresolved path must not trigger read-scoping"
+        );
+
+        // SAFETY: still under ENV_LOCK; restore the prior value.
+        unsafe {
+            match prev_read {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_READ", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_READ");
+                }
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    fn some_manifest_empty() -> Option<Manifest> {
+        Some(Manifest {
+            root: PathBuf::from("/tmp"),
+            tasks: vec![],
+        })
+    }
+
+    /// `!env_flag_off("PIXEL_GUARD_READ")`. Kill switch
+    /// suppresses the read-scoping advisory.
+    #[test]
+    fn should_read_scoping_advisory_respects_the_kill_switch() {
+        let _env_guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let repo = scratch_repo("read-scoping-killswitch");
+        let f = repo.join("src/foo.rs");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(&f, "fn main() {}\n").unwrap();
+        let untargeted = empty_tool_input();
+
+        let prev = std::env::var("PIXEL_GUARD_READ").ok();
+        // SAFETY: ENV_LOCK (held above) serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so no other thread reads or writes it.
+        unsafe {
+            std::env::set_var("PIXEL_GUARD_READ", "0");
+        }
+        assert!(
+            !should_read_scoping_advisory(
+                None,
+                false,
+                "Read",
+                &untargeted,
+                "src/foo.rs",
+                &repo,
+                &repo
+            ),
+            "PIXEL_GUARD_READ=0 must suppress the read-scoping advisory"
+        );
+        // SAFETY: still under ENV_LOCK; restore the prior value.
+        unsafe {
+            match prev {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_READ", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_READ");
+                }
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// `lines > read_advisory_min_lines()`. At exactly the
+    /// threshold, the helper must return false; `>=` would change that.
+    /// Below the threshold, also false; one line above, true. This pins the
+    /// boundary against the `>`, `>=`, `==` and `<` mutants.
+    #[test]
+    fn read_scoping_advisory_size_is_strictly_greater_than_threshold() {
+        let _env_guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Clear any host override so the boundary sits on the default
+        // threshold; the value is restored at the end.
+        let prev_lines = std::env::var("PIXEL_GUARD_READ_LINES").ok();
+        // SAFETY: the mutex above serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so no other thread reads or writes
+        // the variable meanwhile.
+        unsafe {
+            std::env::remove_var("PIXEL_GUARD_READ_LINES");
+        }
+        let baseline_min = read_advisory_min_lines();
+        assert_eq!(
+            baseline_min, 350,
+            "the default threshold applies once unset"
+        );
+
+        // At exactly the threshold, the advisory is suppressed.
+        assert!(
+            !read_scoping_advisory_size(baseline_min),
+            "exactly at threshold ({baseline_min}) → no advisory"
+        );
+        // One above: fires.
+        assert!(
+            read_scoping_advisory_size(baseline_min + 1),
+            "above threshold ({baseline_min}) → fires"
+        );
+        // Below threshold: suppressed.
+        assert!(
+            !read_scoping_advisory_size(baseline_min.saturating_sub(1)),
+            "below threshold ({baseline_min}) → no advisory"
+        );
+
+        // SAFETY: still under ENV_LOCK; restore the prior value.
+        unsafe {
+            match prev_lines {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_READ_LINES", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_READ_LINES");
+                }
+            }
+        }
+    }
+
+    /// `manifest_pair` is the one place the guard turns a manifest state into
+    /// the `(manifest, manifest_expired)` pair that `run_provider_guard` and
+    /// `run_guard` forward. An expired manifest must read as `(None, true)`:
+    /// read as absent, it would re-enable the scope-task advisories the agent
+    /// already followed; an active one must keep its tasks so edits stay scoped.
+    #[test]
+    fn manifest_pair_keeps_active_tasks_and_flags_only_expiry() {
+        let (active, active_expired) = manifest_pair(Some(ManifestState::Active(Manifest {
+            root: PathBuf::from("/tmp/pixel-manifest-pair"),
+            tasks: vec![],
+        })));
+        assert_eq!(
+            active.map(|m| m.root),
+            Some(PathBuf::from("/tmp/pixel-manifest-pair")),
+            "an active manifest is forwarded as is"
+        );
+        assert!(!active_expired, "an active manifest is not expired");
+
+        let (expired, expired_flag) = manifest_pair(Some(ManifestState::Expired));
+        assert!(expired.is_none(), "an expired manifest scopes nothing");
+        assert!(expired_flag, "an expired manifest raises the expiry flag");
+
+        for state in [Some(ManifestState::Absent), None] {
+            let (absent, absent_expired) = manifest_pair(state);
+            assert!(absent.is_none(), "no manifest scopes nothing");
+            assert!(!absent_expired, "no manifest is not an expired one");
+        }
     }
 }
