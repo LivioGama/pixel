@@ -251,16 +251,20 @@ fn is_edge_punctuation(c: char) -> bool {
 fn quoted_spans(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
     let mut out = Vec::new();
     for quote in ['\'', '"'] {
-        let mut from = 0usize;
-        while let Some(open) = text[from..].find(quote) {
-            let start = from + open;
-            let inner = start + 1;
-            let Some(close) = text[inner..].find(quote) else {
+        let mut rest = text;
+        let mut consumed = 0usize;
+        while let Some((head, after_open)) = rest.split_once(quote) {
+            let Some((content, tail)) = after_open.split_once(quote) else {
                 break;
             };
-            let end = inner + close;
-            out.push((start..end + 1, text[inner..end].to_string()));
-            from = end + 1;
+            // The quote sits at `head.len()` in `rest`, and both quotes this
+            // scans for are one byte, so a span is its content plus the two
+            // quotes around it.
+            let start = consumed + head.len();
+            let end = start + content.len() + 2;
+            out.push((start..end, content.to_string()));
+            consumed = start + content.len() + 2;
+            rest = tail;
         }
     }
     out.sort_by_key(|(range, _)| range.start);
@@ -357,6 +361,16 @@ mod tests {
         // An all-uppercase word is not a proper noun, and a bare token does
         // not swallow a sentence: `I` is one letter.
         assert!(candidates("go to the ACRONYM and I").is_empty());
+        // An empty quoted span contributes nothing, and a span at the exact
+        // character cap is kept while one past it is not.
+        assert_eq!(candidates("from '' to Zz"), ["Zz"]);
+        let exact = "Z".repeat(MAX_CANDIDATE_CHARS);
+        assert_eq!(
+            candidates(&format!("'{exact}' and Zz")),
+            [exact.as_str(), "Zz"]
+        );
+        let long = "Y".repeat(MAX_CANDIDATE_CHARS + 1);
+        assert_eq!(candidates(&format!("'{long}' and Zz")), ["Zz"]);
     }
 
     #[test]
@@ -395,13 +409,6 @@ mod tests {
         assert_eq!(asked.labels, ["VAR where_from", NONE_LABEL]);
     }
 
-    /// A declared variable replaces the goal's own words as the option set,
-    /// the engine's budget bounds the rest, and a declaration the engine
-    /// cannot fit is refused rather than halved.
-    /// Two quoted spans that share an edge are two candidates, not one: the
-    /// overlap guard must not swallow the span that starts where the last
-    /// one ended, and the mask must keep its length aligned with the text
-    /// (which is what keeps the token scan from re-reading a quoted span).
     /// The mask's own contract, asserted directly: a span that starts where
     /// the last one ended is blanked too (adjacent, not overlapping), the
     /// prose survives, and the length never moves — which is what keeps the
@@ -431,6 +438,10 @@ mod tests {
         assert!(masked.starts_with("    "), "{masked:?}");
     }
 
+    /// Two quoted spans that share an edge are two candidates, not one: the
+    /// overlap guard must not swallow the span that starts where the last
+    /// one ended, and the mask must keep its length aligned with the text
+    /// (which is what keeps the token scan from re-reading a quoted span).
     #[test]
     fn adjacent_quoted_spans_are_two_candidates() {
         // `(0..4)` and `(4..8)` touch; neither contains the other.
@@ -438,6 +449,73 @@ mod tests {
         // The same shape beside prose, so the masked scan still sees what is
         // outside the quotes.
         assert_eq!(candidates("'ab''cd' and Zz"), ["ab", "cd", "Zz"]);
+    }
+
+    /// A token of the right shape is a date only when every field is one:
+    /// the separators are checked one by one, so each of them can reject.
+    #[test]
+    fn is_date_rejects_a_token_that_gets_any_separator_wrong() {
+        assert!(is_date("2026-09-20"));
+        assert!(!is_date("2026/09/20"), "wrong separator one");
+        assert!(!is_date("2026-09x20"), "wrong separator two");
+        assert!(!is_date("20260920x"), "wrong length");
+    }
+
+    /// A proper noun may carry an inner apostrophe; a word that is
+    /// capitalized in any other way (an inner capital, an acronym) is not
+    /// the shape a goal's own values take.
+    #[test]
+    fn is_capitalized_keeps_an_inner_apostrophe_but_not_an_inner_capital() {
+        assert!(is_capitalized("Zurich"));
+        assert!(is_capitalized("What's"), "What's");
+        assert!(!is_capitalized("San-Francisco"), "an inner capital");
+        assert!(!is_capitalized("ACRONYM"), "an acronym");
+        assert!(!is_capitalized("lowercase"));
+    }
+
+    /// A declared variable replaces the goal's own words as the option set,
+    /// the engine's budget bounds the rest, and a declaration the engine
+    /// cannot fit is refused rather than halved.
+    /// The option budget bounds the declared variables at the boundary too:
+    /// exactly `room` variables are offered whole, one more is refused.
+    /// The ranges the scanner reports, read back directly: quote position,
+    /// the two quote bytes, and the order sorted by position — so a mask
+    /// blanks exactly what the goal quoted, garbled input order included.
+    #[test]
+    fn quoted_spans_reports_the_exact_ranges_in_position_order() {
+        let ranges: Vec<(std::ops::Range<usize>, String)> =
+            quoted_spans("go \'a\' then \"b\" to Zz");
+        assert_eq!(
+            ranges,
+            [(3usize..6, "a".to_string()), (12usize..15, "b".to_string()),]
+        );
+        // Mixed quote styles come back in the order the text wrote them.
+        let ranges = quoted_spans("x \"m\" and \'n\' y");
+        assert_eq!(ranges[0].0, 2..5);
+        assert_eq!(ranges[1].0, 10..13);
+        // Two spans of ONE quote style advance a running cursor between
+        // them, so the second offset proves the cursor stepped exactly the
+        // content plus its two quotes (a different length than two, where
+        // doubling would land somewhere else).
+        let ranges = quoted_spans("\'a\' and \'bcd\'");
+        assert_eq!(
+            ranges,
+            [
+                (0usize..3, "a".to_string()),
+                (8usize..13, "bcd".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn the_variable_count_is_accepted_up_to_the_room() {
+        let two = [Var::new("a", "1"), Var::new("b", "2")];
+        let mut decider = ScriptedDecider::always("VAR a");
+        // Budget 3 leaves room for two values beside NONE.
+        choose(&mut decider, "goal", &field("Where to?"), &two, 3).unwrap();
+        assert_eq!(decider.labels_of(0), ["VAR a", "VAR b", NONE_LABEL]);
+        let mut decider = ScriptedDecider::always("VAR a");
+        assert!(choose(&mut decider, "goal", &field("Where to?"), &two, 2).is_err());
     }
 
     #[test]

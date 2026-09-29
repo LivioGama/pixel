@@ -30,9 +30,6 @@ mod audit_cmd;
 mod call_guard;
 mod classify;
 mod classify_setup;
-mod task_sandbox;
-mod task_scheduler;
-mod ultraflow_cmd;
 mod config_cmd;
 mod config_file;
 mod coverage_cmd;
@@ -56,6 +53,7 @@ mod search_filter;
 mod serve_trace;
 mod sniper_cmd;
 mod task_runtime;
+mod ultraflow_cmd;
 
 mod update_notice;
 mod web_search;

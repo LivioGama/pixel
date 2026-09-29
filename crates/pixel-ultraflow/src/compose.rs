@@ -359,19 +359,17 @@ impl Branch<'_> {
             .collect()
     }
 
-    /// The branch in one line, for a warning or a rationale.
+    /// The branch in one line, for a warning or a rationale. `merge` retains
+    /// only branches with steps, so this always names at least one decision.
     fn label(&self, divergence: usize) -> String {
-        let labels: Vec<&str> = self.runs[0]
+        self.runs[0]
             .steps
             .get(divergence..)
             .unwrap_or_default()
             .iter()
             .map(|traced| traced.decision.label.as_str())
-            .collect();
-        if labels.is_empty() {
-            return "nothing (the run ended here)".to_string();
-        }
-        labels.join(" then ")
+            .collect::<Vec<_>>()
+            .join(" then ")
     }
 
     /// The names this branch's page lists at the divergence. All runs in a
@@ -612,7 +610,7 @@ mod tests {
                 .rationale
                 .as_deref()
                 .unwrap()
-                .contains("diverged here"),
+                .contains("this branch ran CLICK"),
             "{:?}",
             steps[1].rationale
         );
@@ -696,6 +694,12 @@ mod tests {
         assert_eq!(composed.warnings.len(), 1, "{:?}", composed.warnings);
         assert!(
             composed.warnings[0].contains("no condition can name"),
+            "{:?}",
+            composed.warnings
+        );
+        // The warning names the path it gave up on, decision by decision.
+        assert!(
+            composed.warnings[0].ends_with("instead: CLICK"),
             "{:?}",
             composed.warnings
         );

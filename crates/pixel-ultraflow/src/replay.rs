@@ -120,7 +120,6 @@ pub fn replay(
         },
         Err(failure) => runner.report.error = Some(failure),
     }
-    runner.report.success = runner.report.success && runner.report.error.is_none();
     runner.report
 }
 
@@ -238,18 +237,14 @@ impl Runner<'_> {
             (None, Some(detail), _) => Some(detail),
             (None, None, None) => Some("the re-decision produced no step".to_string()),
             (None, None, Some(repaired)) => {
-                let (executed, log) = execute_step(&repaired, self.vars, self.flow, self.browser)?;
+                let (_executed, log) = execute_step(&repaired, self.vars, self.flow, self.browser)?;
                 let pad = indentation(depth);
                 let label = &cycle.decision.label;
                 let body = indented(&log, depth);
                 self.report.log.push_str(&format!(
                     "{pad}# {id}: {failure}\n{pad}# {id}: re-decided with pixel classify -> {label}\n{body}"
                 ));
-                if executed {
-                    self.report.steps_executed += 1;
-                } else {
-                    self.report.steps_skipped += 1;
-                }
+                self.report.steps_executed += 1;
                 deviation.repaired = Some(repaired);
                 deviation.detail = format!(
                     "re-decided and ran {} (p={:.2})",
@@ -877,6 +872,67 @@ mod tests {
         );
         assert!(report.success);
         assert!(report.log.contains("the flow names none"), "{}", report.log);
+    }
+
+    /// A step the executor does not know is counted as skipped, not as run —
+    /// and a report that says `0 executed, 1 skipped` is the contract.
+    #[test]
+    fn an_unknown_action_is_counted_as_skipped() {
+        let flow = flow(vec![FlowStep {
+            action: "teleport".to_string(),
+            ..Default::default()
+        }]);
+        let mut browser = ScriptedBrowser::default();
+        browser.observe(URL, PAGE);
+        let mut decider = ScriptedDecider::new(vec![]);
+        let report = replay(&mut browser, &mut decider, &request(&flow, &no_vars()));
+        assert!(report.success, "{:?}", report.error);
+        assert_eq!(report.steps_executed, 0);
+        assert_eq!(report.steps_skipped, 1);
+    }
+
+    /// The repair budget is spent by a repair that *worked*: the next
+    /// failing step is refused, and the report says the flow — not the
+    /// repair — ran out.
+    #[test]
+    fn a_spent_budget_refuses_the_second_repair() {
+        let step = |hint: &str| FlowStep {
+            action: "click".to_string(),
+            ref_hint: Some(hint.to_string()),
+            on_failure: Some(crate::compose::DECIDE_ON_FAILURE.to_string()),
+            ..Default::default()
+        };
+        let flow = flow(vec![
+            step("button containing 'Gone'"),
+            step("button containing 'Also gone'"),
+        ]);
+        let mut browser = ScriptedBrowser::default();
+        // Step 1: the recorded hint misses, the repair finds the link and
+        // its click runs.
+        browser.ok("- button \"Continue\" [ref=e5]");
+        browser.observe(URL, PAGE);
+        browser.ok("- button \"Continue\" [ref=e5]");
+        browser.ok("");
+        // Step 2: the same miss, with no budget left.
+        browser.ok("- button \"Continue\" [ref=e5]");
+        let mut decider = ScriptedDecider::always("CLICK 1");
+        let vars = no_vars();
+        let borrowed = request(&flow, &vars);
+        let bounded = ReplayRequest {
+            max_repairs: 1,
+            ..borrowed
+        };
+        let report = replay(&mut browser, &mut decider, &bounded);
+        assert!(!report.success);
+        assert_eq!(
+            report.error.as_deref(),
+            Some(
+                "step 2 failed: no element matching 'button containing 'Also gone'' found in snapshot"
+            )
+        );
+        assert_eq!(report.deviations.len(), 1);
+        // Only the first failure was re-decided: the budget was spent on it.
+        assert_eq!(decider.asked.len(), 1);
     }
 
     #[test]

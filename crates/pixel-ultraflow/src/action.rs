@@ -176,14 +176,6 @@ impl ActionSpace {
         &self.truncated
     }
 
-    pub fn len(&self) -> usize {
-        self.labels.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.labels.is_empty()
-    }
-
     /// The winning option for a distribution, or `None` when the engine
     /// gave no probability to any offered label.
     pub fn choose(&self, probabilities: &BTreeMap<String, f64>) -> Option<Choice> {
@@ -267,12 +259,8 @@ mod tests {
         assert_eq!(space.criteria()["SELECT 3"], "combobox \"Trip type\"");
         assert!(space.criteria()["DONE"].contains("complete"));
         assert!(space.criteria()["BLOCKED"].contains("progress"));
-        assert!(
-            !space.is_empty(),
-            "a page always offers at least the targetless five"
-        );
         assert!(space.truncated().is_empty());
-        assert_eq!(space.len(), 9);
+        assert_eq!(space.labels().len(), 9);
     }
 
     #[test]
@@ -359,19 +347,19 @@ mod tests {
             "two element options fit in a budget of seven"
         );
         assert_eq!(space.truncated(), [3]);
-        assert_eq!(space.len(), 7);
+        assert_eq!(space.labels().len(), 7);
 
         // A budget below the five targetless options cannot shrink them: a
         // space always says how to stop.
         let tiny = space_within(body, 2);
-        assert_eq!(tiny.len(), 5);
+        assert_eq!(tiny.labels().len(), 5);
         assert_eq!(tiny.truncated(), [1, 2, 3]);
         // And a budget past the schema ceiling is clamped to it.
         let wide: String = (1..=MAX_LABELS + 2)
             .map(|i| format!("- button \"b{i}\" [ref=e{i}]\n"))
             .collect();
         let huge = space_within(&wide, 10_000);
-        assert_eq!(huge.len(), MAX_LABELS, "the schema ceiling holds");
+        assert_eq!(huge.labels().len(), MAX_LABELS, "the schema ceiling holds");
         assert_eq!(huge.truncated().first(), Some(&(MAX_LABELS - 4)));
         assert_eq!(huge.truncated().len(), 7);
     }

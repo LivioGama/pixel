@@ -254,13 +254,15 @@ fn parse_line(body: &str) -> Option<Element> {
 fn bracketed_spans(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut rest = text;
-    while let Some(open) = rest.find('[') {
-        let after = &rest[open + 1..];
-        let Some(close) = after.find(']') else {
-            break;
-        };
-        out.push(&after[..close]);
-        rest = &after[close + 1..];
+    while let Some((_, after_open)) = rest.split_once('[') {
+        match after_open.split_once(']') {
+            Some((span, tail)) => {
+                out.push(span);
+                rest = tail;
+            }
+            // An unclosed `[` opens nothing.
+            None => break,
+        }
     }
     out
 }
@@ -281,7 +283,7 @@ fn first_quoted(text: &str) -> Option<String> {
 /// what lets it skip a comma inside a quoted value.
 fn attr(attrs: &str, key: &str) -> Option<String> {
     let mut rest = attrs.trim_start_matches([',', ' ']);
-    while !rest.is_empty() {
+    loop {
         if let Some(after) = rest
             .strip_prefix(key)
             .and_then(|tail| tail.strip_prefix('='))
@@ -297,12 +299,11 @@ fn attr(attrs: &str, key: &str) -> Option<String> {
                     .to_string(),
             });
         }
-        rest = match rest.find(',') {
-            Some(comma) => rest[comma + 1..].trim_start_matches(' '),
-            None => "",
-        };
+        // Advance past this attribute — and past a comma inside a quoted
+        // value, which is why this is not `split(',')`. `split_once` always
+        // moves forward, so a malformed list cannot spin the scan.
+        rest = rest.split_once(',')?.1.trim_start_matches(' ');
     }
-    None
 }
 
 /// Whether a comma-separated attribute list carries `key` with no value.
@@ -407,6 +408,14 @@ mod tests {
         // An empty value is not rendered: it says nothing a decision needs,
         // while the criterion still names the field.
         assert!(!elements[1].describe().contains("holding"));
+        // An empty value is not rendered into the table either: ` = ""` says
+        // nothing a decision needs and would read as a typed value.
+        let observation = Observation::of(
+            String::new(),
+            "- textbox \"Where to?\" [value=\"\", ref=e8]".to_string(),
+        );
+        assert!(observation.table().contains("[1] textbox \"Where to?\""));
+        assert!(!observation.table().contains(" = "));
         assert!(elements[0].describe().contains("holding \"San Francisco\""));
     }
 

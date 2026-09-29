@@ -214,7 +214,7 @@ pub fn one_cycle(
     let Some(choice) = space.choose(&distribution.probabilities) else {
         return Err(format!(
             "the decision engine gave no probability to any of the {} options offered on {}",
-            space.len(),
+            space.labels().len(),
             page.url
         ));
     };
@@ -222,7 +222,7 @@ pub fn one_cycle(
         label: choice.label.clone(),
         probability: choice.probability,
         model: distribution.model.clone(),
-        offered: space.len(),
+        offered: space.labels().len(),
         truncated: space.truncated().len(),
     };
     if let Some(terminal) = match choice.action.op {
