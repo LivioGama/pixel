@@ -4,6 +4,6 @@ description: "What pixel install deploys into Antigravity's config: the Pixel pl
 agent: "antigravity"
 ---
 
-<!-- Setup sections: data/agents.toml through layouts/shortcodes/agent-setup.html. No figure on this page: nothing was measured on Antigravity. -->
+<!-- Setup sections: data/agents.toml through layouts/shortcodes/agent-setup.html. -->
 
 {{% agent-setup %}}

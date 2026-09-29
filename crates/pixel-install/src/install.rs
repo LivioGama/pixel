@@ -79,8 +79,9 @@ pub struct InstallOptions {
     /// (`pixel install --repo <path>`). When set, ONLY repo-local steps run:
     /// `.codex/config.toml` + `.codex/hooks.json`, `.devin/config.local.json`,
     /// `.claude/settings.local.json` (PreToolUse guard), and
-    /// `.pi/extensions/pixel-guard.ts` ([`REPO_ARTIFACTS`]) — none of the
-    /// global prompt/lifecycle-hook deploys.
+    /// `.pi/extensions/pixel-guard.ts`, `.warp/.mcp.json`, and a portable
+    /// Pixel-first block in the repository's `AGENTS.md`
+    /// ([`REPO_ARTIFACTS`]) — none of the global prompt/lifecycle-hook deploys.
     pub repo: Option<PathBuf>,
 }
 
@@ -183,6 +184,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
             &home, &exe, dry_run,
         )?);
     }
+    steps.push(crate::routing::install_zcode_at(&home, &exe, dry_run)?);
 
     let green = steps
         .iter()
@@ -217,14 +219,17 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
 ///   - `<repo>/.codex/hooks.json` — the composed-guard PreToolUse group plus
 ///     its `pixel-composed-guard-backup.json` sidecar, which snapshots any
 ///     pre-existing project hooks so the composed runtime can replay them;
-///   - `<repo>/.devin/config.local.json` — a pixel `run-hook guard --provider
-///     devin` PreToolUse group merged alongside any foreign entries;
+///   - `<repo>/.devin/config.local.json` — Pixel's Devin PreToolUse rewrite,
+///     PermissionRequest retrieval approval, and prompt-context hooks merged
+///     alongside any foreign entries;
 ///   - `<repo>/.claude/settings.local.json` — a pixel `run-hook guard
 ///     --provider claude` PreToolUse group merged alongside any foreign
 ///     entries (the personal project settings: the command names this
 ///     machine's binary, so the shared `settings.json` never carries it);
 ///   - `<repo>/.pi/extensions/pixel-guard.ts` — pi's guard extension
 ///     ([`crate::pi_project`]).
+///   - `<repo>/.warp/.mcp.json` — Warp's project-scoped Pixel retrieval tools
+///     ([`crate::warp`]); Warp requires explicitly trusting project servers.
 ///
 /// Every one of those files is then listed in the clone's `info/exclude`
 /// ([`crate::repo_git`]). Codex has no personal project file, so a
@@ -252,6 +257,8 @@ fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Resul
         codex_step,
         crate::routing::install_project_devin_at(repo, exe, dry_run)?,
         crate::pi_project::install(repo, exe, dry_run)?,
+        crate::warp::install(repo, exe, dry_run)?,
+        crate::warp::install_rules(repo, dry_run)?,
         exclude_project_artifacts(repo, dry_run)?,
     ];
 
@@ -360,6 +367,14 @@ pub const REPO_ARTIFACTS: &[RepoArtifact] = &[
         path: crate::pi_project::EXTENSION,
         machine_local: true,
     },
+    RepoArtifact {
+        path: crate::warp::CONFIG_FILE,
+        machine_local: true,
+    },
+    RepoArtifact {
+        path: "AGENTS.md",
+        machine_local: false,
+    },
 ];
 
 /// The [`REPO_ARTIFACTS`] that name this machine's pixel binary.
@@ -400,7 +415,7 @@ pub(crate) const SUBAGENT_PROMPT_FILE: &str = "subagent-prompt.md";
 pub(crate) const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
 
 /// Pi keeps operational policy in its extension and exposes only this short rule.
-pub(crate) const PI_PROMPT_ASSET: &str = "Use the pixel tool for repository retrieval and repository Git workflows. Request the outcome through a stable action and goal. Native repository discovery is guarded.\n";
+pub(crate) const PI_PROMPT_ASSET: &str = "Use the pixel tool for repository retrieval and repository Git workflows. The extension injects task context and post-edit impact automatically. Policy is advisory by default; `pixel config policy enforce` (or PIXEL_POLICY=enforce) opts into supported retrieval checks, `pixel config policy off` disables them. A prior-pixel-call edit gate applies only while Pixel reports healthy — when Pixel health is unhealthy or unknown, edits stay allowed. Native compositions and unsupported capabilities remain available; a failed Pixel operation allows native tools.\n";
 
 const LEGACY_PI_PROMPT_BEGIN: &str = "# Pixel Retrieval Layer\n";
 const LEGACY_PI_PROMPT_END: &str = "All commands accept `[PATH]`, default current directory.\n";

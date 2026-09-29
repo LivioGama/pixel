@@ -1,0 +1,11 @@
+#!/bin/sh
+# Keep `cargo fmt --all -- --check` (CI: Test + Format) from ever failing a
+# review round again: format first, and if anything moved, block the commit
+# so the diff can be staged deliberately rather than smuggled in unreviewed.
+set -e
+cargo fmt --all
+if ! git diff --quiet -- '*.rs'; then
+    echo "pre-commit: cargo fmt rewrote files; stage them and retry:"
+    git diff --name-only -- '*.rs' | sed 's/^/  git add /'
+    exit 1
+fi

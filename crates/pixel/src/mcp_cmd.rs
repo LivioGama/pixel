@@ -190,10 +190,12 @@ impl ServerHandler for PixelServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("pixel", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Deterministic answers about this repository's code index: \
-                 search, resolve, impact, callers/callees, evaluate, context. \
-                 Prefer these over reading files — they are bounded and carry \
-                 evidence.",
+                "Use Pixel as the first retrieval step for repository code discovery. \
+                 Search for known identifiers, resolve behavior/concepts, then \
+                 inspect callers or bounded symbol context as needed. Prefer these \
+                 tools over native search and broad file reads; the answers are \
+                 bounded and carry freshness and epistemic evidence. Native reads \
+                 remain available for focused follow-up or when Pixel is unavailable.",
             )
     }
 }
@@ -311,7 +313,7 @@ mod tests {
         assert!(
             info.instructions
                 .as_deref()
-                .is_some_and(|i| i.contains("Deterministic")),
+                .is_some_and(|i| i.contains("first retrieval step")),
             "{:?}",
             info.instructions
         );

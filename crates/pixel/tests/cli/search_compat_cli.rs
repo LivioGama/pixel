@@ -30,6 +30,7 @@ impl Fixture {
             .env("PIXEL_DAEMON_AUTO_START", "0")
             .env_remove("RIPGREP_CONFIG_PATH")
             .env_remove("GREP_OPTIONS")
+            .env_remove("PIXEL_POLICY")
             .env_remove("PIXEL_TARGETS_GUARD");
         command
     }
@@ -303,7 +304,7 @@ fn codex_argv_shell_events_rewrite_only_the_script_token() {
 fn unsupported_provider_commands_never_get_authorized_or_rewritten() {
     let fixture = Fixture::new(b"needle\n");
     std::fs::write(fixture.0.join("#file"), b"needle\n").unwrap();
-    for provider in ["claude", "codex", "devin"] {
+    for provider in ["claude", "codex"] {
         for command in [
             "grep -rln needle . | wc -l",
             "grep -A20 needle 'a file.rs'",
@@ -313,10 +314,33 @@ fn unsupported_provider_commands_never_get_authorized_or_rewritten() {
             "grep -F needle #file",
         ] {
             let out = fixture.guard(provider, command, false, None);
-            assert!(out.status.success());
+            assert!(out.status.success(), "{provider}: {command}");
             assert!(out.stdout.is_empty(), "{provider}: {command}");
             assert!(out.stderr.is_empty(), "{provider}: {command}");
         }
+    }
+    for command in [
+        "grep -rln needle . | wc -l",
+        "grep -A20 needle 'a file.rs'",
+        "git reset --hard HEAD",
+        "env LC_ALL=C grep needle 'a file.rs'",
+        "grep -F needle #file",
+    ] {
+        let out = fixture.guard("devin", command, false, None);
+        assert!(out.status.success(), "devin: {command}");
+        assert!(out.stdout.is_empty(), "devin: {command}");
+        assert!(out.stderr.is_empty(), "devin: {command}");
+    }
+    let rtk_grep = fixture.guard("devin", "rtk grep needle 'a file.rs'", false, None);
+    assert!(rtk_grep.status.success());
+    let response: serde_json::Value = serde_json::from_slice(&rtk_grep.stdout).unwrap();
+    assert_eq!(
+        response["hookSpecificOutput"]["updatedInput"]["command"],
+        "pixel search-like-rg grep -- 'needle' 'a file.rs'"
+    );
+    assert!(response.get("decision").is_none(), "{response}");
+
+    for provider in ["claude", "codex", "devin"] {
         let quoted = fixture.guard(provider, "grep -F needle '#file'", false, None);
         let response: serde_json::Value = serde_json::from_slice(&quoted.stdout).unwrap();
         assert!(response["hookSpecificOutput"].get("updatedInput").is_some());
@@ -343,6 +367,7 @@ fn credential_shaped_paths_keep_native_permission_boundaries() {
             let out = fixture.guard(provider, &format!("grep needle '{path}'"), false, None);
             assert!(out.status.success(), "{provider}: {path}");
             assert!(out.stdout.is_empty(), "{provider}: {path}");
+            assert!(out.stderr.is_empty(), "{provider}: {path}");
         }
     }
 }

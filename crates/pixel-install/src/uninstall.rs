@@ -53,8 +53,9 @@ pub struct UninstallOptions {
     /// wrote (`pixel uninstall --repo <path>`). When set, ONLY repo-local
     /// removal runs: `.codex/hooks.json` + composed backup,
     /// `.codex/config.toml`, `.claude/settings.local.json`,
-    /// `.devin/config.local.json`, and `.pi/extensions/pixel-guard.ts`
-    /// (plus pixel's files in the `.pi/agent/` older releases used).
+    /// `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` (plus
+    /// pixel's files in the `.pi/agent/` older releases used),
+    /// `.warp/.mcp.json`, and Pixel's managed root `AGENTS.md` block.
     pub repo: Option<PathBuf>,
 }
 
@@ -66,6 +67,7 @@ const PIXEL_HOOK_MARKERS: &[&str] = &[
     config::PROMPT_SUBMIT_HOOK,
     config::POST_COMPACTION_HOOK,
     crate::codex_config::METRICS_HOOK_MARKER,
+    "run-hook guard --provider zcode",
 ];
 
 /// Run `pixel uninstall`. Idempotent: safe to re-run.
@@ -185,7 +187,9 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
 ///   - `<repo>/.devin/config.local.json` (and the legacy `.devin/hooks.json`)
 ///     — the pixel guard group only;
 ///   - `<repo>/.pi/extensions/pixel-guard.ts`, and pixel's files in the
-///     `<repo>/.pi/agent/` an older release used ([`crate::pi_project`]).
+///     `<repo>/.pi/agent/` an older release used ([`crate::pi_project`]);
+///   - the Pixel-first managed block in `<repo>/AGENTS.md`, preserving all
+///     instructions outside its markers ([`crate::warp`]).
 fn uninstall_project(
     repo: &Path,
     binary_path: &Path,
@@ -264,6 +268,8 @@ fn uninstall_project(
             }
         },
         crate::pi_project::uninstall(repo, dry_run)?,
+        crate::warp::uninstall(repo, exe, dry_run)?,
+        crate::warp::uninstall_rules(repo, dry_run)?,
     ];
 
     let green = steps

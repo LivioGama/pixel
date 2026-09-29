@@ -198,3 +198,7 @@ are global only. Legacy JSON remains supported until install/edit creates YAML.
 `pixel install` offers the same flow. Classification is disabled by default;
 `pixel config classify on` explicitly enables it, and `off` blocks all engines.
 Respect a disabled setting; code retrieval works independently of classify.
+`pixel config policy advisory|enforce|off` sets the retrieval policy (default
+`advisory`): `enforce` denies supported native retrieval in Codex, Antigravity,
+Devin and Pi, `off` disables policy decisions; `PIXEL_POLICY` overrides it for
+one environment.

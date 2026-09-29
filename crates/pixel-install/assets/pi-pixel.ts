@@ -2,16 +2,42 @@
 // __MANAGED_BEGIN__
 // __MANAGED_END__
 import { spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const PIXEL_BIN = __PIXEL_BIN__;
 const MAX_OUTPUT = 16000;
 const READ_LIMIT = 200;
+const BOOTSTRAP_BUDGET = 2400;
+const MIN_PROMPT_LEN = 12;
+const EDIT_TOOLS = new Set(["edit", "write", "apply_patch", "edit_file", "replace_file_content", "write_to_file"]);
 const ACTIONS = ["scope_task", "list_areas", "search_content", "find_code", "impact", "pack_context", "what_changed", "review_changes", "fetch", "commit", "commit_and_push"] as const;
 type Action = (typeof ACTIONS)[number];
+type Policy = "advisory" | "enforce" | "off";
+const POLICIES = new Set<string>(["advisory", "enforce", "off"]);
+const policies = new Map<string, Policy>();
+
+// The environment wins without a spawn; otherwise the layered configuration
+// decides (`pixel config policy`, the repository file over the global one),
+// read once per project root. A Pixel that cannot answer leaves advisory in
+// place: configuration is best effort and native tools stay available.
+function policyFor(root: string): Policy {
+  if (["0", "false", "off"].includes(process.env.PIXEL_TARGETS_GUARD?.trim().toLowerCase() ?? "")) return "off";
+  const override = process.env.PIXEL_POLICY?.trim().toLowerCase();
+  if (override) return POLICIES.has(override) ? override as Policy : "advisory";
+  const cached = policies.get(root);
+  if (cached) return cached;
+  let policy: Policy = "advisory";
+  try {
+    const result = spawnSync(PIXEL_BIN, ["config", "policy", "--json", "--metrics", "off"], { cwd: root, encoding: "utf8", timeout: 5000 });
+    const reported = result.status === 0 ? JSON.parse(String(result.stdout)).policy : undefined;
+    if (POLICIES.has(reported)) policy = reported;
+  } catch { /* Unreadable configuration keeps the advisory default. */ }
+  policies.set(root, policy);
+  return policy;
+}
 const LEGACY_OP: Record<string, string> = {
   "scope-task": "targets", "list-areas": "clusters", "search-content": "search",
   "find-code": "resolve", "pack-context": "context", "what-changed": "changes",
@@ -89,10 +115,6 @@ function audit(root: string, kind: string, reason: string, extra: Record<string,
   } catch { /* Logging must never loosen or break the policy. */ }
 }
 
-function shellQuote(value: string) {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
 function inRepo(root: string, path: string) {
   const rel = relative(root, isAbsolute(path) ? path : resolve(root, path));
   return rel === "" || (rel !== ".." && !rel.startsWith("../") && !isAbsolute(rel));
@@ -154,76 +176,49 @@ function commandFor(action: Action, p: any): string[][] {
   }
 }
 
-function simpleTranslation(command: string, root: string, resolvedPaths: Set<string>) {
+function simpleTranslation(command: string, root: string) {
   const text = command.trim();
   if (/[|;&`$<>\\\n]/.test(text)) return null;
-  const match = /^(ls|rg|grep|git|cat)\s*(.*)$/.exec(text);
+  const match = /^(ls|rg|grep|git|cat)(?:\s+|$)(.*)$/.exec(text);
   if (!match) return null;
   const [, verb, rest] = match;
-  if (verb === "cat" && /^[\w./-]+$/.test(rest) && resolvedPaths.has(relativeTarget(root, rest))) {
+  if (rest.startsWith("-")) return null;
+  if ((verb === "cat" || verb === "ls") && rest && !inRepo(root, rest)) return null;
+  if (verb === "cat" && /^[\w./-]+$/.test(rest)) {
     return ["search-content", "^", rest, "--json", "--limit", "200"];
   }
   if (verb === "ls" && /^[\w./-]*$/.test(rest)) return ["list-areas", "--json"];
   if ((verb === "rg" || verb === "grep") && /^['"]?[\w.*/:-]+['"]?(?:\s+[\w./-]+)?$/.test(rest)) {
     const [query, path] = rest.split(/\s+/);
+    if (path && !inRepo(root, path)) return null;
     return ["search-content", query.replace(/^['"]|['"]$/g, ""), ...(path ? [path] : []), "--limit", "40"];
   }
   if (verb === "git") {
     if (rest === "status") return ["repo-state", "--json"];
     if (rest === "diff") return ["review-changes", "--json"];
     if (rest === "log") return ["commit-history", "--json"];
-    if (rest === "fetch" || /^fetch [\w.-]+$/.test(rest)) return ["fetch", rest.split(" ")[1] ?? "origin", "--json"];
     if (/^blame [\w./-]+$/.test(rest)) return ["who-wrote", rest.slice(6), "--json"];
   }
   return null;
 }
 
-function safeTransfer(command: string, root: string) {
-  const words: string[] = [];
-  const token = /\s*(?:'([^']*)'|"([^"]*)"|([^\s'"]+))/y;
-  for (let offset = 0; offset < command.length;) {
-    token.lastIndex = offset;
-    const match = token.exec(command);
-    if (!match) return false;
-    if (match[3]?.startsWith("#")) return false;
-    words.push(match[1] ?? match[2] ?? match[3]);
-    offset = token.lastIndex;
-  }
-  const paths: string[] = [];
-  let literalPaths = false;
-  for (const word of words.slice(1)) {
-    if (/[~*?\[\]{}]/.test(word)) return false;
-    if (!literalPaths && word === "--") { literalPaths = true; continue; }
-    if (!literalPaths && word.startsWith("-")) {
-      if (paths.length === 0 && /^-[RrHLPpfinvXc]+$/.test(word)) continue;
-      return false;
-    }
-    paths.push(word);
-  }
-  if (paths.length < 2) return false;
-  if (!paths.slice(0, -1).some((path) => inRepo(root, path))) return true;
-  let destination = resolve(root, paths.at(-1)!);
-  while (true) {
-    try { return inRepo(realpathSync(root), realpathSync(destination)); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || dirname(destination) === destination) return false;
-      destination = dirname(destination);
-    }
-  }
-}
-
-function classify(tool: string, input: any, root: string, resolvedPaths: Set<string>): { kind: string; reason: string; translation?: string[]; readLimit?: number } {
+function classify(tool: string, input: any, root: string, resolvedPaths: Set<string>, state: { pixelHealthy?: boolean; pixelCalled: boolean }): { kind: string; reason: string; operation?: string } {
   if (tool === "pixel") return { kind: "tool", reason: "structured Pixel" };
-  if (["edit", "write", "apply_patch", "todo", "web_search", "web_contents", "web_answer", "bg_wait"].includes(tool)) {
-    return { kind: "exception", reason: "edit or non-repository tool" };
+  if (EDIT_TOOLS.has(tool)) {
+    // Edits stay allowed when Pixel is unhealthy: the pixel tool already
+    // reports the repair path, and gating would deadlock the session.
+    if (state.pixelHealthy === true && !state.pixelCalled) {
+      return { kind: "blocked", reason: "Call pixel before editing: scope_task with your goal, or pack_context on the target symbol" };
+    }
+    return { kind: "exception", reason: "edit tool" };
+  }
+  if (["todo", "web_search", "web_contents", "web_answer", "bg_wait"].includes(tool)) {
+    return { kind: "exception", reason: "non-repository tool" };
   }
   if (tool === "read" || tool === "view_file") {
     const path = String(input.path ?? input.file_path ?? "");
     if (path && !inRepo(root, path)) return { kind: "exception", reason: "outside repository" };
     const target = path ? relativeTarget(root, path) : "";
-    if (path && resolvedPaths.has(target) && (!input.limit || Number(input.limit) > READ_LIMIT)) {
-      return { kind: "translated", reason: "bounded Pixel-resolved target read", readLimit: READ_LIMIT };
-    }
     if (path && resolvedPaths.has(target) && Number(input.limit) > 0 && Number(input.limit) <= READ_LIMIT) {
       return { kind: "exception", reason: "bounded Pixel-resolved target read" };
     }
@@ -231,34 +226,62 @@ function classify(tool: string, input: any, root: string, resolvedPaths: Set<str
   }
   if (tool === "bash" || tool === "run_command") {
     const command = String(input.command ?? input.cmd ?? "").trim();
-    if (/[|;&`$<>\\\n]/.test(command)) {
-      return { kind: "blocked", reason: "Shell composition can hide repository reads; call pixel with the full task goal" };
-    }
-    if (/^pixel(?:-dev)? (build-index|prepare-repo|doctor|status)(?:\s|$)/.test(command)) {
-      return { kind: "exception", reason: "explicit Pixel recovery or health check" };
-    }
-    if (/^pixel(?:-dev)?(?:\s|$)/.test(command)) return { kind: "blocked", reason: "Call the structured pixel tool with an outcome" };
-    const translation = simpleTranslation(command, root, resolvedPaths);
-    if (translation) return { kind: "translated", reason: translation[0], translation };
-    if (/\b(ls|tree|rg|grep|find|fd|cat|head|tail|git\s+(status|diff|log|blame|fetch)|python|python3|node|ruby|perl|awk|sed)\b/.test(command)) {
-      return { kind: "blocked", reason: "Ambiguous repository read; call pixel with the full task goal" };
-    }
-    if (/^(?:cp|mv)(?:\s|$)/.test(command) && !safeTransfer(command, root)) {
-      return { kind: "blocked", reason: "Copying or moving repository content outside the repository bypasses Pixel reads" };
-    }
-    if (/^(cargo|make|just|npm|pnpm|bun|pytest|go|mkdir|cp|mv|rm|touch|chmod|echo|printf|true|false)(?:\s|$)/.test(command)) {
-      return { kind: "exception", reason: "build, test, edit, or execution command" };
-    }
-    return { kind: "blocked", reason: "Unknown shell capability may read the repository; use pixel or a documented exception" };
+    // Only suggest routes for simple commands with known capabilities.
+    // Compositions and unsupported syntax retain their shell semantics.
+    const translation = simpleTranslation(command, root);
+    if (translation) return { kind: "blocked", reason: `Use pixel ${translation[0]} for repository retrieval`, operation: translation[0] };
+    return { kind: "exception", reason: "native command or unsupported shell syntax" };
   }
-  return { kind: "blocked", reason: `No repository-read policy for tool ${tool}; use pixel` };
+  if (["grep", "find", "ls", "glob", "list_dir", "grep_search", "file_search"].includes(tool)) {
+    const path = input.path ?? input.directory ?? input.target_directory;
+    if (typeof path === "string" && !inRepo(root, path)) return { kind: "exception", reason: "outside repository" };
+    return { kind: "blocked", reason: "Use the pixel tool for repository retrieval" };
+  }
+  return { kind: "exception", reason: "unknown tool capability" };
+}
+
+function pixelText(root: string, args: string[]): string | null {
+  try {
+    const out = run(root, args);
+    const trimmed = out.trim();
+    if (!trimmed) return null;
+    return trimmed;
+  } catch {
+    return null;
+  }
+}
+
+function formatWhatChanged(stdout: string): string | null {
+  const j = parseEvidence(stdout) as any;
+  if (!j || typeof j !== "object") return null;
+  const lines: string[] = [];
+  lines.push(`changed_files: ${j.changed_files ?? 0}  risk: ${j.risk ?? "?"}`);
+  const syms: any[] = j.symbols ?? [];
+  for (const s of syms.slice(0, 15)) {
+    const procs = s.processes_total ? `  (${s.processes_total} flows)` : "";
+    lines.push(`  ${s.change}  ${s.name}  ${s.path}${procs}`);
+  }
+  if (syms.length > 15) lines.push(`  …+${syms.length - 15} more`);
+  const tests: any[] = j.suggested_tests ?? [];
+  if (tests.length) lines.push(`suggested tests: ${tests.slice(0, 10).join(", ")}`);
+  if (j.envelope_note) lines.push(`note: ${j.envelope_note}`);
+  return lines.length > 1 ? lines.join("\n") : null;
 }
 
 export default function activate(pi: ExtensionAPI) {
   const resolvedPaths = new Set<string>();
+  const state: { pixelHealthy?: boolean; pixelCalled: boolean } = { pixelCalled: false };
+  pi.on("session_start", async () => {
+    resolvedPaths.clear();
+    state.pixelHealthy = undefined;
+    state.pixelCalled = false;
+    installed = undefined;
+  });
+  // Keep a distinct name from the global Pixel extension: Pi 0.87.1 rejects
+  // duplicate tool names during startup, before session_start can inspect them.
   pi.registerTool({
-    name: "pixel", label: "Pixel",
-    description: "Mandatory repository retrieval and Git interface. Provide the desired outcome as goal; actions are stable across Pixel CLI versions.",
+    name: "pixel_project", label: "Pixel (project)",
+    description: "Repository retrieval and Git interface. Provide the desired outcome as goal; actions are stable across Pixel CLI versions.",
     parameters: Type.Object({
       action: Type.Union(ACTIONS.map((a) => Type.Literal(a))),
       goal: Type.Optional(Type.String()),
@@ -284,6 +307,7 @@ export default function activate(pi: ExtensionAPI) {
         const steps = commandFor(action, p);
         const evidence = steps.map((args) => {
           const output = run(root, args);
+          rememberPaths(parseEvidence(output), resolvedPaths, root);
           return { operation: args[0], output: parseEvidence(output.slice(0, MAX_OUTPUT)), truncated: output.length > MAX_OUTPUT };
         });
         if (action === "find_code" && /\b(investigate|analy[sz]e|understand)\b/i.test(String(p.goal ?? ""))) {
@@ -294,46 +318,115 @@ export default function activate(pi: ExtensionAPI) {
             const uid = `${match.path}#${match.owner ? `${match.owner}::` : ""}${match.raw}#${match.symbol_kind}`;
             for (const args of [["impact", uid, "--json"], ["pack-context", uid, "--json", "--budget", "1200"]]) {
               const output = run(root, args);
+              rememberPaths(parseEvidence(output), resolvedPaths, root);
               evidence.push({ operation: args[0], output: parseEvidence(output.slice(0, MAX_OUTPUT)), truncated: output.length > MAX_OUTPUT });
             }
           }
         }
         const truncated = evidence.some((item) => item.truncated);
-        evidence.forEach((item) => rememberPaths(item.output, resolvedPaths, root));
         const first = evidence[0].output as any;
         const next_action = truncated ? "Narrow the scope or query"
           : action === "find_code" && first?.confidence !== "resolved" ? "Try search_content with a concrete token"
           : action === "search_content" && Array.isArray(first) && first.length === 0 ? "Broaden the query or check index coverage"
           : undefined;
         const result = { action, evidence, index, truncated, next_action };
+        state.pixelHealthy = true;
+        state.pixelCalled = true;
         audit(root, "tool", action, { index_health: "present", graph_present: index.graph?.present, facts_fresh: index.facts?.fresh, truncated });
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
       } catch (error) {
-        const result = { action, error: String(error), next_action: "Repair Pixel availability or narrow the request; no native fallback" };
-        audit(root, "blocked", action, { reason: "Pixel unavailable or operation failed" });
+        state.pixelHealthy = false;
+        installed = undefined;
+        const result = { action, error: String(error), next_action: "Repair Pixel availability or narrow the request; native tools remain available" };
+        audit(root, "unavailable", action, { reason: "Pixel unavailable or operation failed" });
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
       }
     },
   });
 
-  pi.on("tool_call", async (event, ctx) => {
-    const decision = classify(event.toolName, event.input, ctx.cwd, resolvedPaths);
-    audit(ctx.cwd, decision.kind, decision.reason, { tool: event.toolName, raw_read_covered: ["read", "view_file", "bash", "run_command", "grep", "find", "ls", "glob", "list_dir", "grep_search", "file_search"].includes(event.toolName) });
-    if (decision.kind === "blocked") return { block: true, reason: JSON.stringify({ policy: "pixel", redirect: decision.reason }) };
-    if (decision.readLimit) event.input.limit = decision.readLimit;
-    if (decision.translation) {
-      let rewrite;
-      try {
-        const [name, ...args] = decision.translation;
-        rewrite = [shellQuote(PIXEL_BIN), shellQuote(resolveOperation(name)), ...args.map(shellQuote), "--metrics", "off"].join(" ");
-      }
-      catch (error) {
-        audit(ctx.cwd, "blocked", "Pixel unavailable", { tool: event.toolName });
-        return { block: true, reason: JSON.stringify({ policy: "pixel", error: String(error), redirect: "Repair Pixel, then retry" }) };
-      }
-      if ("command" in event.input) event.input.command = rewrite;
-      else event.input.cmd = rewrite;
+  // Keep both the global and project-specific Pixel tools available even when
+  // a restored tool selection predates this project extension.
+  const activatePixelTool = () => {
+    const active = pi.getActiveTools();
+    const available = new Set(pi.getAllTools().map((tool) => tool.name));
+    const pixelTools = ["pixel", "pixel_project"].filter((name) => available.has(name));
+    const missing = pixelTools.filter((name) => !active.includes(name));
+    if (missing.length) pi.setActiveTools([...active, ...missing]);
+  };
+  pi.on("session_start", activatePixelTool);
+  pi.on("model_select", activatePixelTool);
+
+  // Task context is independent of optional enforcement. Parse complete
+  // evidence before capping the text sent to the model.
+  pi.on("before_agent_start", async (event, ctx) => {
+    const root = ctx?.cwd ?? process.cwd();
+    const prompt = String((event as any).prompt ?? "");
+    if (prompt.trim().length < MIN_PROMPT_LEN) return;
+    try {
+      const index = health(root, "scope_task");
+      const scope = run(root, ["scope-task", prompt, "--json", "--no-manifest", "--max-tier", "P1", "--limit", "15"]).trim();
+      const repo = run(root, ["repo-state", "--json"]).trim();
+      for (const text of [scope, repo]) rememberPaths(parseEvidence(text), resolvedPaths, root);
+      state.pixelHealthy = true;
+      audit(root, "bootstrap", "scope-task and repo-state injected", { graph_present: index.graph?.present });
+      const guidance = policyFor(root) === "enforce"
+        ? "Enforcement is enabled for supported native retrieval. Call the pixel tool before editing; compositions and unsupported syntax retain native behavior."
+        : "Use these targets as suggestions. Native tools remain available; `pixel config policy enforce` opts into retrieval enforcement, `pixel config policy off` disables policy checks.";
+      return {
+        message: {
+          customType: "pixel-bootstrap", display: false,
+          content: `PIXEL TASK CONTEXT (deterministic, from pixel scope-task + repo-state):\n\n${scope.slice(0, BOOTSTRAP_BUDGET)}${scope.length > BOOTSTRAP_BUDGET ? "\n…(truncated)" : ""}\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}\n\n${guidance}`,
+        },
+      };
+    } catch (error) {
+      state.pixelHealthy = false;
+      installed = undefined;
+      audit(root, "bootstrap", "pixel unavailable", { reason: String(error) });
+      return {
+        message: {
+          customType: "pixel-bootstrap", display: false,
+          content: `PIXEL UNAVAILABLE: ${String(error)}. Repair Pixel when possible. Native tools remain available.`,
+        },
+      };
     }
+  });
+
+  pi.on("tool_call", async (event, ctx) => {
+    const mode = policyFor(ctx.cwd);
+    if (mode === "off") return;
+    const decision = classify(event.toolName, event.input, ctx.cwd, resolvedPaths, state);
+    if (decision.kind === "blocked" && mode === "enforce" && state.pixelHealthy === true) {
+      try { if (decision.operation) resolveOperation(decision.operation); }
+      catch {
+        state.pixelHealthy = false;
+        installed = undefined;
+        audit(ctx.cwd, "advisory", "Pixel capability unavailable; native tool preserved", { tool: event.toolName });
+        return;
+      }
+      audit(ctx.cwd, "blocked", decision.reason, { tool: event.toolName });
+      return { block: true, reason: JSON.stringify({ policy: "pixel", redirect: decision.reason }) };
+    }
+    audit(ctx.cwd, decision.kind === "blocked" ? "advisory" : decision.kind, decision.reason, { tool: event.toolName });
     return undefined;
+  });
+
+  // A tool_result replacement must carry forward the original result. Only
+  // successful edits have a post-edit snapshot; failures retain diagnostics.
+  pi.on("tool_result", async (event, ctx) => {
+    if (!EDIT_TOOLS.has(event.toolName) || event.isError) return;
+    const root = ctx?.cwd ?? process.cwd();
+    const raw = pixelText(root, ["what-changed", "--json", "--tests"]);
+    if (!raw) {
+      state.pixelHealthy = false;
+      installed = undefined;
+      return;
+    }
+    const compact = formatWhatChanged(raw);
+    if (!compact) return;
+    return {
+      content: [...event.content, { type: "text", text: `PIXEL BLAST RADIUS (pixel what-changed):\n\n${compact}\n\nEdits are unverified until the project's build/tests run.` }],
+      details: event.details,
+      isError: event.isError,
+    };
   });
 }

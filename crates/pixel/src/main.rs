@@ -994,13 +994,16 @@ enum Command {
         /// does not run under your login shell.
         #[arg(long)]
         shell: Option<String>,
-        /// Install project-local enforcement into this repository only,
+        /// Install project-local integrations into this repository only,
         /// skipping every global step: `.claude/settings.local.json` (Claude
         /// guard; `.claude/pixel-rtk-hooks.json` keeps an RTK hook it takes
         /// over), `.codex/config.toml`, `.codex/hooks.json` (composed guard,
         /// skipped when git tracks it) + `.codex/pixel-composed-guard-backup.json`,
-        /// `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts`. Files
-        /// naming this machine's binary go into the clone's `info/exclude`.
+        /// `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts`,
+        /// `.warp/.mcp.json` (Warp asks you to trust the project server once),
+        /// and a Pixel-first retrieval block in the root `AGENTS.md`. The block
+        /// preserves surrounding instructions and never blocks native tools.
+        /// Machine-specific files naming this binary go into `info/exclude`.
         #[arg(long)]
         repo: Option<PathBuf>,
     },
@@ -1539,6 +1542,10 @@ enum HookCmd {
     SessionStart {
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Provider whose hook-response contract to emit. Codex rejects
+        /// unknown fields, so its response omits the top-level `pixel` block.
+        #[arg(long, value_enum)]
+        provider: Option<guard::Provider>,
     },
     /// `pixel hook prompt-submit "$@"` — task boundary detector.
     /// Reads the UserPromptSubmit payload from stdin, embeds the prompt
@@ -1607,6 +1614,24 @@ enum ConfigCmd {
         /// Write to the machine-wide configuration.
         #[arg(long)]
         global: bool,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Retrieval policy for coding agents: `pixel config policy` reports the
+    /// effective setting and the layer that set it (environment, repository,
+    /// global, or the advisory default); `advisory`, `enforce` or `off`
+    /// persists it to `<root>/.pixel/config.yaml` — or `~/.pixel/config.yaml`
+    /// with `--global`. `PIXEL_POLICY` still overrides one environment.
+    Policy {
+        /// New value; omit to report the effective setting.
+        #[arg(value_enum)]
+        value: Option<config_cmd::PolicyMode>,
+        /// Write to the machine-wide configuration.
+        #[arg(long)]
+        global: bool,
+        /// Print the effective setting as JSON, for the Pi extension.
+        #[arg(long)]
+        json: bool,
         #[arg(default_value = ".")]
         path: PathBuf,
     },
@@ -5416,7 +5441,17 @@ fn run() -> Result<(), String> {
     // Compatibility fallback must exec the original before any logging changes
     // its search corpus; its successful Pixel branch retains existing logging.
     let mut logger = match &root {
-        _ if matches!(&cli.command, Command::SearchLikeRg { .. }) => {
+        // The guard exits through its own path before any event is logged;
+        // spawning the writer would only create `.pixel` in unindexed repos,
+        // which the guard then mistakes for an index.
+        _ if matches!(
+            &cli.command,
+            Command::SearchLikeRg { .. }
+                | Command::RunHook {
+                    cmd: HookCmd::Guard { .. } | HookCmd::ComposedGuard { .. },
+                }
+        ) =>
+        {
             pixel_actionlog::ActionLog::noop()
         }
         Ok(root) => pixel_actionlog::ActionLog::spawn_for_root(root),
@@ -7207,7 +7242,7 @@ fn run_command(
                 }
                 std::process::exit(0);
             }
-            HookCmd::SessionStart { path } => {
+            HookCmd::SessionStart { path, provider } => {
                 let root = discover_root(&path)?;
                 // Advertise the commands the agent types, read from the
                 // parser itself so the block cannot name one that does not
@@ -7282,7 +7317,7 @@ fn run_command(
                 // hookSpecificOutput.additionalContext — the doctrine reaches
                 // every `claude` process, not just wrapper-launched shells.
                 write_stdout(
-                    &serde_json::to_string_pretty(&guard::session_start_output(&block))
+                    &serde_json::to_string_pretty(&guard::session_start_output(&block, provider))
                         .map_err(|e| e.to_string())?,
                 )?;
                 Ok(())
@@ -7323,6 +7358,12 @@ fn run_command(
                 global,
                 path,
             }) => config_cmd::run_metrics(&path, global, value.as_deref().map(|v| v == "on")),
+            Some(ConfigCmd::Policy {
+                value,
+                global,
+                json,
+                path,
+            }) => config_cmd::run_policy(&path, global, value, json),
             Some(ConfigCmd::RemoteKey {
                 preset,
                 value,

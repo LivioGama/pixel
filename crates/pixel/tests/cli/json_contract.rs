@@ -777,6 +777,75 @@ fn session_start_block_reports_the_history_index_phase_and_freshness() {
     );
 }
 
+#[test]
+fn session_start_codex_should_emit_only_schema_fields_and_preserve_context() {
+    let dir = fixture("session-start-codex");
+    let out = pixel(
+        &dir,
+        &["run-hook", "session-start", "--provider", "codex", "."],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let output: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        output
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["hookSpecificOutput"]
+    );
+    let specific = &output["hookSpecificOutput"];
+    assert_eq!(
+        specific
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["additionalContext", "hookEventName"]
+    );
+    assert_eq!(specific["hookEventName"], "SessionStart");
+    // With no deployed prompt, the same capability block is available as
+    // context text rather than as an invalid root field.
+    let context: serde_json::Value =
+        serde_json::from_str(specific["additionalContext"].as_str().unwrap()).unwrap();
+    assert!(
+        context["pixel"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("search-content"))
+    );
+
+    let home = Scratch::for_test("pixel-json-contract", "session-start-codex-home");
+    let prompt_dir = home.join(".local/share/pixel");
+    std::fs::create_dir_all(&prompt_dir).unwrap();
+    std::fs::write(
+        prompt_dir.join("agent-prompt.md"),
+        "# Pixel fixture doctrine\nUse pixel.\n",
+    )
+    .unwrap();
+    let out = pixel_command()
+        .current_dir(&dir)
+        .env("HOME", home.as_ref())
+        .args(["run-hook", "session-start", "--provider", "codex", "."])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let output: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(output.as_object().unwrap().len(), 1);
+    assert_eq!(
+        output["hookSpecificOutput"]["hookEventName"],
+        "SessionStart"
+    );
+    assert!(
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .starts_with("# Pixel fixture doctrine\nUse pixel.")
+    );
+}
+
 /// `dig-history --show` is the follow-up every `dig-history` answer names:
 /// it prints the file at the commit, and without `--file` it refuses under
 /// the command's current name, so the agent can correct the call it typed.

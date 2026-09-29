@@ -316,7 +316,12 @@ short `pixel-subagent-prompt.md`, a managed shell function for Claude Code, a ma
 `developer_instructions` block for Codex and a managed block in Pi's
 `~/.pi/agent/APPEND_SYSTEM.md`. Pi receives a short Pixel rule; its
 repository extension registers the structured `pixel` tool and applies the
-[pre-execution Pi policy](docs/pi-rms.md) at `tool_call` time. It
+[pre-execution Pi policy](docs/pi-harness.md) at `tool_call` time. Retrieval policy
+is advisory by default; `pixel config policy enforce` opts into supported
+retrieval restrictions, `pixel config policy off` (or `PIXEL_POLICY=off`)
+disables policy decisions and rewrites.
+Unknown shell syntax remains native. Pi's task bootstrap and post-edit
+context are independent of that setting and preserve original tool results. It
 preserves agent settings and rule files, does not activate legacy provider
 hooks or routing, and separately registers the managed Codex `PostToolUse`
 metrics hook (`$CODEX_HOME/hooks.json`, default `~/.codex/hooks.json`). The shell functions pass the prompt on a subsequent launch

@@ -6,6 +6,13 @@
 //! an unset layer defaults to on. `--metrics=off` and `PIXEL_METRICS=0`
 //! still veto a single invocation above every file layer.
 //!
+//! The `policy` key says what the guard does when a coding agent reaches for
+//! native retrieval instead of Pixel: `advisory` (suggest, never deny, the
+//! default), `enforce` (deny supported native retrieval in Codex,
+//! Antigravity, Devin and Pi), or `off` (no decisions, no rewrites).
+//! `PIXEL_POLICY` overrides it for one environment, and the legacy
+//! `PIXEL_TARGETS_GUARD=0` kill switch still forces `off`.
+//!
 //! YAML files live under `.pixel/` in the repository and home directory.
 //! Legacy JSON remains readable until install/edit creates the YAML equivalent.
 
@@ -21,12 +28,15 @@ const FEATURES: &[(&str, &str)] = &[
     ("task_boundary", "PIXEL_TASK_BOUNDARY"),
 ];
 
-fn resolved(root: Option<&Path>, key: &str) -> (Option<bool>, String) {
-    let paths = root
-        .map(repo_config_path)
+/// Configuration layers nearest first: the repository file, then the global one.
+fn layers(root: Option<&Path>) -> impl Iterator<Item = PathBuf> {
+    root.map(repo_config_path)
         .into_iter()
-        .chain(global_config_path());
-    for path in paths {
+        .chain(global_config_path())
+}
+
+fn resolved(root: Option<&Path>, key: &str) -> (Option<bool>, String) {
+    for path in layers(root) {
         if let Some(value) = read_config_doc(&path).and_then(|doc| doc.get(key)?.as_bool()) {
             return (Some(value), path.display().to_string());
         }
@@ -45,6 +55,148 @@ fn feature_resolution(root: Option<&Path>, key: &str, env: &str) -> (bool, Strin
     }
     let (value, source) = resolved(root, key);
     (value.unwrap_or(true), source)
+}
+
+/// What the guard does when a coding agent reaches for native retrieval
+/// instead of Pixel. The three values are the YAML setting, the `--json`
+/// value, and the `pixel config policy` argument.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+pub enum PolicyMode {
+    /// Suggest Pixel and keep every native tool call (the default).
+    Advisory,
+    /// Deny supported native retrieval on Codex, Antigravity, Devin and Pi;
+    /// unsupported shapes stay native.
+    Enforce,
+    /// No policy decisions and no rewrites.
+    Off,
+}
+
+impl PolicyMode {
+    /// The exact setting spelling, as stored in YAML and printed in JSON.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Advisory => "advisory",
+            Self::Enforce => "enforce",
+            Self::Off => "off",
+        }
+    }
+
+    /// Parse one configuration value; an unknown spelling is not a policy.
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "advisory" => Some(Self::Advisory),
+            "enforce" => Some(Self::Enforce),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
+/// The layer that decided the effective policy.
+enum PolicySource {
+    /// The environment variable that overrode every file layer.
+    Environment(&'static str),
+    Repo,
+    Global,
+    Default,
+}
+
+/// Effective retrieval policy and the layer that set it.
+struct PolicyResolution {
+    mode: PolicyMode,
+    source: PolicySource,
+    /// The file that declared the setting, for the two file layers.
+    file: Option<PathBuf>,
+}
+
+impl PolicyResolution {
+    fn environment(mode: PolicyMode, variable: &'static str) -> Self {
+        Self {
+            mode,
+            source: PolicySource::Environment(variable),
+            file: None,
+        }
+    }
+
+    /// Layer name for `--json`: a fixed word the Pi extension can branch on.
+    fn source_name(&self) -> &'static str {
+        match self.source {
+            PolicySource::Environment(_) => "env",
+            PolicySource::Repo => "repo",
+            PolicySource::Global => "global",
+            PolicySource::Default => "default",
+        }
+    }
+
+    /// `pixel config policy` reports the layer in words.
+    fn layer(&self) -> String {
+        match (&self.source, &self.file) {
+            (PolicySource::Environment(variable), _) => format!("{variable} (environment)"),
+            (_, Some(file)) => format!("{} {}", self.source_name(), file.display()),
+            _ => "default (no config sets it)".into(),
+        }
+    }
+
+    /// The overview line names the variable or file the value came from.
+    fn overview_label(&self) -> String {
+        match (&self.source, &self.file) {
+            (PolicySource::Environment(variable), _) => (*variable).into(),
+            (_, Some(file)) => file.display().to_string(),
+            _ => "default".into(),
+        }
+    }
+}
+
+/// The policy one layer declares, or `None` when the layer does not
+/// pronounce itself (missing file, missing key, or unknown value). An
+/// unknown value is ignored rather than fatal: a hook must never break a
+/// session over a typo, and `pixel config` reports it when the file is
+/// validated.
+fn read_policy(path: &Path) -> Option<PolicyMode> {
+    PolicyMode::parse(read_config_doc(path)?.get("policy")?.as_str()?)
+}
+
+/// Effective retrieval policy for `root`: the `PIXEL_POLICY` environment
+/// override, the repository layer, the global layer, then the advisory
+/// default. `PIXEL_TARGETS_GUARD=0` (also `false`/`off`) remains the
+/// legacy kill switch over everything.
+fn policy_resolution(root: Option<&Path>) -> PolicyResolution {
+    const LEGACY_SWITCH: &str = "PIXEL_TARGETS_GUARD";
+    if crate::env_flag_off(LEGACY_SWITCH) {
+        return PolicyResolution::environment(PolicyMode::Off, LEGACY_SWITCH);
+    }
+    if let Ok(value) = std::env::var("PIXEL_POLICY") {
+        // An unrecognised value selects the advisory default, as it always has.
+        let mode = PolicyMode::parse(value.trim().to_ascii_lowercase().as_str())
+            .unwrap_or(PolicyMode::Advisory);
+        return PolicyResolution::environment(mode, "PIXEL_POLICY");
+    }
+    let repo = root.map(repo_config_path);
+    if let Some(mode) = repo.as_deref().and_then(read_policy) {
+        return PolicyResolution {
+            mode,
+            source: PolicySource::Repo,
+            file: repo,
+        };
+    }
+    let global = global_config_path();
+    if let Some(mode) = global.as_deref().and_then(read_policy) {
+        return PolicyResolution {
+            mode,
+            source: PolicySource::Global,
+            file: global,
+        };
+    }
+    PolicyResolution {
+        mode: PolicyMode::Advisory,
+        source: PolicySource::Default,
+        file: None,
+    }
+}
+
+/// Effective retrieval policy for `root`, for the guard and the Pi extension.
+pub fn policy(root: Option<&Path>) -> PolicyMode {
+    policy_resolution(root).mode
 }
 
 pub fn ensure_template(root: Option<&Path>) -> Result<PathBuf, String> {
@@ -103,6 +255,15 @@ fn validate(path: &Path) -> Result<(), String> {
     {
         return Err(format!("{}: metrics must be on or off", path.display()));
     }
+    if doc
+        .get("policy")
+        .is_some_and(|v| !v.as_str().and_then(PolicyMode::parse).is_some())
+    {
+        return Err(format!(
+            "{}: policy must be advisory, enforce, or off",
+            path.display()
+        ));
+    }
     classify_enabled_in(&doc)?;
     if let Some(classify) = doc.get("classify") {
         if !classify.is_object() {
@@ -155,6 +316,12 @@ pub fn overview(path: &Path) -> Result<(), String> {
         let (enabled, source) = feature_resolution(root.as_deref(), key, env);
         println!("{key}: {enabled} ({source})");
     }
+    let policy = policy_resolution(root.as_deref());
+    println!(
+        "policy: {} ({})",
+        policy.mode.as_str(),
+        policy.overview_label()
+    );
     println!("classify.enabled: {} (global)", classify_enabled()?);
     println!(
         "classify.engine: {}",
@@ -417,6 +584,16 @@ fn setup_with(
         };
         doc[key] = json!(value);
     }
+    let Some(enforce) = ask_bool(
+        input,
+        output,
+        "Enforce Pixel retrieval in coding agents (deny native search)?",
+        doc.get("policy").and_then(Value::as_str) == Some(PolicyMode::Enforce.as_str()),
+    )?
+    else {
+        return Ok(false);
+    };
+    doc["policy"] = json!(if enforce { "enforce" } else { "advisory" });
     writeln!(output, "Classify is optional AI classification, separate from code search. Local models need a download; remote providers receive your input and may charge per call.").map_err(|e| e.to_string())?;
     let Some(enabled) = ask_bool(
         input,
@@ -427,7 +604,7 @@ fn setup_with(
     else {
         return Ok(false);
     };
-    writeln!(output, "Review: metrics={}, daemon_auto_start={}, task_context={}, task_boundary={}, classify.enabled={}", doc["metrics"], doc["daemon_auto_start"], doc["task_context"], doc["task_boundary"], enabled).map_err(|e| e.to_string())?;
+    writeln!(output, "Review: metrics={}, daemon_auto_start={}, task_context={}, task_boundary={}, policy={}, classify.enabled={}", doc["metrics"], doc["daemon_auto_start"], doc["task_context"], doc["task_boundary"], doc["policy"], enabled).map_err(|e| e.to_string())?;
     if ask_bool(input, output, "Save these settings?", false)? != Some(true) {
         return Ok(false);
     }
@@ -437,6 +614,7 @@ fn setup_with(
             "daemon_auto_start",
             "task_context",
             "task_boundary",
+            "policy",
         ] {
             current[key] = doc[key].clone();
         }
@@ -648,6 +826,58 @@ pub fn run_metrics(path: &Path, global: bool, value: Option<bool>) -> Result<(),
     }
 }
 
+/// `pixel config policy [advisory|enforce|off] [--global] [--json]`: without
+/// a value, report the effective policy and the layer that set it; with one,
+/// persist it to the chosen layer. `--json` is the Pi extension's
+/// machine-readable form, so it never has to parse the prose.
+pub fn run_policy(
+    path: &Path,
+    global: bool,
+    value: Option<PolicyMode>,
+    json: bool,
+) -> Result<(), String> {
+    let root = crate::discover_root(path).ok();
+    match value {
+        None => {
+            let resolution = policy_resolution(root.as_deref());
+            if json {
+                let mut report = json!({
+                    "policy": resolution.mode.as_str(),
+                    "source": resolution.source_name(),
+                });
+                if let Some(file) = resolution.file.as_deref() {
+                    report["file"] = json!(file.display().to_string());
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!(
+                    "policy: {} — {}",
+                    resolution.mode.as_str(),
+                    resolution.layer()
+                );
+            }
+            Ok(())
+        }
+        Some(mode) => {
+            let target = if global {
+                global_config_path().ok_or("no HOME for the global config")?
+            } else {
+                repo_config_path(
+                    &root.ok_or("no repository root here — pass --global or run inside a repo")?,
+                )
+            };
+            write_doc(&target, |doc| {
+                doc["policy"] = Value::String(mode.as_str().to_string());
+            })?;
+            println!("policy: {} — wrote {}", mode.as_str(), target.display());
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,7 +900,7 @@ mod tests {
             let mut calls = 0;
             let result = setup_with_install(
                 &path,
-                &mut std::io::Cursor::new("n\n\n\n\ny\ny\n"),
+                &mut std::io::Cursor::new("n\n\n\n\n\ny\ny\n"),
                 &mut Vec::new(),
                 |_, _| {
                     calls += 1;
@@ -699,7 +929,8 @@ mod tests {
                 crate::config_file::load(&path).unwrap(),
                 json!({
                     "metrics":"off", "daemon_auto_start":true, "task_context":true,
-                    "task_boundary":true, "classify":{"enabled":expected_enabled, "engine":"remote"},
+                    "task_boundary":true, "policy":"advisory",
+                    "classify":{"enabled":expected_enabled, "engine":"remote"},
                     "future":42, "remote_keys":{"openrouter":"retained-secret"}
                 })
             );
@@ -709,7 +940,7 @@ mod tests {
     #[test]
     fn setup_should_not_install_after_cancellation_or_disabling_classify() {
         for (answers, enabled, metrics) in
-            [("q\ny\n", true, "on"), ("n\n\n\n\nn\ny\n", false, "off")]
+            [("q\ny\n", true, "on"), ("n\n\n\n\n\nn\ny\n", false, "off")]
         {
             let home = HomeGuard::set();
             let path = home.0.join("config.yaml");
@@ -733,7 +964,7 @@ mod tests {
         let path = home.0.join("config.yaml");
         let error = setup_with_install(
             &path,
-            &mut std::io::Cursor::new("\n\n\n\ny\ny\n"),
+            &mut std::io::Cursor::new("\n\n\n\n\ny\ny\n"),
             &mut Vec::new(),
             |_, _| {
                 std::fs::remove_file(&path).unwrap();
@@ -779,7 +1010,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("n\nn\nn\nn\nn\ny\n"),
+                &mut std::io::Cursor::new("n\nn\nn\nn\nn\nn\ny\n"),
                 &mut output
             )
             .unwrap()
@@ -789,7 +1020,8 @@ mod tests {
             crate::config_file::load(&path).unwrap(),
             json!({
                 "metrics":"off", "daemon_auto_start":false, "task_context":false,
-                "task_boundary":false, "classify":{"engine":"remote", "enabled":false},
+                "task_boundary":false, "policy":"advisory",
+                "classify":{"engine":"remote", "enabled":false},
                 "remote_keys":{"openrouter":"new-secret"}, "future":42
             })
         );
@@ -802,7 +1034,7 @@ mod tests {
         let path = home.0.join("config.yaml");
         let original = "# personal comment\nremote_keys: {openrouter: hidden-secret}\nclassify: {engine: remote}\nunknown: 42\n";
         write(&path, original);
-        for answers in ["q\n", "", "n\nn\nn\nn\nn\nn\n", "n\nn\nn\nn\nn\n"] {
+        for answers in ["q\n", "", "n\nn\nn\nn\nn\nn\nn\n", "n\nn\nn\nn\nn\nn\n"] {
             assert!(
                 !setup_with(&path, &mut std::io::Cursor::new(answers), &mut Vec::new()).unwrap()
             );
@@ -812,7 +1044,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("n\nn\nn\nn\nn\ny\n"),
+                &mut std::io::Cursor::new("n\nn\nn\nn\nn\nn\ny\n"),
                 &mut output
             )
             .unwrap()
@@ -822,7 +1054,8 @@ mod tests {
             json!({
                 "remote_keys": {"openrouter":"hidden-secret"}, "unknown":42,
                 "metrics":"off", "daemon_auto_start":false, "task_context":false,
-                "task_boundary":false, "classify":{"engine":"remote", "enabled":false}
+                "task_boundary":false, "policy":"advisory",
+                "classify":{"engine":"remote", "enabled":false}
             })
         );
         let output = String::from_utf8(output).unwrap();
@@ -838,7 +1071,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("\n\n\n\n\ny\n"),
+                &mut std::io::Cursor::new("\n\n\n\n\n\ny\n"),
                 &mut Vec::new()
             )
             .unwrap()
@@ -847,11 +1080,16 @@ mod tests {
             crate::config_file::load(&path).unwrap()["classify"]["enabled"],
             false
         );
+        // Enter keeps the saved policy too, rather than defaulting the prompt.
+        assert_eq!(
+            crate::config_file::load(&path).unwrap()["policy"],
+            "advisory"
+        );
         let mut output = Vec::new();
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("y\ny\ny\ny\ny\ny\n"),
+                &mut std::io::Cursor::new("y\ny\ny\ny\ny\ny\ny\n"),
                 &mut output
             )
             .unwrap()
@@ -866,6 +1104,7 @@ mod tests {
         for key in ["daemon_auto_start", "task_context", "task_boundary"] {
             assert_eq!(doc[key], true);
         }
+        assert_eq!(doc["policy"], "enforce");
         assert_eq!(doc["classify"]["enabled"], true);
     }
 
@@ -877,7 +1116,7 @@ mod tests {
         assert!(
             setup_with(
                 &path,
-                &mut std::io::Cursor::new("\n\n\n\n\ny\n"),
+                &mut std::io::Cursor::new("\n\n\n\n\n\ny\n"),
                 &mut Vec::new()
             )
             .unwrap()
@@ -886,7 +1125,7 @@ mod tests {
             crate::config_file::load(&path).unwrap(),
             json!({
                 "metrics":"on", "daemon_auto_start":true, "task_context":true,
-                "task_boundary":true, "classify":{"enabled":false}
+                "task_boundary":true, "policy":"advisory", "classify":{"enabled":false}
             })
         );
     }
@@ -1410,6 +1649,101 @@ mod tests {
         );
 
         restore_home(saved);
+    }
+
+    #[test]
+    fn policy_values_round_trip_and_reject_every_other_spelling() {
+        for mode in [PolicyMode::Advisory, PolicyMode::Enforce, PolicyMode::Off] {
+            assert_eq!(PolicyMode::parse(mode.as_str()), Some(mode));
+        }
+        for value in ["", "advisory ", "ADVISORY", "Enforce", "loud", "offf"] {
+            assert_eq!(PolicyMode::parse(value), None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn policy_resolution_reads_env_then_repo_then_global_and_labels_each_layer() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let repo_dir = HomeGuard::set();
+        let saved_home = home_env();
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            ["PIXEL_POLICY", "PIXEL_TARGETS_GUARD"]
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect();
+        for (name, _) in &saved {
+            // SAFETY: under crate::ENV_LOCK in tests only.
+            unsafe { std::env::remove_var(name) };
+        }
+        point_home(&home.0);
+        let repo = repo_dir.0.clone();
+        let global_path = home.0.join(".pixel/config.yaml");
+        let repo_path = repo.join(".pixel/config.yaml");
+
+        let default = policy_resolution(Some(&repo));
+        assert_eq!(default.mode, PolicyMode::Advisory);
+        assert_eq!(default.source_name(), "default");
+        assert_eq!(default.layer(), "default (no config sets it)");
+        assert_eq!(default.overview_label(), "default");
+
+        // A value the layer cannot read is not a policy: it falls through
+        // instead of failing a hook.
+        write(&global_path, "policy: loudly\n");
+        write(&repo_path, "policy: null\n");
+        assert_eq!(policy(Some(&repo)), PolicyMode::Advisory);
+
+        // Quoted like every YAML string: a bare `off` is a YAML boolean.
+        write(&global_path, "policy: \"off\"\n");
+        let global = policy_resolution(Some(&repo));
+        assert_eq!(global.mode, PolicyMode::Off);
+        assert_eq!(global.source_name(), "global");
+        assert_eq!(global.layer(), format!("global {}", global_path.display()));
+        assert_eq!(global.overview_label(), global_path.display().to_string());
+        assert_eq!(policy(None), PolicyMode::Off, "no repo handle reads global");
+
+        write(&repo_path, "policy: enforce\n");
+        let repo_layer = policy_resolution(Some(&repo));
+        assert_eq!(repo_layer.mode, PolicyMode::Enforce);
+        assert_eq!(repo_layer.source_name(), "repo");
+        assert_eq!(repo_layer.layer(), format!("repo {}", repo_path.display()));
+
+        for (value, expected) in [
+            ("Enforce ", PolicyMode::Enforce),
+            ("ADVISORY", PolicyMode::Advisory),
+            ("nonsense", PolicyMode::Advisory),
+        ] {
+            // SAFETY: under crate::ENV_LOCK in tests only.
+            unsafe { std::env::set_var("PIXEL_POLICY", value) };
+            let environment = policy_resolution(Some(&repo));
+            assert_eq!(environment.mode, expected, "{value:?}");
+            assert_eq!(environment.source_name(), "env");
+            assert_eq!(environment.file, None);
+            assert_eq!(environment.layer(), "PIXEL_POLICY (environment)");
+            assert_eq!(environment.overview_label(), "PIXEL_POLICY");
+        }
+
+        // The legacy kill switch outranks an explicit enforce.
+        // SAFETY: under crate::ENV_LOCK in tests only.
+        unsafe {
+            std::env::set_var("PIXEL_POLICY", "enforce");
+            std::env::set_var("PIXEL_TARGETS_GUARD", "0");
+        }
+        let legacy = policy_resolution(Some(&repo));
+        assert_eq!(legacy.mode, PolicyMode::Off);
+        assert_eq!(legacy.layer(), "PIXEL_TARGETS_GUARD (environment)");
+        assert_eq!(legacy.overview_label(), "PIXEL_TARGETS_GUARD");
+
+        for (name, value) in saved {
+            // SAFETY: under crate::ENV_LOCK in tests only.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+        restore_home(saved_home);
     }
 
     #[test]

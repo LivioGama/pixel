@@ -29,6 +29,17 @@
 # Environment override: PIXEL_TASK_BOUNDARY=0
 # task_boundary: false
 
+# Retrieval policy for coding agents: what Pixel does when an agent reaches
+# for native search instead of Pixel (default: advisory).
+# Environment override: PIXEL_POLICY
+#   advisory (default): suggest Pixel and keep native tools available.
+#   enforce: deny supported native retrieval in Codex, Antigravity, Devin and
+#     Pi. Compositions, unsupported syntax and unindexed trees stay native.
+#   off: no policy decisions and no rewrites. Quote it (a bare `off` is a
+#     YAML boolean): policy: "off"
+# PIXEL_TARGETS_GUARD=0 (also false or off) remains an opt-out.
+# policy: enforce
+
 # Optional AI classification — separate from code search. Global settings only.
 # Disabled by default to avoid API costs or classifier model downloads.
 # Enable only when you want AI classification: pixel config classify on

@@ -49,10 +49,12 @@ Each agent's page under [For your agent](../for/) names the files, the check and
 - `<repo>/.codex/hooks.json`: the guard hook, with `<repo>/.codex/pixel-composed-guard-backup.json` holding the hooks it replays; left alone when Git tracks `.codex/hooks.json`
 - `<repo>/.devin/config.local.json`: the guard hook for Devin
 - `<repo>/.pi/extensions/pixel-guard.ts`: Pi's guard extension, loaded once Pi trusts the project
+- `<repo>/.warp/.mcp.json`: Pixel's read-only retrieval tools for Warp; Warp requires one-time project trust approval
+- `<repo>/AGENTS.md`: a portable, managed Pixel-first retrieval block; surrounding instructions are preserved and native retrieval is never blocked
 
-Every one of those files except `.codex/config.toml` names this machine's `pixel` binary, so the install lists it in the clone's `.git/info/exclude` and a `git add -A` cannot publish it.
+Machine-specific artifacts that name this machine's `pixel` binary are listed in the clone's `.git/info/exclude`, so a `git add -A` cannot publish them. `.codex/config.toml` and the root `AGENTS.md` are portable and do not name the local binary.
 
-The Pi extension registers a structured `pixel` tool and blocks or translates repository discovery before Pi executes the native tool. Other agent guards retain their own policies. [Pi policy and exceptions](https://github.com/LivioGama/pixel/blob/main/docs/pi-rms.md) describe the Pi boundary. `pixel doctor <repo>` reports the global wiring and the per-repository guards as green, stale or missing.
+The Pi extension registers a structured `pixel` tool and provides advisory retrieval guidance by default. The root `AGENTS.md` block tells agents to attempt Pixel before native retrieval and explicitly allows native fallback; it does not produce denial messages. Run `pixel config policy enforce` to opt into supported retrieval gates or `pixel config policy off` to disable classification; `PIXEL_POLICY=enforce` or `PIXEL_POLICY=off` overrides the setting for one environment. Shell compositions and unsupported syntax retain native behavior. [Pi policy and exceptions](https://github.com/LivioGama/pixel/blob/main/docs/pi-harness.md) describe the Pi boundary. `pixel doctor <repo>` reports the global wiring and the per-repository artifacts as green, stale or missing.
 
 ## Updating
 
