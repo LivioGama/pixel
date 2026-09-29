@@ -40,7 +40,7 @@
 shared = ["~/.local/share/pixel/agent-prompt.md", "~/.local/share/pixel/subagent-prompt.md", "~/.pixel/config.yaml"]
 
 # Repo-wide install artifacts and doctor checks, not owned by one agent entry.
-repo_shared = [".warp/.mcp.json", "AGENTS.md"]
+repo_shared = ["AGENTS.md"]
 repo_shared_checks = ["repo.warp-mcp", "repo.pixel-first"]
 
 [[agent]]

@@ -55,7 +55,8 @@ pub struct UninstallOptions {
     /// `.codex/config.toml`, `.claude/settings.local.json`,
     /// `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` (plus
     /// pixel's files in the `.pi/agent/` older releases used),
-    /// `.warp/.mcp.json`, and Pixel's managed root `AGENTS.md` block.
+    /// Pixel's managed root `AGENTS.md` block, and the retired Pixel entry
+    /// in `.warp/.mcp.json`.
     pub repo: Option<PathBuf>,
 }
 
@@ -189,7 +190,8 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
 ///   - `<repo>/.pi/extensions/pixel-guard.ts`, and pixel's files in the
 ///     `<repo>/.pi/agent/` an older release used ([`crate::pi_project`]);
 ///   - the Pixel-first managed block in `<repo>/AGENTS.md`, preserving all
-///     instructions outside its markers ([`crate::warp`]).
+///     instructions outside its markers ([`crate::pixel_first`]);
+///   - the retired Pixel entry in `<repo>/.warp/.mcp.json` ([`crate::warp`]).
 fn uninstall_project(
     repo: &Path,
     binary_path: &Path,
@@ -268,7 +270,7 @@ fn uninstall_project(
             }
         },
         crate::pi_project::uninstall(repo, dry_run)?,
-        crate::warp::uninstall(repo, exe, dry_run)?,
+        crate::warp::retire(repo, dry_run)?,
         crate::pixel_first::uninstall_rules(repo, dry_run)?,
     ];
 

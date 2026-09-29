@@ -31,7 +31,7 @@ read `CLAUDE.md`.
 
 Everything below the CLI is a library crate. Only `crates/pixel` builds a
 binary, and Pixel is deliberately a CLI plus hooks and extensions, not an
-MCP server. `pixel mcp` (a generic MCP stdio server) exists only for hosts that offer no hook or extension point: today Warp, through the `.warp/.mcp.json` that `pixel install --repo` writes.
+MCP server. `pixel install` registers no MCP server with any agent.
 
 ## Crates
 
@@ -52,7 +52,7 @@ MCP server. `pixel mcp` (a generic MCP stdio server) exists only for hosts that 
 | `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel action-log` and `pixel token-savings` reporting. | none |
 | `pixel-release` | `pixel check-release`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
 | `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. | none |
-| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`. Global install: the bundled prompts, Claude Code lifecycle hooks (removing the retired `claude()` shell wrapper), the Codex `developer_instructions` key and metrics hook, the Pi `APPEND_SYSTEM.md` block, and, when their config exists, the OpenCode `AGENTS.md` block, the Antigravity plugin and hooks, and the zcode guard. `--repo`: project guards for Claude, Codex, Devin, Pi and Warp (see "Agent integration"). Backs up changed files. | proto, daemon, index, facts, git |
+| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`. Global install: the bundled prompts, Claude Code lifecycle hooks (removing the retired `claude()` shell wrapper), the Codex `developer_instructions` key and metrics hook, the Pi `APPEND_SYSTEM.md` block, and, when their config exists, the OpenCode `AGENTS.md` block, the Antigravity plugin and hooks, and the zcode guard. `--repo`: project guards for Claude, Codex, Devin and Pi, and the Pixel-first `AGENTS.md` rule (see "Agent integration"). Backs up changed files. | proto, daemon, index, facts, git |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, graph, proto, recall) |
 
 Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context`, `pixel-actionlog`, `pixel-flow` and `pixel-release`; `pixel-session` depends on `pixel-git` only). `pixel-daemon` is
@@ -358,8 +358,9 @@ independent of that setting and preserve original tool results. Install
 preserves foreign agent settings and rule files: it only rewrites its own
 managed blocks and hook entries.
 
-`pixel install --repo <path>` writes the project-scoped guards instead, each
-listed in the clone's `info/exclude` so no machine path is committed:
+`pixel install --repo <path>` writes the project-scoped guards instead; each
+one that names this machine's binary is listed in the clone's `info/exclude`
+so no machine path is committed:
 
 | File | Agent | Content |
 | --- | --- | --- |
@@ -367,9 +368,11 @@ listed in the clone's `info/exclude` so no machine path is committed:
 | `.codex/config.toml`, `.codex/hooks.json` (+ backup sidecar) | Codex | `developer_instructions`, and the `composed-guard` `PreToolUse` group replaying pre-existing project hooks; skipped when the repository tracks `.codex/hooks.json` |
 | `.devin/config.local.json` | Devin | `PreToolUse` rewrite, `PermissionRequest` retrieval approval, prompt-context and metrics hooks |
 | `.pi/extensions/pixel-guard.ts` | Pi | the guard extension |
-| `.warp/.mcp.json`, a managed block in `AGENTS.md` | Warp | the `pixel mcp` server entry (Warp has no hooks) and the Pixel-first rule |
+| a managed block in `AGENTS.md` | Codex, and any agent that reads `AGENTS.md` | the Pixel-first retrieval rule, which never blocks native tools |
 
-`doctor` checks them under the `repo.*` ids.
+`doctor` checks them under the `repo.*` ids. `install --repo` and `uninstall
+--repo` also remove the `pixel mcp` entry releases up to 0.6.1 wrote into
+`.warp/.mcp.json`, and `repo.warp-mcp` reports one still there.
 
 Codex gets the prompt through `developer_instructions` in `~/.codex/config.toml`
 (`$CODEX_HOME` honoured), the key it appends to its developer message while

@@ -4157,7 +4157,7 @@ fn repo_install_should_keep_machine_local_artifacts_out_of_git() {
         .iter()
         .find(|s| s.id == "repo.git-exclude")
         .unwrap();
-    assert!(dry_step.summary.contains("7 machine-local"), "{dry_step:?}");
+    assert!(dry_step.summary.contains("6 machine-local"), "{dry_step:?}");
 
     let report = install(&repo_install_options(&repo, &home)).unwrap();
     assert!(report.ok, "{report:?}");
@@ -4430,20 +4430,6 @@ fn doctor_repo_checks_should_go_red_on_a_broken_pixel_install() {
         let c = check(&report, id);
         assert_eq!(c.status, CheckStatus::Red, "{id}: {c:?}");
     }
-
-    fs::create_dir_all(repo.join(".warp")).unwrap();
-    fs::write(
-        repo.join(".warp/.mcp.json"),
-        r#"{"mcpServers":{"pixel":{"command":"/old/pixel","args":["mcp","/other/repo"],"working_directory":"/other/repo"}}}"#,
-    )
-    .unwrap();
-    let report = doctor(&doctor_options).unwrap();
-    assert_eq!(
-        check(&report, "repo.warp-mcp").status,
-        CheckStatus::Red,
-        "{:?}",
-        check(&report, "repo.warp-mcp")
-    );
 
     let devin_without_permission_approval = serde_json::json!({
         "hooks": {
@@ -5618,4 +5604,97 @@ fn repo_install_at_home_should_keep_each_metrics_relay_in_one_file() {
     let devin = read_json(&home.join(".devin/config.local.json"));
     assert_eq!(metrics_relays(&devin, "devin").len(), 1, "{devin}");
     assert!(!home.join(".config/devin/config.json").exists());
+}
+
+/// A `pixel mcp` entry an older release wrote into Warp's config points Warp
+/// at a server Pixel no longer ships: doctor must name it, `install --repo`
+/// must take it out without touching what the user put there, and a config
+/// Git tracks, which install never edits, is reported without a false fix.
+#[test]
+#[cfg(unix)]
+fn repo_install_should_retire_the_warp_mcp_entry_older_releases_wrote() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".warp")).unwrap();
+    git(&repo, &["init", "-q"]);
+    let root = repo.canonicalize().unwrap();
+    let config = repo.join(".warp/.mcp.json");
+    let legacy = serde_json::json!({
+        "command": "/old/pixel",
+        "args": ["mcp", root],
+        "working_directory": root,
+    });
+    let doctor_options = DoctorOptions {
+        home: Some(home.clone()),
+        repo_root: Some(repo.clone()),
+        only: vec!["repo.warp-mcp".into()],
+        ..Default::default()
+    };
+
+    let foreign = serde_json::json!({"mcpServers": {"pixel": {
+        "command": "/old/pixel", "args": ["mcp", "/other/repo"], "working_directory": "/other/repo",
+    }}});
+    fs::write(&config, foreign.to_string()).unwrap();
+    let report = doctor(&doctor_options).unwrap();
+    assert_eq!(
+        check(&report, "repo.warp-mcp").status,
+        CheckStatus::Green,
+        "an entry for another repository is not this install's leftover"
+    );
+
+    fs::write(
+        &config,
+        serde_json::json!({"mcpServers": {"pixel": legacy, "lint": {"command": "lint"}}})
+            .to_string(),
+    )
+    .unwrap();
+    let report = doctor(&doctor_options).unwrap();
+    let red = check(&report, "repo.warp-mcp");
+    assert_eq!(red.status, CheckStatus::Red, "{red:?}");
+    assert!(
+        red.reason
+            .as_deref()
+            .is_some_and(|r| r.contains("pixel mcp")),
+        "{red:?}"
+    );
+
+    install(&repo_install_options(&repo, &home)).unwrap();
+
+    let kept: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+    assert_eq!(
+        kept,
+        serde_json::json!({"mcpServers": {"lint": {"command": "lint"}}})
+    );
+    let report = doctor(&doctor_options).unwrap();
+    assert_eq!(check(&report, "repo.warp-mcp").status, CheckStatus::Green);
+
+    fs::write(
+        &config,
+        serde_json::json!({"mcpServers": {"pixel": legacy}}).to_string(),
+    )
+    .unwrap();
+    git(&repo, &["add", "--", ".warp/.mcp.json"]);
+    let before = fs::read(&config).unwrap();
+    install(&repo_install_options(&repo, &home)).unwrap();
+    assert_eq!(fs::read(&config).unwrap(), before);
+    let report = doctor(&doctor_options).unwrap();
+    let tracked = check(&report, "repo.warp-mcp");
+    assert_eq!(tracked.status, CheckStatus::Yellow, "{tracked:?}");
+    assert!(
+        tracked.summary.contains("tracked by git"),
+        "{}",
+        tracked.summary
+    );
+
+    git(&repo, &["rm", "-q", "--cached", "--", ".warp/.mcp.json"]);
+    install(&repo_install_options(&repo, &home)).unwrap();
+    assert!(
+        !config.exists(),
+        "a config that held only Pixel's entry is Pixel's file, and goes"
+    );
+    let report = doctor(&doctor_options).unwrap();
+    assert_eq!(check(&report, "repo.warp-mcp").status, CheckStatus::Green);
 }

@@ -49,7 +49,6 @@ Each agent's page under [For your agent](../for/) names the files, the check and
 - `<repo>/.codex/hooks.json`: the guard hook, with `<repo>/.codex/pixel-composed-guard-backup.json` holding the hooks it replays; left alone when Git tracks `.codex/hooks.json`
 - `<repo>/.devin/config.local.json`: the guard hook for Devin
 - `<repo>/.pi/extensions/pixel-guard.ts`: Pi's guard extension, loaded once Pi trusts the project
-- `<repo>/.warp/.mcp.json`: Pixel's read-only retrieval tools for Warp; Warp requires one-time project trust approval
 - `<repo>/AGENTS.md`: a portable, managed Pixel-first retrieval block; surrounding instructions are preserved and native retrieval is never blocked
 
 Machine-specific artifacts that name this machine's `pixel` binary are listed in the clone's `.git/info/exclude`, so a `git add -A` cannot publish them. `.codex/config.toml` and the root `AGENTS.md` are portable and do not name the local binary.

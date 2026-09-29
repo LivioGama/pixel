@@ -1,8 +1,11 @@
-//! Warp project MCP configuration for starting Pixel from a trusted project.
+//! Retirement of the Warp MCP server entry older installs wrote.
 //!
-//! Warp loads `.warp/.mcp.json` for a project after the user approves trusting
-//! that project. This module writes only Pixel's own server entry and never
-//! attempts to grant that trust on the user's behalf.
+//! Up to 0.6.1, `pixel install --repo` added a `pixel mcp` server to Warp's
+//! `.warp/.mcp.json`. Pixel ships no MCP server any more, so an entry left
+//! there points Warp at a command that is gone. Install and uninstall both
+//! remove this repository's entry, and `pixel doctor` reports one that
+//! remains. Only the exact entry Pixel wrote is touched: other servers, other
+//! top-level keys and an entry naming another repository stay byte for byte.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,8 +19,13 @@ use crate::install::{self, CheckStatus, InstallStep, Result};
 /// The Warp MCP configuration file, relative to a repository root.
 pub(crate) const CONFIG_FILE: &str = ".warp/.mcp.json";
 
-/// Install Pixel's project-scoped Warp MCP server without replacing user data.
-pub(crate) fn install(repo: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+/// Remove this repository's retired Pixel entry from Warp's MCP config.
+///
+/// The file goes, without a backup, when the entry was all it held (Pixel
+/// created it), and so does a `.warp/` directory left empty; a file that
+/// keeps other content is backed up and rewritten, and a config Git tracks
+/// is never edited.
+pub(crate) fn retire(repo: &Path, dry_run: bool) -> Result<InstallStep> {
     let path = repo.join(CONFIG_FILE);
     if crate::repo_git::is_tracked(repo, CONFIG_FILE) {
         return Ok(InstallStep {
@@ -25,101 +33,34 @@ pub(crate) fn install(repo: &Path, exe: &Path, dry_run: bool) -> Result<InstallS
             status: CheckStatus::Yellow,
             summary: install::dry_run_summary(
                 dry_run,
-                ".warp/.mcp.json is tracked by git; Warp config embeds this machine's Pixel executable and repository paths, so it was not modified",
-            ),
-            detail: Some(format!("config={}", path.display())),
-        });
-    }
-    let repo_root = absolute_repo(repo)?;
-    let executable = absolute_executable(exe, &path)?;
-    let mut root = read_root(&path)?;
-    let servers = ensure_servers(&mut root, &path)?;
-
-    if servers
-        .get("pixel")
-        .is_some_and(|existing| !owned_by_repo(existing, &repo_root))
-    {
-        return Err(invalid_config(
-            &path,
-            "mcpServers.pixel already exists and does not point to this repository",
-        ));
-    }
-
-    let entry = server_entry(&executable, &repo_root);
-    let changed = servers.get("pixel") != Some(&entry);
-    if changed {
-        servers.insert("pixel".into(), entry);
-    }
-
-    if changed && !dry_run {
-        let serialized = pretty_json(&root)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        config::backup_if_changing(&path, serialized.as_bytes())?;
-        fs::write(&path, serialized)?;
-    }
-
-    let summary = if changed {
-        "Warp project MCP server installed"
-    } else {
-        "Warp project MCP server already configured"
-    };
-    Ok(InstallStep {
-        id: "mcp.warp".into(),
-        status: CheckStatus::Green,
-        summary: install::dry_run_summary(dry_run, summary),
-        detail: Some(format!("config={}", path.display())),
-    })
-}
-
-/// Remove this repository's Pixel Warp MCP entry and preserve every other one.
-pub(crate) fn uninstall(repo: &Path, _exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let path = repo.join(CONFIG_FILE);
-    if crate::repo_git::is_tracked(repo, CONFIG_FILE) {
-        return Ok(InstallStep {
-            id: "mcp.warp".into(),
-            status: CheckStatus::Yellow,
-            summary: install::dry_run_summary(
-                dry_run,
-                ".warp/.mcp.json is tracked by git; refusing to remove machine-specific Warp config",
+                ".warp/.mcp.json is tracked by git; a retired Pixel entry in it is left for you to remove",
             ),
             detail: Some(format!("config={}", path.display())),
         });
     }
     let repo_root = absolute_repo(repo)?;
     let mut root = read_root(&path)?;
-    let mut removed = false;
-
-    let remove_server_map =
-        if let Some(servers) = root.get_mut("mcpServers").and_then(Value::as_object_mut) {
-            if servers
-                .get("pixel")
-                .is_some_and(|entry| owned_by_repo(entry, &repo_root))
-            {
-                servers.remove("pixel");
-                removed = true;
-                servers.is_empty()
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-    if remove_server_map {
-        root.remove("mcpServers");
-    }
+    let removed = remove_owned_entry(&mut root, &repo_root);
 
     if removed && !dry_run {
-        let serialized = pretty_json(&root)?;
-        config::backup_if_changing(&path, serialized.as_bytes())?;
-        fs::write(&path, serialized)?;
+        if root.is_empty() {
+            // Nothing but Pixel's entry was in it, so there is nothing to back up.
+            fs::remove_file(&path)?;
+            if let Some(dir) = path.parent() {
+                // Fails, and is meant to, when the directory holds anything else.
+                let _ = fs::remove_dir(dir);
+            }
+        } else {
+            let serialized = pretty_json(&root)?;
+            config::backup_if_changing(&path, serialized.as_bytes())?;
+            fs::write(&path, serialized)?;
+        }
     }
 
     let summary = if removed {
-        "removed this repository's Pixel Warp MCP server"
+        "removed this repository's retired Pixel Warp MCP server"
     } else {
-        "no Pixel Warp MCP server for this repository found"
+        "no retired Pixel Warp MCP server for this repository"
     };
     Ok(InstallStep {
         id: "mcp.warp".into(),
@@ -129,50 +70,42 @@ pub(crate) fn uninstall(repo: &Path, _exe: &Path, dry_run: bool) -> Result<Insta
     })
 }
 
-/// Report whether Warp has no Pixel entry, the expected entry, or a conflicting entry.
-pub(crate) fn check(repo: &Path, exe: &Path) -> Result<Option<bool>> {
+/// Whether Warp's config still holds the entry an older install wrote here.
+pub(crate) fn has_retired_entry(repo: &Path) -> Result<bool> {
     let path = repo.join(CONFIG_FILE);
     if !path.exists() {
-        return Ok(None);
+        return Ok(false);
     }
     let repo_root = absolute_repo(repo)?;
-    let executable = absolute_executable(exe, &path)?;
-    let root = read_root(&path)?;
-    let Some(servers) = root.get("mcpServers") else {
-        return Ok(None);
+    let mut root = read_root(&path)?;
+    Ok(remove_owned_entry(&mut root, &repo_root))
+}
+
+/// Take this repository's Pixel entry out of `root`, dropping an emptied
+/// `mcpServers`; `false` when there was none.
+fn remove_owned_entry(root: &mut Map<String, Value>, repo_root: &Path) -> bool {
+    let Some(servers) = root.get_mut("mcpServers").and_then(Value::as_object_mut) else {
+        return false;
     };
-    let servers = servers
-        .as_object()
-        .ok_or_else(|| invalid_config(&path, "mcpServers must be a JSON object"))?;
-    let Some(entry) = servers.get("pixel") else {
-        return Ok(None);
-    };
-    Ok(Some(entry == &server_entry(&executable, &repo_root)))
+    if !servers
+        .get("pixel")
+        .is_some_and(|entry| owned_by_repo(entry, repo_root))
+    {
+        return false;
+    }
+    servers.remove("pixel");
+    if servers.is_empty() {
+        root.remove("mcpServers");
+    }
+    true
 }
 
 fn absolute_repo(repo: &Path) -> Result<PathBuf> {
     repo.canonicalize().map_err(InstallError::Io)
 }
 
-fn absolute_executable(exe: &Path, config_path: &Path) -> Result<String> {
-    if !exe.is_absolute() {
-        return Err(invalid_config(
-            config_path,
-            "Pixel executable path must be absolute",
-        ));
-    }
-    Ok(exe.to_string_lossy().into_owned())
-}
-
-fn server_entry(executable: &str, repo_root: &Path) -> Value {
-    let repo = repo_root.to_string_lossy();
-    serde_json::json!({
-        "command": executable,
-        "args": ["mcp", repo.as_ref()],
-        "working_directory": repo.as_ref(),
-    })
-}
-
+/// The exact shape older installs wrote: a Pixel executable, `mcp <repo>`
+/// and the repository as working directory, nothing else.
 fn owned_by_repo(entry: &Value, repo_root: &Path) -> bool {
     let Some(object) = entry.as_object() else {
         return false;
@@ -210,18 +143,6 @@ fn read_root(path: &Path) -> Result<Map<String, Value>> {
         .ok_or_else(|| invalid_config(path, "top-level JSON value must be an object"))
 }
 
-fn ensure_servers<'a>(
-    root: &'a mut Map<String, Value>,
-    path: &Path,
-) -> Result<&'a mut Map<String, Value>> {
-    if !root.contains_key("mcpServers") {
-        root.insert("mcpServers".into(), Value::Object(Map::new()));
-    }
-    root.get_mut("mcpServers")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| invalid_config(path, "mcpServers must be a JSON object"))
-}
-
 fn pretty_json(root: &Map<String, Value>) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string_pretty(root)?))
 }
@@ -245,262 +166,211 @@ mod tests {
         repo.join(CONFIG_FILE)
     }
 
-    fn pixel_entry(repo: &Path, exe: &Path) -> Value {
-        server_entry(exe.to_str().unwrap(), &repo.canonicalize().unwrap())
+    /// The entry 0.6.1 and earlier wrote for `repo`.
+    fn legacy_entry(repo: &Path, exe: &str) -> Value {
+        let root = repo.canonicalize().unwrap();
+        serde_json::json!({
+            "command": exe,
+            "args": ["mcp", root],
+            "working_directory": root,
+        })
+    }
+
+    fn write_config(repo: &Path, value: &Value) -> PathBuf {
+        let path = config_path(repo);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, format!("{value}\n")).unwrap();
+        path
     }
 
     #[test]
-    fn install_should_merge_pixel_and_preserve_other_warp_servers() {
+    fn retire_should_remove_the_legacy_entry_and_preserve_everything_else() {
         let parent = tempfile::tempdir().unwrap();
         let repo = parent.path().join("project with spaces");
         fs::create_dir_all(&repo).unwrap();
-        let path = config_path(&repo);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            r#"{"other":{"command":"keep"},"mcpServers":{"lint":{"command":"lint"}}}"#,
-        )
-        .unwrap();
-        let exe = Path::new("/opt/Pixel Tools/pixel");
+        let path = write_config(
+            &repo,
+            &serde_json::json!({
+                "other": {"command": "keep"},
+                "mcpServers": {
+                    "lint": {"command": "lint"},
+                    "pixel": legacy_entry(&repo, "/opt/Pixel Tools/pixel"),
+                },
+            }),
+        );
+        assert!(has_retired_entry(&repo).unwrap());
 
-        install(&repo, exe, false).unwrap();
+        let step = retire(&repo, false).unwrap();
 
+        assert_eq!(step.status, CheckStatus::Green);
+        assert!(step.summary.starts_with("removed"), "{}", step.summary);
         let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value["other"]["command"], "keep");
-        assert_eq!(value["mcpServers"]["lint"]["command"], "lint");
-        assert_eq!(value["mcpServers"]["pixel"], pixel_entry(&repo, exe));
-        assert_eq!(check(&repo, exe).unwrap(), Some(true));
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "other": {"command": "keep"},
+                "mcpServers": {"lint": {"command": "lint"}},
+            })
+        );
+        assert!(!has_retired_entry(&repo).unwrap());
     }
 
     #[test]
-    fn install_should_be_idempotent_and_dry_run_should_not_write() {
+    fn retire_should_delete_a_config_and_directory_that_held_only_pixel() {
         let repo = tempfile::tempdir().unwrap();
-        let exe = Path::new("/opt/pixel");
+        let path = write_config(
+            repo.path(),
+            &serde_json::json!({"mcpServers": {"pixel": legacy_entry(repo.path(), "/opt/pixel")}}),
+        );
 
-        let preview = install(repo.path(), exe, true).unwrap();
-        assert!(preview.summary.starts_with("[dry-run]"));
-        assert!(!config_path(repo.path()).exists());
+        retire(repo.path(), false).unwrap();
 
-        install(repo.path(), exe, false).unwrap();
-        let before = fs::read(config_path(repo.path())).unwrap();
-        install(repo.path(), exe, false).unwrap();
-        assert_eq!(fs::read(config_path(repo.path())).unwrap(), before);
+        assert!(!path.exists());
+        assert!(
+            !repo.path().join(".warp").exists(),
+            "an emptied .warp/ is Pixel's leftover too"
+        );
     }
 
     #[test]
-    fn install_should_refuse_foreign_pixel_and_malformed_settings() {
+    fn retire_should_keep_a_warp_directory_that_holds_other_files() {
         let repo = tempfile::tempdir().unwrap();
-        let path = config_path(repo.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, r#"{"mcpServers":{"pixel":{"command":"other"}}}"#).unwrap();
-        assert!(matches!(
-            install(repo.path(), Path::new("/opt/pixel"), false),
-            Err(InstallError::InvalidSettings { .. })
-        ));
-        let foreign = fs::read(&path).unwrap();
-        assert_eq!(foreign, br#"{"mcpServers":{"pixel":{"command":"other"}}}"#);
-        fs::write(&path, "{").unwrap();
-        assert!(matches!(
-            install(repo.path(), Path::new("/opt/pixel"), false),
-            Err(InstallError::InvalidSettings { .. })
-        ));
-        assert_eq!(fs::read(&path).unwrap(), b"{");
+        let path = write_config(
+            repo.path(),
+            &serde_json::json!({"mcpServers": {"pixel": legacy_entry(repo.path(), "/opt/pixel")}}),
+        );
+        let sibling = repo.path().join(".warp/workflows.yaml");
+        fs::write(&sibling, "user file\n").unwrap();
+
+        retire(repo.path(), false).unwrap();
+
+        assert!(!path.exists());
+        assert_eq!(fs::read_to_string(sibling).unwrap(), "user file\n");
     }
 
     #[test]
-    fn install_should_refuse_pixel_shaped_entries_with_custom_fields() {
+    fn retire_dry_run_should_report_without_changing_the_config() {
         let repo = tempfile::tempdir().unwrap();
-        let path = config_path(repo.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path = write_config(
+            repo.path(),
+            &serde_json::json!({"mcpServers": {"pixel": legacy_entry(repo.path(), "/opt/pixel")}}),
+        );
+        let before = fs::read(&path).unwrap();
+
+        let step = retire(repo.path(), true).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(
+            step.summary,
+            "[dry-run] would report: removed this repository's retired Pixel Warp MCP server"
+        );
+    }
+
+    #[test]
+    fn retire_should_leave_an_absent_config_absent() {
+        let repo = tempfile::tempdir().unwrap();
+
+        let step = retire(repo.path(), false).unwrap();
+
+        assert_eq!(step.status, CheckStatus::Green);
+        assert!(step.summary.starts_with("no retired"), "{}", step.summary);
+        assert!(!repo.path().join(".warp").exists());
+        assert!(!has_retired_entry(repo.path()).unwrap());
+    }
+
+    #[test]
+    fn retire_should_keep_entries_it_did_not_write() {
+        let repo = tempfile::tempdir().unwrap();
         let root = repo.path().canonicalize().unwrap();
-        let original = serde_json::json!({
-            "mcpServers": {
-                "pixel": {
-                    "command": "/opt/old/pixel",
+        let other_repo = legacy_entry(repo.path(), "/opt/pixel");
+        let mut other_repo = other_repo.as_object().unwrap().clone();
+        other_repo.insert("args".into(), serde_json::json!(["mcp", "/another/repo"]));
+        let cases = [
+            ("another repository", Value::Object(other_repo)),
+            (
+                "a foreign command",
+                legacy_entry(repo.path(), "/opt/unrelated/tool"),
+            ),
+            (
+                "a user field",
+                serde_json::json!({
+                    "command": "/opt/pixel",
                     "args": ["mcp", root],
                     "working_directory": root,
                     "user_note": "keep this",
-                }
-            }
-        })
-        .to_string();
-        fs::write(&path, &original).unwrap();
+                }),
+            ),
+            (
+                "another working directory",
+                serde_json::json!({
+                    "command": "/opt/pixel",
+                    "args": ["mcp", root],
+                    "working_directory": "/elsewhere",
+                }),
+            ),
+            (
+                "another subcommand",
+                serde_json::json!({
+                    "command": "/opt/pixel",
+                    "args": ["serve", root],
+                    "working_directory": root,
+                }),
+            ),
+            ("not an object", serde_json::json!("pixel mcp")),
+        ];
+        for (case, entry) in cases {
+            let path = write_config(
+                repo.path(),
+                &serde_json::json!({"mcpServers": {"pixel": entry}}),
+            );
+            let before = fs::read(&path).unwrap();
 
-        assert!(matches!(
-            install(repo.path(), Path::new("/opt/new/pixel"), false),
-            Err(InstallError::InvalidSettings { .. })
-        ));
-        assert_eq!(fs::read_to_string(path).unwrap(), original);
+            assert!(!has_retired_entry(repo.path()).unwrap(), "{case}");
+            retire(repo.path(), false).unwrap();
+
+            assert_eq!(fs::read(&path).unwrap(), before, "{case}");
+        }
     }
 
     #[test]
-    fn uninstall_should_remove_only_pixel_entry_for_this_repository() {
+    fn retire_should_refuse_malformed_config_without_modifying_bytes() {
         let repo = tempfile::tempdir().unwrap();
         let path = config_path(repo.path());
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut root = Map::new();
-        root.insert(
-            "mcpServers".into(),
-            serde_json::json!({
-                "pixel": pixel_entry(repo.path(), Path::new("/opt/pixel")),
-                "lint": {"command":"lint"}
-            }),
+        for raw in ["{", "[]"] {
+            fs::write(&path, raw).unwrap();
+            assert!(matches!(
+                retire(repo.path(), false),
+                Err(InstallError::InvalidSettings { .. })
+            ));
+            assert!(has_retired_entry(repo.path()).is_err());
+            assert_eq!(fs::read(&path).unwrap(), raw.as_bytes());
+        }
+    }
+
+    #[test]
+    fn retire_should_leave_a_git_tracked_warp_config_untouched() {
+        let repo = tempfile::tempdir().unwrap();
+        let path = write_config(
+            repo.path(),
+            &serde_json::json!({"mcpServers": {"pixel": legacy_entry(repo.path(), "/opt/pixel")}}),
         );
-        fs::write(&path, pretty_json(&root).unwrap()).unwrap();
-
-        uninstall(repo.path(), Path::new("/opt/pixel"), false).unwrap();
-
-        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(value["mcpServers"].get("pixel").is_none());
-        assert_eq!(value["mcpServers"]["lint"]["command"], "lint");
-    }
-
-    #[test]
-    fn uninstall_should_keep_an_entry_owned_by_another_repository() {
-        let repo = tempfile::tempdir().unwrap();
-        let path = config_path(repo.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            r#"{"mcpServers":{"pixel":{"command":"/opt/pixel","args":["mcp","/another/repo"]}}}"#,
-        )
-        .unwrap();
-        let before = fs::read(&path).unwrap();
-
-        uninstall(repo.path(), Path::new("/opt/pixel"), false).unwrap();
-
-        assert_eq!(fs::read(&path).unwrap(), before);
-    }
-
-    #[test]
-    fn uninstall_should_preserve_foreign_commands_with_pixel_shaped_arguments() {
-        let repo = tempfile::tempdir().unwrap();
-        let path = config_path(repo.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let root = repo.path().canonicalize().unwrap();
-        let entry = serde_json::json!({
-            "command": "/opt/unrelated/tool",
-            "args": ["mcp", root],
-            "working_directory": root,
-        });
-        let original = serde_json::json!({"mcpServers":{"pixel":entry}}).to_string();
-        fs::write(&path, &original).unwrap();
-
-        uninstall(repo.path(), Path::new("/opt/pixel"), false).unwrap();
-
-        assert_eq!(fs::read_to_string(&path).unwrap(), original);
-    }
-
-    #[test]
-    fn uninstall_should_preserve_pixel_entry_with_custom_fields() {
-        let repo = tempfile::tempdir().unwrap();
-        let path = config_path(repo.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let root = repo.path().canonicalize().unwrap();
-        let entry = serde_json::json!({
-            "command": "/opt/pixel",
-            "args": ["mcp", root],
-            "working_directory": root,
-            "user_note": "keep this",
-        });
-        let original = serde_json::json!({"mcpServers":{"pixel":entry}}).to_string();
-        fs::write(&path, &original).unwrap();
-
-        uninstall(repo.path(), Path::new("/opt/pixel"), false).unwrap();
-
-        assert_eq!(fs::read_to_string(&path).unwrap(), original);
-    }
-
-    #[test]
-    fn uninstall_dry_run_should_report_without_changing_the_config() {
-        let repo = tempfile::tempdir().unwrap();
-        let path = config_path(repo.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut root = Map::new();
-        root.insert(
-            "mcpServers".into(),
-            serde_json::json!({
-                "pixel": pixel_entry(repo.path(), Path::new("/opt/pixel"))
-            }),
-        );
-        let original = pretty_json(&root).unwrap();
-        fs::write(&path, &original).unwrap();
-
-        let step = uninstall(repo.path(), Path::new("/opt/pixel"), true).unwrap();
-
-        assert_eq!(fs::read_to_string(&path).unwrap(), original);
-        assert!(step.summary.starts_with("[dry-run]"), "{}", step.summary);
-    }
-
-    #[test]
-    fn check_should_require_the_expected_absolute_executable() {
-        let repo = tempfile::tempdir().unwrap();
-        let path = config_path(repo.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            pretty_json(&Map::from_iter([(
-                "mcpServers".into(),
-                serde_json::json!({"pixel":pixel_entry(repo.path(), Path::new("/opt/pixel"))}),
-            )]))
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            check(repo.path(), Path::new("/opt/pixel")).unwrap(),
-            Some(true)
-        );
-        assert_eq!(
-            check(repo.path(), Path::new("/opt/other-pixel")).unwrap(),
-            Some(false)
-        );
-        assert!(matches!(
-            check(repo.path(), Path::new("pixel")),
-            Err(InstallError::InvalidSettings { .. })
-        ));
-    }
-
-    #[test]
-    fn check_should_distinguish_absent_pixel_config_from_conflicting_entry() {
-        let repo = tempfile::tempdir().unwrap();
-        let exe = Path::new("/opt/pixel");
-        assert_eq!(check(repo.path(), exe).unwrap(), None);
-
-        let path = config_path(repo.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, r#"{"mcpServers":{"other":{"command":"other"}}}"#).unwrap();
-        assert_eq!(check(repo.path(), exe).unwrap(), None);
-
-        fs::write(&path, r#"{"mcpServers":{"pixel":{"command":"other"}}}"#).unwrap();
-        assert_eq!(check(repo.path(), exe).unwrap(), Some(false));
-    }
-
-    #[test]
-    fn install_should_leave_a_git_tracked_warp_config_untouched() {
-        let repo = tempfile::tempdir().unwrap();
-        let path = config_path(repo.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, "user-owned tracked config\n").unwrap();
         let git = pixel_git::GitRunner::new(repo.path());
         assert!(git.run_opt(&["init"]).is_some());
         assert!(git.run_opt(&["add", "--", CONFIG_FILE]).is_some());
         let before = fs::read(&path).unwrap();
 
-        let step = install(repo.path(), Path::new("/opt/pixel"), false).unwrap();
+        let step = retire(repo.path(), false).unwrap();
 
         assert_eq!(step.status, CheckStatus::Yellow);
         assert!(step.summary.contains("tracked by git"), "{}", step.summary);
         assert_eq!(fs::read(&path).unwrap(), before);
-
-        let removal = uninstall(repo.path(), Path::new("/opt/pixel"), false).unwrap();
-        assert_eq!(removal.status, CheckStatus::Yellow);
-        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     #[test]
-    fn check_should_report_an_unreadable_warp_config_instead_of_absent() {
+    fn has_retired_entry_should_report_an_unreadable_config_instead_of_absent() {
         let repo = tempfile::tempdir().unwrap();
-        fs::create_dir_all(repo.path().join(".warp/.mcp.json")).unwrap();
-        assert!(check(repo.path(), Path::new("/opt/pixel")).is_err());
+        fs::create_dir_all(config_path(repo.path())).unwrap();
+        assert!(has_retired_entry(repo.path()).is_err());
     }
 }

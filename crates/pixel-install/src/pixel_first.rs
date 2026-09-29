@@ -48,7 +48,7 @@ pub(crate) fn install_rules(repo: &Path, dry_run: bool) -> Result<InstallStep> {
         fs::write(&path, updated)?;
     }
     Ok(InstallStep {
-        id: "rules.warp".into(),
+        id: "rules.pixel-first".into(),
         status: CheckStatus::Green,
         summary: install::dry_run_summary(
             dry_run,
@@ -76,7 +76,7 @@ pub(crate) fn uninstall_rules(repo: &Path, dry_run: bool) -> Result<InstallStep>
         fs::write(&path, updated)?;
     }
     Ok(InstallStep {
-        id: "rules.warp".into(),
+        id: "rules.pixel-first".into(),
         status: CheckStatus::Green,
         summary: install::dry_run_summary(
             dry_run,
