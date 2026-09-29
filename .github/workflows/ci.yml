@@ -160,6 +160,7 @@ jobs:
           # release skill, and the pi extension test-pi-policy.mjs imports.
           cat > scripts.re <<'EOF'
           ^scripts/
+          ^\.githooks/
           ^changelog\.d/
           ^\.github/workflows/
           ^\.agents/skills/release/
@@ -289,6 +290,10 @@ jobs:
       - name: Local gate runner contract (stub cargo, disposable repo)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-gates.py
+
+      - name: Mutation exposure pre-push contract (stub cargo, disposable repo)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: sh scripts/test-mutants-preflight.sh
 
       - name: Release prepare contract (stub gh and cargo, disposable repo)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
