@@ -12,7 +12,7 @@ read `CLAUDE.md`.
 
 ```text
  agent CLI (Claude, Codex, Cursor, pi, …)
-   │  agent prompt + shell wrappers         (pixel-install)
+   │  agent prompt + hooks / extensions     (pixel-install)
    ▼
  pixel binary (crates/pixel)  ── clap commands, prints text or --json
    │  Request = pixel_proto::Op   (NDJSON over a Unix socket)
@@ -20,7 +20,7 @@ read `CLAUDE.md`.
  pixel-daemon ── Service::handle(Op) -> Envelope<Value>
    │  in-process fallback when no daemon is reachable
    ├── pixel-index    trigram text index          .pixel/ shards
-   ├── pixel-graph    symbols / imports / calls   .pixel/graph.db
+   ├── pixel-graph    symbols / imports / calls   .pixel/graph.v2.db
    ├── pixel-facts    history facts + diffs       .pixel/history.db (lazy: built on first history query)
    ├── pixel-rank     task -> ranked file list    (scoring pure; signals read git + sniper)
    ├── pixel-context  token-budgeted rendering    (pure)
@@ -30,29 +30,32 @@ read `CLAUDE.md`.
 ```
 
 Everything below the CLI is a library crate. Only `crates/pixel` builds a
-binary, and Pixel is deliberately a CLI plus hooks, not an MCP server.
+binary, and Pixel is deliberately a CLI plus hooks, not an MCP server:
+`pixel mcp` exists only for hosts that offer no hook or extension point
+(today Warp, through the `.warp/.mcp.json` that `pixel install --repo`
+writes).
 
 ## Crates
 
 | Crate | Role | Depends on (pixel crates) |
 | --- | --- | --- |
-| `pixel-cli` (bin `pixel`, in `crates/pixel`) | Command-line surface. Parses argv with clap, talks to the daemon or runs the service in-process, prints text or JSON. Also hosts the hook entry points (`hook guard`, `hook session-start`, `hook prompt-submit`, `hook post-compaction`, `hook post-tool-use`), `rescue`, `recall`, and `sniper` sub-commands. | every library crate except `pixel-context` (reached through the daemon) and `pixel-bench` |
+| `pixel-cli` (bin `pixel`, in `crates/pixel`) | Command-line surface. Parses argv with clap, talks to the daemon or runs the service in-process, prints text or JSON. Also hosts the hook entry points under `run-hook` (alias `hook`: `guard`, `composed-guard`, `session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`, `metrics`), `rescue`, `recall`, and `sniper` sub-commands. | every library crate except `pixel-context` (reached through the daemon) and `pixel-bench` |
 | `pixel-proto` | The shared contract crate: `Envelope`, `PixelError` and `ErrorCode`, `Epistemics`, `SnapshotInfo`, `Budget`, `Warning`, the `Op` request enum, and `commands::RENAMED_COMMANDS`, the old-to-new CLI subcommand names the CLI accepts as hidden aliases until 1.0. No I/O, no business logic. Every other crate that speaks the wire format depends on it, and it depends on nothing internal. | none |
 | `pixel-daemon` | Transport-agnostic `Service` (`api.rs`) and the Unix-socket NDJSON daemon with filesystem watching (`daemon.rs`). Dispatches each `Op` to the right library, attaches snapshot and epistemics metadata, and is the one place a retrieval envelope is built. Also hosts the recall daemon service. | index, graph, context, rank, proto, ops, facts, session, recall, git |
 | `pixel-index` | Sparse n-gram (trigram) text index: gram extraction, window weighting, posting-list algebra, git-anchored base and delta shards, working-tree overlay, query planner, verification, and the `gitsync` helpers that read HEAD, branch, and porcelain status. | git |
 | `pixel-graph` | Code graph: tree-sitter extraction of symbols, imports, and call sites per file; import resolution; tiered call resolution with an epistemic envelope; and the analyses `impact`, `trace`, `process`, `cluster`, `changes`, `targets`. `store` owns the SQLite schema. | git, index |
-| `pixel-facts` | History-wide fact and diff ingest, search, lifecycle, and rescue discovery. Owns `history.db`: commit metadata, diff text, and contentless FTS5 trigram indexes over the diffs and paths. Demand-driven: the daemon never ingests at startup, and `status` and `doctor` never create the db — the first history query runs a bounded catch-up (`PIXEL_FACTS_QUERY_BUDGET_MS`, default 3 s) and spawns the low-priority keep-fresh loop that never blocks queries. Bounded: diff text is kept for the last 365 days (`PIXEL_HISTORY_WINDOW_DAYS`, `0` for all) within 256 MiB of used pages (`PIXEL_HISTORY_BUDGET_MB`), newest first; older diffs are evicted, metadata never is. `build-index --history` remains the explicit full build. Backs `excavate`, `lifecycle`, `history-search` and `rescue` discovery (`resolve` is the graph's concept index). | git, index |
+| `pixel-facts` | History-wide fact and diff ingest, search, lifecycle, and rescue discovery. Owns `history.db`: commit metadata, diff text, and contentless FTS5 trigram indexes over the diffs and paths. Demand-driven: the daemon never ingests at startup, and `status` and `doctor` never create the db — the first history query runs a bounded catch-up (`PIXEL_FACTS_QUERY_BUDGET_MS`, default 3 s) and spawns the low-priority keep-fresh loop that never blocks queries. Bounded: diff text is kept for the last 365 days (`PIXEL_HISTORY_WINDOW_DAYS`, `0` for all) within 256 MiB of used pages (`PIXEL_HISTORY_BUDGET_MB`), newest first; older diffs are evicted, metadata never is. `build-index --history` remains the explicit full build. Backs `excavate`, `lifecycle`, `history-search` and `rescue` discovery (`resolve` is the graph's concept index). | git |
 | `pixel-rank` | Fusion core for `targets` and ranked `search`: task text and signal inputs in, closed prioritized P0/P1/P2 file list out. The scoring is pure; `compute_signals` gathers the activity channel itself (git log churn when facts have none, and a failed or capped scan is reported as unavailable rather than as an empty map) and takes the session and error-sink channels from its caller — the daemon feeds neither of those. | graph, git, session |
 | `pixel-context` | Semantic compression of code-context items: layered renderings that fit a token budget instead of raw source dumps. | none |
 | `pixel-ops` | Safe git mutation infrastructure ported from usable-git: snapshot store, repository lock, operation journal, recovery keys. Implements `inspect`, `review`, `history`, `diff`, `publish`, `push`, `ship`, `branch`, `update`, `sync`, `reconcile`, `rewrite`, `provenance`, `branches`, `env`. | git |
 | `pixel-git` | The single git subprocess wrapper for the workspace. Replaced three earlier ad-hoc wrappers. Any crate that shells out to git goes through `GitRunner` (timeout, output cap, redacted stderr); `crates/pixel-git/tests/boundary.rs` fails the build on a `Command::new("git")` in any other crate's non-test code. | none |
-| `pixel-recall` | Machine-wide LLM transcript retrieval: ingests Claude Code, Codex, opencode, Devin, Cursor, zcode, and Gemini transcript stores into one SQLite corpus, then serves lexical and semantic search. Demand-driven: nothing scans transcripts until a recall query runs — the in-process path then catches up per agent (last week cold, since-last-ingest warm, capped at 30 days; `recall index` for the full history). Owns the embedding backends (`fastembed` ONNX and pure-Rust `model2vec`, both behind features). | index, rank |
+| `pixel-recall` | Machine-wide LLM transcript retrieval: ingests Claude Code, Codex, opencode, pi, Devin, Cursor, zcode, and Gemini transcript stores into one SQLite corpus, then serves lexical and semantic search. Demand-driven: nothing scans transcripts until a recall query runs — the in-process path then catches up per agent (last week cold, since-last-ingest warm, capped at 30 days; `recall index` for the full history). Owns the embedding backends (`fastembed` ONNX and pure-Rust `model2vec`, both behind features) and the `search-meaning` code chunker, which reuses the graph's tree-sitter extraction. | graph, index, rank |
 | `pixel-session` | One-look error capture: every error from every layer lands at throw time in one structured local SQLite sink, queryable in one call. | git |
 | `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel action-log` and `pixel token-savings` reporting. | none |
 | `pixel-release` | `pixel check-release`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
 | `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. | none |
-| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`: deploys the bundled prompt, the Claude shell wrapper, the Codex `developer_instructions` config key and the OpenCode `AGENTS.md` managed block, backs up changed files; retains legacy hook/routing and cleanup implementations without activating them. | proto, daemon, index, facts, git |
-| `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, proto, recall) |
+| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`. Global install: the bundled prompts, Claude Code lifecycle hooks (removing the retired `claude()` shell wrapper), the Codex `developer_instructions` key and metrics hook, the Pi `APPEND_SYSTEM.md` block, and, when their config exists, the OpenCode `AGENTS.md` block, the Antigravity plugin and hooks, and the zcode guard. `--repo`: project guards for Claude, Codex, Devin, Pi and Warp (see "Agent integration"). Backs up changed files. | proto, daemon, index, facts, git |
+| `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, graph, proto, recall) |
 
 Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context`, `pixel-actionlog`, `pixel-flow` and `pixel-release`; `pixel-session` depends on `pixel-git` only). `pixel-daemon` is
 the integration point and is the only library crate allowed to depend on
@@ -91,7 +94,13 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel list-areas` | Functional-area clusters |
 | `pixel what-changed` | Symbols/flows affected by working-tree changes |
 | `pixel rebuild-graph` | Force (re)build of the code graph db |
+| `pixel workspace` | Multi-repo registry (`.pixel/workspace.json` members add/remove/list); `--workspace` fans `impact`/`who-calls` out across registered repos with per-repo provenance |
+| `pixel index-pack` | Freeze the index into one checksummed `.pxpack` bundle — CI builds once, teammates install instead of re-indexing |
+| `pixel index-unpack` | Install a packed index bundle from a path or https:// URL, hash-verified, refusing to overwrite a live index without `--force` |
+| `pixel mcp` | Serve this repo's index over MCP stdio — the single integration for every MCP-capable agent (search, resolve, impact, callers/callees, evaluate, context, status) |
 | `pixel status` | Index + graph freshness status |
+| `pixel coverage` | Per-language index coverage: files on disk vs files indexed, with unrecognized extensions surfaced — the "what did the index miss?" answer |
+| `pixel audit` | What an agent reads to learn what the largest source files contain: each whole file against its `list-signatures` outline in tokens (bytes / 4, floored), the total and the per-file median, files changed since indexing or with no signatures left out and counted, then per-language coverage. Builds the graph on a first run only; local, read-only, sends nothing |
 | `pixel prepare-repo` | Make a repository ready for agent work: index, graph, and warm daemon |
 | `pixel index-stats` | Show raw shard metadata (legacy) |
 | `pixel daemon` | Manage the per-root background daemon |
@@ -130,12 +139,6 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel list-branches` | One-call read-only branch inventory: ahead/behind, merged, stale, unpushed — the deterministic "did you push everything?" answer |
 | `pixel edit-env` | Additive-only, key-level .env mutations with snapshots and restore. |
 | `pixel plan` | Deterministic todo list generation from code analysis; persists findings in `.pixel/plan.json` so `--status`/`--done N`/`--undone N`/`--prune` track execution state across re-plans without the daemon |
-| `pixel coverage` | Per-language index coverage: files on disk vs files indexed, with unrecognized extensions surfaced — the "what did the index miss?" answer |
-| `pixel audit` | What an agent reads to learn what the largest source files contain: each whole file against its `list-signatures` outline in tokens (bytes / 4, floored), the total and the per-file median, files changed since indexing or with no signatures left out and counted, then per-language coverage. Builds the graph on a first run only; local, read-only, sends nothing |
-| `pixel workspace` | Multi-repo registry (`.pixel/workspace.json` members add/remove/list); `--workspace` fans `impact`/`who-calls` out across registered repos with per-repo provenance |
-| `pixel index-pack` | Freeze the index into one checksummed `.pxpack` bundle — CI builds once, teammates install instead of re-indexing |
-| `pixel index-unpack` | Install a packed index bundle from a path or https:// URL, hash-verified, refusing to overwrite a live index without `--force` |
-| `pixel mcp` | Serve this repo's index over MCP stdio — the single integration for every MCP-capable agent (search, resolve, impact, callers/callees, evaluate, context, status) |
 | `pixel replay-flow` | Save, retrieve, list, revise, and replay proven agent-browser paths (auth flows, config flows) so the agent follows a deterministic shortcut instead of re-discovering the UI from scratch every time |
 | `pixel help` | Print this message or the help of the given subcommand(s). |
 
@@ -146,18 +149,22 @@ Per repository, under `.pixel/` (git-ignored):
 | Path | Owner | Contents |
 | --- | --- | --- |
 | `base.shard`, `delta.shard`, `state.json`, `build.lock` | `pixel-index` | Base shard for all tracked files at a pinned commit, delta shard for files changed between that commit and HEAD, and `state.json` as the delta-layer sidecar (tombstones for superseded base paths). The dirty working-tree overlay is in memory only. First process to hold `build.lock` builds; others wait. |
-| `graph.db` | `pixel-graph` | SQLite: files, symbols, edges with resolution tier. Built lazily on first graph command. |
+| `graph.v2.db` | `pixel-graph` | SQLite: files, symbols, edges with resolution tier. Built lazily on first graph command. The name moves with the schema (`pixel_daemon::api::GRAPH_DB_FILE`); user-facing messages still say `graph.db`. |
 | `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle, FTS5 trigram indexes. Populated by `pixel build-index --history` or the daemon ingest thread on the first history query; capped by the window and budget above, with `auto_vacuum = INCREMENTAL` so an eviction shrinks the file. |
 | `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
 | `targets.json` | CLI `targets` | Active task map (version 2): tasks with ids, timestamps, and P0/P1/P2 paths. Read by the guard hook and re-injected after compaction. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
 | `reconcile-conflict.json`, `env-snapshots/` | `pixel-ops` | Conflict marker left by `reconcile` for the guard, and the pre-mutation copies `env` takes. |
-| `user-state.json` | `pixel-install` | Per-repository install state. |
 | `calls.json` | CLI | Circuit breaker counters for repeated identical calls. |
-| `task-runtime.json`, `tasks/<id>/task.json`, `tasks/<id>/events.jsonl` | CLI `task` and the hooks | Claude Code task-runtime packet: the active task record and its event log. |
+| `task-runtime.json`, `tasks/<id>/task.json`, `tasks/<id>/events.jsonl` | CLI `task-state` and the hooks | Claude Code task-runtime packet: the active task record and its event log. |
+| `plan.json` | CLI `plan` | The persisted `pixel plan` checklist, so `--status`/`--done`/`--prune` survive a re-plan. |
+| `workspace.json` | CLI `workspace` | The registered member repositories. |
+| `config.yaml` (legacy `config.json`) | CLI `config` | Repository-level settings over `~/.pixel/config.yaml` (`pixel config edit --repo`). |
+| `pi-policy.jsonl` | Pi extension (`pi-pixel.ts`) | The Pi harness's policy decisions ([docs/pi-harness.md](docs/pi-harness.md)). |
 
-The prompt-submit hook writes task boundary events to
-`~/.pixel/inbox/task-boundary.json`, outside the repository.
+The prompt-submit hook writes no file: it emits a `[PIXEL:TASK_BOUNDARY]`
+notice and reads `.pixel/actions.jsonl`, then `~/.pixel/actions.jsonl`, to
+spot a task that just ended.
 
 Machine-wide:
 
@@ -170,8 +177,9 @@ Machine-wide:
   (`errors-v1.sqlite` plus a `project.json` naming the root);
   `$PIXEL_SNIPER_STATE_ROOT` overrides the state root.
 - `~/.local/state/pixel/` (`$XDG_STATE_HOME/pixel`): `pixel-ops` crash-safety
-  state, keyed by a hash of the repository's canonical git common directory:
-  `journals/`, `snapshots/` and `locks/<hash>.lock/owner.json`. Guarded git
+  state, keyed by a sha256 of the repository: `journals/`, `snapshots/`,
+  `publish-recovery/` and `locks/<hash>.lock/owner.json` (the lock alone is
+  keyed by the canonical git common directory, so every worktree shares it). Guarded git
   mutations write nothing under `.pixel/` except the two entries above.
 - Daemon socket and pid: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` on Linux
   (else `~/.cache/pixel/sockets/`), named
@@ -204,7 +212,7 @@ The envelope:
   "requestId": "…",          // optional
   "snapshot":   { "head": "…", "branch": "…", "dirty_count": 0 },   // `dirty: [paths]` on inspect/review only
   "epistemics": { "closed_world": false, "lower_bound": true, "staleness_ms": 0, "basis": "…" },
-  "budget":     { "byteCap": 262144 },
+  "budget":     { "byteCap": 262144, "used": 0, "truncated": false },   // + `cursor` when paged
   "result":     { … },        // present when ok
   "error":      { "code": "NOT_FOUND", "message": "…" },   // present when !ok
   "warnings":   []
@@ -233,19 +241,24 @@ Invariants enforced by `Service::handle`:
   (`SnapshotInfo::compact`), so an untracked `vendor/bundle` of 15 000 paths
   does not inflate a `symbol` answer to 240 KB.
 
-Adding an op is one variant on `pixel_proto::Op` plus one arm in
-`Service::dispatch`. `Op::op_name` must match the serde tag, and a unit test
-in `pixel-proto` checks it.
+Adding an op is one variant on `pixel_proto::Op`, one arm in
+`Service::dispatch` and one entry in `pixel_proto::SESSION_CAPABILITIES`.
+Unit tests in `pixel-proto` check both: `op_name_matches_serde_tag` (the
+`Op::op_name` of every variant is its serde tag) and
+`session_capabilities_track_every_real_op` (the capability list and the enum
+agree).
 
 ## Request path from the CLI
 
 1. `main.rs` parses argv with clap. Commands that need the repository call
    `execute(path, Op, no_daemon)`.
 2. `execute` discovers the repo root, then tries the daemon: connect to the
-   socket, ping with a short timeout, and send the op. If the socket is
-   absent it spawns `pixel daemon start --foreground` in the background and
-   polls the socket for up to five seconds. `PIXEL_DAEMON_AUTO_START=0`
-   disables that.
+   socket, ping (5 s timeout), and send the op. If no daemon answers, or one
+   answers on an older `PROTOCOL_VERSION` (it is shut down first), it spawns
+   `pixel daemon start <root> --foreground` in the background and polls the
+   socket for up to five seconds. A daemon on a newer protocol is left alone
+   and the command runs in process. `PIXEL_DAEMON_AUTO_START=0`, or
+   `daemon_auto_start: false` in the config, disables the spawn.
 3. If the daemon path fails, the CLI opens `Service` in-process and calls
    `handle` directly. Both paths return the same `Envelope`.
 4. `unwrap_response` turns a failure envelope into an `Err(message)` that
@@ -288,8 +301,9 @@ envelope talks to the daemon socket directly.
   `PIXEL_GRAPH_INCREMENTAL_MAX_PCT` percent of the indexed files (default
   `20`; `0` always rebuilds). The answer's `graph_build` says which path ran
   (`incremental`, `changed_files`, `removed_files`, or `reason`), and the
-  stderr notice reads `updated graph.db for N changed file(s)` versus
-  `built graph.db on first use`. Call edges carry a resolution tier, and
+  stderr notice reads `updated graph.db for N changed file(s)`, `built
+  graph.db on first use`, or `rebuilt graph.db: <reason>` (the file on disk
+  is `graph.v2.db`). Call edges carry a resolution tier, and
   analyses report a lower bound when same-name call sites stay unresolved.
 - The `graph` op rebuilds from scratch by default (`rebuild-graph`,
   `prepare-repo --rebuild-graph`). With `"if_stale": true` (a request field
@@ -301,8 +315,9 @@ envelope talks to the daemon socket directly.
   `timings.graph.build: null`): `{"mode": "fresh"}`, `{"mode":
   "incremental", "changed_files", "removed_files"}` or `{"mode": "full",
   "reason"}` (`requested` for an explicit rebuild), and `phases`: the full
-  build's phase timings plus `publish_ms`, or `check_ms` (the walk that
-  chose) and `apply_ms` for a kept or updated graph. `prepare-repo --json`
+  build's phase timings plus `publish_ms` (and `check_ms` when `if_stale`
+  chose the rebuild), or `check_ms` (the walk that chose) and `apply_ms` for
+  a kept or updated graph. `prepare-repo --json`
   moves both into `timings.graph`, beside `timings.index` (how each index
   layer was obtained) and `timings.total_ms`.
 - History facts are ingested by a dedicated low-priority thread. Queries
@@ -311,28 +326,53 @@ envelope talks to the daemon socket directly.
 
 ## Agent integration
 
-`pixel install` deliberately deploys the bundled `pixel-agent-prompt.md`, the
-short `pixel-subagent-prompt.md`, a managed shell function for Claude Code, a managed
-`developer_instructions` block for Codex and a managed block in Pi's
-`~/.pi/agent/APPEND_SYSTEM.md`. Pi receives a short Pixel rule; its
-repository extension registers the structured `pixel` tool and applies the
-[pre-execution Pi policy](docs/pi-harness.md) at `tool_call` time. Retrieval policy
-is advisory by default; `pixel config policy enforce` opts into supported
-retrieval restrictions, `pixel config policy off` (or `PIXEL_POLICY=off`)
-disables policy decisions and rewrites.
-Unknown shell syntax remains native. Pi's task bootstrap and post-edit
-context are independent of that setting and preserve original tool results. It
-preserves agent settings and rule files, does not activate legacy provider
-hooks or routing, and separately registers the managed Codex `PostToolUse`
-metrics hook (`$CODEX_HOME/hooks.json`, default `~/.codex/hooks.json`). The shell functions pass the prompt on a subsequent launch
-through the loaded profile; already-running agents and direct executable launches
-do not inherit it automatically. The `claude` function adds
-`--append-subagent-system-prompt-file` only when `-p`/`--print` is among the
-arguments: Claude Code sub-agents do not see the session prompt, and the flag is
-honoured in print mode only. `install` writes that variant only when `claude
---version` reports 2.1.261 or newer (older releases exit on the unknown option),
-keeps the previous decision when `claude` cannot be probed, and `doctor`
-re-derives the expected block from the Claude Code found at check time.
+A global `pixel install` deploys the bundled `pixel-agent-prompt.md` and the
+short `pixel-subagent-prompt.md` under `~/.local/share/pixel/`, then wires
+each agent through its own extension point:
+
+- **Claude Code**: lifecycle hooks in `~/.claude/settings.json`:
+  `SessionStart` (injects the prompt, so every Claude process gets it,
+  direct launches included), `UserPromptSubmit`, `PostToolUse` on `Edit`
+  (dependants of the edit) and on the shell tool (the metrics relay), and
+  `SessionStart` with matcher `compact` (post-compaction re-injection). No
+  global `PreToolUse`: enforcement is repo-local. The retired `claude()`
+  shell wrapper is removed from the login shell's profile, and `doctor`
+  reports one that remains (`install.legacy-wrappers`). The sub-agent prompt
+  is appended only to the Claude workers pixel spawns itself
+  (`--append-subagent-system-prompt-file`).
+- **Codex**: the `developer_instructions` key and the `PostToolUse` metrics
+  hook (`$CODEX_HOME/hooks.json`, default `~/.codex/hooks.json`), detailed
+  below.
+- **Pi**: a short Pixel rule in `~/.pi/agent/APPEND_SYSTEM.md`. Its
+  repository extension (installed by `--repo`) registers the structured
+  `pixel` tool and applies the [pre-execution Pi policy](docs/pi-harness.md)
+  at `tool_call` time.
+- **OpenCode**, **Antigravity** (`~/.gemini/config`: plugin, config entry and
+  `run-hook guard --provider antigravity` hook) and **zcode**
+  (`~/.zcode/cli/config.json`: `run-hook guard --provider zcode`): only when
+  that agent's configuration already exists.
+
+Retrieval policy is advisory by default; `pixel config policy enforce` opts
+into supported retrieval restrictions, `pixel config policy off` (or
+`PIXEL_POLICY=off`) disables policy decisions and rewrites. Unknown shell
+syntax remains native. Pi's task bootstrap and post-edit context are
+independent of that setting and preserve original tool results. Install
+preserves foreign agent settings and rule files: it only rewrites its own
+managed blocks and hook entries.
+
+`pixel install --repo <path>` writes the project-scoped guards instead, each
+listed in the clone's `info/exclude` so no machine path is committed:
+
+| File | Agent | Content |
+| --- | --- | --- |
+| `.claude/settings.local.json` | Claude Code | `PreToolUse` `run-hook guard --provider claude` |
+| `.codex/config.toml`, `.codex/hooks.json` (+ backup sidecar) | Codex | `developer_instructions`, and the `composed-guard` `PreToolUse` group replaying pre-existing project hooks; skipped when the repository tracks `.codex/hooks.json` |
+| `.devin/config.local.json` | Devin | `PreToolUse` rewrite, `PermissionRequest` retrieval approval, prompt-context and metrics hooks |
+| `.pi/extensions/pixel-guard.ts` | Pi | the guard extension |
+| `.warp/.mcp.json`, a managed block in `AGENTS.md` | Warp | the `pixel mcp` server entry (Warp has no hooks) and the Pixel-first rule |
+
+`doctor` checks them under the `repo.*` ids.
+
 Codex gets the prompt through `developer_instructions` in `~/.codex/config.toml`
 (`$CODEX_HOME` honoured), the key it appends to its developer message while
 keeping its own system prompt; `model_instructions_file` would replace that
@@ -367,21 +407,21 @@ never blocks the AGENTS.md write. `doctor`
 when OpenCode is absent; `uninstall` strips the block (deleting the file
 when it held nothing else) and drops leftover instructions entries.
 
-Existing hook entry points remain implemented, separately from active installation:
+The hook entry points, all under `pixel run-hook` (alias `hook`), and where
+`pixel install` registers them:
 
-| Hook event | Command | Effect when independently registered |
+| Hook event | Command | Effect |
 | --- | --- | --- |
-| `SessionStart` | `pixel run-hook session-start` | Emits the capability block from the op registry. |
-| `UserPromptSubmit` | `pixel run-hook prompt-submit` | Task context/boundary detection and guarded task acceptance. |
-| `PostCompaction` | `pixel run-hook post-compaction` | Re-injects the active task evidence as additional context. |
-| `PreToolUse` | `pixel run-hook guard` | Bounded compatible command routing; native fallback and host permissions remain authoritative. |
-| `PostToolUse` | `pixel run-hook post-tool-use` | After an edit, emits the dependants of what was just changed. |
+| `SessionStart` | `pixel run-hook session-start` | Injects the agent prompt and the capability block from the op registry. Global for Claude Code. |
+| `UserPromptSubmit` | `pixel run-hook prompt-submit` | Task context/boundary detection, the task-intent verdict, and guarded task acceptance. Global for Claude Code. |
+| `SessionStart` matcher `compact` (`PostCompaction` on Devin) | `pixel run-hook post-compaction` | Re-injects the active task evidence as additional context. |
+| `PreToolUse` | `pixel run-hook guard` | Bounded compatible command routing; native fallback and host permissions remain authoritative. Repo-local (`--repo`) for Claude Code and Devin; global for Antigravity and zcode. |
+| `PostToolUse` (Claude `Edit`) | `pixel run-hook post-tool-use` | After an edit, emits the dependants of what was just changed. |
 | `PostToolUse` (Codex, Claude `Bash`, Devin `exec`) | `pixel run-hook metrics` | Codex tool results drop stderr, so the finalized invocation's 🟩 metrics line is re-emitted as `additionalContext` (Claude and Devin also get `systemMessage`/`additionalContext` output through the same relay, installed by `pixel install` and `pixel install --repo`; when the tool result already carries the box, Claude still receives it as `systemMessage` only while Codex and Devin stay silent) — correlated to the action record by cwd + argv, silent on any miss, and suppressed by the same `metrics` opt-out. |
-| (Codex install step) | `pixel run-hook composed-guard` | Runs a sealed install-time snapshot of a foreign hook before Pixel's Codex rewrite. |
+| `PreToolUse` (Codex, `<repo>/.codex/hooks.json`, `--repo`) | `pixel run-hook composed-guard` | Runs a sealed install-time snapshot of a foreign hook before Pixel's Codex rewrite. |
 
 `pixel doctor` checks current installation artifacts and distinguishes configured
-or protocol-checked hooks from observed live execution. Dormant registration code
-is not an installed feature. Legacy uninstall behavior remains available.
+or protocol-checked hooks from observed live execution.
 Every check is listed in `pixel_install::doctor::CHECKS` with a stable id and
 the command that repairs it (`pixel doctor --list`): `--only`/`--skip` select
 by id, and each yellow or red check reports that command as `fix`.
@@ -476,14 +516,25 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   small git fixtures in a temp dir and call `Service::handle` directly.
 - CLI integration tests in `crates/pixel/tests/cli/` (one binary, one module per file) invoke the built binary
   through `CARGO_BIN_EXE_pixel` against a temp fixture repo.
-- CI runs `cargo fmt --check`, `cargo nextest run --profile ci`
-  (`.config/nextest.toml`: one process per test, retry once but fail on
-  flaky, kill after 180 s) plus `cargo test --doc` for the workspace, and
-  the installer and gate-runner contract scripts in the Test job; beside it,
-  a Lint job (`cargo clippy --all-targets` with warnings denied, then
-  `cargo check` of the two reduced feature lanes, `--no-default-features`
-  and `model2vec` only), the NDCG ranking gate, and separate MSRV and
-  `cargo deny` jobs.
+- CI (`.github/workflows/ci.yml`) classifies the diff first, so a job whose
+  paths did not change skips its steps, then runs in parallel:
+  - **Test + Format**: action-pin verification (`scripts/verify-action-pins.py`),
+    `cargo fmt --check`, `cargo nextest run --profile ci`
+    (`.config/nextest.toml`: one process per test, retry once but fail on
+    flaky, kill after 180 s), `cargo test --doc`, a check that the tests left
+    the checkout's `.pixel/actions.jsonl` alone, the `scripts/test-*.py`
+    contract scripts (installer, gate runner, mutation pre-push, release
+    prepare, nightly mutants, mutants config, action pins, clean) and the Bun
+    Pi-policy contract (`scripts/test-pi-policy.mjs`);
+  - **Lint**: `cargo clippy --all-targets` with warnings denied, then
+    `cargo check` of the two reduced feature lanes (`--no-default-features`,
+    `model2vec` only);
+  - **MSRV**, **Ranking gates** (the NDCG@10 bench in test mode) and
+    **Dependency policy** (`cargo deny`).
+- Other workflows: `mutants.yml` (the `Mutants in diff` gate on every pull
+  request touching `crates/`, sharded), `mutants-nightly.yml` (a whole-tree
+  rotation), `cross-build.yml` (the three release lanes), `release.yml`,
+  `release-prepare-scope.yml` and `pages.yml` (the website).
 - After any change to `crates/` the project rule in `CLAUDE.md` applies:
   rebuild, reinstall the binary atomically, re-index, reinstall hooks, and
   run `pixel doctor`.
@@ -491,8 +542,9 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 ## Release gate
 
 `pixel check-release <version|tag> [--repo <path>] [--json]`
-(the `pixel-release` crate) is the first job of
-`.github/workflows/release.yml` and a maintainer's last local step: it
+(the `pixel-release` crate) runs in the first job of
+`.github/workflows/release.yml` (`verify`, before its `cargo test`) and is a
+maintainer's last local step: it
 reads `Cargo.toml`, every member's manifest, `Cargo.lock` and
 `CHANGELOG.md` and reports three checks (`cli-version`, `cargo-lock`,
 `changelog`), exit 1 on any failure. Pure functions over file contents;
@@ -501,11 +553,13 @@ no git, no network.
 ## Build provenance
 
 `crates/pixel/build.rs` captures the commit (`-dirty` when tracked files
-were modified), target triple, rustc version and build date at compile
-time and `pixel --version` prints them under the version line (`pixel -V`
-stays one line). Every value falls back to `unknown` rather than failing
-the build. The script re-runs when `.git/HEAD`, the ref it points to, or
-the index changes, so the flag follows commits without a `cargo clean`.
+were modified), target triple, rustc version and build date
+(`SOURCE_DATE_EPOCH` honoured) at compile time and `pixel --version` prints
+them under the version line (`pixel -V` stays one line). Every value falls
+back to `unknown` rather than failing the build. The script re-runs when
+`.git/HEAD`, the ref it points to (looked up in the worktree's git dir and
+the common dir), the index, or `SOURCE_DATE_EPOCH` changes, so the flag
+follows commits without a `cargo clean`.
 
 ## Build features
 
