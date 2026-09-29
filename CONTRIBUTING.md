@@ -281,6 +281,22 @@ Repo-wide exclusions (`impl Debug`, the bench crate) are listed in
 `.cargo/mutants.toml`. Do not skip a business rule because the test is hard
 to write: the missed mutant is the bug report.
 
+### The nightly whole-tree run
+
+The pull-request gate mutates only the lines a diff changes. The rest of the
+tree is re-checked by `Mutants nightly` (`.github/workflows/mutants-nightly.yml`):
+the whole list (13 624 mutants on 2026-09-29) is cut into 70 round-robin
+shards, and each night at 01:17 UTC runs ten of them, so every mutant is
+judged once a week. It catches what a diff cannot show: code merged before
+the gate existed, a pull request that only weakened a test, the operators a
+newer cargo-mutants adds, a skip that no longer holds. It blocks no pull
+request. Its survivors land in the open issue labelled `mutants-nightly`,
+one section per night, rewritten by the next run of that night; fix them
+like any `MISSED` line, a crate at a time. `gh workflow run mutants-nightly.yml
+-f slice=3` re-runs Thursday's night (0 is Monday's, 6 Sunday's);
+`scripts/mutants-nightly.py` holds the
+rotation and the report, and `scripts/test-mutants-nightly.py` their contract.
+
 ## Local install loop (when `crates/` changed)
 
 The installed `pixel` (`command -v pixel`: a mise/asdf-managed install

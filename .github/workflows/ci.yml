@@ -320,6 +320,10 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-release-prepare-only.py
 
+      - name: Nightly mutants rotation and report contract
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-mutants-nightly.py
+
       - name: Mutation gate config contract (no module silently excluded)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-mutants-config.py
