@@ -192,7 +192,7 @@ impl DecisionEngine for crate::decide_ollaya::Ollaya {
 
 /// The argmax label — first in the caller's label order on a tie
 /// (deterministic, never alphabetical accident).
-fn predicted<'a>(probs: &BTreeMap<String, f64>, labels: &'a [String]) -> &'a str {
+pub(crate) fn predicted<'a>(probs: &BTreeMap<String, f64>, labels: &'a [String]) -> &'a str {
     // max_by returns the LAST maximum; reversing makes a tie resolve to the
     // first label in the caller's order.
     labels
@@ -427,6 +427,16 @@ pub struct ClassifyOptions {
     /// Serve mode: JSONL spec lines on stdin, one result per line.
     #[arg(long)]
     pub jsonl: bool,
+    /// Answer only from a local engine that is already listening: never
+    /// auto-start it, never fall back to remote. When it is not warm the
+    /// command prints nothing on stdout and fails with a message.
+    #[arg(long, conflicts_with = "remote_preset")]
+    pub if_warm: bool,
+    /// Judge the text as a coding-agent prompt with the built-in intent
+    /// labels (bugfix, feature, refactor, investigate, question, review, ops)
+    /// and name the pixel ops that fit the verdict.
+    #[arg(long, conflicts_with_all = ["labels", "context", "jsonl"])]
+    pub task_intent: bool,
     #[arg(long)]
     pub json: bool,
 }
@@ -462,6 +472,9 @@ fn one_shot_spec(opts: &ClassifyOptions) -> Result<Spec, String> {
         .text
         .as_deref()
         .ok_or("classify needs a text argument (or --jsonl)")?;
+    if opts.task_intent {
+        return crate::prompt_intent::spec(text);
+    }
     Spec::checked(
         text.to_string(),
         opts.context.clone().unwrap_or_default(),
@@ -572,7 +585,7 @@ fn run_with(
     // No labels, no bounded decision: answer the default question battery
     // instead (what `ollaya run` does with no --questions). Context folds
     // into the state — the battery's questions carry their own rubric.
-    if opts.labels.is_empty() {
+    if opts.labels.is_empty() && !opts.task_intent {
         let text = opts
             .text
             .as_deref()
@@ -610,10 +623,22 @@ fn run_with(
     let spec = one_shot_spec(&opts)?;
     let mut engine = opener(resolve(&opts)?)?;
     let probs = engine.decide(&spec)?;
+    let ops = opts
+        .task_intent
+        .then(|| crate::prompt_intent::ops_for(predicted(&probs, &spec.labels)))
+        .flatten();
     if opts.json {
-        output.print_document(&document(engine.as_ref(), &spec, &probs))
+        let mut doc = document(engine.as_ref(), &spec, &probs);
+        if let Some(ops) = ops {
+            doc["next_ops"] = json!(ops);
+        }
+        output.print_document(&doc)
     } else {
-        output.write_text(&render_probs(&probs, &spec))
+        let mut text = render_probs(&probs, &spec);
+        if let Some(ops) = ops {
+            text.push_str(&format!("next: {}\n", ops.join(", ")));
+        }
+        output.write_text(&text)
     }
 }
 
@@ -624,6 +649,14 @@ fn run_with(
 fn resolve_engine_for(
     opts: &ClassifyOptions,
 ) -> Result<crate::classify_setup::ResolvedEngine, String> {
+    if opts.if_warm {
+        return resolve_if_warm(
+            opts,
+            crate::config_cmd::classify_engine(),
+            crate::classify_setup::local_base(),
+            crate::classify_setup::server_reachable,
+        );
+    }
     resolve_engine_with(
         opts,
         crate::config_cmd::classify_engine(),
@@ -657,6 +690,36 @@ fn resolve_engine_with(
         ensure(base)?;
     }
     Ok(resolved)
+}
+
+/// The engine `--if-warm` may use: the local daemon, and only when it
+/// already answers. Nothing is started and nothing falls back to remote.
+fn resolve_if_warm(
+    opts: &ClassifyOptions,
+    stored: Option<String>,
+    local_base: String,
+    reachable: impl FnOnce(&str) -> bool,
+) -> Result<crate::classify_setup::ResolvedEngine, String> {
+    let base = match opts.engine {
+        Some(EngineChoice::Remote) => {
+            return Err(
+                "--if-warm answers only from the local engine; drop --engine remote".into(),
+            );
+        }
+        Some(EngineChoice::Ollaya) => opts.ollaya_url.clone(),
+        None if !crate::classify_setup::local_permitted(stored.as_deref()) => {
+            return Err(
+                "not warm: the stored classify engine is remote, and --if-warm answers only from the local engine".into(),
+            );
+        }
+        None => local_base,
+    };
+    if !reachable(&base) {
+        return Err(format!(
+            "not warm: no local classify engine is listening at {base}; --if-warm never starts it (`pixel classify` without --if-warm does)"
+        ));
+    }
+    Ok(crate::classify_setup::ResolvedEngine::Local { base })
 }
 
 fn resolve_remote_preset(
@@ -1115,6 +1178,7 @@ mod tests {
         let mut ollaya = crate::decide_ollaya::Ollaya::open(crate::decide_ollaya::OllayaConfig {
             base: "http://127.0.0.1:9".to_string(),
             model_name: "test-ollaya".to_string(),
+            ..Default::default()
         });
         let ollaya_document = battery_document(&ollaya, &json!({}), false);
         assert_eq!(ollaya_document["snapshot"]["model"], "test-ollaya");
@@ -1170,6 +1234,8 @@ mod tests {
             engine: Some(EngineChoice::Remote),
             ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
             jsonl: false,
+            if_warm: false,
+            task_intent: false,
             json: false,
         };
         let e = one_shot_spec(&opts(None, &["a", "b"], &[])).unwrap_err();
@@ -1390,6 +1456,8 @@ mod tests {
             engine: Some(EngineChoice::Remote),
             ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
             jsonl: false,
+            if_warm: false,
+            task_intent: false,
             json: false,
         };
         let mut output = RecordingOutput::default();
@@ -1419,6 +1487,8 @@ mod tests {
             engine: Some(EngineChoice::Remote),
             ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
             jsonl: false,
+            if_warm: false,
+            task_intent: false,
             json: true,
         };
         run_with(
@@ -1432,6 +1502,151 @@ mod tests {
         assert!(output.text.is_empty());
         assert_eq!(output.documents.len(), 1);
         assert_eq!(output.documents[0]["predicted"], "yes");
+        assert!(
+            output.documents[0].get("next_ops").is_none(),
+            "ops are named only for --task-intent"
+        );
+    }
+
+    #[test]
+    fn task_intent_should_judge_the_built_in_labels_and_name_the_ops_of_the_verdict() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&calls);
+        let mut output = RecordingOutput::default();
+        run_with(
+            parse_classify(&["pixel", "classify", "the login broke", "--task-intent"]),
+            test_resolve,
+            move |_resolved| fake_engine(recorded),
+            Cursor::new(Vec::<u8>::new()),
+            &mut output,
+        )
+        .unwrap();
+        let spec = calls.lock().unwrap().remove(0);
+        assert_eq!(spec, crate::prompt_intent::spec("the login broke").unwrap());
+        // The fake ties every intent label: the first, bugfix, is predicted.
+        assert!(
+            output.text.contains("predicted: bugfix\n"),
+            "{}",
+            output.text
+        );
+        assert!(
+            output.text.ends_with(
+                "next: pixel plan-rollback \"<problem>\", pixel dig-history --phrase \"<text>\", pixel impact \"<symbol>\"\n"
+            ),
+            "{}",
+            output.text
+        );
+
+        let mut output = RecordingOutput::default();
+        run_with(
+            parse_classify(&[
+                "pixel",
+                "classify",
+                "the login broke",
+                "--task-intent",
+                "--json",
+            ]),
+            test_resolve,
+            |_resolved| fake_engine(Arc::new(Mutex::new(Vec::new()))),
+            Cursor::new(Vec::<u8>::new()),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output.documents[0]["predicted"], "bugfix");
+        assert_eq!(
+            output.documents[0]["next_ops"],
+            json!(crate::prompt_intent::ops_for("bugfix").unwrap())
+        );
+
+        let mut output = RecordingOutput::default();
+        run_with(
+            parse_classify(&["pixel", "classify", "beta", "--label", "yes,no"]),
+            test_resolve,
+            |_resolved| fake_engine(Arc::new(Mutex::new(Vec::new()))),
+            Cursor::new(Vec::<u8>::new()),
+            &mut output,
+        )
+        .unwrap();
+        assert!(output.text.contains("predicted: no\n"), "{}", output.text);
+        assert!(!output.text.contains("next:"), "{}", output.text);
+    }
+
+    #[test]
+    fn resolve_if_warm_should_use_only_an_already_listening_local_engine() {
+        use crate::classify_setup::ResolvedEngine;
+        let base = "http://127.0.0.1:7777".to_string();
+        let resolve = |args: &[&str], stored: Option<&str>, live: bool| {
+            let probed = std::cell::RefCell::new(Vec::new());
+            let result = resolve_if_warm(
+                &parse_classify(args),
+                stored.map(str::to_string),
+                base.clone(),
+                |url| {
+                    probed.borrow_mut().push(url.to_string());
+                    live
+                },
+            );
+            (result, probed.into_inner())
+        };
+
+        let (result, probed) = resolve(
+            &["pixel", "classify", "t", "--if-warm"],
+            Some("local"),
+            true,
+        );
+        assert!(matches!(result, Ok(ResolvedEngine::Local { base: b }) if b == base));
+        assert_eq!(probed, std::slice::from_ref(&base));
+
+        let (result, probed) = resolve(&["pixel", "classify", "t", "--if-warm"], None, false);
+        let Err(error) = result else {
+            panic!("a cold engine is refused")
+        };
+        assert_eq!(
+            error,
+            "not warm: no local classify engine is listening at http://127.0.0.1:7777; --if-warm never starts it (`pixel classify` without --if-warm does)"
+        );
+        assert_eq!(probed, std::slice::from_ref(&base));
+
+        let (result, probed) = resolve(
+            &["pixel", "classify", "t", "--if-warm"],
+            Some("remote"),
+            true,
+        );
+        let Err(error) = result else {
+            panic!("a stored remote engine is refused")
+        };
+        assert!(
+            error.starts_with("not warm: the stored classify engine is remote"),
+            "{error}"
+        );
+        assert!(probed.is_empty());
+
+        let args = [
+            "pixel",
+            "classify",
+            "t",
+            "--if-warm",
+            "--engine",
+            "ollaya",
+            "--ollaya-url",
+            "http://127.0.0.1:8888",
+        ];
+        let (result, probed) = resolve(&args, Some("remote"), true);
+        assert!(
+            matches!(result, Ok(ResolvedEngine::Local { base: b }) if b == "http://127.0.0.1:8888")
+        );
+        assert_eq!(probed, ["http://127.0.0.1:8888"]);
+
+        let args = ["pixel", "classify", "t", "--if-warm", "--engine", "remote"];
+        let (result, probed) = resolve(&args, Some("local"), true);
+        let Err(error) = result else {
+            panic!("an explicit remote engine is refused")
+        };
+        assert_eq!(
+            error,
+            "--if-warm answers only from the local engine; drop --engine remote"
+        );
+        assert!(probed.is_empty());
     }
 
     #[test]
@@ -1457,6 +1672,8 @@ mod tests {
             engine: Some(EngineChoice::Remote),
             ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
             jsonl: true,
+            if_warm: false,
+            task_intent: false,
             json: false,
         };
         let mut output = RecordingOutput::default();
@@ -1521,6 +1738,8 @@ mod tests {
                 engine: Some(EngineChoice::Ollaya),
                 ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
                 jsonl: false,
+                if_warm: false,
+                task_intent: false,
                 json: false,
             },
             test_resolve,
@@ -1569,6 +1788,8 @@ mod tests {
                 engine: Some(EngineChoice::Remote),
                 ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
                 jsonl: false,
+                if_warm: false,
+                task_intent: false,
                 json: false,
             },
             |_| {
@@ -1606,6 +1827,8 @@ mod tests {
                 engine: Some(EngineChoice::Remote),
                 ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
                 jsonl: false,
+                if_warm: false,
+                task_intent: false,
                 json: false,
             },
             test_resolve,
@@ -1666,6 +1889,8 @@ mod tests {
             engine: Some(EngineChoice::Remote),
             ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
             jsonl: true,
+            if_warm: false,
+            task_intent: false,
             json: false,
         };
         let mut output = RecordingOutput::default();
@@ -1717,6 +1942,8 @@ mod tests {
                 engine: Some(EngineChoice::Remote),
                 ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
                 jsonl: false,
+                if_warm: false,
+                task_intent: false,
                 json: true,
             },
             test_resolve,
@@ -1779,6 +2006,8 @@ mod tests {
             engine: Some(EngineChoice::Ollaya),
             ollaya_url: "http://127.0.0.1:9".to_string(),
             jsonl: false,
+            if_warm: false,
+            task_intent: false,
             json: false,
         };
         // A dead server address fails the decision with a transport error —

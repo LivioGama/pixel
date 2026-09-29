@@ -50,8 +50,17 @@ pub(crate) struct EvidenceSnapshot {
     pub(crate) impact: String,
 }
 
+/// A task-intent verdict from the local classifier: a model claim about the
+/// prompt, kept apart from the packet's repository facts and rendered as such.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Intent {
+    pub(crate) label: String,
+    pub(crate) p: f64,
+    pub(crate) model: String,
+}
+
 /// The factual packet injected into a Claude Code session.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Packet {
     pub(crate) version: u8,
     pub(crate) task_id: String,
@@ -63,6 +72,10 @@ pub(crate) struct Packet {
     pub(crate) created_unix: u64,
     pub(crate) updated_unix: u64,
     pub(crate) evidence: EvidenceSnapshot,
+    /// The classifier's verdict on this prompt, when the local daemon was
+    /// warm. Absent in stores written before it existed, which still load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) intent: Option<Intent>,
 }
 
 /// A provider-neutral durable task record. `facts` and `model_claims` are
@@ -137,14 +150,18 @@ impl Packet {
             return None;
         }
         let mut text = format!(
-            "[PIXEL:TASK_RUNTIME v1] Factual local task packet, not an exhaustive task map or read/edit boundary. Expand investigation when evidence is insufficient.\nTask ID: {}\nGeneration: {} | revision: {}\nHEAD: {}\nTask: {}\nImpact: {}\nTargets:\n",
-            self.task_id,
-            self.generation,
-            self.revision,
-            self.head_oid,
-            self.task,
-            self.evidence.impact,
+            "[PIXEL:TASK_RUNTIME v1] Factual local task packet, not an exhaustive task map or read/edit boundary. Expand investigation when evidence is insufficient.\nTask ID: {}\nGeneration: {} | revision: {}\nHEAD: {}\nTask: {}\n",
+            self.task_id, self.generation, self.revision, self.head_oid, self.task,
         );
+        if let Some(line) = self
+            .intent
+            .as_ref()
+            .and_then(crate::prompt_intent::render_line)
+        {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        text.push_str(&format!("Impact: {}\nTargets:\n", self.evidence.impact));
         if text.len() >= budget {
             return None;
         }
@@ -186,13 +203,20 @@ pub(crate) fn upsert_claude_task(
     prompt: &str,
     targets: Value,
     boundary: bool,
+    intent: Option<Intent>,
 ) -> Option<Packet> {
     if !valid_session_id(session_id) {
         return None;
     }
     let now = now_unix();
     let head_oid = current_head(root);
-    upsert_at(root, session_id, prompt, targets, boundary, &head_oid, now).ok()
+    let state = PromptState {
+        prompt,
+        targets,
+        boundary,
+        intent,
+    };
+    upsert_at(root, session_id, state, &head_oid, now).ok()
 }
 
 /// Read a session's active packet only when it still refers to the supplied
@@ -384,15 +408,27 @@ pub(crate) fn events(root: &Path, task_id: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// What one prompt contributes to its session's packet.
+struct PromptState<'a> {
+    prompt: &'a str,
+    targets: Value,
+    boundary: bool,
+    intent: Option<Intent>,
+}
+
 fn upsert_at(
     root: &Path,
     session_id: &str,
-    prompt: &str,
-    targets: Value,
-    boundary: bool,
+    state: PromptState<'_>,
     head_oid: &str,
     now: u64,
 ) -> Result<Packet, String> {
+    let PromptState {
+        prompt,
+        targets,
+        boundary,
+        intent,
+    } = state;
     let state_path = store_path(root);
     let mut store = load_store(&state_path);
     store
@@ -440,6 +476,7 @@ fn upsert_at(
             targets: extract_targets(&targets),
             impact: "deferred_no_symbol".to_string(),
         },
+        intent,
     };
     store.sessions.push(packet.clone());
     store.sessions.sort_by_key(|entry| entry.updated_unix);
@@ -660,6 +697,24 @@ mod tests {
         root
     }
 
+    fn upsert_plain(
+        root: &Path,
+        session_id: &str,
+        prompt: &str,
+        targets: Value,
+        boundary: bool,
+        head_oid: &str,
+        now: u64,
+    ) -> Result<Packet, String> {
+        let state = PromptState {
+            prompt,
+            targets,
+            boundary,
+            intent: None,
+        };
+        upsert_at(root, session_id, state, head_oid, now)
+    }
+
     fn targets(path: &str) -> Value {
         serde_json::json!({"targets":[{
             "path": path,
@@ -671,7 +726,7 @@ mod tests {
     #[test]
     fn starts_then_refreshes_same_generation_with_bounded_evidence() {
         let root = root("refresh");
-        let first = upsert_at(
+        let first = upsert_plain(
             &root,
             "session-1",
             " first task ",
@@ -681,7 +736,7 @@ mod tests {
             100,
         )
         .unwrap();
-        let refreshed = upsert_at(
+        let refreshed = upsert_plain(
             &root,
             "session-1",
             "second prompt",
@@ -708,7 +763,7 @@ mod tests {
     #[test]
     fn boundary_starts_new_generation_and_revision_one() {
         let root = root("boundary");
-        upsert_at(
+        upsert_plain(
             &root,
             "session-1",
             "first",
@@ -718,7 +773,7 @@ mod tests {
             100,
         )
         .unwrap();
-        let next = upsert_at(
+        let next = upsert_plain(
             &root,
             "session-1",
             "new task",
@@ -740,7 +795,7 @@ mod tests {
     #[test]
     fn mismatched_head_and_expired_packet_do_not_restore() {
         let root = root("freshness");
-        upsert_at(
+        upsert_plain(
             &root,
             "session-1",
             "task",
@@ -760,7 +815,7 @@ mod tests {
     fn cap_evicts_oldest_session_and_invalid_or_corrupt_state_fails_open() {
         let root = root("cap");
         for index in 0..=MAX_SESSIONS {
-            upsert_at(
+            upsert_plain(
                 &root,
                 &format!("session-{index}"),
                 "task",
@@ -783,7 +838,15 @@ mod tests {
         std::fs::write(store_path(&root), "not json").unwrap();
         assert!(read_claude_packet(&root, "session-1", "abc", 200).is_none());
         assert!(
-            upsert_claude_task(&root, "bad/session", "task", targets("src/a.rs"), false).is_none()
+            upsert_claude_task(
+                &root,
+                "bad/session",
+                "task",
+                targets("src/a.rs"),
+                false,
+                None
+            )
+            .is_none()
         );
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -791,7 +854,7 @@ mod tests {
     #[test]
     fn rendered_packet_is_bounded_and_says_evidence_is_not_a_boundary() {
         let root = root("render");
-        let packet = upsert_at(
+        let packet = upsert_plain(
             &root,
             "session-1",
             "task",
@@ -807,6 +870,92 @@ mod tests {
         assert!(rendered.contains("[PIXEL:TASK_RUNTIME v1]"));
         assert!(rendered.contains("not an exhaustive task map"));
         assert!(packet.render_context(100).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn intent(label: &str, p: f64) -> Intent {
+        Intent {
+            label: label.to_string(),
+            p,
+            model: "winnow:e4b".to_string(),
+        }
+    }
+
+    fn upsert_with_intent(root: &Path, prompt: &str, intent: Option<Intent>, now: u64) -> Packet {
+        let state = PromptState {
+            prompt,
+            targets: targets("src/a.rs"),
+            boundary: false,
+            intent,
+        };
+        upsert_at(root, "session-1", state, "abc", now).unwrap()
+    }
+
+    #[test]
+    fn store_should_load_a_packet_written_before_the_intent_field_existed() {
+        let root = root("pre-intent");
+        let packet = [
+            r#"{"version":1,"task_id":"claude:session-1:1","session_id":"session-1","#,
+            r#""generation":1,"revision":1,"task":"fix auth","head_oid":"abc","#,
+            r#""created_unix":100,"updated_unix":100,"evidence":{"revision":1,"#,
+            r#""reason":"initial_prompt","created_unix":100,"head_oid":"abc","#,
+            r#""targets":[{"path":"src/a.rs","tier":"P0"}],"impact":"deferred_no_symbol"}}"#,
+        ]
+        .join("");
+        std::fs::write(
+            store_path(&root),
+            format!(r#"{{"version":1,"sessions":[{packet}]}}"#),
+        )
+        .unwrap();
+        let loaded = read_claude_packet(&root, "session-1", "abc", 101).unwrap();
+        assert_eq!(loaded.task, "fix auth");
+        assert_eq!(loaded.intent, None);
+        assert!(!loaded.render_context(4096).unwrap().contains("Intent"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn packet_should_persist_its_intent_and_render_it_after_a_restore() {
+        let root = root("intent-roundtrip");
+        let written = upsert_with_intent(&root, "fix auth", Some(intent("bugfix", 0.82)), 100);
+        assert_eq!(written.intent, Some(intent("bugfix", 0.82)));
+        let restored = read_claude_packet(&root, "session-1", "abc", 101).unwrap();
+        assert_eq!(restored, written);
+        let rendered = restored.render_context(4096).unwrap();
+        let task = rendered.find("Task: fix auth\n").unwrap();
+        let line = rendered
+            .find("Intent (classifier verdict, not fact): bugfix p=0.82 (winnow:e4b) → start with: pixel plan-rollback")
+            .unwrap();
+        let impact = rendered.find("Impact: ").unwrap();
+        assert!(task < line && line < impact, "{rendered}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn packet_should_drop_a_previous_intent_when_the_next_prompt_has_none() {
+        let root = root("intent-refresh");
+        upsert_with_intent(&root, "fix auth", Some(intent("bugfix", 0.82)), 100);
+        let refreshed = upsert_with_intent(&root, "now explain it", None, 101);
+        assert_eq!(refreshed.intent, None);
+        assert_eq!(
+            read_claude_packet(&root, "session-1", "abc", 102)
+                .unwrap()
+                .intent,
+            None
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn packet_should_not_render_an_intent_below_one_half() {
+        let root = root("intent-low");
+        let packet = upsert_with_intent(&root, "fix auth", Some(intent("bugfix", 0.4)), 100);
+        assert_eq!(
+            packet.intent,
+            Some(intent("bugfix", 0.4)),
+            "kept as a claim"
+        );
+        assert!(!packet.render_context(4096).unwrap().contains("Intent"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

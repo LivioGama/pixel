@@ -11,9 +11,15 @@
 //!
 //! Task context uses the existing warm daemon only: no shell command, daemon
 //! startup, or model download. For provider-qualified Claude hooks, the bounded
-//! target response is also recorded as a session-owned task packet. Both workers
-//! share a 750ms deadline; one slow worker does not discard useful context from
-//! the other.
+//! target response is also recorded as a session-owned task packet, with the
+//! local classifier's task-intent verdict when its daemon is already warm
+//! (`prompt_intent`). The workers share a 750ms deadline; one slow worker does
+//! not discard useful context from the others.
+//!
+//! The intent verdict never gates the automatic handoff: that decision runs
+//! before the workers start, on `is_explicit_local_coding_prompt` alone, so
+//! waiting for a verdict would add its latency to every handoff-eligible
+//! prompt.
 
 use std::ffi::OsString;
 use std::io::Read;
@@ -148,10 +154,22 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
             let _ = tx.send((kind, note));
         });
     }
+    if intent_worker_enabled(task_context, provider) {
+        let prompt = payload.prompt.clone();
+        spawn_note(tx.clone(), 2, move || {
+            crate::prompt_intent::hook_intent(&prompt).map(PromptNote::Intent)
+        });
+    }
     drop(tx);
     let notes = collect_notes(rx, deadline);
     let mut context = if is_claude_runtime {
-        render_claude_runtime(&payload, &cwd, notes.targets, notes.boundary.as_ref())
+        render_claude_runtime(
+            &payload,
+            &cwd,
+            notes.targets,
+            notes.boundary.as_ref(),
+            notes.intent,
+        )
     } else {
         render_legacy_context(notes.targets, notes.boundary.as_ref())
     };
@@ -184,6 +202,27 @@ fn overview_pointer(prompt: &str, root: &Path) -> Option<String> {
 /// Either feature can run independently; only disabling both suppresses the hook.
 fn prompt_features_disabled(context: bool, boundary: bool) -> bool {
     !context && !boundary
+}
+
+/// The intent verdict belongs to the Claude task packet, so it is asked for
+/// only on a Claude-qualified hook with task context enabled.
+fn intent_worker_enabled(task_context: bool, provider: Option<crate::guard::Provider>) -> bool {
+    task_context && matches!(provider, Some(crate::guard::Provider::Claude))
+}
+
+/// Run one worker on its own thread and send its note tagged with `kind`. A
+/// panic sends `None`, so the collector still sees the worker finish.
+fn spawn_note(
+    tx: std::sync::mpsc::Sender<(usize, Option<PromptNote>)>,
+    kind: usize,
+    work: impl FnOnce() -> Option<PromptNote> + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let note = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+            .ok()
+            .flatten();
+        let _ = tx.send((kind, note));
+    });
 }
 
 /// Accept only a plainly imperative local coding request. Questions, planning,
@@ -356,12 +395,14 @@ fn emit_handoff(handoff: &ClaudeHandoff) -> ! {
 enum PromptNote {
     Targets(Value),
     Boundary(BoundaryEvent),
+    Intent(crate::task_runtime::Intent),
 }
 
 #[derive(Default)]
 struct PromptNotes {
     targets: Option<Value>,
     boundary: Option<BoundaryEvent>,
+    intent: Option<crate::task_runtime::Intent>,
 }
 
 fn collect_notes(
@@ -374,6 +415,7 @@ fn collect_notes(
         match (kind, note) {
             (0, Some(PromptNote::Targets(targets))) => notes.targets = Some(targets),
             (1, Some(PromptNote::Boundary(boundary))) => notes.boundary = Some(boundary),
+            (2, Some(PromptNote::Intent(intent))) => notes.intent = Some(intent),
             _ => {}
         }
     }
@@ -412,8 +454,15 @@ fn render_claude_runtime(
     cwd: &Path,
     targets: Option<Value>,
     boundary: Option<&BoundaryEvent>,
+    intent: Option<crate::task_runtime::Intent>,
 ) -> String {
     let mut notes = Vec::new();
+    // Without a packet (no targets, no session) the verdict still reaches the
+    // prompt, as its own line.
+    let standalone = intent
+        .as_ref()
+        .and_then(crate::prompt_intent::render_line)
+        .map(|line| format!("[PIXEL:TASK_INTENT] {line}"));
     if let (Some(session_id), Some(targets), Ok(root)) = (
         payload.session_id.as_deref(),
         targets,
@@ -424,9 +473,12 @@ fn render_claude_runtime(
         &payload.prompt,
         targets,
         boundary.is_some(),
+        intent,
     ) && let Some(packet_context) = packet.render_context(TASK_CONTEXT_BYTES)
     {
         notes.push(packet_context);
+    } else if let Some(line) = standalone {
+        notes.push(line);
     }
     if let Some(boundary) = boundary {
         notes.push(boundary_note(boundary));
@@ -1342,6 +1394,133 @@ mod tests {
         );
         let _ = crate::task_scheduler::stop(&root, &handoff.task_id, "initial");
         let _ = crate::task_sandbox::cleanup(&root, &handoff.task_id, "initial");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn claude_intent(label: &str, p: f64) -> crate::task_runtime::Intent {
+        crate::task_runtime::Intent {
+            label: label.to_string(),
+            p,
+            model: "winnow:e4b".to_string(),
+        }
+    }
+
+    #[test]
+    fn intent_worker_should_run_only_for_claude_with_task_context() {
+        use crate::guard::Provider;
+        assert!(intent_worker_enabled(true, Some(Provider::Claude)));
+        assert!(!intent_worker_enabled(false, Some(Provider::Claude)));
+        assert!(!intent_worker_enabled(true, Some(Provider::Devin)));
+        assert!(!intent_worker_enabled(true, None));
+    }
+
+    #[test]
+    fn spawned_intent_note_should_reach_the_collector_under_its_kind() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        spawn_note(tx.clone(), 2, || {
+            Some(PromptNote::Intent(claude_intent("bugfix", 0.82)))
+        });
+        drop(tx);
+        let notes = collect_notes(rx, Instant::now() + HOOK_DEADLINE);
+        assert_eq!(notes.intent, Some(claude_intent("bugfix", 0.82)));
+        assert!(notes.targets.is_none());
+        assert!(notes.boundary.is_none());
+    }
+
+    #[test]
+    fn panicking_worker_should_report_nothing_and_release_the_collector() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        spawn_note(tx.clone(), 2, || panic!("classifier adapter bug"));
+        drop(tx);
+        let started = Instant::now();
+        let notes = collect_notes(rx, Instant::now() + Duration::from_secs(10));
+        assert!(notes.intent.is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a panicked worker still ends the wait"
+        );
+    }
+
+    #[test]
+    fn slow_intent_worker_should_not_hold_the_hook_past_its_deadline() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        spawn_note(tx.clone(), 2, || {
+            std::thread::sleep(Duration::from_secs(3));
+            Some(PromptNote::Intent(claude_intent("bugfix", 0.9)))
+        });
+        tx.send((
+            0,
+            Some(PromptNote::Targets(serde_json::json!({"targets": []}))),
+        ))
+        .unwrap();
+        drop(tx);
+        let started = Instant::now();
+        let notes = collect_notes(rx, Instant::now() + Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(notes.intent.is_none(), "a late verdict is dropped");
+        assert!(notes.targets.is_some(), "ready context is kept");
+    }
+
+    #[test]
+    fn claude_runtime_should_put_the_intent_into_the_persisted_packet() {
+        let root = fixture_repo("intent-packet");
+        let targets = serde_json::json!({"targets":[{"path":"tracked.rs","tier":"P0"}]});
+        let context = render_claude_runtime(
+            &coding_payload(),
+            &root,
+            Some(targets),
+            None,
+            Some(claude_intent("bugfix", 0.82)),
+        );
+        assert!(context.starts_with("[PIXEL:TASK_RUNTIME v1]"), "{context}");
+        assert!(
+            context.contains("\nIntent (classifier verdict, not fact): bugfix p=0.82 (winnow:e4b) → start with: pixel plan-rollback"),
+            "{context}"
+        );
+        assert!(
+            !context.contains("[PIXEL:TASK_INTENT]"),
+            "one line, in the packet"
+        );
+        let head = pixel_git::GitRunner::new(&root).rev_parse_head().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let stored =
+            crate::task_runtime::read_claude_packet(&root, "session-handoff", &head, now).unwrap();
+        assert_eq!(stored.intent, Some(claude_intent("bugfix", 0.82)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn claude_runtime_should_emit_the_intent_alone_when_no_packet_is_written() {
+        let root = fixture_repo("intent-alone");
+        let context = render_claude_runtime(
+            &coding_payload(),
+            &root,
+            None,
+            None,
+            Some(claude_intent("review", 0.7)),
+        );
+        assert_eq!(
+            context,
+            "[PIXEL:TASK_INTENT] Intent (classifier verdict, not fact): review p=0.70 (winnow:e4b) → start with: pixel review-changes, pixel what-changed"
+        );
+        assert_eq!(
+            render_claude_runtime(
+                &coding_payload(),
+                &root,
+                None,
+                None,
+                Some(claude_intent("review", 0.3)),
+            ),
+            "",
+            "a verdict under one half adds nothing"
+        );
+        assert_eq!(
+            render_claude_runtime(&coding_payload(), &root, None, None, None),
+            ""
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

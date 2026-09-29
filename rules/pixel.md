@@ -115,7 +115,12 @@ an unindexed repo still classifies.
 pixel classify "<text>" --label bug --label feature --context "what kind of change" [--criterion bug="what bug means"]
 pixel classify "<text>"    # no --label: the default question battery (intent/urgency/…), local engine only
 pixel classify --jsonl     # batch: one {"text","labels","criteria","context"} spec per stdin line
+pixel classify "<prompt>" --task-intent --if-warm   # task kind + the pixel ops to start with; local engine only, never cold-started
 ```
+
+The harness classifies each prompt's task intent for you: when the local
+engine is warm, the task packet carries an `Intent (classifier verdict, not
+fact)` line with the ops to start with; weigh it, do not re-run it.
 
 Output is a probability per label plus `predicted:` (the argmax). Engine:
 `--engine remote|ollaya` wins over the stored `pixel config classify-engine`
