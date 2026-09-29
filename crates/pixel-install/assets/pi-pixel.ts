@@ -804,7 +804,7 @@ export default function activate(pi: ExtensionAPI) {
       return {
         message: {
           customType: "pixel-bootstrap", display: false,
-          content: `PIXEL TASK CONTEXT (deterministic, from pixel scope-task + repo-state):\n\n${scope.slice(0, BOOTSTRAP_BUDGET)}${scope.length > BOOTSTRAP_BUDGET ? "\n…(truncated)" : ""}\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}\n\n${guidance}${intentText ? `\n\n${intentText}` : ""}`,
+          content: `PIXEL TASK CONTEXT (deterministic, from pixel scope-task + repo-state):\n\n${scope.slice(0, BOOTSTRAP_BUDGET)}${scope.length > BOOTSTRAP_BUDGET ? "\n…(truncated)" : ""}\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}\n\n${guidance}${intentText ? `\n\n${intentText}` : ""}`.replace(/```bash/g, '```'),
         },
       };
     } catch (error) {
