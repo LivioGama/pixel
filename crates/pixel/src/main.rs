@@ -2316,6 +2316,12 @@ fn print_data(data: &Value, raw_json: bool) -> Result<(), String> {
     write_stdout(&rendered.text)
 }
 
+/// Whether the interactive install banner may use color: NO_COLOR unset or
+/// empty means yes. A parameter over the env read, so the rule is tested.
+fn banner_color(no_color: Option<&std::ffi::OsStr>) -> bool {
+    no_color.is_none_or(std::ffi::OsStr::is_empty)
+}
+
 /// Output of [`render_data`]: the bytes for stdout plus whether the cap
 /// fired (so metrics can refuse to count evidence the caller never saw).
 struct Rendered {
@@ -2532,6 +2538,13 @@ fn render_data(data: &Value, raw_json: bool, cap: usize) -> Rendered {
 #[cfg(test)]
 mod render_data_tests {
     use super::*;
+
+    #[test]
+    fn the_install_banner_color_follows_no_color() {
+        assert!(banner_color(None));
+        assert!(banner_color(Some(std::ffi::OsStr::new(""))));
+        assert!(!banner_color(Some(std::ffi::OsStr::new("1"))));
+    }
 
     fn big() -> Value {
         json!({"matches": (0..200).map(|i| json!({"path": format!("src/file_{i}.rs"), "line": i, "text": "é".repeat(20)})).collect::<Vec<_>>()})
@@ -6975,10 +6988,17 @@ fn run_command(
             if should_offer_classify_setup(is_global_install, json, stdin_tty, stderr_tty) {
                 config_cmd::setup()?;
             }
-            print_data(
-                &serde_json::to_value(&report).map_err(|e| e.to_string())?,
-                json,
-            )
+            let report_value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+            // A person at a terminal reads the banner; `--json` and a piped
+            // stdout keep the machine-readable report an agent parses.
+            let stdout_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+            if json || !stdout_tty {
+                print_data(&report_value, json)
+            } else {
+                operation_metrics::observe(&report_value);
+                let color = banner_color(std::env::var_os("NO_COLOR").as_deref());
+                write_stdout(&pixel_install::banner::render(&report, color))
+            }
         }
         Command::Uninstall {
             json,
