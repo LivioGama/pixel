@@ -117,9 +117,26 @@ fn ensure_local_with(
     ))
 }
 
+/// Connect cap of [`server_reachable`]: a daemon on this machine accepts in
+/// well under a millisecond, so 250 ms only bounds a dead or filtered address.
+const REACHABLE_PROBE: Duration = Duration::from_millis(250);
+
+/// Whether the stored engine preference lets a caller use the local daemon:
+/// `remote` rules it out; `local`, `auto`, an unknown value or no preference
+/// all resolve to local when it answers (see [`resolve_engine`]).
+pub fn local_permitted(stored: Option<&str>) -> bool {
+    stored != Some("remote")
+}
+
 /// Whether the local Ollaya daemon answers on its base URL (TCP level —
 /// enough to distinguish "daemon up" from "not started").
 pub fn server_reachable(base: &str) -> bool {
+    server_reachable_within(base, REACHABLE_PROBE)
+}
+
+/// [`server_reachable`] with the connect cap set by the caller: the prompt
+/// hook probes with a tighter one than an interactive `pixel classify`.
+pub fn server_reachable_within(base: &str, cap: Duration) -> bool {
     use std::net::TcpStream;
     let authority = base
         .trim_start_matches("http://")
@@ -135,7 +152,7 @@ pub fn server_reachable(base: &str) -> bool {
     std::net::ToSocketAddrs::to_socket_addrs(&(host, port))
         .ok()
         .and_then(|mut addrs| addrs.next())
-        .is_some_and(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok())
+        .is_some_and(|addr| TcpStream::connect_timeout(&addr, cap).is_ok())
 }
 
 /// Parse the interactive answer ("1"/"2") into an engine choice.
@@ -915,6 +932,29 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         assert!(server_reachable(&format!("http://127.0.0.1:{port}/api")));
+    }
+
+    #[test]
+    fn server_reachable_within_should_answer_inside_its_cap_for_open_and_closed_ports() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let open = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let closed = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://127.0.0.1:{}", probe.local_addr().unwrap().port())
+        };
+        let cap = Duration::from_millis(100);
+        assert!(server_reachable_within(&open, cap));
+        let started = std::time::Instant::now();
+        assert!(!server_reachable_within(&closed, cap));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn local_permitted_should_refuse_only_a_stored_remote_preference() {
+        assert!(!local_permitted(Some("remote")));
+        for stored in [Some("local"), Some("auto"), Some("something-else"), None] {
+            assert!(local_permitted(stored), "{stored:?}");
+        }
     }
 
     #[test]
