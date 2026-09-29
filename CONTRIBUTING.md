@@ -139,6 +139,21 @@ finding locally, scope the run to the function:
 git diff main...HEAD > target/pr.diff && cargo mutants --in-diff target/pr.diff -F '<function name>'
 ```
 
+The tracked pre-push hook runs `scripts/mutants-preflight.sh --check` before
+each Rust branch update. It makes the committed three-dot diff's prospective
+mutants visible without compiling or running them, then blocks once so each
+listing is reviewed. After naming the killing test for every line (or adding
+one), acknowledge that exact commit, base and listing with:
+
+```bash
+scripts/mutants-preflight.sh --ack
+```
+
+The receipt is invalidated by a commit, rebase, base advance or changed
+listing. `PIXEL_MUTANTS_BASE=<ref>` selects a stacked or maintenance base.
+`git push --no-verify` remains Git's explicit local bypass; `Mutants in diff`
+remains the required merge gate.
+
 Optional but recommended when the change touches the CLI surface, hooks, or
 the install flow:
 

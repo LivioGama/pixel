@@ -1,0 +1,8 @@
+#!/bin/sh
+# Mutation coverage is proved in CI. Before pushing Rust changes, make its
+# prospective mutation surface visible and require a receipt for this exact
+# commit, base and listing.
+set -eu
+
+repo=$(git rev-parse --show-toplevel) || exit 0
+exec "$repo/scripts/mutants-preflight.sh" --check
