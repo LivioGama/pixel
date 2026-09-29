@@ -179,7 +179,21 @@ def yaml_run_blocks(text: str) -> list[str]:
             while i < len(lines) and (not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > indent):
                 body.append(lines[i].strip())
                 i += 1
-            blocks.append(" ".join(b for b in body if b) if block.group(2) == ">" else "\n".join(body))
+            if block.group(2) == ">":
+                # Folding joins adjacent lines with a space, but a blank
+                # line is a line break: two commands, not one.
+                paragraphs, current = [], []
+                for part in body:
+                    if part:
+                        current.append(part)
+                    elif current:
+                        paragraphs.append(" ".join(current))
+                        current = []
+                if current:
+                    paragraphs.append(" ".join(current))
+                blocks.append("\n".join(paragraphs))
+            else:
+                blocks.append("\n".join(body))
         elif inline:
             blocks.append(inline.group(1))
     return blocks
@@ -252,6 +266,19 @@ class OneProgramForEveryLane(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         self.assertIn("--all-targets", runs[0])
         self.assertNotIn("echo done", runs[0])
+
+    def test_a_blank_line_in_a_folded_block_separates_two_commands(self):
+        workflow = (
+            "      - name: Run\n"
+            "        run: >\n"
+            "          cargo mutants --version\n"
+            "\n"
+            "          cargo mutants --in-diff pr.diff\n"
+            "          -- --all-targets\n"
+        )
+        runs = cargo_mutants_runs(lane_shell("x.yml", workflow))
+        self.assertEqual(len(runs), 1)
+        self.assertIn("--all-targets", runs[0])
 
     def test_a_flag_named_in_a_workflow_comment_is_not_a_flag_passed(self):
         workflow = (
