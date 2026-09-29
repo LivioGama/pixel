@@ -1252,11 +1252,8 @@ impl Service {
                  candidates beyond the cap"
             ));
         }
-        if credential_hidden > 0 {
-            caps.push(format!(
-                "{credential_hidden} match(es) in credential-shaped files hidden by the \
-                 daemon; continue via next_offset for adjacent matches"
-            ));
+        if Self::credential_hidden_cap_line(credential_hidden).is_some() {
+            caps.push(Self::credential_hidden_cap_line(credential_hidden).expect("just checked"));
         }
         Ok(json!({
             "matches": arr,
@@ -1276,6 +1273,22 @@ impl Service {
                 "truncated": stats.truncated,
             }
         }))
+    }
+    /// Cap line that names the count of credential-shaped matches the
+    /// daemon silently hid. Returns `None` when nothing was hidden so the
+    /// caller can `push` the line conditionally. The boundary is strictly
+    /// greater than zero: at zero the caller's response is already
+    /// complete and naming "0 hidden" would be misleading; at one or more
+    /// the user has lost a result and the envelope must say so.
+    fn credential_hidden_cap_line(credential_hidden: usize) -> Option<String> {
+        if credential_hidden > 0 {
+            Some(format!(
+                "{credential_hidden} match(es) in credential-shaped files hidden by the \
+                 daemon; continue via next_offset for adjacent matches"
+            ))
+        } else {
+            None
+        }
     }
 
     /// Sniper target list: tokenize the task, gather lexical + graph signals,
@@ -7768,34 +7781,38 @@ mod tests {
         assert_eq!(paths, vec!["src/safe.rs"], "safe match must survive");
     }
 
-    /// The cap line at `op_search:1255` only fires when `credential_hidden`
-    /// is positive — that comparison is the truth behind the `RESULT_CAPPED`
-    /// warning the envelope surfaces. `partition_credential_matches`
-    /// returning `(_, 0)` must produce no cap (a healthy search with no
-    /// hidden matches is not a partial answer) and a non-zero hidden count
-    /// must produce a cap the envelope surfaces.
+    /// The cap line `op_search` emits when `credential_hidden` is positive
+    /// is the truth behind the `RESULT_CAPPED` warning the envelope
+    /// surfaces. `partition_credential_matches` returning `(_, 0)` must
+    /// produce no cap (a healthy search with no hidden matches is not a
+    /// partial answer); a non-zero hidden count must produce a cap the
+    /// envelope surfaces, with the exact count visible in the line.
     #[test]
     fn op_search_surfaces_a_credential_cap_only_when_hidden_is_positive() {
-        // Zero hidden → no cap line.
-        let mut caps: Vec<String> = Vec::new();
-        let credential_hidden = 0usize;
-        if credential_hidden > 0 {
-            caps.push(format!(
-                "{credential_hidden} match(es) in credential-shaped files hidden by the \
-                 daemon; continue via next_offset for adjacent matches"
-            ));
-        }
-        assert!(caps.is_empty(), "no cap on a clean search");
+        // Zero hidden → no cap line. A healthy search is not a partial
+        // answer, so naming "0 hidden" would be misleading.
+        assert_eq!(
+            Service::credential_hidden_cap_line(0),
+            None,
+            "no cap on a clean search"
+        );
 
-        // Non-zero hidden → exact cap line the envelope emits.
-        let credential_hidden = 2usize;
-        if credential_hidden > 0 {
-            caps.push(format!(
-                "{credential_hidden} match(es) in credential-shaped files hidden by the \
-                 daemon; continue via next_offset for adjacent matches"
-            ));
-        }
-        assert_eq!(caps.len(), 1, "exactly one cap line for two hidden matches");
-        assert!(caps[0].starts_with("2 match(es)"), "{}", caps[0]);
+        // One hidden → cap line that names the exact count.
+        let line = Service::credential_hidden_cap_line(1).expect("one hidden must produce a cap");
+        assert!(
+            line.starts_with("1 match(es)"),
+            "expected cap to name the count: {line:?}"
+        );
+        assert!(
+            line.contains("next_offset"),
+            "expected cap to point at next_offset: {line:?}"
+        );
+
+        // Two hidden → cap line that names the exact count.
+        let line = Service::credential_hidden_cap_line(2).expect("two hidden must produce a cap");
+        assert!(
+            line.starts_with("2 match(es)"),
+            "expected cap to name the count: {line:?}"
+        );
     }
 }
