@@ -421,7 +421,7 @@ fn checked_dir(raw: &str, cwd: &Path) -> Option<(PathBuf, PathBuf, String)> {
 /// Credential-shaped paths never qualify for automatic permission grants.
 /// This is metadata-only eligibility, not a claim to detect every secret.
 /// The single canonical predicate lives in `pixel_index::index::credential_path`
-/// (shared with the daemon's search filter and the task sandbox).
+/// (shared with the daemon's search filter; the task sandbox keeps its own).
 fn credential_path(path: &Path) -> bool {
     pixel_index::index::credential_path(path)
 }

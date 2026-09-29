@@ -60,8 +60,8 @@ pub fn is_ignored_dir_name(name: &str) -> bool {
 }
 
 /// Path-safety predicate shared by every consumer that surfaces an indexed
-/// file's contents (search daemon, MCP server, guard's native-command rewrite,
-/// task sandbox): a tracked, non-ignored `.env` / `id_rsa` / `*.pem` is a
+/// file's contents (search daemon, MCP server, guard's native-command rewrite):
+/// a tracked, non-ignored `.env` / `id_rsa` / `*.pem` is a
 /// place the user almost certainly does not want echoed back. Eligibility
 /// is metadata-only — content stays for the execution side — and a positive
 /// answer here never claims to detect every secret.
@@ -69,9 +69,10 @@ pub fn is_ignored_dir_name(name: &str) -> bool {
 /// A `pub fn` in the index crate is the only home the workspace has that
 /// every reader already imports: `pixel` (CLI) and `pixel-daemon` both
 /// depend on `pixel-index`, and `pixel-daemon` cannot depend on `pixel`
-/// (circular). Suffix/name based by design, mirroring the existing
-/// `search_compat::credential_path` and the task sandbox's own list, both
-/// of which call into here.
+/// (circular). Suffix/name based by design; `search_compat::credential_path`
+/// delegates here. `task_sandbox::credential_path` keeps its own list on
+/// purpose: it gates which WIP paths may be copied into a sandbox, not what
+/// a search may display, so the two may diverge.
 pub fn credential_path(path: &Path) -> bool {
     if path.components().any(|part| {
         part.as_os_str()
