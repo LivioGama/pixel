@@ -984,6 +984,32 @@ mod tests {
         assert_eq!(wait.action, "wait");
         assert_eq!(wait.wait.as_deref(), Some(WAIT_STEP));
         assert_eq!(wait.value, None);
+        // Every arm carries the decision it was recorded from.
+        for (label, step) in [
+            ("CLICK 3", &click),
+            ("TYPE 2", &step_for(&choose("TYPE 2"), None, None).unwrap()),
+            (
+                "SELECT 2",
+                &step_for(&choose("SELECT 2"), None, None).unwrap(),
+            ),
+            (
+                "SCROLL_UP",
+                &step_for(&choose("SCROLL_UP"), None, None).unwrap(),
+            ),
+            (
+                "SCROLL_DOWN",
+                &step_for(&choose("SCROLL_DOWN"), None, None).unwrap(),
+            ),
+            ("WAIT", &wait),
+        ] {
+            assert!(
+                step.rationale
+                    .as_deref()
+                    .is_some_and(|rationale| rationale.starts_with("classified ")),
+                "{label}: {:?}",
+                step.rationale
+            );
+        }
 
         for label in ["DONE", "BLOCKED"] {
             assert_eq!(step_for(&choose(label), None, None), None, "{label}");
@@ -991,20 +1017,23 @@ mod tests {
     }
 
     /// A variable-sourced value is recorded as `value_var` too, so a replay
-    /// re-reads it from the caller instead of freezing one answer.
+    /// re-reads it from the caller instead of freezing one answer — for both
+    /// operations that take a value.
     #[test]
     fn a_variable_value_is_recorded_with_its_name() {
         let (elements, _) = parse_snapshot(DUCK);
         let space = ActionSpace::of(&elements, MAX_LABELS);
-        let choice = space.choose(&weights(&[("TYPE 2", 1.0)])).unwrap();
-        let step = step_for(
-            &choice,
-            Some("Zurich"),
-            Some(&ValueSource::Var("query".to_string())),
-        )
-        .unwrap();
-        assert_eq!(step.value_var.as_deref(), Some("query"));
-        assert_eq!(step.value.as_deref(), Some("Zurich"));
+        for label in ["TYPE 2", "SELECT 2"] {
+            let choice = space.choose(&weights(&[(label, 1.0)])).unwrap();
+            let step = step_for(
+                &choice,
+                Some("Zurich"),
+                Some(&ValueSource::Var("query".to_string())),
+            )
+            .unwrap();
+            assert_eq!(step.value_var.as_deref(), Some("query"), "{label}");
+            assert_eq!(step.value.as_deref(), Some("Zurich"), "{label}");
+        }
     }
 
     /// A targeted option with no element would record a step that acts on

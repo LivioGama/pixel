@@ -273,12 +273,14 @@ fn mask(text: &str, spans: &[(std::ops::Range<usize>, String)]) -> String {
     let mut out = String::with_capacity(text.len());
     let mut cursor = 0usize;
     for (range, _) in spans {
-        // Overlapping spans keep the first: the second is inside it.
-        if range.start <= cursor {
+        // Overlapping spans keep the first: the second is inside it. A span
+        // that *starts* where the last one ended is not inside it — its own
+        // bytes still have to leave the token scan.
+        if range.start < cursor {
             continue;
         }
         out.push_str(&text[cursor..range.start]);
-        out.extend(std::iter::repeat(' ', range.len()));
+        out.extend(std::iter::repeat_n(' ', range.len()));
         cursor = range.end;
     }
     out.push_str(&text[cursor..]);
@@ -396,6 +398,48 @@ mod tests {
     /// A declared variable replaces the goal's own words as the option set,
     /// the engine's budget bounds the rest, and a declaration the engine
     /// cannot fit is refused rather than halved.
+    /// Two quoted spans that share an edge are two candidates, not one: the
+    /// overlap guard must not swallow the span that starts where the last
+    /// one ended, and the mask must keep its length aligned with the text
+    /// (which is what keeps the token scan from re-reading a quoted span).
+    /// The mask's own contract, asserted directly: a span that starts where
+    /// the last one ended is blanked too (adjacent, not overlapping), the
+    /// prose survives, and the length never moves — which is what keeps the
+    /// token scan aligned with the original text.
+    #[test]
+    fn the_mask_blanks_every_quoted_span_and_keeps_the_texts_length() {
+        // Two spans with prose between them.
+        let gapped = "'ab' x 'cd' and Zz";
+        let masked = mask(gapped, &quoted_spans(gapped));
+        assert_eq!(
+            masked.len(),
+            gapped.len(),
+            "aligned with the original: {masked:?}"
+        );
+        assert!(masked.contains(" x "), "the prose survives: {masked:?}");
+        assert!(
+            !masked.contains('\''),
+            "every quoted byte is blanked: {masked:?}"
+        );
+        // Two spans sharing an edge are both blanked too: adjacent is not
+        // overlapping, and the prose's own spacing survives untouched.
+        let adjacent = "'ab''cd' and Zz";
+        let masked = mask(adjacent, &quoted_spans(adjacent));
+        assert_eq!(masked.len(), adjacent.len(), "{masked:?}");
+        assert!(!masked.contains('\''), "{masked:?}");
+        assert!(masked.ends_with(" and Zz"), "{masked:?}");
+        assert!(masked.starts_with("    "), "{masked:?}");
+    }
+
+    #[test]
+    fn adjacent_quoted_spans_are_two_candidates() {
+        // `(0..4)` and `(4..8)` touch; neither contains the other.
+        assert_eq!(candidates("'ab''cd'"), ["ab", "cd"]);
+        // The same shape beside prose, so the masked scan still sees what is
+        // outside the quotes.
+        assert_eq!(candidates("'ab''cd' and Zz"), ["ab", "cd", "Zz"]);
+    }
+
     #[test]
     fn a_declared_variable_is_the_whole_option_set() {
         let mut decider = ScriptedDecider::always("VAR query");

@@ -546,6 +546,10 @@ mod tests {
         assert_eq!(flow.steps.len(), 3);
         assert_eq!(flow.steps[0].action, "open");
         assert_eq!(flow.steps[0].url.as_deref(), Some(URL));
+        assert_eq!(
+            flow.steps[0].rationale.as_deref(),
+            Some("start of the discovered path")
+        );
         assert_eq!(flow.steps[1].action, "click");
         assert_eq!(flow.steps[2].action, "fill");
         assert_eq!(flow.steps[2].value_var.as_deref(), Some("code"));
