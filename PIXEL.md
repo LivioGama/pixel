@@ -114,9 +114,13 @@ pixel classify --jsonl     # batch: one {"text","labels","criteria","context"} s
 pixel classify "<prompt>" --task-intent --if-warm   # task kind + the pixel ops to start with; local engine only, never cold-started
 ```
 
-The harness classifies each prompt's task intent for you: when the local
-engine is warm, the task packet carries an `Intent (classifier verdict, not
-fact)` line with the ops to start with; weigh it, do not re-run it.
+On Claude with the task-context hook on, the harness classifies each prompt's
+task intent for you: with `classify.enabled` on and the local engine warm,
+the verdict arrives as an `Intent (classifier verdict, not fact)` line with
+the ops to start with — inside the `[PIXEL:TASK_RUNTIME v1]` packet, or
+standalone as a `[PIXEL:TASK_INTENT]` line when no packet was written. Weigh
+it, do not re-run it: other providers, a cold engine, or classify off yield
+no verdict.
 
 Output is a probability per label plus `predicted:` (the argmax). Engine:
 `--engine remote|ollaya` wins over the stored `pixel config classify-engine`
