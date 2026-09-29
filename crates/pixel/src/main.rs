@@ -5319,15 +5319,16 @@ fn run() -> Result<(), String> {
     // After the answer, before the metrics block: a person at a terminal
     // reads it last-but-one, and nothing else ever sees it. After `elapsed`
     // too: waiting on the release check is not the command's cost.
-    if let Some(check) = release_check
-        && let Some(notice) = update_notice::finish(
+    let update_line = release_check.and_then(|check| {
+        update_notice::finish(
             check,
             task_scheduler::now_unix(),
             env!("CARGO_PKG_VERSION"),
             release_upgrade_hint,
             std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()),
         )
-    {
+    });
+    if let Some(notice) = &update_line {
         eprint!("{notice}");
     }
     // A command that owns its exit code still reports its outcome to the
@@ -5382,6 +5383,31 @@ fn run() -> Result<(), String> {
     // metrics history and the next invocation's footer read it back.
     // `finish` would drop it whenever the process exits first.
     logger.finish_flush();
+    // The update question closes the command, after the journal: an exec
+    // here must not lose the record of what just ran. `close_with_update`
+    // re-checks the updater, the opt-outs and the owned exit code, asks,
+    // upgrades, and on a taken update replaces this process with the new
+    // binary on the same arguments.
+    update_notice::close_with_update(
+        update_notice::Close {
+            notice: update_line.as_deref(),
+            owned_exit,
+            command_label: &command_label,
+            stdin_is_terminal: std::io::IsTerminal::is_terminal(&std::io::stdin()),
+            hint: release_upgrade_hint(),
+            exe: std::env::current_exe().ok(),
+            args: &argv[1..],
+        },
+        |name| std::env::var_os(name),
+        &mut |prompt| {
+            eprint!("{prompt}");
+            let _ = std::io::stderr().flush();
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer).map(|_| answer)
+        },
+        &mut update_notice::run_upgrade,
+        &mut |exe, args| update_notice::relaunch(exe, args),
+    );
     if let Some(code) = owned_exit {
         std::process::exit(code);
     }
