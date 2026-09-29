@@ -1,1 +1,0 @@
-**sniper:** The `@pixel/sniper` TypeScript package (Vite dev plugin, browser client, Vitest reporter) and its two CI jobs are removed. `pixel list-errors` is unchanged — `report` still ingests a record and `last`/`show`/`since` still read them — but nothing sends browser, HMR or vitest records to the sink any more. ([#354](https://github.com/LivioGama/pixel/pull/354))

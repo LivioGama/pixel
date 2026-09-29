@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-29
+
+A polish release on top of 0.6.0: the agent integration layer gets a forced-workflow pass (Pi, Claude, Codex, Antigravity), the config surface grows into YAML, and the index and graph builders get measurably faster.
+
+### Highlights
+- Retrieval policy is advisory by default and configurable with `pixel config policy`; Pi gains a forced Pixel workflow and task-scoped agent guidance across providers.
+- `pixel config` moves to YAML with a guided `pixel config setup`, an editor (`pixel config edit`) and update prompts when a newer release exists.
+- `pixel classify` lands with provider and engine choice plus a default question battery; `pixel recall` and task-context injection tighten agent retrieval.
+
+### Added
+- **classify:** `pixel classify <text>` no longer requires `--label` — with the local Ollaya engine it answers Ollaya's default `triage` question battery (the same default `ollaya run` picks for models without built-in questions: `choice`/`score`/`noul` typed answers). The remote engine still needs `--label`; `--jsonl` specs are unchanged. ([#347](https://github.com/LivioGama/pixel/pull/347))
+- **classify, install:** `pixel install` proposes the classify engine — local Ollaya (auto-setup: the `ollaya` binary into a pixel-managed prefix plus the recommended `winnow:e4b` model, on-demand daemon) or a remote LLM with a stored key (new `deepseek` and `opencode-go` presets) — and engine selection needs no flags: the stored choice decides, with auto-detection when unset. Remote classification still requires `--label`. ([#347](https://github.com/LivioGama/pixel/pull/347))
+- **classify:** add an opt-in local Ollaya engine (`--engine ollaya --ollaya-url …`) — native typed-choice probabilities from the local Ollaya decision daemon (TypeSafe-compatible `/v1/systemone`), with calibrated confidence disclosed in the snapshot; remote stays the default. ([#347](https://github.com/LivioGama/pixel/pull/347))
+- **classify:** add `deepseek` and `opencode-go` remote presets — DeepSeek's hosted API and OpenCode Go join OpenRouter/Ollama/local, each with its own key variable and install-time key prompt. ([#347](https://github.com/LivioGama/pixel/pull/347))
+- **install:** Pi harness repositories get a structured Pixel tool and a pre-execution guard for repository reads and Git workflows. ([#348](https://github.com/LivioGama/pixel/pull/348))
+- **scripts:** `mutants-preflight.sh --run [regex]` executes the committed diff's mutants locally in a throwaway git worktree — optionally bounded to the functions a CI run flagged — so a fix can be verified before pushing instead of waiting on the whole `Mutants` workflow. ([#353](https://github.com/LivioGama/pixel/pull/353))
+- **config:** Add commented YAML settings, preserving comments and unknown keys on updates. Installation copies legacy JSON settings without overwriting existing YAML. [#357](https://github.com/LivioGama/pixel/pull/357)
+- **config:** Show effective settings and file paths with `pixel config`; open commented YAML with `pixel config edit [--repo]`. Add persistent daemon-startup, task-context, and task-boundary switches. [#358](https://github.com/LivioGama/pixel/pull/358)
+- **config:** Add guided terminal setup to `pixel config setup` and interactive global installs, explain YAML settings for new users, and make classification opt-in with `pixel config classify on|off`. ([#360](https://github.com/LivioGama/pixel/pull/360))
+- **install:** on a terminal, after a read-only command, the daily update notice gains `update now and relaunch? [Y/n]`: a yes runs the named upgrade command (`brew update && brew upgrade LivioGama/tap/pixel`, `mise upgrade pixel`, `install.sh`) and relaunches through the stable PATH entry on the same arguments; mutating commands, declines, failures and non-interactive streams keep the notice-only behaviour; `PIXEL_NO_UPDATE_PROMPT` opts out. ([#363](https://github.com/LivioGama/pixel/pull/363))
+
+### Changed
+- **docs:** `docs/bench/vs-landscape.md` and `docs/comparison.md` re-measure natural-language retrieval on pixel 0.6.0: `search-meaning` r@1 0.87 (semble 0.64, WarpGrep 0.69), r@10 0.96 (semble 1.00), with the 0.4.0 and 0.5.2 runs kept as history and the doc-comment bias stated beside the table. ([#332](https://github.com/LivioGama/pixel/pull/332))
+- **graph:** a cold graph build no longer decodes and splits a source file once per symbol to cut each body's crux lines: once per file is enough. `prepare-repo` on a clone of ruby/ruby (11 297 files) goes from 14.2 s to 11.1 s, with the same graph rows. ([#339](https://github.com/LivioGama/pixel/pull/339))
+- **graph:** the graph write path runs its statements from the connection's prepared-statement cache instead of parsing and planning the SQL again on every row. A cold `prepare-repo` on a clone of DataDog/dd-trace-rb goes from 2.6 s to 2.2 s, with the same graph rows. ([#340](https://github.com/LivioGama/pixel/pull/340))
+- **index:** the shard builder's gram map uses each gram's xxh3 hash as its map hash instead of hashing it again with SipHash. `build-index` on a clone of ruby/ruby (11 297 files) goes from 690 ms to 546 ms, with the same shard bytes. ([#341](https://github.com/LivioGama/pixel/pull/341))
+- **install:** agent guidance now distinguishes read-only task scoping from an active edit manifest and warns that clearing the manifest affects other concurrent tasks. ([#350](https://github.com/LivioGama/pixel/pull/350))
+- **install:** Guide agents to search directly for known identifiers and resolve unknown names by concept, avoiding a redundant file-only search. ([#351](https://github.com/LivioGama/pixel/pull/351))
+- **ci:** The Test + Format job classifies the pull request's diff once and skips the steps it cannot affect: the compiled suite and everything it reads gate on `cargo`, the Python and Bun contract tests gate on `scripts`, and cargo-deny and the MSRV job run only when the dependency graph or Rust code changed. A changelog-only commit no longer builds the workspace. ([#353](https://github.com/LivioGama/pixel/pull/353))
+
+### Removed
+- **sniper:** The `@pixel/sniper` TypeScript package (Vite dev plugin, browser client, Vitest reporter) and its two CI jobs are removed. `pixel list-errors` is unchanged — `report` still ingests a record and `last`/`show`/`since` still read them — but nothing sends browser, HMR or vitest records to the sink any more. ([#354](https://github.com/LivioGama/pixel/pull/354))
+
+### Fixed
+- **install:** the agent prompt's REPLACEMENT MAP now spells `pixel new-branch`, `fetch`, `fast-forward` and `commit-and-push` as the CLI parses them (`new-branch` had lost its required `--request-id`), a test dry-runs every table cell as well as every fenced line, and a missing `--request-id` now ends on a `tip:` saying what value to give it. ([#337](https://github.com/LivioGama/pixel/pull/337))
+- **daemon:** a float in a daemon response now parses back to the exact value it was written from, so a command served by the daemon prints the same digits as the same command run in process. `list-areas` printed a cluster's cohesion as `0.4545454545454546` through the daemon and `0.45454545454545453` in process. ([#343](https://github.com/LivioGama/pixel/pull/343))
+- **install:** Keep hook executable paths stable across package-manager upgrades. [#345](https://github.com/LivioGama/pixel/pull/345)
+- **classify:** Remember the remote provider chosen during setup, honor explicit provider overrides, and report local daemon startup failures before sending requests. ([#347](https://github.com/LivioGama/pixel/pull/347))
+- **install:** Remove all recognized pre-marker Pi prompts in one install while preserving surrounding user instructions and fenced examples, including fences spanning a managed block. ([#352](https://github.com/LivioGama/pixel/pull/352))
+- **install:** Make retrieval policy advisory by default, configurable with `pixel config policy advisory|enforce|off` (environment `PIXEL_POLICY` still overrides it), preserve shell compositions, correct Codex and Antigravity hook contracts, and retain Pi edit results while adding automatic task context and post-edit impact. ([#353](https://github.com/LivioGama/pixel/pull/353))
+- **install:** Run Antigravity's initial Pixel search inside its hook and deliver actual results through `ephemeralMessage`, avoiding AGY 1.2.13's injected-tool crash. Doctor detects missing or disabled retrieval hooks.
+  ([#353](https://github.com/LivioGama/pixel/pull/353))
+- **guard:** Cover the retrieval-permission and compat-rewrite leaves the Mutants gate flagged: bounded `sed`/`head` reads, safe chain splitting, the Devin/Zcode approve shapes, `ls`/`find`/`cat` rewrite forms, and `agy` CLI registration reporting. `antigravity_retrieval_output`'s read cap and deadline comparison are timing-equivalent under mutation and carry a reasoned `mutants::skip`. ([#353](https://github.com/LivioGama/pixel/pull/353))
+- **metrics:** Show only command, duration and invocation ID when no native-workflow comparison policy exists, removing duplicate unavailable rows from commands such as install and doctor. Keep the reason in the action log. [#356](https://github.com/LivioGama/pixel/pull/356)
+- **index:** Honor project `.gitignore` rules in `policy_walk` but skip the user's global `core.excludesFile`. A repo can carry a `.claude/` directory (or any other path) full of code that the global file excludes from *their* commits; recall, the graph and the indexer now see those files again, matching the policy the existing `collector_should_skip_nested_checkouts_when_walking_a_repository` test asserts. [#359](https://github.com/LivioGama/pixel/issues/359)
+
 ## [0.6.0] - 2026-09-27
 
 This release rebuilds `pixel search-meaning`, the plain-English code search. On the 45-query benchmark in `docs/bench/vs-landscape.md` it now puts the right file first for 87% of questions (0.5.2: 47%) and in its top 10 for 96% (0.5.2: 69%), ahead of semble and WarpGrep on the first answer (the queries are doc comments, a bias the page states), and answers a repeated question in about half a second on the benchmark repositories.
