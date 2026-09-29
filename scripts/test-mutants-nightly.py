@@ -114,14 +114,40 @@ class Report(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("0 judged (no outcome)", body)
 
-    def test_the_named_survivors_are_capped_and_the_rest_counted(self):
+    def test_a_long_survivor_list_stays_within_the_section_budget(self):
+        names = [f"crates/pixel/src/some/long/module_{i:04}.rs:{i}:9: replace a_function -> bool with true"
+                 for i in range(2_000)]
+        sec = nightly.section(4, 2_000, nightly.Counter(missed=2_000), [f"MISSED {n}" for n in names],
+                              "2000 mutant(s) survived", "https://example/run/1", "a" * 40)
+        self.assertLessEqual(len(sec), nightly.SECTION_BUDGET)
+        named = sec.count("MISSED crates/")
+        self.assertGreater(named, 0)
+        self.assertIn(f"{2_000 - named} more in the run's", sec)
+        self.assertTrue(sec.endswith(nightly.end(4)))
+
+    def test_seven_full_nights_fit_github_s_issue_limit(self):
+        survivors = [f"MISSED crates/x/src/m.rs:{i}:9: replace f_{i} -> Option<String> with None" for i in range(5_000)]
+        body = ""
+        for d in range(nightly.SLICES):
+            body = nightly.update_body(body, d, nightly.section(
+                d, 5_000, nightly.Counter(missed=5_000), survivors, "5000 mutant(s) survived",
+                "https://github.com/LivioGama/pixel/actions/runs/99999999999", "b" * 40))
+        self.assertLessEqual(len(body) + nightly.PROSE_ALLOWANCE - len(nightly.HEADER), nightly.ISSUE_BODY_LIMIT)
+
+    def test_prose_too_long_for_the_issue_fails_before_writing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp, "shards")
-            n = nightly.MAX_NAMED + 7
-            outcomes(root, "a", [(f"m{i}", "MissedMutant") for i in range(n)])
-            _, body = self.run_report(root, n)
-        self.assertEqual(body.count("MISSED m"), nightly.MAX_NAMED)
-        self.assertIn("7 more in the run's", body)
+            outcomes(root, "a", [("f", "CaughtMutant")])
+            import contextlib, io
+            issue = Path(tmp, "issue.md")
+            issue.write_text(nightly.HEADER + "\n\n" + "x" * nightly.ISSUE_BODY_LIMIT)
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = nightly.main(["report", "--slice", "0", "--expected", "1", "--outcomes-root", str(root),
+                                     "--run-url", "u", "--sha", "s" * 12, "--issue-body", str(issue)])
+        self.assertEqual(code, 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("over GitHub's 65536", err.getvalue())
 
     def test_rewriting_one_night_keeps_the_others(self):
         other = nightly.section(1, 5, nightly.Counter(caught=5), [], None, "https://example/run/0", "f" * 40)
@@ -136,6 +162,18 @@ class Report(unittest.TestCase):
         self.assertEqual(new.count("<!-- mutants-nightly slice 3 -->"), 1)
         self.assertLess(new.index("slice 1 -->"), new.index("slice 3 -->"))
         self.assertEqual(new.count(nightly.HEADER), 1)
+
+    def test_notes_outside_the_sections_survive_every_rewrite(self):
+        note = "Triage: slice 2's survivors in pixel-rank are tracked in #999."
+        body = nightly.update_body("", 4, nightly.section(4, 0, nightly.Counter(), [], None, "u", "s" * 12))
+        body = body.replace(nightly.HEADER, nightly.HEADER + "\n\n" + note)
+        body += "\nFooter note kept below the sections.\n"
+        for d in (1, 6, 4):
+            body = nightly.update_body(body, d, nightly.section(d, 0, nightly.Counter(), [], None, "u", "s" * 12))
+        self.assertIn(note, body)
+        self.assertIn("Footer note kept below the sections.", body)
+        order = [int(x) for x in __import__("re").findall(r"<!-- mutants-nightly slice (\d+) -->", body)]
+        self.assertEqual(order, [1, 4, 6])
 
     def test_a_new_night_is_inserted_in_slice_order(self):
         body = ""

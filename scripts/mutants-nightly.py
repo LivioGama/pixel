@@ -48,9 +48,15 @@ SLICES = 7
 SHARDS_PER_SLICE = 10
 #: Shards in the whole-tree list, the `N` of every `--shard k/N`.
 TOTAL_SHARDS = SLICES * SHARDS_PER_SLICE
-#: Survivors named in the issue per slice. The rest are in the run's
-#: artifacts; an issue body is capped at 65 536 characters.
-MAX_NAMED = 150
+#: GitHub refuses an issue body longer than this (characters).
+ISSUE_BODY_LIMIT = 65_536
+#: Room kept for the header and for whatever a human writes outside the
+#: slice sections (triage notes, links), which the run never trims.
+PROSE_ALLOWANCE = 4_096
+#: The most one slice's section may take, so that all seven fit together:
+#: the survivors named in it stop there, and the rest are counted and left
+#: in the run's artifacts.
+SECTION_BUDGET = (ISSUE_BODY_LIMIT - PROSE_ALLOWANCE) // SLICES
 
 GATE_PATH = Path(__file__).with_name("mutants-gate.py")
 _spec = importlib.util.spec_from_file_location("mutants_gate", GATE_PATH)
@@ -97,9 +103,20 @@ def section(slice_index: int, expected: int, counts, survivors: list[str],
     if failure:
         lines += ["", f"**{failure}**"]
     if survivors:
-        lines += ["", "```"] + survivors[:MAX_NAMED] + ["```"]
-        if len(survivors) > MAX_NAMED:
-            lines.append(f"{len(survivors) - MAX_NAMED} more in the run's `mutants-nightly-out-*` artifacts.")
+        # Name survivors while the section stays within SECTION_BUDGET, with
+        # room left for the closing fence, the count of the rest and the end
+        # marker; a name too long for what is left is counted, not cut.
+        tail_room = 160
+        used = len("\n".join(lines)) + len("\n\n```")
+        named = []
+        for name in survivors:
+            if used + 1 + len(name) + tail_room > SECTION_BUDGET:
+                break
+            named.append(name)
+            used += 1 + len(name)
+        lines += ["", "```", *named, "```"]
+        if len(named) < len(survivors):
+            lines.append(f"{len(survivors) - len(named)} more in the run's `mutants-nightly-out-*` artifacts.")
     lines.append(end(slice_index))
     return "\n".join(lines)
 
@@ -112,17 +129,24 @@ HEADER = (
 )
 
 
+SECTION = re.compile(r"<!-- mutants-nightly slice (\d+) -->.*?<!-- /mutants-nightly slice \1 -->", re.S)
+
+
 def update_body(body: str, slice_index: int, new_section: str) -> str:
-    """`body` with the slice's section replaced, or added in slice order."""
+    """`body` with the slice's section replaced, or inserted before the first
+    section of a later slice (appended when there is none). Everything
+    outside the sections -- the header, a human's triage notes -- is kept as
+    it was."""
     if HEADER not in body:
-        body = HEADER + "\n\n" + body.strip()
-    pattern = re.compile(re.escape(begin(slice_index)) + r".*?" + re.escape(end(slice_index)), re.S)
-    if pattern.search(body):
-        return pattern.sub(lambda _: new_section, body, count=1).rstrip() + "\n"
-    sections = {int(m.group(1)): m.group(0) for m in re.finditer(
-        r"<!-- mutants-nightly slice (\d+) -->.*?<!-- /mutants-nightly slice \1 -->", body, re.S)}
-    sections[slice_index] = new_section
-    return HEADER + "\n\n" + "\n\n".join(sections[k] for k in sorted(sections)) + "\n"
+        body = HEADER + ("\n\n" + body.strip() if body.strip() else "")
+    for match in SECTION.finditer(body):
+        index = int(match.group(1))
+        if index == slice_index:
+            return (body[:match.start()] + new_section + body[match.end():]).rstrip() + "\n"
+        if index > slice_index:
+            return (body[:match.start()].rstrip() + "\n\n" + new_section + "\n\n"
+                    + body[match.start():].lstrip()).rstrip() + "\n"
+    return body.rstrip() + "\n\n" + new_section + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -157,7 +181,15 @@ def main(argv: list[str] | None = None) -> int:
     failure = gate.outcome_failure(args.expected, counts)
     new = section(args.slice, args.expected, counts, survivors, failure, args.run_url, args.sha)
     current = args.issue_body.read_text() if args.issue_body.is_file() else ""
-    sys.stdout.write(update_body(current, args.slice, new))
+    body = update_body(current, args.slice, new)
+    if len(body) > ISSUE_BODY_LIMIT:
+        # Only prose outside the sections can get here: each section is held
+        # to SECTION_BUDGET. Fail before `gh issue edit` would refuse it.
+        print(f"tracking issue body would be {len(body)} characters, over GitHub's "
+              f"{ISSUE_BODY_LIMIT}: the text outside the slice sections exceeds "
+              f"{PROSE_ALLOWANCE}; move it elsewhere", file=sys.stderr)
+        return 2
+    sys.stdout.write(body)
     if args.summary:
         with args.summary.open("a") as fh:
             fh.write(new + "\n")

@@ -287,7 +287,8 @@ newer cargo-mutants adds, a skip that no longer holds. It blocks no pull
 request. Its survivors land in the open issue labelled `mutants-nightly`,
 one section per night, rewritten by the next run of that night; fix them
 like any `MISSED` line, a crate at a time. `gh workflow run mutants-nightly.yml
--f slice=<0-6>` re-runs one night; `scripts/mutants-nightly.py` holds the
+-f slice=3` re-runs Thursday's night (0 is Monday's, 6 Sunday's);
+`scripts/mutants-nightly.py` holds the
 rotation and the report, and `scripts/test-mutants-nightly.py` their contract.
 
 ## Local install loop (when `crates/` changed)
