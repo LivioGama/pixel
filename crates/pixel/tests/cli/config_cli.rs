@@ -12,6 +12,7 @@ fn run(home: &Path, cwd: &Path, args: &[&str]) -> Output {
         .env_remove("PIXEL_DAEMON_AUTO_START")
         .env_remove("PIXEL_TASK_CONTEXT")
         .env_remove("PIXEL_TASK_BOUNDARY")
+        .env_remove("PIXEL_AUTO_HANDOFF")
         .current_dir(cwd)
         .args(args)
         .output()
