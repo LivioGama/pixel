@@ -1571,11 +1571,9 @@ fn is_pixel_retrieval_stage(stage: &str, cwd: &Path) -> bool {
         if !spec.values.contains(&name) {
             // A cluster of boolean short flags (`-Fi`).
             let cluster = arg.strip_prefix('-').filter(|flags| {
-                !arg.starts_with("--")
-                    && !flags.is_empty()
-                    && flags
-                        .chars()
-                        .all(|c| spec.bools.contains(&format!("-{c}").as_str()))
+                flags
+                    .chars()
+                    .all(|c| spec.bools.contains(&format!("-{c}").as_str()))
             });
             if cluster.is_none() {
                 return false;
@@ -6835,8 +6833,14 @@ mod tests {
                 "cwd": repo,
             })
         };
-        assert!(provider_rewrite(Provider::Devin, &payload("exec")).is_some());
-        assert!(provider_rewrite(Provider::Devin, &payload("Bash")).is_some());
+        for tool in ["exec", "Bash"] {
+            let rewritten = provider_rewrite(Provider::Devin, &payload(tool)).expect(tool);
+            assert_eq!(
+                rewritten["hookSpecificOutput"]["updatedInput"]["command"],
+                "pixel search-like-rg rg -- 'needle' 'src'",
+                "{tool}"
+            );
+        }
         assert_eq!(
             provider_rewrite(Provider::Devin, &payload("WebSearch")),
             None
@@ -6857,8 +6861,14 @@ mod tests {
                 "cwd": repo,
             })
         };
-        assert!(provider_rewrite(Provider::Zcode, &payload("exec")).is_some());
-        assert!(provider_rewrite(Provider::Zcode, &payload("Bash")).is_some());
+        for tool in ["exec", "Bash"] {
+            let rewritten = provider_rewrite(Provider::Zcode, &payload(tool)).expect(tool);
+            assert_eq!(
+                rewritten["hookSpecificOutput"]["updatedInput"]["command"],
+                "pixel search-like-rg rg -- 'needle' 'src'",
+                "{tool}"
+            );
+        }
         assert_eq!(
             provider_rewrite(Provider::Zcode, &payload("WebSearch")),
             None
@@ -7536,6 +7546,20 @@ mod tests {
             format!("pixel find-code x {outside}"),
             format!("pixel find-code {outside} src"),
             "pixel find-code x ~".to_string(),
+            // A missing absolute, `~` or `..` word is a path even where a
+            // pattern is expected.
+            "pixel find-code /nonexistent/zzz src".to_string(),
+            "pixel find-code '~/zzz' src".to_string(),
+            "pixel find-code ../zzz src".to_string(),
+            "pixel find-code .. src".to_string(),
+            // A short flag takes its value as the next word, never `=`.
+            "pixel search-content -F x -g='*.rs'".to_string(),
+            "pixel search-content -F x -t=rust".to_string(),
+            // Unknown letters, alone or inside a cluster of real bool flags.
+            "pixel search-content -F needle -Z".to_string(),
+            "pixel search-content -Fz needle".to_string(),
+            "pixel search-content -FZ needle".to_string(),
+            "pixel list-areas src x".to_string(),
             // A pattern that names an existing credential file is a path.
             "pixel search-content -F .env src".to_string(),
         ];
@@ -7556,6 +7580,11 @@ mod tests {
             "pixel file-history --file src/lib.rs",
             "pixel who-wrote src/lib.rs",
             "pixel find-code 'a/b c' src",
+            "pixel pack-context abc123",
+            "pixel list-areas",
+            "pixel list-flows",
+            "pixel list-areas src",
+            "pixel search-content -Fin needle src",
         ] {
             assert_eq!(
                 permission(Provider::Devin, &repo, command),
