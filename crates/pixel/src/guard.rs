@@ -1058,6 +1058,15 @@ fn retrieval_permission_response(provider: Provider, payload: &Value) -> Option<
         return None;
     }
     let cwd = provider_cwd(payload, tool_input);
+    // A repository that holds `$HOME` holds the dotfiles with tokens and
+    // shell history: nothing is auto-approved there.
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if cwd
+        .as_deref()
+        .is_some_and(|cwd| repo_holds_home(cwd, home.as_deref()))
+    {
+        return None;
+    }
     let mut has_pixel_retrieval = false;
     let mut has_bounded_sed = false;
     for segment in split_safe_command_chain(command)? {
@@ -1243,6 +1252,12 @@ fn credential_shaped(path: &str) -> bool {
         || name.ends_with(".env")
         || name == "credentials"
         || name.starts_with("credentials.")
+        || name == "secret"
+        || name.starts_with("secret_")
+        || name.starts_with("secret-")
+        || name.starts_with("password")
+        || name == "passwd"
+        || (name.starts_with("service-account") && name.ends_with(".json"))
         || (name.contains("secret") && name.contains('.'))
         || matches!(
             name,
@@ -1256,6 +1271,11 @@ fn credential_shaped(path: &str) -> bool {
                 | ".git-credentials"
                 | ".htpasswd"
                 | ".dockercfg"
+                | ".bash_history"
+                | ".zsh_history"
+                | ".python_history"
+                | ".psql_history"
+                | ".mysql_history"
                 | ".boto"
                 | ".s3cfg"
                 | "application_default_credentials.json"
@@ -1281,6 +1301,11 @@ fn credential_shaped(path: &str) -> bool {
             ".keystore",
             ".truststore",
             ".kdbx",
+            ".tfvars",
+            ".tfstate",
+            ".p8",
+            ".ppk",
+            ".gpg",
             "_rsa",
             "_dsa",
             "_ecdsa",
@@ -1305,7 +1330,16 @@ struct PixelSpec {
 
 /// Audit of the read-only subcommands (flags read from each `--help`).
 /// Dropped: `search-like-rg` (unsupported inputs run the original rg/grep,
-/// `--pre` is a program hook) and `evaluate` (runs benchmark commands).
+/// `--pre` is a program hook), `evaluate` (runs benchmark commands),
+/// `search-meaning` (first use downloads an embedding model and writes the
+/// cache) and `search-history` (prints snippets of deleted files).
+/// Refused flags: `dig-history --phrase` and `file-history --token` (search
+/// history text, so they print snippets of deleted credential files).
+/// Kept because they print metadata only (paths, oids, subjects, authors,
+/// line ranges): `commit-history`, `who-wrote`, `repo-state`,
+/// `review-changes`, `list-branches`, `file-history --file` and
+/// `dig-history` without `--phrase`; `dig-history --show <oid> --file <p>`
+/// prints file content and is path-checked by `--file`.
 /// Refused flags: `list-branches --fetch` (runs `git fetch`), `impact` and
 /// `who-calls --workspace` (reads other repositories). Every other listed
 /// command is judged by its own flag list below and by the path boundary.
@@ -1319,6 +1353,10 @@ fn pixel_spec(subcommand: &str) -> Option<PixelSpec> {
         max_positionals,
     };
     Some(match subcommand {
+        // Known residual: over a directory operand this can print matching
+        // lines from tracked, non-ignored credential-shaped files in the
+        // repo. The agent is already inside that repo; this guard's job is
+        // the outside-repo boundary, not policing the repo's own contents.
         "search-content" => spec(
             &[
                 "--json",
@@ -1356,13 +1394,6 @@ fn pixel_spec(subcommand: &str) -> Option<PixelSpec> {
             2,
         ),
         "find-symbol" => spec(&["--json"], &["--metrics"], NONE, Some((1, 1)), 2),
-        "search-meaning" => spec(
-            &["--json"],
-            &["--metrics", "--limit", "--max-files"],
-            NONE,
-            Some((1, 1)),
-            2,
-        ),
         "pack-context" => spec(
             &["--json"],
             &["--metrics", "--budget"],
@@ -1398,31 +1429,16 @@ fn pixel_spec(subcommand: &str) -> Option<PixelSpec> {
             Some((0, 0)),
             1,
         ),
-        "search-history" => spec(
-            &["--json"],
-            &["--metrics", "--facet", "--limit"],
-            NONE,
-            Some((1, 1)),
-            2,
-        ),
         "dig-history" => spec(
             &["--json", "--parent"],
-            &[
-                "--metrics",
-                "--phrase",
-                "--file",
-                "--from",
-                "--to",
-                "--limit",
-                "--show",
-            ],
+            &["--metrics", "--file", "--from", "--to", "--limit", "--show"],
             &["--file"],
             Some((0, 0)),
             1,
         ),
         "file-history" => spec(
             &["--json"],
-            &["--metrics", "--file", "--token"],
+            &["--metrics", "--file"],
             &["--file"],
             Some((0, 0)),
             1,
@@ -1471,6 +1487,16 @@ fn pixel_spec(subcommand: &str) -> Option<PixelSpec> {
         ),
         _ => return None,
     })
+}
+
+/// Whether the repository around `cwd` is `home` or contains it, both
+/// canonical (`pixel install --repo $HOME` makes the home directory a repo).
+fn repo_holds_home(cwd: &Path, home: Option<&Path>) -> bool {
+    let (Some(home), Ok(root)) = (home, crate::discover_root(cwd)) else {
+        return false;
+    };
+    home.canonicalize()
+        .is_ok_and(|home| home.starts_with(canonical(&root)))
 }
 
 /// The running executable, canonical: the only path spelling of `pixel`
@@ -7605,6 +7631,145 @@ mod tests {
                 permission(Provider::Devin, &repo, command),
                 approve,
                 "{command:?}"
+            );
+        }
+    }
+
+    /// Round-two names: infrastructure state, keys, shell histories and
+    /// password-like files. `secret` as a substring with an extension was
+    /// already refused; the new rules are prefixes and exact names.
+    #[test]
+    fn credential_shaped_refuses_state_keys_histories_and_passwords() {
+        for path in [
+            "prod.tfvars",
+            "infra/terraform.tfstate",
+            "AuthKey_ABC.p8",
+            "putty.ppk",
+            "backup.gpg",
+            "service-account.json",
+            "service-account-prod.json",
+            "secret",
+            "infra/secret",
+            "secret_key",
+            "secret-token",
+            "Secret_Store",
+            "password",
+            "passwords.txt",
+            "password_list",
+            "passwords-policy.md",
+            "infra/passwd",
+            "PASSWD",
+            ".bash_history",
+            ".zsh_history",
+            ".python_history",
+            ".psql_history",
+            ".mysql_history",
+            "home/.zsh_history",
+            // The older substring rule: "secret" plus an extension.
+            "secretary.md",
+        ] {
+            assert!(credential_shaped(path), "{path}");
+        }
+        for path in [
+            "secretary",
+            "passwd.rs",
+            "src/passwd.rs",
+            "service-account-guide.md",
+            "service-account.rs",
+            "history.md",
+            "zsh_history_notes.md",
+            "state.rs",
+            "keys.rs",
+        ] {
+            assert!(!credential_shaped(path), "{path}");
+        }
+    }
+
+    /// B and C: `search-meaning` (model download), `search-history`,
+    /// `dig-history --phrase` and `file-history --token` (history text,
+    /// which prints snippets of deleted credential files) are not
+    /// auto-approved; the metadata-only commands and `--show` still are.
+    #[test]
+    fn permission_drops_model_download_and_history_text_search() {
+        let (repo, _) = permission_fixture("perm-round2");
+        for command in [
+            "pixel search-meaning 'how does auth work'",
+            "pixel search-meaning x --limit 3",
+            "pixel search-history SECRET",
+            "pixel search-history SECRET --facet diff",
+            "pixel dig-history --phrase SECRET --json",
+            "pixel dig-history --phrase=SECRET",
+            "pixel file-history --token SECRET",
+            "pixel file-history --file src/lib.rs --token SECRET",
+        ] {
+            for provider in [Provider::Devin, Provider::Zcode] {
+                assert_eq!(permission(provider, &repo, command), None, "{command}");
+            }
+        }
+        let approve = Some(serde_json::json!({"decision": "approve"}));
+        for command in [
+            "pixel commit-history",
+            "pixel commit-history --detail full --limit 5",
+            "pixel who-wrote src/lib.rs",
+            "pixel repo-state --json",
+            "pixel review-changes",
+            "pixel list-branches",
+            "pixel file-history --file src/lib.rs",
+            "pixel dig-history --json",
+            "pixel dig-history --file src/lib.rs --from main",
+            "pixel dig-history --show abc123 --file src/lib.rs",
+            "pixel search-content -F needle src",
+            "pixel find-code 'x' | head -20",
+            "pixel status",
+            "pixel who-calls foo",
+            "pixel impact foo",
+            "sed -n '1,5p' src/lib.rs",
+        ] {
+            assert_eq!(
+                permission(Provider::Devin, &repo, command),
+                approve,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            permission(
+                Provider::Devin,
+                &repo,
+                "pixel dig-history --show abc123 --file password.txt"
+            ),
+            None
+        );
+    }
+
+    /// D: a repository that is or contains `$HOME` gets no auto-approval.
+    #[test]
+    fn repo_holds_home_is_true_when_home_is_the_root_or_below_it() {
+        let (repo, outside) = permission_fixture("perm-home");
+        std::fs::create_dir_all(repo.join("sub/home")).unwrap();
+        assert!(repo_holds_home(&repo, Some(&repo)));
+        assert!(repo_holds_home(&repo, Some(&repo.join("sub/home"))));
+        assert!(repo_holds_home(&repo.join("src"), Some(&repo)));
+        assert!(!repo_holds_home(&repo, Some(&outside)));
+        assert!(!repo_holds_home(&repo, Some(&repo.join("missing"))));
+        assert!(!repo_holds_home(&repo, None));
+        assert!(!repo_holds_home(&outside, Some(&repo)));
+    }
+
+    /// E: the known residual, pinned. A plain directory operand is approved
+    /// even though the search may reach credential-shaped tracked files.
+    #[test]
+    fn permission_pins_the_directory_operand_residual() {
+        let (repo, _) = permission_fixture("perm-residual");
+        let approve = Some(serde_json::json!({"decision": "approve"}));
+        for command in [
+            "pixel search-content -F tok .",
+            "pixel search-content -F tok src",
+            "pixel search-content -F tok",
+        ] {
+            assert_eq!(
+                permission(Provider::Devin, &repo, command),
+                approve,
+                "{command}"
             );
         }
     }

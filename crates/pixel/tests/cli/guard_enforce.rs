@@ -1209,6 +1209,100 @@ fn permission_approval_is_closed_list_bare_program_and_repo_bound() {
     );
 }
 
+/// Round two: history text search and model downloads are not auto-approved,
+/// new credential names are refused, and a repository holding `$HOME` gets
+/// no approval at all. The directory-operand residual is pinned as approved.
+#[test]
+fn permission_round_two_history_text_credentials_and_home_repo() {
+    let dir = indexed_dir("permission-round2");
+    for name in [
+        "prod.tfvars",
+        "terraform.tfstate",
+        ".zsh_history",
+        "password.txt",
+        "secret",
+    ] {
+        std::fs::write(dir.join(name), "x\n").unwrap();
+    }
+    let refused = [
+        "pixel search-meaning 'how does auth work'",
+        "pixel search-history SECRET",
+        "pixel dig-history --phrase SECRET --json",
+        "pixel file-history --token SECRET",
+        "sed -n '1,5p' prod.tfvars",
+        "sed -n '1,5p' terraform.tfstate",
+        "sed -n '1,5p' .zsh_history",
+        "sed -n '1,5p' password.txt",
+        "pixel dig-history --show abc123 --file infra/passwd",
+        "pixel dig-history --show abc123 --file secret",
+        "pixel search-content -F x .zsh_history",
+    ];
+    let approve = json!({"decision":"approve"});
+    let allow = json!({"hookSpecificOutput":{
+        "hookEventName":"PermissionRequest",
+        "decision":{"behavior":"allow"}
+    }});
+    for command in refused {
+        assert_eq!(
+            guard("devin", &devin_permission_request(command, &dir), &[]),
+            Value::Null,
+            "devin: {command}"
+        );
+        assert_eq!(
+            guard("zcode", &zcode_permission_request(command, &dir), &[]),
+            Value::Null,
+            "zcode: {command}"
+        );
+    }
+    let ok = [
+        "pixel search-content -F needle src",
+        "pixel search-content -F tok .",
+        "pixel find-code 'x' | head -20",
+        "pixel status",
+        "pixel who-calls foo",
+        "pixel impact foo",
+        "pixel commit-history",
+        "sed -n '1,1p' src/lib.rs",
+    ];
+    for command in ok {
+        assert_eq!(
+            guard("devin", &devin_permission_request(command, &dir), &[]),
+            approve,
+            "devin: {command}"
+        );
+        assert_eq!(
+            guard("zcode", &zcode_permission_request(command, &dir), &[]),
+            allow,
+            "zcode: {command}"
+        );
+    }
+    // The same commands, with the repository as $HOME: no decision at all.
+    let home = dir.canonicalize().unwrap();
+    let envs = [("HOME", home.to_str().unwrap())];
+    for command in ok {
+        assert_eq!(
+            guard("devin", &devin_permission_request(command, &dir), &envs),
+            Value::Null,
+            "devin with HOME=repo: {command}"
+        );
+        assert_eq!(
+            guard("zcode", &zcode_permission_request(command, &dir), &envs),
+            Value::Null,
+            "zcode with HOME=repo: {command}"
+        );
+    }
+    let elsewhere = Scratch::for_test("pixel-guard-policy", "permission-home");
+    let envs = [("HOME", elsewhere.to_str().unwrap())];
+    assert_eq!(
+        guard(
+            "devin",
+            &devin_permission_request("pixel status", &dir),
+            &envs
+        ),
+        approve
+    );
+}
+
 #[test]
 fn zcode_rewrites_and_approves_only_standalone_pixel_retrieval() {
     let dir = indexed_dir("zcode-hook-contract");
