@@ -274,11 +274,11 @@ fn mask(text: &str, spans: &[(std::ops::Range<usize>, String)]) -> String {
     let mut cursor = 0usize;
     for (range, _) in spans {
         // Overlapping spans keep the first: the second is inside it.
-        if range.start < cursor {
+        if range.start <= cursor {
             continue;
         }
         out.push_str(&text[cursor..range.start]);
-        out.extend(std::iter::repeat_n(' ', range.len()));
+        out.extend(std::iter::repeat(' ', range.len()));
         cursor = range.end;
     }
     out.push_str(&text[cursor..]);
