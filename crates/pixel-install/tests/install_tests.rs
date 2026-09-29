@@ -3434,6 +3434,83 @@ fn repo_install_writes_all_five_artifacts() {
     assert!(!home.join(".codex").exists());
 }
 
+/// A deleted `.codex/hooks.json` with a surviving composed-guard sidecar is
+/// not a user edit to reconcile: the reinstall must start fresh from the
+/// sidecar instead of refusing on the absent PreToolUse group, and the
+/// adopted groups the sidecar held come back with it.
+#[test]
+#[cfg(unix)]
+fn repo_install_recovers_a_deleted_codex_hooks_file() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".codex")).unwrap();
+
+    let foreign = serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":"keep-security-check"}]});
+    fs::write(
+        repo.join(".codex/hooks.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {"PreToolUse": [foreign.clone()]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    install(&repo_install_options(&repo, &home)).unwrap();
+
+    fs::remove_file(repo.join(".codex/hooks.json")).unwrap();
+
+    install(&repo_install_options(&repo, &home))
+        .expect("an orphaned sidecar is not a user edit: reinstall must run");
+    let hooks: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo.join(".codex/hooks.json")).unwrap()).unwrap();
+    assert!(
+        hooks["hooks"]["PreToolUse"].as_array().unwrap()[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("composed-guard"),
+        "{hooks}"
+    );
+    let sidecar: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repo.join(".codex/pixel-composed-guard-backup.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        sidecar["pre_tool_use"],
+        serde_json::json!([foreign]),
+        "the groups the first install adopted survive in the sidecar"
+    );
+    assert_eq!(
+        sidecar["managed_pre_tool_use"], hooks["hooks"]["PreToolUse"],
+        "the rewritten sidecar names the group it just published"
+    );
+}
+
+/// A reinstall that agrees with the published contract does not touch the
+/// sidecar at all: it is the runtime's private input, so even an identical
+/// rewrite (new inode, new mtime) is a change we do not make.
+#[test]
+#[cfg(unix)]
+fn repo_install_leaves_an_agreeing_sidecar_file_untouched() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+
+    install(&repo_install_options(&repo, &home)).unwrap();
+    let sidecar = repo.join(".codex/pixel-composed-guard-backup.json");
+    let inode = fs::metadata(&sidecar).unwrap().ino();
+
+    install(&repo_install_options(&repo, &home)).unwrap();
+    assert_eq!(
+        fs::metadata(&sidecar).unwrap().ino(),
+        inode,
+        "a reinstall that agrees must not rewrite the sidecar"
+    );
+}
+
 #[test]
 #[cfg(unix)]
 fn repo_install_is_idempotent() {
