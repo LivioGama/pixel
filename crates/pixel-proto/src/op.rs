@@ -5,8 +5,7 @@
 //!
 //! This is **not yet wired into `pixel-daemon`** — `Request` there remains
 //! the live type the daemon dispatches on. Swapping the daemon over to this
-//! `Op` (and re-deriving CLI args / MCP tool schemas from it, per `PLAN.md`
-//! A2) is a separate future step. Until then, this enum's only job is to
+//! `Op` (and re-deriving CLI args from it, per `PLAN.md` A2) is a separate future step. Until then, this enum's only job is to
 //! exist, compile, and round-trip identically to `Request`'s current wire
 //! format so it is ready to be swapped in without a contract change.
 //!

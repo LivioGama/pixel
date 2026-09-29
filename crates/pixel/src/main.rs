@@ -40,7 +40,6 @@ mod evaluate_cmd;
 mod execution_brief;
 mod guard;
 mod index_cmd;
-mod mcp_cmd;
 mod operation_metrics;
 mod overview_intent;
 mod plan_cmd;
@@ -573,13 +572,6 @@ enum Command {
         /// Replace the index while a daemon is running.
         #[arg(long)]
         force: bool,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-    /// Serve this repo's index over MCP stdio — the single integration for
-    /// every MCP-capable agent (search, resolve, impact, callers/callees,
-    /// evaluate, context, status).
-    Mcp {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
@@ -5419,9 +5411,8 @@ fn run() -> Result<(), String> {
                     ..
                 }
             }
-            | Command::Mcp { .. }
             | Command::ListErrors {
-                cmd: sniper_cmd::SniperCmd::Mcp { .. } | sniper_cmd::SniperCmd::Run { .. }
+                cmd: sniper_cmd::SniperCmd::Run { .. }
             }
     );
     let root = discover_root(&path).or_else(|_| discover_root(Path::new(".")));
@@ -6449,7 +6440,6 @@ fn run_command(
             force,
             path,
         }),
-        Command::Mcp { path } => mcp_cmd::run(path),
         Command::Status {
             path,
             json,

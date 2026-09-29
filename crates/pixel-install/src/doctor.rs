@@ -904,7 +904,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     CheckStatus::Yellow,
                     DoctorCheckDetail {
                         summary: format!(
-                            "{} (tracked by git) still starts the retired `pixel mcp` server — remove its `pixel` entry",
+                            "{} (tracked by git) still starts Pixel's retired MCP server — remove its `pixel` entry",
                             path.display()
                         ),
                         detail: Some(serde_json::json!({ "path": path.display().to_string() })),
@@ -912,7 +912,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 ));
             }
             Err(format!(
-                "{} still starts the retired `pixel mcp` server — run `pixel install --repo {}`",
+                "{} still starts Pixel's retired MCP server — run `pixel install --repo {}`",
                 path.display(),
                 crate::routing::quoted_executable(root)
             ))

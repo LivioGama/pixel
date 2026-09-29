@@ -5656,7 +5656,7 @@ fn repo_install_should_retire_the_warp_mcp_entry_older_releases_wrote() {
     assert!(
         red.reason
             .as_deref()
-            .is_some_and(|r| r.contains("pixel mcp")),
+            .is_some_and(|r| r.contains("retired MCP server")),
         "{red:?}"
     );
 

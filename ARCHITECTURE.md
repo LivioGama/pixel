@@ -95,7 +95,6 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel workspace` | Multi-repo registry (`.pixel/workspace.json` members add/remove/list); `--workspace` fans `impact`/`who-calls` out across registered repos with per-repo provenance |
 | `pixel index-pack` | Freeze the index into one checksummed `.pxpack` bundle — CI builds once, teammates install instead of re-indexing |
 | `pixel index-unpack` | Install a packed index bundle from a path or https:// URL, hash-verified, refusing to overwrite a live index without `--force` |
-| `pixel mcp` | Serve this repo's index over MCP stdio — the single integration for every MCP-capable agent (search, resolve, impact, callers/callees, evaluate, context, status) |
 | `pixel status` | Index + graph freshness status |
 | `pixel coverage` | Per-language index coverage: files on disk vs files indexed, with unrecognized extensions surfaced — the "what did the index miss?" answer |
 | `pixel audit` | What an agent reads to learn what the largest source files contain: each whole file against its `list-signatures` outline in tokens (bytes / 4, floored), the total and the per-file median, files changed since indexing or with no signatures left out and counted, then per-language coverage. Builds the graph on a first run only; local, read-only, sends nothing |
@@ -371,7 +370,7 @@ so no machine path is committed:
 | a managed block in `AGENTS.md` | Codex, and any agent that reads `AGENTS.md` | the Pixel-first retrieval rule, which never blocks native tools |
 
 `doctor` checks them under the `repo.*` ids. `install --repo` and `uninstall
---repo` also remove the `pixel mcp` entry releases up to 0.6.1 wrote into
+--repo` also remove the MCP server entry releases up to 0.6.1 wrote into
 `.warp/.mcp.json`, and `repo.warp-mcp` reports one still there.
 
 Codex gets the prompt through `developer_instructions` in `~/.codex/config.toml`
