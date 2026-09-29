@@ -30,7 +30,6 @@ mod audit_cmd;
 mod call_guard;
 mod classify;
 mod classify_setup;
-mod claude_controller;
 mod config_cmd;
 mod config_file;
 mod coverage_cmd;
@@ -53,10 +52,7 @@ mod search_compat;
 mod search_filter;
 mod serve_trace;
 mod sniper_cmd;
-mod task_plan;
 mod task_runtime;
-mod task_sandbox;
-mod task_scheduler;
 mod update_notice;
 mod web_search;
 mod workspace_cmd;
@@ -1674,19 +1670,6 @@ enum TaskCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Atomically accept a task for Pixel-owned worker execution.
-    Accept {
-        /// Observable objective retained in the durable task specification.
-        objective: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long, default_value = "claude")]
-        provider: String,
-        #[arg(long)]
-        session: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
     /// Refresh a task's factual repository snapshot.
     Prepare {
         task_id: String,
@@ -1706,131 +1689,6 @@ enum TaskCmd {
     /// Replay bounded, factual task-ledger events.
     Events {
         task_id: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Create or reopen an isolated candidate worktree at current HEAD.
-    SandboxCreate {
-        task_id: String,
-        candidate_id: String,
-        /// Repo-relative path the candidate exclusively owns. Repeat per path.
-        #[arg(long = "owned-path", required = true)]
-        owned_paths: Vec<String>,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Inspect a candidate without mutating either worktree.
-    SandboxInspect {
-        task_id: String,
-        candidate_id: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Compare-and-apply an eligible candidate; never performs a merge.
-    SandboxPromote {
-        task_id: String,
-        candidate_id: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Discard the recorded candidate worktree. Safe to repeat.
-    SandboxCleanup {
-        task_id: String,
-        candidate_id: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Alias for sandbox cleanup when cancelling a candidate.
-    SandboxCancel {
-        task_id: String,
-        candidate_id: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Start one Claude worker inside an existing Pixel-owned sandbox.
-    WorkerStart {
-        task_id: String,
-        candidate_id: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Claude executable used for this isolated worker.
-        #[arg(long, default_value = "claude")]
-        executable: PathBuf,
-        #[arg(long)]
-        model: Option<String>,
-        #[arg(long)]
-        max_turns: Option<u32>,
-        #[arg(long)]
-        max_budget_usd: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Report the recorded process truth for one Pixel worker.
-    WorkerStatus {
-        task_id: String,
-        candidate_id: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Stop one Pixel-owned Claude worker and its process group.
-    WorkerStop {
-        task_id: String,
-        candidate_id: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Start a bounded race across pre-registered, isolated candidates.
-    RaceStart {
-        task_id: String,
-        /// Candidate IDs for the same accepted task. Pixel caps the group at three.
-        #[arg(required = true, num_args = 1..=3)]
-        candidate_ids: Vec<String>,
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-        #[arg(long, default_value = "claude")]
-        executable: PathBuf,
-        #[arg(long)]
-        model: Option<String>,
-        #[arg(long)]
-        max_turns: Option<u32>,
-        #[arg(long)]
-        max_budget_usd: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Inspect a race and promote the first Pixel-eligible candidate, if any.
-    RacePoll {
-        task_id: String,
-        #[arg(required = true, num_args = 1..=3)]
-        candidate_ids: Vec<String>,
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Deterministically validate a model-proposed work plan before fanout.
-    PlanValidate {
-        /// Durable task which owns this proposed plan.
-        task_id: String,
-        /// JSON file containing only explicit lanes, ownership, symbols, and dependencies.
-        #[arg(long)]
-        file: PathBuf,
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long)]
@@ -5448,7 +5306,7 @@ fn run() -> Result<(), String> {
     .map(|path| {
         update_notice::begin(
             path,
-            task_scheduler::now_unix(),
+            task_runtime::now_unix(),
             update_notice::fetch_latest_tag,
         )
     });
@@ -5522,7 +5380,7 @@ fn run() -> Result<(), String> {
     let update_line = release_check.and_then(|check| {
         update_notice::finish(
             check,
-            task_scheduler::now_unix(),
+            task_runtime::now_unix(),
             env!("CARGO_PKG_VERSION"),
             release_upgrade_hint,
             std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()),
@@ -7439,21 +7297,6 @@ fn run_command(
                     json,
                 )
             }
-            TaskCmd::Accept {
-                objective,
-                path,
-                provider,
-                session,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let record =
-                    task_runtime::accept_task(&root, &objective, &provider, session.as_deref())?;
-                print_data(
-                    &serde_json::to_value(record).map_err(|e| e.to_string())?,
-                    json,
-                )
-            }
             TaskCmd::Prepare {
                 task_id,
                 path,
@@ -7486,175 +7329,6 @@ fn run_command(
                 let root = discover_root(&path)?;
                 let events = task_runtime::events(&root, &task_id);
                 print_data(&json!({"task_id": task_id, "events": events}), json)
-            }
-            TaskCmd::SandboxCreate {
-                task_id,
-                candidate_id,
-                owned_paths,
-                path,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let candidate = task_sandbox::create(&root, &task_id, &candidate_id, owned_paths)?;
-                print_data(
-                    &serde_json::to_value(candidate).map_err(|e| e.to_string())?,
-                    json,
-                )
-            }
-            TaskCmd::SandboxInspect {
-                task_id,
-                candidate_id,
-                path,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let data = match task_sandbox::load(&root, &task_id, &candidate_id)? {
-                    Some(candidate) => serde_json::to_value(task_sandbox::inspect(&candidate)?)
-                        .map_err(|e| e.to_string())?,
-                    None => {
-                        json!({"task_id": task_id, "candidate_id": candidate_id, "status": "absent"})
-                    }
-                };
-                print_data(&data, json)
-            }
-            TaskCmd::SandboxPromote {
-                task_id,
-                candidate_id,
-                path,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let data = match task_sandbox::load(&root, &task_id, &candidate_id)? {
-                    Some(candidate) => serde_json::to_value(task_sandbox::promote(&candidate)?)
-                        .map_err(|e| e.to_string())?,
-                    None => {
-                        json!({"task_id": task_id, "candidate_id": candidate_id, "status": "absent"})
-                    }
-                };
-                print_data(&data, json)
-            }
-            TaskCmd::SandboxCleanup {
-                task_id,
-                candidate_id,
-                path,
-                json,
-            }
-            | TaskCmd::SandboxCancel {
-                task_id,
-                candidate_id,
-                path,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let removed = task_sandbox::cleanup(&root, &task_id, &candidate_id)?;
-                print_data(
-                    &json!({"task_id": task_id, "candidate_id": candidate_id, "removed": removed}),
-                    json,
-                )
-            }
-            TaskCmd::WorkerStart {
-                task_id,
-                candidate_id,
-                path,
-                executable,
-                model,
-                max_turns,
-                max_budget_usd,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let config = task_scheduler::WorkerConfig {
-                    executable,
-                    model,
-                    max_turns,
-                    max_budget_usd,
-                    system_prompt_file: None,
-                    subagent_prompt_file: None,
-                };
-                let record = task_scheduler::start(&root, &task_id, &candidate_id, &config)?;
-                print_data(
-                    &serde_json::to_value(record).map_err(|e| e.to_string())?,
-                    json,
-                )
-            }
-            TaskCmd::WorkerStatus {
-                task_id,
-                candidate_id,
-                path,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let data = task_scheduler::status(&root, &task_id, &candidate_id)?
-                    .map(|status| serde_json::to_value(status).map_err(|e| e.to_string()))
-                    .transpose()?
-                    .unwrap_or_else(|| json!({"task_id": task_id, "candidate_id": candidate_id, "status": "absent"}));
-                print_data(&data, json)
-            }
-            TaskCmd::WorkerStop {
-                task_id,
-                candidate_id,
-                path,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let data = task_scheduler::stop(&root, &task_id, &candidate_id)?
-                    .map(|record| serde_json::to_value(record).map_err(|e| e.to_string()))
-                    .transpose()?
-                    .unwrap_or_else(|| json!({"task_id": task_id, "candidate_id": candidate_id, "status": "absent"}));
-                print_data(&data, json)
-            }
-            TaskCmd::RaceStart {
-                task_id,
-                candidate_ids,
-                path,
-                executable,
-                model,
-                max_turns,
-                max_budget_usd,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let config = task_scheduler::WorkerConfig {
-                    executable,
-                    model,
-                    max_turns,
-                    max_budget_usd,
-                    system_prompt_file: None,
-                    subagent_prompt_file: None,
-                };
-                let records = task_scheduler::start_race(&root, &task_id, &candidate_ids, &config)?;
-                print_data(
-                    &serde_json::to_value(records).map_err(|e| e.to_string())?,
-                    json,
-                )
-            }
-            TaskCmd::RacePoll {
-                task_id,
-                candidate_ids,
-                path,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let result = task_scheduler::poll_race(&root, &task_id, &candidate_ids)?;
-                print_data(
-                    &serde_json::to_value(result).map_err(|e| e.to_string())?,
-                    json,
-                )
-            }
-            TaskCmd::PlanValidate {
-                task_id,
-                file,
-                path,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                task_runtime::status(&root, &task_id)
-                    .ok_or_else(|| "task is absent or corrupt".to_string())?;
-                let proposal = std::fs::read_to_string(&file)
-                    .map_err(|error| format!("read work plan {}: {error}", file.display()))?;
-                let plan = task_plan::parse(&proposal)?;
-                let validation = task_plan::validate(&plan);
-                print_data(&json!({"task_id": task_id, "validation": validation}), json)
             }
             TaskCmd::Show {
                 session,
@@ -8884,7 +8558,7 @@ mod tests {
     fn variadic_placeholder_on_a_multi_value_argument_parses() {
         // The sentinel is the last value, so it is held only if its first
         // value's argument is found at the index just before it.
-        let line = "pixel task-state race-start <task> <candidate>...";
+        let line = "pixel search-content \"<re>\" <path>...";
         let argv = pixel_install::doctor::normalize_rule_command(line)
             .unwrap_or_else(|| panic!("`{line}` did not normalize"));
         assert_eq!(validate_cli_syntax(&argv), Ok(()), "argv {argv:?}");
@@ -8901,6 +8575,21 @@ mod tests {
                 "--no-such-flag".into(),
             ],
             vec!["pixel".to_string(), "frobnicate".into()],
+            // Retired with the task worker runtime: a rule line naming one
+            // must fail the parity check.
+            vec![
+                "pixel".to_string(),
+                "task-state".into(),
+                "accept".into(),
+                "change greeting behavior".into(),
+            ],
+            vec![
+                "pixel".to_string(),
+                "task-state".into(),
+                "worker-start".into(),
+                "task-100-1".into(),
+                "candidate-1".into(),
+            ],
             vec![
                 "pixel".to_string(),
                 "plan-rollback".into(),
@@ -8933,15 +8622,6 @@ mod tests {
             vec![
                 "pixel".to_string(),
                 "task-state".into(),
-                "accept".into(),
-                "change greeting behavior".into(),
-                "--provider".into(),
-                "claude".into(),
-                "/repo".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "task-state".into(),
                 "prepare".into(),
                 "task-100-1".into(),
                 "/repo".into(),
@@ -8960,100 +8640,6 @@ mod tests {
                 "events".into(),
                 "task-100-1".into(),
                 "/repo".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "task-state".into(),
-                "sandbox-create".into(),
-                "task-100-1".into(),
-                "candidate-1".into(),
-                "--owned-path".into(),
-                "src/a.rs".into(),
-                "--owned-path".into(),
-                "src/b.rs".into(),
-                "/repo".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "task-state".into(),
-                "sandbox-inspect".into(),
-                "task-100-1".into(),
-                "candidate-1".into(),
-                "/repo".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "task-state".into(),
-                "sandbox-promote".into(),
-                "task-100-1".into(),
-                "candidate-1".into(),
-                "/repo".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "task-state".into(),
-                "sandbox-cancel".into(),
-                "task-100-1".into(),
-                "candidate-1".into(),
-                "/repo".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "task-state".into(),
-                "worker-start".into(),
-                "task-100-1".into(),
-                "candidate-1".into(),
-                "--model".into(),
-                "sonnet".into(),
-                "--max-turns".into(),
-                "12".into(),
-                "/repo".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "task-state".into(),
-                "worker-status".into(),
-                "task-100-1".into(),
-                "candidate-1".into(),
-                "/repo".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "task-state".into(),
-                "worker-stop".into(),
-                "task-100-1".into(),
-                "candidate-1".into(),
-                "/repo".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "task-state".into(),
-                "race-start".into(),
-                "task-100-1".into(),
-                "candidate-1".into(),
-                "candidate-2".into(),
-                "--path".into(),
-                "/repo".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "task-state".into(),
-                "race-poll".into(),
-                "task-100-1".into(),
-                "candidate-1".into(),
-                "candidate-2".into(),
-                "--path".into(),
-                "/repo".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "task-state".into(),
-                "plan-validate".into(),
-                "task-100-1".into(),
-                "--file".into(),
-                "plan.json".into(),
-                "/repo".into(),
-                "--json".into(),
             ],
             vec![
                 "pixel".to_string(),

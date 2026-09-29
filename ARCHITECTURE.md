@@ -335,9 +335,9 @@ each agent through its own extension point:
   `SessionStart` with matcher `compact` (post-compaction re-injection). No
   global `PreToolUse`: enforcement is repo-local. The retired `claude()`
   shell wrapper is removed from the login shell's profile, and `doctor`
-  reports one that remains (`install.legacy-wrappers`). The sub-agent prompt
-  is appended only to the Claude workers pixel spawns itself
-  (`--append-subagent-system-prompt-file`).
+  reports one that remains (`install.legacy-wrappers`). The hook does not
+  reach sub-agents: a print-mode run passes the deployed sub-agent prompt
+  with `--append-subagent-system-prompt-file` ([docs/manual-setup.md](docs/manual-setup.md)).
 - **Codex**: the `developer_instructions` key and the `PostToolUse` metrics
   hook (`$CODEX_HOME/hooks.json`, default `~/.codex/hooks.json`), detailed
   below.
