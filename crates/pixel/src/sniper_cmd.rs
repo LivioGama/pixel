@@ -1,5 +1,5 @@
 //! `gitpixel sniper` — one-look error capture queries. Thin dispatch over
-//! `pixel_session::query` (the same layer the MCP server wraps) plus the
+//! `pixel_session::query` plus the
 //! generic one-record ingest path (`report`) the JS adapters shell to.
 
 use std::io::Read;
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use clap::Subcommand;
 use pixel_session::store::{Store, now_ms, resolve_project_root};
 use pixel_session::types::{ReportEnvelope, Surface};
-use pixel_session::{format, mcp, query, run};
+use pixel_session::{format, query, run};
 
 #[derive(Subcommand)]
 pub enum SniperCmd {
@@ -106,12 +106,6 @@ pub enum SniperCmd {
         repo: PathBuf,
         #[arg(long)]
         json: bool,
-    },
-    /// Run the stdio MCP server (tools: errors_since, error_show,
-    /// errors_query, hmr_status, env_fingerprint).
-    Mcp {
-        #[arg(long, default_value = ".")]
-        repo: PathBuf,
     },
     /// Wrap a command: tee its output live, mirror its exit code, and on
     /// failure record structured errors. tsc is parsed per TS code; Minitest
@@ -274,10 +268,6 @@ pub fn run_sniper(cmd: SniperCmd) -> Result<(), String> {
                     })
                 }
             }
-        }
-        SniperCmd::Mcp { repo } => {
-            let store = open_store(&repo)?;
-            mcp::run(store)
         }
         SniperCmd::Run { label, repo, cmd } => {
             let store = open_store(&repo)?;

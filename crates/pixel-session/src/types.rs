@@ -1,5 +1,5 @@
 //! Record types for the sniper error sink — THE shapes shared by store,
-//! query layer, CLI, and MCP server.
+//! query layer and CLI.
 
 use serde::{Deserialize, Serialize};
 

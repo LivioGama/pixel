@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import select
 import shutil
 import subprocess
 import tempfile
@@ -216,44 +215,6 @@ class Audit:
         self.call("list-errors run", ["list-errors", "run", "--", "/bin/sh", "-c", "printf audit_wrapper_failure >&2; exit 9"], exit_code=9)
         # Search indexes the error message; the captured tail is separate extra data.
         self.call("list-errors query", ["list-errors", "query", "exited 9", "--json"], contains="audit_wrapper_failure", json_output=True)
-        self.mcp(int(error_id))
-
-    def mcp(self, error_id):
-        argv = [str(self.pixel), "list-errors", "mcp"]
-        process = subprocess.Popen(argv, cwd=self.repo, env=self.env,
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True)
-        def exchange(payload):
-            process.stdin.write(json.dumps(payload) + "\n")
-            process.stdin.flush()
-            assert select.select([process.stdout], [], [], 15)[0], "MCP response timeout"
-            response = json.loads(process.stdout.readline())
-            assert response.get("id") == payload["id"], response
-            assert "error" not in response, response
-            return response
-        started = time.monotonic()
-        try:
-            exchange({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "audit-fixture", "version": "1"}}})
-            process.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
-            process.stdin.flush()
-            listing = exchange({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-            assert len(listing["result"]["tools"]) == 5
-            for request_id, (name, arguments, expected) in enumerate([
-                ("errors_since", {"cursor": 0}, "audit_error"),
-                ("error_show", {"id": error_id}, "audit_error"),
-                ("errors_query", {"text": "audit_error"}, "audit_error"),
-                ("hmr_status", {"file": "lib.rs"}, "lib.rs"),
-                ("env_fingerprint", {"diff": False}, "run_id"),
-            ], 3):
-                result = exchange({"jsonrpc": "2.0", "id": request_id, "method": "tools/call", "params": {"name": name, "arguments": arguments}})
-                assert expected in json.dumps(result), result
-            process.stdin.close()
-            assert process.wait(timeout=10) == 0
-            self.results.append({"leaf": "list-errors mcp", "argv": ["list-errors", "mcp"], "exit_code": 0, "status": "PASS", "seconds": round(time.monotonic() - started, 4), "assertion": "initialize, list exactly 5 tools, call all 5 against populated store, EOF cleanup"})
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
 
     def tasks(self):
         task = json.loads(self.call("task-state begin", ["task-state", "begin", "fix login_user boundary", "--session", "audit-session", "--provider", "codex", "--json"], json_output=True))["task_id"]

@@ -1,13 +1,12 @@
-//! Query-layer behavior + the shared-module guarantee: MCP tool results are
-//! the same serialization the CLI's `--json` path emits.
+//! Query-layer behavior: what `pixel list-errors` reads back from the store.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use pixel_session::query;
 use pixel_session::store::{Store, now_ms};
 use pixel_session::types::{ErrorInput, EventInput, EventKind, RunInput, Surface};
-use pixel_session::{mcp, query};
-use serde_json::{Value, json};
+use serde_json::json;
 
 struct TempRoot(PathBuf);
 
@@ -242,79 +241,4 @@ fn test_status_picks_the_newest_failure_across_test_surfaces() {
         assert_eq!(failure.id, newest.id, "{first:?} then {second:?}");
         assert_eq!(failure.surface, second);
     }
-}
-
-// ---------------------------------------------------------------------------
-// MCP (rmcp server): shared-module guarantee + server surface
-// ---------------------------------------------------------------------------
-
-#[test]
-fn mcp_lists_exactly_the_five_tools() {
-    // rmcp's ToolRouter::list_all returns tools sorted by name.
-    assert_eq!(
-        mcp::SniperServer::tool_names(),
-        [
-            "env_fingerprint",
-            "error_show",
-            "errors_query",
-            "errors_since",
-            "hmr_status"
-        ]
-    );
-}
-
-#[test]
-fn mcp_server_info_identifies_the_server() {
-    use rmcp::ServerHandler;
-    let state = TempRoot::new();
-    let (store, _) = seeded_store(&state);
-    let info = mcp::SniperServer::new(store).get_info();
-    assert_eq!(info.server_info.name, "pixel-session");
-    assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
-    assert!(info.capabilities.tools.is_some());
-}
-
-/// THE guarantee: every MCP tool's structured result comes from `call_tool`,
-/// the single dispatch the rmcp tool methods wrap — and it equals the CLI
-/// `--json` serialization of the same query call.
-#[test]
-fn mcp_results_equal_cli_json() {
-    let state = TempRoot::new();
-    let (store, _) = seeded_store(&state);
-
-    let call = |name: &str, args: Value| -> Value {
-        mcp::call_tool(&store, name, &args).unwrap_or_else(|e| panic!("tool {name} errored: {e}"))
-    };
-
-    assert_eq!(
-        call("errors_since", json!({"cursor": 0})),
-        serde_json::to_value(query::since(&store, 0).unwrap()).unwrap()
-    );
-    assert_eq!(
-        call("error_show", json!({"id": 1})),
-        serde_json::to_value(query::show(&store, 1).unwrap().unwrap()).unwrap()
-    );
-    assert_eq!(
-        call("errors_query", json!({"text": "failed"})),
-        serde_json::to_value(query::search(&store, "failed", 20).unwrap()).unwrap()
-    );
-    assert_eq!(
-        call("hmr_status", json!({"file": "src/routes/chat.tsx"})),
-        serde_json::to_value(query::hmr(&store, Some("src/routes/chat.tsx")).unwrap()).unwrap()
-    );
-    assert_eq!(
-        call("env_fingerprint", json!({"diff": true})),
-        serde_json::to_value(query::env(&store, true).unwrap()).unwrap()
-    );
-}
-
-#[test]
-fn mcp_tool_errors_are_soft() {
-    let state = TempRoot::new();
-    let (store, _) = seeded_store(&state);
-    // The rmcp tool methods turn these Errs into CallToolResult::error
-    // (isError: true) rather than protocol failures.
-    assert!(mcp::call_tool(&store, "error_show", &json!({"id": 424_242})).is_err());
-    assert!(mcp::call_tool(&store, "nope", &json!({})).is_err());
-    assert!(mcp::call_tool(&store, "errors_since", &json!({})).is_err());
 }

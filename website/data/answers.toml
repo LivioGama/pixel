@@ -64,7 +64,7 @@ slug = "mcp-or-cli-context-cost"
 gist = "an MCP server costs its tool schemas on every turn, a CLI the prompt that teaches it; the size decides, not the protocol."
 short = '''An MCP server puts its tool schemas into the context of every turn; a CLI puts in the prompt that teaches the agent its commands. Measured on one machine, GitNexus's MCP tools cost about 19,700 tokens per turn and Pixel's CLI prompt about 4,160, 4.7× less. The protocol is not the lever, the size is: semble's and stacklit's MCP servers cost less than Pixel's prompt.'''
 bench = ["against-gitnexus", "where-a-specialist-wins"]
-limits = '''Pixel is the lighter one only against GitNexus: semble costs about 980 tokens per turn and stacklit about 420, both less than Pixel. None of these figures counts what an answer costs once the agent asks. A user can switch off individual MCP tools, which shrinks a server's share. <code>pixel mcp</code> serves the same index over MCP; its schemas are not measured, so this page gives no figure for it.'''
+limits = '''Pixel is the lighter one only against GitNexus: semble costs about 980 tokens per turn and stacklit about 420, both less than Pixel. None of these figures counts what an answer costs once the agent asks. A user can switch off individual MCP tools, which shrinks a server's share.'''
 related = ["vs/gitnexus/", "vs/semble/"]
 checked = 2026-09-25
 

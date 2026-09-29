@@ -1,7 +1,6 @@
-//! THE shared query layer — CLI and MCP server are both thin wrappers over
-//! these functions, so their answers cannot drift. Every result type is
-//! `Serialize`; the CLI `--json` output and the MCP `structuredContent` are
-//! the same serialization of the same struct.
+//! THE shared query layer — `pixel list-errors` is a thin wrapper over these
+//! functions. Every result type is `Serialize`, and the CLI `--json` output
+//! is that serialization.
 
 use serde::Serialize;
 

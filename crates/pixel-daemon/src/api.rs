@@ -104,7 +104,7 @@ impl From<std::io::Error> for ServeError {
 // ---------------------------------------------------------------------------
 
 /// The daemon request type. Re-exported from `pixel_proto::Op` so the daemon,
-/// CLI, and MCP surfaces all share one enum — per PLAN.md A1, this kills the
+/// and CLI share one enum — per PLAN.md A1, this kills the
 /// N-touchpoint op-registration problem (adding an op is one variant here,
 /// not edits across 4+ crates).
 pub use pixel_proto::Op as Request;
