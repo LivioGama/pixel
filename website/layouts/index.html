@@ -339,9 +339,10 @@
           </li>
         </ul>
       </div>
-      {{/* One classify call, drawn the way the command answers: the caller names the labels, --criterion holds each definition, and the answer is one probability per label plus `predicted:` (the argmax). $lines is the single source — each token paints itself (k: command, f: flag, s: prose string, d: dim joiner) and also feeds $copy, the string Copy sends. The meter values are one real run of that command — remote probabilities are the model's own report, renormalized to sum to 1 — so the caption says what they are. Labels list alphabetically, as the command prints them. */}}
+      {{/* One classify call, drawn the way the command answers: the caller names the labels, --criterion holds each definition, and the answer is one probability per label plus `predicted:` (the argmax). $lines is the single source — each token paints itself (k: command, f: flag, s: prose string, d: dim joiner) and also feeds $copy, the string Copy sends. The meter values are the supplied real local Ollaya run. Labels list alphabetically, as the command prints them. */}}
       {{ $lines := slice
         (slice (dict "t" "pixel classify " "c" "k") (dict "t" `"Review this Rust PR, find correctness bugs, and propose a safe patch."` "c" "s") (dict "t" ` \` "c" "d"))
+        (slice (dict "t" "    ") (dict "t" "--engine ollaya" "c" "f") (dict "t" ` \` "c" "d"))
         (slice (dict "t" "    ") (dict "t" "--context " "c" "f") (dict "t" `"Choose the cheapest model that can reliably handle the request."` "c" "s") (dict "t" ` \` "c" "d"))
         (slice (dict "t" "    ") (dict "t" "--label " "c" "f") (dict "t" `'claude-haiku-4.5_(fast)'` "c" "l") (dict "t" ` \` "c" "d"))
         (slice (dict "t" "    ") (dict "t" "--label " "c" "f") (dict "t" `'claude-opus-5.5_(strong)'` "c" "l") (dict "t" ` \` "c" "d"))
@@ -380,7 +381,7 @@
           </ol>
           <p class="classify__verdict"><span class="term__c">predicted:</span> claude-opus-5.5_(strong)</p>
         </div>
-        <figcaption class="decisions__caption">One real run of that command: a probability per label, <code>predicted:</code> the argmax. Remote probabilities are the model's own report, renormalized to sum to 1 — a decision aid, not a measurement.</figcaption>
+        <figcaption class="decisions__caption">One local run using Ollaya: each score is the local model's probability for that label; <code>predicted:</code> is the highest-scoring choice. Remote engines are also available and report their own scores, renormalized to sum to 1 — a decision aid, not a measurement.</figcaption>
       </figure>
       <p class="decisions__more" data-reveal><a class="link" href="{{ $bench }}#coding-decisions">Benchmark source and method</a> <span>· typed-decisions accuracy, higher is better; latency, lower is better</span></p>
     </section>
