@@ -325,6 +325,47 @@ fn policy_should_resolve_environment_then_repository_then_global_and_write_each_
     );
 }
 
+/// The 0.6.1 report: setup saved `metrics: "on"` globally while a legacy repo
+/// `config.json` carried `metrics: "off"`, so every launch in that repository
+/// hid the footer. The global write must name the layer that wins instead of
+/// letting the answer look ignored.
+#[test]
+fn metrics_on_global_should_report_a_contradicting_repo_layer() {
+    let home = Scratch::for_test("config", "metrics-home");
+    let repo = Scratch::for_test("config", "metrics-repo");
+    crate::support::git(&repo, &["init", "-q"]);
+    let legacy = repo.join(".pixel/config.json");
+    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    fs::write(&legacy, "{\"metrics\":\"off\"}").unwrap();
+
+    let text = stdout(&run(&home, &repo, &["config", "metrics", "on", "--global"]));
+    assert!(
+        text.contains(&format!(
+            "metrics: on — wrote {}",
+            home.join(".pixel/config.yaml").display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "note: {} sets metrics: off and wins in this repository — \
+             run `pixel config metrics on` here to apply this answer",
+            legacy.display()
+        )),
+        "{text}"
+    );
+    // The note only reports: the repo layer is untouched, and the report
+    // command names it as the winner.
+    assert_eq!(
+        fs::read_to_string(&legacy).unwrap(),
+        "{\"metrics\":\"off\"}"
+    );
+    assert_eq!(
+        stdout(&run(&home, &repo, &["config", "metrics"])),
+        format!("metrics: off — repo {}\n", legacy.display())
+    );
+}
+
 #[test]
 fn setup_should_refuse_piped_input_without_writing_configuration() {
     let home = Scratch::for_test("config", "setup-piped-home");
