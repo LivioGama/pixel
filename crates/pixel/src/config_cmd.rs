@@ -515,10 +515,11 @@ pub fn setup() -> Result<(), String> {
             "setup needs a terminal; use pixel config edit or pixel config classify off".into(),
         );
     }
+    let color = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
     let path = ensure_template(None)?;
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stderr().lock();
-    let saved = setup_with_install(&path, &mut input, &mut output, |input, output| {
+    let saved = setup_with_install(&path, &mut input, &mut output, color, |input, output| {
         crate::classify_setup::install_step(true, input, output)
     })?;
     let root = std::env::current_dir()
@@ -533,10 +534,11 @@ fn setup_with_install(
     path: &Path,
     input: &mut dyn BufRead,
     output: &mut dyn Write,
+    color: bool,
     install: impl FnOnce(&mut dyn BufRead, &mut dyn Write) -> Result<(), String>,
 ) -> Result<bool, String> {
     let was_enabled = classify_enabled_in(&crate::config_file::load(path)?)?;
-    if !setup_with(path, input, output)? {
+    if !setup_with(path, input, output, color)? {
         return Ok(false);
     }
     if !classify_enabled_in(&crate::config_file::load(path)?)? {
@@ -587,14 +589,70 @@ fn note_repo_override(
     .map_err(|e| e.to_string())
 }
 
+/// The classify question's shown default: a previously saved choice wins
+/// (an explicit opt-out must not be re-asked as yes); an unset value
+/// defaults to yes, so the feature is offered, not hidden.
+fn classify_default_in(doc: &Value) -> Result<bool, String> {
+    match doc.get("classify").and_then(|c| c.get("enabled")) {
+        None => Ok(true),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "classify.enabled must be true or false".into()),
+    }
+}
+
+/// The classify explanation the setup question is asked under. Java is
+/// named on purpose: the command works on any text, and the concrete
+/// example is what stops a reader from scrolling past it.
+fn classify_blurb(color: bool) -> String {
+    format!(
+        "{} is optional AI classification, separate from code search. Ask it a\n\
+         bounded question about any text — a prompt, a diff, a Java method — and\n\
+         it returns one probability per label you name:\n\n{}\n{}\n\n\
+         The local engine runs offline after a one-time model download and\n\
+         costs nothing per call; remote providers receive your input and may\n\
+         charge per call.",
+        paint(color, "1", "Classify"),
+        paint(
+            color,
+            "2",
+            "  pixel classify \"Which of these Java methods handles null safely?\" \\"
+        ),
+        paint(
+            color,
+            "2",
+            "      --label 'early-return' --label 'Optional'"
+        )
+    )
+}
+
 fn setup_with(
     path: &Path,
     input: &mut dyn BufRead,
     output: &mut dyn Write,
+    color: bool,
 ) -> Result<bool, String> {
     validate(path)?;
     let mut doc = crate::config_file::load(path)?;
-    writeln!(output, "Pixel setup — global settings\nFile: {}\nEnter keeps the shown value. q or Ctrl-D cancels without saving.\nRepository and environment overrides still apply.", path.display()).map_err(|e| e.to_string())?;
+    writeln!(output).map_err(|e| e.to_string())?;
+    writeln!(
+        output,
+        "{}",
+        paint(color, "1;36", "Pixel setup — global settings")
+    )
+    .map_err(|e| e.to_string())?;
+    writeln!(output, "File: {}", path.display()).map_err(|e| e.to_string())?;
+    writeln!(
+        output,
+        "{}",
+        paint(
+            color,
+            "2",
+            "Enter keeps the shown value · q or Ctrl-D cancels without saving\n\
+             Repository and environment overrides still apply."
+        )
+    )
+    .map_err(|e| e.to_string())?;
     let metrics = doc.get("metrics").and_then(Value::as_str) != Some("off");
     let Some(metrics) = ask_bool(
         input,
@@ -633,12 +691,13 @@ fn setup_with(
         return Ok(false);
     };
     doc["policy"] = json!(if enforce { "enforce" } else { "advisory" });
-    writeln!(output, "Classify is optional AI classification, separate from code search. Local models need a download; remote providers receive your input and may charge per call.").map_err(|e| e.to_string())?;
+    writeln!(output).map_err(|e| e.to_string())?;
+    writeln!(output, "{}", classify_blurb(color)).map_err(|e| e.to_string())?;
     let Some(enabled) = ask_bool(
         input,
         output,
         "Allow pixel classify?",
-        classify_enabled_in(&doc)?,
+        classify_default_in(&doc)?,
     )?
     else {
         return Ok(false);
@@ -668,6 +727,16 @@ fn setup_with(
     )
     .map_err(|e| e.to_string())?;
     Ok(true)
+}
+
+/// Wrap `text` in the SGR `code` when `color` is on; pass it through plain
+/// otherwise. NO_COLOR is resolved by the caller.
+fn paint(color: bool, code: &str, text: &str) -> String {
+    if color {
+        format!("\x1b[{code}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
 }
 
 fn ask_bool(
@@ -965,6 +1034,7 @@ mod tests {
                 &path,
                 &mut std::io::Cursor::new("n\n\n\n\n\ny\ny\n"),
                 &mut Vec::new(),
+                false,
                 |_, _| {
                     calls += 1;
                     // A partially completed install can already have written credentials.
@@ -1013,6 +1083,7 @@ mod tests {
                 &path,
                 &mut std::io::Cursor::new(answers),
                 &mut Vec::new(),
+                false,
                 |_, _| panic!("cancelled or disabled setup must never invoke an installer"),
             )
             .unwrap();
@@ -1031,6 +1102,7 @@ mod tests {
             &path,
             &mut std::io::Cursor::new("\n\n\n\n\ny\ny\n"),
             &mut Vec::new(),
+            false,
             |_, _| {
                 std::fs::remove_file(&path).unwrap();
                 std::fs::create_dir(&path).unwrap();
@@ -1192,7 +1264,8 @@ mod tests {
             setup_with(
                 &path,
                 &mut std::io::Cursor::new("n\nn\nn\nn\nn\nn\ny\n"),
-                &mut output
+                &mut output,
+                false,
             )
             .unwrap()
         );
@@ -1217,7 +1290,13 @@ mod tests {
         write(&path, original);
         for answers in ["q\n", "", "n\nn\nn\nn\nn\nn\nn\n", "n\nn\nn\nn\nn\nn\n"] {
             assert!(
-                !setup_with(&path, &mut std::io::Cursor::new(answers), &mut Vec::new()).unwrap()
+                !setup_with(
+                    &path,
+                    &mut std::io::Cursor::new(answers),
+                    &mut Vec::new(),
+                    false
+                )
+                .unwrap()
             );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         }
@@ -1226,7 +1305,8 @@ mod tests {
             setup_with(
                 &path,
                 &mut std::io::Cursor::new("n\nn\nn\nn\nn\nn\ny\n"),
-                &mut output
+                &mut output,
+                false,
             )
             .unwrap()
         );
@@ -1253,7 +1333,8 @@ mod tests {
             setup_with(
                 &path,
                 &mut std::io::Cursor::new("\n\n\n\n\n\ny\n"),
-                &mut Vec::new()
+                &mut Vec::new(),
+                false,
             )
             .unwrap()
         );
@@ -1271,7 +1352,8 @@ mod tests {
             setup_with(
                 &path,
                 &mut std::io::Cursor::new("y\ny\ny\ny\ny\ny\ny\n"),
-                &mut output
+                &mut output,
+                false,
             )
             .unwrap()
         );
@@ -1290,7 +1372,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_should_keep_classify_disabled_for_a_new_user() {
+    fn setup_should_offer_classify_yes_by_default_to_a_new_user() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
         let home = HomeGuard::set();
         let path = home.0.join("config.yaml");
@@ -1298,17 +1380,82 @@ mod tests {
             setup_with(
                 &path,
                 &mut std::io::Cursor::new("\n\n\n\n\n\ny\n"),
-                &mut Vec::new()
+                &mut Vec::new(),
+                false,
             )
             .unwrap()
         );
+        // Enter on the classify question takes the shown default: yes. The
+        // runtime kill switch (`classify_enabled_in` on an unset key) stays
+        // false — this saved value is what turns it on.
         assert_eq!(
             crate::config_file::load(&path).unwrap(),
             json!({
                 "metrics":"on", "daemon_auto_start":true, "task_context":true,
-                "task_boundary":true, "policy":"advisory", "classify":{"enabled":false}
+                "task_boundary":true, "policy":"advisory", "classify":{"enabled":true}
             })
         );
+        // A saved opt-out is respected: Enter keeps classify off rather
+        // than re-asking the user into it.
+        write(&path, "classify: {enabled: false}\n");
+        assert!(
+            setup_with(
+                &path,
+                &mut std::io::Cursor::new("\n\n\n\n\n\ny\n"),
+                &mut Vec::new(),
+                false,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            crate::config_file::load(&path).unwrap()["classify"]["enabled"],
+            false
+        );
+        // A non-boolean stored value is an error, not a silent default.
+        write(&path, "classify: {enabled: \"false\"}\n");
+        assert_eq!(
+            setup_with(
+                &path,
+                &mut std::io::Cursor::new("\n\n\n\n\n\ny\n"),
+                &mut Vec::new(),
+                false,
+            )
+            .unwrap_err(),
+            "classify.enabled must be true or false"
+        );
+    }
+
+    #[test]
+    fn the_classify_explanation_names_java_and_the_default_shows_yes() {
+        let home = HomeGuard::set();
+        let path = home.0.join("config.yaml");
+        // Five noes answer the five questions before classify; q then
+        // cancels at the classify question itself, after it was printed.
+        let mut output = Vec::new();
+        setup_with(
+            &path,
+            &mut std::io::Cursor::new("n\nn\nn\nn\nn\nq\n"),
+            &mut output,
+            true,
+        )
+        .unwrap();
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("Java"), "{rendered}");
+        assert!(rendered.contains("pixel classify"), "{rendered}");
+        assert!(rendered.contains("\x1b[1;36mPixel setup"), "{rendered}");
+        assert!(
+            rendered.contains("Allow pixel classify? [Y/n] >"),
+            "{rendered}"
+        );
+        let mut output = Vec::new();
+        setup_with(
+            &path,
+            &mut std::io::Cursor::new("n\nn\nn\nn\nn\nq\n"),
+            &mut output,
+            false,
+        )
+        .unwrap();
+        assert!(!String::from_utf8(output).unwrap().contains('\x1b'));
     }
 
     #[test]
