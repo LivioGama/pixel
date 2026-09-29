@@ -1,5 +1,7 @@
 //! `pixel classify` outer-routing errors exercised without opening the model.
 
+use std::io::{Read, Write};
+
 use crate::support::{Scratch, pixel_command};
 
 #[test]
@@ -111,6 +113,81 @@ fn classify_if_warm_should_fail_fast_with_empty_stdout_when_no_local_engine_list
         format!(
             "pixel: not warm: no local classify engine is listening at {base}; --if-warm never starts it (`pixel classify` without --if-warm does)"
         )
+    );
+}
+
+/// A local daemon that completes the TCP handshake and drains the request,
+/// then answers only after `delay`: warm to the connect probe, slow to
+/// answer, which is the daemon still loading its model. The accept loop is
+/// nonblocking with a deadline so a mutant that never connects fails an
+/// assertion instead of hanging the test.
+fn stalled_daemon(delay: std::time::Duration) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0u8; 4096];
+            if stream.read(&mut request).unwrap_or(0) == 0 {
+                continue; // the reachability probe connects, then closes
+            }
+            std::thread::sleep(delay);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+            );
+        }
+    });
+    base
+}
+
+#[test]
+fn classify_if_warm_should_give_up_when_the_daemon_accepts_but_still_loads_the_model() {
+    let home = Scratch::for_test("classify", "if-warm-slow-home");
+    std::fs::create_dir_all(home.join(".pixel")).unwrap();
+    // Answers at 3 s, far past the 300 ms warm cap but inside the connect
+    // probe: without a bounded timeout `--if-warm` would wait for it.
+    let base = stalled_daemon(std::time::Duration::from_secs(3));
+    std::fs::write(
+        home.join(".pixel/config.yaml"),
+        format!(
+            "classify: {{enabled: true, engine: local, ollaya: {{base: \"{base}\", argv: [\"/usr/bin/false\"]}}}}\n"
+        ),
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let out = pixel_command()
+        .env("HOME", &*home)
+        .args([
+            "classify",
+            "fix the login bug",
+            "--task-intent",
+            "--if-warm",
+        ])
+        .env("PIXEL_METRICS", "0")
+        .output()
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        !out.status.success(),
+        "--if-warm exits rather than wait for the model: {out:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "--if-warm answers at once or exits: {elapsed:?}"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with(&format!("pixel: ollaya {base}/v1/systemone:")),
+        "{stderr}"
     );
 }
 

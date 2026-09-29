@@ -729,6 +729,22 @@ fn resolve_remote_preset(
     flag.or(stored).unwrap_or_default()
 }
 
+/// The Ollaya engine config for one classify call. `--if-warm` gets the
+/// prompt hook's short whole-request cap: its warm check is a TCP connect
+/// only, so a daemon that accepts while it is still loading the model would
+/// otherwise hold the command for the 120 s default instead of leaving the
+/// documented exit 1.
+fn ollaya_config(base: String, if_warm: bool) -> crate::decide_ollaya::OllayaConfig {
+    let mut config = crate::decide_ollaya::OllayaConfig {
+        base,
+        ..Default::default()
+    };
+    if if_warm {
+        config.timeout = crate::prompt_intent::HOOK_CALL_TIMEOUT;
+    }
+    config
+}
+
 pub fn run(opts: ClassifyOptions) -> Result<(), String> {
     if !crate::config_cmd::classify_enabled()? {
         return Err("classify is disabled; enable it with `pixel config classify on` or `pixel config setup`".into());
@@ -738,6 +754,8 @@ pub fn run(opts: ClassifyOptions) -> Result<(), String> {
         crate::config_cmd::classify_remote_preset(),
     );
     let remote_model = opts.remote_model.clone();
+    // `opts` moves into `run_with`; the engine opener still needs the flag.
+    let if_warm = opts.if_warm;
     let stdin = std::io::stdin();
     let mut output = ProductionOutput;
     run_with(
@@ -748,10 +766,7 @@ pub fn run(opts: ClassifyOptions) -> Result<(), String> {
                 open_engine(remote_preset, remote_model).map(|e| Box::new(e) as _)
             }
             crate::classify_setup::ResolvedEngine::Local { base } => Ok(Box::new(
-                crate::decide_ollaya::Ollaya::open(crate::decide_ollaya::OllayaConfig {
-                    base,
-                    ..Default::default()
-                }),
+                crate::decide_ollaya::Ollaya::open(ollaya_config(base, if_warm)),
             ) as _),
         },
         stdin.lock(),
@@ -1647,6 +1662,19 @@ mod tests {
             "--if-warm answers only from the local engine; drop --engine remote"
         );
         assert!(probed.is_empty());
+    }
+
+    #[test]
+    fn ollaya_config_should_cap_only_the_if_warm_call_at_the_hook_timeout() {
+        let base = "http://127.0.0.1:7777".to_string();
+        let warm = ollaya_config(base.clone(), true);
+        assert_eq!(warm.base, base);
+        assert_eq!(warm.timeout, crate::prompt_intent::HOOK_CALL_TIMEOUT);
+        assert_eq!(
+            ollaya_config(base, false).timeout,
+            crate::decide_ollaya::OllayaConfig::default().timeout,
+            "a plain classify keeps the interactive cap"
+        );
     }
 
     #[test]
