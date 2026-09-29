@@ -418,7 +418,7 @@ fn provider_rewrite(provider: Provider, payload: &Value) -> Option<Value> {
             "Bash" | "shell" | "unified_exec" | "local_shell" | "exec_command"
         ),
         Provider::Devin => tool == "exec" || tool == "Bash",
-        Provider::Zcode => tool == "Bash" || tool != "exec",
+        Provider::Zcode => tool == "Bash" || tool == "exec",
         // Antigravity has no documented input rewrite contract.
         Provider::Antigravity => return None,
     };
