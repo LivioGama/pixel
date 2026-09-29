@@ -35,7 +35,7 @@ switch (args[0]) {
   case "config": console.log(JSON.stringify({policy: settings.policy ?? "advisory", source: "repo"})); break;
   case "scope-task": console.log(JSON.stringify({padding: "x".repeat(settings.scopePadding ?? 0), targets:[{path:"src/main.rs"}]})); break;
   case "repo-state": console.log(JSON.stringify({branch:"fixture"})); break;
-  case "find-code": console.log(JSON.stringify({padding: "x".repeat(settings.findPadding ?? 0), confidence:"resolved",matches:[{path:"src/found.rs",raw:"main",symbol_kind:"function"}]})); break;
+  case "find-code": console.log(JSON.stringify(settings.findAmbiguous ? {confidence:"ranked",matches:[{path:"src/a.rs",raw:"main",symbol_kind:"function"},{path:"src/b.rs",raw:"main",symbol_kind:"function"}]} : {padding: "x".repeat(settings.findPadding ?? 0), confidence:"resolved",matches:[{path:"src/found.rs",raw:"main",symbol_kind:"function"}]})); break;
   case "what-changed": console.log(JSON.stringify({changed_files:1,risk:"LOW",symbols:[{change:"modified",name:readFileSync(${JSON.stringify(editedPath)}, "utf8"),path:"src/main.rs"}],suggested_tests:["main_tests"]})); break;
   default: console.log(JSON.stringify({ok:true,op:args[0]}));
 }
@@ -283,6 +283,16 @@ switch (args[0]) {
     const packCalls = calls().filter(([name]) => name === "pack-context");
     assert.equal(packCalls.length, before + 1);
     assert.ok(packCalls.at(-1).includes("src/found.rs#main#function"), JSON.stringify(packCalls.at(-1)));
+  });
+  await check("ambiguous pack_context target returns find_code candidate uids", async () => {
+    configure({ findAmbiguous: true });
+    const h = await host("enforce");
+    const result = await h.tool.execute("pack", { action: "pack_context", symbol: "main" }, null, null, user());
+    const details = JSON.parse(result.content[0].text);
+    assert.match(details.next_action, /find_code/);
+    assert.match(details.next_action, /src\/a\.rs#main#function/);
+    const packCalls = calls().filter(([name]) => name === "pack-context");
+    assert.ok(packCalls.at(-1).includes('"main"') || packCalls.at(-1).includes("main"), JSON.stringify(packCalls.at(-1)));
   });
 
   console.log(`Pi extension: ${passed} event-handler contract groups passed`);

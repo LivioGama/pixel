@@ -212,14 +212,16 @@ function matchUid(match: any): string | undefined {
   return `${match.path}#${match.owner ? `${match.owner}::` : ""}${name}#${match.symbol_kind}`;
 }
 
-function resolveSymbolUid(root: string, wanted: string, path?: string): string | undefined {
+function resolveSymbolUid(root: string, wanted: string, path?: string): { uid?: string; candidates: string[] } {
   try {
     const output = run(root, ["find-code", wanted, ...(path ? [path] : []), "--json", "--limit", "5"]);
     const found = parseEvidence(output) as any;
-    if (found?.confidence !== "resolved") return undefined;
-    return matchUid(found?.matches?.[0]);
+    const candidates = (Array.isArray(found?.matches) ? found.matches : [])
+      .map(matchUid)
+      .filter((uid): uid is string => Boolean(uid));
+    return { uid: found?.confidence === "resolved" ? candidates[0] : undefined, candidates };
   } catch {
-    return undefined;
+    return { candidates: [] };
   }
 }
 
@@ -325,11 +327,13 @@ export default function activate(pi: ExtensionAPI) {
           return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
         }
         const index = health(root, action);
+        let ambiguousCandidates: string[] = [];
         if ((action === "impact" || action === "pack_context")) {
           const wanted = String(p.symbol ?? p.query ?? p.goal ?? "").trim();
           if (wanted && !wanted.includes("#")) {
-            const uid = resolveSymbolUid(root, wanted, p.path ? String(p.path) : undefined);
-            if (uid) p = { ...p, symbol: uid };
+            const resolved = resolveSymbolUid(root, wanted, p.path ? String(p.path) : undefined);
+            if (resolved.uid) p = { ...p, symbol: resolved.uid };
+            else if (action === "pack_context") ambiguousCandidates = resolved.candidates;
           }
         }
         const steps = commandFor(action, p);
@@ -354,6 +358,7 @@ export default function activate(pi: ExtensionAPI) {
         const truncated = evidence.some((item) => item.truncated);
         const first = evidence[0].output as any;
         const next_action = truncated ? "Narrow the scope or query"
+          : ambiguousCandidates.length ? `Ambiguous symbol; call find_code to pick the target, then retry pack_context with a path#name#kind uid: ${ambiguousCandidates.join(", ")}`
           : action === "find_code" && first?.confidence !== "resolved" ? "Try search_content with a concrete token"
           : action === "search_content" && Array.isArray(first) && first.length === 0 ? "Broaden the query or check index coverage"
           : undefined;
