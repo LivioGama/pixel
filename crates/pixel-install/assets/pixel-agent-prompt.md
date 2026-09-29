@@ -193,3 +193,8 @@ credentials masked. `pixel config edit` opens `~/.pixel/config.yaml` in
 lists optional settings. Repository overrides win over global settings, and
 existing environment overrides win over files. Classification and credentials
 are global only. Legacy JSON remains supported until install/edit creates YAML.
+
+`pixel config setup` opens guided global setup in a terminal; interactive global
+`pixel install` offers the same flow. Classification is disabled by default;
+`pixel config classify on` explicitly enables it, and `off` blocks all engines.
+Respect a disabled setting; code retrieval works independently of classify.

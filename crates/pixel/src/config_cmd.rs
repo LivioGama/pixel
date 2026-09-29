@@ -103,6 +103,7 @@ fn validate(path: &Path) -> Result<(), String> {
     {
         return Err(format!("{}: metrics must be on or off", path.display()));
     }
+    classify_enabled_in(&doc)?;
     if let Some(classify) = doc.get("classify") {
         if !classify.is_object() {
             return Err(format!("{}: classify must be a mapping", path.display()));
@@ -154,6 +155,7 @@ pub fn overview(path: &Path) -> Result<(), String> {
         let (enabled, source) = feature_resolution(root.as_deref(), key, env);
         println!("{key}: {enabled} ({source})");
     }
+    println!("classify.enabled: {} (global)", classify_enabled()?);
     println!(
         "classify.engine: {}",
         classify_engine().unwrap_or_else(|| "auto (default)".into())
@@ -178,6 +180,7 @@ pub fn overview(path: &Path) -> Result<(), String> {
             }
         }
     }
+    println!("Setup: pixel config setup (interactive global settings)");
     println!("Edit: pixel config edit (global), pixel config edit --repo (repository)");
     Ok(())
 }
@@ -304,6 +307,178 @@ fn write_metrics(path: &Path, on: bool) -> Result<(), String> {
     write_doc(path, |doc| {
         doc["metrics"] = Value::String(if on { "on" } else { "off" }.to_string());
     })
+}
+
+/// Global kill switch: checked before classify reads input or opens an engine.
+pub fn classify_enabled() -> Result<bool, String> {
+    let path = global_config_path().ok_or("no HOME for the global config")?;
+    classify_enabled_in(&crate::config_file::load(&path)?)
+}
+
+fn classify_enabled_in(doc: &Value) -> Result<bool, String> {
+    match doc.get("classify").and_then(|c| c.get("enabled")) {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "classify.enabled must be true or false".into()),
+    }
+}
+
+/// Save a global classify switch while retaining engine and credential settings.
+pub fn set_classify_enabled(enabled: bool) -> Result<(), String> {
+    let path = global_config_path().ok_or("no HOME for the global config")?;
+    set_classify_enabled_at(&path, enabled)
+}
+
+fn set_classify_enabled_at(path: &Path, enabled: bool) -> Result<(), String> {
+    write_doc(path, |doc| {
+        if !doc.get("classify").is_some_and(Value::is_object) {
+            doc["classify"] = json!({});
+        }
+        doc["classify"]["enabled"] = json!(enabled);
+    })
+}
+
+/// Terminal adapter shared by explicit setup and interactive global installation.
+#[cfg_attr(test, mutants::skip)] // Terminal and provider adapters; draft/save policy tested with injected I/O.
+pub fn setup() -> Result<(), String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Err(
+            "setup needs a terminal; use pixel config edit or pixel config classify off".into(),
+        );
+    }
+    let path = ensure_template(None)?;
+    let mut input = std::io::stdin().lock();
+    let mut output = std::io::stderr().lock();
+    setup_with_install(&path, &mut input, &mut output, |input, output| {
+        crate::classify_setup::install_step(true, input, output)
+    })
+}
+
+/// Keep a failed first-time engine installation from enabling classification.
+fn setup_with_install(
+    path: &Path,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+    install: impl FnOnce(&mut dyn BufRead, &mut dyn Write) -> Result<(), String>,
+) -> Result<(), String> {
+    let was_enabled = classify_enabled_in(&crate::config_file::load(path)?)?;
+    if !setup_with(path, input, output)? {
+        return Ok(());
+    }
+    if !classify_enabled_in(&crate::config_file::load(path)?)? {
+        return Ok(());
+    }
+    if let Err(error) = install(input, output) {
+        if !was_enabled {
+            set_classify_enabled_at(path, false).map_err(|rollback| {
+                format!("{error}; could not disable classification: {rollback}")
+            })?;
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn setup_with(
+    path: &Path,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> Result<bool, String> {
+    validate(path)?;
+    let mut doc = crate::config_file::load(path)?;
+    writeln!(output, "Pixel setup — global settings\nFile: {}\nEnter keeps the shown value. q or Ctrl-D cancels without saving.\nRepository and environment overrides still apply.", path.display()).map_err(|e| e.to_string())?;
+    let metrics = doc.get("metrics").and_then(Value::as_str) != Some("off");
+    let Some(metrics) = ask_bool(
+        input,
+        output,
+        "Show command timing and estimated savings?",
+        metrics,
+    )?
+    else {
+        return Ok(false);
+    };
+    doc["metrics"] = json!(if metrics { "on" } else { "off" });
+    for (key, label) in [
+        (
+            "daemon_auto_start",
+            "Start the background repository daemon on demand?",
+        ),
+        (
+            "task_context",
+            "Suggest relevant code when an agent receives a prompt?",
+        ),
+        ("task_boundary", "Detect task changes in agent prompts?"),
+    ] {
+        let current = doc.get(key).and_then(Value::as_bool).unwrap_or(true);
+        let Some(value) = ask_bool(input, output, label, current)? else {
+            return Ok(false);
+        };
+        doc[key] = json!(value);
+    }
+    writeln!(output, "Classify is optional AI classification, separate from code search. Local models need a download; remote providers receive your input and may charge per call.").map_err(|e| e.to_string())?;
+    let Some(enabled) = ask_bool(
+        input,
+        output,
+        "Allow pixel classify?",
+        classify_enabled_in(&doc)?,
+    )?
+    else {
+        return Ok(false);
+    };
+    writeln!(output, "Review: metrics={}, daemon_auto_start={}, task_context={}, task_boundary={}, classify.enabled={}", doc["metrics"], doc["daemon_auto_start"], doc["task_context"], doc["task_boundary"], enabled).map_err(|e| e.to_string())?;
+    if ask_bool(input, output, "Save these settings?", false)? != Some(true) {
+        return Ok(false);
+    }
+    write_doc(path, |current| {
+        for key in [
+            "metrics",
+            "daemon_auto_start",
+            "task_context",
+            "task_boundary",
+        ] {
+            current[key] = doc[key].clone();
+        }
+        if !current.get("classify").is_some_and(Value::is_object) {
+            current["classify"] = json!({});
+        }
+        current["classify"]["enabled"] = json!(enabled);
+    })?;
+    writeln!(
+        output,
+        "Saved. Run pixel config to see effective settings or pixel config setup to change them."
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+fn ask_bool(
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+    label: &str,
+    current: bool,
+) -> Result<Option<bool>, String> {
+    loop {
+        write!(
+            output,
+            "{label} [{}] > ",
+            if current { "Y/n" } else { "y/N" }
+        )
+        .map_err(|e| e.to_string())?;
+        output.flush().map_err(|e| e.to_string())?;
+        let mut line = String::new();
+        if input.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+            return Ok(None);
+        }
+        match line.trim().to_ascii_lowercase().as_str() {
+            "" => return Ok(Some(current)),
+            "y" | "yes" => return Ok(Some(true)),
+            "n" | "no" => return Ok(Some(false)),
+            "q" => return Ok(None),
+            _ => writeln!(output, "Type y, n, Enter, or q.").map_err(|e| e.to_string())?,
+        }
+    }
 }
 
 /// The stored classify engine preference: `local`, `remote`, or `auto`.
@@ -476,6 +651,287 @@ pub fn run_metrics(path: &Path, global: bool, value: Option<bool>) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_install_should_only_revert_a_new_classify_opt_in() {
+        for (was_enabled, install_succeeds, expected_enabled) in [
+            (false, false, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            let home = HomeGuard::set();
+            let path = home.0.join("config.yaml");
+            write(
+                &path,
+                &json!({"metrics":"on", "classify":{"enabled":was_enabled}, "future":42})
+                    .to_string(),
+            );
+            let mut calls = 0;
+            let result = setup_with_install(
+                &path,
+                &mut std::io::Cursor::new("n\n\n\n\ny\ny\n"),
+                &mut Vec::new(),
+                |_, _| {
+                    calls += 1;
+                    // A partially completed install can already have written credentials.
+                    write_doc(&path, |doc| {
+                        doc["remote_keys"] = json!({"openrouter":"retained-secret"});
+                        doc["classify"]["engine"] = json!("remote");
+                    })?;
+                    if install_succeeds {
+                        Ok(())
+                    } else {
+                        Err("model download failed".into())
+                    }
+                },
+            );
+            assert_eq!(calls, 1);
+            assert_eq!(
+                result,
+                if install_succeeds {
+                    Ok(())
+                } else {
+                    Err("model download failed".into())
+                }
+            );
+            assert_eq!(
+                crate::config_file::load(&path).unwrap(),
+                json!({
+                    "metrics":"off", "daemon_auto_start":true, "task_context":true,
+                    "task_boundary":true, "classify":{"enabled":expected_enabled, "engine":"remote"},
+                    "future":42, "remote_keys":{"openrouter":"retained-secret"}
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn setup_should_not_install_after_cancellation_or_disabling_classify() {
+        for (answers, enabled, metrics) in
+            [("q\ny\n", true, "on"), ("n\n\n\n\nn\ny\n", false, "off")]
+        {
+            let home = HomeGuard::set();
+            let path = home.0.join("config.yaml");
+            write(&path, "metrics: 'on'\nclassify: {enabled: true}\n");
+            setup_with_install(
+                &path,
+                &mut std::io::Cursor::new(answers),
+                &mut Vec::new(),
+                |_, _| panic!("cancelled or disabled setup must never invoke an installer"),
+            )
+            .unwrap();
+            let doc = crate::config_file::load(&path).unwrap();
+            assert_eq!(doc["classify"]["enabled"], enabled);
+            assert_eq!(doc["metrics"], metrics);
+        }
+    }
+
+    #[test]
+    fn rollback_failure_should_report_both_the_install_and_storage_errors() {
+        let home = HomeGuard::set();
+        let path = home.0.join("config.yaml");
+        let error = setup_with_install(
+            &path,
+            &mut std::io::Cursor::new("\n\n\n\ny\ny\n"),
+            &mut Vec::new(),
+            |_, _| {
+                std::fs::remove_file(&path).unwrap();
+                std::fs::create_dir(&path).unwrap();
+                Err("model download failed".into())
+            },
+        )
+        .unwrap_err();
+        assert!(error.starts_with("model download failed; could not disable classification: cannot read configuration "), "{error}");
+    }
+
+    #[test]
+    fn setup_should_preserve_unrelated_changes_made_while_prompting() {
+        struct UpdatingOutput<'a> {
+            path: &'a Path,
+            updated: bool,
+        }
+        impl Write for UpdatingOutput<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if !self.updated {
+                    // The first prompt is printed after setup has loaded its draft.
+                    write_doc(self.path, |doc| {
+                        doc["remote_keys"] = json!({"openrouter":"new-secret"});
+                        doc["classify"] = json!({"engine":"remote", "enabled":true});
+                        doc["future"] = json!(42);
+                    })
+                    .map_err(std::io::Error::other)?;
+                    self.updated = true;
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let home = HomeGuard::set();
+        let path = home.0.join("config.yaml");
+        write(&path, "remote_keys: {openrouter: old-secret}\n");
+        let mut output = UpdatingOutput {
+            path: &path,
+            updated: false,
+        };
+        assert!(
+            setup_with(
+                &path,
+                &mut std::io::Cursor::new("n\nn\nn\nn\nn\ny\n"),
+                &mut output
+            )
+            .unwrap()
+        );
+        assert!(output.updated);
+        assert_eq!(
+            crate::config_file::load(&path).unwrap(),
+            json!({
+                "metrics":"off", "daemon_auto_start":false, "task_context":false,
+                "task_boundary":false, "classify":{"engine":"remote", "enabled":false},
+                "remote_keys":{"openrouter":"new-secret"}, "future":42
+            })
+        );
+    }
+
+    #[test]
+    fn setup_should_save_choices_preserve_secrets_and_allow_cancellation() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let path = home.0.join("config.yaml");
+        let original = "# personal comment\nremote_keys: {openrouter: hidden-secret}\nclassify: {engine: remote}\nunknown: 42\n";
+        write(&path, original);
+        for answers in ["q\n", "", "n\nn\nn\nn\nn\nn\n", "n\nn\nn\nn\nn\n"] {
+            assert!(
+                !setup_with(&path, &mut std::io::Cursor::new(answers), &mut Vec::new()).unwrap()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        }
+        let mut output = Vec::new();
+        assert!(
+            setup_with(
+                &path,
+                &mut std::io::Cursor::new("n\nn\nn\nn\nn\ny\n"),
+                &mut output
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            crate::config_file::load(&path).unwrap(),
+            json!({
+                "remote_keys": {"openrouter":"hidden-secret"}, "unknown":42,
+                "metrics":"off", "daemon_auto_start":false, "task_context":false,
+                "task_boundary":false, "classify":{"engine":"remote", "enabled":false}
+            })
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("classify.enabled=false"));
+        assert!(output.contains("Saved."));
+        assert!(!output.contains("hidden-secret"));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("# personal comment")
+        );
+        // Enter keeps saved values; explicit yes re-enables every switch.
+        assert!(
+            setup_with(
+                &path,
+                &mut std::io::Cursor::new("\n\n\n\n\ny\n"),
+                &mut Vec::new()
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            crate::config_file::load(&path).unwrap()["classify"]["enabled"],
+            false
+        );
+        let mut output = Vec::new();
+        assert!(
+            setup_with(
+                &path,
+                &mut std::io::Cursor::new("y\ny\ny\ny\ny\ny\n"),
+                &mut output
+            )
+            .unwrap()
+        );
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("classify.enabled=true")
+        );
+        let doc = crate::config_file::load(&path).unwrap();
+        assert_eq!(doc["metrics"], "on");
+        for key in ["daemon_auto_start", "task_context", "task_boundary"] {
+            assert_eq!(doc[key], true);
+        }
+        assert_eq!(doc["classify"]["enabled"], true);
+    }
+
+    #[test]
+    fn setup_should_keep_classify_disabled_for_a_new_user() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let path = home.0.join("config.yaml");
+        assert!(
+            setup_with(
+                &path,
+                &mut std::io::Cursor::new("\n\n\n\n\ny\n"),
+                &mut Vec::new()
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            crate::config_file::load(&path).unwrap(),
+            json!({
+                "metrics":"on", "daemon_auto_start":true, "task_context":true,
+                "task_boundary":true, "classify":{"enabled":false}
+            })
+        );
+    }
+
+    #[test]
+    fn prompts_should_keep_defaults_retry_invalid_answers_and_cancel_on_eof() {
+        for (answer, current, expected) in [
+            ("\n", true, Some(true)),
+            ("\n", false, Some(false)),
+            ("YES\n", false, Some(true)),
+            ("no\n", true, Some(false)),
+            ("q\ny\n", true, None),
+            ("", true, None),
+            ("invalid\nn\n", true, Some(false)),
+        ] {
+            let mut output = Vec::new();
+            assert_eq!(
+                ask_bool(
+                    &mut std::io::Cursor::new(answer),
+                    &mut output,
+                    "Choice",
+                    current
+                )
+                .unwrap(),
+                expected
+            );
+            assert!(String::from_utf8(output).unwrap().contains("Choice"));
+        }
+    }
+
+    #[test]
+    fn classify_switch_should_default_off_and_reject_non_boolean_values() {
+        for (doc, expected) in [
+            (json!({}), false),
+            (json!({"classify":{"engine":"remote"}}), false),
+            (json!({"classify":{"enabled":true}}), true),
+            (json!({"classify":{"enabled":false}}), false),
+        ] {
+            assert_eq!(classify_enabled_in(&doc).unwrap(), expected);
+        }
+        assert_eq!(
+            classify_enabled_in(&json!({"classify":{"enabled":"false"}})).unwrap_err(),
+            "classify.enabled must be true or false"
+        );
+    }
 
     #[test]
     fn fresh_template_should_have_no_active_options_and_use_the_requested_root() {

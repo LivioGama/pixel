@@ -1582,6 +1582,13 @@ enum HookCmd {
 
 #[derive(Subcommand)]
 enum ConfigCmd {
+    /// Guided global setup in a terminal; also offered by pixel install.
+    Setup,
+    /// Enable or disable all classify calls, including explicit --engine flags.
+    Classify {
+        #[arg(value_parser = ["on", "off"])]
+        value: String,
+    },
     /// Open the global YAML configuration in $VISUAL or $EDITOR (default: vi).
     Edit {
         /// Edit repository overrides instead of global settings.
@@ -6730,13 +6737,10 @@ fn run_command(
             .map_err(|e| e.to_string())?;
             config_cmd::ensure_template(config_root.as_deref())?;
             // Interactive UX goes to stderr so `--json` stdout stays pure.
-            let tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
-            if should_offer_classify_setup(is_global_install, json, tty) {
-                classify_setup::install_step(
-                    tty,
-                    &mut std::io::stdin().lock(),
-                    &mut std::io::stderr().lock(),
-                )?;
+            let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+            let stderr_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+            if should_offer_classify_setup(is_global_install, json, stdin_tty, stderr_tty) {
+                config_cmd::setup()?;
             }
             print_data(
                 &serde_json::to_value(&report).map_err(|e| e.to_string())?,
@@ -7141,6 +7145,8 @@ fn run_command(
         },
         Command::Config { cmd } => match cmd {
             None => config_cmd::overview(Path::new(".")),
+            Some(ConfigCmd::Setup) => config_cmd::setup(),
+            Some(ConfigCmd::Classify { value }) => config_cmd::set_classify_enabled(value == "on"),
             Some(ConfigCmd::Edit { repo, path }) => config_cmd::edit(&path, repo),
             Some(ConfigCmd::Metrics {
                 value,
@@ -7711,8 +7717,13 @@ fn run_command(
     }
 }
 
-fn should_offer_classify_setup(is_global_install: bool, json: bool, tty: bool) -> bool {
-    is_global_install && !json && tty
+fn should_offer_classify_setup(
+    is_global_install: bool,
+    json: bool,
+    stdin_tty: bool,
+    stderr_tty: bool,
+) -> bool {
+    is_global_install && !json && stdin_tty && stderr_tty
 }
 
 #[cfg(test)]
@@ -7721,10 +7732,11 @@ mod classify_setup_prompt_tests {
 
     #[test]
     fn prompt_runs_only_for_an_interactive_non_json_global_install() {
-        assert!(should_offer_classify_setup(true, false, true));
-        assert!(!should_offer_classify_setup(false, false, true));
-        assert!(!should_offer_classify_setup(true, true, true));
-        assert!(!should_offer_classify_setup(true, false, false));
+        assert!(should_offer_classify_setup(true, false, true, true));
+        assert!(!should_offer_classify_setup(false, false, true, true));
+        assert!(!should_offer_classify_setup(true, true, true, true));
+        assert!(!should_offer_classify_setup(true, false, false, true));
+        assert!(!should_offer_classify_setup(true, false, true, false));
     }
 }
 

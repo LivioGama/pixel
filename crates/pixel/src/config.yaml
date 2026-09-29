@@ -1,29 +1,60 @@
-# Pixel user configuration. Uncomment an example to override its default.
-# Repository settings override global settings; environment overrides win.
-# pixel config shows effective settings and their sources.
-# pixel config edit opens this file; add --repo for repository settings.
+# Welcome to Pixel
+#
+# You can use code search and the code graph without an AI provider or API key.
+# For guided setup, run: pixel config setup
+# To edit this file, run: pixel config edit
+# To see effective values and overrides, run: pixel config
+#
+# All examples below are commented out: defaults apply until you remove the
+# leading "# " from a setting. Keep the two-space indentation under classify.
+# Global file: ~/.pixel/config.yaml
+# Repository overrides: <repository>/.pixel/config.yaml (pixel config edit --repo)
+# Priority: environment overrides > repository settings > global settings > defaults.
+# classify and remote_keys are GLOBAL ONLY; repository copies have no effect.
 
-# Live metrics footer (default: on).
+# Show timing and estimated savings after commands (default: "on").
+# Use quotes around "on" and "off". PIXEL_METRICS=0 also hides the footer.
 # metrics: "off"
 
-# Background repository daemon startup (default: true).
-# Disabling startup does not stop an already running daemon.
+# Start a background process to speed up repeated repository queries (default: true).
+# false prevents automatic startup; it does not stop an already running daemon.
+# Environment override: PIXEL_DAEMON_AUTO_START=0
 # daemon_auto_start: false
 
-# Automatic code entry-point suggestions on prompt submission (default: true).
+# Suggest relevant code when your coding agent receives a prompt (default: true).
+# Environment override: PIXEL_TASK_CONTEXT=0
 # task_context: false
 
-# Task-boundary detection on prompt submission (default: true).
+# Detect changes of task in agent prompts (default: true).
+# Environment override: PIXEL_TASK_BOUNDARY=0
 # task_boundary: false
 
-# Classification is used only when requested. Global settings only.
-# Engine: auto (default), local, or remote.
-# Remote use requires your provider credentials; it may incur API charges.
+# Optional AI classification — separate from code search. Global settings only.
+# Disabled by default to avoid API costs or classifier model downloads.
+# Enable only when you want AI classification: pixel config classify on
+# Disable ALL classify calls (including --engine overrides) with:
+#   pixel config classify off
+# Re-enable later with: pixel config classify on
+# Disabling preserves your engine choice and credentials; it does not stop an
+# already running Ollaya server or delete downloaded models.
+#
+# To disable in YAML, uncomment BOTH "classify:" and "  enabled: false" below.
+# engine options:
+#   auto   (default): try a local Ollaya server, otherwise use a remote provider.
+#   local: use Ollaya; initial setup downloads its binary and model.
+#   remote: send the text you classify to your provider; API charges may apply.
+# remote_preset options: openrouter, ollama, deepseek, opencode-go, local.
+# The local preset uses an existing OpenAI-compatible server on localhost;
+# it is separate from engine: local (Ollaya).
+# Run pixel config setup for the optional local/provider setup prompts.
 # classify:
-#   engine: remote
+#   enabled: false
+#   engine: auto
 #   remote_preset: openrouter
 
-# Global credentials only. Environment credentials take precedence.
-# Prefer: pixel config remote-key openrouter -  (reads a key from stdin).
+# Provider credentials. Global file only; provider environment variables win.
+# Prefer an environment variable or read a key from stdin (keeps it out of
+# command history): pixel config remote-key openrouter -
+# Never commit credentials to a repository. pixel config masks stored keys.
 # remote_keys:
 #   openrouter: "<your-api-key>"
