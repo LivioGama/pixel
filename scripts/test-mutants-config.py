@@ -141,6 +141,7 @@ class MutantsConfigContract(unittest.TestCase):
 #: Every file that runs `cargo mutants` (not only lists them).
 LANES = [
     ".github/workflows/mutants.yml",
+    ".github/workflows/mutants-nightly.yml",
     "scripts/mutants-preflight.sh",
     "scripts/gates.sh",
 ]
@@ -220,7 +221,9 @@ class OneProgramForEveryLane(unittest.TestCase):
                 self.assertLess(check, text.find("cargo mutants -", check) if "cargo mutants -" in text[check:] else len(text))
 
     def test_every_job_pins_the_same_cargo_mutants(self):
-        pins = set(re.findall(r"tool: cargo-mutants@(\S+)", (REPO / ".github/workflows/mutants.yml").read_text()))
+        pins = set()
+        for workflow in (".github/workflows/mutants.yml", ".github/workflows/mutants-nightly.yml"):
+            pins |= set(re.findall(r"tool: cargo-mutants@(\S+)", (REPO / workflow).read_text()))
         self.assertEqual(len(pins), 1, pins)
 
 
