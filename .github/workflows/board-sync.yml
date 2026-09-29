@@ -1,0 +1,95 @@
+name: Board sync
+
+# The Status field of the tracking task on project 3 follows the PR carrying
+# `Task <number>` (`.agents/rules/project-task.md`): In Progress when the PR
+# opens, Done when it merges, Todo when it closes unmerged. It lives apart
+# from ci.yml: docs-only pull requests still sync work, so ci.yml's path
+# filter must not gate it.
+#
+# `GITHUB_TOKEN` cannot write Projects v2; the job degrades gracefully when
+# PROJECTS_TOKEN (a fine-grained or classic token with `project: write` on
+# the board, a repository secret) is absent, printing what it skipped.
+#
+# `pull_request_target` (not `pull_request`) so fork PRs still reach the
+# repository secrets. This job is metadata-only: it never checks out the
+# PR's code, only reads the PR body and runs `gh` against the project.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, closed]
+
+concurrency:
+  group: board-sync-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync project 3 status with the PR lifecycle
+        env:
+          PROJECTS_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_REPO_URL: ${{ github.event.pull_request.base.repo.html_url }}
+        run: |
+          if [ -z "$PROJECTS_TOKEN" ]; then
+            echo "PROJECTS_TOKEN is not set; board status not synced for PR ${PR_NUMBER}"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json, os, re, subprocess
+
+          body = os.environ["PR_BODY"] or ""
+          action = os.environ["PR_ACTION"]
+          merged = os.environ["PR_MERGED"] == "true"
+          token = os.environ["PROJECTS_TOKEN"]
+
+          # A body opens on `Task <number>` or declares `no task: <reason>`
+          # (project-task.md); anything else has nothing to sync.
+          m = re.match(r"\s*Task (\d+)\b", body)
+          if not m:
+            print("no Task line found; nothing to sync")
+          else:
+            number = int(m.group(1))
+            if action == "opened" or action == "reopened":
+              option, note = "47fc9ee4", "In Progress"
+            elif merged:
+              option, note = "98236657", "Done"
+            else:
+              option, note = "f75ad846", "Todo"
+
+            def gh(*args):
+              env = dict(os.environ, GH_TOKEN=token)
+              return subprocess.run(["gh", *args], capture_output=True,
+                                    text=True, check=True, env=env).stdout
+
+            # A single call with a large limit walks every item (gh
+            # paginates internally). Match the content type and repository
+            # so another repo's issue with the same number can never be
+            # edited.
+            page = json.loads(gh(
+              "project", "item-list", "3", "--owner", "LivioGama",
+              "--format", "json", "--limit", "10000"))
+            found = None
+            for entry in page.get("items", []):
+              content = entry.get("content", {})
+              if (content.get("number") == number
+                  and content.get("type") == "Issue"
+                  and content.get("url", "").startswith(
+                      os.environ["PR_REPO_URL"])
+              ):
+                found = entry["id"]
+                break
+            if found is None:
+              print(f"issue {number} is not on the board; nothing to sync")
+            else:
+              gh("project", "item-edit", "--id", found,
+                 "--project-id", "PVT_kwHOAGnAQs4BlIxX",
+                 "--field-id", "PVTSSF_lAHOAGnAQs4BlIxXzhj2yRU",
+                 "--single-select-option-id", option)
+              print(f"PR {os.environ['PR_NUMBER']} ({action}, "
+                    f"merged={merged}): task {number} set to {note}")
+          PY
