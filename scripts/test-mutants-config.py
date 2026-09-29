@@ -159,13 +159,43 @@ LANE_ONLY_FORBIDDEN = [
 ]
 
 
+def yaml_run_blocks(text: str) -> list[str]:
+    """The shell of every `run:` in a workflow, as the runner receives it.
+
+    A folded scalar (`run: >`) is one line, every continuation line joined
+    with a space however many there are; a literal one (`run: |`) keeps its
+    lines. Comments and every other key are dropped, so a flag named in a
+    comment is not a flag passed.
+    """
+    lines = text.splitlines()
+    blocks = []
+    i = 0
+    while i < len(lines):
+        block = re.match(r"^(\s*)(?:- )?run:\s*([>|])[-+]?\s*$", lines[i])
+        inline = re.match(r"^\s*(?:- )?run:\s*(\S.*)$", lines[i])
+        i += 1
+        if block:
+            indent = len(block.group(1))
+            body = []
+            while i < len(lines) and (not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > indent):
+                body.append(lines[i].strip())
+                i += 1
+            blocks.append(" ".join(b for b in body if b) if block.group(2) == ">" else "\n".join(body))
+        elif inline:
+            blocks.append(inline.group(1))
+    return blocks
+
+
+def lane_shell(lane: str, text: str) -> str:
+    """The shell a lane runs: a workflow's `run:` blocks, a script whole."""
+    return "\n".join(yaml_run_blocks(text)) if lane.endswith((".yml", ".yaml")) else text
+
+
 def cargo_mutants_runs(text: str) -> list[str]:
-    """Each `cargo mutants` invocation that runs mutants, continuation lines
-    joined. `--list` and `--version` invocations build nothing and are left
-    out."""
+    """Each `cargo mutants` invocation that runs mutants, backslash
+    continuations joined. `--list` and `--version` invocations build nothing
+    and are left out. A workflow goes through `lane_shell` first."""
     joined = re.sub(r"\\\n\s*", " ", text)
-    # A folded YAML scalar (`run: >`) continues on the next indented line.
-    joined = re.sub(r"(cargo mutants[^\n]*)\n\s+(--[^\n]*)", r"\1 \2", joined)
     runs = []
     for line in joined.splitlines():
         code = line.split(" #", 1)[0]
@@ -192,12 +222,12 @@ class OneProgramForEveryLane(unittest.TestCase):
     def test_every_lane_is_found(self):
         for lane in LANES:
             with self.subTest(lane=lane):
-                self.assertTrue(cargo_mutants_runs((REPO / lane).read_text()),
+                self.assertTrue(cargo_mutants_runs(lane_shell(lane, (REPO / lane).read_text())),
                                 f"{lane} no longer runs cargo mutants; update LANES")
 
     def test_no_lane_passes_an_argument_that_changes_the_program(self):
         for lane in LANES:
-            for run in cargo_mutants_runs((REPO / lane).read_text()):
+            for run in cargo_mutants_runs(lane_shell(lane, (REPO / lane).read_text())):
                 words = set(re.findall(r"(?<![\w-])-{1,2}[\w-]+", run))
                 with self.subTest(lane=lane, run=run.strip()):
                     self.assertEqual(sorted(words & set(LANE_ONLY_FORBIDDEN)), [])
@@ -208,6 +238,43 @@ class OneProgramForEveryLane(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         words = set(re.findall(r"(?<![\w-])-{1,2}[\w-]+", runs[0]))
         self.assertEqual(sorted(words & set(LANE_ONLY_FORBIDDEN)), ["--all-targets", "--locked", "-C"])
+
+    def test_every_line_of_a_folded_command_is_inspected(self):
+        workflow = (
+            "      - name: Run\n"
+            "        run: >\n"
+            "          cargo mutants -vV --no-shuffle --in-place --in-diff pr.diff\n"
+            "          --shard \"$SHARD\"\n"
+            "          -- --all-targets 2>&1 | tee results.txt\n"
+            "      - name: Next\n"
+            "        run: echo done\n"
+        )
+        runs = cargo_mutants_runs(lane_shell("x.yml", workflow))
+        self.assertEqual(len(runs), 1)
+        self.assertIn("--all-targets", runs[0])
+        self.assertNotIn("echo done", runs[0])
+
+    def test_a_flag_named_in_a_workflow_comment_is_not_a_flag_passed(self):
+        workflow = (
+            "      # `--all-targets` comes from .cargo/mutants.toml\n"
+            "      - name: Run\n"
+            "        run: cargo mutants --in-diff pr.diff\n"
+        )
+        runs = cargo_mutants_runs(lane_shell("x.yml", workflow))
+        self.assertEqual([r.strip() for r in runs], ["--in-diff pr.diff"])
+
+    def test_every_ci_run_reads_the_workflow_s_own_configuration(self):
+        # A dispatch mutates a tip whose .cargo/mutants.toml may predate the
+        # shared arguments: the listing and every shard read the plan's copy.
+        for lane in (".github/workflows/mutants.yml",):
+            text = (REPO / lane).read_text()
+            shell = lane_shell(lane, text)
+            with self.subTest(lane=lane):
+                self.assertIn("cp .cargo/mutants.toml mutants-config.toml", shell)
+                for run in cargo_mutants_runs(shell):
+                    self.assertIn("--config mutants-config.toml", run)
+                listing = [l for l in re.sub(r"\\\n\s*", " ", shell).splitlines() if "cargo mutants --list" in l]
+                self.assertTrue(listing and all('--config "$PWD/mutants-config.toml"' in l for l in listing), listing)
 
     def test_a_listing_is_not_a_run(self):
         self.assertEqual(cargo_mutants_runs('cargo mutants --list --in-diff "$d" > out\ncargo mutants --version\n'), [])
