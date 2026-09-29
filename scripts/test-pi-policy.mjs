@@ -257,6 +257,17 @@ switch (args[0]) {
     assert.equal((await h.emit("tool_call", read("src/main.rs", 201))).block, true, "the read limit still applies");
   });
 
+  await check("an unauthorized pixel_project commit is an error and does not count as a call", async () => {
+    const h = await host("enforce");
+    await h.boot();
+    const denied = await h.tool.execute("denied", { action: "commit", files: ["src/main.rs"], message: "x", request_id: "r" }, null, null, user("do not commit"));
+    assert.match(denied.content[0].text, /authorization.*absent/);
+    assert.equal(denied.isError, true, "a denied commit is an error result");
+    const relayed = await h.emit("tool_result", { toolName: "pixel_project", toolCallId: "denied", input: {}, ...denied, isError: false });
+    assert.equal(relayed.isError, true, "the error-shaped payload reaches the tool_result session message");
+    assert.equal((await h.emit("tool_call", read("src/main.rs", 100))).block, true, "a denied commit does not unlock reads");
+  });
+
   await check("a successful tool result carries the metrics box as its own content item", async () => {
     const h = await host("enforce");
     await h.boot();
@@ -283,6 +294,7 @@ switch (args[0]) {
     assert.equal(await h.emit("tool_call", read("src/never-resolved.rs", 200)), undefined, "global pixel result unlocks any in-repo path");
     assert.equal(await why(read("src/other.rs", 300)), "Read blocked: limit 300 exceeds 200" + tail);
     assert.equal(await why(read(".env", 10)), "Read blocked: credential path" + tail);
+    assert.equal(await why(read("@.env", 10)), "Read blocked: credential path" + tail);
     assert.equal(await why(read("keys/id_rsa", 10)), "Read blocked: credential path" + tail);
     assert.equal(await h.emit("tool_call", read("/etc/hosts", 10)), undefined, "outside the repository stays native");
   });

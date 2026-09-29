@@ -384,9 +384,11 @@ fn passive_gitnexus_claude_hook(group: &Value, provider: Provider) -> bool {
 
 /// The PostToolUse group that relays the finalized 🟩 metrics line as hook
 /// output (`systemMessage` for the user, `additionalContext` for the model)
-/// after a shell call. `pixel run-hook metrics` stays silent when the tool
-/// result already carries the box, so a host that surfaces stderr does not
-/// print it twice. Codex's own entry lives in `codex_config`.
+/// after a shell call. When the tool result already carries the box, Codex
+/// and Devin stay silent while Claude still gets the line as `systemMessage`
+/// only (its Bash result surfaces stderr the user never sees), so a host that
+/// shows stderr does not print it twice for the model. Codex's own entry
+/// lives in `codex_config`.
 fn metrics_relay_group(exe: &Path, provider: Provider) -> Value {
     hook_group(
         format!(

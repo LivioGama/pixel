@@ -1282,6 +1282,7 @@ fn credential_shaped(path: &str) -> bool {
                 | "kubeconfig"
         )
         || name.ends_with("-credentials.json")
+        || (name == "hosts.yml" && parent == Some("gh"))
         || (name == "config"
             && (in_git
                 || matches!(
@@ -3563,7 +3564,7 @@ fn bypass_advisory_lines(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<Strin
 
         // `rtk read file -l 640-820`: `-l` is a level, so the range never
         // applies; a bare `read` stays the shell builtin and is left alone.
-        "read" if rtk_wrapped && tokens.len() >= 2 => Some(vec![
+        "read" if rtk_wrapped && rtk_read_range(&tokens[1..]).is_some() => Some(vec![
             "BLOCKED by pixel-guard: `rtk read -l` takes a level (none, minimal, aggressive), not a line range.".to_string(),
             "  pixel pack-context <uid>  # a symbol with its surrounding code".to_string(),
             "  sed -n 'START,ENDp' <file>  # a bounded line window, at most 200 lines".to_string(),
@@ -7165,6 +7166,14 @@ mod tests {
         assert_eq!(bypass_advisory_lines("read line", &root, &root), None);
         assert_eq!(bypass_advisory_lines("rtk read", &root, &root), None);
         assert_eq!(
+            bypass_advisory_lines("rtk read routing.rs", &root, &root),
+            None
+        );
+        assert_eq!(
+            bypass_advisory_lines("rtk read routing.rs -l aggressive", &root, &root),
+            None
+        );
+        assert_eq!(
             bypass_advisory_lines("command read x y", &root, &root),
             None
         );
@@ -7606,6 +7615,7 @@ mod tests {
             ".git-credentials",
             "home/.git-credentials",
             ".htpasswd",
+            "home/.config/gh/hosts.yml",
             ".dockercfg",
             ".boto",
             ".s3cfg",
@@ -7620,7 +7630,14 @@ mod tests {
         ] {
             assert!(credential_shaped(path), "{path}");
         }
-        for path in ["kubeconfig.md", "src/boto.rs", "htpasswd.md", "notes.txt"] {
+        for path in [
+            "kubeconfig.md",
+            "src/boto.rs",
+            "htpasswd.md",
+            "notes.txt",
+            "hosts.yml",
+            "config/hosts.yml",
+        ] {
             assert!(!credential_shaped(path), "{path}");
         }
     }

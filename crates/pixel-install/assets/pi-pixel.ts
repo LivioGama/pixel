@@ -72,7 +72,7 @@ function run(root: string, args: string[], quiet = false) {
 // "🟩 pixel" header to the closing "└" rule) are kept, never diagnostics.
 function metricsBox(stderr: string) {
   const lines = String(stderr ?? "").split("\n");
-  const start = lines.findIndex((line) => line.includes("🟩"));
+  const start = lines.findIndex((line) => line.includes("🟩 pixel"));
   if (start < 0) return "";
   const rest = lines.slice(start);
   const closing = rest.findIndex((line) => line.trimStart().startsWith("└"));
@@ -239,7 +239,10 @@ function classify(tool: string, input: any, root: string, resolvedPaths: Set<str
     return { kind: "exception", reason: "non-repository tool" };
   }
   if (tool === "read" || tool === "view_file") {
-    const path = String(input.path ?? input.file_path ?? "");
+    // Pi 0.87.1 strips a leading `@` while resolving a read path, so the
+    // lexical repository and credential checks must see what it will open.
+    const requested = String(input.path ?? input.file_path ?? "");
+    const path = requested.startsWith("@") ? requested.slice(1) : requested;
     if (path && !inRepo(root, path)) return { kind: "exception", reason: "outside repository" };
     const target = path ? relativeTarget(root, path) : "";
     // Bootstrap-injected paths are not evidence of a Pixel call: a bounded
@@ -332,7 +335,7 @@ export default function activate(pi: ExtensionAPI) {
         if (!authorized(action, ctx)) {
           const result = { action, error: `User authorization for ${action} is absent from the current request`, next_action: "Ask the user for explicit authorization" };
           audit(root, "blocked", action, { reason: "authorization absent" });
-          return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+          return { content: [{ type: "text", text: JSON.stringify(result) }], details: result, isError: true };
         }
         const index = health(root, action);
         const steps = commandFor(action, p);
@@ -374,7 +377,7 @@ export default function activate(pi: ExtensionAPI) {
         installed = undefined;
         const result = { action, error: String(error), next_action: "Repair Pixel availability or narrow the request; native tools remain available" };
         audit(root, "unavailable", action, { reason: "Pixel unavailable or operation failed" });
-        return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+        return { content: [{ type: "text", text: JSON.stringify(result) }], details: result, isError: true };
       }
     },
   });
@@ -449,8 +452,14 @@ export default function activate(pi: ExtensionAPI) {
   // successful edits have a post-edit snapshot; failures retain diagnostics.
   pi.on("tool_result", async (event, ctx) => {
     // The global `pixel` tool never runs pixel_project.execute; its result is
-    // the only signal that the model consulted Pixel.
-    if ((event.toolName === "pixel" || event.toolName === "pixel_project") && !event.isError) state.pixelCalled = true;
+    // the only signal that the model consulted Pixel. Pi reports a tool's
+    // returned `isError` as false unless it throws, so an error-shaped
+    // payload is recognized here instead of trusting the flag.
+    if (event.toolName === "pixel" || event.toolName === "pixel_project") {
+      const details = event.details as { error?: unknown } | undefined;
+      if (event.isError || Boolean(details?.error)) return { isError: true };
+      state.pixelCalled = true;
+    }
     if (!EDIT_TOOLS.has(event.toolName) || event.isError) return;
     const root = ctx?.cwd ?? process.cwd();
     const raw = pixelText(root, ["what-changed", "--json", "--tests"]);
