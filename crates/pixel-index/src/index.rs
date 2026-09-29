@@ -59,6 +59,58 @@ pub fn is_ignored_dir_name(name: &str) -> bool {
     DEFAULT_IGNORED_DIRS.contains(&name)
 }
 
+/// Path-safety predicate shared by every consumer that surfaces an indexed
+/// file's contents (search daemon, guard's native-command rewrite):
+/// a tracked, non-ignored `.env` / `id_rsa` / `*.pem` is a
+/// place the user almost certainly does not want echoed back. Eligibility
+/// is metadata-only — content stays for the execution side — and a positive
+/// answer here never claims to detect every secret.
+///
+/// A `pub fn` in the index crate is the only home the workspace has that
+/// every reader already imports: `pixel` (CLI) and `pixel-daemon` both
+/// depend on `pixel-index`, and `pixel-daemon` cannot depend on `pixel`
+/// (circular). Suffix/name based by design; `search_compat::credential_path`
+/// delegates here. `task_sandbox::credential_path` keeps its own list on
+/// purpose: it gates which WIP paths may be copied into a sandbox, not what
+/// a search may display, so the two may diverge.
+pub fn credential_path(path: &Path) -> bool {
+    if path.components().any(|part| {
+        part.as_os_str()
+            .to_str()
+            .is_some_and(|s| s.eq_ignore_ascii_case("secrets"))
+    }) {
+        return true;
+    }
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    name.starts_with(".env")
+        || name.ends_with(".env")
+        || name.starts_with("credentials.")
+        // Extensionless too: `secret_token` or `client_secret` holds the
+        // value itself as often as `app_secret.yaml` does.
+        || name.contains("secret")
+        || name == "serviceaccountkey.json"
+        || name.ends_with("-credentials.json")
+        || [
+            ".pem",
+            ".key",
+            ".p12",
+            ".pfx",
+            ".jks",
+            ".keystore",
+            ".truststore",
+            "_rsa",
+            "_dsa",
+            "_ecdsa",
+            "_ed25519",
+        ]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+}
+
 /// The single walk policy shared by every indexing/freshness walk (shard
 /// build, plain-tree signature, graph collect/freshness): hidden entries are
 /// included, default-ignored dirs are pruned, and `.gitignore`/`.ignore`
@@ -708,5 +760,64 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// `credential_path` is the single predicate the daemon filter and the
+    /// search-compat guard share. Every name
+    /// listed here must have a sibling test that would FAIL if the
+    /// predicate silently grew a typo or lost a suffix — a positive answer
+    /// here decides whether an `.env` byte reaches the caller's stdout.
+    #[test]
+    fn credential_path_matches_every_shape_in_the_predicate() {
+        let positives = [
+            ".env",
+            ".env.local",
+            "config/.env",
+            "production.env",
+            "credentials.json",
+            "credentials.prod.json",
+            "config/secrets/db.json",
+            "nested/secrets/x.json",
+            "serviceAccountKey.json",
+            "service-account-credentials.json",
+            "tls.pem",
+            "tls.key",
+            "keystore.p12",
+            "trust.pfx",
+            "trust.jks",
+            "server.keystore",
+            "client.truststore",
+            "id_rsa",
+            "id_dsa",
+            "id_ecdsa",
+            "id_ed25519",
+            "deploy_key_rsa",
+            "config/app_secret.yaml",
+            // Extensionless secret-named files carry the value itself.
+            "secret_token",
+            "deploy/client_secret",
+            "SECRET",
+        ];
+        for path in positives {
+            assert!(
+                credential_path(Path::new(path)),
+                "expected `credential_path({path:?}) == true`"
+            );
+        }
+        let negatives = [
+            "src/main.rs",
+            "src/credentials_helper.rs",
+            "Cargo.toml",
+            "config.yaml",
+            "deploy/notes.md",
+            "keymap.json",
+            "src/server.pem.bak",
+        ];
+        for path in negatives {
+            assert!(
+                !credential_path(Path::new(path)),
+                "expected `credential_path({path:?}) == false`"
+            );
+        }
     }
 }

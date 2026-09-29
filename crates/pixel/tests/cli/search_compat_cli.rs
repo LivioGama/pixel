@@ -372,6 +372,217 @@ fn credential_shaped_paths_keep_native_permission_boundaries() {
     }
 }
 
+/// A TRACKED `.env` whose body matches a token must not echo the token, the
+/// path, or the matching line through `pixel search-content`. The daemon is
+/// the single sink every output mode goes through, so a fixture
+/// that asserts this in `--json`, human, and `-l` modes is the contract:
+/// drop the credential bytes everywhere, name the hidden count in the
+/// envelope so the partial answer is not silent (CONTRIBUTING.md: every cap
+/// is named in `basis` and mirrored as a warning).
+#[test]
+fn tracked_dotenv_with_matching_token_is_hidden_from_search_content() {
+    let fixture = tracked_credential_fixture();
+    // Synthetic, nonsensitive bytes only — the test never reads real secrets.
+    let token = "ABCDEF_GUARDED_TOKEN_xyzzy_42";
+
+    // Human format: the path and the matching line must both be absent.
+    let human = fixture
+        .command(PIXEL)
+        .args(["search-content", "-F", token, "."])
+        .output()
+        .unwrap();
+    assert!(
+        human.status.success(),
+        "human: {}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let human_stdout = String::from_utf8_lossy(&human.stdout);
+    // Only the credential-shaped paths must be hidden. The non-credential
+    // `src/safe.rs` carries the same synthetic token and is allowed to
+    // match; the contract is "drop matches from credential-shaped files,
+    // not every line that happens to contain the token".
+    assert!(
+        !human_stdout.contains(".env"),
+        "human stdout must not name the .env path: {human_stdout:?}"
+    );
+    assert!(
+        !human_stdout.contains("secrets/"),
+        "human stdout must not name the secrets/ path: {human_stdout:?}"
+    );
+    // The synthetic non-credential match is the positive case: it shows.
+    assert!(
+        human_stdout.contains("src/safe.rs"),
+        "human stdout must still show the safe match: {human_stdout:?}"
+    );
+
+    // NDJSON: every match line carries a `path`; the page metadata line is
+    // the last one. The hidden count must reach the caller via the envelope
+    // so a partial answer is never silent.
+    let json = fixture
+        .command(PIXEL)
+        .args(["search-content", "-F", token, ".", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        json.status.success(),
+        "json: {}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let json_stdout = String::from_utf8_lossy(&json.stdout);
+    // The synthetic non-credential match is the positive case: it appears.
+    assert!(
+        json_stdout.contains("src/safe.rs"),
+        "json stdout must still carry the safe match: {json_stdout:?}"
+    );
+    // The hidden-match basis names the count: 2 (.env + secrets/real.pem).
+    assert!(
+        json_stdout.contains(
+            "\"basis\":\"text index; caps: 2 match(es) in credential-shaped files hidden"
+        ),
+        "json trailer must name the hidden count: {json_stdout:?}"
+    );
+    let docs: Vec<serde_json::Value> = json_stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(
+        !docs.is_empty(),
+        "json page must carry at least the trailer"
+    );
+    for d in &docs[..docs.len() - 1] {
+        assert!(d.get("path").is_some(), "match line missing path: {d}");
+        let path = d["path"].as_str().unwrap_or("");
+        assert!(!path.contains(".env"), "match path must not be .env: {d}");
+    }
+    let trailer = docs.last().unwrap();
+    let warnings = trailer
+        .get("warnings")
+        .and_then(|w| w.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        warnings.iter().any(|w| {
+            w.get("code").and_then(|c| c.as_str()) == Some("RESULT_CAPPED")
+                && w.get("message")
+                    .and_then(|m| m.as_str())
+                    .is_some_and(|m| m.contains("credential-shaped"))
+        }),
+        "envelope warning must name the credential-shaped cap: {warnings:?}"
+    );
+    let basis = trailer
+        .pointer("/epistemics/basis")
+        .and_then(|b| b.as_str())
+        .unwrap_or_default();
+    assert!(
+        basis.contains("credential-shaped"),
+        "epistemics.basis must name the credential-shaped cap: {basis:?}"
+    );
+
+    // `-l` (files-only) must not list any credential-shaped path either.
+    let files_only = fixture
+        .command(PIXEL)
+        .args(["search-content", "-F", token, ".", "-l"])
+        .output()
+        .unwrap();
+    assert!(
+        files_only.status.success(),
+        "-l: {}",
+        String::from_utf8_lossy(&files_only.stderr)
+    );
+    let lo_stdout = String::from_utf8_lossy(&files_only.stdout);
+    assert!(
+        lo_stdout
+            .lines()
+            .all(|line| !line.contains(".env") && !line.contains(token)),
+        "-l must not list credential-shaped files or echo the token: {lo_stdout:?}"
+    );
+}
+
+/// Builds a fixture with a tracked `.env`, a tracked non-credential file,
+/// and a tracked `secrets/` directory holding a tracked `.pem`. The `.env`
+/// and the `.pem` carry the test token; the non-credential file carries it
+/// too, so the test can prove the daemon does NOT also hide matches in
+/// safe files when it strips matches from credential-shaped ones.
+fn tracked_credential_fixture() -> TrackedFixture {
+    use std::process::Command;
+
+    let root = std::env::temp_dir().join(format!(
+        "pixel-search-content-credential-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
+    ));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("secrets")).unwrap();
+    // Synthetic, nonsensitive fixture bytes only — the test never reads
+    // real secrets, only asserts that the daemon hides matches in paths
+    // whose shape looks credential-shaped.
+    std::fs::write(
+        root.join(".env"),
+        b"ABCDEF_GUARDED_TOKEN_xyzzy_42=please_do_not_match_me\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(root.join(".env"), std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(
+        root.join("secrets/real.pem"),
+        b"-----BEGIN PRIVATE KEY-----\nABCDEF_GUARDED_TOKEN_xyzzy_42\n-----END ...\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/safe.rs"),
+        b"// ABCDEF_GUARDED_TOKEN_xyzzy_42 lives here too, but this is safe\n",
+    )
+    .unwrap();
+    std::fs::write(root.join(".gitignore"), ".pixel/\n").unwrap();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .current_dir(&root)
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "fixture"]);
+    TrackedFixture(root.canonicalize().unwrap())
+}
+
+/// A git-anchored fixture that is removed on drop, after a daemon-leak
+/// check (the same one `Fixture` and `Scratch` use elsewhere in this suite).
+struct TrackedFixture(PathBuf);
+
+impl TrackedFixture {
+    fn command(&self, binary: &str) -> Command {
+        let mut command = Command::new(binary);
+        command
+            .current_dir(&self.0)
+            .env("PIXEL_DAEMON_AUTO_START", "0")
+            .env_remove("RIPGREP_CONFIG_PATH")
+            .env_remove("GREP_OPTIONS")
+            .env_remove("PIXEL_POLICY")
+            .env_remove("PIXEL_TARGETS_GUARD");
+        command
+    }
+}
+
+impl Drop for TrackedFixture {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            crate::support::assert_no_daemon(&self.0);
+        }
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn native_configuration_and_environment_overrides_never_get_autoauthorized() {
     let fixture = Fixture::new(b"needle\n");

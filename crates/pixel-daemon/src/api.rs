@@ -19,7 +19,7 @@ use pixel_context::estimate_tokens;
 use pixel_facts::FactsStore;
 use pixel_graph::{EdgeKind, EdgeRow, FileRow, GraphStore, SymbolKind, SymbolRow};
 use pixel_index::TrigramExtractor;
-use pixel_index::index::{MAX_FILE_BYTES, open_regular_bounded};
+use pixel_index::index::{MAX_FILE_BYTES, credential_path, open_regular_bounded};
 use pixel_index::indexset::{IndexSet, IndexSetError, OpenTimings, RefreshOutcome, millis};
 use pixel_proto::{Envelope, Epistemics, ErrorCode, PixelError, SnapshotInfo, Warning};
 use pixel_recall::embed::{EmbedKind, Embedder, open_default_embedder};
@@ -1185,6 +1185,17 @@ impl Service {
                 .map_err(|e| e.to_string())?
         };
 
+        // Drop matches whose path is credential-shaped before any byte or row
+        // accounting runs. Every `search-content` request reaches `op_search`,
+        // so filtering here covers each output mode without the CLI having
+        // to duplicate the predicate.
+        // The hidden count is surfaced below in the `caps` array — the same
+        // channel `derive_epistemics` turns into `epistemics.basis` content
+        // AND a `RESULT_CAPPED` envelope warning, so a partial answer is
+        // never silently shrunk (CONTRIBUTING.md: every cap is named in
+        // `basis` and mirrored as a warning).
+        let (matches, credential_hidden) = partition_credential_matches(matches);
+
         // Render matches until either the row limit or the byte cap is hit.
         let mut arr: Vec<Value> = Vec::with_capacity(matches.len().min(row_limit));
         let mut bytes = 0usize;
@@ -1241,6 +1252,9 @@ impl Service {
                  candidates beyond the cap"
             ));
         }
+        if Self::credential_hidden_cap_line(credential_hidden).is_some() {
+            caps.push(Self::credential_hidden_cap_line(credential_hidden).expect("just checked"));
+        }
         Ok(json!({
             "matches": arr,
             "caps": caps,
@@ -1259,6 +1273,22 @@ impl Service {
                 "truncated": stats.truncated,
             }
         }))
+    }
+    /// Cap line that names the count of credential-shaped matches the
+    /// daemon silently hid. Returns `None` when nothing was hidden so the
+    /// caller can `push` the line conditionally. The boundary is strictly
+    /// greater than zero: at zero the caller's response is already
+    /// complete and naming "0 hidden" would be misleading; at one or more
+    /// the user has lost a result and the envelope must say so.
+    fn credential_hidden_cap_line(credential_hidden: usize) -> Option<String> {
+        if credential_hidden > 0 {
+            Some(format!(
+                "{credential_hidden} match(es) in credential-shaped files hidden by the \
+                 daemon; continue via next_offset for adjacent matches"
+            ))
+        } else {
+            None
+        }
     }
 
     /// Sniper target list: tokenize the task, gather lexical + graph signals,
@@ -3385,6 +3415,30 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
     (epistemics, warnings)
 }
 
+/// Drop matches whose path is credential-shaped before any byte or row
+/// accounting runs in `op_search`. The canonical predicate
+/// (`pixel_index::index::credential_path`) is shared with the search-compat
+/// guard and the task sandbox — change-propagation: a named constant is the
+/// only spelling. The returned count is the number of matches the daemon
+/// silently hid so the caller can name the cap in the envelope and surface
+/// a `RESULT_CAPPED` warning via `derive_epistemics`. Pagination stays
+/// correct: a filtered match still consumes an index row, so the existing
+/// `next_offset = offset + arr.len()` resume point skips past it.
+fn partition_credential_matches(
+    matches: Vec<pixel_index::verify::MatchLine>,
+) -> (Vec<pixel_index::verify::MatchLine>, usize) {
+    let mut kept = Vec::with_capacity(matches.len());
+    let mut hidden = 0usize;
+    for m in matches {
+        if credential_path(Path::new(&m.path)) {
+            hidden += 1;
+        } else {
+            kept.push(m);
+        }
+    }
+    (kept, hidden)
+}
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
@@ -4704,6 +4758,7 @@ mod tests {
     use super::*;
     use pixel_graph::Tier;
     use pixel_graph::concept_resolve::{RankedCandidate, Reranker, SignalBundle};
+    use pixel_index::verify::MatchLine;
     use std::path::PathBuf;
 
     #[test]
@@ -7698,5 +7753,66 @@ mod tests {
             dry_run: false,
         });
         assert!(!resp.ok, "{resp:?}");
+    }
+
+    /// `partition_credential_matches` is the unit the daemon's cap line at
+    /// `op_search` reports back to the caller; if either the count or the
+    /// predicate goes wrong, the basis string (`text index; caps: N match(es)
+    /// in credential-shaped files hidden…`) silently lies. The two assertions
+    /// pin both halves: every credential-shaped path drops, every safe path
+    /// survives, and the count matches the number of drops exactly.
+    #[test]
+    fn partition_credential_matches_drops_credential_paths_and_counts_them() {
+        let mk = |path: &str, line: u64| MatchLine {
+            path: path.into(),
+            line_number: line,
+            line: "needle".into(),
+        };
+        let (kept, hidden) = partition_credential_matches(vec![
+            mk(".env", 1),
+            mk("secrets/real.pem", 5),
+            mk("src/safe.rs", 9),
+        ]);
+        assert_eq!(
+            hidden, 2,
+            "two credential-shaped matches were filtered: {kept:?}"
+        );
+        let paths: Vec<&str> = kept.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, vec!["src/safe.rs"], "safe match must survive");
+    }
+
+    /// The cap line `op_search` emits when `credential_hidden` is positive
+    /// is the truth behind the `RESULT_CAPPED` warning the envelope
+    /// surfaces. `partition_credential_matches` returning `(_, 0)` must
+    /// produce no cap (a healthy search with no hidden matches is not a
+    /// partial answer); a non-zero hidden count must produce a cap the
+    /// envelope surfaces, with the exact count visible in the line.
+    #[test]
+    fn op_search_surfaces_a_credential_cap_only_when_hidden_is_positive() {
+        // Zero hidden → no cap line. A healthy search is not a partial
+        // answer, so naming "0 hidden" would be misleading.
+        assert_eq!(
+            Service::credential_hidden_cap_line(0),
+            None,
+            "no cap on a clean search"
+        );
+
+        // One hidden → cap line that names the exact count.
+        let line = Service::credential_hidden_cap_line(1).expect("one hidden must produce a cap");
+        assert!(
+            line.starts_with("1 match(es)"),
+            "expected cap to name the count: {line:?}"
+        );
+        assert!(
+            line.contains("next_offset"),
+            "expected cap to point at next_offset: {line:?}"
+        );
+
+        // Two hidden → cap line that names the exact count.
+        let line = Service::credential_hidden_cap_line(2).expect("two hidden must produce a cap");
+        assert!(
+            line.starts_with("2 match(es)"),
+            "expected cap to name the count: {line:?}"
+        );
     }
 }
