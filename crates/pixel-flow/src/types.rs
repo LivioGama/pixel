@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A variable that can be substituted into replay commands.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowVar {
     pub name: String,
     pub description: String,
@@ -17,7 +17,7 @@ pub struct FlowVar {
 /// (`open`, `snapshot`, `click`, `fill`, `type`, `select`, `press`,
 /// `wait`, `conditional`, `switch_tab`). Fields are optional except
 /// `action` and `rationale` — only the relevant ones are set per action type.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowStep {
     pub action: String,
     /// Why this step exists — the human/agent rationale.
@@ -32,6 +32,9 @@ pub struct FlowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ref_hint: Option<String>,
     /// Literal value to fill/type. Mutually exclusive with `value_var`.
+    ///
+    /// Also carries the argument where that is what the action takes: for
+    /// `scroll`, `"<up|down|left|right> [pixels]"`; for `eval`, the script.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     /// Name of a flow var whose value is substituted at replay time.
@@ -80,7 +83,7 @@ fn default_retries() -> u32 {
 
 /// A saved browser flow — a deterministic, replayable path through a web
 /// interaction (auth, config, OAuth, etc.).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Flow {
     pub name: String,
     pub title: String,

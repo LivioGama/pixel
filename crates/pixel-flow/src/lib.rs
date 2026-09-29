@@ -12,11 +12,12 @@ pub mod replay;
 pub mod store;
 pub mod types;
 
-mod vars;
+pub mod vars;
 
-pub use execute::{ExecResult, execute};
+pub use execute::{Browser, ExecResult, agent_browser, evaluate_condition, execute, execute_step};
 pub use store::{delete, ensure_flow_dir, exists, flow_dir, list, load, save, slugify};
 pub use types::{Flow, FlowStep, FlowVar};
+pub use vars::substitute;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -93,7 +94,7 @@ pub fn flow(action: &FlowAction) -> Result<Value, String> {
     }
 }
 
-fn now_unix() -> i64 {
+pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
