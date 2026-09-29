@@ -1464,6 +1464,80 @@ fn prompt_submit_should_treat_a_harness_task_notification_as_no_prompt() {
     assert!(context.contains("Pixel-first retrieval"), "{context}");
 }
 
+/// Devin loads `~/.claude/settings.json` hooks verbatim, so the Claude entry
+/// `pixel install` wrote there runs inside a Devin session with its
+/// `--provider claude` argument intact. That argument names the install, not
+/// the host: starting the Claude task runtime there rejected the user's prompt
+/// and left it for a Claude worker the user never invoked. The repository
+/// opts in to `auto_handoff`, so the quiet imported host is the host gate's
+/// doing, not the default-off switch's.
+#[test]
+fn a_host_that_imports_claude_config_never_starts_the_claude_handoff() {
+    let repo = Scratch::for_test("guard-enforce-imported-claude-config", "repo");
+    std::fs::write(repo.join("tracked.rs"), "pub const VALUE: u8 = 1;\n").unwrap();
+    std::fs::create_dir_all(repo.join(".pixel")).unwrap();
+    std::fs::write(repo.join(".pixel/config.yaml"), "auto_handoff: true\n").unwrap();
+    crate::support::git(&repo, &["init", "-q"]);
+    crate::support::git(&repo, &["add", "."]);
+    crate::support::git(&repo, &["commit", "-q", "-m", "seed"]);
+
+    let submit = |devin: bool| {
+        let mut command = pixel_command();
+        command
+            .env_remove("PIXEL_TASK_CONTEXT")
+            .env_remove("PIXEL_TASK_BOUNDARY")
+            .env("PIXEL_CLAUDE_EXECUTABLE", "/usr/bin/true")
+            .current_dir(&*repo)
+            .args(["run-hook", "prompt-submit", "--provider", "claude"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if devin {
+            command.env("DEVIN_PROJECT_DIR", repo.as_ref());
+        } else {
+            command.env_remove("DEVIN_PROJECT_DIR");
+        }
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                json!({
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": "Add the story feature",
+                    "session_id": "imported-claude-config",
+                    "cwd": repo.as_ref(),
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    // The importing host keeps its prompt: no handoff, no task ledger row.
+    let imported = submit(true);
+    assert_eq!(imported.status.code(), Some(0), "{imported:?}");
+    assert!(imported.stderr.is_empty(), "{imported:?}");
+    assert!(
+        !repo.join(".pixel/tasks").exists(),
+        "a host that only imports Claude's config must not own a Claude task"
+    );
+
+    // A real Claude Code session still hands the same prompt off.
+    let claude = submit(false);
+    assert_eq!(claude.status.code(), Some(2), "{claude:?}");
+    assert!(
+        String::from_utf8_lossy(&claude.stderr).contains("foreground prompt handed off"),
+        "{claude:?}"
+    );
+    assert!(
+        repo.join(".pixel/tasks").is_dir(),
+        "a Claude Code session records the accepted task"
+    );
+}
+
 #[test]
 fn codex_exec_command_should_preserve_cmd_key_and_metadata_on_exact_rewrite() {
     let dir = indexed_dir("cmd");

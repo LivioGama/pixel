@@ -79,6 +79,7 @@ const FIX_PREPARE: Option<&str> = Some("pixel prepare-repo {root}");
 pub const CHECKS: &[CheckSpec] = &[
     entry("binary.path", None),
     entry("binary.executable", None),
+    entry("binary.shell-path", None),
     entry("install.agent-prompt", FIX_INSTALL),
     entry("install.subagent-prompt", FIX_INSTALL),
     entry("install.pi-prompt", FIX_INSTALL),
@@ -303,6 +304,16 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             }
         },
     );
+
+    // The agent shells inherit the login shell's environment, and a coding
+    // agent that cannot resolve `pixel` silently works without it (measured
+    // on a machine where only .bashrc put the install on PATH and the
+    // harness ran zsh). Ask the resolved shell itself, the authority on the
+    // profile it loads, so the probe uses the same lookup the profile adds.
+    let shell_override = options.shell.clone();
+    runner.check_status("binary.shell-path", || {
+        shell_path_check(shell_override.as_deref())
+    });
 
     runner.check(
         "install.agent-prompt",
@@ -1353,7 +1364,8 @@ fn rtk_backup_check(orphan: Option<PathBuf>) -> (CheckStatus, DoctorCheckDetail,
     }
 }
 
-struct DoctorCheckDetail {
+#[derive(Debug)]
+pub(crate) struct DoctorCheckDetail {
     summary: String,
     detail: Option<serde_json::Value>,
 }
@@ -1371,6 +1383,75 @@ enum Remedy {
 
 /// Longest stderr excerpt a check reason quotes from a child process.
 const STDERR_EXCERPT_CHARS: usize = 256;
+
+/// The `binary.shell-path` check body, with the shell resolved from
+/// `--shell` (or the login shell). Green when the shell answers the lookup
+/// with a path; yellow when it runs but resolves nothing — pixel itself
+/// works, the agent's environment is what is missing — and red when the
+/// shell process cannot run at all. Split out so the three outcomes have
+/// direct unit tests instead of depending on the CLI suite's parse of the
+/// rendered report.
+pub(crate) fn shell_path_check(
+    shell_override: Option<&str>,
+) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+    let shell = install::resolve_shell(shell_override);
+    // Login shell mode: interactive shells load rc files that
+    // non-interactive shells do not, and the PATH is their work.
+    let lookup = match install::shell_kind_from(&shell) {
+        install::ShellKind::Fish => ["-l", "-c", "which pixel"],
+        install::ShellKind::Posix => ["-l", "-c", "command -v pixel"],
+    };
+    let out = Command::new(&shell)
+        .args(lookup)
+        .stdin(Stdio::null())
+        .output();
+    let out = match out {
+        Ok(o) if o.status.success() => o,
+        // `command -v` exits 1 without resolving; a spawn failure is
+        // a different failure (the shell itself is broken).
+        Ok(o) => {
+            return Ok((
+                CheckStatus::Yellow,
+                DoctorCheckDetail {
+                    summary: "the shell pixel is installed for does not resolve it".to_string(),
+                    detail: Some(serde_json::json!({
+                        "shell": shell,
+                        "exit_status": o.status.to_string(),
+                        "stderr": capped(
+                            &one_line(&String::from_utf8_lossy(&o.stderr)),
+                            STDERR_EXCERPT_CHARS,
+                        ),
+                    })),
+                },
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "failed to run shell {shell}: {e}; the login shell itself is broken"
+            ));
+        }
+    };
+    let resolved = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if resolved.is_empty() {
+        return Ok((
+            CheckStatus::Yellow,
+            DoctorCheckDetail {
+                summary: "the shell pixel is installed for does not resolve it".to_string(),
+                detail: Some(serde_json::json!({ "shell": shell })),
+            },
+        ));
+    }
+    Ok((
+        CheckStatus::Green,
+        DoctorCheckDetail {
+            summary: format!("{shell} resolves pixel as {resolved}"),
+            detail: Some(serde_json::json!({
+                "shell": shell,
+                "resolved": resolved,
+            })),
+        },
+    ))
+}
 
 /// Runs the checks the selection keeps and records each outcome.
 struct Runner<'a> {
@@ -2133,8 +2214,8 @@ mod tests {
         age_secs, capped, catalogue_steps, claude_hooks_owner_check, extract_rule_commands,
         fix_for, judge_repair, names_check, normalize_rule_command, one_line,
         probe_daemon_epistemics, render_catalogue, render_repairs, repair_for, repair_plan,
-        rtk_backup_check, run_repair, scenario_mismatches, selected, shell_word, spec,
-        split_home_repairs, validate_selection,
+        rtk_backup_check, run_repair, scenario_mismatches, selected, shell_path_check, shell_word,
+        spec, split_home_repairs, validate_selection,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
@@ -2561,6 +2642,65 @@ mod tests {
             .as_deref(),
             Some("pixel daemon stop '/r' && pixel daemon start '/r'")
         );
+    }
+
+    /// The three outcomes of the shell probe, driven through a script the
+    /// test controls: the success guard's two directions and the empty
+    /// stdout case each change exactly one of them.
+    #[test]
+    fn shell_path_check_reports_each_shell_outcome() {
+        let dir =
+            std::env::temp_dir().join(format!("pixel-doctor-shell-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let make_shell = |tag: &str, body: &str| {
+            let shell = dir.join(tag);
+            std::fs::write(&shell, format!("#!/bin/sh\n{body}\n")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            shell.to_string_lossy().into_owned()
+        };
+
+        let (status, detail) =
+            shell_path_check(Some(&make_shell("green", "echo /fake/bin/pixel; exit 0"))).unwrap();
+        assert_eq!(status, CheckStatus::Green, "{detail:?}");
+        assert_eq!(
+            detail.detail.as_ref().unwrap()["resolved"],
+            "/fake/bin/pixel"
+        );
+
+        // Exit 1: `command -v` found nothing — the shell works, pixel is not
+        // reachable from it. Yellow, not red: no catalogue command repairs it.
+        // The detail carries the shell's own words (an exit 1 a profile
+        // script printed an error into is diagnosable), which is what tells
+        // this miss apart from an empty-success one.
+        let (status, detail) = shell_path_check(Some(&make_shell("yellow", "exit 1"))).unwrap();
+        assert_eq!(status, CheckStatus::Yellow, "{detail:?}");
+        let yellow = detail.detail.unwrap();
+        assert!(yellow["exit_status"].is_string(), "{yellow}");
+
+        // Success with empty stdout is the same miss, not a green check —
+        // and it is not the exit-1 shape either: nothing to report yet.
+        let (status, detail) = shell_path_check(Some(&make_shell("empty", "exit 0"))).unwrap();
+        assert_eq!(status, CheckStatus::Yellow, "{detail:?}");
+        assert_eq!(
+            detail.detail.as_ref().unwrap()["shell"],
+            make_shell("empty", "exit 0")
+        );
+        assert!(
+            detail.detail.as_ref().unwrap()["exit_status"].is_null(),
+            "an empty success has no exit status to report: {detail:?}"
+        );
+
+        // A shell the OS cannot exec: red, a different failure from a miss.
+        let err = shell_path_check(Some(dir.join("no-such-shell").to_string_lossy().as_ref()))
+            .expect_err("a spawn failure is red");
+        assert!(err.contains("failed to run shell"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

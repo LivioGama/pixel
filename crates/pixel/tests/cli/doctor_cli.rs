@@ -323,7 +323,7 @@ fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
         [
             "pixel doctor --fix: ran 1 repair(s) — 1 fixed, 0 not converged, 0 failed",
             "  [fixed] pixel install --shell zsh (install.agent-prompt, install.pi-prompt)",
-            "pixel doctor: ran 2 check(s), skipped 24 — 2 green, 0 yellow, 0 red",
+            "pixel doctor: ran 2 check(s), skipped 25 — 2 green, 0 yellow, 0 red",
             "",
         ]
         .join("\n")
@@ -435,4 +435,91 @@ fn doctor_should_pass_a_repo_whose_history_was_never_built_and_leave_it_unbuilt(
         !repo.join(".pixel").join("history.db").exists(),
         "the check must not create history.db"
     );
+}
+
+/// A fake shell makes the probe hermetic: the login shells of a developer
+/// machine carry a system-level PATH (macOS `path_helper`) the test cannot
+/// reset, but `--shell` accepts any executable, and the check runs it with
+/// `-l -c "command -v pixel"`/`which pixel` exactly as it would the real
+/// one.
+fn fake_shell(tag: &str, script: &str) -> Scratch {
+    let dir = Scratch::for_test("doctor-cli-shell", tag);
+    let shell = dir.join("fake-zsh");
+    std::fs::write(&shell, format!("#!/bin/sh\n{script}\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    dir
+}
+
+fn shell_path_doctor(shell: &Path, repo: &Path) -> Output {
+    pixel_command()
+        .arg("doctor")
+        .arg(repo)
+        .args(["--only", "binary.shell-path", "--json"])
+        .arg("--shell")
+        .arg(shell.as_os_str())
+        .env("CODEX_HOME", std::env::temp_dir().join("doctor-cli-codex"))
+        .env("PIXEL_METRICS", "0")
+        .output()
+        .unwrap()
+}
+
+/// The check reports what the shell resolves, so an agent's shells and the
+/// doctor agree on where `pixel` comes from.
+#[test]
+fn shell_path_should_be_green_when_the_shell_resolves_pixel() {
+    let (_, repo) = fixture("shell-path-green");
+    let shell = fake_shell("shell-path-green", "echo /fake/bin/pixel\nexit 0");
+    let out = shell_path_doctor(shell.join("fake-zsh").as_path(), &repo);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["checks"][0]["status"], "green", "{report}");
+    assert_eq!(report["summary"]["green"], 1, "{report}");
+    assert_eq!(
+        report["checks"][0]["detail"]["resolved"], "/fake/bin/pixel",
+        "{report}"
+    );
+}
+
+/// A shell that cannot resolve `pixel` is the silent failure agents live
+/// with: every pixel command is "command not found" inside the harness
+/// while outside it works. Yellow — the binary itself runs, and no
+/// catalogue command repairs a PATH — and `--fail-on yellow` makes it a
+/// gate.
+#[test]
+fn shell_path_should_flag_a_shell_that_cannot_resolve_pixel() {
+    let (_, repo) = fixture("shell-path-yellow");
+    let shell = fake_shell("shell-path-yellow", "exit 1");
+    let out = shell_path_doctor(shell.join("fake-zsh").as_path(), &repo);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["checks"][0]["status"], "yellow", "{report}");
+    assert_eq!(report["summary"]["yellow"], 1, "{report}");
+
+    let strict = pixel_command()
+        .arg("doctor")
+        .arg(&*repo)
+        .arg("--shell")
+        .arg(shell.join("fake-zsh").as_os_str())
+        .args(["--only", "binary.shell-path", "--fail-on", "yellow"])
+        .env("CODEX_HOME", std::env::temp_dir().join("doctor-cli-codex"))
+        .env("PIXEL_METRICS", "0")
+        .output()
+        .unwrap();
+    assert_eq!(strict.status.code(), Some(1), "{strict:?}");
+}
+
+/// A spawn failure of the shell itself is a different failure from "the
+/// shell could not resolve pixel": it is red, not yellow.
+#[test]
+fn shell_path_should_go_red_when_the_shell_cannot_run() {
+    let (_, repo) = fixture("shell-path-red");
+    let shell_dir = Scratch::for_test("doctor-cli-shell", "shell-path-red");
+    let out = shell_path_doctor(shell_dir.join("no-such-shell").as_path(), &repo);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["checks"][0]["status"], "red", "{report}");
 }

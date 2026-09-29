@@ -37,7 +37,7 @@ const MAX_SESSION_AGE_MS: i64 = 4 * 3600 * 1000;
 const HOOK_DEADLINE: Duration = Duration::from_millis(750);
 const TASK_CONTEXT_BYTES: usize = 4096;
 const TASK_TARGET_LIMIT: usize = 8;
-const DEVIN_PIXEL_GUIDANCE: &str = concat!(
+pub(crate) const DEVIN_PIXEL_GUIDANCE: &str = concat!(
     "Pixel-first retrieval (non-blocking): before any repository search, file read, or other retrieval tool call, use Pixel first. ",
     "For a known identifier or call-site request, run `pixel search-content -F '<identifier>'`; for behavior, run `pixel find-code '<concept>'`. ",
     "Make that the first tool action: do not start with `ls`, `command -v`, `pixel status`, native grep/rg/glob/find, or a native file read. ",
@@ -110,7 +110,7 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         .or(payload.hook_event_name_camel.as_deref())
         .unwrap_or("UserPromptSubmit");
 
-    let is_claude_runtime = matches!(provider, Some(crate::guard::Provider::Claude));
+    let claude_host = is_claude_host(provider);
     // Run independently: a missing embedding model must not prevent retrieval.
     let (tx, rx) = std::sync::mpsc::channel();
     let deadline = Instant::now() + HOOK_DEADLINE;
@@ -150,7 +150,7 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     }
     drop(tx);
     let notes = collect_notes(rx, deadline);
-    let mut context = if is_claude_runtime {
+    let mut context = if claude_host {
         render_claude_runtime(
             &payload,
             &cwd,
@@ -211,6 +211,30 @@ fn spawn_note(
             .flatten();
         let _ = tx.send((kind, note));
     });
+}
+
+/// Environment markers set by a harness that loads Claude Code's configuration
+/// rather than being Claude Code. Devin reads `~/.claude/settings.json` by
+/// default (its `read_config_from.claude`) and runs the hook commands it finds
+/// there unchanged, so `--provider claude` on this hook names the install, not
+/// the host that invoked it.
+const IMPORTED_CLAUDE_CONFIG_MARKERS: &[&str] = &["DEVIN_PROJECT_DIR"];
+
+/// The imported-config marker set in this process, if any.
+pub(crate) fn imported_config_host() -> Option<&'static str> {
+    IMPORTED_CLAUDE_CONFIG_MARKERS
+        .iter()
+        .copied()
+        .find(|marker| std::env::var_os(marker).is_some())
+}
+
+/// Whether this invocation belongs to a Claude Code session. The Claude task
+/// runtime is a Claude Code feature: `--provider claude` alone is not enough,
+/// because a host that imports Claude's configuration re-runs this hook with
+/// that argument while the user's prompt belongs to the other host. Starting a
+/// Claude worker there would reject a prompt Claude never received.
+fn is_claude_host(provider: Option<crate::guard::Provider>) -> bool {
+    matches!(provider, Some(crate::guard::Provider::Claude)) && imported_config_host().is_none()
 }
 
 enum PromptNote {
@@ -815,6 +839,29 @@ mod tests {
         assert!(!is_trivial_continuation(
             "can you also add tests for the auth module"
         ));
+    }
+
+    /// The host gate is the discriminator between a Claude Code session and
+    /// a harness that only imports Claude's configuration: the `--provider
+    /// claude` argument alone must never qualify a host.
+    #[test]
+    fn claude_host_requires_the_provider_without_an_importing_marker() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("DEVIN_PROJECT_DIR");
+        // SAFETY: DEVIN_PROJECT_DIR is only changed under ENV_LOCK.
+        unsafe { std::env::set_var("DEVIN_PROJECT_DIR", "/tmp/devin-repo") };
+        assert!(!is_claude_host(Some(crate::guard::Provider::Claude)));
+        assert!(!is_claude_host(Some(crate::guard::Provider::Devin)));
+        assert!(!is_claude_host(None));
+        // SAFETY: same lock as above.
+        unsafe { std::env::remove_var("DEVIN_PROJECT_DIR") };
+        assert!(is_claude_host(Some(crate::guard::Provider::Claude)));
+        assert!(!is_claude_host(Some(crate::guard::Provider::Devin)));
+        assert!(!is_claude_host(None));
+        if let Some(restored) = saved {
+            // SAFETY: same lock as above.
+            unsafe { std::env::set_var("DEVIN_PROJECT_DIR", restored) };
+        }
     }
 
     const TASK_NOTIFICATION: &str = "<task-notification>\n<task-id>b1f0c2</task-id>\n<status>completed</status>\n<summary>Agent \"fix auth\" completed</summary>\n</task-notification>";

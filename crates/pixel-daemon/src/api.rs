@@ -136,7 +136,8 @@ pub type Response = Envelope<Value>;
 ///   writes that name no code (`REFUSED:`, `STALE_REMOTE:`,
 ///   `FILE_NOT_TRACKED:`, `PROVENANCE_BAD_ARGS:`, …) stay unclassified.
 /// - the repository lock reports `repository is busy…`, and the lookups in
-///   this file report `no symbol named …` / `no symbol with uid …`.
+///   this file report `no symbol named …` / `no symbol with uid …` (each
+///   followed by a `pixel find-symbol` recovery hint the classifier ignores).
 ///
 /// Everything else — a malformed regex, a bad parameter, an opaque message
 /// forwarded from another crate — stays `InvalidInput`, the correct default
@@ -1605,10 +1606,13 @@ impl Service {
         let built = self.ensure_graph()?;
         let store = self.graph.as_ref().unwrap();
         let files = file_map(store)?;
-        let sym = store
-            .symbol_by_uid(uid)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("no symbol with uid {uid:?}"))?;
+        // Same `uid_or_name` protocol as `impact`: an agent that passes the
+        // name it just read (`pack-context renderStories`) gets the symbol,
+        // not an error teaching the uid format.
+        let sym = match resolve_symbol(store, uid)? {
+            Resolved::One(s) => s,
+            Resolved::Many(v) => return candidates_value(store, &v),
+        };
         let envelope = store
             .envelope_for_name(&sym.name)
             .map_err(|e| e.to_string())?;
@@ -3627,19 +3631,29 @@ enum Resolved {
 
 /// `uid_or_name` protocol: '#' means uid; otherwise a name, with the
 /// disambiguation protocol (`{candidates: [...], hint}`) on ambiguity.
+///
+/// When nothing matches, the error names the recovery
+/// (`pixel find-symbol`) instead of only restating the input, so an agent
+/// that guessed the identifier wrong learns the lookup that answers.
 fn resolve_symbol(store: &GraphStore, uid_or_name: &str) -> Result<Resolved, String> {
     if uid_or_name.contains('#') {
         return store
             .symbol_by_uid(uid_or_name)
             .map_err(|e| e.to_string())?
             .map(Resolved::One)
-            .ok_or_else(|| format!("no symbol with uid {uid_or_name:?}"));
+            .ok_or_else(|| {
+                format!(
+                    "no symbol with uid {uid_or_name:?}; run `pixel find-symbol <name>` to list uids"
+                )
+            });
     }
     let syms = store
         .symbols_by_name(uid_or_name, None, 50)
         .map_err(|e| e.to_string())?;
     match syms.len() {
-        0 => Err(format!("no symbol named {uid_or_name:?}")),
+        0 => Err(format!(
+            "no symbol named {uid_or_name:?}; run `pixel find-symbol {uid_or_name}` to list matching symbols"
+        )),
         1 => Ok(Resolved::One(syms.into_iter().next().unwrap())),
         _ => Ok(Resolved::Many(syms)),
     }
@@ -4988,7 +5002,16 @@ mod tests {
             ),
             ("repository is busy", ErrorCode::BusyRepository),
             ("no symbol named \"nope\"", ErrorCode::NotFound),
-            ("no symbol with uid \"#42\"", ErrorCode::NotFound),
+            // The recovery hint appended to a lookup miss must not move the
+            // code off `NotFound`: it is what an agent branches on.
+            (
+                "no symbol named \"nope\"; run `pixel find-symbol nope` to list matching symbols",
+                ErrorCode::NotFound,
+            ),
+            (
+                "no symbol with uid \"#42\"; run `pixel find-symbol <name>` to list uids",
+                ErrorCode::NotFound,
+            ),
             // Markers that name no code, and messages that carry no code at all.
             (
                 "REFUSED: main is the repository default branch; rewriting it is forbidden",
@@ -5339,6 +5362,65 @@ mod tests {
             // and macro-generated calls are invisible to it.
             assert!(!response.epistemics.as_ref().unwrap().closed_world);
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The `uid_or_name` protocol is the contract `impact`, `uses` and
+    /// `context` share: a bare name resolves, and a miss is an Err naming
+    /// the recovery — not an Ok with empty fields, which a caller would
+    /// read as a valid answer about a symbol that does not exist.
+    #[test]
+    fn resolve_symbol_misses_are_errors_and_hits_resolve() {
+        let root = tmpdir("resolve-protocol");
+        std::fs::write(
+            root.join("a.ts"),
+            "export function alpha(x: number): number { return x + 1 }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "resolve fixture"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        // Miss by name: an error, with the recovery the next call needs.
+        let miss = svc.handle(Request::Uses {
+            uid_or_name: "no_such_symbol_anywhere".into(),
+            role: "callers".into(),
+            offset: None,
+        });
+        assert!(!miss.ok, "{miss:?}");
+        let error = miss.error.as_ref().expect("a miss is an error");
+        assert_eq!(error.code, ErrorCode::NotFound, "{error:?}");
+        assert!(
+            error
+                .message
+                .contains("run `pixel find-symbol no_such_symbol_anywhere`"),
+            "{error:?}"
+        );
+
+        // Miss by uid: the same recovery protocol.
+        let miss = svc.handle(Request::Impact {
+            uid_or_name: "a.ts#ghost#function".into(),
+            direction: "upstream".into(),
+            depth: Some(2),
+        });
+        assert!(!miss.ok, "{miss:?}");
+        let error = miss.error.as_ref().unwrap();
+        assert_eq!(error.code, ErrorCode::NotFound, "{error:?}");
+        assert!(
+            error.message.contains("run `pixel find-symbol <name>`"),
+            "{error:?}"
+        );
+
+        // Unique bare name resolves to the one symbol.
+        let hit = svc.handle(Request::Impact {
+            uid_or_name: "alpha".into(),
+            direction: "upstream".into(),
+            depth: Some(2),
+        });
+        assert!(hit.ok, "{hit:?}");
+        assert_eq!(hit.data()["target"], "a.ts#alpha#function", "{hit:?}");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 

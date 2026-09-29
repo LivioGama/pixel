@@ -1165,3 +1165,97 @@ fn files_with_matches_stop_at_the_stdout_cap_between_paths() {
         "{fits:?}"
     );
 }
+
+/// `pack-context` takes the symbol an agent actually has in hand. An agent
+/// that just read `renderStories` in a file calls
+/// `pixel pack-context renderStories` — the same `uid_or_name` protocol
+/// `impact` accepts — and only a fully-qualified uid pins one symbol among
+/// same-named ones. When nothing matches, the error names the recovery
+/// (`pixel find-symbol`) instead of only restating the guess, so the next
+/// call is the one that answers.
+#[test]
+fn pack_context_resolves_a_bare_name_and_names_the_recovery_when_it_fails() {
+    let dir = fixture("pack-context-name");
+
+    // Bare name, unique in the fixture: the same packet the uid form returns.
+    let out = pixel(&dir, &["pack-context", "login_user", ".", "--json"]);
+    let what = "pack-context bare name";
+    assert!(
+        out.status.success(),
+        "{what} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let docs = parse_stdout_lines(&out, what);
+    assert_eq!(docs.len(), 1, "{docs:?}");
+    assert_eq!(docs[0]["symbol"]["name"], "login_user", "{docs:?}");
+    assert!(
+        docs[0]["symbol"]["uid"]
+            .as_str()
+            .is_some_and(|uid| uid.contains('#')),
+        "the packet names the uid a caller can pin next time: {docs:?}"
+    );
+
+    // A name that resolves to nothing: NOT_FOUND, with the lookup that
+    // answers on stderr and in the envelope.
+    let out = pixel(&dir, &["pack-context", "no_such_symbol_anywhere", "."]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("pixel find-symbol no_such_symbol_anywhere"),
+        "{out:?}"
+    );
+}
+
+/// An importing host re-runs the Claude session-start entry unchanged.
+/// Devin's sessions get the short Pixel-first guidance and the capability
+/// block inside `additionalContext` — not the ~11 KB Claude agent prompt —
+/// and no Claude-contract top-level fields a non-Claude host cannot use.
+/// Under `PIXEL_OUTPUT_CAP_BYTES`? No: the injected context is the contract
+/// here, and its size is exactly the point of the branch.
+#[test]
+fn session_start_for_an_importing_host_carries_the_guidance_not_the_claude_prompt() {
+    let dir = fixture("session-start-devin");
+    let out = pixel(
+        &dir,
+        &["run-hook", "session-start", "--provider", "claude", "."],
+    );
+    let what = "session-start claude";
+    assert!(
+        out.status.success(),
+        "{what}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let block: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        block["pixel"]["capabilities"].is_array(),
+        "without an importing marker the Claude envelope holds the block: {block}"
+    );
+
+    let out = pixel_command()
+        .args(["run-hook", "session-start", "--provider", "claude", "."])
+        .env("DEVIN_PROJECT_DIR", dir.as_os_str())
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let what = "session-start importing host";
+    assert!(
+        out.status.success(),
+        "{what}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let block: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let context = block["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("the importing-host dialect carries the context");
+    assert!(
+        context.starts_with("Pixel-first retrieval (non-blocking)"),
+        "{context}"
+    );
+    assert!(
+        context.contains("scope-task"),
+        "the capability block rides inside the context: {context}"
+    );
+    assert!(
+        !context.contains("Claude Code"),
+        "Claude-specific doctrine stays out of the other host's sessions: {context}"
+    );
+}

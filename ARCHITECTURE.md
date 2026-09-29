@@ -414,7 +414,7 @@ The hook entry points, all under `pixel run-hook` (alias `hook`), and where
 | Hook event | Command | Effect |
 | --- | --- | --- |
 | `SessionStart` | `pixel run-hook session-start` | Injects the agent prompt and the capability block from the op registry. Global for Claude Code. |
-| `UserPromptSubmit` | `pixel run-hook prompt-submit` | Task context/boundary detection and the task-intent verdict. Never rejects a prompt. Global for Claude Code. |
+| `UserPromptSubmit` | `pixel run-hook prompt-submit` | Task context/boundary detection and the task-intent verdict. Never rejects a prompt. The Claude task packet is written only in a Claude Code session, never in a session that only imports Claude's configuration (a `--provider claude` hook Devin re-runs from `~/.claude/settings.json` delivers target/boundary context alone). Global for Claude Code. |
 | `SessionStart` matcher `compact` (`PostCompaction` on Devin) | `pixel run-hook post-compaction` | Re-injects the active task evidence as additional context. |
 | `PreToolUse` | `pixel run-hook guard` | Bounded compatible command routing; native fallback and host permissions remain authoritative. Repo-local (`--repo`) for Claude Code and Devin; global for Antigravity and zcode. |
 | `PostToolUse` (Claude `Edit`) | `pixel run-hook post-tool-use` | After an edit, emits the dependants of what was just changed. |
@@ -434,7 +434,10 @@ distinct catalogue command, in catalogue order, `run_repair` executes it with
 the running binary, and the checks are re-run so each repair is judged
 `fixed`, `not_converged` or `failed` from the new report, not from its exit
 code. A command only one outcome names (the `rm` of an orphaned RTK backup)
-is never run. The exit code carries the verdict: 0 when no check reaches `--fail-on` (default `red`),
+is never run. The binary checks go beyond the artifact: `binary.shell-path`
+asks the resolved login shell itself (or `--shell`) for `pixel`, because an
+agent harness that inherits an environment where `pixel` is not a command
+silently works without it. The exit code carries the verdict: 0 when no check reaches `--fail-on` (default `red`),
 1 when one does, 2 when the checks could not run.
 
 ### Invocation accounting and chat delivery
