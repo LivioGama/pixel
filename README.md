@@ -67,6 +67,19 @@ If you are an LLM reading this to set Pixel up for a user, do this, in order:
 
 Then use Pixel the way [`PIXEL.md`](PIXEL.md) describes: it is the complete agent protocol, the same text `pixel install` deploys, and it says which command replaces `grep`, `git log`, `git blame` and whole-file reads, and when a native tool is still the right choice. An agent that `pixel install` does not wire (Cursor, Gemini CLI, Copilot…) needs that file in its own rules; see the [plugins table](https://pixel-cli.dev/docs/#plugins).
 
+## Configuration
+
+Pixel stores user settings in `~/.pixel/config.yaml`, with repository overrides
+in `.pixel/config.yaml`. Installation creates a commented template without
+replacing an existing YAML file. Uncomment an example to set a preference.
+`pixel config metrics on|off` updates repository settings (`--global` updates
+your user settings); credentials and classification preferences are global only.
+
+Existing `config.json` files remain supported until installation copies their
+settings into YAML. JSON is retained as a backup and ignored once YAML exists
+in that scope. Config commands preserve YAML comments and unknown keys, refuse
+to overwrite malformed files, and create files owner-only on Unix.
+
 ## The flow
 
 ```text

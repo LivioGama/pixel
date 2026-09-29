@@ -6,20 +6,30 @@
 //! an unset layer defaults to on. `--metrics=off` and `PIXEL_METRICS=0`
 //! still veto a single invocation above every file layer.
 //!
-//! Files: `<root>/.pixel/config.json` (repo) and `~/.pixel/config.json`
-//! (global). Both are flat `{"metrics": "on"|"off"}` objects; unknown keys
-//! are preserved on write so the file can grow new settings.
+//! YAML files live under `.pixel/` in the repository and home directory.
+//! Legacy JSON remains readable until install/edit creates the YAML equivalent.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+pub fn ensure_template(root: Option<&Path>) -> Result<PathBuf, String> {
+    let directory = if let Some(root) = root {
+        root.join(".pixel")
+    } else {
+        PathBuf::from(std::env::var_os("HOME").ok_or("no HOME for the global config")?)
+            .join(".pixel")
+    };
+    let path = directory.join(crate::config_file::FILE_NAME);
+    crate::config_file::ensure(&path)?;
+    Ok(path)
+}
+
 /// The metrics setting one layer declares, or `None` when the layer does
 /// not pronounce itself (missing file, missing key, or malformed value).
 fn read_metrics(path: &Path) -> Option<bool> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let value: Value = serde_json::from_str(&text).ok()?;
+    let value = read_config_doc(path)?;
     match value.get("metrics")?.as_str()? {
         "on" => Some(true),
         "off" => Some(false),
@@ -28,15 +38,16 @@ fn read_metrics(path: &Path) -> Option<bool> {
 }
 
 fn repo_config_path(root: &Path) -> PathBuf {
-    root.join(".pixel").join("config.json")
+    crate::config_file::preferred_path(&root.join(".pixel"))
 }
 
 fn global_config_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pixel").join("config.json"))
+    std::env::var_os("HOME")
+        .map(|home| crate::config_file::preferred_path(&PathBuf::from(home).join(".pixel")))
 }
 
 /// Effective live-metrics setting for `root`: repo layer first, then the
-/// machine-wide `~/.pixel/config.json`, then the on-by-default baseline.
+/// global configuration, then the on-by-default baseline.
 pub fn metrics_enabled(root: Option<&Path>) -> bool {
     if let Some(root) = root
         && let Some(on) = read_metrics(&repo_config_path(root))
@@ -72,12 +83,10 @@ fn metrics_resolution(root: Option<&Path>) -> (bool, Source) {
 }
 
 fn write_doc(path: &Path, mutate: impl FnOnce(&mut Value)) -> Result<(), String> {
-    let mut doc: Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .filter(|v: &Value| v.is_object())
-        .unwrap_or_else(|| json!({}));
+    let before = crate::config_file::load(path)?;
+    let mut doc = before.clone();
     mutate(&mut doc);
+    let rendered = crate::config_file::render(path, &before, &doc)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
@@ -91,7 +100,7 @@ fn write_doc(path: &Path, mutate: impl FnOnce(&mut Value)) -> Result<(), String>
             .unwrap_or("config.json"),
         std::process::id(),
     ));
-    if let Err(e) = write_private(&tmp, format!("{doc}\n").as_bytes()) {
+    if let Err(e) = write_private(&tmp, rendered.as_bytes()) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("write {}: {e}", tmp.display()));
     }
@@ -203,17 +212,15 @@ pub fn set_ollaya_launch(launch: &Value) -> Result<(), String> {
 }
 
 fn read_config_doc(path: &Path) -> Option<Value> {
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    crate::config_file::load(path).ok()
 }
 
 /// The stored API key for a remote decision preset, if the global config
-/// carries one. Keys live only in `~/.pixel/config.json` under
+/// carries one. Keys live only in the global configuration under
 /// `remote_keys` — never in the repo layer, never echoed back by the CLI.
 pub fn remote_key(preset: crate::decide_remote::Preset) -> Option<String> {
     let path = global_config_path()?;
-    let text = std::fs::read_to_string(path).ok()?;
-    let doc: Value = serde_json::from_str(&text).ok()?;
+    let doc = read_config_doc(&path)?;
     doc.get("remote_keys")?
         .get(preset.display())?
         .as_str()
@@ -222,7 +229,7 @@ pub fn remote_key(preset: crate::decide_remote::Preset) -> Option<String> {
 }
 
 /// `pixel config remote-key <preset> [key]`: with a value, persist it to
-/// `~/.pixel/config.json` (created 0600 on unix — it holds secrets);
+/// the global configuration (created 0600 on unix — it holds secrets);
 /// without one, report whether a key is stored. `--clear` removes it.
 /// The key itself is never printed.
 pub fn run_remote_key(
@@ -313,6 +320,136 @@ pub fn run_metrics(path: &Path, global: bool, value: Option<bool>) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_template_should_have_no_active_options_and_use_the_requested_root() {
+        let home = HomeGuard::set();
+        let path = ensure_template(Some(&home.0)).unwrap();
+        assert_eq!(path, home.0.join(".pixel/config.yaml"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# metrics:"));
+        assert!(
+            text.lines()
+                .all(|line| line.trim().is_empty() || line.starts_with('#')),
+            "uncommenting an example must not conflict with an active empty mapping: {text}"
+        );
+        assert_eq!(crate::config_file::load(&path).unwrap(), json!({}));
+        ensure_template(Some(&home.0)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn render_should_reject_a_concurrent_change_instead_of_silently_losing_values() {
+        let home = HomeGuard::set();
+        let path = home.0.join("config.yaml");
+        let before = json!({"metrics":"on"});
+        write(&path, "metrics: 'off'\n");
+        let error = crate::config_file::render(&path, &before, &before).unwrap_err();
+        assert!(error.contains("file unchanged"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "metrics: 'off'\n");
+    }
+
+    #[test]
+    fn yaml_should_drive_all_existing_readers_after_migration() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        let legacy = home.0.join(".pixel/config.json");
+        write(
+            &legacy,
+            r#"{"metrics":"off","classify":{"engine":"remote","remote_preset":"deepseek","ollaya":{"base":"http://localhost:11435","argv":["ollaya","serve"]}},"remote_keys":{"deepseek":"key"}}"#,
+        );
+        let yaml = ensure_template(None).unwrap();
+        write(&legacy, "{}");
+        assert!(!metrics_enabled(None));
+        assert_eq!(classify_engine().as_deref(), Some("remote"));
+        assert_eq!(
+            classify_remote_preset(),
+            Some(crate::decide_remote::Preset::Deepseek)
+        );
+        assert_eq!(
+            ollaya_launch(),
+            Some(json!({"base":"http://localhost:11435","argv":["ollaya","serve"]}))
+        );
+        assert_eq!(
+            remote_key(crate::decide_remote::Preset::Deepseek).as_deref(),
+            Some("key")
+        );
+        set_classify_engine("local").unwrap();
+        assert_eq!(classify_engine().as_deref(), Some("local"));
+        assert_eq!(crate::config_file::load(&yaml).unwrap()["metrics"], "off");
+        restore_home(saved);
+    }
+
+    #[test]
+    fn yaml_should_preserve_comments_and_unknown_values_when_commands_update_settings() {
+        let home = HomeGuard::set();
+        let path = home.0.join("config.yaml");
+        let original = "# my settings\nmetrics: \"on\" # keep footer note\nclassify:\n  # provider choice\n  engine: auto\n  custom: 42\nremote_keys:\n  ollama: old\n  openrouter: keep\n";
+        write(&path, original);
+        write_doc(&path, |doc| {
+            doc["metrics"] = json!("off");
+            doc["classify"]["engine"] = json!("remote");
+            doc["remote_keys"].as_object_mut().unwrap().remove("ollama");
+            doc["remote_keys"]["deepseek"] = json!("special: # ' \"\nsecret");
+        })
+        .unwrap();
+        let result = std::fs::read_to_string(&path).unwrap();
+        for comment in ["# my settings", "# keep footer note", "# provider choice"] {
+            assert!(result.contains(comment), "{result}");
+        }
+        assert_eq!(
+            crate::config_file::load(&path).unwrap(),
+            json!({
+                "metrics": "off", "classify": {"engine": "remote", "custom": 42},
+                "remote_keys": {"openrouter": "keep", "deepseek": "special: # ' \"\nsecret"}
+            })
+        );
+        #[cfg(unix)]
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn migration_should_preserve_legacy_values_and_leave_existing_yaml_alone() {
+        let home = HomeGuard::set();
+        let yaml = home.0.join("config.yaml");
+        let legacy = home.0.join("config.json");
+        let original = r#"{"metrics":"off","remote_keys":{"ollama":"secret"},"future":[1,2]}"#;
+        write(&legacy, original);
+        assert_eq!(crate::config_file::preferred_path(&home.0), legacy);
+        crate::config_file::ensure(&yaml).unwrap();
+        assert_eq!(
+            crate::config_file::load(&yaml).unwrap(),
+            serde_json::from_str::<Value>(original).unwrap()
+        );
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), original);
+        assert_eq!(crate::config_file::preferred_path(&home.0), yaml);
+        let contents = std::fs::read_to_string(&yaml).unwrap();
+        assert!(contents.contains("# metrics:"));
+        write(&legacy, "{}");
+        crate::config_file::ensure(&yaml).unwrap();
+        assert_eq!(std::fs::read_to_string(&yaml).unwrap(), contents);
+        #[cfg(unix)]
+        assert_eq!(mode(&yaml), 0o600);
+    }
+
+    #[test]
+    fn invalid_config_should_fail_without_overwriting_or_echoing_secrets() {
+        let home = HomeGuard::set();
+        for (extension, contents) in [
+            ("yaml", "remote_keys: [secret-invalid"),
+            ("json", "{\"secret-invalid\":"),
+            ("yaml", "- secret-invalid"),
+        ] {
+            let path = home.0.join(format!("config.{extension}"));
+            write(&path, contents);
+            let err = write_metrics(&path, false).unwrap_err();
+            assert!(err.contains("configuration"));
+            assert!(!err.contains("secret-invalid"));
+            assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
+        }
+    }
 
     struct HomeGuard(PathBuf);
 
@@ -543,15 +680,15 @@ mod tests {
         run_remote_key(preset, Some("sk-test-secret".to_string()), false).unwrap();
         assert_eq!(remote_key(preset).as_deref(), Some("sk-test-secret"));
 
-        let cfg: Value = serde_json::from_str(
-            &std::fs::read_to_string(home.0.join(".pixel/config.json")).unwrap(),
+        let cfg: Value = serde_saphyr::from_str(
+            &std::fs::read_to_string(home.0.join(".pixel/config.yaml")).unwrap(),
         )
         .unwrap();
         assert_eq!(cfg["remote_keys"]["ollama"], "sk-test-secret");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(home.0.join(".pixel/config.json"))
+            let mode = std::fs::metadata(home.0.join(".pixel/config.yaml"))
                 .unwrap()
                 .permissions()
                 .mode();
@@ -568,12 +705,11 @@ mod tests {
     fn a_failed_publish_leaves_no_tmp_file_behind() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
         let home = HomeGuard::set();
-        // Renaming the tmp file onto an existing directory must fail — and
-        // the tmp file must not be left behind.
+        // A directory cannot be read as configuration and must remain untouched.
         let dir = home.0.join("target-is-dir");
         std::fs::create_dir_all(&dir).unwrap();
-        let err = write_metrics(&dir, false).expect_err("rename onto a dir fails");
-        assert!(err.contains("rename"), "{err}");
+        let err = write_metrics(&dir, false).expect_err("directory is not configuration");
+        assert!(err.contains("cannot read configuration"), "{err}");
         let leftovers: Vec<_> = std::fs::read_dir(&home.0)
             .unwrap()
             .filter_map(std::result::Result::ok)

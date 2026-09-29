@@ -570,7 +570,7 @@ fn config_metrics_off_hides_the_footer_until_turned_back_on() {
     let set = run(&["config", "metrics", "off"]);
     assert_success(&set);
     let config: Value =
-        serde_json::from_str(&fs::read_to_string(fixture.0.join(".pixel/config.json")).unwrap())
+        serde_saphyr::from_str(&fs::read_to_string(fixture.0.join(".pixel/config.yaml")).unwrap())
             .unwrap();
     assert_eq!(config["metrics"], "off");
 
