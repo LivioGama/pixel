@@ -777,35 +777,35 @@ pub(crate) fn install_project_codex_at(
         stored_pre_tool_use = stored["pre_tool_use"].as_array().cloned();
         if settings_file_exists {
             let existing = value
-            .get("hooks")
-            .and_then(Value::as_object)
-            .and_then(|hooks| hooks.get("PreToolUse"))
-            .and_then(Value::as_array)
-            .ok_or_else(|| InstallError::InvalidSettings {
-                path: path.into(),
-                reason: "composed Codex install lost its PreToolUse group; refusing to overwrite user changes".into(),
-            })?;
+                .get("hooks")
+                .and_then(Value::as_object)
+                .and_then(|hooks| hooks.get("PreToolUse"))
+                .and_then(Value::as_array)
+                .ok_or_else(|| InstallError::InvalidSettings {
+                    path: path.into(),
+                    reason: "composed Codex install lost its PreToolUse group; refusing to overwrite user changes".into(),
+                })?;
             let existing_legacy =
                 existing.as_slice() == [legacy_group.clone()] && legacy_group != expected_group;
             if !existing_legacy && existing.as_slice() != [expected_group.clone()] {
                 return Err(InstallError::InvalidSettings {
-                path: path.into(),
-                reason: "composed Codex PreToolUse diverged from its managed contract; refusing to overwrite user changes".into(),
-            });
+                    path: path.into(),
+                    reason: "composed Codex PreToolUse diverged from its managed contract; refusing to overwrite user changes".into(),
+                });
             }
             let stored_legacy = stored["managed_pre_tool_use"] == json!([legacy_group.clone()])
                 && legacy_group != expected_group;
             if !stored_legacy && stored["managed_pre_tool_use"] != json!([expected_group.clone()]) {
                 return Err(InstallError::InvalidSettings {
-                path: backup_path.clone(),
-                reason: "composed Codex backup managed contract diverged; refusing to execute or overwrite it".into(),
-            });
+                    path: backup_path.clone(),
+                    reason: "composed Codex backup managed contract diverged; refusing to execute or overwrite it".into(),
+                });
             }
             if existing_legacy != stored_legacy {
                 return Err(InstallError::InvalidSettings {
-                path: backup_path.clone(),
-                reason: "composed Codex config and backup disagree on the managed executable spelling; refusing to overwrite either".into(),
-            });
+                    path: backup_path.clone(),
+                    reason: "composed Codex config and backup disagree on the managed executable spelling; refusing to overwrite either".into(),
+                });
             }
             migrate_executable_spelling = existing_legacy;
         }
