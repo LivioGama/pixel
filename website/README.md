@@ -307,9 +307,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   the domain spelled out (`baseURL`'s host, for screenshots and prints) and
   the CLI version linking to its release, then three columns (Product,
   Guides, Community) and the legal lines, which end on the links to the two
-  legal pages. One legal line thanks RunsOn with a link to `runs-on.com`:
-  its free open-source license requires that public acknowledgement (the
-  About page repeats it), so it stays while CI uses its runners.
+  legal pages.
 - `content/about.md`: the `/about/` page (a trust line up front, the
   problem that started Pixel, what it does with the one figure a shortcode
   prints, the two co-founders as equals, why to trust it on your code, a
