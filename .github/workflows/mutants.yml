@@ -214,9 +214,16 @@ jobs:
           save-if: false
 
       - name: Install system dependencies
+        # Vendored OpenSSL needs perl and make. The GitHub Ubuntu images ship
+        # both ("already the newest version" in every log), so the ~7 s of
+        # apt-get update runs only on an image that lacks one of them.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y perl make
+          if command -v perl >/dev/null && command -v make >/dev/null; then
+            echo "perl and make already installed"
+          else
+            sudo apt-get update
+            sudo apt-get install -y perl make
+          fi
 
       - name: Install cargo-mutants
         uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
