@@ -138,6 +138,9 @@ jobs:
           # on: crates, the workspace manifest and cargo config, the files
           # docs_drift.rs compares command-for-command, the plugin surfaces
           # install_tests.rs regenerates, and the scripts those tests run.
+          # This workflow too: a pull request that only edits how the Rust
+          # steps build (a profile variable, a cache key, a nextest flag)
+          # otherwise skips them and reports green having run none (#371).
           cat > cargo.re <<'EOF'
           ^crates/
           ^Cargo\.(toml|lock)$
@@ -152,6 +155,7 @@ jobs:
           ^skills/
           ^\.(openclaw|clinerules|kiro|qoder|windsurf)/
           ^scripts/gen-plugin-assets\.sh$
+          ^\.github/workflows/ci\.yml$
           EOF
 
           # The contract tests' own inputs: their scripts, the fixtures and
