@@ -26,7 +26,6 @@ const MIN_RENDER_BUDGET: usize = 256;
 const LEDGER_VERSION: u8 = 1;
 const MAX_PROVIDER_BYTES: usize = 32;
 const MAX_EVENTS: usize = 256;
-const MAX_TRANSITION_BYTES: usize = 64;
 /// Marks a task the rendered packet had to cut to fit its byte budget.
 const TASK_CUT_MARK: &str = "…";
 /// What a packet appends after its targets when none fit the budget.
@@ -304,19 +303,6 @@ pub(crate) fn begin(
     create_task(root, objective, provider, session_id, "begun")
 }
 
-/// Atomically enough for a hard handoff: this returns an accepted task only
-/// after the immutable task record and its acceptance event have both been
-/// published. A caller that receives an error must fail open rather than claim
-/// the foreground handoff happened.
-pub(crate) fn accept_task(
-    root: &Path,
-    objective: &str,
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<TaskRecord, String> {
-    create_task(root, objective, provider, session_id, "accepted")
-}
-
 fn create_task(
     root: &Path,
     objective: &str,
@@ -371,7 +357,8 @@ pub(crate) fn prepare(root: &Path, task_id: &str) -> Result<Option<TaskRecord>, 
         None => return Ok(None),
     };
     let now = now_unix();
-    // Refreshing evidence must not revoke acceptance or rewind a worker lifecycle.
+    // Refreshing evidence must not rewrite a later status, such as the
+    // `accepted` or worker states earlier releases recorded.
     if record.status == "begun" {
         record.status = "prepared".to_string();
     }
@@ -381,30 +368,6 @@ pub(crate) fn prepare(root: &Path, task_id: &str) -> Result<Option<TaskRecord>, 
     record.snapshot.head_oid = current_head(root);
     save_task(root, &record)?;
     append_event(root, &record, "prepared")?;
-    Ok(Some(record))
-}
-
-/// Persist one scheduler-owned lifecycle transition. The returned record is
-/// available only after both the atomic record replacement and append-only
-/// factual event have been published. Model prose cannot enter this path.
-pub(crate) fn transition(
-    root: &Path,
-    task_id: &str,
-    status: &str,
-    event: &str,
-) -> Result<Option<TaskRecord>, String> {
-    if !valid_transition(status) || !valid_transition(event) {
-        return Err("invalid task transition".to_string());
-    }
-    let mut record = match load_task(root, task_id) {
-        Some(record) => record,
-        None => return Ok(None),
-    };
-    let now = now_unix();
-    record.status = status.to_string();
-    record.updated_unix = now;
-    save_task(root, &record)?;
-    append_event(root, &record, event)?;
     Ok(Some(record))
 }
 
@@ -683,19 +646,11 @@ fn valid_task_id(task_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-fn valid_transition(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_TRANSITION_BYTES
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
 fn expired(updated_unix: u64, now: u64) -> bool {
     now.saturating_sub(updated_unix) > TTL_SECS
 }
 
-fn now_unix() -> u64 {
+pub(crate) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
@@ -1106,51 +1061,22 @@ mod tests {
     }
 
     #[test]
-    fn prepare_refresh_preserves_accepted_running_and_terminal_states() {
+    fn prepare_refresh_should_keep_a_status_other_than_begun() {
+        // Records written by earlier releases carry `accepted` and worker
+        // states; a refresh must not turn them into `prepared`.
         let root = root("prepare-state");
-        for state in ["accepted", "running", "completed", "failed", "cancelled"] {
-            let task = accept_task(&root, "run controller", "claude", Some("session-1")).unwrap();
-            let before = transition(&root, &task.task_id, state, "fixture_state")
-                .unwrap()
-                .unwrap();
+        for state in ["accepted", "worker_running", "launch_failed", "prepared"] {
+            let mut task = begin(&root, "run controller", "claude", Some("session-1")).unwrap();
+            task.status = state.to_string();
+            save_task(&root, &task).unwrap();
             let refreshed = prepare(&root, &task.task_id).unwrap().unwrap();
             assert_eq!(
                 refreshed.status, state,
-                "snapshot refresh must not revoke {state}"
+                "snapshot refresh must not rewrite {state}"
             );
-            assert_eq!(refreshed.snapshot.revision, before.snapshot.revision + 1);
+            assert_eq!(refreshed.snapshot.revision, task.snapshot.revision + 1);
             assert_eq!(status(&root, &task.task_id).unwrap().status, state);
         }
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn acceptance_returns_only_after_durable_acceptance_event() {
-        let root = root("accept");
-        let accepted = accept_task(&root, "run controller", "claude", Some("session-1")).unwrap();
-
-        assert_eq!(accepted.status, "accepted");
-        assert_eq!(status(&root, &accepted.task_id), Some(accepted.clone()));
-        assert_eq!(events(&root, &accepted.task_id)[0]["event"], "accepted");
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn transition_updates_status_and_appends_a_factual_event() {
-        let root = root("transition");
-        let begun = begin(&root, "run scheduler", "claude", None).unwrap();
-        let running = transition(&root, &begun.task_id, "running", "worker_started")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(running.status, "running");
-        assert_eq!(events(&root, &begun.task_id)[1]["event"], "worker_started");
-        assert!(
-            transition(&root, "missing", "running", "worker_started")
-                .unwrap()
-                .is_none()
-        );
-        assert!(transition(&root, &begun.task_id, "not valid", "worker_started").is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -70,9 +70,7 @@ pub fn is_ignored_dir_name(name: &str) -> bool {
 /// every reader already imports: `pixel` (CLI) and `pixel-daemon` both
 /// depend on `pixel-index`, and `pixel-daemon` cannot depend on `pixel`
 /// (circular). Suffix/name based by design; `search_compat::credential_path`
-/// delegates here. `task_sandbox::credential_path` keeps its own list on
-/// purpose: it gates which WIP paths may be copied into a sandbox, not what
-/// a search may display, so the two may diverge.
+/// delegates here.
 pub fn credential_path(path: &Path) -> bool {
     if path.components().any(|part| {
         part.as_os_str()

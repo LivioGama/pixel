@@ -156,9 +156,7 @@ fn disabled_prompt_features_should_leave_no_handoff_or_context() {
     assert!(!repo.join(".pixel/tasks").exists());
 }
 
-/// Runs the Claude prompt hook on `prompt`, with `/usr/bin/true` as the Claude
-/// executable so a regression that spawns a worker exits at once instead of
-/// spending a session.
+/// Runs the Claude prompt hook on `prompt` in `repo`, with `env` on top.
 fn claude_prompt_hook(home: &Path, repo: &Path, prompt: &str, env: &[(&str, &str)]) -> Output {
     let mut command = pixel_command();
     command
@@ -166,7 +164,6 @@ fn claude_prompt_hook(home: &Path, repo: &Path, prompt: &str, env: &[(&str, &str
         .env_remove("PIXEL_TASK_CONTEXT")
         .env_remove("PIXEL_TASK_BOUNDARY")
         .env_remove("DEVIN_PROJECT_DIR")
-        .env("PIXEL_CLAUDE_EXECUTABLE", "/usr/bin/true")
         .current_dir(repo)
         .args(["run-hook", "prompt-submit", "--provider", "claude"])
         .stdin(Stdio::piped())

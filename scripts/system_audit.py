@@ -40,7 +40,6 @@ class Audit:
             "PIXEL_METRICS": "0",
             "PIXEL_FLOW_DIR": str(self.home / "flows"),
             "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
-            "PIXEL_CLAUDE_EXECUTABLE": str(fake_bin / "claude"),
             "PIXEL_TASK_BOUNDARY": "0",
             "PIXEL_TASK_CONTEXT": "1",
             "PIXEL_POST_COMPACTION": "1",
@@ -218,52 +217,8 @@ class Audit:
 
     def tasks(self):
         task = json.loads(self.call("task-state begin", ["task-state", "begin", "fix login_user boundary", "--session", "audit-session", "--provider", "codex", "--json"], json_output=True))["task_id"]
-        task = json.loads(self.call("task-state accept", ["task-state", "accept", "fix login_user boundary", "--session", "accepted-session", "--provider", "claude", "--json"], contains="accepted", json_output=True))["task_id"]
         for leaf in ["prepare", "status", "events"]:
             self.call(f"task-state {leaf}", ["task-state", leaf, task, "--json"], contains=task, json_output=True)
-        plan = self.root / "plan.json"
-        plan.write_text(json.dumps({"lanes": [{"id": "login-lane", "owned_paths": ["lib.rs"], "symbols": ["lib.rs#login_user#function"], "depends_on": [], "candidate_count": 1}]}))
-        self.call("task-state plan-validate", ["task-state", "plan-validate", task, "--file", str(plan), "--json"], json_output=True)
-        candidate = json.loads(self.call("task-state sandbox-create", ["task-state", "sandbox-create", task, "candidate", "--owned-path", "lib.rs", "--json"], contains="sandbox_root", json_output=True))
-        sandbox = Path(candidate["sandbox_root"])
-        with (sandbox / "lib.rs").open("a") as source:
-            source.write("pub fn sandbox_verified() {}\n")
-        self.call("task-state sandbox-inspect", ["task-state", "sandbox-inspect", task, "candidate", "--json"], contains="eligible", json_output=True)
-        self.call("task-state sandbox-promote", ["task-state", "sandbox-promote", task, "candidate", "--json"], contains="promoted", json_output=True)
-        assert "sandbox_verified" in (self.repo / "lib.rs").read_text()
-        self.call("task-state sandbox-cleanup", ["task-state", "sandbox-cleanup", task, "candidate", "--json"], json_output=True)
-        assert not sandbox.exists()
-        self.git("add", "lib.rs")
-        self.git("commit", "-m", "fixture: promoted sandbox")
-        worker = self.root / "fake-worker"
-        worker.write_text("#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do /bin/sleep 1; done\n")
-        worker.chmod(0o700)
-        cleanup = [(task, "worker")]
-        try:
-            self.call("task-state sandbox-create", ["task-state", "sandbox-create", task, "worker", "--owned-path", "lib.rs", "--json"], json_output=True)
-            self.call("task-state worker-start", ["task-state", "worker-start", task, "worker", "--executable", str(worker), "--json"], json_output=True)
-            self.call("task-state worker-status", ["task-state", "worker-status", task, "worker", "--json"], contains="running", json_output=True)
-            self.call("task-state worker-stop", ["task-state", "worker-stop", task, "worker", "--json"], json_output=True)
-            self.call("task-state sandbox-cancel", ["task-state", "sandbox-cancel", task, "worker", "--json"], json_output=True)
-            # A completed/stopped worker task is not a new race authorization.
-            task = json.loads(self.call("task-state accept", ["task-state", "accept", "race login implementations", "--provider", "claude", "--session", "race-session", "--json"], contains="accepted", json_output=True))["task_id"]
-            for candidate_id in ["winner", "loser"]:
-                cleanup.append((task, candidate_id))
-                self.call("task-state sandbox-create", ["task-state", "sandbox-create", task, candidate_id, "--owned-path", "lib.rs", "--json"], json_output=True)
-            worker.write_text("#!/bin/sh\nif [ \"$PIXEL_WORKTREE_ID\" = winner ]; then printf '\\npub fn race_winner() {}\\n' >> lib.rs; git add lib.rs; exit 0; fi\ntrap 'exit 0' TERM\nwhile :; do /bin/sleep 1; done\n")
-            self.call("task-state race-start", ["task-state", "race-start", task, "winner", "loser", "--executable", str(worker), "--json"], json_output=True)
-            assert self.results[-1]["status"] == "PASS", "race did not start"
-            deadline = time.monotonic() + 8
-            while time.monotonic() < deadline:
-                self.call("task-state race-poll", ["task-state", "race-poll", task, "winner", "loser", "--json"], json_output=True)
-                if "race_winner" in (self.repo / "lib.rs").read_text():
-                    break
-                time.sleep(0.1)
-            assert "race_winner" in (self.repo / "lib.rs").read_text(), "race winner not promoted"
-        finally:
-            for task_id, candidate_id in cleanup:
-                subprocess.run([str(self.pixel), "task-state", "worker-stop", task_id, candidate_id, "--json"], cwd=self.repo, env=self.env, capture_output=True, timeout=10)
-                subprocess.run([str(self.pixel), "task-state", "sandbox-cleanup", task_id, candidate_id, "--json"], cwd=self.repo, env=self.env, capture_output=True, timeout=10)
         self.call("task-state show", ["task-state", "show", "--session", "audit-session", "--json"], json_output=True)
         self.call("task-state reset", ["task-state", "reset", "--session", "audit-session", "--json"], json_output=True)
 
