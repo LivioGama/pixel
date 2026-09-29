@@ -428,6 +428,11 @@ fn an_empty_search_from_a_subdirectory_names_the_root_and_claims_no_saving() {
         !output.stdout.is_empty(),
         "control: the match exists in src"
     );
+    let control_stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !control_stderr.contains("matches under"),
+        "a search that matched prints no empty-answer note: {control_stderr}"
+    );
     let output = fixture
         .command()
         .current_dir(&sub)
@@ -457,6 +462,42 @@ fn an_empty_search_from_a_subdirectory_names_the_root_and_claims_no_saving() {
         "{block}"
     );
     assert!(!block.contains("estimated LLM context saved"), "{block}");
+    // `--json` keeps its envelope on stdout and adds no note; a page past the
+    // first (`--offset 1`) is not "nothing found" and adds none either.
+    for extra in [&["--json"][..], &["--offset", "1"][..]] {
+        let mut args = vec![
+            "search-content",
+            "-F",
+            "no_such_name_anywhere",
+            "--no-daemon",
+        ];
+        args.extend_from_slice(extra);
+        let output = fixture
+            .command()
+            .current_dir(&sub)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_success(&output);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("matches under"), "{extra:?}: {stderr}");
+    }
+}
+
+/// `find-code --json` on an overview prompt answers with an empty match list
+/// and the README pointer as the note.
+#[test]
+fn overview_find_code_json_carries_an_empty_match_list_and_the_readme_note() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("README.md"), "# demo\n").unwrap();
+    let output = fixture.run(&["find-code", "what does this repo do", "--json"]);
+    assert_success(&output);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({"matches": [], "note": "no concept match; read README.md"}),
+        "{output:?}"
+    );
 }
 
 /// "What does this repo do" names no code: `find-code` and `scope-task` point

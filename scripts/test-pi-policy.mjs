@@ -90,6 +90,7 @@ switch (args[0]) {
   const native = (command, toolName = "bash") => ({ toolName, toolCallId: "shell", input: { command } });
   const edit = () => ({ toolName: "edit", toolCallId: "edit", input: { path: "src/main.rs" } });
   const read = (path = "src/main.rs", limit) => ({ toolName: "read", input: { path, ...(limit === undefined ? {} : { limit }) } });
+  const pixelResult = (isError = false, toolName = "pixel") => ({ toolName, toolCallId: "pixel", input: {}, content: [{ type: "text", text: "{}" }], isError });
   const count = (op) => calls().filter(([name]) => name === op).length;
 
   await check("advisory default and invalid settings preserve every native input", async () => {
@@ -235,10 +236,23 @@ switch (args[0]) {
     configure({ scopePadding: 3000, findPadding: 17000 });
     const boot = await h.boot();
     assert.match(boot.message.content, /truncated/);
+    assert.equal((await h.emit("tool_call", read("src/main.rs", 200))).block, true, "bootstrap paths alone do not unlock reads");
+    assert.equal(await h.emit("tool_result", pixelResult()), undefined);
     assert.equal(await h.emit("tool_call", read("src/main.rs", 200)), undefined);
     const found = await h.tool.execute("find", { action: "find_code", goal: "main" }, null, null, user());
     assert.equal(found.details.truncated, true);
     assert.equal(await h.emit("tool_call", read("src/found.rs", 200)), undefined);
+  });
+
+  await check("bounded reads unlock only after a successful pixel result", async () => {
+    const h = await host("enforce");
+    await h.boot();
+    assert.equal((await h.emit("tool_call", read("src/main.rs", 100))).block, true, "blocked before any pixel call");
+    await h.emit("tool_result", pixelResult(true));
+    assert.equal((await h.emit("tool_call", read("src/main.rs", 100))).block, true, "a failed pixel result does not unlock");
+    await h.emit("tool_result", pixelResult(false, "pixel_project"));
+    assert.equal(await h.emit("tool_call", read("src/main.rs", 100)), undefined, "allowed after a successful result");
+    assert.equal((await h.emit("tool_call", read("src/main.rs", 201))).block, true, "the read limit still applies");
   });
 
   await check("short prompts and session changes never retain stale edit or path state", async () => {

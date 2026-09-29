@@ -5249,6 +5249,11 @@ fn doctor_should_flag_a_claude_install_missing_the_metrics_relay() {
         .as_array_mut()
         .unwrap()
         .retain(|g| g["matcher"] != "Bash");
+    // A foreign relay on the same matcher is not Pixel's.
+    settings["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":"/usr/bin/other run-hook metrics --provider claude"}]}));
     fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
     let doctor_hooks = || {
         let report = doctor(&DoctorOptions {
@@ -5346,6 +5351,10 @@ fn devin_repo_install_should_register_an_idempotent_exec_metrics_relay() {
         .as_array_mut()
         .unwrap()
         .retain(|g| g["matcher"] != "exec");
+    stale["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"matcher":"exec","hooks":[{"type":"command","command":"/usr/bin/other run-hook metrics --provider devin"}]}));
     fs::write(&config, serde_json::to_string_pretty(&stale).unwrap()).unwrap();
     let red = doctor(&doctor_options).unwrap();
     let devin = check(&red, "repo.devin-hooks");

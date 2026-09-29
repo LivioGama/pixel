@@ -584,6 +584,8 @@ fn devin_should_rewrite_exec_and_allow_native_retrieval_by_default() {
 #[test]
 fn devin_should_auto_approve_only_safe_pixel_retrieval_commands() {
     let dir = indexed_dir("permission-request");
+    std::fs::create_dir_all(dir.join("crates/pixel/src")).unwrap();
+    std::fs::write(dir.join("crates/pixel/src/guard.rs"), "fn guard() {}\n").unwrap();
     for command in [
         "pixel search-like-rg grep -- '-r' 'needle' 'src'",
         "pixel search-content -F needle src",
@@ -951,6 +953,107 @@ fn metrics_relay_shows_claude_users_the_box_already_in_the_result() {
         "cwd":dir.as_ref()
     });
     assert_eq!(relay("codex", &codex), Value::Null);
+}
+
+/// The lone bounded-sed approval stops at the repository: absolute paths,
+/// `..` escapes, device files, credential names, an in-repo symlink to
+/// `.env` and missing files all leave the decision to the user. Exact
+/// outputs for Devin and Zcode; a normal in-repo file is still approved.
+#[test]
+fn bounded_sed_approval_stops_at_the_repository_and_credentials() {
+    let dir = indexed_dir("sed-boundary");
+    std::fs::write(dir.join(".env"), "K=v\n").unwrap();
+    std::fs::write(dir.join(".npmrc"), "//registry:_authToken=x\n").unwrap();
+    std::fs::create_dir_all(dir.join(".ssh")).unwrap();
+    std::fs::write(dir.join(".ssh/config"), "Host x\n").unwrap();
+    std::fs::write(dir.join("credentials"), "aws\n").unwrap();
+    std::os::unix::fs::symlink(dir.join(".env"), dir.join("notes.txt")).unwrap();
+    std::os::unix::fs::symlink("/etc/hosts", dir.join("hosts.txt")).unwrap();
+    let up = format!("{}etc/hosts", "../".repeat(24));
+    let refused = [
+        "/etc/passwd".to_string(),
+        "/dev/stdin".to_string(),
+        "/Users/livio/.aws/credentials".to_string(),
+        "/Users/livio/.ssh/config".to_string(),
+        up,
+        ".npmrc".to_string(),
+        ".env".to_string(),
+        "credentials".to_string(),
+        ".ssh/config".to_string(),
+        "notes.txt".to_string(),
+        "hosts.txt".to_string(),
+        "src".to_string(),
+        "missing.rs".to_string(),
+    ];
+    for file in &refused {
+        let command = format!("sed -n '1,5p' {file}");
+        let chained = format!("pixel find-code x && {command}");
+        for command in [
+            command,
+            format!("rtk {}", chained.replace("pixel find-code x && ", "")),
+        ] {
+            assert_eq!(
+                guard("devin", &devin_permission_request(&command, &dir), &[]),
+                Value::Null,
+                "{command}"
+            );
+            assert_eq!(
+                guard("zcode", &zcode_permission_request(&command, &dir), &[]),
+                Value::Null,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            guard("devin", &devin_permission_request(&chained, &dir), &[]),
+            Value::Null,
+            "{chained}"
+        );
+    }
+    let approve = json!({"decision":"approve"});
+    for command in [
+        "sed -n '1,5p' src/lib.rs",
+        "rtk sed -n '1,200p' ./src/lib.rs",
+        "pixel find-code x && sed -n '1,5p' src/lib.rs",
+    ] {
+        assert_eq!(
+            guard("devin", &devin_permission_request(command, &dir), &[]),
+            approve,
+            "{command}"
+        );
+    }
+    assert_eq!(
+        guard(
+            "zcode",
+            &zcode_permission_request("sed -n '1,5p' src/lib.rs", &dir),
+            &[]
+        ),
+        json!({"hookSpecificOutput":{
+            "hookEventName":"PermissionRequest",
+            "decision":{"behavior":"allow"}
+        }})
+    );
+    // Enforce: the in-repo credential reads are blocked, never rewritten.
+    let envs = [("PIXEL_POLICY", "enforce")];
+    let block = json!({"decision":"block","reason":"pixel policy: repository read: use pixel search-content or pixel pack-context <uid>"});
+    for command in [
+        "sed -n '1,5p' .env",
+        "sed -n '1,5p' notes.txt",
+        "head .env",
+        "tail -n 5 notes.txt",
+        "rtk read notes.txt",
+        "rtk read .npmrc -l 1-5",
+    ] {
+        let response = guard("devin", &devin_exec(command, &dir), &envs);
+        assert!(
+            response.get("hookSpecificOutput").is_none(),
+            "credential read must not be rewritten: {command}: {response}"
+        );
+        if command.contains("-l 1-5") {
+            assert_eq!(response["decision"], "block", "{command}");
+        } else {
+            assert_eq!(response, block, "{command}");
+        }
+    }
 }
 
 #[test]

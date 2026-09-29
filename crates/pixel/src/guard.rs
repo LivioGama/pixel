@@ -684,6 +684,7 @@ fn reader_rewrite(command: &str, cwd: &Path) -> Option<String> {
     }
     let (program, args) = argv.split_first()?;
     let cat = |file: &str| {
+        readable_repo_file(cwd, file)?;
         crate::search_compat::rewrite_retrieval(
             &format!("cat {}", crate::search_compat::shell_quote(file)),
             cwd,
@@ -729,7 +730,25 @@ fn head_count_is_bounded(count: &str) -> bool {
 /// `sed -n 'A,Bp' F` for a bounded window of an existing, non-credential file
 /// of the indexed repository around `cwd`.
 fn bounded_sed_rewrite(file: &str, start: usize, end: usize, cwd: &Path) -> Option<String> {
-    if !line_range_is_bounded(start, end) || credential_shaped(file) {
+    if !line_range_is_bounded(start, end) || readable_repo_file(cwd, file).is_none() {
+        return None;
+    }
+    Some(format!(
+        "sed -n '{start},{end}p' {}",
+        crate::search_compat::shell_quote(file)
+    ))
+}
+
+/// The canonical path of `file` (relative to `cwd`, or absolute) when it is a
+/// regular file inside the indexed repository and safe to read on the
+/// user's behalf: not under `.git` or `.pixel`, and credential-shaped neither
+/// by the typed name nor by where it really lives (an in-repo symlink to
+/// `.env` is refused). `..` escapes, `/dev/*`, FIFOs, symlinks out of the
+/// root and missing paths give `None`. The one boundary shared by the
+/// permission approval, the bounded-sed rewrite and the head/tail/`rtk read`
+/// rewrites.
+fn readable_repo_file(cwd: &Path, file: &str) -> Option<PathBuf> {
+    if credential_shaped(file) {
         return None;
     }
     let root = crate::discover_root(cwd).ok()?;
@@ -738,13 +757,14 @@ fn bounded_sed_rewrite(file: &str, start: usize, end: usize, cwd: &Path) -> Opti
     }
     let absolute = cwd.join(file).canonicalize().ok()?;
     let relative = absolute.strip_prefix(canonical(&root)).ok()?;
-    if !absolute.is_file() || relative.starts_with(".git") || relative.starts_with(".pixel") {
+    if !absolute.is_file()
+        || relative.starts_with(".git")
+        || relative.starts_with(".pixel")
+        || credential_shaped(relative.to_str()?)
+    {
         return None;
     }
-    Some(format!(
-        "sed -n '{start},{end}p' {}",
-        crate::search_compat::shell_quote(file)
-    ))
+    Some(absolute)
 }
 
 /// A read is bounded when the caller states a line window of at most 200
@@ -916,7 +936,7 @@ fn enforce_leaf(
         "awk" if !awk_may_write(args) => repo_read_reason(args, 1, cwd, root, enforce_retrieval),
         // A bounded `sed -n 'A,Bp' file` is how an agent reads a Pixel hit:
         // never denied. In-place edits are writes, not reads.
-        "sed" if !sed_edits_in_place(args) && !is_bounded_sed_read(segment) => {
+        "sed" if !sed_edits_in_place(args) && !is_bounded_sed_read(segment, cwd) => {
             repo_read_reason(args, 1, cwd, root, enforce_retrieval)
         }
         // `rtk read` only; a bare `read` is the shell builtin.
@@ -1050,14 +1070,24 @@ fn retrieval_permission_response(provider: Provider, payload: &Value) -> Option<
     {
         return None;
     }
-    let command = payload.get("tool_input")?.get("command")?.as_str()?;
+    let tool_input = payload.get("tool_input")?;
+    let command = tool_input.get("command")?.as_str()?;
+    let cwd = provider_cwd(payload, tool_input);
     let mut has_pixel_retrieval = false;
     let mut has_bounded_sed = false;
     for command in split_safe_command_chain(command)? {
         if is_static_echo(command) {
             continue;
         }
-        if is_bounded_sed_read(command) {
+        if bounded_sed_shape(command).is_some() {
+            // The shape alone is not a grant: the file must be a plain file
+            // of this repository, or the user is asked.
+            if !cwd
+                .as_deref()
+                .is_some_and(|cwd| is_bounded_sed_read(command, cwd))
+            {
+                return None;
+            }
             has_bounded_sed = true;
             continue;
         }
@@ -1157,42 +1187,44 @@ fn is_static_echo(command: &str) -> bool {
     })
 }
 
-/// Accepts a bounded, read-only sed line-range print used to inspect a Pixel hit.
-fn is_bounded_sed_read(command: &str) -> bool {
+/// The `(start, end, path)` of a literal `[rtk] sed -n 'A,Bp' path` whose
+/// window is bounded and whose typed path is not credential-shaped. Shape
+/// only: whether the path is a readable repository file is
+/// `readable_repo_file`'s question.
+fn bounded_sed_shape(command: &str) -> Option<(usize, usize, String)> {
     if command.chars().any(|character| {
         matches!(
             character,
             '$' | '`' | '\\' | '>' | '<' | '|' | '&' | ';' | '\n' | '\r'
         )
     }) {
-        return false;
+        return None;
     }
-    let Some(mut argv) = crate::search_compat::shell_argv(command) else {
-        return false;
-    };
+    let mut argv = crate::search_compat::shell_argv(command)?;
     if argv.first().is_some_and(|program| program == "rtk") {
         argv.remove(0);
     }
     let [program, flag, range, path] = argv.as_slice() else {
-        return false;
+        return None;
     };
     if std::path::Path::new(program).file_name() != Some(std::ffi::OsStr::new("sed"))
         || flag != "-n"
         || path.starts_with('-')
         || credential_shaped(path)
     {
-        return false;
+        return None;
     }
-    let Some((start, end)) = range
+    let (start, end) = range
         .strip_suffix('p')
-        .and_then(|range| range.split_once(','))
-    else {
-        return false;
-    };
-    let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) else {
-        return false;
-    };
-    line_range_is_bounded(start, end)
+        .and_then(|range| range.split_once(','))?;
+    let (start, end) = (start.parse::<usize>().ok()?, end.parse::<usize>().ok()?);
+    line_range_is_bounded(start, end).then(|| (start, end, path.clone()))
+}
+
+/// A bounded, read-only sed line-range print of a plain file inside the
+/// indexed repository around `cwd`: the follow-up to a Pixel hit.
+fn is_bounded_sed_read(command: &str, cwd: &Path) -> bool {
+    bounded_sed_shape(command).is_some_and(|(_, _, path)| readable_repo_file(cwd, &path).is_some())
 }
 
 /// The widest line window a bounded read may name, inclusive of both ends.
@@ -1205,28 +1237,51 @@ fn line_range_is_bounded(start: usize, end: usize) -> bool {
     start > 0 && end >= start && end - start < BOUNDED_READ_LINES
 }
 
-/// Credential-shaped file names never earn an automatic grant or rewrite.
-/// Mirrors the metadata-only rule of `search_compat`: a name, not a scan.
+/// Credential-shaped paths never earn an automatic grant or rewrite. A name
+/// and parent-directory rule, not a scan; callers apply it to the typed path
+/// and to the canonical one.
 fn credential_shaped(path: &str) -> bool {
     let path = Path::new(path);
-    if path.components().any(|part| {
-        part.as_os_str()
-            .to_str()
-            .is_some_and(|name| name.eq_ignore_ascii_case("secrets"))
-    }) {
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|part| part.as_os_str().to_str())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    if parts.iter().any(|part| part == "secrets") {
         return true;
     }
-    let name = path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_ascii_lowercase();
+    let Some((name, parents)) = parts.split_last() else {
+        return false;
+    };
+    let name = name.as_str();
+    let parent = parents.last().map(String::as_str);
+    let in_git = parents.iter().any(|part| part == ".git");
     name.starts_with(".env")
         || name.ends_with(".env")
+        || name == "credentials"
         || name.starts_with("credentials.")
         || (name.contains("secret") && name.contains('.'))
-        || name == "serviceaccountkey.json"
+        || matches!(
+            name,
+            ".netrc"
+                | ".npmrc"
+                | ".pgpass"
+                | ".pypirc"
+                | "token.json"
+                | "tokens.json"
+                | "serviceaccountkey.json"
+        )
         || name.ends_with("-credentials.json")
+        || (name == "config"
+            && (in_git
+                || matches!(
+                    parent,
+                    Some(".ssh" | ".docker" | ".kube" | ".aws" | ".gnupg")
+                )))
+        || (name == "config.json" && parent == Some(".docker"))
+        || ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
         || [
             ".pem",
             ".key",
@@ -6501,6 +6556,8 @@ mod tests {
     #[test]
     fn enforce_leaf_judges_head_tail_awk_sed_and_rtk_read_like_cat() {
         let root = scratch_repo("enforce-readers");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".pixel")).unwrap();
         std::fs::write(root.join("README.md"), "text\n").unwrap();
         let leaf = |command: &str, enforce: bool| {
             let words = crate::search_compat::shell_argv(command).unwrap();
@@ -6733,15 +6790,198 @@ mod tests {
         assert!(!credential_shaped("src/lib.rs"));
     }
 
+    /// The bounded-sed approval has a repository boundary: only a regular,
+    /// non-credential file inside the indexed root earns it. Consuming
+    /// paths: the Devin and Zcode permission hook (approve / no decision),
+    /// Devin enforce (block), and the `rtk read -l`, `head` and `tail`
+    /// rewrites (no rewrite).
+    #[test]
+    fn readers_stop_at_the_repository_boundary_and_credentials() {
+        let outer = scratch_repo("boundary");
+        let repo = outer.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".pixel")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::create_dir_all(repo.join(".ssh")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(repo.join(".env"), "K=v\n").unwrap();
+        std::fs::write(repo.join(".git/config"), "[core]\n").unwrap();
+        std::fs::write(repo.join(".ssh/config"), "Host x\n").unwrap();
+        std::fs::write(outer.join("outside.txt"), "outside\n").unwrap();
+        let repo = canonical(&repo);
+        let link = |target: &Path, name: &str| {
+            let path = repo.join(name);
+            let _ = std::fs::remove_file(&path);
+            std::os::unix::fs::symlink(target, &path).unwrap();
+        };
+        link(&repo.join(".env"), "notes.txt");
+        link(&outer.join("outside.txt"), "escape.txt");
+        link(&repo.join("src/lib.rs"), "alias.rs");
+        let up = "../../../../../../../../../../../../etc/hosts";
+        let refused = [
+            "/etc/passwd",
+            "/dev/stdin",
+            "/Users/x/.aws/credentials",
+            "/Users/x/.ssh/config",
+            up,
+            ".npmrc",
+            ".env",
+            ".git/config",
+            ".ssh/config",
+            "notes.txt",
+            "escape.txt",
+            "src",
+            "missing.rs",
+        ];
+        for file in refused {
+            assert!(readable_repo_file(&repo, file).is_none(), "{file}");
+            let sed = format!("sed -n '1,5p' {file}");
+            assert!(!is_bounded_sed_read(&sed, &repo), "{sed}");
+            assert_eq!(bounded_sed_rewrite(file, 1, 5, &repo), None, "{file}");
+            assert_eq!(
+                reader_rewrite(&format!("rtk read {file} -l 1-5"), &repo),
+                None
+            );
+            assert_eq!(reader_rewrite(&format!("rtk read {file}"), &repo), None);
+            assert_eq!(reader_rewrite(&format!("head {file}"), &repo), None);
+            assert_eq!(reader_rewrite(&format!("tail -n 5 {file}"), &repo), None);
+            for provider in [Provider::Devin, Provider::Zcode] {
+                let tool = if provider == Provider::Devin {
+                    "exec"
+                } else {
+                    "Bash"
+                };
+                let response = retrieval_permission_response(
+                    provider,
+                    &serde_json::json!({
+                        "hook_event_name": "PermissionRequest",
+                        "tool_name": tool,
+                        "tool_input": {"command": sed},
+                        "cwd": repo,
+                    }),
+                );
+                assert_eq!(response, None, "{provider:?}: {sed}");
+            }
+        }
+        // A chain with a pixel retrieval does not launder the refused read.
+        let chained = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "exec",
+            "tool_input": {"command": "pixel find-code x && sed -n '1,5p' /etc/passwd"},
+            "cwd": repo,
+        });
+        assert_eq!(
+            retrieval_permission_response(Provider::Devin, &chained),
+            None
+        );
+        // Enforce blocks the in-repo credential reads that are not bounded reads.
+        let words = |command: &str| crate::search_compat::shell_argv(command).unwrap();
+        for command in ["sed -n '1,5p' .env", "sed -n '1,5p' notes.txt"] {
+            assert_eq!(
+                enforce_leaf(command, &words(command), false, &repo, &repo, true),
+                Some(REPO_READ_REASON.into()),
+                "{command}"
+            );
+        }
+        // A plain in-repo file, directly or through a symlink that stays in
+        // the repo, within 200 lines, is still approved and rewritten.
+        for file in ["src/lib.rs", "alias.rs", "./src/lib.rs"] {
+            assert!(readable_repo_file(&repo, file).is_some(), "{file}");
+            assert!(is_bounded_sed_read(
+                &format!("sed -n '1,200p' {file}"),
+                &repo
+            ));
+            assert_eq!(
+                bounded_sed_rewrite(file, 1, 200, &repo),
+                Some(format!("sed -n '1,200p' '{file}'"))
+            );
+        }
+        assert_eq!(
+            readable_repo_file(&repo, "src/lib.rs"),
+            Some(repo.join("src/lib.rs"))
+        );
+        let approve = retrieval_permission_response(
+            Provider::Devin,
+            &serde_json::json!({
+                "hook_event_name": "PermissionRequest",
+                "tool_name": "exec",
+                "tool_input": {"command": "sed -n '1,5p' src/lib.rs"},
+                "cwd": repo,
+            }),
+        );
+        assert_eq!(approve, Some(serde_json::json!({"decision": "approve"})));
+        assert!(!is_bounded_sed_read("sed -n '1,201p' src/lib.rs", &repo));
+    }
+
+    /// Credential names are refused at the name level: extension-less
+    /// `credentials`, dotfiles that hold tokens, and `config` inside the
+    /// directories that keep secrets. Ordinary code stays readable.
+    #[test]
+    fn credential_shaped_refuses_the_secret_bearing_names() {
+        for path in [
+            ".env",
+            ".env.local",
+            "deploy/prod.env",
+            "a/secrets/x.txt",
+            "Secrets/x.txt",
+            "server.pem",
+            "tls.key",
+            "id_rsa",
+            "id_ed25519.pub",
+            "home/.ssh/id_rsa",
+            "credentials",
+            "credentials.json",
+            "/Users/x/.aws/credentials",
+            ".netrc",
+            "home/.npmrc",
+            ".pgpass",
+            ".pypirc",
+            "token.json",
+            "sub/tokens.json",
+            ".ssh/config",
+            "/Users/x/.ssh/config",
+            ".docker/config",
+            ".docker/config.json",
+            ".kube/config",
+            ".aws/config",
+            ".gnupg/config",
+            ".git/config",
+            "repo/.git/config",
+            "serviceAccountKey.json",
+            "gcp-credentials.json",
+            "my.secret.yaml",
+        ] {
+            assert!(credential_shaped(path), "{path}");
+        }
+        for path in [
+            "src/lib.rs",
+            "config",
+            "src/config",
+            "config/settings.toml",
+            "docs/credentials-guide.md",
+            "src/token.rs",
+            ".gitignore",
+            "README.md",
+            "docker/config.json",
+        ] {
+            assert!(!credential_shaped(path), "{path}");
+        }
+    }
+
     /// Only `PermissionRequest` reaches the pixel-approval path, and only a
     /// pixel retrieval subcommand inside it earns the approve.
     #[test]
     fn retrieval_permission_approves_devin_exec_pixel_retrieval_only() {
+        let repo = scratch_repo("permission-sed");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".pixel")).unwrap();
+        std::fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
         let payload = |event: &str, tool: &str, command: &str| {
             serde_json::json!({
                 "hook_event_name": event,
                 "tool_name": tool,
                 "tool_input": {"command": command},
+                "cwd": repo,
             })
         };
         let devin = |event: &str, command: &str| {
@@ -6837,7 +7077,7 @@ mod tests {
             "sed -n '40,200p' f.rs",
             "rtk sed -n '1,5p' f.rs",
         ] {
-            assert!(is_bounded_sed_read(command), "{command}");
+            assert!(bounded_sed_shape(command).is_some(), "{command}");
         }
         for command in [
             "sed -e '1,5p' f.rs",
@@ -6848,7 +7088,7 @@ mod tests {
             "sed '1,5p' f.rs",
             "sed -n '5,3p' f.rs",
         ] {
-            assert!(!is_bounded_sed_read(command), "{command}");
+            assert!(bounded_sed_shape(command).is_none(), "{command}");
         }
     }
 
