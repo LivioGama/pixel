@@ -45,8 +45,6 @@
     </nav>
     <div class="footer__legal">
       <p>MIT licensed. Runs on your machine; nothing leaves it.</p>
-      {{/* RunsOn's free open-source license requires a public acknowledgement linking runs-on.com: keep this line while CI uses its runners. */}}
-      <p>Our CI runs on <a href="https://runs-on.com" target="_blank" rel="noopener">RunsOn</a>, free for open-source projects.</p>
       {{- with site.Params.cf_analytics_token }}
       {{/* The site and the binary are two things: the site counts visits, without cookies; the binary still measures nothing. Not "no personal data": the beacon, like the fonts and the star count, reaches its provider with the visitor's IP (content/legal/privacy-policy.md). */}}
       <p>This site counts visits with Cloudflare Web Analytics, without cookies. The <code>pixel</code> binary measures nothing.</p>
