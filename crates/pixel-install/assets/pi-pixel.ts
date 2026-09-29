@@ -401,6 +401,7 @@ function isBoundedSedRead(args: string[]): boolean {
 }
 
 const REPO_READ_REASON = "repository read: use pixel search-content or pixel pack-context <uid>";
+const RTK_READ_RANGE_REASON = "repository read: `rtk read -l` takes a level (none, minimal, aggressive), not a line range; use sed -n 'START,ENDp' <file> (at most 200 lines) or pixel pack-context <uid>";
 const REPO_SEARCH_REASON = "repository search: use pixel search-content";
 const LS_REASON = "repository discovery: use pixel list-areas or find-code";
 const FIND_REASON = "repository discovery: use pixel find-code or list-areas";
@@ -488,9 +489,27 @@ function enforceLeaf(segment: string, words: string[], piped: boolean, root: str
     }
     case "read": {
       if (!rtkWrapped) return undefined;
+      // Detect an rtk read with a -l X-Y range: that hits the special block
+      // (`rtk read F -l START-END`).
+      const lineRangeArg = (() => {
+        const idx = effectiveArgs.findIndex(a => a === '-l' || a === '--level');
+        if (idx === -1) return undefined;
+        const val = effectiveArgs[idx + 1];
+        if (!val) return undefined;
+        // Looks like N-M
+        const m = val.match(/^(\d+)-(\d+)$/);
+        if (m) {
+          const start = Number(m[1]), end = Number(m[2]);
+          if (Number.isInteger(start) && Number.isInteger(end) && start >= 1 && end >= start && end - start <= 199) {
+            return true;
+          }
+        }
+        return false;
+      })();
       const paths = nonFlagPaths(0);
       for (const p of paths) if (credentialPath(p)) return { reason: CREDENTIAL_REASON };
       if (!paths.some((p) => argReadsRepo(root, p))) return undefined;
+      if (lineRangeArg) return { reason: RTK_READ_RANGE_REASON };
       return { reason: REPO_READ_REASON, operation: "search-content" };
     }
     case "cp": {
