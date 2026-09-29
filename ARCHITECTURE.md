@@ -30,10 +30,10 @@ read `CLAUDE.md`.
 ```
 
 Everything below the CLI is a library crate. Only `crates/pixel` builds a
-binary, and Pixel is deliberately a CLI plus hooks, not an MCP server:
-`pixel mcp` exists only for hosts that offer no hook or extension point
-(today Warp, through the `.warp/.mcp.json` that `pixel install --repo`
-writes).
+binary, and Pixel uses hooks or extensions where the host supports them.
+It also provides `pixel mcp` as a generic MCP stdio server. `pixel install
+--repo` registers that server for Warp, which has no hook or extension point,
+through the `.warp/.mcp.json` file it writes.
 
 ## Crates
 
